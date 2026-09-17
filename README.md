@@ -66,6 +66,26 @@ priorities, context outside the codebase. When exploration is inconclusive, say 
 you checked and what is still unknown, then ask.
 ```
 
+## Token economy: rtk
+
+Every tool result an agent sees costs tokens, and an unattended loop sees thousands. [rtk](https://github.com/rtk-ai/rtk) rewrites each Bash command to `rtk <cmd>` and condenses its output before it enters context, keeping the signal and dropping the noise. Install it once and register its hook:
+
+```sh
+brew install rtk-ai/tap/rtk && rtk init -g     # registers `rtk hook claude` as a PreToolUse(Bash) hook
+```
+
+`/grimoire:setup` detects rtk and proposes the project-level hook plus the loop's guard. The guard is `requireHook` in `/orchestrate`: an execute run probes the session it runs in and refuses to dispatch when the hook is missing, because a registered hook whose binary is absent fails silently on every call and the whole run would read raw output.
+
+```json
+"requireHook": {
+  "name": "rtk hook claude",
+  "check": "command -v rtk && rtk hook check \"git status\" | grep -q '^rtk '",
+  "fix": "brew install rtk-ai/tap/rtk && rtk init -g, then restart the session"
+}
+```
+
+Without rtk everything still works; it just costs more.
+
 ## What is in the box
 
 Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` when unambiguous), and the loop's briefs live under the plugin root: pass `briefsDir: "${CLAUDE_PLUGIN_ROOT}/workflows/briefs"` and `personasDir` alike to `/orchestrate` if you did not copy `workflows/` into the project.

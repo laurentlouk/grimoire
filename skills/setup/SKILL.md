@@ -13,6 +13,7 @@ Everything the harness needs is derivable from the project except the decisions 
 - **Existing instructions.** `CLAUDE.md`, `AGENTS.md`, `.claude/agents/`, `.claude/skills/`, `docs/`, ADRs, runbooks. Note every invariant, rule and convention already written down; the setup must not duplicate them, it points at them.
 - **Gates.** Anything that must pass before a PR and is expensive or machine-global: end-to-end suites (`make e2e*`, `npm run e2e*`), device or emulator tests, contract checks, stamp files, pre-PR hooks. Note the exact command and any path filter that decides whether it applies.
 - **Tracker and design tools.** Which issue tracker and design tool the project uses (from docs, MCP configuration, PR templates).
+- **Token economy.** Is [rtk](https://github.com/rtk-ai/rtk) installed (`command -v rtk`) and is `rtk hook claude` registered as a `PreToolUse(Bash)` hook in the user's or the project's `.claude/settings.json`? It condenses every tool result before it enters context; an unattended loop without it costs several times more.
 - **Deploy facts.** Which merges deploy to production (CD on main, Vercel-style integrations); those go into memory as facts the reviewer and orchestrator must know.
 
 ## 2 · Propose, in one screen
@@ -25,6 +26,7 @@ Show the user a single proposal and ask for one yes, or corrections:
 - **Roster**: `AGENTS.md` with the rows filled in.
 - **Instructions**: the lines to add to `CLAUDE.md` (the `@memory/harness.md` import, the pointer to `AGENTS.md`, the explore-before-asking paragraph if it is not already there).
 - **Docs**: `docs/specs/`, `docs/plans/`, `docs/crystallize/` if missing.
+- **rtk**: if installed but not registered for the project, the `PreToolUse(Bash)` hook entry (`rtk hook claude`) to add to `.claude/settings.json`; if not installed, the one-line install; either way the `requireHook` block for `/orchestrate` so an execute run refuses to dispatch without compression.
 - **Scouts**: which grimoire scouts apply (tracker-scout needs a tracker, design-scout a design tool, contract-checker a shared contract) and any project-specific scout worth adding.
 
 State what you could not determine and what you assumed. Do not ask a question you could answer from the repository.
