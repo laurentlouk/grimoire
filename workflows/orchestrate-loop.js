@@ -455,7 +455,7 @@ ${(task.files || []).map((f) => '- ' + f).join('\n')}
 ${task.successCriteria || '(tests pass + the steps above)'}
 
 ## This dispatch
-- Repo: ${path}; branch ${task.branch || '(create the feature branch off ${BASE_BRANCH})'}; PR title tag ${ticketTag(task)}.
+- Repo: ${path}; branch ${task.branch || `(create the feature branch off ${BASE_BRANCH})`}; base branch \`${BASE_BRANCH}\` (your \`baseSha\` = \`git merge-base ${BASE_BRANCH} HEAD\`); PR title tag ${ticketTag(task)}.
 ${lane}${gated}- Return the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED) with baseSha · commits · headSha.`
   // Answers the resolver already fetched for THIS task, carried into every later dispatch
   // so a re-dispatched implementer never re-asks what has been settled.
