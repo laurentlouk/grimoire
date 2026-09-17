@@ -5,7 +5,12 @@ description: Entry point for the unattended build loop. Use when the user wants 
 
 # Orchestrate: launch the build loop
 
-The loop lives in `workflows/orchestrate-loop.js` (the engine, covered by tests) plus `workflows/briefs/*.md` and `workflows/personas/*.md`, which hold everything a dispatched agent reads. This skill is its front door.
+The loop lives in the plugin: `workflows/orchestrate-loop.js` (the engine, covered by tests) plus `workflows/briefs/*.md` and `workflows/personas/*.md`, everything a dispatched agent reads. This skill is its front door.
+
+## Where the engine is, and where the config is
+
+- **Engine path.** The plugin root is the directory two levels above this `SKILL.md` (the one that contains `skills/`, `workflows/`, `agents/`). Launch the workflow by path, never by name: `Workflow({ scriptPath: "<plugin root>/workflows/orchestrate-loop.js", args })`, and pass `briefsDir: "<plugin root>/workflows/briefs"` and `personasDir: "<plugin root>/workflows/personas"`. If the project copied `workflows/` locally instead, use that copy.
+- **Project config.** Read `grimoire.config.json` at the project root (written by `/grimoire:setup`; see `grimoire.config.example.json` in the plugin). It holds `repos`, `requireHook`, `baseBranch`, `memoryDir`, `runsDir`. Merge it under the per-run inputs (`specPath`, `planPath`, `project`, `execute`, knobs). If the file is missing, say so and point at `/grimoire:setup`; do not invent a repos table.
 
 ## Check before you spend
 

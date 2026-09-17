@@ -23,6 +23,19 @@ It explores the repositories and proposes, in one screen, a team agent per repo 
 
 Prefer to do it by hand? Copy `memory/`, `AGENTS.md`, `templates/team-agent.md` (one per repo into `.claude/agents/`) and optionally `workflows/`, then add `@memory/harness.md` and a pointer to `AGENTS.md` in your `CLAUDE.md`.
 
+### Pin it for the whole team
+
+Add to the project's `.claude/settings.json` so everyone who trusts the folder gets the plugin, no prompts:
+
+```json
+{
+  "extraKnownMarketplaces": { "grimoire": { "source": { "source": "github", "repo": "laurentlouk/grimoire" } } },
+  "enabledPlugins": { "grimoire@grimoire": true }
+}
+```
+
+`/grimoire:setup` writes this for you, along with `grimoire.config.json` (repos, gates, rtk guard) that `/orchestrate` reads. **Updating** is one command: `/plugin update grimoire@grimoire` (marketplace plugins also refresh in the background). Nothing is copied into the project except your own agents, memory and config, so an update reaches every project at once.
+
 ### With Claude Code, skills only
 
 ```sh
