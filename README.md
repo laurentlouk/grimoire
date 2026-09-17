@@ -13,23 +13,15 @@ Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/
 /plugin install grimoire@grimoire
 ```
 
-That installs every skill and every agent (scouts, reviewer). Two things are not plugin components and are copied once into your project:
+Then, in the project, run:
 
-```sh
-git clone https://github.com/laurentlouk/grimoire /tmp/grimoire
-cp -r /tmp/grimoire/memory ./memory        # harness + per-agent memory stores
-cp /tmp/grimoire/AGENTS.md ./AGENTS.md     # the roster; fill in your repos
-cp -r /tmp/grimoire/workflows .claude/workflows   # optional: the build loop
+```text
+/grimoire:setup
 ```
 
-Then in your `CLAUDE.md`:
+It explores the repositories and proposes, in one screen, a team agent per repo (with the gate it must never run), the memory stores seeded only with facts found in your docs, the roster (`AGENTS.md`), the loop's `repos` configuration, and the lines to add to `CLAUDE.md`. Nothing is written until you say yes, and nothing existing is overwritten. A session-start hint points at it while the project has no roster.
 
-```markdown
-@memory/harness.md
-See AGENTS.md for the agents this project dispatches and how the harness learns.
-```
-
-Create one team agent per repository from `templates/team-agent.md` (into `.claude/agents/`), and one memory file per agent in `memory/agents/`.
+Prefer to do it by hand? Copy `memory/`, `AGENTS.md`, `templates/team-agent.md` (one per repo into `.claude/agents/`) and optionally `workflows/`, then add `@memory/harness.md` and a pointer to `AGENTS.md` in your `CLAUDE.md`.
 
 ### With Claude Code, skills only
 
@@ -43,7 +35,7 @@ Skills are plain `SKILL.md` files and work in any agent that reads them (`npx sk
 
 ## Use
 
-**The pipeline**, one skill recommending the next:
+**First run**: `/grimoire:setup`. **The pipeline**, one skill recommending the next:
 
 ```
 roast → to-plan → to-issues → build ⇄ review → PR → crystallize → ship
@@ -81,6 +73,7 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 
 | Path | What |
 | --- | --- |
+| [`skills/setup`](skills/setup/SKILL.md) | First run: explore the project, propose agents, memory, roster, loop config; write on approval |
 | [`skills/roast`](skills/roast/SKILL.md) | Stress-test a design: docs and code recon in parallel, self-answer ladder, open-source references, one question at a time |
 | [`skills/to-plan`](skills/to-plan/SKILL.md) · [`skills/to-issues`](skills/to-issues/SKILL.md) | Spec → plan → vertical-slice issues |
 | [`skills/tdd`](skills/tdd/SKILL.md) | Red, green, refactor, one behaviour at a time |

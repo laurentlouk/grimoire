@@ -1,10 +1,20 @@
 {
   "name": "grimoire",
-  "version": "0.2.0",
-  "description": "Portable skills, an agent roster, curated memory and a build loop that learns: roast, to-plan, to-issues, implement, review, crystallize, orchestrate, launch-agent, tdd, adaptive-replanning, plus the scouts and reviewer they dispatch.",
-  "author": { "name": "Laurent Loukopoulos", "url": "https://github.com/laurentlouk" },
+  "version": "0.3.0",
+  "description": "Portable skills, an agent roster, curated memory and a build loop that learns: setup, roast, to-plan, to-issues, implement, review, crystallize, orchestrate, launch-agent, tdd, adaptive-replanning, plus the scouts and reviewer they dispatch.",
+  "author": {
+    "name": "Laurent Loukopoulos",
+    "url": "https://github.com/laurentlouk"
+  },
   "homepage": "https://github.com/laurentlouk/grimoire",
   "repository": "https://github.com/laurentlouk/grimoire",
   "license": "MIT",
-  "keywords": ["skills", "agents", "orchestration", "tdd", "memory", "workflow"]
+  "keywords": [
+    "skills",
+    "agents",
+    "orchestration",
+    "tdd",
+    "memory",
+    "workflow"
+  ]
 }
