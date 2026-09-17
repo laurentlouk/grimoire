@@ -1,0 +1,36 @@
+[
+  {
+    "id": 1,
+    "query": "PR #212 on the API repo is merged. A review bot flagged an ordering race we fixed in 3f2a1c, and the implementer had to stop twice to ask about the dedup marker. Crystallize it.",
+    "should_trigger": true,
+    "expected_output": "Reads the PR diff and every review thread with its resolution; patches the closest umbrella skill with the ordering gotcha and adds an eval case; adds a dated declarative fact to the API role's memory store if it applies to every future task; records both questions as roast misses; writes docs/crystallize/<date>-api-pr212.md and opens a crystallize PR; summarises created/patched items in one screen.",
+    "expectations": [
+      { "text": "Fetches the PR's review threads and uses their resolutions as signals", "passed": null, "evidence": "" },
+      { "text": "Patches an existing skill rather than creating a narrow new one, and adds an eval case for it", "passed": null, "evidence": "" },
+      { "text": "Any memory entry is a dated declarative fact within the cap, not a narrative", "passed": null, "evidence": "" },
+      { "text": "A report is written under docs/crystallize/ and a PR opened", "passed": null, "evidence": "" },
+      { "text": "Does not modify hooks, settings, engine code, or agent invariants", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "The mobile implementer just reported DONE on issue 640. Capture the learnings now, before the PR.",
+    "should_trigger": false,
+    "expected_output": "Crystallize runs after the PR exists and its threads are settled (or after merge), because the review threads are its main input. Proceed to review and PR first; crystallize afterwards.",
+    "expectations": [
+      { "text": "Declines to crystallize before the PR exists and explains that review threads are the input", "passed": null, "evidence": "" },
+      { "text": "No skill or memory file is written", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Crystallize infra PR #77. The only review comment was a human noting that our retention doc still describes the old cleanup worker, but the code has used native TTL for months. Nothing else notable.",
+    "should_trigger": true,
+    "expected_output": "Identifies a docs-drift signal: updates the retention document to match the code and records it under 'Docs synced'; judges that no new procedure or fact warrants a skill or memory change and says so under 'Declined, and why'; still writes the report and opens the PR.",
+    "expectations": [
+      { "text": "Fixes the drifted doc to match the code, treating code as the source of truth", "passed": null, "evidence": "" },
+      { "text": "Explicitly reports that no skill or memory change was warranted instead of inventing one", "passed": null, "evidence": "" },
+      { "text": "Report and PR are still produced", "passed": null, "evidence": "" }
+    ]
+  }
+]

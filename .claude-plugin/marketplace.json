@@ -1,0 +1,12 @@
+{
+  "name": "grimoire",
+  "description": "Laurent's spellbook: skills, agents, memory and a build loop that learns, for Claude Code.",
+  "owner": { "name": "Laurent Loukopoulos", "url": "https://github.com/laurentlouk" },
+  "plugins": [
+    {
+      "name": "grimoire",
+      "source": "./",
+      "description": "The whole spellbook: roast · to-plan · to-issues · implement · review · crystallize · orchestrate · launch-agent · tdd · adaptive-replanning, with the scouts, the reviewer, the memory stores and the build loop."
+    }
+  ]
+}
