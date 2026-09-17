@@ -1,12 +1,17 @@
-# grimoire
+# 🔮 grimoire
 
 *A spellbook for coding agents: portable skills, a roster, a memory, and a build loop that learns.*
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)](#-setup)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-11-success)](#-what-is-in-the-box)
+[![Stack-agnostic](https://img.shields.io/badge/stack-agnostic-lightgrey)](#)
+
 Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) plus the pieces around them that make an agent workflow repeatable: an agent roster (`AGENTS.md`), curated memory (`memory/`), and an unattended build loop (`workflows/`) that ends every run by crystallizing what it learned back into the skills. Stack-agnostic, tracker-agnostic (Jira, Linear, GitHub Issues, or other).
 
-## Setup
+## 🚀 Setup
 
-### With Claude Code, as a plugin (recommended)
+### 🧩 With Claude Code, as a plugin (recommended)
 
 ```text
 /plugin marketplace add laurentlouk/grimoire
@@ -23,7 +28,7 @@ It explores the repositories and proposes, in one screen, a team agent per repo 
 
 Prefer to do it by hand? Copy `memory/`, `AGENTS.md`, `templates/team-agent.md` (one per repo into `.claude/agents/`) and optionally `workflows/`, then add `@memory/harness.md` and a pointer to `AGENTS.md` in your `CLAUDE.md`.
 
-### Pin it for the whole team
+### 👥 Pin it for the whole team
 
 Add to the project's `.claude/settings.json` so everyone who trusts the folder gets the plugin, no prompts:
 
@@ -36,19 +41,19 @@ Add to the project's `.claude/settings.json` so everyone who trusts the folder g
 
 `/grimoire:setup` writes this for you, along with `grimoire.config.json` (repos, gates, rtk guard) that `/orchestrate` reads. **Updating** is one command: `/plugin update grimoire@grimoire` (marketplace plugins also refresh in the background). Nothing is copied into the project except your own agents, memory and config, so an update reaches every project at once.
 
-### With Claude Code, skills only
+### 📜 With Claude Code, skills only
 
 ```sh
 npx skills add laurentlouk/grimoire      # every skill → .claude/skills/
 ```
 
-### Without Claude Code
+### 🧭 Without Claude Code
 
 Skills are plain `SKILL.md` files and work in any agent that reads them (`npx skills add laurentlouk/grimoire` installs them for several). `AGENTS.md` and `memory/` are Markdown any agent can be pointed at; import `memory/harness.md` from whatever instruction file your agent reads. The build loop in `workflows/` is a Claude Code Workflow script and runs only there; without it you walk the pipeline one skill at a time, which is how it is meant to be used interactively anyway.
 
-## Use
+## ⚡ Use
 
-**First run**: `/grimoire:setup`. **The pipeline**, one skill recommending the next:
+**🪄 First run**: `/grimoire:setup`. **🔁 The pipeline**, one skill recommending the next:
 
 ```
 roast → to-plan → to-issues → build ⇄ review → PR → crystallize → ship
@@ -66,9 +71,9 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 
 `/orchestrate` needs a fourth input besides the three design artifacts: `repos`, the list of repositories with their owning agent, tags (for review-lens selection) and gate command. `workflows/README.md` has the full reference.
 
-**How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
+**🧠 How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
 
-**Recommended agent-instructions snippet.** `roast` and every agent work best when the whole project explores before asking. Add this to `CLAUDE.md` or `AGENTS.md`:
+**🔍 Recommended agent-instructions snippet.** `roast` and every agent work best when the whole project explores before asking. Add this to `CLAUDE.md` or `AGENTS.md`:
 
 ```markdown
 ## Explore before asking; don't guess
@@ -79,7 +84,7 @@ priorities, context outside the codebase. When exploration is inconclusive, say 
 you checked and what is still unknown, then ask.
 ```
 
-## Token economy: rtk
+## 💸 Token economy: rtk
 
 Every tool result an agent sees costs tokens, and an unattended loop sees thousands. [rtk](https://github.com/rtk-ai/rtk) rewrites each Bash command to `rtk <cmd>` and condenses its output before it enters context, keeping the signal and dropping the noise. Install it once and register its hook:
 
@@ -99,7 +104,7 @@ brew install rtk-ai/tap/rtk && rtk init -g     # registers `rtk hook claude` as 
 
 Without rtk everything still works; it just costs more.
 
-## What is in the box
+## 📦 What is in the box
 
 Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` when unambiguous), and the loop's briefs live under the plugin root: pass `briefsDir: "${CLAUDE_PLUGIN_ROOT}/workflows/briefs"` and `personasDir` alike to `/orchestrate` if you did not copy `workflows/` into the project.
 
@@ -120,6 +125,6 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`AGENTS.md`](AGENTS.md) | The roster and the three learning stores |
 | [`workflows/`](workflows/README.md) | `orchestrate-loop.js` (engine, tested), `briefs/` and `personas/` (everything a dispatched agent reads) |
 
-## License
+## 📄 License
 
 [MIT](LICENSE)
