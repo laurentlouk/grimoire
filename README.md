@@ -2,7 +2,7 @@
 
 *A spellbook for coding agents: portable skills you cast on your own workflow.*
 
-Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) for Claude Code and other SKILL.md-compatible agents. Each skill is a portable workflow an agent discovers and runs on its own, living in `skills/<name>/SKILL.md`. A JS orchestrator that chains them end-to-end is coming.
+Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) for Claude Code and other SKILL.md-compatible agents. Each skill is a portable workflow an agent discovers and runs on its own, living in `skills/<name>/SKILL.md`. `workflows/` holds the orchestrator that chains the build half of them end-to-end.
 
 ## Install
 
@@ -31,6 +31,10 @@ Skills land in `.claude/skills/` (project) or `~/.claude/skills/` (global). Invo
 | [`to-issues`](skills/to-issues/SKILL.md) | Breaks a plan into independently grabbable issues, one vertical slice each, in your tracker (Jira, Linear, GitHub Issues, or other). |
 | [`tdd`](skills/tdd/SKILL.md) | Test-driven development discipline: red, green, refactor, one behavior at a time, tested through the public interface. |
 | [`adaptive-replanning`](skills/adaptive-replanning/SKILL.md) | How an unattended build loop recovers from a failed step: replan the remaining work from the current state instead of restarting or retrying blindly. |
+
+## Workflows
+
+`workflows/orchestrate-loop.js` is a [dynamic workflow](https://code.claude.com/docs/en/workflows) script that runs the build half of the pipeline unattended: it takes the spec, the plan and the tracker project the design skills produced, then implements every issue, reviews each one through a diverse-lens panel, gates the final tree and opens one PR per repo. It previews by default, and every repo, agent, gate command and path is configuration you pass in — nothing about a stack is baked in. See [`workflows/README.md`](workflows/README.md).
 
 ## Recommended `CLAUDE.md` setup
 
