@@ -1,51 +1,69 @@
 # grimoire
 
-*A spellbook for coding agents: portable skills you cast on your own workflow.*
+*A spellbook for coding agents: portable skills, a roster, a memory, and a build loop that learns.*
 
-Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) for Claude Code and other SKILL.md-compatible agents. Each skill is a portable workflow an agent discovers and runs on its own, living in `skills/<name>/SKILL.md`. A JS orchestrator that chains them end-to-end is coming.
+Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) plus the pieces around them that make an agent workflow repeatable: an agent roster (`AGENTS.md`), curated memory (`memory/`), and an unattended build loop (`workflows/`) that ends every run by crystallizing what it learned back into the skills. Stack-agnostic, tracker-agnostic (Jira, Linear, GitHub Issues, or other).
 
-## Install
+## Setup
 
-Install every skill in this repo with the [`skills`](https://skills.sh) CLI:
-
-```sh
-npx skills add laurentlouk/grimoire
-```
-
-Or install a single skill:
+### With Claude Code
 
 ```sh
-npx skills add laurentlouk/grimoire/roast
+npx skills add laurentlouk/grimoire            # every skill → .claude/skills/
+git clone https://github.com/laurentlouk/grimoire /tmp/grimoire
+cp -r /tmp/grimoire/agents .claude/agents        # the scouts + a team-agent template
+cp -r /tmp/grimoire/memory ./memory              # harness + per-agent memory stores
+cp /tmp/grimoire/AGENTS.md ./AGENTS.md           # the roster; fill in your repos
+cp -r /tmp/grimoire/workflows .claude/workflows  # optional: the build loop
 ```
 
-Skills land in `.claude/skills/` (project) or `~/.claude/skills/` (global). Invoke one in Claude Code with `/roast`, or let the agent trigger it automatically from the description.
-
-## Skills
-
-`roast`, `to-plan`, and `to-issues` run in order as a design pipeline. `tdd` is the discipline for writing the code once the work is planned. `adaptive-replanning` describes how an unattended build loop recovers when a step fails. Each one is useful on its own.
-
-| Skill | What it does |
-| ----- | ------------ |
-| [`roast`](skills/roast/SKILL.md) | Stress-tests a plan or design before any code is written. It reads the code and existing patterns first, then interrogates the design one question at a time until you reach shared understanding. |
-| [`to-plan`](skills/to-plan/SKILL.md) | Turns an approved `roast` design into a written plan. No interview, just a synthesis of what was settled, sliced into small vertical increments. |
-| [`to-issues`](skills/to-issues/SKILL.md) | Breaks a plan into independently grabbable issues, one vertical slice each, in your tracker (Jira, Linear, GitHub Issues, or other). |
-| [`tdd`](skills/tdd/SKILL.md) | Test-driven development discipline: red, green, refactor, one behavior at a time, tested through the public interface. |
-| [`adaptive-replanning`](skills/adaptive-replanning/SKILL.md) | How an unattended build loop recovers from a failed step: replan the remaining work from the current state instead of restarting or retrying blindly. |
-
-## Recommended `CLAUDE.md` setup
-
-`roast` works best when your agent reads the project's documentation before asking you anything. Add this to your project's `CLAUDE.md` (or `AGENTS.md`) so the docs-first behavior applies everywhere, not just inside the skill:
+Then, in your `CLAUDE.md`:
 
 ```markdown
-## Explore before asking; don't guess
-
-If a fact is discoverable — in the project's documentation (`README`, `docs/`, ADRs,
-specs, runbooks), the code, schemas, API contracts, config, or git history — find it
-yourself before putting the question to the user, and never state a discoverable fact
-as a guess. Reserve questions for decisions only the user owns: product/UX calls, cost
-or vendor trade-offs, priorities, and context that lives outside the codebase. When
-exploration is inconclusive, say what you checked and what's still unknown, then ask.
+@memory/harness.md
+See AGENTS.md for the agents this project dispatches and how the harness learns.
 ```
+
+Create one team agent per repository from `agents/team-agent.template.md`, and one memory file per agent in `memory/agents/`.
+
+### Without Claude Code
+
+Skills are plain `SKILL.md` files and work in any agent that reads them (`npx skills add laurentlouk/grimoire` installs them for several). `AGENTS.md` and `memory/` are Markdown any agent can be pointed at; import `memory/harness.md` from whatever instruction file your agent reads. The build loop in `workflows/` is a Claude Code Workflow script and runs only there; without it you walk the pipeline one skill at a time, which is how it is meant to be used interactively anyway.
+
+## Use
+
+**The pipeline**, one skill recommending the next:
+
+```
+roast → to-plan → to-issues → build ⇄ review → PR → crystallize → ship
+```
+
+```text
+/roast <idea>        # stress-test the design; answers itself from docs + code first, asks you only real decisions
+/to-plan             # synthesize the approved spec into a plan of vertical slices
+/to-issues           # one tracker issue per slice, with blocked-by links
+/launch-agent …      # dispatch a team agent or scout from AGENTS.md, memory pasted in
+/tdd                 # the discipline for writing the code
+/crystallize         # after the PR: patch/create skills, add memory facts, sync docs, one reviewable PR
+/orchestrate {specPath, planPath, project, repos}   # or run the whole build half unattended
+```
+
+**How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
+
+## What is in the box
+
+| Path | What |
+| --- | --- |
+| [`skills/roast`](skills/roast/SKILL.md) | Stress-test a design: docs and code recon in parallel, self-answer ladder, open-source references, one question at a time |
+| [`skills/to-plan`](skills/to-plan/SKILL.md) · [`skills/to-issues`](skills/to-issues/SKILL.md) | Spec → plan → vertical-slice issues |
+| [`skills/tdd`](skills/tdd/SKILL.md) | Red, green, refactor, one behaviour at a time |
+| [`skills/launch-agent`](skills/launch-agent/SKILL.md) | Dispatch from the roster with memory injected |
+| [`skills/crystallize`](skills/crystallize/SKILL.md) | Post-PR learning into skills, memory and docs |
+| [`skills/orchestrate`](skills/orchestrate/SKILL.md) · [`skills/adaptive-replanning`](skills/adaptive-replanning/SKILL.md) | Front door and failure behaviour of the loop |
+| [`agents/`](agents) | `codebase-scout`, `reference-scout`, `reviewer`, and a team-agent template |
+| [`memory/`](memory/README.md) | Harness and per-agent stores, Hermes-style rules |
+| [`AGENTS.md`](AGENTS.md) | The roster and the three learning stores |
+| [`workflows/`](workflows/README.md) | `orchestrate-loop.js` (engine, tested), `briefs/` and `personas/` (everything a dispatched agent reads) |
 
 ## License
 

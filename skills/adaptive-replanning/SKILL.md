@@ -45,3 +45,7 @@ A run should report enough to audit the path it took: how many times it replanne
 The replan budget is the backstop for an unattended run. A higher budget gives more chances to route around a hard failure at the cost of more time and tokens, and setting it to zero turns replanning off, so the first failed slice stops the run. Set it to the number of genuinely different approaches worth trying before a person should step in.
 
 If the loop keeps stopping on the same cause, that is the signal that a design question is still open. Take it back to the design stage, settle it, and rerun. Adaptive replanning routes around dead ends in execution. It does not invent product decisions; by design it stops on those and hands them back.
+
+## Learnings outlive the run
+
+The lessons a replan records are not lost when the run ends. The loop writes them into a run ledger, the next run reads the previous ledgers back into planning, and `crystallize` turns the durable ones into skill patches or memory facts. A failure teaches the current run first, and every run after it second.
