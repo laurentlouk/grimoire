@@ -6,25 +6,36 @@ Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/
 
 ## Setup
 
-### With Claude Code
+### With Claude Code, as a plugin (recommended)
 
-```sh
-npx skills add laurentlouk/grimoire            # every skill → .claude/skills/
-git clone https://github.com/laurentlouk/grimoire /tmp/grimoire
-cp -r /tmp/grimoire/agents .claude/agents        # the scouts + a team-agent template
-cp -r /tmp/grimoire/memory ./memory              # harness + per-agent memory stores
-cp /tmp/grimoire/AGENTS.md ./AGENTS.md           # the roster; fill in your repos
-cp -r /tmp/grimoire/workflows .claude/workflows  # optional: the build loop
+```text
+/plugin marketplace add laurentlouk/grimoire
+/plugin install grimoire@grimoire
 ```
 
-Then, in your `CLAUDE.md`:
+That installs every skill and every agent (scouts, reviewer). Two things are not plugin components and are copied once into your project:
+
+```sh
+git clone https://github.com/laurentlouk/grimoire /tmp/grimoire
+cp -r /tmp/grimoire/memory ./memory        # harness + per-agent memory stores
+cp /tmp/grimoire/AGENTS.md ./AGENTS.md     # the roster; fill in your repos
+cp -r /tmp/grimoire/workflows .claude/workflows   # optional: the build loop
+```
+
+Then in your `CLAUDE.md`:
 
 ```markdown
 @memory/harness.md
 See AGENTS.md for the agents this project dispatches and how the harness learns.
 ```
 
-Create one team agent per repository from `agents/team-agent.template.md`, and one memory file per agent in `memory/agents/`.
+Create one team agent per repository from `templates/team-agent.md` (into `.claude/agents/`), and one memory file per agent in `memory/agents/`.
+
+### With Claude Code, skills only
+
+```sh
+npx skills add laurentlouk/grimoire      # every skill → .claude/skills/
+```
 
 ### Without Claude Code
 
@@ -65,6 +76,9 @@ you checked and what is still unknown, then ask.
 
 ## What is in the box
 
+Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` when unambiguous), and the loop's briefs live under the plugin root: pass `briefsDir: "${CLAUDE_PLUGIN_ROOT}/workflows/briefs"` and `personasDir` alike to `/orchestrate` if you did not copy `workflows/` into the project.
+
+
 | Path | What |
 | --- | --- |
 | [`skills/roast`](skills/roast/SKILL.md) | Stress-test a design: docs and code recon in parallel, self-answer ladder, open-source references, one question at a time |
@@ -73,7 +87,9 @@ you checked and what is still unknown, then ask.
 | [`skills/launch-agent`](skills/launch-agent/SKILL.md) | Dispatch from the roster with memory injected |
 | [`skills/crystallize`](skills/crystallize/SKILL.md) | Post-PR learning into skills, memory and docs |
 | [`skills/orchestrate`](skills/orchestrate/SKILL.md) · [`skills/adaptive-replanning`](skills/adaptive-replanning/SKILL.md) | Front door and failure behaviour of the loop |
-| [`agents/`](agents) | `codebase-scout`, `reference-scout`, `reviewer`, and a team-agent template |
+| [`agents/`](agents) | `codebase-scout`, `reference-scout`, `contract-checker`, `tracker-scout`, `design-scout`, `reviewer` |
+| [`templates/`](templates) | the team-agent definition to copy per repository |
+| [`skills/implement`](skills/implement/SKILL.md) · [`skills/review`](skills/review/SKILL.md) | Build one issue through its team agent; gate it with the diverse-lens panel |
 | [`memory/`](memory/README.md) | Harness and per-agent stores, Hermes-style rules |
 | [`AGENTS.md`](AGENTS.md) | The roster and the three learning stores |
 | [`workflows/`](workflows/README.md) | `orchestrate-loop.js` (engine, tested), `briefs/` and `personas/` (everything a dispatched agent reads) |

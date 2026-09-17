@@ -31,7 +31,7 @@ Agents never write memory mid-task. The lesson is extracted afterwards by `cryst
 
 ## Team agents
 
-Create one from `agents/team-agent.template.md` per repository. Interactive dispatches run one implementer per repository at a time; the loop relaxes this with worktree lanes when declared files are disjoint. Never two agents on one checkout.
+Create one from `templates/team-agent.md` per repository. Interactive dispatches run one implementer per repository at a time; the loop relaxes this with worktree lanes when declared files are disjoint. Never two agents on one checkout.
 
 | Agent | Repo | Default model | Owns |
 | --- | --- | --- | --- |
