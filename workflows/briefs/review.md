@@ -24,4 +24,10 @@ be agreeable.
 A FAIL must carry at least one blocker/major finding naming `path:line` — a FAIL with no
 actionable finding cannot be acted on and is treated as gating anyway, so be specific.
 
+## Terminal sweep: read by lens
+In the terminal stage the subject is the whole integrated branch. Do not read it in full: take
+the `--stat` first, then read only the files your persona's Scope section names. Five reviewers
+each reading the entire branch was the largest single input cost of a run, for verdicts that
+never depended on the files outside their scope.
+
 Return PASS/FAIL with findings (`path:line` + severity). Read-only — you diagnose, you do not fix.

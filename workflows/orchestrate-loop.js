@@ -508,7 +508,7 @@ function gatePrompt(task, gate, hits) {
 }
 
 function reviewPrompt(task, mode, persona, range) {
-  return `${memoryBlock('reviewer')}${brief('review')}You are reviewing as: **${persona.name}** — your lens is \`${PERSONAS_DIR}/${persona.id}.md\` (read it). Mode: **${mode}**.
+  return `${memoryBlock('reviewer')}${brief('review')}You are reviewing as: **${persona.name}** — your lens is \`${PERSONAS_DIR}/${persona.id}.md\` (read it, including its Scope section). Mode: **${mode}**.
 
 Repo: ${repoPath(task.repo)} (branch ${task.branch || '(feature branch)'}). ${artifacts()}
 Task (verbatim):
@@ -517,7 +517,24 @@ ${task.taskText}
 Spec excerpt:
 ${task.specExcerpt || '(see the spec/plan)'}
 
-${rangeBlock(task, range)}`
+${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}`
+}
+
+// The TERMINAL sweep judges the whole integrated branch, but each persona reads only the
+// files its lens concerns: five reviewers each reading the entire branch was the largest
+// single input cost of a run, for verdicts that never depended on the files outside their
+// scope. The stat comes first, the reads are filtered by the persona's Scope section.
+function sweepBlock(task) {
+  const path = repoPath(task.repo)
+  const branch = task.branch || 'HEAD'
+  return `## The subject: the WHOLE integrated branch — read it BY LENS, never in full
+1. Start with the shape of the change, not its content:
+\`\`\`bash
+git -C ${path} diff --stat ${BASE_BRANCH}...${branch}
+git -C ${path} log --oneline ${BASE_BRANCH}..${branch}
+\`\`\`
+2. From that file list, read the diff ONLY for the files your persona's **Scope** section names as its concern (\`git -C ${path} diff ${BASE_BRANCH}...${branch} -- <paths>\`). A file outside your scope is another persona's job; skip it even if it looks interesting.
+3. Read surrounding files for context when a finding needs it. Your verdict covers the integrated feature as your lens sees it — cross-task consistency, the assembled flow, release readiness — not a re-review of each task.`
 }
 
 // The review GUARD — verifies a fix against the exact findings that gated.
@@ -921,7 +938,8 @@ const index = await step('verify design artifacts + slice index (whole project)'
   agentT(indexPrompt(project, specPath, planPath, execute && !skipHookCheck ? requireHook : null), {
     label: 'parse-index',
     phase: 'Parse plan',
-    model: 'opus',
+    model: 'sonnet', // verification + listing: extraction, not judgement
+    effort: 'low',
     schema: SLICE_INDEX_SCHEMA,
   }),
 )
@@ -1215,6 +1233,7 @@ function integrateLane(task) {
       label: `integrate:${task.id}`,
       phase: 'Implement',
       model: 'sonnet',
+      effort: 'low', // mechanical merge; a conflict is reported, never resolved
       agentType: task.agent,
       schema: INTEGRATE_SCHEMA,
     })
@@ -1287,6 +1306,7 @@ async function runTask(task) {
       label: 'harness-context',
       phase: 'Parse plan',
       model: 'haiku',
+      effort: 'low', // reads files verbatim
       schema: HARNESS_CONTEXT_SCHEMA,
     }),
   )
@@ -1527,7 +1547,7 @@ while (true) {
           agentT(hydratePrompt(project, toHydrate, [...priorLearnings, ...learnings]), {
             label: `hydrate:w${waves}`,
             phase: 'Parse plan',
-            model: 'opus',
+            model: 'sonnet', // extraction from the tracker + spec excerpts; the replanner stays on opus,
             schema: TASK_LIST_SCHEMA,
           }),
         )
@@ -1804,6 +1824,7 @@ if (execute) {
       label: 'ledger',
       phase: 'Crystallize',
       model: 'haiku',
+      effort: 'low', // writes a payload verbatim
       isolation: 'worktree', // never mutate the session's live checkout
       schema: LEDGER_SCHEMA,
     }),

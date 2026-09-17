@@ -4,3 +4,6 @@
 
 ## Lens
 Privacy by design and data exposure: data minimization, processing on-device or in-region where possible, no silent tracking, honest permission purpose strings, the applicable data-protection regime for the deployment region. Hard authorization: can a crafted request read a redacted field, a hidden participant, or any data it should not? FAIL on blocker/major.
+
+## Scope (terminal sweep: read only these)
+Data models and persistence, API responses and resolvers (what leaves the server), analytics and tracking calls, permission and purpose strings, logging. Skip pure styling.

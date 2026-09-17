@@ -4,3 +4,6 @@
 
 ## Lens
 Event and state correctness: idempotency, message ordering and replay, at-least-once delivery handled as such, eventual-consistency windows, transaction boundaries, schema and migration drift — nothing orphaned, lost, or double-counted. FAIL on blocker/major.
+
+## Scope (terminal sweep: read only these)
+Command handlers, event producers/consumers, repositories, schema and migration files, idempotency and dedup code. Skip UI, styles, docs.

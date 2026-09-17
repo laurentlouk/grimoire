@@ -937,5 +937,32 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
   ok(impl2 && /origin\/main/.test(impl2.prompt), 'without the arg, origin/main is the default')
 }
 
+
+// ══════════════ TE · token economy: lens-scoped sweep, low effort on mechanical steps, cheaper parse ══════════════
+{
+  const { calls } = await run('TE · sweep reviewers read by lens; mechanical steps run cheap', [APP_TASK],
+    (label) => {
+      if (label.startsWith('impl:')) return IMPL_OK
+      if (label.startsWith('gate:')) return GATE_OK
+      if (label === 'ledger') return { path: 'runs/x.json', branch: 'harness/run-x' }
+      return V('PASS')
+    })
+  const sweep = calls.filter((c) => c.opts.phase === 'Terminal review')
+  ok(sweep.length > 0, 'the terminal sweep ran')
+  ok(sweep.every((c) => /diff --stat/.test(c.prompt) && /read it BY LENS/.test(c.prompt) && /Scope/.test(c.prompt)), 'every sweep reviewer starts from the --stat and is told to read only its Scope')
+  ok(sweep.every((c) => !/THIS is the change you are judging/.test(c.prompt)), 'the sweep does not hand over a whole-branch diff to read in full')
+  const perTask = calls.filter((c) => c.opts.agentType === 'reviewer' && c.opts.phase !== 'Terminal review')
+  ok(perTask.length > 0 && perTask.every((c) => !/diff --stat/.test(c.prompt)), 'per-task reviewers still get their exact range, not the lens-scoped sweep')
+  const eff = (l) => calls.find((c) => c.label === l || c.label.startsWith(l))?.opts.effort
+  ok(eff('parse-index') === 'low' && eff('harness-context') === 'low' && eff('ledger') === 'low', 'index, loader and ledger run at low effort')
+  const impl = calls.find((c) => c.label.startsWith('impl:'))
+  ok(impl.opts.effort === undefined, 'implementers inherit the session effort — never lowered')
+  ok(calls.find((c) => c.label === 'parse-index').opts.model === 'sonnet', 'the index runs on sonnet')
+  ok(calls.find((c) => c.label.startsWith('hydrate:')).opts.model === 'sonnet', 'hydration runs on sonnet')
+  const { readdirSync } = await import('node:fs')
+  const personas = readdirSync(`${DIR}/personas`).filter((f) => f.endsWith('.md') && f !== 'README.md')
+  ok(personas.length === 8 && personas.every((f) => /## Scope/.test(readFileSync(`${DIR}/personas/${f}`, 'utf8'))), 'every persona declares the Scope the sweep reads')
+}
+
 console.log(`\n${'═'.repeat(60)}\n${PASS} passed · ${FAIL} failed`)
 process.exit(FAIL ? 1 : 0)
