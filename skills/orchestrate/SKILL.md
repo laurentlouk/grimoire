@@ -21,6 +21,7 @@ If any check fails, say which artifact is missing and which skill produces it. D
 - **Preview** is the default. It dispatches exactly one agent (the slice index) and shows the dependency graph and each repo's review panel.
 - **Execute** adds `execute: true`. Knobs: `maxPerRepo` (parallel lanes inside one repo, default 3), `maxReplans` (default 3), `maxFixAttempts` (default 3), `requireHook` (a shell probe the run must pass before it dispatches, or none; the canonical one is rtk's output-compression hook, `{ name: 'rtk hook claude', check: 'command -v rtk && rtk hook check "git status" | grep -q "^rtk "' }`, because a hook registered without its binary fails silently on every call), `baseBranch` (default `origin/main`), and the memory, runs, briefs and personas directories if they are not at their defaults (installed as a plugin, the briefs and personas are under `${CLAUDE_PLUGIN_ROOT}/workflows/`).
 - Execute runs take hours. Launch it, then wait for the completion notification; do not poll.
+- **After a halt or a kill, resume, do not re-run.** Relaunch with `resumeFromRunId` (and the same `scriptPath` and args): every completed agent call returns its cached result instantly and only the unfinished work runs. Re-invoking the project from scratch re-indexes the tracker and re-hydrates every task, which is the most expensive way to get the same result.
 
 ## Read the result back
 

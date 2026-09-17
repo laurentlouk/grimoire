@@ -246,3 +246,12 @@ script only coordinates them. It cannot call `Date.now()`, `Math.random()` or `n
 (the runtime makes them throw so a relaunched run replays identically), and it cannot
 `import()`. That is why the review range travels as SHAs in the implementer's structured
 return, and why memory and ledgers are read and written by dedicated cheap agents.
+
+## Token economy (built in)
+
+- The terminal sweep reads **by lens**: each persona takes the branch `--stat` and reads only the files its Scope section names, never the whole branch.
+- Mechanical dispatches (index, harness-context, integrate, ledger) run with `effort: 'low'`; index and hydration run on sonnet, the replanner and implementers stay on opus.
+- The first review of a stage is the full panel; after a fix a sonnet guard decides whether the panel re-runs.
+- Briefs and memory are pasted as a stable prefix so prompt caching hits across dispatches; volatile values (task, SHAs) come last.
+- `requireHook` (rtk) refuses to execute without output compression.
+- After a halt, resume with `resumeFromRunId`; cached agent results replay instantly.
