@@ -7,6 +7,9 @@ description: First-run setup of the grimoire harness in an existing project. Use
 
 Everything the harness needs is derivable from the project except the decisions that are the owner's. Explore first, propose once, write on a yes.
 
+## 0 · Migration mode
+If the project already carries copies of what the plugin ships — skills named like grimoire's (`roast`, `to-plan`, `to-issues`, `implement`, `review`, `crystallize`, `orchestrate`, `launch-agent`, `tdd`, `adaptive-replanning`, `setup`), agents named like grimoire's scouts and reviewer, a `.claude/workflows/` with `orchestrate-loop.js`, or a memory README — list them as **duplicates the plugin now provides** and propose deleting them, so a plugin update reaches the project without a second copy drifting. Keep anything project-specific: team-agent definitions, memory data files, stack skills, hooks, docs. Never delete without the user's yes.
+
 ## 1 · Explore (read-only, in one fan-out)
 
 - **Layout.** Is this one repository or a hub of several (a `repositories/` folder, git submodules, a workspace)? For each repo: language, framework, package manager, test runner, lint and typecheck commands, CI workflow jobs.
@@ -21,7 +24,8 @@ Everything the harness needs is derivable from the project except the decisions 
 Show the user a single proposal and ask for one yes, or corrections:
 
 - **Team agents**, one per repository, from `templates/team-agent.md`: name, stack line, the skills it owns (existing project skills plus any grimoire skill that fits), the gate it must never run, its default model.
-- **Repos configuration** for `/orchestrate`: `{ name, path, agent, tags, gate: { run, when? } | null, prBy }` per repo, with `baseBranch` if the integration branch is not `origin/main`.
+- **`grimoire.config.json`** at the project root, for `/orchestrate`: `repos` (`{ name, path, agent, tags, gate: { run, stamp?, timeoutMin?, when? } | null, laneSetup?, prBy }`), `requireHook` (rtk, when installed), `baseBranch` if not `origin/main`, `memoryDir`, `runsDir`. Follow `grimoire.config.example.json` in the plugin.
+- **Team pinning** in `.claude/settings.json`: `extraKnownMarketplaces.grimoire` (github `laurentlouk/grimoire`) and `enabledPlugins["grimoire@grimoire"] = true`, so every teammate who trusts the folder gets the plugin without prompts, and `/plugin update grimoire@grimoire` is the whole upgrade path.
 - **Memory stores**: `memory/harness.md` and `memory/agents/<agent>.md` per team agent plus the reviewer, seeded only with facts you actually found in the docs (dated, declarative, within the caps), never with guesses.
 - **Roster**: `AGENTS.md` with the rows filled in.
 - **Instructions**: the lines to add to `CLAUDE.md` (the `@memory/harness.md` import, the pointer to `AGENTS.md`, the explore-before-asking paragraph if it is not already there).
