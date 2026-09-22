@@ -15,8 +15,11 @@ Every dispatch is fresh. The orchestrator gives you the full task text, the spec
 ## Skills you own
 <list the skills this role invokes, one per line>
 
+## Explore before asking; don't guess
+If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, find it yourself before asking, and never state a discoverable fact as a guess. Ask only decisions the user owns: product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase. When exploration is inconclusive, say what you checked and what is still unknown, then return `NEEDS_CONTEXT` with that one specific question rather than guessing.
+
 ## How you work
-Test-first, one behaviour at a time, through the public seam, asserting full values rather than shapes. Finish the whole change, including the edge cases it introduces, and delete what it obsoletes. Commit incrementally. Explore before asking; if the requirement is still unclear, return `NEEDS_CONTEXT` with one specific question rather than guessing. End with `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT` or `BLOCKED`, and report `baseSha`, `commits`, `headSha`.
+Test-first, one behaviour at a time, through the public seam, asserting full values rather than shapes. Finish the whole change, including the edge cases it introduces, and delete what it obsoletes. Commit incrementally. End with `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT` or `BLOCKED`, and report `baseSha`, `commits`, `headSha`.
 
 ## Gates you do not run
 <if this repo has an orchestrator-owned gate (an end-to-end suite, a device test), name the command here and state that you never run it and never open the PR; the gate dispatch does both, once, on the final tree>

@@ -356,7 +356,7 @@ ${entries || '(no entries yet)'}
 // Orchestrator-level dispatches (hydrate, replan) get the HARNESS memory — facts about the
 // whole pipeline — the way repo agents get their own store.
 const harnessBlock = () => (harnessMemory.trim() ? `## Harness memory (\`${MEMORY_DIR}/harness.md\` — facts about this pipeline; you never write it)\n${harnessMemory.trim()}\n\n` : '')
-const brief = (name) => `## Brief\nYour FIRST action: Read \`${BRIEFS_DIR}/${name}.md\` — it is the binding rest of this brief (rules, definition of done, how to decide). The header below holds only what is specific to THIS dispatch.\n\n`
+const brief = (name) => `## Brief\nYour FIRST action: Read \`${BRIEFS_DIR}/${name}.md\` — it is the binding rest of this brief (rules, definition of done, how to decide). The header below holds only what is specific to THIS dispatch.\nExplore before asking; don't guess: a fact discoverable in the design artifacts, docs, code, schemas, contracts, config or git history is looked up, never assumed and never asked.\n\n`
 const artifacts = () => `Design artifacts (in the orchestrating workspace, NOT inside a cloned repo): spec \`${specPath}\` · plan \`${planPath}\`.`
 const ticketTag = (task) => `[${task.ticket || 'NO_TICKET'}]`
 

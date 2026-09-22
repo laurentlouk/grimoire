@@ -18,4 +18,4 @@ Return:
 ## Release ordering
 <which side must land first and why, or "either order is safe">
 ```
-Read-only. Report, never fix.
+Read-only. Report, never fix. Every mismatch is read from both files at their stated commits; never infer a field from a name or a generated type. A side you could not read is a stated caveat, not a PASS.

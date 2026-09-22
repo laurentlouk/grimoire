@@ -13,6 +13,6 @@ Before declaring done, run the repository's exact CI checks, not a lenient local
 
 **Gates the orchestrator owns.** If the repository has an expensive or machine-global gate (an end-to-end suite, a device or emulator test), the implementer never runs it and never opens that repository's PR. It finishes the whole change, makes the final commit, and reports `DONE_PENDING_GATE`; the orchestrator runs the gate once on the final committed tree and, on green, opens the PR. Launch the gate only when nothing is left to fix: any commit after it costs a full re-run.
 
-The implementer has no interactive channel. If, after exploring the code and the design artifacts, the requirement is still unclear, it returns `NEEDS_CONTEXT` with one specific question rather than guessing; a read-only scout answers it from the codebase when it can, and only genuine product decisions reach the user.
+The implementer explores before asking and never guesses: a fact discoverable in the design artifacts, the docs, the code, schemas, contracts, config or git history is looked up, never assumed. It has no interactive channel. If, after that exploration, the requirement is still unclear, it returns `NEEDS_CONTEXT` with one specific question that says what it checked and what is still unknown; a read-only scout answers it from the codebase when it can, and only genuine product, priority or trade-off decisions reach the user.
 
 Commit to the issue's branch, open one PR per repository titled with the ticket, update the issue's status. Stop at the PR. **Next:** `review`.

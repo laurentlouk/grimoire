@@ -31,8 +31,12 @@ already settled there.
 - Never work on the default branch. Append commits to the repo's EXISTING open PR for this
   ticket; don't open a duplicate. The PR title carries the ticket, e.g. `[PROJ-123] …`. (A
   parallel lane or a gated repo overrides this — the header says so.)
-- Explore the repo, its schemas, its contracts and its git history first; never state a
-  discoverable fact as a guess.
+- **Explore before asking; don't guess.** If a fact is discoverable in the design artifacts,
+  the docs, the code, schemas, contracts, config or git history, find it yourself before
+  asking, and never state a discoverable fact as a guess. Only decisions the owner holds
+  (product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase) may
+  leave as a question. When exploration is inconclusive, your NEEDS_CONTEXT question says
+  what you checked and what is still unknown.
 - **Commit incrementally** — every time you reach a green step, commit it. This dispatch can
   be cut off by the per-agent timeout: anything COMMITTED survives and a re-dispatch resumes
   from it; anything uncommitted is redone from scratch.

@@ -23,12 +23,12 @@ If the project already carries copies of what the plugin ships — skills named 
 
 Show the user a single proposal and ask for one yes, or corrections:
 
-- **Team agents**, one per repository, from `templates/team-agent.md`: name, stack line, the skills it owns (existing project skills plus any grimoire skill that fits), the gate it must never run, its default model.
+- **Team agents**, one per repository, from `templates/team-agent.md`: name, stack line, the skills it owns (existing project skills plus any grimoire skill that fits), the gate it must never run, its default model. A team agent the project already has keeps its definition, but if it lacks the template's *Explore before asking; don't guess* section, propose appending it: the rule ships in the plugin's agents, briefs and skills, and the project's own agents must carry it too.
 - **`grimoire.config.json`** at the project root, for `/orchestrate`: `repos` (`{ name, path, agent, tags, gate: { run, stamp?, timeoutMin?, when? } | null, laneSetup?, prBy }`), `requireHook` (rtk, when installed), `baseBranch` if not `origin/main`, `memoryDir`, `runsDir`. Follow `grimoire.config.example.json` in the plugin.
 - **Team pinning** in `.claude/settings.json`: `extraKnownMarketplaces.grimoire` (github `laurentlouk/grimoire`) and `enabledPlugins["grimoire@grimoire"] = true`, so every teammate who trusts the folder gets the plugin without prompts, and `/plugin update grimoire@grimoire` is the whole upgrade path.
 - **Memory stores**: `memory/harness.md` and `memory/agents/<agent>.md` per team agent plus the reviewer, seeded only with facts you actually found in the docs (dated, declarative, within the caps), never with guesses.
 - **Roster**: `AGENTS.md` with the rows filled in.
-- **Instructions**: the lines to add to `CLAUDE.md` (the `@memory/harness.md` import, the pointer to `AGENTS.md`, the explore-before-asking paragraph if it is not already there).
+- **Instructions**: the lines to add to `CLAUDE.md` (the `@memory/harness.md` import, the pointer to `AGENTS.md`). The explore-before-asking rule needs no `CLAUDE.md` line: it is built into every grimoire skill, scout, brief and the team-agent template.
 - **Docs**: `docs/specs/`, `docs/plans/`, `docs/crystallize/` if missing.
 - **rtk**: if installed but not registered for the project, the `PreToolUse(Bash)` hook entry (`rtk hook claude`) to add to `.claude/settings.json`; if not installed, the one-line install; either way the `requireHook` block for `/orchestrate` so an execute run refuses to dispatch without compression.
 - **Scouts**: which grimoire scouts apply (tracker-scout needs a tracker, design-scout a design tool, contract-checker a shared contract) and any project-specific scout worth adding.

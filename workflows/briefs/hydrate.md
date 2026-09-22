@@ -28,4 +28,8 @@ third-party step). An acceptance demo that would be MORE convincing against a de
 dependency is a concern to report with DONE_WITH_CONCERNS, not a deferral.
 
 If the header carries learnings from earlier work, fold them into `taskText` where relevant
-so this work does not repeat a failure. Read-only; do not modify the tracker or any repo.
+so this work does not repeat a failure. Where an issue is silent on something the implementer
+will need (a path, a table, an existing helper), look it up in the repo and state it in the
+task rather than leaving a gap the implementer must guess at or ask about; report in
+`inputProblems` only what neither the artifacts nor the code settle. Read-only; do not modify
+the tracker or any repo.

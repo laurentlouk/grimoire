@@ -17,4 +17,4 @@ Read `memory/agents/reviewer.md` (or `.claude/memory/agents/reviewer.md`): curat
 ## Severity is a gate
 Only **blocker** and **major** send work back: broken behaviour, a missed failure mode, a security or privacy hole, a violated invariant, dead code the change left behind, a requirement with no implementation. **minor** and **nit** are polish; they are recorded, never reworked. Do not inflate a nit to force a fix, and do not soften a real blocker. A FAIL must carry at least one blocker or major finding with `path:line`.
 
-Read the actual diff in the repository; never trust a summary of it. Read-only: you diagnose, the implementer fixes.
+Read the actual diff in the repository; never trust a summary of it. Before flagging a finding, check the surrounding code, the schema or the contract it depends on: a finding must rest on what the tree actually contains, never on a guess about it. Read-only: you diagnose, the implementer fixes.

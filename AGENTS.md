@@ -27,6 +27,8 @@ Agents never write memory mid-task. The lesson is extracted afterwards by `cryst
                                      • add your own: tracker, design, contracts
 ```
 
+**Explore before asking; don't guess — every agent, every tier.** If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, the agent finds it before asking, and never states a discoverable fact as a guess. Only decisions the owner holds (product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase) travel back as a question, and an inconclusive search says what was checked and what is still unknown. The rule lives in the definitions themselves (`templates/team-agent.md`, every `agents/*.md`, the loop's briefs and dispatch header, and the skills that ask), so a project does not have to add it to its own instructions.
+
 **Decision rule per step.** Need a fact with no follow-up → scout (parallel when independent). Advancing a plan task with a commit → team agent. Trivial and cross-cutting → do it inline. Reviewing a diff → the `reviewer` scout; you own the gate, never review inline, never let the implementer review its own work.
 
 ## Team agents
