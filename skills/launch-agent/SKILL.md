@@ -18,7 +18,7 @@ Before dispatching a team agent or the reviewer, read its store at `memory/agent
 
 ## The brief
 
-Paste the full task text, never "go read the plan". Add the relevant spec excerpt, the files to touch, the success criteria, and the ticket. Remind a team agent that it has no interactive channel: if the requirement is still unclear after exploring, it returns `NEEDS_CONTEXT` with one specific question rather than guessing. It commits incrementally so a cut-off dispatch resumes instead of restarting, and ends with one of `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, `BLOCKED`. If the repo has a gate the orchestrator owns (an end-to-end suite, a device test), tell the agent not to run it and not to open the PR.
+Paste the full task text, never "go read the plan". Add the relevant spec excerpt, the files to touch, the success criteria, and the ticket. Every brief, team agent or scout, carries the rule *explore before asking; don't guess*: a fact discoverable in the docs, the code, schemas, contracts, config or git history is found, never assumed, and only decisions the owner holds may come back as a question. Remind a team agent that it has no interactive channel: if the requirement is still unclear after exploring, it returns `NEEDS_CONTEXT` with one specific question that names what it checked, rather than guessing. It commits incrementally so a cut-off dispatch resumes instead of restarting, and ends with one of `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, `BLOCKED`. If the repo has a gate the orchestrator owns (an end-to-end suite, a device test), tell the agent not to run it and not to open the PR.
 
 ## Parallelism
 

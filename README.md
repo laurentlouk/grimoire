@@ -73,16 +73,7 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 
 **🧠 How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
 
-**🔍 Recommended agent-instructions snippet.** `roast` and every agent work best when the whole project explores before asking. Add this to `CLAUDE.md` or `AGENTS.md`:
-
-```markdown
-## Explore before asking; don't guess
-If a fact is discoverable in the docs, the code, schemas, contracts, config or git
-history, find it yourself before asking, and never state a discoverable fact as a
-guess. Ask only decisions the user owns: product/UX calls, cost or vendor trade-offs,
-priorities, context outside the codebase. When exploration is inconclusive, say what
-you checked and what is still unknown, then ask.
-```
+**🔍 Explore before asking; don't guess: built in.** If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, an agent finds it before asking and never states a discoverable fact as a guess; only decisions the owner holds (product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase) come back as questions, and an inconclusive search says what was checked and what is still unknown. Nothing to paste into `CLAUDE.md`: the rule is carried by the skills that ask (`roast`, `to-plan`, `to-issues`, `implement`, `launch-agent`, `setup`), the team-agent template, every scout and the reviewer, and the loop's briefs and dispatch header, so no project can miss it.
 
 ## 💸 Token economy: rtk
 

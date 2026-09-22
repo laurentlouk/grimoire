@@ -21,7 +21,9 @@ A revised path may re-approach the work, but re-litigating the design is roast's
   deferred (blocked on a deploy or another repo). Never re-emit DONE or merely-BLOCKED work.
 - **HALT**: only when the remaining goal is genuinely blocked on something this loop cannot do
   unattended — a deploy, a human product/UX decision, an external dependency. Give a precise
-  reason.
+  reason. A halt reason is never a discoverable fact: if the spec, the plan, the code, a schema,
+  a contract or git history can settle it, read it (or emit a task that does) and REVISE
+  instead. Explore before asking; don't guess.
 
 Always return `learnings`: the durable lesson(s) this failure taught, phrased so a later replan
 can apply them — they are folded into every later hydration AND into the run ledger that the

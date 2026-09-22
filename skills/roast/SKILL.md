@@ -24,7 +24,7 @@ Then diff the two. The code is the source of truth. Where a document contradicts
 
 ## Answer your own question before you ask it
 
-Every question climbs this ladder, and only the top rung reaches the user:
+Explore before asking; don't guess. If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, find it yourself before asking, and never state a discoverable fact as a guess. Ask only decisions the user owns: product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase. When exploration is inconclusive, say what you checked and what is still unknown, then ask. Every question climbs this ladder, and only the top rung reaches the user:
 
 1. Is it in the docs or the memory? Answer it and cite the file.
 2. Is it in the code, schema, contract, config, deployed infra or history? Find it, or send a scout, and cite the location.
