@@ -25,7 +25,7 @@ Run it from the project root so it finds `grimoire.config.json`. It refreshes th
 The page is one file with no network access:
 
 - **Overview**: repositories with their HEAD and index time, languages, file, symbol and edge counts.
-- **Map**: files as a dependency map (imports and calls between files), colored by repository. The most connected files when there are many. Drag, zoom, click a file to open it.
+- **Map**: files as a dependency map (imports and calls between files), one named cluster per directory, colored by repository. The layout is computed once at render time and is the same every time. The most connected files carry their name, more appear as you zoom in, and hovering a file names it and highlights what it uses and what uses it. The 1,500 most connected files when there are more. Drag, zoom, click a file to open it, double-click to reset the view.
 - **Files** and **Symbols**: search everything; a file shows what it depends on, what uses it and what it defines; a symbol shows where it is, its callers and callees with how each edge was resolved, and its supertypes and subtypes.
 - **Hotspots**: most-called symbols, widest fan-out, most depended-on files, files that change together in git history.
 

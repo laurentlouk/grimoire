@@ -49,7 +49,7 @@ export async function openStore(dbPath, { readOnly = false } = {}) {
   if (!readOnly) mkdirSync(path.dirname(dbPath), { recursive: true })
   const db = new DatabaseSync(dbPath, readOnly ? { readOnly: true } : {})
   if (readOnly) return db
-  db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;')
+  db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;')
   const v = (() => { try { return db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value } catch { return null } })()
   if (v && v !== SCHEMA_VERSION) {
     for (const t of ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange']) db.exec(`DROP TABLE IF EXISTS ${t}`)

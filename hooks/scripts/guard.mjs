@@ -328,28 +328,37 @@ function checkBash(command, cwd, ctx, depth = 0) {
 }
 
 // ─────────────────────────────── write rules ───────────────────────────────
-// The checkout the rules apply to: a linked git worktree of the project's repository (a loop lane
-// under .worktrees/, a session worktree anywhere) is judged as the project itself, so its memory/
-// and .claude/ are protected the same way. Returns [root, abs] with both real paths, or null.
-function checkoutOf(abs, ctx) {
-  let d = path.dirname(abs)
-  while (!existsSync(d)) { const up = path.dirname(d); if (up === d) return null; d = up }
-  const absReal = path.join(real(d), path.relative(d, abs))
-  if (ctx.commonDir) {
-    const top = git(d, ['rev-parse', '--show-toplevel'])
-    if (top && git(top, ['rev-parse', '--path-format=absolute', '--git-common-dir']) === ctx.commonDir) return [real(top), absReal]
+// Where the rules apply. A write is judged as a path inside the project AND as a path inside
+// whichever checkout of the project's repository holds it (a loop lane under .worktrees/, a
+// session worktree anywhere), both by its literal path and by its real path. A symlinked
+// component can therefore never hide a protected path: if ANY reading of the path is protected,
+// the write is denied.
+const isCheckout = (dir, ctx) => ctx.commonDir && existsSync(path.join(dir, '.git')) && git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']) === ctx.commonDir
+function targets(abs, ctx) {
+  const out = []
+  const add = (root, p) => { if (inside(p, root) && !out.some(([r, q]) => same(r, root) && same(q, p))) out.push([root, p]) }
+  add(ctx.projectDir, abs) // literal, as typed
+  for (let d = path.dirname(abs); ; d = path.dirname(d)) { // literal ancestors: the checkout by path
+    if (isCheckout(d, ctx)) { add(d, abs); break }
+    if (path.dirname(d) === d) break
   }
-  return inside(absReal, real(ctx.projectDir)) ? [real(ctx.projectDir), absReal] : null
+  let d = path.dirname(abs)
+  while (!existsSync(d)) { const up = path.dirname(d); if (up === d) return out; d = up }
+  const absReal = path.join(real(d), path.relative(d, abs)) // real path: the checkout it lands in
+  add(real(ctx.projectDir), absReal)
+  const top = ctx.commonDir && git(real(d), ['rev-parse', '--show-toplevel'])
+  if (top && isCheckout(top, ctx)) add(real(top), absReal)
+  return out
 }
 
 function checkWrite(file, cwd, ctx, input) {
   if (typeof file !== 'string' || !file) return
-  const target = checkoutOf(path.resolve(cwd || ctx.projectDir, file.replace(/^~(?=\/)/, process.env.HOME || homedir())), ctx)
-  if (!target) return
-  const [root, abs] = target
-  if (!inside(abs, root)) return
-  let rel = path.relative(root, abs).split(path.sep).join('/')
-  if (FOLD) rel = rel.toLowerCase()
+  const abs = path.resolve(cwd || ctx.projectDir, file.replace(/^~(?=\/)/, process.env.HOME || homedir()))
+  for (const [root, p] of targets(abs, ctx)) checkRules(path.relative(root, p).split(path.sep).join('/'), ctx, input)
+}
+
+function checkRules(relPath, ctx, input) {
+  const rel = FOLD ? relPath.toLowerCase() : relPath
   const f = (s) => (FOLD ? s.toLowerCase() : s)
   const under = (dir) => { const d = f(dir.replace(/^\.\//, '').replace(/\/+$/, '')); return rel === d || rel.startsWith(d + '/') }
   const allow = process.env.GRIMOIRE_GUARD_ALLOW === '1'

@@ -15,7 +15,7 @@
 //  prior index that installed it into the user cache. Without it the file is skipped, except
 //  under CI, where a missing runtime fails.
 import { spawnSync, spawn } from 'node:child_process'
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, realpathSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, realpathSync, mkdirSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -234,6 +234,13 @@ writeFileSync(path.join(WT, 'src/<b>/x.ts'), 'export function tagged(): number {
 const rd2 = spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'render', '--root', WT], { encoding: 'utf8' })
 const data2 = rd2.status === 0 ? (/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(readFileSync(rd2.stdout.trim(), 'utf8')) || [])[1] || '' : ''
 ok(data2.includes('src/\\u003cb>/x.ts') && !data2.includes('<'), 'a path holding "<" is escaped: data can never close the script element')
+const { layoutMap } = await import('../lib/layout.mjs')
+const lf = [...Array(60)].map((_, i) => ({ id: i, repo: i < 40 ? 'a' : 'b', path: `${i % 3 ? 'src' : 'lib'}/f${i}.ts`, deg: i % 9 }))
+const ll = [...Array(120)].map((_, i) => [i % 60, (i * 7 + 3) % 60, 1 + (i % 3)]).filter(([x, y]) => x !== y)
+const L1 = layoutMap(lf, ll), L2 = layoutMap(lf, ll)
+ok(JSON.stringify(L1) === JSON.stringify(L2), 'map layout is deterministic: same index, same picture')
+ok(L1.pos.every(([x, y]) => x >= 0 && x <= 1000 && y >= 0 && y <= 1000) && L1.groups.length === 4, 'every file is on the page; one group per repo directory')
+ok(L1.groups.every((g, i) => L1.groups.every((o, j) => i === j || (g.x - o.x) ** 2 + (g.y - o.y) ** 2 >= (g.r + o.r) ** 2)), 'directory clusters never overlap')
 const LOCKDIR = path.join(SANDBOX, 'lock')
 let runs = 0, inner
 const outer = await withLock(LOCKDIR, async () => { runs++; if (runs === 1) inner = await withLock(LOCKDIR, async () => 'never'); return 'done' })
@@ -241,6 +248,16 @@ ok(inner?.busy === true, 'a second indexer does not overlap: it gets busy and ma
 ok(outer === 'done' && runs === 2 && !existsSync(path.join(LOCKDIR, 'index.lock')), 'the holder re-runs for the pending change, then releases the lock')
 writeFileSync(path.join(LOCKDIR, 'index.lock'), '999999999')
 ok(await withLock(LOCKDIR, async () => 'taken') === 'taken', 'a lock left by a dead process is taken over')
+writeFileSync(path.join(LOCKDIR, 'index.lock'), String(process.pid))
+ok((await withLock(LOCKDIR, async () => 'stolen'))?.busy === true, 'a fresh lock held by a live pid is respected')
+const old = new Date(Date.now() - 26 * 60_000); utimesSync(path.join(LOCKDIR, 'index.lock'), old, old)
+ok(await withLock(LOCKDIR, async () => 'taken') === 'taken', 'a lock older than any index run is taken over even when its pid was reused')
+ok(!readdirSync(LOCKDIR).some((f) => f.startsWith('index.lock.')), 'no temp files left behind')
+const contenders = await Promise.all([0, 1, 2, 3].map(() => new Promise((res) => {
+  const c = spawn(process.execPath, ['--input-type=module', '-e', `import { withLock } from ${JSON.stringify(path.join(ROOT, 'lib/freshness.mjs'))}; const r = await withLock(${JSON.stringify(path.join(SANDBOX, 'race'))}, async () => { await new Promise((z) => setTimeout(z, 300)); return 'ran' }); console.log(JSON.stringify(r))`], { stdio: ['ignore', 'pipe', 'inherit'] })
+  let out = ''; c.stdout.on('data', (d) => { out += d }); c.on('close', () => res(out.trim()))
+})))
+ok(contenders.filter((r) => r === '"ran"').length >= 1 && contenders.every((r) => r === '"ran"' || r === '{"busy":true}'), `four racing processes: never an error, busy ones hand over (${contenders.join(' ')})`)
 
 rmSync(SANDBOX, { recursive: true, force: true })
 console.log(`\n${PASS} passed, ${FAIL} failed`)

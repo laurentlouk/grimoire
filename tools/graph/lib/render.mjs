@@ -1,13 +1,15 @@
 // grimoire graph · the browsable page. Reads the index read-only and writes ONE self-contained HTML
 // file (no network, no CDN: data and code are inlined, a CSP forbids everything else):
 //   overview   repositories, languages, file / symbol / edge counts, when each repo was indexed
-//   map        the file-level dependency map (imports + calls between files), force-laid out,
-//              colored by repository; click a file to open it
+//   map        the file-level dependency map (imports + calls between files), laid out ONCE here,
+//              deterministically (layout.mjs): files cluster by directory, the biggest carry their
+//              name, the rest show it on hover; colored by repository; click a file to open it
 //   symbols    search every definition; a symbol shows where it is, its callers, its callees, and
 //              what it extends / implements or is extended by
 //   hotspots   most-called symbols, most-imported files, widest fan-out, strongest co-change
 // Like every graph answer, the page is a map: read the code at the path:line it points to.
 import { openStore } from './store.mjs'
+import { layoutMap, groupOf } from './layout.mjs'
 
 const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
 const MAP_MAX_FILES = 1500 // the map keeps the most connected files; the other tabs keep everything
@@ -23,6 +25,7 @@ export async function renderGraph(project) {
     const confs = [...new Set(edges.map((e) => e.confidence || ''))]
     const kinds = [...new Set(nodes.map((n) => n.kind))]
     const data = {
+      map: mapData(files, nodes, edges),
       generatedAt: new Date().toISOString(),
       mapMax: MAP_MAX_FILES,
       repos,
@@ -36,6 +39,29 @@ export async function renderGraph(project) {
     }
     return html(data)
   } finally { db.close() }
+}
+
+// The file-level graph for the map: most connected files, weighted links, positions, groups.
+function mapData(files, nodes, edges) {
+  const fileOfNode = new Map()
+  for (const f of files) fileOfNode.set(f.node_id, f.id)
+  for (const n of nodes) fileOfNode.set(n.id, n.file_id)
+  const w = new Map(), deg = new Map()
+  for (const e of edges) {
+    const a = fileOfNode.get(e.src), b = fileOfNode.get(e.dst)
+    if (a === undefined || b === undefined || a === b) continue
+    const k = a < b ? `${a},${b}` : `${b},${a}`
+    if (!w.has(k)) { deg.set(a, (deg.get(a) || 0) + 1); deg.set(b, (deg.get(b) || 0) + 1) }
+    w.set(k, (w.get(k) || 0) + 1)
+  }
+  const keep = files.map((f) => ({ id: f.id, repo: f.repo, path: f.path, deg: deg.get(f.id) || 0 }))
+    .sort((a, b) => b.deg - a.deg || (a.path < b.path ? -1 : 1)).slice(0, MAP_MAX_FILES)
+  const at = new Map(keep.map((f, i) => [f.id, i]))
+  const links = []
+  for (const [k, v] of w) { const [a, b] = k.split(',').map(Number); if (at.has(a) && at.has(b)) links.push([at.get(a), at.get(b), v]) }
+  links.sort((x, y) => x[0] - y[0] || x[1] - y[1])
+  const { pos, groups } = layoutMap(keep, links)
+  return { files: keep.map((f) => f.id), deg: keep.map((f) => f.deg), pos, links, groups, total: files.length }
 }
 
 function html(data) {
@@ -118,6 +144,9 @@ function client() {
     }
   }
   const loc = (n) => `${n.file ? n.file.shown : '?'}:${n.line}`
+  const perRepo = new Map(D.repos.map((r) => [r.name, { files: 0, symbols: 0 }]))
+  for (const f of files.values()) if (perRepo.has(f.repo)) perRepo.get(f.repo).files++
+  for (const n of nodes.values()) if (n.file && perRepo.has(n.file.repo)) perRepo.get(n.file.repo).symbols++
 
   // ── state ──
   const st = { tab: 'overview', repo: '', q: '', sel: null }
@@ -137,8 +166,8 @@ function client() {
       h('table', null, h('tr', null, h('th', null, 'repo'), h('th', null, 'root'), h('th', null, 'files'), h('th', null, 'symbols'), h('th', null, 'HEAD'), h('th', null, 'indexed')),
         D.repos.filter((r) => !st.repo || r.name === st.repo).map((r) => h('tr', null,
           h('td', null, h('i', { style: `display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:${repoColor.get(r.name)}` }), r.name),
-          h('td', { class: 'mono' }, r.root), h('td', { class: 'n' }, [...files.values()].filter((f) => f.repo === r.name).length),
-          h('td', { class: 'n' }, [...nodes.values()].filter((n) => n.file && n.file.repo === r.name).length),
+          h('td', { class: 'mono' }, r.root), h('td', { class: 'n' }, perRepo.get(r.name).files),
+          h('td', { class: 'n' }, perRepo.get(r.name).symbols),
           h('td', { class: 'mono' }, (r.head || '').slice(0, 10)), h('td', null, r.indexed_at || '')))),
       h('h2', null, 'Languages'),
       h('table', null, h('tr', null, h('th', null, 'language'), h('th', null, 'files')),
@@ -204,110 +233,122 @@ function client() {
         : h('p', { class: 'muted' }, 'No co-change data (no git history indexed).'))
   }
 
-  // ── map: force layout on a canvas ──
-  let sim = null
+  // ── map: a fixed layout (computed at render time), drawn on a canvas ──
+  let drag = null
+  window.addEventListener('mouseup', () => { drag = null })
+  const M = D.map
+  const mapFiles = M.files.map((id, i) => ({ f: files.get(id), x: M.pos[i][0], y: M.pos[i][1], deg: M.deg[i], r: 2.5 + Math.min(9, Math.sqrt(M.deg[i])), nb: new Set() }))
+  for (const [a, b] of M.links) { mapFiles[a].nb.add(b); mapFiles[b].nb.add(a) }
+  const byDeg = mapFiles.map((_, i) => i).sort((a, b) => mapFiles[b].deg - mapFiles[a].deg)
+  const base = (p) => p.split('/').pop()
   function mapView() {
-    const all = [...files.values()].filter(inRepo)
-    const deg = (f) => f.in.size + f.out.size
-    const keep = all.sort((a, b) => deg(b) - deg(a)).slice(0, D.mapMax)
-    const set = new Set(keep)
+    const shown = mapFiles.filter((m) => inRepo(m.f)).length
     const wrap = h('div', { id: 'map' }), canvas = h('canvas'), tip = h('div', { id: 'tip' })
     wrap.append(canvas, tip)
     const legend = h('div', { class: 'legend' }, D.repos.filter((r) => !st.repo || r.name === st.repo).map((r) => h('span', null, h('i', { style: `background:${repoColor.get(r.name)}` }), r.name)))
-    const note = h('p', { class: 'note' }, `${keep.length} of ${all.length} files${all.length > keep.length ? ` (the ${D.mapMax} most connected)` : ''} · edges are imports and calls between files · drag to pan, scroll to zoom, click a file to open it`)
-    requestAnimationFrame(() => startSim(canvas, tip, keep, set))
+    const note = h('p', { class: 'note' }, `${shown} of ${M.total} files${M.total > M.files.length ? ` (the ${M.files.length} most connected)` : ''}, grouped by directory · the biggest are named, hover for the rest · lines are imports and calls between files · drag to pan, scroll to zoom, click to open, double-click to reset`)
+    requestAnimationFrame(() => drawMap(canvas, tip))
     return h('section', null, st.sel && st.sel.file ? fileDetail(st.sel.file) : null, legend, wrap, note)
   }
-  function startSim(canvas, tip, keep, set) {
-    if (sim) sim.stop = true
+  let resizeTimer = null
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (st.tab === 'map') render() }, 150) })
+  function drawMap(canvas, tip) {
+    if (!canvas.isConnected) return
+    if (canvas.clientWidth < 50 || canvas.clientHeight < 50) return requestAnimationFrame(() => drawMap(canvas, tip)) // not laid out yet
     const dpr = window.devicePixelRatio || 1
     const W = canvas.clientWidth, H = canvas.clientHeight
     canvas.width = W * dpr; canvas.height = H * dpr
     const ctx = canvas.getContext('2d')
-    const idx = new Map(keep.map((f, i) => [f, i]))
-    const repoIdx = new Map(D.repos.map((r, i) => [r.name, i]))
-    const P = keep.map((f, i) => {
-      const a = (repoIdx.get(f.repo) || 0) / Math.max(1, D.repos.length) * Math.PI * 2 + (i % 17) * 0.05
-      const r = 120 + (i % 97) * 3
-      return { f, x: Math.cos(a) * r + (Math.random() - 0.5) * 40, y: Math.sin(a) * r + (Math.random() - 0.5) * 40, vx: 0, vy: 0, r: 2.5 + Math.min(9, Math.sqrt(f.in.size + f.out.size)) }
-    })
-    const L = []
-    for (const f of keep) for (const [g, w] of f.out) if (set.has(g)) L.push([idx.get(f), idx.get(g), w])
-    for (const [a, b] of L) P[a].linked = P[b].linked = true
-    const view = { x: W / 2, y: H / 2, k: 1 }
-    const me = { stop: false, alpha: 1 }
-    sim = me
-    const CELL = 60
-    function tick() {
-      const grid = new Map()
-      for (let i = 0; i < P.length; i++) { const p = P[i]; const key = `${Math.floor(p.x / CELL)},${Math.floor(p.y / CELL)}`; (grid.get(key) || grid.set(key, []).get(key)).push(i) }
-      for (let i = 0; i < P.length; i++) {
-        const p = P[i], cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL)
-        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const j of grid.get(`${cx + dx},${cy + dy}`) || []) {
-          if (j <= i) continue
-          const q = P[j]; let x = p.x - q.x, y = p.y - q.y; let d2 = x * x + y * y || 0.01
-          if (d2 > CELL * CELL) continue
-          const fr = (900 / d2) * me.alpha; x *= fr; y *= fr
-          p.vx += x; p.vy += y; q.vx -= x; q.vy -= y
-        }
-      }
-      for (const [a, b] of L) {
-        const p = P[a], q = P[b]; const x = q.x - p.x, y = q.y - p.y, d = Math.sqrt(x * x + y * y) || 1
-        const fr = ((d - 40) / d) * 0.03 * me.alpha
-        p.vx += x * fr; p.vy += y * fr; q.vx -= x * fr; q.vy -= y * fr
-      }
-      for (const p of P) { const g = p.linked ? 0.002 : 0.02; p.vx -= p.x * g * me.alpha; p.vy -= p.y * g * me.alpha; p.vx *= 0.6; p.vy *= 0.6; p.x += p.vx; p.y += p.vy }
-      me.alpha = Math.max(0.02, me.alpha * 0.985)
-    }
     const css = getComputedStyle(document.documentElement)
+    const col = (v) => css.getPropertyValue(v).trim()
+    const fitK = Math.min((W - 60) / 1000, (H - 60) / 1000)
+    const view = { k: fitK, x: (W - 1000 * fitK) / 2, y: (H - 1000 * fitK) / 2 }
+    let hover = -1
+    const vis = (m) => inRepo(m.f)
+    const selIdx = () => (st.sel && st.sel.file ? mapFiles.findIndex((m) => m.f === st.sel.file) : -1)
+    const sx = (x) => view.x + x * view.k, sy = (y) => view.y + y * view.k
     function draw() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.clearRect(0, 0, W, H)
-      ctx.translate(view.x, view.y); ctx.scale(view.k, view.k)
-      ctx.strokeStyle = css.getPropertyValue('--edge'); ctx.lineWidth = 1 / view.k
+      const focus = hover >= 0 ? hover : selIdx()
+      const near = focus >= 0 ? mapFiles[focus].nb : null
+      // directory labels, behind everything, while zoomed out
+      // directories: a faint disc each (their names are drawn last, on top)
+      const groupsShown = M.groups.filter((g) => !st.repo || g.key.startsWith(st.repo + ':'))
+      for (const g of groupsShown) { ctx.beginPath(); ctx.arc(sx(g.x), sy(g.y), g.r * view.k, 0, Math.PI * 2); ctx.fillStyle = col('--hover'); ctx.fill() }
+      ctx.lineWidth = 1
+      ctx.strokeStyle = col('--edge')
       ctx.beginPath()
-      for (const [a, b] of L) { ctx.moveTo(P[a].x, P[a].y); ctx.lineTo(P[b].x, P[b].y) }
+      for (const [a, b] of M.links) if (vis(mapFiles[a]) && vis(mapFiles[b]) && (focus < 0 || (a !== focus && b !== focus))) { ctx.moveTo(sx(mapFiles[a].x), sy(mapFiles[a].y)); ctx.lineTo(sx(mapFiles[b].x), sy(mapFiles[b].y)) }
       ctx.stroke()
-      const sel = st.sel && st.sel.file
-      for (const p of P) {
-        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
-        ctx.fillStyle = repoColor.get(p.f.repo) || '#888'
-        ctx.globalAlpha = sel && sel !== p.f && !sel.out.has(p.f) && !sel.in.has(p.f) ? 0.2 : 1
-        ctx.fill()
-        if (p.f === sel) { ctx.lineWidth = 2 / view.k; ctx.strokeStyle = css.getPropertyValue('--ink'); ctx.stroke() }
+      if (focus >= 0) {
+        ctx.strokeStyle = col('--accent'); ctx.lineWidth = 1.6; ctx.beginPath()
+        for (const b of near) { ctx.moveTo(sx(mapFiles[focus].x), sy(mapFiles[focus].y)); ctx.lineTo(sx(mapFiles[b].x), sy(mapFiles[b].y)) }
+        ctx.stroke()
+      }
+      const zr = Math.max(0.7, Math.sqrt(view.k / fitK))
+      for (let i = 0; i < mapFiles.length; i++) {
+        const m = mapFiles[i]
+        if (!vis(m)) continue
+        ctx.globalAlpha = focus >= 0 && i !== focus && !near.has(i) ? 0.18 : 1
+        ctx.beginPath(); ctx.arc(sx(m.x), sy(m.y), m.r * zr, 0, Math.PI * 2)
+        ctx.fillStyle = repoColor.get(m.f.repo) || '#888'; ctx.fill()
+        if (i === focus) { ctx.lineWidth = 2; ctx.strokeStyle = col('--ink'); ctx.stroke() }
       }
       ctx.globalAlpha = 1
+      // file names: the focus and its neighbors always; otherwise the most connected files first,
+      // as many as fit without overlapping (more appear as you zoom in)
+      // Directory names claim their space first, biggest directory first; file names avoid them.
+      const boxes = [], dirLabels = []
+      ctx.font = '600 12px ui-sans-serif,system-ui,sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'
+      for (const g of groupsShown) {
+        if (g.r * view.k < 14) continue
+        const t = g.key.split(':')[1], w = ctx.measureText(t).width, x = sx(g.x) - w / 2, y = sy(g.y) - g.r * view.k - 9
+        const b = [x - 3, y - 8, x + w + 3, y + 8]
+        if (boxes.some((o) => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1])) continue
+        boxes.push(b); dirLabels.push([t, x, y])
+      }
+      ctx.font = '11.5px ui-sans-serif,system-ui,sans-serif'
+      const place = (i, strong) => {
+        const m = mapFiles[i]; if (!vis(m)) return
+        const t = base(m.f.path), w = ctx.measureText(t).width, x = sx(m.x) + m.r * zr + 4, y = sy(m.y)
+        if (x > W || y < 0 || y > H || x + w < 0) return
+        const b = [x - 2, y - 8, x + w + 2, y + 8]
+        if (!strong && boxes.some((o) => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1])) return
+        boxes.push(b)
+        ctx.lineWidth = 3; ctx.strokeStyle = col('--panel'); ctx.strokeText(t, x, y)
+        ctx.fillStyle = col('--ink'); ctx.globalAlpha = strong || focus < 0 ? 1 : 0.35; ctx.fillText(t, x, y); ctx.globalAlpha = 1
+      }
+      if (focus >= 0) { place(focus, true); for (const j of near) place(j, true) }
+      const budget = Math.round(30 * (view.k / fitK) ** 1.5)
+      for (let r = 0, n = 0; r < byDeg.length && n < budget; r++) { const i = byDeg[r]; if (i === focus || (near && near.has(i))) continue; const before = boxes.length; place(i, false); if (boxes.length > before) n++ }
+      ctx.font = '600 12px ui-sans-serif,system-ui,sans-serif'
+      for (const [t, x, y] of dirLabels) { ctx.lineWidth = 4; ctx.strokeStyle = col('--panel'); ctx.strokeText(t, x, y); ctx.fillStyle = col('--muted'); ctx.fillText(t, x, y) }
     }
-    // Fit the layout to the canvas while it settles, until the user pans or zooms.
-    let frames = 0, touched = false
-    function fit() {
-      if (touched || !P.length) return
-      // 2nd–98th percentile: a few loose files must not shrink everything else to a dot.
-      const xs = P.map((p) => p.x).sort((a, b) => a - b), ys = P.map((p) => p.y).sort((a, b) => a - b)
-      const q = (a, t) => a[Math.min(a.length - 1, Math.max(0, Math.round(t * (a.length - 1))))]
-      const x0 = q(xs, 0.02), x1 = q(xs, 0.98), y0 = q(ys, 0.02), y1 = q(ys, 0.98)
-      const k = Math.min(2, (W - 40) / Math.max(1, x1 - x0), (H - 40) / Math.max(1, y1 - y0))
-      view.k = k; view.x = W / 2 - ((x0 + x1) / 2) * k; view.y = H / 2 - ((y0 + y1) / 2) * k
+    draw()
+    const hit = (e) => {
+      const b = canvas.getBoundingClientRect(), x = e.clientX - b.left, y = e.clientY - b.top, zr = Math.max(0.7, Math.sqrt(view.k / fitK))
+      let best = -1, bd = Infinity
+      for (let i = 0; i < mapFiles.length; i++) { const m = mapFiles[i]; if (!vis(m)) continue; const d = (sx(m.x) - x) ** 2 + (sy(m.y) - y) ** 2; if (d < bd && d < (m.r * zr + 5) ** 2) { bd = d; best = i } }
+      return best
     }
-    function loop() { if (me.stop || !canvas.isConnected) return; if (frames++ < 400) { tick(); if (frames % 20 === 0) fit() } draw(); requestAnimationFrame(loop) }
-    loop()
-    const toWorld = (e) => { const b = canvas.getBoundingClientRect(); return [(e.clientX - b.left - view.x) / view.k, (e.clientY - b.top - view.y) / view.k] }
-    const hit = (e) => { const [x, y] = toWorld(e); let best = null, bd = Infinity; for (const p of P) { const d = (p.x - x) ** 2 + (p.y - y) ** 2; if (d < bd && d < (p.r + 4 / view.k) ** 2) { bd = d; best = p } } return best }
-    let drag = null, moved = false
-    canvas.addEventListener('mousedown', (e) => { drag = [e.clientX, e.clientY, view.x, view.y]; moved = false; touched = true })
-    window.addEventListener('mouseup', () => { drag = null })
+    let moved = false
+    canvas.addEventListener('mousedown', (e) => { drag = [e.clientX, e.clientY, view.x, view.y]; moved = false })
     canvas.addEventListener('mousemove', (e) => {
-      if (drag) { view.x = drag[2] + e.clientX - drag[0]; view.y = drag[3] + e.clientY - drag[1]; moved = moved || Math.abs(e.clientX - drag[0]) + Math.abs(e.clientY - drag[1]) > 3; return }
-      const p = hit(e), b = canvas.getBoundingClientRect()
-      if (p) { tip.textContent = `${p.f.shown} · ${p.f.in.size} in · ${p.f.out.size} out`; tip.style.display = 'block'; tip.style.left = `${e.clientX - b.left + 12}px`; tip.style.top = `${e.clientY - b.top + 12}px` } else tip.style.display = 'none'
+      if (drag) { view.x = drag[2] + e.clientX - drag[0]; view.y = drag[3] + e.clientY - drag[1]; moved = moved || Math.abs(e.clientX - drag[0]) + Math.abs(e.clientY - drag[1]) > 3; draw(); return }
+      const i = hit(e), b = canvas.getBoundingClientRect()
+      if (i !== hover) { hover = i; draw() }
+      if (i >= 0) { const m = mapFiles[i]; tip.textContent = `${m.f.shown} · used by ${m.f.in.size} · uses ${m.f.out.size}`; tip.style.display = 'block'; tip.style.left = `${Math.min(e.clientX - b.left + 14, W - tip.offsetWidth - 8)}px`; tip.style.top = `${e.clientY - b.top + 14}px` } else tip.style.display = 'none'
     })
-    canvas.addEventListener('click', (e) => { if (moved) return; const p = hit(e); if (p) { st.sel = { file: p.f }; render() } })
+    canvas.addEventListener('mouseleave', () => { if (hover !== -1) { hover = -1; draw() } tip.style.display = 'none' })
+    canvas.addEventListener('click', (e) => { if (moved) return; const i = hit(e); if (i >= 0) { st.sel = { file: mapFiles[i].f }; render() } })
+    canvas.addEventListener('dblclick', () => { view.k = fitK; view.x = (W - 1000 * fitK) / 2; view.y = (H - 1000 * fitK) / 2; draw() })
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault()
-      touched = true
       const b = canvas.getBoundingClientRect(), mx = e.clientX - b.left, my = e.clientY - b.top
-      const k = Math.min(8, Math.max(0.1, view.k * (e.deltaY < 0 ? 1.15 : 1 / 1.15)))
+      const k = Math.min(fitK * 30, Math.max(fitK * 0.5, view.k * (e.deltaY < 0 ? 1.18 : 1 / 1.18)))
       view.x = mx - ((mx - view.x) / view.k) * k; view.y = my - ((my - view.y) / view.k) * k; view.k = k
+      draw()
     }, { passive: false })
   }
 

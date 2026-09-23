@@ -6,8 +6,10 @@
 //                      incremental index re-hashes and re-parses only what differs on this branch.
 //   withLock(dir, fn)  one indexer per index. A second caller does not wait: it marks the index
 //                      pending and returns { busy: true }; the holder re-runs until nothing is
-//                      pending, so no change is lost. A lock whose pid is dead is taken over.
-import { existsSync, mkdirSync, openSync, writeSync, closeSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+//                      pending, so no change is lost. The lock is created atomically (temp file +
+//                      link); one whose pid is dead, or older than any index run can last, is taken
+//                      over. SQLite's busy timeout (store.mjs) is the second line if two ever meet.
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, linkSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { openStore } from './store.mjs'
@@ -32,31 +34,47 @@ export async function seed(project) {
   const src = path.join(main, rel)
   if (!existsSync(src)) return false
   mkdirSync(path.dirname(project.dbPath), { recursive: true })
+  // Snapshot into a private file, then link it into place: a reader never opens a half-written
+  // copy, and when two processes seed at once the second one simply finds it done.
+  const tmp = `${project.dbPath}.seed.${process.pid}.${Math.random().toString(36).slice(2)}`
   const db = await openStore(src, { readOnly: true })
-  try { db.exec(`VACUUM INTO '${project.dbPath.replace(/'/g, "''")}'`) } finally { db.close() }
-  return true
+  try { db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`) } finally { db.close() }
+  try { linkSync(tmp, project.dbPath); return true } catch (e) { if (e.code === 'EEXIST') return false; throw e } finally { rmSync(tmp, { force: true }) }
 }
 
 const alive = (pid) => { try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' } }
+// No index run outlives run.mjs's 20 min timeout: an older lock is stale even when its pid was
+// reused by an unrelated live process.
+const STALE_MS = 25 * 60_000
+
+// Create `lock` holding our pid in ONE step: write a private temp file, then hard-link it into
+// place (link fails with EEXIST if the lock exists). The lock is never visible empty.
+function tryCreate(lock) {
+  const tmp = `${lock}.${process.pid}.${Math.random().toString(36).slice(2)}`
+  writeFileSync(tmp, String(process.pid))
+  try { linkSync(tmp, lock); return true } catch (e) { if (e.code === 'EEXIST') return false; throw e } finally { rmSync(tmp, { force: true }) }
+}
+
+// Is the existing lock stale? null when it vanished meanwhile (the holder just finished).
+function stale(lock) {
+  let pid, age
+  try { pid = Number(readFileSync(lock, 'utf8')); age = Date.now() - statSync(lock).mtimeMs } catch (e) { if (e.code === 'ENOENT') return null; throw e }
+  return age > STALE_MS || !(pid > 0 && alive(pid))
+}
 
 export async function withLock(dir, fn) {
   mkdirSync(dir, { recursive: true })
   const lock = path.join(dir, 'index.lock')
   const pending = path.join(dir, 'index.pending')
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const fd = openSync(lock, 'wx')
-      writeSync(fd, String(process.pid))
-      closeSync(fd)
-      break
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e
-      const pid = Number(readFileSync(lock, 'utf8'))
-      if (attempt === 0 && !(pid > 0 && alive(pid))) { rmSync(lock, { force: true }); continue }
-      writeFileSync(pending, String(Date.now()))
-      return { busy: true }
-    }
+  let got = false
+  for (let attempt = 0; attempt < 5 && !got; attempt++) {
+    if (tryCreate(lock)) { got = true; break }
+    const s = stale(lock)
+    if (s === null) continue // released between our create and our read: try again
+    if (!s) break // held by a live indexer
+    rmSync(lock, { force: true }) // dead holder: take over on the next attempt
   }
+  if (!got) { writeFileSync(pending, String(Date.now())); return { busy: true } }
   try {
     let result
     do {

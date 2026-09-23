@@ -63,7 +63,7 @@ node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
 
 ## Seeing it
 
-`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview, the file-level dependency map, every file and symbol with its callers, callees, dependencies and supertypes, and hotspots (most called, widest fan-out, most depended-on, co-change). No network, no CDN. It stays local.
+`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview, the file-level dependency map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`, the biggest files named, the rest on hover), every file and symbol with its callers, callees, dependencies and supertypes, and hotspots (most called, widest fan-out, most depended-on, co-change). No network, no CDN. It stays local.
 
 ## Freshness
 
