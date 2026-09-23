@@ -142,6 +142,7 @@ try {
   symlinkSync(EXT, path.join(PROJ, '.claude'))
   expectDeny(write('Write', path.join(PROJ, '.claude/settings.json')), '.claude/settings.json when .claude is a symlink out of the repo')
   expectDeny(write('Write', '.claude/settings.json'), 'the same, by a relative path')
+  if (process.platform === 'darwin') expectDeny(write('Write', path.join(PROJ, '.claude/settings.json'), {}, { project: PROJ.replace(/proj$/, 'Proj') }), 'CLAUDE_PROJECT_DIR in another letter case (case-insensitive macOS volume)')
   rmSync(path.join(PROJ, '.claude'))
   rmSync(path.join(LANE, 'memory'), { recursive: true, force: true })
   symlinkSync(EXT, path.join(LANE, 'memory'))

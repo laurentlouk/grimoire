@@ -354,7 +354,9 @@ function targets(abs, ctx) {
 function checkWrite(file, cwd, ctx, input) {
   if (typeof file !== 'string' || !file) return
   const abs = path.resolve(cwd || ctx.projectDir, file.replace(/^~(?=\/)/, process.env.HOME || homedir()))
-  for (const [root, p] of targets(abs, ctx)) checkRules(path.relative(root, p).split(path.sep).join('/'), ctx, input)
+  // norm() folds case on macOS/Windows: /x/Proj and /x/proj are one directory there, and a raw
+  // path.relative across them would read as ../proj/… and match no rule.
+  for (const [root, p] of targets(abs, ctx)) checkRules(path.relative(norm(root), norm(p)).split(path.sep).join('/'), ctx, input)
 }
 
 function checkRules(relPath, ctx, input) {

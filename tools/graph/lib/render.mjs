@@ -9,7 +9,7 @@
 //   hotspots   most-called symbols, most-imported files, widest fan-out, strongest co-change
 // Like every graph answer, the page is a map: read the code at the path:line it points to.
 import { openStore } from './store.mjs'
-import { layoutMap, groupOf } from './layout.mjs'
+import { layoutMap } from './layout.mjs'
 
 const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
 const MAP_MAX_FILES = 1500 // the map keeps the most connected files; the other tabs keep everything
@@ -54,14 +54,26 @@ function mapData(files, nodes, edges) {
     if (!w.has(k)) { deg.set(a, (deg.get(a) || 0) + 1); deg.set(b, (deg.get(b) || 0) + 1) }
     w.set(k, (w.get(k) || 0) + 1)
   }
-  const keep = files.map((f) => ({ id: f.id, repo: f.repo, path: f.path, deg: deg.get(f.id) || 0 }))
-    .sort((a, b) => b.deg - a.deg || (a.path < b.path ? -1 : 1)).slice(0, MAP_MAX_FILES)
+  // The cap is shared out per repository, in proportion to its size, so filtering to a small repo
+  // still shows its own best-connected files; slots a repo cannot use go to the rest.
+  const all = files.map((f) => ({ id: f.id, repo: f.repo, path: f.path, deg: deg.get(f.id) || 0 }))
+    .sort((a, b) => b.deg - a.deg || (a.path < b.path ? -1 : 1))
+  const perRepo = new Map()
+  for (const f of all) (perRepo.get(f.repo) || perRepo.set(f.repo, []).get(f.repo)).push(f)
+  const totals = Object.fromEntries([...perRepo].map(([r, fs]) => [r, fs.length]))
+  let keep = all
+  if (all.length > MAP_MAX_FILES) {
+    const picked = new Set()
+    for (const [, fs] of perRepo) for (const f of fs.slice(0, Math.floor((MAP_MAX_FILES * fs.length) / all.length))) picked.add(f)
+    for (const f of all) { if (picked.size >= MAP_MAX_FILES) break; picked.add(f) }
+    keep = all.filter((f) => picked.has(f))
+  }
   const at = new Map(keep.map((f, i) => [f.id, i]))
   const links = []
   for (const [k, v] of w) { const [a, b] = k.split(',').map(Number); if (at.has(a) && at.has(b)) links.push([at.get(a), at.get(b), v]) }
   links.sort((x, y) => x[0] - y[0] || x[1] - y[1])
   const { pos, groups } = layoutMap(keep, links)
-  return { files: keep.map((f) => f.id), deg: keep.map((f) => f.deg), pos, links, groups, total: files.length }
+  return { files: keep.map((f) => f.id), deg: keep.map((f) => f.deg), pos, links, groups, total: files.length, totals }
 }
 
 function html(data) {
@@ -243,10 +255,11 @@ function client() {
   const base = (p) => p.split('/').pop()
   function mapView() {
     const shown = mapFiles.filter((m) => inRepo(m.f)).length
+    const total = st.repo ? M.totals[st.repo] || 0 : M.total
     const wrap = h('div', { id: 'map' }), canvas = h('canvas'), tip = h('div', { id: 'tip' })
     wrap.append(canvas, tip)
     const legend = h('div', { class: 'legend' }, D.repos.filter((r) => !st.repo || r.name === st.repo).map((r) => h('span', null, h('i', { style: `background:${repoColor.get(r.name)}` }), r.name)))
-    const note = h('p', { class: 'note' }, `${shown} of ${M.total} files${M.total > M.files.length ? ` (the ${M.files.length} most connected)` : ''}, grouped by directory · the biggest are named, hover for the rest · lines are imports and calls between files · drag to pan, scroll to zoom, click to open, double-click to reset`)
+    const note = h('p', { class: 'note' }, `${shown} of ${total} files${total > shown ? ' (the most connected)' : ''}, grouped by directory · the biggest are named, hover for the rest · lines are imports and calls between files · drag to pan, scroll to zoom, click to open, double-click to reset`)
     requestAnimationFrame(() => drawMap(canvas, tip))
     return h('section', null, st.sel && st.sel.file ? fileDetail(st.sel.file) : null, legend, wrap, note)
   }
@@ -320,11 +333,13 @@ function client() {
         ctx.fillStyle = col('--ink'); ctx.globalAlpha = strong || focus < 0 ? 1 : 0.35; ctx.fillText(t, x, y); ctx.globalAlpha = 1
       }
       if (focus >= 0) { place(focus, true); for (const j of near) place(j, true) }
-      const budget = Math.round(30 * (view.k / fitK) ** 1.5)
+      const budget = Math.min(400, Math.round(30 * (view.k / fitK) ** 1.5))
       for (let r = 0, n = 0; r < byDeg.length && n < budget; r++) { const i = byDeg[r]; if (i === focus || (near && near.has(i))) continue; const before = boxes.length; place(i, false); if (boxes.length > before) n++ }
       ctx.font = '600 12px ui-sans-serif,system-ui,sans-serif'
       for (const [t, x, y] of dirLabels) { ctx.lineWidth = 4; ctx.strokeStyle = col('--panel'); ctx.strokeText(t, x, y); ctx.fillStyle = col('--muted'); ctx.fillText(t, x, y) }
     }
+    let queued = false
+    const redraw = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; draw() }) }
     draw()
     const hit = (e) => {
       const b = canvas.getBoundingClientRect(), x = e.clientX - b.left, y = e.clientY - b.top, zr = Math.max(0.7, Math.sqrt(view.k / fitK))
@@ -335,20 +350,20 @@ function client() {
     let moved = false
     canvas.addEventListener('mousedown', (e) => { drag = [e.clientX, e.clientY, view.x, view.y]; moved = false })
     canvas.addEventListener('mousemove', (e) => {
-      if (drag) { view.x = drag[2] + e.clientX - drag[0]; view.y = drag[3] + e.clientY - drag[1]; moved = moved || Math.abs(e.clientX - drag[0]) + Math.abs(e.clientY - drag[1]) > 3; draw(); return }
+      if (drag) { view.x = drag[2] + e.clientX - drag[0]; view.y = drag[3] + e.clientY - drag[1]; moved = moved || Math.abs(e.clientX - drag[0]) + Math.abs(e.clientY - drag[1]) > 3; redraw(); return }
       const i = hit(e), b = canvas.getBoundingClientRect()
-      if (i !== hover) { hover = i; draw() }
+      if (i !== hover) { hover = i; redraw() }
       if (i >= 0) { const m = mapFiles[i]; tip.textContent = `${m.f.shown} · used by ${m.f.in.size} · uses ${m.f.out.size}`; tip.style.display = 'block'; tip.style.left = `${Math.min(e.clientX - b.left + 14, W - tip.offsetWidth - 8)}px`; tip.style.top = `${e.clientY - b.top + 14}px` } else tip.style.display = 'none'
     })
-    canvas.addEventListener('mouseleave', () => { if (hover !== -1) { hover = -1; draw() } tip.style.display = 'none' })
+    canvas.addEventListener('mouseleave', () => { if (hover !== -1) { hover = -1; redraw() } tip.style.display = 'none' })
     canvas.addEventListener('click', (e) => { if (moved) return; const i = hit(e); if (i >= 0) { st.sel = { file: mapFiles[i].f }; render() } })
-    canvas.addEventListener('dblclick', () => { view.k = fitK; view.x = (W - 1000 * fitK) / 2; view.y = (H - 1000 * fitK) / 2; draw() })
+    canvas.addEventListener('dblclick', () => { view.k = fitK; view.x = (W - 1000 * fitK) / 2; view.y = (H - 1000 * fitK) / 2; redraw() })
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault()
       const b = canvas.getBoundingClientRect(), mx = e.clientX - b.left, my = e.clientY - b.top
       const k = Math.min(fitK * 30, Math.max(fitK * 0.5, view.k * (e.deltaY < 0 ? 1.18 : 1 / 1.18)))
       view.x = mx - ((mx - view.x) / view.k) * k; view.y = my - ((my - view.y) / view.k) * k; view.k = k
-      draw()
+      redraw()
     }, { passive: false })
   }
 

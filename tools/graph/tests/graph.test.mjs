@@ -95,7 +95,7 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
 console.log('\n2 · polyglot project (TypeScript · Rust · Python · Go)')
 const SANDBOX = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-graph-')))
 const PROJ = path.join(SANDBOX, 'poly')
-cpSync(path.join(HERE, 'fixtures', 'poly'), PROJ, { recursive: true })
+cpSync(path.join(HERE, 'fixtures', 'poly'), PROJ, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') }) // never a stray local index
 const q = (tool, args = {}) => call(`graph_${tool}`, args, { root: PROJ })
 
 has(await q('status'), 'not been built', 'before graph_index, queries point at it instead of indexing implicitly')
@@ -235,6 +235,24 @@ const rd2 = spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph
 const data2 = rd2.status === 0 ? (/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(readFileSync(rd2.stdout.trim(), 'utf8')) || [])[1] || '' : ''
 ok(data2.includes('src/\\u003cb>/x.ts') && !data2.includes('<'), 'a path holding "<" is escaped: data can never close the script element')
 const { layoutMap } = await import('../lib/layout.mjs')
+{ // the map's file cap is shared per repository
+  const { openStore } = await import('../lib/store.mjs')
+  const { renderGraph } = await import('../lib/render.mjs')
+  const CAP = path.join(SANDBOX, 'cap'); mkdirSync(path.join(CAP, '.grimoire/graph'), { recursive: true })
+  const db = await openStore(path.join(CAP, '.grimoire/graph/graph.db'))
+  db.exec("INSERT INTO repos(name, root) VALUES('big', 'big'), ('small', 'small')")
+  const ins = db.prepare('INSERT INTO files(id, repo, path, lang, is_test, node_id) VALUES(?, ?, ?, ?, 0, ?)')
+  const edge = db.prepare("INSERT INTO edges(src, dst, kind) VALUES(?, ?, 'IMPORTS')")
+  for (let i = 1; i <= 1900; i++) ins.run(i, 'big', `src/f${i}.ts`, 'typescript', 100000 + i)
+  for (let i = 1901; i <= 2000; i++) ins.run(i, 'small', `lib/g${i}.ts`, 'typescript', 100000 + i)
+  for (let i = 1; i < 1900; i++) edge.run(100000 + i, 100000 + i + 1) // big is densely linked, small not at all
+  db.close()
+  const pageCap = await renderGraph({ dbPath: path.join(CAP, '.grimoire/graph/graph.db') })
+  const Dc = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageCap)[1].replace(/\\u003c/g, '<'))
+  const smallShown = Dc.map.files.filter((id) => id > 1900).length
+  ok(Dc.map.files.length === 1500 && smallShown >= 70, `the 1500-file map cap is shared per repo: the unlinked small repo keeps ${smallShown} of its 100`)
+  ok(Dc.map.totals.small === 100 && Dc.map.totals.big === 1900, 'per-repo totals reach the page for the note')
+}
 const lf = [...Array(60)].map((_, i) => ({ id: i, repo: i < 40 ? 'a' : 'b', path: `${i % 3 ? 'src' : 'lib'}/f${i}.ts`, deg: i % 9 }))
 const ll = [...Array(120)].map((_, i) => [i % 60, (i * 7 + 3) % 60, 1 + (i % 3)]).filter(([x, y]) => x !== y)
 const L1 = layoutMap(lf, ll), L2 = layoutMap(lf, ll)
