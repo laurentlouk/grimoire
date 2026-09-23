@@ -1,0 +1,9 @@
+{
+  "name": "grimoire-graph-deps",
+  "private": true,
+  "description": "Parser runtime for the grimoire code graph. Not installed with the plugin: lib/deps.mjs installs it on first index into a per-user cache (npm ci against this lockfile), or uses tools/graph/node_modules when present (CI, development).",
+  "dependencies": {
+    "tree-sitter-wasms": "0.1.13",
+    "web-tree-sitter": "0.25.10"
+  }
+}

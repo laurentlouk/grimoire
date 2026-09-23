@@ -12,7 +12,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
-      # No dependencies, so no install step.
+      # The repo has no dependencies; only the code graph's parser runtime is installed, for its tests.
+      - run: npm ci --prefix tools/graph --no-audit --no-fund --ignore-scripts
       - run: npm test
       - run: npm run check
       - run: npm run evals:check

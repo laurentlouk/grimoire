@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "graph": {
+      "command": "node",
+      "args": [
+        "--no-warnings",
+        "${CLAUDE_PLUGIN_ROOT}/tools/graph/mcp.mjs"
+      ],
+      "env": {
+        "GRIMOIRE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR:-}"
+      }
+    }
+  }
+}

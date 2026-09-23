@@ -13,7 +13,7 @@
 //  `echo "git push origin main"` is ALLOWED; `bash -c "…"`, `eval`, and $(…) are
 //  executed, so their bodies are checked.
 import { spawnSync, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import path from 'node:path'
 
@@ -116,6 +116,7 @@ try {
   expectDeny(bash('git push origin main 2>&1 | tail -5'), 'push piped into tail')
 
   console.log('\n── protected paths')
+  expectDeny(write('Write', path.join(PROJ, '.worktrees', 'feat-x', '.claude/settings.json')), "a lane's .claude/settings.json")
   expectDeny(write('Write', path.join(PROJ, '.claude/settings.json')), 'Write .claude/settings.json')
   expectDeny(write('Edit', '.claude/settings.local.json'), 'Edit .claude/settings.local.json (relative path)')
   expectDeny(write('MultiEdit', path.join(PROJ, '.claude/hooks/pre.sh')), 'MultiEdit under .claude/hooks/')
@@ -130,6 +131,25 @@ try {
   expectAllow(write('Edit', path.join(PROJ, 'memory/harness.md'), { agent_id: 'a2', agent_type: 'general-purpose' }), 'a generic subagent (how crystallize is dispatched)')
   expectAllow(write('Edit', path.join(PROJ, 'memory/harness.md')), 'the main session')
   expectAllow(write('Edit', path.join(PROJ, 'memory/harness.md'), { agent_id: 'a3', agent_type: 'crystallize' }), 'an agent named crystallize')
+  const LANE = path.join(PROJ, '.worktrees', 'feat-x')
+  const OUTER = path.join(SANDBOX, 'outer-wt')
+  g('worktree', 'add', '-q', '-b', 'feat/y', OUTER)
+  expectDeny(write('Edit', path.join(LANE, 'memory/harness.md'), { agent_id: 'w1', agent_type: 'reviewer' }), 'the reviewer writing memory/ inside a loop lane (.worktrees/)')
+  expectDeny(write('Write', path.join(OUTER, 'memory/agents/x.md'), { agent_id: 'w2', agent_type: 'codebase-scout' }), 'a scout writing memory/ in a worktree outside the project')
+  expectAllow(write('Edit', path.join(LANE, 'memory/harness.md'), { agent_id: 'w3', agent_type: 'general-purpose' }), 'crystallize (a generic subagent) writing memory/ in its own worktree')
+  expectAllow(write('Edit', path.join(LANE, 'src/app.ts'), { agent_id: 'w4', agent_type: 'reviewer' }), 'ordinary files in a lane stay writable')
+  const EXT = path.join(SANDBOX, 'external'); mkdirSync(EXT)
+  symlinkSync(EXT, path.join(PROJ, '.claude'))
+  expectDeny(write('Write', path.join(PROJ, '.claude/settings.json')), '.claude/settings.json when .claude is a symlink out of the repo')
+  expectDeny(write('Write', '.claude/settings.json'), 'the same, by a relative path')
+  if (process.platform === 'darwin') expectDeny(write('Write', path.join(PROJ, '.claude/settings.json'), {}, { project: PROJ.replace(/proj$/, 'Proj') }), 'CLAUDE_PROJECT_DIR in another letter case (case-insensitive macOS volume)')
+  rmSync(path.join(PROJ, '.claude'))
+  rmSync(path.join(LANE, 'memory'), { recursive: true, force: true })
+  symlinkSync(EXT, path.join(LANE, 'memory'))
+  expectDeny(write('Edit', path.join(LANE, 'memory/harness.md'), { agent_id: 'w5', agent_type: 'reviewer' }), "a lane's memory/ symlinked out of the repo")
+  mkdirSync(path.join(PROJ, 'memory'), { recursive: true })
+  symlinkSync(path.join(PROJ, 'memory'), path.join(PROJ, 'notes'))
+  expectDeny(write('Edit', path.join(PROJ, 'notes/harness.md'), { agent_id: 'w6', agent_type: 'reviewer' }), 'a symlink INTO memory/ under another name')
 
   console.log('\n── config')
   writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({

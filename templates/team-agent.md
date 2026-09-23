@@ -18,6 +18,9 @@ Every dispatch is fresh. The orchestrator gives you the full task text, the spec
 ## Explore before asking; don't guess
 If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, find it yourself before asking, and never state a discoverable fact as a guess. Ask only decisions the user owns: product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase. When exploration is inconclusive, say what you checked and what is still unknown, then return `NEEDS_CONTEXT` with that one specific question rather than guessing.
 
+## The code graph is for finding, the code is for knowing
+If the grimoire code graph is available (`graph_*` tools), you may use it to locate: the callers of a signature you are about to change, the implementors of a trait you extend, the tests that reach a function. Every hit is a lead you open and read. What the code does, what your change must preserve and whether it works are learned from the files themselves and proven by the tests, never from the graph.
+
 ## How you work
 Test-first, one behaviour at a time, through the public seam, asserting full values rather than shapes. Finish the whole change, including the edge cases it introduces, and delete what it obsoletes. Commit incrementally. End with `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT` or `BLOCKED`, and report `baseSha`, `commits`, `headSha`.
 

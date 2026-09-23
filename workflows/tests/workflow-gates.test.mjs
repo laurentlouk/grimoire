@@ -838,6 +838,17 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
     ok(/Invoke the `crystallize` skill/.test(cryBrief) && /NEVER touch hook scripts, settings files/.test(cryBrief), 'the crystallize brief invokes the skill and forbids hooks/settings/invariants')
   }
   {
+    const ABS = '/Users/me/project/.grimoire/runs/run-wt'
+    const { calls } = await run('L2b · crystallize in its own worktree gets the journal by its absolute path in the main checkout', [APP_TASK], (label, prompt) => {
+      if (label.startsWith('journal#')) return { runDir: ABS, lines: (prompt.match(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/) || ['', ''])[1].split('\n').length, bytes: 0 }
+      return learner(label)
+    }, { extraArgs: { runId: 'run-wt', telemetry: { flushEvery: 50 } } })
+    const cry = calls.find((c) => c.label === 'crystallize')
+    ok(cry && cry.prompt.includes(`\`${ABS}\` (this run) under \`/Users/me/project/.grimoire/runs/\``), 'crystallize is handed the absolute run dir and its parent, not a path relative to its own worktree')
+    const j = calls.find((c) => c.label.startsWith('journal#'))
+    ok(j && /case "\$DIR" in \/\*\) ;; \*\) C=\$\(git rev-parse --path-format=absolute --git-common-dir/.test(j.prompt), 'the journal script resolves a relative dir against the main checkout')
+  }
+  {
     const { result, calls } = await run('L3 · no PR this run (gate BLOCKED) → ledger still written, crystallize skipped', [BE_TASK],
       (label) => {
         if (label === 'harness-context') return CTX

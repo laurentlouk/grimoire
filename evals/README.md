@@ -18,6 +18,7 @@ Each run writes `evals/results/<timestamp>/`, which is git-ignored.
 | --- | --- | --- | --- | --- |
 | adaptive-replanning | 4 | 1 | 1 | 2 |
 | crystallize | 4 | 1 | 1 | 2 |
+| graph | 4 | 1 | 2 | 1 |
 | implement | 5 | 1 | 1 | 3 |
 | launch-agent | 5 | 1 | 1 | 3 |
 | logs | 4 | 1 | 1 | 2 |
