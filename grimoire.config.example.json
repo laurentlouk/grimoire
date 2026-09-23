@@ -1,20 +1,29 @@
 {
-  "$comment": "grimoire.config.json — the project's harness configuration. Written by /grimoire:setup, read by /orchestrate. Keep it at the project root.",
+  "$comment": "grimoire.config.json — the project's harness configuration. Written by /grimoire:setup, read by /orchestrate, /grimoire:logs and the guard hook. Keep it at the project root.",
   "baseBranch": "origin/main",
-  "memoryDir": ".claude/memory",
+  "memoryDir": "memory",
   "runsDir": "runs",
   "requireHook": {
     "name": "rtk hook claude",
     "check": "command -v rtk && rtk hook check \"git status\" | grep -q '^rtk '",
     "fix": "brew install rtk-ai/tap/rtk && rtk init -g, then restart the session"
   },
+  "maxOutputTokens": 4000000,
+  "telemetry": { "enabled": true, "dir": ".grimoire/runs", "retentionDays": 183 },
+  "claim": { "identity": "grimoire-bot" },
+  "specialists": [
+    { "agent": "migration-engineer", "repos": ["api"], "use": "schema and data migrations, expand/contract steps" },
+    { "agent": "test-engineer", "repos": ["*"], "use": "putting untested code under test before changing it" }
+  ],
+  "guard": { "enabled": true, "protectedBranches": ["main", "release/*"] },
   "repos": [
     {
       "name": "api",
       "path": "repositories/api",
       "agent": "api-engineer",
       "tags": ["backend"],
-      "gate": { "run": "make e2e-test E2E_LOCK_WAIT=1800", "stamp": "tests/e2e/.e2e-green", "timeoutMin": 60 },
+      "gate": { "run": "make e2e-test E2E_LOCK_WAIT=1800", "stamp": "tests/e2e/.e2e-green" },
+      "timeoutMin": 60,
       "prBy": "gate"
     },
     {

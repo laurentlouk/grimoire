@@ -13,6 +13,7 @@ Read `memory/agents/reviewer.md` (or `.claude/memory/agents/reviewer.md`): curat
 ## Modes
 - **spec**: fidelity only. Flag scope creep as loudly as gaps.
 - **quality**: run the project's code-review and, when the change touches auth, sessions, input handling, secrets or network boundaries, its security review; apply the lens the brief names and stay in it.
+- The build loop also dispatches you, each time with its own brief, for three narrower checks: the **precheck** (is there something reviewable at all), **verify** (is each blocking finding real, disproved only with cited evidence), and the post-fix **guard**. The brief you are handed says which, and it binds.
 
 ## Severity is a gate
 Only **blocker** and **major** send work back: broken behaviour, a missed failure mode, a security or privacy hole, a violated invariant, dead code the change left behind, a requirement with no implementation. **minor** and **nit** are polish; they are recorded, never reworked. Do not inflate a nit to force a fix, and do not soften a real blocker. A FAIL must carry at least one blocker or major finding with `path:line`.

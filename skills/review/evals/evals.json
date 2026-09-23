@@ -1,0 +1,104 @@
+[
+  {
+    "id": 1,
+    "query": "Review PR #214 for EXPORT-2 before it merges.",
+    "should_trigger": true,
+    "expected_output": "Uses an independent reviewer, never the implementer: a spec gate (spec hawk) then a quality panel of lenses in parallel, each applied only to repos it fits. Blocker/major findings route back to the implementer and are re-reviewed, bounded; a FAIL names at least one finding with path:line; always ends on a review. On PASS the PR is ready once every thread has an explicit resolution; next is crystallize.",
+    "expectations": [
+      {
+        "text": "The reviewer is independent of the implementer",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Runs a spec gate and a quality-lens panel, with lenses chosen to fit the repository",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Any FAIL names at least one finding with `path:line`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Failing findings go back to the implementer and the work is re-reviewed, ending on a review",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "On PASS, requires every review thread to have an explicit resolution and names `crystallize` as next",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "Write the code for EXPORT-8 and open the PR.",
+    "should_trigger": false,
+    "expected_output": "Building an issue is `implement`'s job; review runs after it.",
+    "expectations": [
+      {
+        "text": "Does not run a review panel",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Routes the request to `implement`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not write or commit code for the issue",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "The review panel on PR #214 came back with two minor findings and three nits, no blockers or majors. Send it back for another round so it's perfect.",
+    "should_trigger": true,
+    "expected_output": "Severity is a gate: minor and nit are recorded for the human and never buy a rework round. The review passes (given the spec gate passed); no fix round is dispatched.",
+    "expectations": [
+      {
+        "text": "Does not send the work back for a rework round",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Records the minor and nit findings for the human",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Treats only blocker and major findings as failing",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "The implementer of EXPORT-2 says it already checked its own diff; just use its self-review as the gate.",
+    "should_trigger": true,
+    "expected_output": "Declines: the review must come from an independent reviewer, never the implementer. Runs the spec gate and quality panel with an independent reviewer.",
+    "expectations": [
+      {
+        "text": "Does not accept the implementer's self-review as the gate",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Dispatches an independent reviewer for the spec and quality gates",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "States that the reviewer is never the implementer",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  }
+]

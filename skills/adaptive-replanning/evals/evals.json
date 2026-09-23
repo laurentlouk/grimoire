@@ -1,0 +1,99 @@
+[
+  {
+    "id": 1,
+    "query": "Explain why the loop replanned slice 3 after the fix attempts on its second task ran out.",
+    "should_trigger": true,
+    "expected_output": "Distinguishes the inner fix loop (same task, retried with findings, bounded attempts) from the outer replan loop (whole remaining plan, bounded by the replan budget); explains the replan starts from the current state, leaves finished work untouched, feeds the failure's cause in, and returns revised tasks in the same shape or a reasoned stop.",
+    "expectations": [
+      {
+        "text": "Distinguishes the fix loop (retries the same task) from the replan loop (changes the remaining plan)",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "States that a replan starts from the current state and never reissues finished work",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "States that the failure's cause is fed into the replan so the next path is different",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "States the replanner either returns revised tasks in the original shape or stops and says why",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "Launch the loop on the EXPORT project in preview.",
+    "should_trigger": false,
+    "expected_output": "Launching the loop is `orchestrate`'s job; adaptive-replanning only explains, tunes or debugs replanning.",
+    "expectations": [
+      {
+        "text": "Does not launch the workflow itself",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Routes the request to `orchestrate`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not pass `execute: true` or start any agent dispatch",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "We set maxReplans to 0. Slice 2 failed its review after the fix rounds, and the whole run stopped. Why, and what happened to slices 3 to 5?",
+    "should_trigger": true,
+    "expected_output": "Explains that a replan budget of zero turns replanning off, so the first failed slice stops the run; the untried tasks are marked skipped so nothing is silently dropped, and the run report lists them.",
+    "expectations": [
+      {
+        "text": "States that a replan budget of zero disables replanning so the first failed slice stops the run",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "States that the untried tasks (slices 3 to 5) are marked as skipped, not silently dropped",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not claim the loop would retry or replan slice 2",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "The loop has stopped three runs in a row on the same cause: nobody has decided whether exports include archived records. Should I raise maxReplans to 10?",
+    "should_trigger": true,
+    "expected_output": "Advises against raising the budget: the same stop cause recurring signals an open design question; take it back to the design stage (roast), settle it, and rerun. Replanning routes around execution dead ends but does not invent product decisions.",
+    "expectations": [
+      {
+        "text": "Does not recommend raising the replan budget as the fix",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Identifies the recurring stop cause as an open design question",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Recommends taking it back to the design stage (`roast`), settling it, and rerunning",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  }
+]

@@ -1,0 +1,16 @@
+{
+  "name": "grimoire",
+  "private": true,
+  "type": "module",
+  "description": "Repo tooling for the grimoire plugin: tests, the drift check, the eval generator and the log renderer. No dependencies.",
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "check": "node scripts/check-drift.mjs",
+    "evals:build": "node scripts/build-evals.mjs",
+    "evals:check": "node scripts/build-evals.mjs --check",
+    "logs": "node scripts/render-logs.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

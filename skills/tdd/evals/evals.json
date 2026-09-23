@@ -1,0 +1,99 @@
+[
+  {
+    "id": 1,
+    "query": "Fix the bug where a user can claim the same reward twice in one session. Do it test-first.",
+    "should_trigger": true,
+    "expected_output": "Writes one failing test for that behaviour through the public interface, watches it fail, writes the least code to pass, then refactors only on green. The assertion compares the whole value against an independent expected value.",
+    "expectations": [
+      {
+        "text": "Writes a failing test before any production code change and shows it failing",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "The test goes through the public interface a real caller uses, not a private helper",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Asserts the full result against an independent expected value, not its shape",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Refactors only after the tests are green",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "Implement EXPORT-2 end to end through the API engineer and open the PR.",
+    "should_trigger": false,
+    "expected_output": "Building a tracker issue end to end and opening a PR is `implement` (which applies tdd inside it), not tdd on its own.",
+    "expectations": [
+      {
+        "text": "Routes the request to `implement`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not treat it as a standalone tdd session",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not open a PR or update tracker status as part of a standalone tdd session",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "For the new pricing module, write the full test suite up front, all the cases, then we'll write the code.",
+    "should_trigger": true,
+    "expected_output": "Declines to write tests in bulk: works one behaviour at a time (one failing test, least code to pass, refactor), letting each test follow from what the last cycle taught.",
+    "expectations": [
+      {
+        "text": "Does not write the whole test suite before any code",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Proceeds one behaviour at a time: one failing test, then the least code to pass it",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Explains that bulk tests only check imagined behaviour",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Test the checkout service test-first. Mock our own ledger module and assert it gets called exactly twice, in order.",
+    "should_trigger": true,
+    "expected_output": "Does not mock the team's own ledger module and does not assert call counts or order; mocks only at the edges (outside APIs, clock, randomness) and asserts behaviour through the public interface.",
+    "expectations": [
+      {
+        "text": "Does not mock the project's own ledger module",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not assert how often or in what order something was called",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Mocks only external edges such as outside APIs, the clock or randomness",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  }
+]

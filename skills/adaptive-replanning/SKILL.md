@@ -34,11 +34,15 @@ The fix loop retries the same work. Only the replan loop changes the plan. A sli
 3. Otherwise replan from the current state, given the goal, the finished work (left untouched), the failure and its cause, the queue that remains, and the lessons so far.
 4. The replanner either returns a revised set of remaining tasks, which replace the queue, or decides to stop and says why.
 
-Revised tasks use the same shape as the original ones, so they run through the same build and review machinery. A replan is not a special case for anything downstream.
+Revised tasks use the same shape as the original ones, so they run through the same build and review machinery. The one difference: a replanned task runs on the strongest model tier, because the cheaper path has already failed once. The fix loop has its own escalation, moving a task to the strongest tier after repeated fix rounds.
 
 ## Reading the result
 
-A run should report enough to audit the path it took: how many times it replanned, the lessons the failures taught, whether and why it stopped early, and which tasks were skipped because it stopped first. Emit a start and a done marker for every step, plus each step's token cost, so a step that hangs is obvious rather than invisible.
+A run should report enough to audit the path it took: how many times it replanned, the lessons the failures taught, whether and why it stopped early, and which tasks were skipped because it stopped first. Emit a start and a done marker for every step, plus each step's token cost, so a step that hangs is obvious rather than invisible. The loop also writes every replan decision, with its reason and learnings, to the decision journal (`/grimoire:logs`).
+
+## Budgets survive a new session
+
+A replan budget that resets whenever the session changes is no budget. The loop's journal checkpoint records the replans and fix rounds already spent, and a resumed run in a new session starts from those counts, not from zero.
 
 ## Tuning the replan budget
 
@@ -48,4 +52,4 @@ If the loop keeps stopping on the same cause, that is the signal that a design q
 
 ## Learnings outlive the run
 
-The lessons a replan records are not lost when the run ends. The loop writes them into a run ledger, the next run reads the previous ledgers back into planning, and `crystallize` turns the durable ones into skill patches or memory facts. A failure teaches the current run first, and every run after it second.
+The lessons a replan records are not lost when the run ends. The loop writes them into a run ledger, tagged with the repositories they concern. The next run reads the previous ledgers back into planning, handing each task only the lessons about its own repositories plus the pipeline-wide ones, and `crystallize` turns the durable ones into skill patches or memory facts. A failure teaches the current run first, and every run after it second.

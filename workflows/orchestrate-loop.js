@@ -19,13 +19,13 @@
 export const meta = {
   name: 'orchestrate-loop',
   description:
-    'OPTIONAL adaptive build LOOP: run the `implement` ⇄ `review` half of the design pipeline unattended over a FULL tracker project from `to-issues` — dispatching one owning agent per repo (implement) and a diverse-lens review panel SPLIT BY SCOPE: per task, spec review + a build-safety core (adversarial QA, + data-integrity on backend/infra repos) gates whether dependents may build on the change; once per repo, AT PROJECT END (one final wave, all repos in parallel), a TERMINAL quality sweep (SRE · human-interface · a11y · privacy · store review) reviews the whole integrated run branch, then the repo\'s own gate command + PR — the expensive gates are paid exactly ONCE, on the final tree, never while implementation runs. Scheduling is CONTINUOUS and dependsOn-driven, straight from the tickets: an issue dispatches the MOMENT everything blocking it has landed — no wave barrier, so a slow task in one repo never idles ready dependents elsewhere — parallel across repos AND within a repo when declared files are disjoint (worktree lanes merged by a serialized integrate step, up to maxPerRepo in flight); ready order is slice, then transitive downstream unlocked (critical path), never a barrier. Parsing is two-phase so any project size fits — a lightweight slice INDEX up front, then per-cycle just-in-time hydration; issues already done/canceled in the tracker are absorbed, so re-invoking resumes. The first review of a stage is always its full panel; after a fix, a cheap GUARD verifies the fix diff against the blocking findings and either passes the stage (no panel re-run) or triggers a full re-review. When failures leave work blocked it RE-PLANS from the current state (A* from where we are, not a restart) — failures become learning. Emits per-step start/finish + output-token telemetry so a stuck step is visible. LEARNS across runs: loads harness + per-agent memory and prior run ledgers at start, pastes each agent\'s memory into its brief, writes a run ledger at the end, and — after the PRs — runs the `crystallize` skill once to patch/create skills, add memory facts and sync docs in ONE reviewable PR. REQUIRES the design half\'s three artifacts — {specPath} (roast), {planPath} (to-plan), {project} (to-issues) — plus {repos} (the repo/agent/gate config), and refuses to start when any is missing. Stops at PRs — merge and deploy stay manual.',
+    'OPTIONAL adaptive build LOOP: run the `implement` ⇄ `review` half of the design pipeline unattended over a FULL tracker project from `to-issues` — dispatching one owning agent per repo (implement) and a diverse-lens review panel SPLIT BY SCOPE: per task, spec review + a build-safety core (adversarial QA, + data-integrity on backend/infra repos) gates whether dependents may build on the change; once per repo, AT PROJECT END (one final wave, all repos in parallel), a TERMINAL quality sweep (SRE · human-interface · a11y · privacy · store review) reviews the whole integrated run branch, then the repo\'s own gate command + PR — the expensive gates are paid exactly ONCE, on the final tree, never while implementation runs. Scheduling is CONTINUOUS and dependsOn-driven, straight from the tickets: an issue dispatches the MOMENT everything blocking it has landed — no wave barrier, so a slow task in one repo never idles ready dependents elsewhere — parallel across repos AND within a repo when declared files are disjoint (worktree lanes merged by a serialized integrate step, up to maxPerRepo in flight); ready order is slice, then transitive downstream unlocked (critical path), never a barrier. Parsing is two-phase so any project size fits — a lightweight slice INDEX up front, then per-cycle just-in-time hydration; issues already done/canceled in the tracker are absorbed, so re-invoking resumes. The first review of a stage is always its full panel; after a fix, a cheap GUARD verifies the fix diff against the blocking findings and either passes the stage (no panel re-run) or triggers a full re-review. When failures leave work blocked it RE-PLANS from the current state (A* from where we are, not a restart) — failures become learning. Hydration doubles as the SELECTOR (agent × model per task, validated against the roster, escalated to opus on repeated fixes or a replan); a cheap PRECHECK stops an unreviewable diff before the panel, and a VERIFIER checks each blocking finding against the code before it buys a fix. Every decision is written to a local DECISION JOURNAL (chunked, receipt-checked, with a resume checkpoint) that /grimoire:logs renders; a run-level output-token cap and optional tracker claims make unattended runs safer. LEARNS across runs: loads harness + per-agent memory and prior run ledgers at start, pastes each agent\'s memory into its brief, writes a run ledger at the end, and — after the PRs — runs the `crystallize` skill once to patch/create skills, add memory facts and sync docs in ONE reviewable PR. REQUIRES the design half\'s three artifacts — {specPath} (roast), {planPath} (to-plan), {project} (to-issues) — plus {repos} (the repo/agent/gate config), and refuses to start when any is missing. Stops at PRs — merge and deploy stay manual.',
   whenToUse:
     'After the FULL design half has run (`roast` → spec, `to-plan` → plan, `to-issues` → slice-tagged issues): execute the WHOLE project start to finish with your repo agents (implement + scoped review panel: per-task build-safety core, per-repo terminal sweep), scheduled by the tickets\' own dependsOn links — parallel where the tickets allow, waiting where they block — instead of running `implement`/`review` by hand. When failures leave work blocked it adaptively re-plans from the current state rather than looping the original plan. The design half stays interactive, and its three artifacts are REQUIRED inputs ({specPath, planPath, project}), alongside {repos}. PREVIEWS BY DEFAULT — pass {execute:true} to dispatch implementers. Heavy mode; stops at PRs.',
   phases: [
     { title: 'Parse plan', detail: 'verify the design artifacts, then phase A: the whole project as a lightweight slice INDEX; each dispatch cycle hydrates just-in-time' },
     { title: 'Implement', detail: 'owning repo agent builds each task (+ fix loop on review FAIL)' },
-    { title: 'Spec review', detail: 'Spec Hawk: does the diff do EXACTLY what the task says' },
+    { title: 'Spec review', detail: 'precheck (is there something reviewable?), then Spec Hawk: does the diff do EXACTLY what the task says' },
     { title: 'Quality review', detail: 'per-task build-safety core (adversarial QA, + data-integrity on backend/infra repos), in parallel' },
     { title: 'Terminal review', detail: 'once per repo AT PROJECT END (one final wave, repos in parallel): SRE · human-interface · a11y · privacy · store review sweep the whole integrated run branch, then the repo gate + PR' },
     { title: 'Replan', detail: 'when failures leave work blocked, re-run A* from the current state → revised tasks or HALT' },
@@ -43,11 +43,16 @@ const DEFAULT_MAX_REPLANS = 3 // replan rung: how many times a failed slice may 
 const DEFAULT_MAX_CONTEXT_RESOLVES = 2 // resolve rung (cheapest): NEEDS_CONTEXT answers fetched from a read-only scout before the question is allowed to escalate to a replan. Override with {maxContextResolves:N}; 0 disables.
 const DEFAULT_AGENT_TIMEOUT_MIN = 40 // per-agent wall-clock backstop (minutes). Must exceed the longest legit single-agent op so it fires only on a true hang. Override with {agentTimeoutMin:N}; 0 disables. A repo may raise it for ITS dispatches with {repos:[{timeoutMin:N}]} — e.g. a repo whose gate queues for a machine-global lock.
 const DEFAULT_MAX_PER_REPO = 3 // within-repo parallelism: how many of a repo's tasks may be IN FLIGHT at once. Whether a ready task actually joins is decided at dispatch by declared-file overlap against the repo's running tasks — disjoint files → parallel worktree lanes, any overlap or an undeclared footprint → held until the conflict clears. {maxPerRepo:1} restores strict serialization.
+const DEFAULT_MAX_PRECHECK_FIXES = 1 // precheck rung: cheap structural check between the implementer and the panel. A FAIL buys this many fix dispatches before the task fails as PRECHECK_FAILED. {precheck:false} disables the rung.
+const DEFAULT_ESCALATE_AT_FIX_ROUND = 2 // model escalation: from this fix round on (counted per task, across stages), the implementer runs on opus whatever tier the selector chose. {escalateAtFixRound:0} disables.
+const DEFAULT_BUDGET_FLOOR = 80000 // stop dispatching when the turn's remaining token budget drops below this. {budgetFloor:N} overrides.
+const DEFAULT_JOURNAL_FLUSH_EVERY = 40 // telemetry: decision events buffered before one cheap writer puts them on disk (also flushed at every replan, the final wave and the end)
 
 // Paths. All overridable through args — a skill installed with `npx skills add` lands under
 // `.claude/skills/<name>/`, so the brief/persona directories must be able to follow it.
 const DEFAULT_RUNS_DIR = 'runs' // run ledgers, one JSON per execute run — the harness's episodic memory
-const DEFAULT_MEMORY_DIR = '.claude/memory' // harness.md + agents/<agent>.md — curated facts
+const DEFAULT_MEMORY_DIR = 'memory' // harness.md + agents/<agent>.md — curated facts (the layout /grimoire:setup writes)
+const DEFAULT_TELEMETRY_DIR = '.grimoire/runs' // the decision event log, one directory per run — local, gitignored, read by /grimoire:logs
 const DEFAULT_BRIEFS_DIR = 'workflows/briefs'
 const DEFAULT_PERSONAS_DIR = 'workflows/personas'
 const DEFAULT_WORKTREE_DIR = '.worktrees' // parallel lanes live here, one git worktree per task
@@ -59,6 +64,7 @@ let RUNS_DIR = DEFAULT_RUNS_DIR
 let BRIEFS_DIR = DEFAULT_BRIEFS_DIR
 let PERSONAS_DIR = DEFAULT_PERSONAS_DIR
 let WORKTREE_DIR = DEFAULT_WORKTREE_DIR
+let TELEMETRY_DIR = DEFAULT_TELEMETRY_DIR
 const DEFAULT_BASE_BRANCH = 'origin/main' // the integration branch every lane, range and sweep diffs against
 let BASE_BRANCH = DEFAULT_BASE_BRANCH
 
@@ -77,10 +83,43 @@ const repoTimeout = (repo) => {
   return Number.isFinite(v) && v > 0 ? v : undefined
 }
 
+// Specialists: implementer agents a repo may route a task to instead of its owner, e.g.
+// {agent:'migration-engineer', repos:['api'], use:'schema and data migrations'}. The
+// selector (hydration) picks agent × model per task; the engine only ACCEPTS a pick that is
+// the repo's owner or a specialist enabled for that repo — anything else falls back to the
+// owner, logged.
+let specialists = [] // [{agent, repos: ['*'] | [names], use}]
+const specialistsFor = (repo) => specialists.filter((s) => s.repos.includes('*') || s.repos.includes(repo))
+const MODELS = ['haiku', 'sonnet', 'opus']
+
 // Filled by the harness-context loader (execute runs); read by every brief builder below.
 let agentMemory = {} // agent name → verbatim entries of <memoryDir>/agents/<agent>.md
 let harnessMemory = '' // verbatim entries of <memoryDir>/harness.md
-let priorLearnings = [] // learnings from earlier ledgers of this project / these repos
+let priorLearnings = [] // [{text, repos}] from earlier ledgers of this project / these repos
+
+// Learnings are tagged with the repos they came from, so a hydration only carries the ones
+// that concern its own repos (plus untagged, pipeline-wide ones) instead of the last N of
+// everything. Older ledgers store bare strings; they arrive tagged with the ledger's repos.
+const toLearning = (x, repos) =>
+  typeof x === 'string'
+    ? x.trim() ? { text: x.trim(), repos: repos || [] } : null
+    : x && typeof x.text === 'string' && x.text.trim()
+      ? { text: x.text.trim(), repos: Array.isArray(x.repos) ? x.repos.filter((r) => typeof r === 'string') : repos || [] }
+      : null
+const learningText = (l) => (typeof l === 'string' ? l : l.text)
+const MAX_HYDRATE_LEARNINGS = 12
+function relevantLearnings(list, repos) {
+  const seen = new Set()
+  const uniq = list.filter((l) => {
+    const k = learningText(l).toLowerCase()
+    if (seen.has(k)) return false
+    seen.add(k)
+    return true
+  })
+  const hit = uniq.filter((l) => (l.repos || []).some((r) => repos.includes(r)))
+  const global = uniq.filter((l) => !(l.repos || []).length)
+  return hit.concat(global).slice(0, MAX_HYDRATE_LEARNINGS)
+}
 
 // ═══════════════════════════ REVIEW_PANEL ═══════════════════════════════
 // The diverse-lens review panel. All run as a read-only reviewer — the lens differs by
@@ -116,7 +155,18 @@ const HARNESS_CONTEXT_SCHEMA = {
       description: 'agent name → verbatim entries of <memoryDir>/agents/<agent>.md, for each agent named in the prompt',
       additionalProperties: { type: 'string' },
     },
-    priorLearnings: { type: 'array', items: { type: 'string' }, description: 'deduplicated `learnings` from earlier run ledgers for the same project or touching the same repos — newest first, at most 20' },
+    priorLearnings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['text', 'repos'],
+        properties: {
+          text: { type: 'string' },
+          repos: { type: 'array', items: { type: 'string' }, description: 'the repos the learning concerns; empty = pipeline-wide' },
+        },
+      },
+      description: 'deduplicated `learnings` from earlier run ledgers for the same project or touching the same repos — newest first, at most 30',
+    },
     priorLedgers: { type: 'array', items: { type: 'string' }, description: 'paths of the ledgers read' },
   },
   required: ['harnessMemory', 'agentMemory', 'priorLearnings', 'priorLedgers'],
@@ -150,8 +200,9 @@ const TASK_ITEM_SCHEMA = {
     id: { type: 'string', description: 'the tracker issue identifier EXACTLY as listed (e.g. PROJ-123) — the scheduler matches dependsOn/landed work on this, so it must equal the ticket id. A plan-style slice.task id (e.g. 1.2) is allowed ONLY for a replan-invented task that has no tracker issue.' },
     ticket: { type: 'string', description: 'the tracker issue id, or NO_TICKET' },
     repo: { type: 'string', description: 'the owning repo — one of the configured repo names' },
-    agent: { type: 'string', description: 'the owning repo agent — one of the configured agent names' },
-    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'per-task build tier for the impl/fix agents; DEFAULTS TO opus when unset — only set a lower tier to intentionally downgrade a trivial task' },
+    agent: { type: 'string', description: "the agent that builds it — the repo's owning agent, or a specialist the header enables for that repo" },
+    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'the build tier for the impl/fix agents, chosen by the routing rubric in the brief; opus when unset. Escalates to opus automatically on a later fix round or a replan' },
+    routeReason: { type: 'string', description: 'one sentence: the signal that decided agent × model (logged, and read by crystallize to tune the rubric)' },
     branch: { type: 'string' },
     slice: { type: 'integer', description: 'the vertical slice this task belongs to (0 = a thin shared enabler; 1, 2, … = increments of value, smallest-valuable-first)' },
     sliceLabel: { type: 'string', description: "the slice's value statement, e.g. 'user earns and sees points'" },
@@ -182,6 +233,7 @@ const INDEX_ISSUE_SCHEMA = {
       enum: ['todo', 'started', 'done', 'canceled'],
       description: 'bucketed tracker state — done/canceled issues are ABSORBED (count as landed dependencies, never re-implemented)',
     },
+    assignee: { type: 'string', description: 'who the issue is assigned to in the tracker (their handle), or "" when unassigned' },
     dependsOn: { type: 'array', items: { type: 'string' }, description: "tracker ids of the issues that BLOCK this one (its 'blocked by' relations)" },
   },
 }
@@ -305,6 +357,70 @@ const GUARD_SCHEMA = {
   },
 }
 
+// The PRECHECK's verdict — structural, not a judgement of quality. It exists so the full
+// panel is never paid to discover that there is nothing to review (no commits, an empty
+// diff, conflict markers, stub markers, no test touched on a behaviour change).
+const PRECHECK_SCHEMA = {
+  type: 'object',
+  required: ['verdict', 'problems'],
+  properties: {
+    verdict: { type: 'string', enum: ['PASS', 'FAIL'] },
+    problems: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { file: { type: 'string' }, line: { type: 'integer' }, issue: { type: 'string' } },
+      },
+      description: 'one entry per failed check from the brief; empty on PASS',
+    },
+    summary: { type: 'string' },
+  },
+}
+
+// The finding VERIFIER's verdicts — one per gating finding, in the order given. REJECTED is
+// only honoured with evidence: a reviewer's blocking finding is overturned by a cited
+// counter-fact, never by an opinion.
+const VERIFY_SCHEMA = {
+  type: 'object',
+  required: ['results'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['index', 'verdict'],
+        properties: {
+          index: { type: 'integer', description: 'the finding number from the header, 1-based' },
+          verdict: { type: 'string', enum: ['CONFIRMED', 'REJECTED'] },
+          evidence: { type: 'string', description: 'REJECTED: the path:line (or command output) that proves the finding false. Required — a REJECTED without evidence counts as CONFIRMED' },
+        },
+      },
+    },
+  },
+}
+
+// The telemetry WRITER's receipt. The engine compares both counts against what it sent, so
+// a writer that dropped or altered lines is detected instead of trusted.
+const JOURNAL_SCHEMA = {
+  type: 'object',
+  required: ['runDir', 'lines', 'bytes'],
+  properties: {
+    runDir: { type: 'string', description: 'the run directory written into' },
+    lines: { type: 'integer', description: 'the number the script printed for LINES' },
+    bytes: { type: 'integer', description: 'the number the script printed for BYTES' },
+  },
+}
+
+// The tracker CLAIM release: issues this run claimed but did not land, handed back.
+const RELEASE_SCHEMA = {
+  type: 'object',
+  required: ['released'],
+  properties: {
+    released: { type: 'array', items: { type: 'string' }, description: 'issue ids handed back' },
+    failed: { type: 'array', items: { type: 'string' }, description: 'issue ids that could not be updated, with the reason' },
+  },
+}
+
 // The integration step's verdict: a reviewed lane branch either merged into the repo
 // run branch or it did not. CONFLICT is a first-class outcome, not an error — the
 // scheduler routes it to the replanner (a reviewed diff is never silently rewritten).
@@ -340,7 +456,7 @@ const REPLAN_SCHEMA = {
 function harnessContextPrompt(project, repos, agents) {
   return `Load the harness context for an automated build run of tracker project ${project} touching repos: ${repos.join(', ') || '(unknown yet)'}. Read-only; return the structured object.
 1. Read \`${MEMORY_DIR}/harness.md\` and, for each of ${agents.join(', ')}, \`${MEMORY_DIR}/agents/<agent>.md\`. Return each file's ENTRIES verbatim (drop the leading HTML comment header and a literal "(no entries yet)" placeholder — return "" for those). Do not summarize or reword entries.
-2. List \`${RUNS_DIR}/*.json\` (if the directory exists). Read, newest first, the ledgers whose \`project\` equals ${project} OR whose \`repos\` intersect the list above — at most 8 files. Collect their \`learnings\` arrays, deduplicate (case-insensitive, trimmed), keep newest first, cap at 20, return as priorLearnings and the paths read as priorLedgers.
+2. List \`${RUNS_DIR}/*.json\` (if the directory exists). Read, newest first, the ledgers whose \`project\` equals ${project} OR whose \`repos\` intersect the list above — at most 8 files. Collect their \`learnings\` arrays. An entry is either an object \`{text, repos}\` (return it as is) or a bare string (older ledgers: return \`{text: <the string>, repos: <that ledger's repos array>}\`). Deduplicate on text (case-insensitive, trimmed), keep newest first, cap at 30, return as priorLearnings and the paths read as priorLedgers.
 Missing files/dirs are normal on a fresh harness — return empty values, never an error.`
 }
 // The "## Your memory" block pasted at the top of every brief, per agent.
@@ -372,7 +488,7 @@ ${JSON.stringify(payload, null, 2)}
 \`\`\``
 }
 // The CRYSTALLIZE dispatch — the harness learning step, once per run, over every PR opened.
-function crystallizePrompt({ project, prs, ledger, learnings, contextQuestions, advisoryNotes, halt }) {
+function crystallizePrompt({ project, prs, ledger, learnings, contextQuestions, advisoryNotes, halt, telemetryDir }) {
   return `${brief('crystallize')}- Tracker project: ${project}
 - Ledger branch: \`${ledger.branch}\` · ledger file: \`${ledger.path}\`
 - Brief/persona prose this run used: \`${BRIEFS_DIR}/\` · \`${PERSONAS_DIR}/\` · memory: \`${MEMORY_DIR}/\`
@@ -384,17 +500,18 @@ ${learnings.length ? learnings.map((l) => `  - ${l}`).join('\n') : '  - (none)'}
 ${contextQuestions.length ? contextQuestions.map((q) => `  - [${q.task}] ${q.question} (answered by ${q.resolvedBy || 'escalation'})`).join('\n') : '  - (none)'}
 - Advisory (minor/nit) findings not reworked: ${advisoryNotes.length}
 - ${halt ? `The run HALTED: ${halt.reason}` : 'The run drained the project.'}
+- Decision journal: ${telemetryDir ? `\`${telemetryDir}\` (this run) under \`${TELEMETRY_DIR}/\` (earlier runs, local) — cross-run evidence per version/briefs hash` : '(telemetry off this run)'}
 - PR title: \`[NO_TICKET] crystallize: ${project} — ${prs.length} PR(s)\``
 }
 
 // Phase A: the slice index. The required-hook probe is DYNAMIC (execute runs only).
-function indexPrompt(project, specPath, planPath, hook) {
+function indexPrompt(project, specPath, planPath, hook, claimOn) {
   const repoList = [...repoConfig.values()].map((r) => `${r.name} (${r.path})`).join(' · ')
   return `${brief('index')}- Approved spec (\`roast\`): ${specPath}
 - Plan (\`to-plan\`): ${planPath}
 - Slice-tagged issues (\`to-issues\`): tracker project / parent ticket ${project}
 - Repos in this run — map every issue onto exactly one of these names: ${repoList}
-
+${claimOn ? '- Claims are ON: for every issue also return `assignee` (the tracker handle it is assigned to, "" when unassigned).\n' : ''}
 ${hook ? `## Also VERIFY the required hook — the run refuses to EXECUTE without it
 Every agent this run dispatches is an in-process subagent of the session you run in, so it
 inherits the session's tool hooks. Run these read-only checks in Bash and report each FAILED one in
@@ -407,18 +524,35 @@ failure — still return the slice index.
    Hooks load only at session start, so a hook added mid-session does not count.` : `Return "hookProblems": [] — this run does not probe for a required hook.`}`
 }
 
-// Phase B: hydrate ONE cycle's ready issues — full bodies for these only.
-function hydratePrompt(project, issues, learnings) {
+// The agents a task in `repo` may be routed to: its owner first, then enabled specialists.
+function routingTable() {
+  return [...repoConfig.values()]
+    .map((r) => {
+      const sp = specialistsFor(r.name)
+      return `- ${r.name} → owner \`${r.agent}\` (checkout \`${r.path}\`)${sp.length ? `; specialists: ${sp.map((s) => `\`${s.agent}\`${s.use ? ` (${s.use})` : ''}`).join(', ')}` : ''}`
+    })
+    .join('\n')
+}
+
+// Phase B: hydrate ONE cycle's ready issues — full bodies for these only. Hydration is also
+// the SELECTOR: it already reads each issue in full, so choosing agent × model there costs
+// no extra dispatch.
+function hydratePrompt(project, issues, learnings, claim) {
   return `${harnessBlock()}${brief('hydrate')}${artifacts()} Tracker project ${project}.
 
 ## Fetch the FULL bodies of exactly these issues — no others
 ${issues.map((i) => `- ${i.id} (${i.repo}, slice ${i.slice ?? 0})${i.title ? ` — ${i.title}` : ''}`).join('\n')}
 
-## The repos and their owning agents — set \`repo\`/\`agent\` from this table
-${[...repoConfig.values()].map((r) => `- ${r.name} → agent \`${r.agent}\` (checkout \`${r.path}\`)`).join('\n')}
+## The repos and who may build their tasks — set \`repo\`, then route \`agent\` × \`model\` (brief: "Route each task")
+${routingTable()}
 ${
+    claim
+      ? `\n## CLAIM these issues — the run is about to build them
+For each issue above: assign it to \`${claim.identity}\` and move it to your tracker's in-progress state. This is the ONLY tracker change you make.\n`
+      : ''
+  }${
     learnings.length
-      ? `\n## Learnings from earlier work in this run — fold them into taskText where relevant, so this work does not repeat a failure:\n${learnings.map((l) => `- ${l}`).join('\n')}\n`
+      ? `\n## Learnings from earlier work that concern these repos — fold them into taskText where relevant, so this work does not repeat a failure:\n${learnings.map((l) => `- ${learningText(l)}`).join('\n')}\n`
       : ''
   }`
 }
@@ -441,7 +575,14 @@ function implPrompt(task, fixFindings, resolved) {
   const gated = prByGate(task.repo)
     ? `- GATED REPO: the PR is opened by the gate dispatch at PROJECT END. Do NOT run \`gh pr create\` here${gate && gate.run ? `, and do NOT run the repo gate (\`${gate.run}\`)` : ''}; commit everything and return.\n`
     : ''
-  let out = `${memoryBlock(agent)}${brief('implement')}## Task (${task.id} · ${task.ticket || 'NO_TICKET'}) — from the plan, verbatim
+  // A specialist also gets the OWNER's memory: those facts are about the repo, and they bind
+  // whoever builds in it.
+  const owner = agentFor(task.repo)
+  const ownerFacts =
+    owner && agent !== owner && (agentMemory[owner] || '').trim()
+      ? `## Repo facts (\`${MEMORY_DIR}/agents/${owner}.md\` — the owning agent's memory; binding in this repo)\n${agentMemory[owner].trim()}\n\n`
+      : ''
+  let out = `${memoryBlock(agent)}${ownerFacts}${brief('implement')}## Task (${task.id} · ${task.ticket || 'NO_TICKET'}) — from the plan, verbatim
 ${task.taskText}
 
 ## Where it fits
@@ -561,6 +702,97 @@ ${r.firstSha ? `Whole-task context when you need it: \`git -C ${path} diff ${r.f
 git -C ${path} log --oneline ${BASE_BRANCH}..HEAD
 \`\`\``
   }`
+}
+
+// The PRECHECK — one cheap structural look between the implementer and the panel.
+function precheckPrompt(task, range, impl) {
+  const declared = (task.files || []).map((f) => `- ${f}`).join('\n') || '- (none declared)'
+  const reported = ((impl && impl.filesChanged) || []).map((f) => `- ${f}`).join('\n') || '- (none reported)'
+  return `${brief('precheck')}Task ${task.id} in \`${repoPath(task.repo)}\` (branch ${task.branch || '(feature branch)'}), implementer status ${(impl && impl.status) || '?'}.
+
+## Declared files (the task's footprint)
+${declared}
+
+## Files the implementer reported changing
+${reported}
+
+${rangeBlock(task, range)}`
+}
+
+// The finding VERIFIER — one dispatch per failing review round, before any fix is bought.
+function verifyPrompt(task, mode, findings, range) {
+  return `${brief('verify')}Task ${task.id} in \`${repoPath(task.repo)}\` (branch ${task.branch || '(feature branch)'}) — ${mode} review. ${artifacts()}
+
+## The gating findings to verify (numbered — return one result per number)
+${findings.map((f, i) => `${i + 1}. [${f.severity}${f.persona ? ` · ${f.persona}` : ''}] ${f.file || '?'}:${f.line || '?'} — ${f.issue}`).join('\n')}
+
+## Task (verbatim — what the change had to do)
+${task.taskText}
+
+${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}`
+}
+
+// The telemetry WRITER — a fixed shell script, so the cheap agent only has to run it. Each
+// flush writes its own chunk file named by its first sequence number: a replayed or retried
+// flush OVERWRITES the same file instead of appending duplicates. `__AT__` / `__STARTED__`
+// are stamped by the shell (a workflow script has no clock).
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+function utf8Bytes(s) {
+  let n = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x80) n += 1
+    else if (c < 0x800) n += 2
+    else if (c >= 0xd800 && c < 0xdc00) {
+      n += 4
+      i++
+    } else n += 3
+  }
+  return n
+}
+function journalPrompt(lines, runJson, firstSeq, runDir, slug) {
+  const dir = runDir ? `DIR=${shq(runDir)}` : `DIR=${shq(TELEMETRY_DIR)}/"$(date -u +%Y%m%d-%H%M%S)"-${shq(slug)}`
+  const chunk = String(firstSeq).padStart(8, '0')
+  return `${brief('journal')}Run this script ONCE, VERBATIM, in one Bash call from the orchestrating workspace root. Do not edit, reformat, re-indent or re-encode any line of it.
+
+\`\`\`bash
+set -u
+${dir}
+mkdir -p "$DIR/events"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+F="$DIR/events/${chunk}.jsonl"
+cat > "$F.tmp" <<'GRIMOIRE_EOF'
+${lines.join('\n')}
+GRIMOIRE_EOF
+echo "LINES $(wc -l < "$F.tmp" | tr -d ' ')"
+echo "BYTES $(wc -c < "$F.tmp" | tr -d ' ')"
+sed "s/__AT__/$NOW/g" "$F.tmp" > "$F" && rm -f "$F.tmp"
+STARTED=$(sed -n 's/.*"startedAt": *"\\([^"]*\\)".*/\\1/p' "$DIR/run.json" 2>/dev/null | head -n 1)
+[ -n "$STARTED" ] || STARTED=$NOW
+cat > "$DIR/run.json.tmp" <<'GRIMOIRE_EOF'
+${JSON.stringify(runJson)}
+GRIMOIRE_EOF
+sed -e "s/__AT__/$NOW/g" -e "s/__STARTED__/$STARTED/g" "$DIR/run.json.tmp" > "$DIR/run.json" && rm -f "$DIR/run.json.tmp"
+echo "RUNDIR $DIR"
+\`\`\``
+}
+
+// The CLAIM for issues a replan re-enters without hydration (hydration claims the rest).
+function claimPrompt(issues, identity) {
+  return `${brief('claim')}Mode: **CLAIM**. Tracker identity of this run: \`${identity}\`.
+
+## Claim these issues — a replan is about to build them
+${issues.map((i) => `- ${i.id} (${i.repo})`).join('\n')}`
+}
+
+// The claim RELEASE — hand back tracker issues this run claimed but did not land.
+function releasePrompt(issues, identity, reason) {
+  return `${brief('claim')}Mode: **RELEASE**. Tracker identity of this run: \`${identity}\`.
+
+## Hand these issues back — they were claimed by this run and did not land
+${issues.map((i) => `- ${i.id} (${i.repo}) — ${i.status}`).join('\n')}
+
+Why the run stopped short of them: ${reason}`
 }
 
 // The INTEGRATION step for a parallel lane — mechanical merge, serialized per repo.
@@ -775,6 +1007,66 @@ async function step(label, thunk) {
   return result
 }
 
+// ── the decision JOURNAL — every choice the loop makes, with its reason ──
+// `emit` records one event: routing, dispatch, precheck, each reviewer verdict, finding
+// verification, fixes and escalations, the guard, context resolves, integration, settles,
+// replans, terminal slots, gates, claims, budget actions, halts. Events carry a sequence
+// number and the cumulative output-token count (the script has no clock; the writer stamps
+// wall time per chunk). They are buffered and flushed by ONE cheap writer per chunk into
+// `<telemetryDir>/<runId>/events/<firstSeq>.jsonl`, with `run.json` (meta, status,
+// checkpoint) rewritten on every flush — the checkpoint is what a NEW session resumes from.
+// Local and gitignored by design: /grimoire:logs renders it, crystallize reads it.
+const journal = {
+  enabled: false, // set once args are parsed: execute runs with telemetry on
+  pending: [],
+  seq: 0,
+  runDir: null,
+  chain: Promise.resolve(),
+  flushes: 0,
+  written: 0,
+  mismatches: 0,
+  dead: 0,
+  final: null, // {status, summary} once the run is over — the last flush writes it into run.json
+}
+const clip = (v) => (typeof v === 'string' && v.length > 300 ? v.slice(0, 297) + '…' : v)
+function emit(type, data) {
+  if (!journal.enabled) return
+  const ev = { seq: ++journal.seq, type, tok: spentTokens(), at: '__AT__' }
+  for (const [k, v] of Object.entries(data || {})) ev[k] = Array.isArray(v) ? v.map(clip) : clip(v)
+  journal.pending.push(ev)
+  if (journal.pending.length >= JOURNAL_FLUSH_EVERY) flushJournal()
+}
+let runJsonFor = () => ({}) // assigned once run state exists (see below)
+function flushJournal() {
+  if (!journal.enabled || !journal.pending.length) return journal.chain
+  const batch = journal.pending.splice(0)
+  const n = ++journal.flushes
+  journal.chain = journal.chain.then(async () => {
+    const lines = batch.map((e) => JSON.stringify(e))
+    const firstSeq = batch[0].seq
+    const r = await agentT(journalPrompt(lines, runJsonFor(journal.final), firstSeq, journal.runDir, projectSlug), {
+      label: `journal#${n}`,
+      phase: 'Implement',
+      model: 'haiku',
+      effort: 'low', // runs one fixed script
+      schema: JOURNAL_SCHEMA,
+    })
+    if (!r) {
+      journal.dead++
+      if (journal.dead === 1) log('⚠ telemetry writer died — events of this chunk are lost; the run itself is unaffected')
+      return
+    }
+    if (typeof r.runDir === 'string' && r.runDir.trim()) journal.runDir = journal.runDir || r.runDir.trim()
+    const expectLines = lines.length
+    const expectBytes = utf8Bytes(lines.join('\n')) + 1 // the heredoc ends the last line with a newline
+    if (r.lines !== expectLines || r.bytes !== expectBytes) {
+      journal.mismatches++
+      log(`⚠ telemetry chunk #${n}: writer reported ${r.lines} line(s)/${r.bytes} byte(s), expected ${expectLines}/${expectBytes} — the chunk may be altered`)
+    } else journal.written += expectLines
+  })
+  return journal.chain
+}
+
 // ═══════════════════════ 0 · obtain the task DAG ═══════════════════════
 phase('Parse plan')
 
@@ -812,6 +1104,42 @@ const MAX_CONTEXT_RESOLVES =
 const AGENT_TIMEOUT_MIN = Number.isFinite(opts.agentTimeoutMin) && opts.agentTimeoutMin >= 0 ? opts.agentTimeoutMin : DEFAULT_AGENT_TIMEOUT_MIN
 // Within-repo parallelism cap: tasks in flight per repo.
 const MAX_PER_REPO = Number.isInteger(opts.maxPerRepo) && opts.maxPerRepo >= 1 ? opts.maxPerRepo : DEFAULT_MAX_PER_REPO
+// Precheck rung (cheap structural check before the panel). ON unless {precheck:false}.
+const PRECHECK = opts.precheck !== false
+const MAX_PRECHECK_FIXES =
+  Number.isInteger(opts.maxPrecheckFixes) && opts.maxPrecheckFixes >= 0 ? opts.maxPrecheckFixes : DEFAULT_MAX_PRECHECK_FIXES
+// Finding verification (each failing round's gating findings checked before a fix is bought). ON unless {verifyFindings:false}.
+const VERIFY_FINDINGS = opts.verifyFindings !== false
+// Model escalation: the fix round from which the implementer runs on opus. 0 disables.
+const ESCALATE_AT_FIX_ROUND =
+  Number.isInteger(opts.escalateAtFixRound) && opts.escalateAtFixRound >= 0 ? opts.escalateAtFixRound : DEFAULT_ESCALATE_AT_FIX_ROUND
+// Cost fuse. `maxOutputTokens` caps THIS run's output tokens (budget.spent() is the only
+// usage counter a script gets — input and cache tokens are not visible to it); a resumed
+// run counts what its earlier sessions spent. `budgetFloor` keeps the turn-level floor.
+const MAX_OUTPUT_TOKENS = Number.isFinite(opts.maxOutputTokens) && opts.maxOutputTokens > 0 ? opts.maxOutputTokens : null
+const BUDGET_FLOOR = Number.isFinite(opts.budgetFloor) && opts.budgetFloor >= 0 ? opts.budgetFloor : DEFAULT_BUDGET_FLOOR
+// Telemetry: {telemetry:{enabled?, dir?, flushEvery?}}. ON for execute runs unless enabled:false.
+const telemetryOpt = opts.telemetry && typeof opts.telemetry === 'object' ? opts.telemetry : {}
+const JOURNAL_FLUSH_EVERY =
+  Number.isInteger(telemetryOpt.flushEvery) && telemetryOpt.flushEvery >= 1 ? telemetryOpt.flushEvery : DEFAULT_JOURNAL_FLUSH_EVERY
+// What produced this run — the orchestrate skill reads the plugin version and hashes the
+// briefs, personas and config, because crystallize changes the prose between releases and a
+// version alone would not say which behaviour a run had.
+const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+const runMetaOpt = opts.runMeta && typeof opts.runMeta === 'object' ? opts.runMeta : {}
+const runMeta = {
+  grimoireVersion: str(runMetaOpt.grimoireVersion),
+  briefsHash: str(runMetaOpt.briefsHash),
+  personasHash: str(runMetaOpt.personasHash),
+  configHash: str(runMetaOpt.configHash),
+}
+const runId = str(opts.runId) && /^[A-Za-z0-9._-]+$/.test(opts.runId.trim()) ? opts.runId.trim() : null
+// Cross-session resume: the checkpoint the journal last wrote (run.json → checkpoint), passed
+// back by the orchestrate skill, so a new session keeps the budgets the earlier one used.
+const resumeOpt = opts.resumeState && typeof opts.resumeState === 'object' ? opts.resumeState : null
+// Tracker claims: {claim:{identity}} — claim issues at hydration, skip issues someone else
+// has started, hand back what this run claimed and did not land. OFF unless configured.
+const claim = opts.claim && typeof opts.claim === 'object' && str(opts.claim.identity) ? { identity: opts.claim.identity.trim() } : null
 
 // Paths — defaults are the repo layout, but a skill installed under .claude/skills/ can
 // point the brief/persona directories at wherever it landed.
@@ -821,6 +1149,7 @@ RUNS_DIR = dirOpt(opts.runsDir, DEFAULT_RUNS_DIR)
 BRIEFS_DIR = dirOpt(opts.briefsDir, DEFAULT_BRIEFS_DIR)
 PERSONAS_DIR = dirOpt(opts.personasDir, DEFAULT_PERSONAS_DIR)
 WORKTREE_DIR = dirOpt(opts.worktreeDir, DEFAULT_WORKTREE_DIR)
+TELEMETRY_DIR = dirOpt(telemetryOpt.dir, DEFAULT_TELEMETRY_DIR)
 BASE_BRANCH = typeof opts.baseBranch === 'string' && opts.baseBranch.trim() ? opts.baseBranch.trim() : DEFAULT_BASE_BRANCH
 
 // The required-hook gate is OFF by default: {requireHook:{name, check, fix?}} turns it on.
@@ -850,10 +1179,19 @@ const repoList = Array.isArray(opts.repos)
       }))
   : []
 repoConfig = new Map(repoList.map((r) => [r.name, r]))
+specialists = Array.isArray(opts.specialists)
+  ? opts.specialists
+      .filter((s) => s && str(s.agent))
+      .map((s) => ({
+        agent: s.agent.trim(),
+        repos: Array.isArray(s.repos) && s.repos.length ? s.repos.filter((r) => typeof r === 'string') : ['*'],
+        use: str(s.use) || '',
+      }))
+  : []
 // Teach the schemas which repos/agents exist, so an agent cannot invent one.
 if (repoList.length) {
   const names = repoList.map((r) => r.name)
-  const agents = [...new Set(repoList.map((r) => r.agent))]
+  const agents = [...new Set([...repoList.map((r) => r.agent), ...specialists.map((s) => s.agent)])]
   TASK_ITEM_SCHEMA.properties.repo.enum = names
   TASK_ITEM_SCHEMA.properties.agent.enum = agents
   INDEX_ISSUE_SCHEMA.properties.repo.enum = names
@@ -929,13 +1267,14 @@ if (missingInputs.length) {
 
 // A short, human-readable reference to the goal — handed to the re-planner.
 const goalRef = `${project} — spec: ${specPath} · plan: ${planPath}`
+const projectSlug = String(project).replace(/[^A-Za-z0-9._-]+/g, '-')
 
 // ── phase A: the slice INDEX (lightweight — no issue bodies) ──
 // One agent cannot absorb a full project in a single structured return (taskText is the
 // full issue body verbatim), so the indexer only verifies the artifacts and lists every
 // issue's id/repo/state/dependsOn — the scheduler hydrates each cycle just-in-time.
 const index = await step('verify design artifacts + slice index (whole project)', () =>
-  agentT(indexPrompt(project, specPath, planPath, execute && !skipHookCheck ? requireHook : null), {
+  agentT(indexPrompt(project, specPath, planPath, execute && !skipHookCheck ? requireHook : null, !!claim), {
     label: 'parse-index',
     phase: 'Parse plan',
     model: 'sonnet', // verification + listing: extraction, not judgement
@@ -977,22 +1316,38 @@ if (execute && requireHook && !skipHookCheck) {
 // project (an earlier run, a human, a halt) RESUMES instead of redoing.
 const isSettled = (s) => s === 'done' || s === 'canceled'
 const alreadyDone = []
+const claimedElsewhere = [] // {id, repo, slice, by} — started by someone else (claims on)
 const pendingIndex = [] // {id, title, repo, state, dependsOn, slice, sliceLabel} still to run
 for (const s of [...(index.slices || [])].sort((a, b) => (a.slice ?? 0) - (b.slice ?? 0))) {
   for (const i of s.issues || []) {
     const entry = { ...i, slice: s.slice ?? 0, sliceLabel: s.sliceLabel || '' }
     if (isSettled(i.state)) alreadyDone.push({ id: i.id, repo: i.repo, slice: entry.slice, state: i.state })
+    // Someone else has STARTED it: never build over a person's (or another run's) work in
+    // progress. It stays in the project (its dependents wait for it) but is not dispatched.
+    else if (claim && i.state === 'started' && str(i.assignee) && i.assignee.trim() !== claim.identity)
+      claimedElsewhere.push({ id: i.id, repo: i.repo, slice: entry.slice, by: i.assignee.trim() })
     else pendingIndex.push(entry)
   }
 }
 const alreadyDoneIds = new Set(alreadyDone.map((d) => d.id))
-const inProject = new Set([...pendingIndex.map((i) => i.id), ...alreadyDoneIds])
+const inProject = new Set([...pendingIndex.map((i) => i.id), ...alreadyDoneIds, ...claimedElsewhere.map((c) => c.id)])
 log(
   `${pendingIndex.length} issue(s) to run across ${new Set(pendingIndex.map((i) => i.slice)).size} slice(s) · ${alreadyDone.length} already done/canceled (absorbed) · ` +
-    `mode=${execute ? 'EXECUTE' : 'PREVIEW (no implementers)'} · scheduling=dependsOn-driven · maxPerRepo=${MAX_PER_REPO} (disjoint-file lanes) · maxReplans=${MAX_REPLANS} · maxFixAttempts=${MAX_FIX_ATTEMPTS} · maxContextResolves=${MAX_CONTEXT_RESOLVES} · agentTimeout=${AGENT_TIMEOUT_MIN ? AGENT_TIMEOUT_MIN + 'm' : 'off'}`,
+    `mode=${execute ? 'EXECUTE' : 'PREVIEW (no implementers)'} · scheduling=dependsOn-driven · maxPerRepo=${MAX_PER_REPO} (disjoint-file lanes) · maxReplans=${MAX_REPLANS} · maxFixAttempts=${MAX_FIX_ATTEMPTS} · maxContextResolves=${MAX_CONTEXT_RESOLVES} · agentTimeout=${AGENT_TIMEOUT_MIN ? AGENT_TIMEOUT_MIN + 'm' : 'off'}` +
+    ` · precheck=${PRECHECK ? 'on' : 'off'} · verifyFindings=${VERIFY_FINDINGS ? 'on' : 'off'} · escalateAtFixRound=${ESCALATE_AT_FIX_ROUND || 'off'}` +
+    `${MAX_OUTPUT_TOKENS ? ` · maxOutputTokens=${fmtTok(MAX_OUTPUT_TOKENS)}` : ''}${specialists.length ? ` · specialists=${specialists.map((s) => s.agent).join(',')}` : ''}` +
+    `${claimedElsewhere.length ? ` · ${claimedElsewhere.length} started by someone else (not dispatched): ${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}` : ''}`,
 )
 if (pendingIndex.length === 0) {
-  return { done: [], needsAttention: [], alreadyDone, note: 'Nothing to run — every issue in the project is already done or canceled.' }
+  return {
+    done: [],
+    needsAttention: [],
+    alreadyDone,
+    claimedElsewhere,
+    note: claimedElsewhere.length
+      ? `Nothing to run — every issue is done, canceled, or started by someone else (${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}).`
+      : 'Nothing to run — every issue in the project is already done or canceled.',
+  }
 }
 
 // DEFAULT = PREVIEW: stop after the index and show the dependency DAG + the review panel
@@ -1014,7 +1369,7 @@ if (!execute) {
   const repoView = Object.fromEntries(
     repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null, prBy: prByGate(r.name) ? 'gate' : 'implementer' }]),
   )
-  return { preview: true, note: 'PREVIEW ONLY — index level (no hydration), no implementers ran. Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.', inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, alreadyDone, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN }
+  return { preview: true, note: 'PREVIEW ONLY — index level (no hydration), no implementers ran. Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.', inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
 }
 
 // ═══════════════════════ 1 · per-task lifecycle ═══════════════════════
@@ -1032,7 +1387,43 @@ const guardChecks = { checked: 0, passed: 0, reReviewed: 0 }
 // `passedFirstRound / stages` is the waved-through rate; `fixDispatches` is the real
 // rework (each one a full opus dispatch); the finding split says whether reviewers
 // mostly produce gates (load-bearing) or advisory notes (candidates for slimming).
-const reviewStats = { stages: 0, passedFirstRound: 0, fixDispatches: 0, gatingFindings: 0, advisoryFindings: 0 }
+const reviewStats = { stages: 0, passedFirstRound: 0, fixDispatches: 0, gatingFindings: 0, advisoryFindings: 0, verifyChecks: 0, overturnedFindings: 0 }
+// Precheck telemetry: panel rounds it saved (a FAIL caught before any reviewer ran).
+const precheckStats = { checked: 0, failed: 0, fixDispatches: 0, exhausted: 0 }
+// Routing telemetry: what the selector chose, and what the engine had to correct.
+const routingStats = { byAgent: {}, byModel: {}, fallbacks: 0, escalations: 0 }
+const overturned = [] // gating findings the verifier REJECTED with evidence — reported, not reworked
+
+// ── the finding VERIFIER: is each gating finding real before a fix is bought? ──
+// A false positive costs a full implementation dispatch AND can push the implementer into a
+// wrong change. One cheap dispatch checks every gating finding of the round against the code;
+// a REJECTED finding counts only with cited evidence. A dead verifier keeps every finding
+// (fail safe to the reviewers). Synthesized findings (a FAIL with no finding) are not sent:
+// there is nothing concrete to verify.
+async function verifyFindings(task, mode, findings, range, attempt, phaseName) {
+  if (!VERIFY_FINDINGS || !findings.length) return { kept: findings, rejected: [] }
+  reviewStats.verifyChecks++
+  const v = await agentT(verifyPrompt(task, mode, findings, range), {
+    label: `verify:${task.id}:${mode}#${attempt}`,
+    phase: phaseName,
+    model: 'sonnet',
+    agentType: 'reviewer',
+    schema: VERIFY_SCHEMA,
+  })
+  if (!v || !Array.isArray(v.results)) {
+    emit('verify', { task: task.id, stage: mode, round: attempt, confirmed: findings.length, overturned: 0, reasons: ['verifier died — every finding kept'] })
+    return { kept: findings, rejected: [] }
+  }
+  const rejectedIdx = new Map()
+  for (const r of v.results)
+    if (r && r.verdict === 'REJECTED' && Number.isInteger(r.index) && r.index >= 1 && r.index <= findings.length && str(r.evidence)) rejectedIdx.set(r.index - 1, r.evidence.trim())
+  const kept = findings.filter((_, i) => !rejectedIdx.has(i))
+  const rejected = findings.filter((_, i) => rejectedIdx.has(i)).map((f) => ({ ...f, overturnedBy: rejectedIdx.get(findings.indexOf(f)) }))
+  reviewStats.overturnedFindings += rejected.length
+  emit('verify', { task: task.id, stage: mode, round: attempt, confirmed: kept.length, overturned: rejected.length, reasons: rejected.map((f) => `${f.persona || '?'} ${f.file || '?'}:${f.line || '?'} — ${f.overturnedBy}`) })
+  if (rejected.length) log(`   · ${task.id}: verifier overturned ${rejected.length}/${findings.length} gating finding(s) with evidence — not reworked`)
+  return { kept, rejected }
+}
 async function runReviewStage(task, mode, personas, phaseName, resolved, range) {
   if (personas.length === 0) return { verdict: 'PASS', findings: [], advisory: [], summary: 'no applicable reviewers' }
   reviewStats.stages++
@@ -1055,6 +1446,8 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
 
     if (reviews.length === 0) return { verdict: 'FAIL', findings: [], advisory: [], summary: 'reviewers unavailable (all died)' }
 
+    for (const r of reviews)
+      emit('review', { task: task.id, stage: mode, persona: r.persona, verdict: r.v.verdict, gating: (r.v.findings || []).filter(isGating).length, advisory: (r.v.findings || []).filter((f) => !isGating(f)).length, round: attempt })
     const findings = reviews.flatMap((r) => (r.v.findings || []).map((f) => ({ ...f, persona: r.persona })))
     // ── THE GATE: severity decides, not the verdict flag ──
     // blocker/major → rework. minor/nit → advisory, reported, no rework (a fix round costs a
@@ -1062,7 +1455,9 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
     // One exception, so the gate can't be talked past: a reviewer that returns FAIL with NO
     // findings at all gave us nothing to verify, so we cannot classify it as a nit — it gates,
     // carrying its summary as a synthesized major.
-    const gating = findings.filter(isGating)
+    const checked = await verifyFindings(task, mode, findings.filter(isGating), range, attempt, phaseName)
+    overturned.push(...checked.rejected.map((f) => ({ task: task.id, repo: task.repo, stage: mode, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue, evidence: f.overturnedBy })))
+    const gating = checked.kept
     const advisory = findings.filter((f) => !isGating(f))
     const voidFails = reviews.filter((r) => r.v.verdict === 'FAIL' && !(r.v.findings || []).length)
     const gate = gating.concat(
@@ -1102,7 +1497,8 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
     log(`   · ${task.id}: ${mode} FAIL — ${aggregate.summary}; fix attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS}…`)
     const fixFrom = range && range.headSha // HEAD before the fix — isolates the fix's own diff for the guard
     reviewStats.fixDispatches++
-    const fix = await dispatchImpl(task, gate, resolved || [], `fix:${task.id}:${mode}#${attempt + 1}`)
+    task.fixRounds = (task.fixRounds || 0) + 1
+    const fix = await dispatchImpl(task, gate, resolved || [], `fix:${task.id}:${mode}#${attempt + 1}`, mode)
     if (!fix || fix.status === 'BLOCKED' || fix.status === 'NEEDS_CONTEXT') {
       return { verdict: 'FAIL', findings, advisory, summary: `implementer ${fix ? fix.status : 'died'} during ${mode} fix` }
     }
@@ -1129,6 +1525,7 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
         agentType: 'reviewer',
         schema: GUARD_SCHEMA,
       })
+      emit('guard', { task: task.id, stage: mode, round: attempt + 1, decision: g ? g.decision : 'RE_REVIEW', reason: g ? g.reason : 'guard died — failing safe to the full panel' })
       if (g && g.decision === 'PASS') {
         guardChecks.passed++
         log(`   · ${task.id}: guard verified the fix — quality panel NOT re-run${g.reason ? ` (${g.reason.slice(0, 140)})` : ''}`)
@@ -1157,12 +1554,17 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
 // scout. Both run on their agent definition's model — deliberately no `model` override
 // here, that is the whole point of this rung being cheap.
 const CONTRACT_Q = /\b(proto|grpc|schema|contract|migration|table|column|envelope|endpoint|api|topic|openapi|graphql)\b/i
+const SECURITY_Q = /\b(auth\w*|permissions?|roles?|secrets?|credentials?|csrf|xss|injection|sanitiz\w*|encrypt\w*|cve|vulnerab\w*|advisory)\b/i
+const PERF_Q = /\b(latency|throughput|slow\w*|performance|perf|profil\w*|benchmarks?|hot ?path|n\+1|memory (?:leak|usage))\b/i
+// Contract first (a contract question is also often a security or perf one, and the contract
+// checker reads both sides), then security, then performance, else the codebase scout.
+const scoutFor = (q) => (CONTRACT_Q.test(q) ? 'contract-checker' : SECURITY_Q.test(q) ? 'security-scout' : PERF_Q.test(q) ? 'perf-scout' : 'codebase-scout')
 // Rung telemetry. A high `asked` means the SPEC was underspecified — that is a signal for
 // roast/to-issues, not a fault of this rung. `escalated` is what actually reached a human.
 const contextResolves = { asked: 0, answered: 0, escalated: 0, questions: [] }
 async function resolveContext(task, question, n) {
   contextResolves.asked++
-  const agentType = CONTRACT_Q.test(question) ? 'contract-checker' : 'codebase-scout'
+  const agentType = scoutFor(question)
   log(`   · ${task.id}: NEEDS_CONTEXT → ${agentType} (${n}/${MAX_CONTEXT_RESOLVES}) before escalating — "${question.slice(0, 140)}"`)
   const r = await agentT(resolvePrompt(task, question), {
     label: `resolve:${task.id}#${n}`,
@@ -1170,6 +1572,7 @@ async function resolveContext(task, question, n) {
     agentType,
     schema: RESOLVE_SCHEMA,
   })
+  emit('resolve', { task: task.id, scout: agentType, answered: !!(r && r.answered && (r.answer || '').trim()), question })
   if (r && r.answered && (r.answer || '').trim()) {
     contextResolves.answered++
     contextResolves.questions.push({ task: task.id, question, resolvedBy: agentType })
@@ -1185,14 +1588,32 @@ async function resolveContext(task, question, n) {
 // Every implementer dispatch goes through this, so the resolve rung is uniform: a returned
 // NEEDS_CONTEXT is answered and retried in-place, and only an UNANSWERABLE one escalates.
 // `resolved` accumulates Q→A for the task and is threaded into every later prompt.
-async function dispatchImpl(task, fixFindings, resolved, label) {
+// The build tier for THIS dispatch: the selector's pick, escalated to opus once the task has
+// needed ESCALATE_AT_FIX_ROUND fix rounds (a cheap tier that keeps failing review is the
+// expensive path) — logged once per task.
+function modelFor(task) {
+  const base = MODELS.includes(task.model) ? task.model : 'opus'
+  if (base !== 'opus' && ESCALATE_AT_FIX_ROUND > 0 && (task.fixRounds || 0) >= ESCALATE_AT_FIX_ROUND) {
+    if (!task.escalated) {
+      task.escalated = true
+      routingStats.escalations++
+      emit('escalate', { task: task.id, from: base, to: 'opus', reason: `fix round ${task.fixRounds} ≥ ${ESCALATE_AT_FIX_ROUND}` })
+      log(`   · ${task.id}: escalating ${base} → opus (fix round ${task.fixRounds})`)
+    }
+    return 'opus'
+  }
+  return base
+}
+async function dispatchImpl(task, fixFindings, resolved, label, stage) {
   // A repo may declare a longer floor for ITS dispatches — e.g. one whose focused test runs
   // share infrastructure with a machine-global-locked gate and can queue before starting.
   const timeoutMin = repoTimeout(task.repo)
+  const model = modelFor(task)
+  if (fixFindings && fixFindings.length) emit('fix', { task: task.id, stage: stage || '?', round: task.fixRounds || 0, model, findings: fixFindings.length })
   let out = await agentT(implPrompt(task, fixFindings, resolved), {
     label,
     phase: 'Implement',
-    model: task.model || 'opus',
+    model,
     agentType: task.agent,
     schema: IMPL_SCHEMA,
     timeoutMin,
@@ -1209,7 +1630,7 @@ async function dispatchImpl(task, fixFindings, resolved, label) {
     out = await agentT(implPrompt(task, fixFindings, resolved), {
       label: `${label}+ctx${n}`,
       phase: 'Implement',
-      model: task.model || 'opus',
+      model,
       agentType: task.agent,
       schema: IMPL_SCHEMA,
       timeoutMin,
@@ -1238,7 +1659,10 @@ function integrateLane(task) {
       schema: INTEGRATE_SCHEMA,
     })
   const after = Promise.all([mergeQueues[task.repo] || null, directDone[task.repo] || null])
-  const p = after.then(dispatch, dispatch)
+  const p = after.then(dispatch, dispatch).then((r) => {
+    emit('integrate', { task: task.id, status: r ? r.status : 'DIED' })
+    return r
+  })
   mergeQueues[task.repo] = p.catch(() => null) // keep the chain alive past a failure
   return p
 }
@@ -1258,6 +1682,43 @@ async function runTask(task) {
   // Pinned to this task's origin, advanced by each fix — handed to every reviewer so the
   // panel judges this task's change instead of re-deriving it once per reviewer.
   const range = reviewRange(impl, null)
+
+  // ── the PRECHECK rung: is there something reviewable at all? ──
+  // One cheap structural dispatch before the first panel round — the panel is never paid to
+  // discover an empty diff, a missing commit range, conflict markers or a stub. A FAIL goes
+  // back to the SAME implementer (bounded); a dead precheck passes through (it is an
+  // optimisation, never a gate the reviewers depend on).
+  if (PRECHECK) {
+    for (let p = 0; ; p++) {
+      precheckStats.checked++
+      const pc = await agentT(precheckPrompt(task, range, impl), {
+        label: `precheck:${task.id}${p ? `#${p}` : ''}`,
+        phase: 'Spec review',
+        model: 'haiku',
+        effort: 'low',
+        agentType: 'reviewer',
+        schema: PRECHECK_SCHEMA,
+      })
+      const problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
+      emit('precheck', { task: task.id, verdict: pc ? (problems.length ? 'FAIL' : 'PASS') : 'DIED', problems: problems.map((x) => `${x.file || '?'}:${x.line || '?'} — ${x.issue}`) })
+      if (!problems.length) break
+      precheckStats.failed++
+      const asFindings = problems.map((x) => ({ severity: 'major', persona: 'Precheck', file: x.file || '?', line: x.line || 0, issue: x.issue }))
+      if (p >= MAX_PRECHECK_FIXES) {
+        precheckStats.exhausted++
+        log(`   · ${task.id}: precheck FAIL after ${p} fix(es) — ${problems.length} problem(s); the panel is not paid`)
+        return { id: task.id, repo: task.repo, status: 'PRECHECK_FAILED', impl, review: { verdict: 'FAIL', findings: asFindings, summary: pc.summary || `${problems.length} structural problem(s) before review` } }
+      }
+      log(`   · ${task.id}: precheck FAIL — ${problems.length} problem(s); sending back before the panel (${p + 1}/${MAX_PRECHECK_FIXES})`)
+      precheckStats.fixDispatches++
+      const fix = await dispatchImpl(task, asFindings, resolved, `fix:${task.id}:precheck#${p + 1}`, 'precheck')
+      if (!fix || fix.status === 'BLOCKED' || fix.status === 'NEEDS_CONTEXT')
+        return { id: task.id, repo: task.repo, status: fix ? fix.status : 'DIED', impl: fix || impl }
+      Object.assign(range, reviewRange(fix, range))
+      recordTouched(task, fix)
+      impl.filesChanged = [...new Set([...(impl.filesChanged || []), ...(fix.filesChanged || [])])]
+    }
+  }
 
   const spec = await runReviewStage(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', resolved, range)
   if (spec.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'SPEC_FAILED', impl, review: spec }
@@ -1300,7 +1761,7 @@ async function runTask(task) {
 // memory — the agent definitions still tell each agent to read its own file.
 {
   const repos = [...new Set(pendingIndex.map((i) => i.repo).filter(Boolean))]
-  const agents = [...new Set([...repoList.map((r) => r.agent), 'reviewer'])]
+  const agents = [...new Set([...repoList.map((r) => r.agent), ...specialists.map((sp) => sp.agent), 'reviewer'])]
   const ctx = await step('harness context — memory stores + prior run ledgers', () =>
     agentT(harnessContextPrompt(project, repos, agents), {
       label: 'harness-context',
@@ -1313,16 +1774,42 @@ async function runTask(task) {
   if (ctx) {
     harnessMemory = typeof ctx.harnessMemory === 'string' ? ctx.harnessMemory : ''
     agentMemory = ctx.agentMemory && typeof ctx.agentMemory === 'object' ? ctx.agentMemory : {}
-    priorLearnings = Array.isArray(ctx.priorLearnings) ? ctx.priorLearnings.filter((l) => typeof l === 'string' && l.trim()) : []
+    priorLearnings = Array.isArray(ctx.priorLearnings) ? ctx.priorLearnings.map((l) => toLearning(l, [])).filter(Boolean) : []
     const withMem = Object.entries(agentMemory).filter(([, v]) => v && v.trim()).map(([k]) => k)
     log(`◎ harness context: ${priorLearnings.length} prior learning(s) from ${(ctx.priorLedgers || []).length} ledger(s) · memory for ${withMem.length ? withMem.join(', ') : 'no agent yet'}`)
   } else log('⚠ harness-context loader died — running with empty memory (agents still read their own memory files)')
 }
 
+// ── telemetry on (execute runs) + cross-session resume ──
+journal.enabled = execute && telemetryOpt.enabled !== false
+if (runId) journal.runDir = `${TELEMETRY_DIR}/${runId}`
+else if (resumeOpt && journal.enabled) log('⚠ resumeState without runId — the journal starts a NEW run directory; pass the earlier run\'s runId to continue its log')
+// A checkpoint from an earlier session: continue its sequence numbers, keep the replans and
+// fix rounds it already spent (budgets are per project run, not per session), carry its
+// learnings, and count its output tokens against maxOutputTokens.
+const resumeFixRounds = resumeOpt && resumeOpt.fixRounds && typeof resumeOpt.fixRounds === 'object' ? resumeOpt.fixRounds : {}
+const resumeSpent = resumeOpt && Number.isFinite(resumeOpt.outputTokensSpent) && resumeOpt.outputTokensSpent > 0 ? resumeOpt.outputTokensSpent : 0
+if (resumeOpt && Number.isInteger(resumeOpt.lastSeq) && resumeOpt.lastSeq > 0) journal.seq = resumeOpt.lastSeq
+const runStartTok = spentTokens()
+const runSpent = () => {
+  const now = spentTokens()
+  return (now != null && runStartTok != null ? now - runStartTok : 0) + resumeSpent
+}
+emit('run.start', {
+  project,
+  mode: 'execute',
+  meta: runMeta,
+  resumed: !!resumeOpt,
+  knobs: { maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, budgetFloor: BUDGET_FLOOR, claims: !!claim },
+  repos: repoList.map((r) => r.name),
+})
+for (const c of claimedElsewhere) emit('claim', { task: c.id, action: 'skip', by: c.by })
+
 phase('Implement')
 
 const doneTasks = [] // {id, repo, status, summary} — immutable input to every replan
-const learnings = [] // durable lessons failures taught — carried into replans AND every later hydration
+const learnings = [] // [{text, repos}] durable lessons failures taught — carried into replans AND every later hydration
+if (resumeOpt && Array.isArray(resumeOpt.learnings)) learnings.push(...resumeOpt.learnings.map((l) => toLearning(l, [])).filter(Boolean))
 const allResults = [] // every task + gate result, flat
 const failures = [] // {id, repo, status, detail} — unlanded work (a replan can requeue it)
 const deferred = [] // tasks hydration or a replan marked deferred (blocked on deploy/other repo)
@@ -1362,20 +1849,61 @@ Fix dispatches: address ONLY the findings listed, commit to \`${ref.branch}\`. T
     successCriteria: 'every listed finding addressed on the run branch; full suite + lint/typecheck green',
   }
 }
-let replans = 0
+let replans = resumeOpt && Number.isInteger(resumeOpt.replansUsed) && resumeOpt.replansUsed > 0 ? Math.min(resumeOpt.replansUsed, MAX_REPLANS) : 0
 let halt = null // {reason} once we stop early
+const claimedByRun = new Map() // id → repo: issues this run claimed at hydration (released at the end if they did not land)
 let waves = 0 // dispatch cycles (historical name — reported in the summary)
 
-// Stop CLEANLY when the turn's token target runs low — a full project can outsize
-// one budget, and dying mid-flight loses committed-but-unreviewed work: checked
-// before every dispatch, honored at quiescence (in-flight work still settles).
-const BUDGET_FLOOR = 80000
+// Stop CLEANLY when the turn's token target runs low — or this run's own cap is reached —
+// a full project can outsize one budget, and dying mid-flight loses committed-but-unreviewed
+// work: checked before every dispatch, honored at quiescence (in-flight work still settles).
+// What run.json holds on every flush: identity, status, and the CHECKPOINT a new session
+// resumes from (the orchestrate skill passes it back as {resumeState}).
+runJsonFor = (final) => ({
+  runId: runId || null,
+  project,
+  meta: runMeta,
+  startedAt: '__STARTED__',
+  updatedAt: '__AT__',
+  status: final ? final.status : 'running',
+  summary: final ? final.summary : null,
+  checkpoint: {
+    replansUsed: replans,
+    learnings,
+    fixRounds: Object.fromEntries([...hydratedById.values()].filter((t) => t && t.fixRounds).map((t) => [t.id, t.fixRounds])),
+    outputTokensSpent: runSpent(),
+    lastSeq: journal.seq,
+    landed: [...landedIds],
+    pending: [...pendingById.keys()],
+  },
+})
+let budgetWarned = false
+let budgetStop = null // why dispatching stopped: 'floor' | 'cap'
 const budgetLow = () => {
-  try {
-    return !!budget.total && budget.remaining() < BUDGET_FLOOR
-  } catch (e) {
-    return false
+  if (budgetStop) return true
+  if (MAX_OUTPUT_TOKENS) {
+    const spent = runSpent()
+    if (!budgetWarned && spent >= 0.8 * MAX_OUTPUT_TOKENS) {
+      budgetWarned = true
+      log(`⚠ output tokens at ${fmtTok(spent)} of the ${fmtTok(MAX_OUTPUT_TOKENS)} cap (80%)`)
+      emit('budget', { spent, cap: MAX_OUTPUT_TOKENS, action: 'warn' })
+    }
+    if (spent >= MAX_OUTPUT_TOKENS) {
+      budgetStop = 'cap'
+      emit('budget', { spent, cap: MAX_OUTPUT_TOKENS, action: 'stop' })
+      return true
+    }
   }
+  try {
+    if (budget.total && budget.remaining() < BUDGET_FLOOR) {
+      budgetStop = 'floor'
+      emit('budget', { spent: runSpent(), cap: BUDGET_FLOOR, action: 'floor' })
+      return true
+    }
+  } catch (e) {
+    // budget unavailable in this environment — the run-level cap above still applies
+  }
+  return false
 }
 // A dependency outside the project cannot be tracked — count it satisfied, never deadlock on it.
 const depsMet = (i) => (i.dependsOn || []).every((d) => landedIds.has(d) || !inProject.has(d))
@@ -1426,6 +1954,36 @@ const downstreamOf = (() => {
   }
 })()
 
+// ── the SELECTOR's pick, validated: agent × model per task ──
+// Hydration (or a replan) proposed an agent and a tier with a reason. The engine accepts an
+// agent only if it is the repo's owner or a specialist enabled for that repo — anything else
+// falls back to the owner, logged, so a hallucinated agent never gets dispatched. An unset or
+// unknown tier is opus (the safe default); a replanned task runs on opus (it already failed
+// once on the cheaper path). Earlier sessions' fix rounds carry over on resume.
+function routeTask(t, cycle) {
+  const owner = agentFor(t.repo)
+  const allowed = [owner, ...specialistsFor(t.repo).map((sp) => sp.agent)].filter(Boolean)
+  let fallback = false
+  if (!allowed.includes(t.agent)) {
+    if (t.agent) {
+      fallback = true
+      routingStats.fallbacks++
+      log(`   · ${t.id}: routed to unknown agent \`${t.agent}\` for ${t.repo} — falling back to the owner \`${owner}\``)
+    }
+    t.agent = owner
+  }
+  let reason = str(t.routeReason) || (MODELS.includes(t.model) ? '(no reason given)' : 'tier unset → opus')
+  if (!MODELS.includes(t.model)) t.model = 'opus'
+  if (t.replanned && t.model !== 'opus') {
+    reason = `replanned task → opus (selector chose ${t.model})`
+    t.model = 'opus'
+  }
+  if (!Number.isInteger(t.fixRounds) && Number.isInteger(resumeFixRounds[t.id])) t.fixRounds = resumeFixRounds[t.id]
+  routingStats.byAgent[t.agent] = (routingStats.byAgent[t.agent] || 0) + 1
+  routingStats.byModel[t.model] = (routingStats.byModel[t.model] || 0) + 1
+  emit('route', { task: t.id, repo: t.repo, agent: t.agent, model: t.model, reason, fallback })
+}
+
 // Start one task NOW. The promise never rejects and always carries the task's id so
 // the race loop can settle it; a runtime-lost agent (terminal API error) surfaces as
 // DIED through runTask's own null handling, an internal throw as ERROR.
@@ -1441,12 +1999,15 @@ function startTask(t) {
   })()
   inFlight.set(t.id, entry)
   if (entry.direct) directDone[t.repo] = entry.promise.then(() => null, () => null)
+  emit('dispatch', { task: t.id, repo: t.repo, agent: t.agent, model: modelFor(t), lane: t.lane === 'worktree' ? 'worktree' : 'direct', cycle: waves })
 }
 
 // Book one settled result — task or terminal slot — into the run state.
 function settle(r) {
   allResults.push(r)
   if (r.gateStep) {
+    if (/:final$/.test(r.id)) emit('terminal', { repo: r.repo, verdict: r.status === 'TERMINAL_REVIEW_FAILED' ? 'FAIL' : 'PASS' })
+    else emit('gate', { repo: r.repo, status: r.status, applies: !!r.gateApplies, prUrl: r.prUrl || '' })
     if (r.status === 'GATE_FAILED' || r.status === 'TERMINAL_REVIEW_FAILED') {
       // the sweep/gate caught what per-task review did not → replannable
       failures.push({ id: r.id, repo: r.repo, status: r.status, detail: failureDetail(r) })
@@ -1463,6 +2024,7 @@ function settle(r) {
     return
   }
   pendingById.delete(r.id)
+  emit('settle', { task: r.id, repo: r.repo, status: r.status })
   if (r.status === 'DONE' || r.status === 'DONE_WITH_CONCERNS') {
     consecutiveDied = 0
     landedIds.add(r.id)
@@ -1511,7 +2073,8 @@ async function terminalSlot(repo) {
     timeoutMin: repoTimeout(repo),
   })
   const failed = !gate || gate.status === 'BLOCKED' || gate.status === 'NEEDS_CONTEXT'
-  return { id: pseudo.id, repo, gateStep: true, status: failed ? 'GATE_FAILED' : gate.status, gate, prUrl: gate && gate.prUrl, advisory: terminal.advisory }
+  emit('terminal', { repo, verdict: 'PASS' })
+  return { id: pseudo.id, repo, gateStep: true, status: failed ? 'GATE_FAILED' : gate.status, gate, gateApplies: applies, prUrl: gate && gate.prUrl, advisory: terminal.advisory }
 }
 
 while (true) {
@@ -1544,7 +2107,7 @@ while (true) {
       const toHydrate = picks.filter((i) => !hydratedById.has(i.id))
       if (toHydrate.length) {
         const hyd = await step(`cycle ${waves} — hydrate ${toHydrate.map((i) => i.id).join(', ')}`, () =>
-          agentT(hydratePrompt(project, toHydrate, [...priorLearnings, ...learnings]), {
+          agentT(hydratePrompt(project, toHydrate, relevantLearnings([...learnings, ...priorLearnings], [...new Set(toHydrate.map((i) => i.repo))]), claim), {
             label: `hydrate:w${waves}`,
             phase: 'Parse plan',
             model: 'sonnet', // extraction from the tracker + spec excerpts; the replanner stays on opus,
@@ -1565,6 +2128,11 @@ while (true) {
           hydratedById.set(t.id, t)
           if (t.ticket && t.ticket !== 'NO_TICKET') hydratedById.set(t.ticket, t)
         }
+        if (claim)
+          for (const i of toHydrate) {
+            claimedByRun.set(i.id, i.repo)
+            emit('claim', { task: i.id, action: 'claim', by: claim.identity })
+          }
       }
       // deferrals surfaced by hydration cannot run unattended — their dependents stay blocked
       const runnable = []
@@ -1577,6 +2145,10 @@ while (true) {
           continue
         }
         t.id = i.id // scheduler identity is the tracker id — landedIds/dependsOn/pendingById all match on it
+        if (!t.routed) {
+          routeTask(t, waves)
+          t.routed = true
+        }
         if (t.deferred) {
           pendingById.delete(i.id)
           deferred.push(t)
@@ -1654,7 +2226,12 @@ while (true) {
   // which is exactly the coherence the old wave barrier existed to provide. ──
   if (halt) break
   if (stopping) {
-    halt = { reason: `token budget floor (${BUDGET_FLOOR}) reached — stopped cleanly at quiescence` }
+    halt = {
+      reason:
+        budgetStop === 'cap'
+          ? `budget_exhausted: this run's output-token cap (${fmtTok(MAX_OUTPUT_TOKENS)}) reached — stopped cleanly at quiescence`
+          : `token budget floor (${BUDGET_FLOOR}) reached — stopped cleanly at quiescence`,
+    }
     log(`⛔ ${halt.reason}`)
     break
   }
@@ -1667,11 +2244,16 @@ while (true) {
   const finals = !pendingById.size ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r)) : []
   if (finals.length) {
     log(`▶ final wave: terminal sweep${finals.some((r) => prByGate(r)) ? ' → gate+PR' : ''}: ${finals.join(', ')}`)
+    flushJournal()
     const results = await step(`final wave — terminal slots (${finals.join(', ')})`, () => parallel(finals.map((repo) => () => terminalSlot(repo))))
     // A null slot is an agent the runtime lost to a terminal error — map it back to
     // its repo by index and book it as GATE_FAILED (the existing dead-gate semantics).
     ;(results || [])
-      .map((r, i) => r || (finals[i] ? { id: `${finals[i]}:gate`, repo: finals[i], gateStep: true, status: 'GATE_FAILED', gate: null } : null))
+      .map((r, i) => {
+        if (r || !finals[i]) return r
+        emit('terminal', { repo: finals[i], verdict: 'DIED' })
+        return { id: `${finals[i]}:gate`, repo: finals[i], gateStep: true, status: 'GATE_FAILED', gate: null }
+      })
       .filter(Boolean)
       .forEach(settle)
     continue
@@ -1685,7 +2267,7 @@ while (true) {
       phase('Replan')
       const blocked = [...pendingById.values()].map((i) => ({ id: i.id, repo: i.repo, slice: i.slice, dependsOn: i.dependsOn || [] }))
       let revision = await step(`replan #${replans} — A* from current state`, () =>
-        agentT(replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings], replanNo: replans, maxReplans: MAX_REPLANS }), {
+        agentT(replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans, maxReplans: MAX_REPLANS }), {
           label: `replan#${replans}`,
           phase: 'Replan',
           model: 'opus',
@@ -1698,7 +2280,7 @@ while (true) {
         log(`⚠ replan #${replans}: REVISE returned zero tasks — retrying the planner once`)
         revision = await step(`replan #${replans} — retry (REVISE had no tasks)`, () =>
           agentT(
-            replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings, replanNo: replans, maxReplans: MAX_REPLANS }) +
+            replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans, maxReplans: MAX_REPLANS }) +
               '\n\nIMPORTANT: a previous attempt chose REVISE but returned an EMPTY "tasks" array (its task list was serialized into "reason" as text, which the scheduler cannot use). Return the revised remaining tasks as structured items in the "tasks" array field; keep "reason" to short prose.',
             {
               label: `replan#${replans}-retry`,
@@ -1714,8 +2296,11 @@ while (true) {
         log(`⛔ replan #${replans}: planner died`)
         break
       }
-      if (revision.learnings && revision.learnings.length) learnings.push(...revision.learnings)
+      const failingRepos = [...new Set(failures.map((f) => f.repo).filter(Boolean))]
+      const newLearnings = (revision.learnings || []).map((l) => toLearning(l, failingRepos)).filter(Boolean)
+      learnings.push(...newLearnings)
       if (revision.decision === 'HALT') {
+        emit('replan', { n: replans, decision: 'HALT', reason: revision.reason, requeued: 0, learnings: newLearnings.map(learningText) })
         halt = { reason: revision.reason }
         log(`⛔ replan #${replans}: HALT — ${revision.reason}`)
         break
@@ -1731,13 +2316,35 @@ while (true) {
         if (t.ticket && t.ticket !== 'NO_TICKET' && inProject.has(t.ticket)) t.id = t.ticket
         pendingById.set(t.id, { id: t.id, title: '', repo: t.repo, state: 'todo', slice: t.slice ?? 0, sliceLabel: t.sliceLabel || '', dependsOn: t.dependsOn || [] })
         inProject.add(t.id)
+        t.replanned = true
+        t.routed = false // a replanned task is routed afresh (and on opus)
         hydratedById.set(t.id, t)
         if (t.ticket && t.ticket !== 'NO_TICKET') hydratedById.set(t.ticket, t)
         const fi = failures.findIndex((f) => f.id === t.id)
         if (fi >= 0) failures.splice(fi, 1) // being retried with a NEW approach — no longer a standing failure
         requeued++
       }
-      log(`↻ replan #${replans}: REVISE — ${revision.reason} · ${requeued} task(s) requeued${revision.learnings && revision.learnings.length ? ` · learned: ${revision.learnings.join('; ')}` : ''}`)
+      emit('replan', { n: replans, decision: 'REVISE', reason: revision.reason, requeued, learnings: newLearnings.map(learningText) })
+      flushJournal() // a replan is a checkpoint worth having on disk
+      // A replan re-enters tasks WITHOUT hydration, so an in-project ticket it (re)uses that
+      // hydration never claimed is claimed here — otherwise it would be built unclaimed.
+      if (claim) {
+        const unclaimed = revised
+          .filter((t) => !t.deferred && inProject.has(t.id) && !alreadyDoneIds.has(t.id) && !claimedByRun.has(t.id) && !claimedElsewhere.some((c) => c.id === t.id) && t.ticket && t.ticket !== 'NO_TICKET')
+          .map((t) => ({ id: t.id, repo: t.repo }))
+        if (unclaimed.length) {
+          const got = await agentT(claimPrompt(unclaimed, claim.identity), { label: `claim#${replans}`, phase: 'Replan', model: 'haiku', effort: 'low', schema: RELEASE_SCHEMA })
+          // Only what the tracker actually took counts as ours (and is released later). An
+          // issue someone else holds is still built — the replanner chose it — but logged.
+          const took = new Set(got && Array.isArray(got.released) ? got.released : [])
+          for (const u of unclaimed) {
+            if (took.has(u.id)) claimedByRun.set(u.id, u.repo)
+            emit('claim', { task: u.id, action: took.has(u.id) ? 'claim' : 'claim-failed', by: claim.identity })
+          }
+          if (took.size < unclaimed.length) log(`⚠ claim: ${unclaimed.length - took.size} replanned issue(s) could not be claimed — ${unclaimed.filter((u) => !took.has(u.id)).map((u) => u.id).join(', ')}`)
+        }
+      }
+      log(`↻ replan #${replans}: REVISE — ${revision.reason} · ${requeued} task(s) requeued${newLearnings.length ? ` · learned: ${newLearnings.map(learningText).join('; ')}` : ''}`)
       if (!requeued) {
         halt = { reason: `replan #${replans} requeued nothing while work is still open` }
         log(`⛔ ${halt.reason}`)
@@ -1751,7 +2358,9 @@ while (true) {
           ? `exhausted replan budget (${MAX_REPLANS}) — ${pendingById.size} issue(s) still blocked behind failures`
           : deferred.length
             ? `${pendingById.size} issue(s) blocked behind ${deferred.length} deferral(s) (${deferred.map((t) => t.id).join(', ')}) — resolve the deferral, then re-invoke to resume`
-            : `${pendingById.size} issue(s) unschedulable — dependency cycle or dangling dependsOn in the tickets`,
+            : claimedElsewhere.length
+              ? `${pendingById.size} issue(s) blocked behind work someone else has started (${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}) — re-invoke once it lands`
+              : `${pendingById.size} issue(s) unschedulable — dependency cycle or dangling dependsOn in the tickets`,
       }
       log(`⛔ ${halt.reason}`)
     }
@@ -1762,6 +2371,31 @@ while (true) {
 // Whatever is still pending when we stop never ran — report it, never drop it silently.
 const blocked = [...pendingById.values()].map((i) => ({ id: i.id, repo: i.repo, slice: i.slice ?? 0, dependsOn: i.dependsOn || [], status: 'BLOCKED_NOT_RUN' }))
 if (blocked.length) log(`⚠ ${blocked.length} issue(s) never ran — blocked behind failures or a halt`)
+if (halt) emit('halt', { reason: halt.reason })
+
+// ── claims: hand back what this run claimed and did not land ──
+// A claimed ticket left "in progress" under the run's identity would read as someone working
+// on it. One cheap dispatch returns every such ticket to the queue, with the reason.
+let claimsReleased = null
+if (claim && claimedByRun.size) {
+  const toRelease = [...claimedByRun.entries()]
+    .filter(([id]) => !landedIds.has(id))
+    .map(([id, repo]) => ({ id, repo, status: (allResults.find((r) => r.id === id) || {}).status || 'NOT_RUN' }))
+  if (toRelease.length) {
+    const rel = await step(`release ${toRelease.length} claimed issue(s)`, () =>
+      agentT(releasePrompt(toRelease, claim.identity, halt ? halt.reason : 'failed or blocked work at the end of the run'), {
+        label: 'release-claims',
+        phase: 'Final pass',
+        model: 'haiku',
+        effort: 'low',
+        schema: RELEASE_SCHEMA,
+      }),
+    )
+    claimsReleased = rel && Array.isArray(rel.released) ? rel.released.filter((x) => typeof x === 'string') : []
+    for (const t of toRelease) emit('claim', { task: t.id, action: claimsReleased.includes(t.id) ? 'release' : 'release-failed', by: claim.identity })
+    if (!rel) log(`⚠ claim release died — hand back by hand: ${toRelease.map((t) => t.id).join(', ')}`)
+  }
+}
 
 // ═══════════════════════ 3 · final cross-repo pass ═══════════════════════
 // Optional and configured: {finalCheck:{repos:[a,b], prompt, agentType?}} runs one
@@ -1793,6 +2427,24 @@ if (finalCheck && finalCheck.repos.every((r) => touched.has(r))) {
 // nothing this phase writes is live before that PR merges.
 phase('Crystallize')
 const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo: r.repo, pr: r.prUrl }))
+
+// ── the journal's last chunk, BEFORE the ledger: crystallize reads it ──
+{
+  const isOk = (r) => r.status === 'DONE' || r.status === 'DONE_WITH_CONCERNS'
+  const endSummary = {
+    done: allResults.filter((r) => !r.gateStep && isOk(r)).length,
+    failed: allResults.filter((r) => !isOk(r)).length,
+    blocked: blocked.length,
+    prs: prsOpened.length,
+    tokens: runSpent(),
+  }
+  emit('run.end', { status: halt ? 'halted' : 'drained', ...endSummary })
+  journal.final = { status: halt ? 'halted' : 'drained', summary: { ...endSummary, replans, halt: halt ? halt.reason : null, prUrls: prsOpened.map((p) => p.pr) } }
+  flushJournal()
+  await journal.chain
+  if (journal.enabled)
+    log(`◎ decision journal: ${journal.written} event(s) written in ${journal.flushes} chunk(s) → ${journal.runDir || TELEMETRY_DIR}${journal.mismatches ? ` · ${journal.mismatches} chunk(s) failed the line/byte check` : ''}${journal.dead ? ` · ${journal.dead} chunk(s) lost (writer died)` : ''}`)
+}
 const contextQuestionsForLedger = (contextResolves.questions || []).map((q) => ({ task: q.task, question: q.question, resolvedBy: q.resolvedBy }))
 const advisoryForLedger = allResults.flatMap((r) =>
   (r.advisory || []).map((f) => ({ task: r.id, repo: r.repo, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue })),
@@ -1801,23 +2453,31 @@ let harnessLearning = null
 if (execute) {
   const ledgerPayload = {
     project,
-    projectSlug: String(project).replace(/[^A-Za-z0-9._-]+/g, '-'),
+    projectSlug,
+    meta: runMeta,
+    runId: runId || null,
+    telemetryDir: journal.enabled ? journal.runDir : null,
     inputs: { specPath, planPath },
     repos: [...new Set(doneTasks.map((t) => t.repo))],
     done: doneTasks.map((t) => ({ id: t.id, repo: t.repo, status: t.status })),
     needsAttention: allResults.filter((r) => !(r.status === 'DONE' || r.status === 'DONE_WITH_CONCERNS')).map((r) => ({ id: r.id, repo: r.repo, status: r.status })),
     blocked: blocked.map((b) => b.id),
     prs: prsOpened,
-    learnings,
-    priorLearningsUsed: priorLearnings,
+    learnings, // [{text, repos}] — the next run's loader filters them by repo
+    priorLearningsUsed: priorLearnings.map(learningText),
     contextResolves: { asked: contextResolves.asked, answered: contextResolves.answered, escalated: contextResolves.escalated, questions: contextQuestionsForLedger },
     guardChecks,
     reviewStats,
+    precheckStats,
+    routing: routingStats,
+    overturnedFindings: overturned,
+    claimedElsewhere,
+    claimsReleased,
     replans,
     waves,
     advisoryNotes: advisoryForLedger,
     halt,
-    telemetry: { totalOutputTokens: spentTokens(), steps: telemetry },
+    telemetry: { totalOutputTokens: spentTokens(), runOutputTokens: runSpent(), steps: telemetry },
   }
   const ledgerRaw = await step(`run ledger — write ${RUNS_DIR}/<date>-<project>.json`, () =>
     agentT(ledgerPrompt(ledgerPayload), {
@@ -1837,7 +2497,7 @@ if (execute) {
     harnessLearning = { ledger, crystallize: null }
   } else {
     const cryRaw = await step(`crystallize — ${prsOpened.length} PR(s) → skills · memory · docs`, () =>
-      agentT(crystallizePrompt({ project, prs: prsOpened, ledger, learnings, contextQuestions: contextQuestionsForLedger, advisoryNotes: advisoryForLedger, halt }), {
+      agentT(crystallizePrompt({ project, prs: prsOpened, ledger, learnings: learnings.map(learningText), contextQuestions: contextQuestionsForLedger, advisoryNotes: advisoryForLedger, halt, telemetryDir: journal.enabled ? journal.runDir || TELEMETRY_DIR : null }), {
         label: 'crystallize',
         phase: 'Crystallize',
         model: 'opus',
@@ -1885,7 +2545,9 @@ log(
     `context-Qs: ${contextResolves.asked} (${contextResolves.answered} answered by a scout, ${contextResolves.escalated} escalated) · ` +
     `guard: ${guardChecks.passed}/${guardChecks.checked} fix(es) passed without a panel re-run · ` +
     `review: ${reviewStats.passedFirstRound}/${reviewStats.stages} stage(s) passed first round, ${reviewStats.fixDispatches} fix dispatch(es), ${reviewStats.gatingFindings} gating / ${reviewStats.advisoryFindings} advisory finding(s) · ` +
-    `replans: ${replans} · ${fmtTok(spentTokens())} total output tok`
+    `precheck: ${precheckStats.failed}/${precheckStats.checked} caught before the panel · verifier overturned ${reviewStats.overturnedFindings} finding(s) · ` +
+    `routing: ${Object.entries(routingStats.byModel).map(([m, n]) => `${m}×${n}`).join(' ') || '—'}, ${routingStats.escalations} escalation(s), ${routingStats.fallbacks} fallback(s) · ` +
+    `replans: ${replans} · ${fmtTok(runSpent())} output tok this run`
 )
 return {
   inputs: { specPath, planPath, project }, // the design artifacts this run was built from
@@ -1909,8 +2571,11 @@ return {
   prs: prsOpened,
   waves,
   replans,
-  learnings,
+  learnings: learnings.map(learningText),
   halt,
+  // Issues someone else had started (claims on) — never dispatched, their dependents waited.
+  claimedElsewhere,
+  claimsReleased,
   // The resolve rung, made auditable: every NEEDS_CONTEXT question, who answered it, and
   // which ones the codebase could not settle. A high `asked` count is a signal the spec was
   // underspecified — take it back to roast, not to maxContextResolves.
@@ -1923,7 +2588,21 @@ return {
   // many passed their FIRST round untouched, real rework bought (fixDispatches, each a
   // full opus dispatch), and the gating-vs-advisory finding split per reviewer economy.
   reviewStats,
-  telemetry: { totalOutputTokens: spentTokens(), steps: telemetry },
+  // The precheck rung: FAILs it caught before any reviewer was paid.
+  precheckStats,
+  // Gating findings the verifier overturned WITH EVIDENCE — not reworked; each names the
+  // counter-fact. A persona that keeps being overturned is a lens to recalibrate.
+  overturnedFindings: overturned,
+  // The selector: agent × model picks, fallbacks to the owner, escalations to opus.
+  routing: routingStats,
+  meta: runMeta,
+  telemetry: {
+    totalOutputTokens: spentTokens(),
+    runOutputTokens: runSpent(),
+    maxOutputTokens: MAX_OUTPUT_TOKENS,
+    steps: telemetry,
+    journal: journal.enabled ? { runDir: journal.runDir, events: journal.seq, written: journal.written, chunks: journal.flushes, mismatches: journal.mismatches, lost: journal.dead } : null,
+  },
   note:
     'Absorbed the WHOLE tracker project: a lightweight slice index up front, each dispatch cycle hydrated just-in-time, already-done issues skipped. Scheduling was CONTINUOUS and dependsOn-driven straight from the tickets — each issue dispatched the moment its dependencies landed (no wave barrier), parallel across repos AND within a repo where declared files were disjoint (worktree lanes, integrations serialized into one run branch per repo); ready order was slice, then downstream-unlocked (critical path). A failed issue blocked only its dependents, and when failures left work stuck the loop re-planned from the current state. Reviews were SCOPED: per task, spec review + the build-safety quality core gated whether dependents could build on the change; once per repo, AT PROJECT END (one final wave, repos in parallel), the TERMINAL quality sweep reviewed the whole integrated run branch before the PR — implementation never paid a gate. Gated on blocker/major only, so any minor/nit finding is in advisoryNotes and was NOT reworked; a cheap guard decided whether a multi-reviewer panel re-reviewed each fix (guardChecks). Gated repos had their PR opened by a gate dispatch after the sweep passed (the gate command run exactly ONCE, on the final tree; ungatedRepos lists any repo a halt left without its gate/PR). ' +
     (halt ? `Stopped early: ${halt.reason}. ` : 'Ran the project start to finish. ') +
