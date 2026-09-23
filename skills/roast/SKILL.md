@@ -18,7 +18,7 @@ If the project keeps harness memory (a `memory/` or `.claude/memory/` store of c
 Run both lanes together, in one fan-out:
 
 - **Docs lane.** The project's README, `docs/`, ADRs, runbooks, API contract comments, and any previous spec on the topic.
-- **Code lane.** How it actually works today: the code, schemas, contracts, config, git history, and the patterns the project follows. Use read-only scouts when the search is wide.
+- **Code lane.** How it actually works today: the code, schemas, contracts, config, git history, and the patterns the project follows. Use read-only scouts when the search is wide. When the project has the code graph (`graph_*` tools), map the terrain with it first (what calls the area, what it reaches, what implements it, what changes with it) and then read the code it points to: the graph says where to look, the code says what is true.
 
 Then diff the two. The code is the source of truth. Where a document contradicts the code, record a *docs-drift* item (what the doc says, what the code does, file and line for both) and do not bend the design toward the stale document. Fixing that document is part of this roast's deliverable: update it alongside the spec, or hand the fix to the implementer if it lives elsewhere. A design built on a document that lied is the most expensive roast failure there is. The one exception is a document that is openly a forward-looking spec; mark it as such instead of rewriting it.
 

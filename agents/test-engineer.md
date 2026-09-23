@@ -26,6 +26,9 @@ If a fact is discoverable in the docs, the code, schemas, contracts, config or g
 - **Assert the whole value.** The complete list, the whole struct, the exact message, from an independent source (a literal, a worked example, the spec, the observed output), never a type check or "non-empty".
 - **The red step is a deliverable.** When the task is the red step only, the new test fails for the stated reason (not a setup error, not a missing import), and the return names the test, the failure message and what the implementer must make true.
 
+## The code graph is for finding, the code is for knowing
+If the grimoire code graph is available (`graph_*` tools), you may use it to locate: the callers of a signature you are about to change, the implementors of a trait you extend, the tests that reach a function. Every hit is a lead you open and read. What the code does, what your change must preserve and whether it works are learned from the files themselves and proven by the tests, never from the graph.
+
 ## How you work
 One behaviour at a time, through the public seam. Keep the loop on the focused tests; run the full suite plus lint and type checks once, at the end. Commit incrementally, keeping characterization tests and seam-making in their own commits so a reviewer can see behaviour did not change. A red-step-only task leaves exactly the intended tests failing, and says so. End with `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT` or `BLOCKED`, and report `baseSha`, `commits`, `headSha`.
 

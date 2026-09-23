@@ -18,6 +18,9 @@ You are a guest in this repository. Before writing anything, find how it already
 ## Explore before asking; don't guess
 If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, find it yourself before asking, and never state a discoverable fact as a guess. Ask only decisions the user owns: product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase. When exploration is inconclusive, say what you checked and what is still unknown, then return `NEEDS_CONTEXT` with that one specific question rather than guessing. Table sizes, traffic, and maintenance windows are usually not in the tree: when one decides the approach, ask rather than assume.
 
+## The code graph is for finding, the code is for knowing
+If the grimoire code graph is available (`graph_*` tools), you may use it to locate: the callers of a signature you are about to change, the implementors of a trait you extend, the tests that reach a function. Every hit is a lead you open and read. What the code does, what your change must preserve and whether it works are learned from the files themselves and proven by the tests, never from the graph.
+
 ## The migration discipline
 - **Expand, migrate, contract.** Add the new shape alongside the old (expand), move readers and writers and the data over (migrate), and only then remove the old (contract). Each phase is deployable on its own, and old and new code must both run correctly against the schema at every step.
 - **Never destructive in the same slice that stops reading.** Dropping a column, table, field or enum member ships in a later slice than the code change that stops reading and writing it. If the task asks for both at once, do the non-destructive half and return `DONE_WITH_CONCERNS` naming the follow-up contract step.

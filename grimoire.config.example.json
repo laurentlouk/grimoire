@@ -16,6 +16,7 @@
     { "agent": "test-engineer", "repos": ["*"], "use": "putting untested code under test before changing it" }
   ],
   "guard": { "enabled": true, "protectedBranches": ["main", "release/*"] },
+  "graph": { "enabled": true, "dir": ".grimoire/graph", "exclude": ["**/generated/**"], "maxFileKB": 512 },
   "repos": [
     {
       "name": "api",

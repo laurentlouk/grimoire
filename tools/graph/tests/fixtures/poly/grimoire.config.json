@@ -1,0 +1,9 @@
+{
+  "repos": [
+    { "name": "web", "path": "web", "agent": "web-engineer" },
+    { "name": "core", "path": "core", "agent": "core-engineer" },
+    { "name": "svc", "path": "svc", "agent": "svc-engineer" },
+    { "name": "shop", "path": "shop", "agent": "shop-engineer" }
+  ],
+  "graph": { "dir": ".grimoire/graph" }
+}

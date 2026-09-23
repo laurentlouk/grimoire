@@ -76,6 +76,12 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 
 **🔍 Explore before asking; don't guess: built in.** If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, an agent finds it before asking and never states a discoverable fact as a guess; only decisions the owner holds (product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase) come back as questions, and an inconclusive search says what was checked and what is still unknown. Nothing to paste into `CLAUDE.md`: the rule is carried by the skills that ask (`roast`, `to-plan`, `to-issues`, `implement`, `launch-agent`, `setup`), the team-agent template, every scout and the reviewer, and the loop's briefs and dispatch header, so no project can miss it.
 
+## 🕸️ The code graph: research fast, then read the code
+
+The plugin ships a code graph (`tools/graph`): every repository of the project parsed with tree-sitter into a local SQLite graph of definitions and their relations (`CALLS`, `IMPORTS`, `EXTENDS` / `IMPLEMENTS`, tests, git co-change), for TypeScript/JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP and Swift. Scouts and the design skills reach it as MCP tools (`graph_search`, `graph_callers`, `graph_impact`, `graph_path`, `graph_hierarchy`, `graph_file`, `graph_sql`, …) to answer *where is it* and *what relates to what* in one call instead of a dozen greps: who calls this, what a change reaches and which tests cover it, how a request gets to a write.
+
+It is a map for research, never the source of truth: every answer is a `path:line` lead with the confidence of its edge, and what the code does or whether it is right is always read in the code. The reviewer does not get it at all. Incremental (only changed files re-parse, queries refresh themselves), no service to run, and its parser runtime installs itself on first index. `/grimoire:setup` proposes it; the reference is [`tools/graph/README.md`](tools/graph/README.md).
+
 ## 🔭 Seeing what the loop decided: `/grimoire:logs`
 
 Every execute run writes a **decision journal**: which agent and model each task was routed to and why, each precheck and reviewer verdict, the findings the verifier overturned, every fix, escalation, guard decision, replan, claim, gate and halt, with the output tokens at each step. It lives locally in `.grimoire/runs/<runId>/` (gitignored), tagged with the grimoire version and a hash of the briefs, personas and config, so runs can be compared across harness changes. The committed run ledger in `runs/` keeps the summary.
@@ -131,12 +137,13 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`AGENTS.md`](AGENTS.md) | The roster and the three learning stores |
 | [`workflows/`](workflows/README.md) | `orchestrate-loop.js` (engine, tested), `briefs/` and `personas/` (everything a dispatched agent reads) |
 | [`hooks/`](hooks/README.md) | the session-start hint and the `PreToolUse` guard |
+| [`tools/graph/`](tools/graph/README.md) | the code graph: indexer, MCP server (`.mcp.json`) and CLI, research-only |
 | [`scripts/`](scripts) · [`evals/`](evals/README.md) | the log renderer, the drift check CI runs, and the skill evals (`skills/*/evals/evals.json`, generated into `evals/` for `claude plugin eval`) |
 
 ## 🧪 Developing grimoire
 
 ```sh
-npm test               # engine, guard and renderer tests (no dependencies)
+npm test               # engine, guard, renderer and code-graph tests (the graph's need `npm ci --prefix tools/graph`)
 npm run check          # drift: roster ↔ agents, briefs ↔ engine, evals present, config documented
 npm run evals:check    # evals/ is up to date with skills/*/evals/evals.json
 claude plugin eval .   # run the skill evals (paid; see evals/README.md)
