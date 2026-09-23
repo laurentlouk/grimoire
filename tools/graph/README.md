@@ -61,6 +61,10 @@ node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
 
 `--root <dir>` points it at another project; otherwise it serves `$GRIMOIRE_PROJECT_DIR`, `$CLAUDE_PROJECT_DIR` or the current directory.
 
+## Seeing it
+
+`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview, the file-level dependency map, every file and symbol with its callers, callees, dependencies and supertypes, and hotspots (most called, widest fan-out, most depended-on, co-change). No network, no CDN. It stays local.
+
 ## Freshness
 
 `graph_index` re-parses only files whose size or mtime moved and whose content hash changed, drops deleted files, and re-resolves the edges of a repository that changed. Every query first checks (stat only) whether files moved and refreshes incrementally if they did, at most every 15 s per process. A project that was never indexed is not indexed implicitly by a query: the first `graph_index` installs the parser runtime and can take a while on a large tree.

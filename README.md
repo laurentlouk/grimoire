@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)](#-setup)
-[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-12-success)](#-what-is-in-the-box)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-13-success)](#-what-is-in-the-box)
 [![Stack-agnostic](https://img.shields.io/badge/stack-agnostic-lightgrey)](#)
 
 Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) plus the pieces around them that make an agent workflow repeatable: an agent roster (`AGENTS.md`), curated memory (`memory/`), and an unattended build loop (`workflows/`) that ends every run by crystallizing what it learned back into the skills. Stack-agnostic, tracker-agnostic (Jira, Linear, GitHub Issues, or other).
@@ -68,6 +68,7 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 /crystallize         # after the PR: patch/create skills, add memory facts, sync docs, one reviewable PR
 /orchestrate {specPath, planPath, project, repos}   # or run the whole build half unattended
 /grimoire:logs       # what the loop decided, and why: a local HTML report of every run
+/grimoire:graph      # the code graph as a local HTML page: dependency map, files, symbols, hotspots
 ```
 
 `/orchestrate` needs a fourth input besides the three design artifacts: `repos`, the list of repositories with their owning agent, tags (for review-lens selection) and gate command. `workflows/README.md` has the full reference.
@@ -80,7 +81,7 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 
 The plugin ships a code graph (`tools/graph`): every repository of the project parsed with tree-sitter into a local SQLite graph of definitions and their relations (`CALLS`, `IMPORTS`, `EXTENDS` / `IMPLEMENTS`, tests, git co-change), for TypeScript/JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP and Swift. Scouts and the design skills reach it as MCP tools (`graph_search`, `graph_callers`, `graph_impact`, `graph_path`, `graph_hierarchy`, `graph_file`, `graph_sql`, …) to answer *where is it* and *what relates to what* in one call instead of a dozen greps: who calls this, what a change reaches and which tests cover it, how a request gets to a write.
 
-It is a map for research, never the source of truth: every answer is a `path:line` lead with the confidence of its edge, and what the code does or whether it is right is always read in the code. The reviewer does not get it at all. Incremental (only changed files re-parse, queries refresh themselves), no service to run, and its parser runtime installs itself on first index. `/grimoire:setup` proposes it; the reference is [`tools/graph/README.md`](tools/graph/README.md).
+It is a map for research, never the source of truth: every answer is a `path:line` lead with the confidence of its edge, and what the code does or whether it is right is always read in the code. The reviewer does not get it at all. Incremental (only changed files re-parse, queries refresh themselves), no service to run, and its parser runtime installs itself on first index. Indexing is always the deterministic script, never a model: the plugin's `SubagentStop` hook re-runs it after every implementer and integrate step, and each worktree gets its own index, seeded from the main checkout's. `/grimoire:graph` renders all of it as one local page (dependency map, files, symbols with callers and callees, hotspots). `/grimoire:setup` proposes it; the reference is [`tools/graph/README.md`](tools/graph/README.md).
 
 ## 🔭 Seeing what the loop decided: `/grimoire:logs`
 
@@ -130,6 +131,7 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`skills/crystallize`](skills/crystallize/SKILL.md) | Post-PR learning into skills, memory and docs |
 | [`skills/orchestrate`](skills/orchestrate/SKILL.md) · [`skills/adaptive-replanning`](skills/adaptive-replanning/SKILL.md) | Front door and failure behaviour of the loop |
 | [`skills/logs`](skills/logs/SKILL.md) | Read, render and prune the loop's decision journal |
+| [`skills/graph`](skills/graph/SKILL.md) | Browse the code graph as a local page: map, files, symbols, hotspots |
 | [`agents/`](agents) | scouts (`codebase-scout`, `reference-scout`, `contract-checker`, `tracker-scout`, `design-scout`, `security-scout`, `perf-scout`), the `reviewer`, and the specialists `migration-engineer` and `test-engineer` the loop can route tasks to |
 | [`templates/`](templates) | the team-agent definition to copy per repository |
 | [`skills/implement`](skills/implement/SKILL.md) · [`skills/review`](skills/review/SKILL.md) | Build one issue through its team agent; gate it with the diverse-lens panel |

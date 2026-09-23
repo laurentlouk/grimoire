@@ -223,6 +223,17 @@ writeFileSync(path.join(WT, 'src/b.ts'), "import { base } from './a'\n\nexport f
 r = await call('graph_callers', { symbol: 'base' }, { root: WT })
 has(r, 'onBranch  function  src/b.ts:3', 'a worktree with no index is seeded from the main checkout and sees its own branch')
 lacks(await call('graph_search', { query: 'onBranch' }, { root: MAIN }), 'src/b.ts', 'the main checkout index is untouched by the worktree')
+const rd = spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'render', '--root', WT], { encoding: 'utf8' })
+const page = rd.status === 0 ? readFileSync(rd.stdout.trim(), 'utf8') : ''
+ok(rd.stdout.trim() === path.join(WT, '.grimoire/graph/graph.html') && page.startsWith('<!doctype html>'), `render writes the page next to the index and prints its path (${rd.stderr.trim().slice(0, 200)})`)
+const blob = JSON.parse((/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page) || [])[1] || 'null')
+ok(blob && blob.files.some((f) => f[2] === 'src/b.ts') && blob.nodes.some((n) => n[3] === 'onBranch') && blob.edges.length > 0, 'the page carries every file, symbol and edge of the index')
+ok(/default-src 'none'/.test(page) && !/<script[^>]+src=/.test(page) && !/https?:\/\//.test(page.replace(/<script type="application\/json"[\s\S]*?<\/script>/, '')), 'the page is self-contained: a CSP, no external script, no URL outside the data')
+mkdirSync(path.join(WT, 'src/<b>'), { recursive: true })
+writeFileSync(path.join(WT, 'src/<b>/x.ts'), 'export function tagged(): number {\n  return 1\n}\n')
+const rd2 = spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'render', '--root', WT], { encoding: 'utf8' })
+const data2 = rd2.status === 0 ? (/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(readFileSync(rd2.stdout.trim(), 'utf8')) || [])[1] || '' : ''
+ok(data2.includes('src/\\u003cb>/x.ts') && !data2.includes('<'), 'a path holding "<" is escaped: data can never close the script element')
 const LOCKDIR = path.join(SANDBOX, 'lock')
 let runs = 0, inner
 const outer = await withLock(LOCKDIR, async () => { runs++; if (runs === 1) inner = await withLock(LOCKDIR, async () => 'never'); return 'done' })

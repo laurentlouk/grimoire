@@ -3,18 +3,40 @@
 //   node tools/graph/graph.mjs <command> [value] [--key value …] [--root <project>]
 //   commands: status · index [--full] · search <q> · symbol <s> · callers <s> [--depth n] ·
 //             callees <s> · impact <target> · file <path> · hierarchy <s> · path <from> <to> · sql <select>
+//             render [--out <file>]: refresh, then write the browsable HTML page (default
+//             <graph dir>/graph.html) and print its path. Local only: never publish it.
 //             refresh: what the SubagentStop hook runs. Seeds a worktree from the main checkout,
 //             then indexes incrementally; builds the first index only when grimoire.config.json
 //             has a `graph` block. Silent no-op when the graph is disabled or was never set up.
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { TOOLS, call } from './lib/commands.mjs'
 import { loadProject } from './lib/project.mjs'
 import { seed } from './lib/freshness.mjs'
 import { runIndex } from './lib/run.mjs'
+import { renderGraph } from './lib/render.mjs'
 
 const argv = process.argv.slice(2)
 const cmd = argv.shift()
+if (cmd === 'render') {
+  const opt = (k) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1] : null }
+  try {
+    const project = loadProject(opt('root'))
+    if (!project.enabled) { console.error('graph: disabled for this project (grimoire.config.json: graph.enabled = false)'); process.exit(1) }
+    await seed(project)
+    if (!existsSync(project.dbPath)) { console.error('graph: no index yet; build it first: node tools/graph/graph.mjs index'); process.exit(1) }
+    const r = await runIndex(project.root, { onLog: (m) => process.stderr.write(m + '\n') })
+    if (r.error) console.error(`graph: refresh failed, rendering the previous index: ${r.error}`)
+    const out = path.resolve(opt('out') || path.join(path.dirname(project.dbPath), 'graph.html'))
+    mkdirSync(path.dirname(out), { recursive: true })
+    writeFileSync(out, await renderGraph(project))
+    console.log(out)
+    process.exit(0)
+  } catch (e) {
+    console.error(`graph render: ${e.message}`)
+    process.exit(1)
+  }
+}
 if (cmd === 'refresh') {
   const i = argv.indexOf('--root')
   try {

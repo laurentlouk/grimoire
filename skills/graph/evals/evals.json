@@ -1,0 +1,41 @@
+[
+  {
+    "id": 1,
+    "query": "Show me the code graph of this project so I can see what depends on what.",
+    "should_trigger": true,
+    "expected_output": "Finds the plugin root two directories above the SKILL.md, runs node <root>/tools/graph/graph.mjs render from the project root (which refreshes the index first), takes the path it prints (default .grimoire/graph/graph.html) and opens it locally with open or xdg-open. Says the page is a map and stays local.",
+    "expectations": [
+      { "text": "Runs tools/graph/graph.mjs render from the plugin root, from the project root", "passed": null, "evidence": "" },
+      { "text": "Opens the printed file locally with open or xdg-open", "passed": null, "evidence": "" },
+      { "text": "Does not publish, upload or share the page", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "Rebuild the graph index, it's never been built here.",
+    "should_trigger": true,
+    "expected_output": "Checks grimoire.config.json for graph.enabled, runs node <root>/tools/graph/graph.mjs index (the script, not a model reading files), notes that the first run installs the parser runtime once per machine, and reports the per-repo counts it prints. Offers to render the page afterwards.",
+    "expectations": [
+      { "text": "Builds the index with the graph.mjs index script, not by reading files and extracting relations itself", "passed": null, "evidence": "" },
+      { "text": "Reports the counts the script printed", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Open the run log for last night's loop run.",
+    "should_trigger": false,
+    "expected_output": "The run log is the logs skill's job (scripts/render-logs.mjs). The graph skill is not used: no graph page is rendered.",
+    "expectations": [
+      { "text": "Does not render the code graph page", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Who calls Session.refresh?",
+    "should_trigger": false,
+    "expected_output": "A narrow graph question is answered with the graph_callers tool (or a scout), then confirmed in the code; it does not need the HTML page, so the graph skill is not used.",
+    "expectations": [
+      { "text": "Does not render the page for a single lookup", "passed": null, "evidence": "" }
+    ]
+  }
+]
