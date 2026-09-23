@@ -500,7 +500,7 @@ ${learnings.length ? learnings.map((l) => `  - ${l}`).join('\n') : '  - (none)'}
 ${contextQuestions.length ? contextQuestions.map((q) => `  - [${q.task}] ${q.question} (answered by ${q.resolvedBy || 'escalation'})`).join('\n') : '  - (none)'}
 - Advisory (minor/nit) findings not reworked: ${advisoryNotes.length}
 - ${halt ? `The run HALTED: ${halt.reason}` : 'The run drained the project.'}
-- Decision journal: ${telemetryDir ? `\`${telemetryDir}\` (this run) under \`${TELEMETRY_DIR}/\` (earlier runs, local) — cross-run evidence per version/briefs hash` : '(telemetry off this run)'}
+- Decision journal: ${telemetryDir ? `\`${telemetryDir}\` (this run) under \`${telemetryDir.startsWith('/') ? telemetryDir.replace(/\/[^/]+$/, '') : TELEMETRY_DIR}/\` (earlier runs, local) — cross-run evidence per version/briefs hash. It lives in the main checkout, not in your worktree: read it at that path and pass it to render-logs as \`--dir\`` : '(telemetry off this run)'}
 - PR title: \`[NO_TICKET] crystallize: ${project} — ${prs.length} PR(s)\``
 }
 
@@ -758,6 +758,7 @@ function journalPrompt(lines, runJson, firstSeq, runDir, slug) {
 \`\`\`bash
 set -u
 ${dir}
+case "$DIR" in /*) ;; *) C=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true); if [ "\${C##*/}" = .git ]; then DIR="\${C%/.git}/$DIR"; else DIR="$PWD/$DIR"; fi ;; esac
 mkdir -p "$DIR/events"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 F="$DIR/events/${chunk}.jsonl"
@@ -1021,6 +1022,7 @@ const journal = {
   pending: [],
   seq: 0,
   runDir: null,
+  absRunDir: null, // runDir as the writer resolved it (absolute, main checkout)
   chain: Promise.resolve(),
   flushes: 0,
   written: 0,
@@ -1056,7 +1058,10 @@ function flushJournal() {
       if (journal.dead === 1) log('⚠ telemetry writer died — events of this chunk are lost; the run itself is unaffected')
       return
     }
-    if (typeof r.runDir === 'string' && r.runDir.trim()) journal.runDir = journal.runDir || r.runDir.trim()
+    if (typeof r.runDir === 'string' && r.runDir.trim()) {
+      journal.runDir = journal.runDir || r.runDir.trim()
+      if (r.runDir.trim().startsWith('/')) journal.absRunDir = r.runDir.trim() // resolved against the main checkout: valid from any worktree
+    }
     const expectLines = lines.length
     const expectBytes = utf8Bytes(lines.join('\n')) + 1 // the heredoc ends the last line with a newline
     if (r.lines !== expectLines || r.bytes !== expectBytes) {
@@ -2497,7 +2502,7 @@ if (execute) {
     harnessLearning = { ledger, crystallize: null }
   } else {
     const cryRaw = await step(`crystallize — ${prsOpened.length} PR(s) → skills · memory · docs`, () =>
-      agentT(crystallizePrompt({ project, prs: prsOpened, ledger, learnings: learnings.map(learningText), contextQuestions: contextQuestionsForLedger, advisoryNotes: advisoryForLedger, halt, telemetryDir: journal.enabled ? journal.runDir || TELEMETRY_DIR : null }), {
+      agentT(crystallizePrompt({ project, prs: prsOpened, ledger, learnings: learnings.map(learningText), contextQuestions: contextQuestionsForLedger, advisoryNotes: advisoryForLedger, halt, telemetryDir: journal.enabled ? journal.absRunDir || journal.runDir || TELEMETRY_DIR : null }), {
         label: 'crystallize',
         phase: 'Crystallize',
         model: 'opus',

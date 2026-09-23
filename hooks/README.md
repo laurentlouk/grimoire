@@ -1,11 +1,12 @@
 # Hooks
 
-Two hooks ship with the plugin (`hooks.json`). Both are silent unless they have something to say, and both fail open: a hook that breaks must never wedge a session.
+Three hooks ship with the plugin (`hooks.json`). All are silent unless they have something to say, and all fail open: a hook that breaks must never wedge a session.
 
 | Hook | Event · matcher | What it does |
 | --- | --- | --- |
 | `scripts/first-run.sh` | `SessionStart` | One line pointing at `/grimoire:setup` while the project has no `AGENTS.md` and no `memory/`. |
 | `scripts/guard.sh` → `guard.mjs` | `PreToolUse` · `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit` | Blocks a narrow set of irreversible actions, so an unattended loop cannot do them by mistake. |
+| `scripts/graph-refresh.sh` | `SubagentStop` · async | Re-indexes the code graph after every subagent (an implementer's commit, an integrate merge), with the deterministic indexer, never a model: `tools/graph/graph.mjs refresh`. Runs in the background, so nothing waits on it. |
 
 ## The guard
 
@@ -22,6 +23,7 @@ Commands are split the way the shell would (`;`, `&&`, `||`, `|`, newlines, `$(�
 **Write · Edit · MultiEdit · NotebookEdit**
 
 - The project's `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks/`, and every `guard.protectedPaths` entry (a root `hooks/` is left alone: many app layouts keep source code there). An agent that can edit its own permissions or the guard has no guard.
+- The same paths in every linked git worktree of the project's repository (a loop lane under `.worktrees/`, a session worktree anywhere): a lane is judged as the project itself.
 - `<memoryDir>/` when the writing subagent is a named roster agent: the plugin's scouts and `reviewer`, plus every `repos[].agent` in `grimoire.config.json` (and `guard.memoryDeniedAgents`). Memory is written only by the `crystallize` step. Claude Code sets `agent_type` on the hook input inside a subagent, but the loop dispatches `crystallize` as a generic subagent and humans run it in the main session, so the rule names who may not write rather than who may. The main session and generic subagents are never blocked.
 
 ## Configuration

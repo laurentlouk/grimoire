@@ -3,11 +3,14 @@
 //
 // Freshness: before answering, a query re-indexes incrementally when files moved since the last
 // index (throttled to once per FRESH_MS per process). A project never indexed is not indexed
-// implicitly: that is graph_index's job, since the first run can take a while on a large tree.
+// implicitly: that is graph_index's job (or the SubagentStop hook's `refresh`), since the first run
+// can take a while on a large tree. A linked git worktree with no index is seeded from the main
+// checkout's first (freshness.mjs), so it only re-parses what its branch changed.
 import { existsSync } from 'node:fs'
 import { loadProject, scanRepo } from './project.mjs'
 import { openStore } from './store.mjs'
 import { runIndex } from './run.mjs'
+import { seed } from './freshness.mjs'
 import { Graph, sql, FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
@@ -114,11 +117,13 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
   if (!tool) throw new Error(`unknown tool ${name}`)
   const project = loadProject(root)
   if (!project.enabled) return 'The code graph is disabled for this project (grimoire.config.json: graph.enabled = false). Use Grep/Glob/Read.'
+  await seed(project).catch((e) => log(`could not seed from the main checkout: ${e.message}`))
 
   if (tool.index) {
     const r = await runIndex(project.root, { full: !!args.full, repo: args.repo || null, onLog: log })
     lastFresh = Date.now()
     if (r.error) return `Index failed: ${r.error}`
+    if (r.busy) return 'Another index of this project is running; it will pick up the current changes before it finishes.'
     return [`Indexed in ${(r.ms / 1000).toFixed(1)}s.`, ...r.repos.map((x) => `  ${x.repo}: ${x.files} files, ${x.parsed} parsed, ${x.removed} removed${x.failed.length ? `, ${x.failed.length} failed to parse (${x.failed.slice(0, 3).join('; ')})` : ''}`)].join('\n')
   }
 
@@ -131,7 +136,7 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
     lastFresh = Date.now()
     if (Object.keys(stale).length) {
       const r = await runIndex(project.root, { onLog: log })
-      note = r.error ? `(refresh failed, answering from the previous index: ${r.error})\n` : ''
+      note = r.error ? `(refresh failed, answering from the previous index: ${r.error})\n` : r.busy ? '(another index is running; answering from the previous index)\n' : ''
     }
   }
   const db = await openStore(project.dbPath, { readOnly: true })

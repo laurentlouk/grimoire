@@ -9,7 +9,7 @@ Every unattended run writes a decision event log: which agent and model each tas
 
 ## Where it lives
 
-- **Local telemetry**: `<telemetry dir>/<runId>/`, gitignored, never committed. The telemetry dir is `telemetry.dir` in `grimoire.config.json`, default `.grimoire/runs`.
+- **Local telemetry**: `<telemetry dir>/<runId>/`, gitignored, never committed. The telemetry dir is `telemetry.dir` in `grimoire.config.json`, default `.grimoire/runs`, always in the main checkout: from a linked git worktree the script reads (and prunes) the main checkout's runs, so every worktree sees the same history.
   - `run.json` holds the run's identity (`runId`, `project`, `meta` with `grimoireVersion`, `briefsHash`, `personasHash`, `configHash`), its `status` (`running`, `drained`, `halted`), a `summary` (with `summary.telemetry` when the engine reports it) and a `checkpoint` (`replansUsed`, `learnings`, `fixRounds` per task, `outputTokensSpent`, `lastSeq`, `landed`, `pending`).
   - `events/<8-digit firstSeq>.jsonl` holds the events in chunks, one JSON object per line: `seq` (monotonic), `type`, `tok` (cumulative output tokens), `at` (ISO time), plus the type's fields. Older runs have a single `events.jsonl` instead. A retried flush can repeat a `seq`; the first one seen counts.
 - **Committed ledgers**: `<runsDir>/<date>-<slug>.json` (`runsDir` in `grimoire.config.json`, default `runs`), one summary per run (done, needs attention, PRs, learnings, replans, halt). These are shared; the event log is not.

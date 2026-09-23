@@ -15,7 +15,7 @@
 //  prior index that installed it into the user cache. Without it the file is skipped, except
 //  under CI, where a missing runtime fails.
 import { spawnSync, spawn } from 'node:child_process'
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, realpathSync } from 'node:fs'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, realpathSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -199,6 +199,37 @@ mcp.kill()
 const calls = readFileSync(path.join(PROJ, '.grimoire/graph/calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
 ok(calls.some((c) => c.tool === 'graph_callers' && c.ok === true && typeof c.ms === 'number') && calls.some((c) => c.tool === 'graph_nope' && c.ok === false), 'audit log: one line per tools/call, success and failure')
 ok(calls.every((c) => !('arguments' in c)), 'audit log: arguments are not logged')
+
+// ── 5 · worktrees, the lock, the hook's refresh ──
+console.log('\n5 · worktrees and refresh')
+const { withLock, mainCheckout } = await import('../lib/freshness.mjs')
+const MAIN = path.join(SANDBOX, 'main')
+mkdirSync(path.join(MAIN, 'src'), { recursive: true })
+writeFileSync(path.join(MAIN, 'grimoire.config.json'), '{ "graph": {} }\n')
+writeFileSync(path.join(MAIN, '.gitignore'), '.grimoire/\n')
+writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  return 1\n}\n')
+const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' })
+git(MAIN, 'init', '-q', '-b', 'main'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init')
+const refresh = (root) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'refresh', '--root', root], { encoding: 'utf8' })
+let rf = refresh(MAIN)
+ok(rf.status === 0 && existsSync(path.join(MAIN, '.grimoire/graph/graph.db')), `refresh builds the first index when grimoire.config.json has a graph block (${rf.stdout.trim() || rf.stderr.trim()})`)
+const BARE = path.join(SANDBOX, 'bare'); mkdirSync(BARE)
+rf = refresh(BARE)
+ok(rf.status === 0 && !existsSync(path.join(BARE, '.grimoire')), 'refresh is a silent no-op in a project that never set the graph up')
+const WT = path.join(SANDBOX, 'wt')
+git(MAIN, 'worktree', 'add', '-q', '-b', 'feat', WT)
+ok(mainCheckout(WT) === MAIN && mainCheckout(MAIN) === null, 'a linked worktree finds its main checkout; the main checkout has none')
+writeFileSync(path.join(WT, 'src/b.ts'), "import { base } from './a'\n\nexport function onBranch(): number {\n  return base()\n}\n")
+r = await call('graph_callers', { symbol: 'base' }, { root: WT })
+has(r, 'onBranch  function  src/b.ts:3', 'a worktree with no index is seeded from the main checkout and sees its own branch')
+lacks(await call('graph_search', { query: 'onBranch' }, { root: MAIN }), 'src/b.ts', 'the main checkout index is untouched by the worktree')
+const LOCKDIR = path.join(SANDBOX, 'lock')
+let runs = 0, inner
+const outer = await withLock(LOCKDIR, async () => { runs++; if (runs === 1) inner = await withLock(LOCKDIR, async () => 'never'); return 'done' })
+ok(inner?.busy === true, 'a second indexer does not overlap: it gets busy and marks the index pending')
+ok(outer === 'done' && runs === 2 && !existsSync(path.join(LOCKDIR, 'index.lock')), 'the holder re-runs for the pending change, then releases the lock')
+writeFileSync(path.join(LOCKDIR, 'index.lock'), '999999999')
+ok(await withLock(LOCKDIR, async () => 'taken') === 'taken', 'a lock left by a dead process is taken over')
 
 rmSync(SANDBOX, { recursive: true, force: true })
 console.log(`\n${PASS} passed, ${FAIL} failed`)

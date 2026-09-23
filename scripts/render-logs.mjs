@@ -24,6 +24,7 @@
 import { readFileSync, writeFileSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const DAY = 86400000
@@ -282,10 +283,10 @@ function summaryText(groups, runs, dir) {
 // ── prune ──
 function safeDir(dir) {
   const abs = resolve(dir)
-  const cwd = resolve(process.cwd())
-  const rel = relative(cwd, abs)
+  const inside = (root) => { const rel = relative(resolve(root), abs); return !!rel && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) }
   if (abs === resolve('/') || abs === resolve(homedir())) return `refusing to prune ${abs}: it is / or $HOME`
-  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return `refusing to prune ${abs}: it must be inside the current directory (${cwd}) and not the directory itself`
+  // Inside the cwd, or inside the main checkout when the cwd is one of its linked worktrees.
+  if (!inside(process.cwd()) && !inside(stateRoot())) return `refusing to prune ${abs}: it must be inside the current directory (${resolve(process.cwd())}) or its main checkout, and not the directory itself`
   return null
 }
 
@@ -589,13 +590,24 @@ function renderHtml({ runs, ledgers, groups, initialRun, initialVersion }) {
 `
 }
 
+// The decision journal lives in the MAIN checkout: a relative --dir (or telemetry.dir) resolves
+// there from any linked git worktree, as the loop's journal writer does, so every worktree and
+// crystallize's own worktree see the same runs. Outside git, it resolves against the cwd.
+function stateRoot() {
+  const r = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' })
+  const common = r.status === 0 ? r.stdout.trim() : ''
+  return common.endsWith(`${sep}.git`) ? dirname(common) : process.cwd()
+}
+
 // ── main ──
 function main() {
   const args = parseArgs(process.argv.slice(2))
   const cmd = args._[0] || 'render'
   const cfg = config()
   const tcfg = isObj(cfg.telemetry) ? cfg.telemetry : {}
-  const dir = typeof args.dir === 'string' ? args.dir : typeof tcfg.dir === 'string' && tcfg.dir ? tcfg.dir : '.grimoire/runs'
+  const absDir = resolve(stateRoot(), typeof args.dir === 'string' ? args.dir : typeof tcfg.dir === 'string' && tcfg.dir ? tcfg.dir : '.grimoire/runs')
+  const shown = relative(process.cwd(), absDir)
+  const dir = shown && !shown.startsWith('..') && !isAbsolute(shown) ? shown : absDir // as typed when under the cwd
   const version = typeof args.version === 'string' ? args.version : null
 
   if (cmd === 'prune') {
@@ -616,7 +628,7 @@ function main() {
   if (cmd !== 'render') { console.error(`unknown command: ${cmd} (expected render, summary or prune)`); process.exit(2) }
 
   const ledgers = loadLedgers(resolve(typeof args.ledgers === 'string' ? args.ledgers : typeof cfg.runsDir === 'string' && cfg.runsDir ? cfg.runsDir : 'runs'))
-  const out = resolve(typeof args.out === 'string' ? args.out : '.grimoire/logs.html')
+  const out = resolve(typeof args.out === 'string' ? args.out : join(stateRoot(), '.grimoire/logs.html'))
   const initialRun = typeof args.run === 'string' ? args.run : runs[0]?.runId ?? null
   if (typeof args.run === 'string' && !runs.some((r) => r.runId === args.run)) console.error(`warning: run ${args.run} not found in ${dir}; opening the newest`)
   mkdirSync(dirname(out), { recursive: true })

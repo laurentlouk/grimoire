@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-export const SURFACE = ['.harness/mcp-policy.json', '.mcp.json', 'hooks/hooks.json', 'hooks/scripts/guard.sh', 'hooks/scripts/guard.mjs']
+export const SURFACE = ['.harness/mcp-policy.json', '.mcp.json', 'hooks/hooks.json', 'hooks/scripts/guard.sh', 'hooks/scripts/guard.mjs', 'hooks/scripts/graph-refresh.sh']
 export const sha256 = (file) => createHash('sha256').update(readFileSync(path.join(ROOT, file))).digest('hex')
 
 if (path.resolve(process.argv[1] || '') === path.resolve(new URL(import.meta.url).pathname)) {

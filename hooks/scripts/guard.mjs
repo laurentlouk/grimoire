@@ -10,11 +10,12 @@
 //   Write/Edit/MultiEdit/ · the project's .claude/settings.json, .claude/settings.local.json,
 //   NotebookEdit            .claude/hooks/ and guard.protectedPaths (override: GRIMOIRE_GUARD_ALLOW=1)
 //                         · <memoryDir>/ when a named roster agent (not crystallize) writes it
+//                         · the same paths in every linked git worktree of the project's repository
 //
 // Deny = exit 2 with one line on stderr (Claude Code shows it to the agent and skips the call).
 // Everything else, including malformed input or config and any internal error, exits 0
 // silently: the guard fails open, so it can never wedge a session.
-import { readFileSync, realpathSync } from 'node:fs'
+import { readFileSync, realpathSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -327,11 +328,27 @@ function checkBash(command, cwd, ctx, depth = 0) {
 }
 
 // ─────────────────────────────── write rules ───────────────────────────────
+// The checkout the rules apply to: a linked git worktree of the project's repository (a loop lane
+// under .worktrees/, a session worktree anywhere) is judged as the project itself, so its memory/
+// and .claude/ are protected the same way. Returns [root, abs] with both real paths, or null.
+function checkoutOf(abs, ctx) {
+  let d = path.dirname(abs)
+  while (!existsSync(d)) { const up = path.dirname(d); if (up === d) return null; d = up }
+  const absReal = path.join(real(d), path.relative(d, abs))
+  if (ctx.commonDir) {
+    const top = git(d, ['rev-parse', '--show-toplevel'])
+    if (top && git(top, ['rev-parse', '--path-format=absolute', '--git-common-dir']) === ctx.commonDir) return [real(top), absReal]
+  }
+  return inside(absReal, real(ctx.projectDir)) ? [real(ctx.projectDir), absReal] : null
+}
+
 function checkWrite(file, cwd, ctx, input) {
   if (typeof file !== 'string' || !file) return
-  const abs = path.resolve(cwd || ctx.projectDir, file.replace(/^~(?=\/)/, process.env.HOME || homedir()))
-  if (!inside(abs, ctx.projectDir)) return
-  let rel = path.relative(ctx.projectDir, abs).split(path.sep).join('/')
+  const target = checkoutOf(path.resolve(cwd || ctx.projectDir, file.replace(/^~(?=\/)/, process.env.HOME || homedir())), ctx)
+  if (!target) return
+  const [root, abs] = target
+  if (!inside(abs, root)) return
+  let rel = path.relative(root, abs).split(path.sep).join('/')
   if (FOLD) rel = rel.toLowerCase()
   const f = (s) => (FOLD ? s.toLowerCase() : s)
   const under = (dir) => { const d = f(dir.replace(/^\.\//, '').replace(/\/+$/, '')); return rel === d || rel.startsWith(d + '/') }
@@ -360,7 +377,8 @@ function main() {
   if (!cfg.enabled) return 0
   const tmpRoots = [tmpdir(), '/tmp', '/private/tmp', '/var/tmp', '/private/var/folders', process.env.TMPDIR, input.scratchpad_dir]
     .filter((p) => typeof p === 'string' && path.isAbsolute(p))
-  const ctx = { projectDir, isProtected: branchMatcher(cfg.branches), protectedPaths: cfg.protectedPaths, memoryDir: cfg.memoryDir, memoryDenied: cfg.memoryDenied, tmpRoots }
+  const commonDir = git(projectDir, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const ctx = { projectDir, commonDir, isProtected: branchMatcher(cfg.branches), protectedPaths: cfg.protectedPaths, memoryDir: cfg.memoryDir, memoryDenied: cfg.memoryDenied, tmpRoots }
   const ti = input.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {}
   try {
     switch (input.tool_name) {

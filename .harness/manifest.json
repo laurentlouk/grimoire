@@ -6,8 +6,9 @@
   "files": {
     ".harness/mcp-policy.json": "6ed274eb105556410a08835aff94971f678bdc86d6541aea83ac42209f75f010",
     ".mcp.json": "f6667436ee59516743f79390597bd9509f3c5983e6f121c18c72b3b86ed18ba4",
-    "hooks/hooks.json": "cf872b68a3aefc82c92b82b61acf450f0978dc8b21557e31db29c664c5875ee9",
+    "hooks/hooks.json": "d127b9901a259107cac391d5cf1269d37a124ca4d587a5ca9d29692db7f7a437",
     "hooks/scripts/guard.sh": "62b809b6738af5b06654b6855f1f73cab62e67c0a6048afe35962ce025850d3c",
-    "hooks/scripts/guard.mjs": "fda8708cebef99b357361d71b00c74dff468aa63dea8b515364809ddb3d22767"
+    "hooks/scripts/guard.mjs": "95d878cd03d9ef0fda5eecced2e38a8914c63ec8c2304fbcafd6633f29866d4f",
+    "hooks/scripts/graph-refresh.sh": "1c6d2a808e4998a35eb0c2a2d02c20e00ddd3e2820df05796d17fe62959fd0ea"
   }
 }

@@ -63,7 +63,17 @@ node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
 
 ## Freshness
 
-`graph_index` re-parses only files whose size or mtime moved and whose content hash changed, drops deleted files, and re-resolves the edges of a repository that changed. Every query first checks (stat only) whether files moved and refreshes incrementally if they did, at most every 15 s per process. A project that was never indexed is not indexed implicitly: the first `graph_index` installs the parser runtime and can take a while on a large tree.
+`graph_index` re-parses only files whose size or mtime moved and whose content hash changed, drops deleted files, and re-resolves the edges of a repository that changed. Every query first checks (stat only) whether files moved and refreshes incrementally if they did, at most every 15 s per process. A project that was never indexed is not indexed implicitly by a query: the first `graph_index` installs the parser runtime and can take a while on a large tree.
+
+Indexing is always this script, never a model. Three things run it:
+
+- **After every subagent**: the plugin's `SubagentStop` hook runs `graph.mjs refresh` in the background, so the graph follows each implementer's commit and each integrate merge of the build loop. `refresh` builds the first index when `grimoire.config.json` has a `graph` block, and does nothing when the graph is disabled or was never set up.
+- **Before a query**, as above.
+- **By hand**: `graph_index`, or `npm run graph -- index`.
+
+One indexer runs per index at a time (a lock next to it). A second one does not wait: it marks the index pending and the running one goes again before it finishes, so no change is lost.
+
+**Worktrees.** Each checkout has its own index, since each branch has its own code. A linked git worktree with no index yet starts from a snapshot of the main checkout's, then re-parses only what its branch changed. The build loop's lanes live under `.worktrees/`, which is not indexed; the run branch they merge into is.
 
 Measured on this machine: ripgrep (114 Rust files) 0.7 s, FastAPI (1,147 Python files) 1.4 s, Vite (1,576 JS/TS files) 1.5 s, full index.
 
