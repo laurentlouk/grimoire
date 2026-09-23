@@ -10,7 +10,7 @@
 //                      link); one whose pid is dead, or older than any index run can last, is taken
 //                      over by one process at a time (a reap lock, re-checked before removal).
 //                      SQLite's busy timeout (store.mjs) is the second line if two ever meet.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, linkSync, statSync, copyFileSync, constants } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, linkSync, statSync, renameSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { openStore } from './store.mjs'
@@ -41,7 +41,13 @@ export async function seed(project) {
   const db = await openStore(src, { readOnly: true })
   try { db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`) } finally { db.close() }
   try {
-    try { linkSync(tmp, project.dbPath) } catch (e) { if (!NO_LINK.has(e.code)) throw e; copyFileSync(tmp, project.dbPath, constants.COPYFILE_EXCL) }
+    try { linkSync(tmp, project.dbPath) } catch (e) {
+      if (!NO_LINK.has(e.code)) throw e
+      // No hard links: a rename is still atomic (never a half-copied file); losing a race to
+      // another seeder at worst replaces one complete snapshot with another.
+      if (existsSync(project.dbPath)) return false
+      renameSync(tmp, project.dbPath)
+    }
     return true
   } catch (e) { if (e.code === 'EEXIST') return false; throw e } finally { rmSync(tmp, { force: true }) }
 }
