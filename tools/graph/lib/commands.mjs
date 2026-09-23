@@ -124,7 +124,7 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
 
   if (!existsSync(project.dbPath)) return 'The code graph has not been built for this project yet: call graph_index first (or answer with Grep/Glob/Read).'
   let note = ''
-  if (Date.now() - lastFresh > FRESH_MS) {
+  if (Date.now() - lastFresh >= FRESH_MS) {
     const probe = await openStore(project.dbPath, { readOnly: true })
     const stale = staleness(project, probe)
     probe.close()
