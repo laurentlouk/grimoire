@@ -54,8 +54,8 @@ function mapData(files, nodes, edges) {
     if (!w.has(k)) { deg.set(a, (deg.get(a) || 0) + 1); deg.set(b, (deg.get(b) || 0) + 1) }
     w.set(k, (w.get(k) || 0) + 1)
   }
-  // The cap is shared out per repository, in proportion to its size, so filtering to a small repo
-  // still shows its own best-connected files; slots a repo cannot use go to the rest.
+  // The cap is shared out per repository, in proportion to its size and at least one file each, so
+  // filtering to a small repo still shows its own best-connected files; unused slots go to the rest.
   const all = files.map((f) => ({ id: f.id, repo: f.repo, path: f.path, deg: deg.get(f.id) || 0 }))
     .sort((a, b) => b.deg - a.deg || (a.path < b.path ? -1 : 1))
   const perRepo = new Map()
@@ -64,7 +64,7 @@ function mapData(files, nodes, edges) {
   let keep = all
   if (all.length > MAP_MAX_FILES) {
     const picked = new Set()
-    for (const [, fs] of perRepo) for (const f of fs.slice(0, Math.floor((MAP_MAX_FILES * fs.length) / all.length))) picked.add(f)
+    for (const [, fs] of perRepo) for (const f of fs.slice(0, Math.max(1, Math.floor(((MAP_MAX_FILES - perRepo.size) * fs.length) / all.length)))) picked.add(f)
     for (const f of all) { if (picked.size >= MAP_MAX_FILES) break; picked.add(f) }
     keep = all.filter((f) => picked.has(f))
   }

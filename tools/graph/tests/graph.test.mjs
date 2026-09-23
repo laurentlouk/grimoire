@@ -276,6 +276,15 @@ const contenders = await Promise.all([0, 1, 2, 3].map(() => new Promise((res) =>
   let out = ''; c.stdout.on('data', (d) => { out += d }); c.on('close', () => res(out.trim()))
 })))
 ok(contenders.filter((r) => r === '"ran"').length >= 1 && contenders.every((r) => r === '"ran"' || r === '{"busy":true}'), `four racing processes: never an error, busy ones hand over (${contenders.join(' ')})`)
+const RACE2 = path.join(SANDBOX, 'race2'); mkdirSync(RACE2)
+const MARK = path.join(SANDBOX, 'race2.inside')
+writeFileSync(path.join(RACE2, 'index.lock'), '999999999') // a dead holder everyone recovers from at once
+const recover = await Promise.all([...Array(6)].map(() => new Promise((res) => {
+  const c = spawn(process.execPath, ['--input-type=module', '-e', `import { withLock } from ${JSON.stringify(path.join(ROOT, 'lib/freshness.mjs'))}; import { appendFileSync, readFileSync } from 'node:fs'; const r = await withLock(${JSON.stringify(RACE2)}, async () => { appendFileSync(${JSON.stringify(MARK)}, '+'); const n = readFileSync(${JSON.stringify(MARK)}, 'utf8'); await new Promise((z) => setTimeout(z, 250)); appendFileSync(${JSON.stringify(MARK)}, '-'); return n }); console.log(JSON.stringify(r))`], { stdio: ['ignore', 'pipe', 'inherit'] })
+  let out = ''; c.stdout.on('data', (d) => { out += d }); c.on('close', () => res(out.trim()))
+})))
+const trace = existsSync(MARK) ? readFileSync(MARK, 'utf8') : ''
+ok(/^(\+-)+$/.test(trace) && recover.every((r) => r !== ''), `six processes recovering one dead lock: never two inside at once (${trace}; ${recover.join(' ')})`)
 
 rmSync(SANDBOX, { recursive: true, force: true })
 console.log(`\n${PASS} passed, ${FAIL} failed`)
