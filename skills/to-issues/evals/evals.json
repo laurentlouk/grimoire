@@ -1,0 +1,99 @@
+[
+  {
+    "id": 1,
+    "query": "The plan at docs/plans/2026-09-12-export-plan.md is agreed. Break it into issues in the tracker under the EXPORT project.",
+    "should_trigger": true,
+    "expected_output": "Explores the affected code first; proposes a numbered list of thin vertical slices (title in the project's vocabulary, who builds it, exact files, success criteria, dependencies, order smallest first); waits for sign-off; then creates one issue at a time, linked to the parent project, tagged with its slice number, with blocks/is-blocked-by links.",
+    "expectations": [
+      {
+        "text": "Explores the affected code before proposing slices, and names the files each slice touches exactly",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Shows the breakdown as a numbered list with title, builder, files, success criteria, dependencies and order for each slice",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Creates no issue before the user signs off on the breakdown",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Each created issue is linked to the parent project, tagged with its slice number, and carries block / is-blocked-by links",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "Issue EXPORT-3 is ready. Build it and open the PR.",
+    "should_trigger": false,
+    "expected_output": "Building a single issue belongs to `implement`, not to-issues.",
+    "expectations": [
+      {
+        "text": "Does not create or re-slice issues",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Routes the request to `implement`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not dispatch an implementer itself as part of to-issues",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Here's the agreed plan. Create the issues in the tracker now: one for the database changes, one for the API, one for the UI.",
+    "should_trigger": true,
+    "expected_output": "Refuses to carve the work by layer; proposes vertical slices that each cut through database, API and UI and can be demoed alone; shows the numbered breakdown and waits for sign-off before creating anything, even though the user said 'now'.",
+    "expectations": [
+      {
+        "text": "Does not create layer-by-layer issues (database / API / UI)",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Proposes vertical slices that each cut end to end and can be demoed on their own",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Shows the numbered breakdown and waits for sign-off before creating any issue",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "The plan includes renaming the account id field across both repos; there are hundreds of call sites. Break it into issues.",
+    "should_trigger": true,
+    "expected_output": "Sequences the wide mechanical change as expand then contract: add the new form next to the old, move call sites in batches, then delete the old form; never one big rewrite. Proposes it as a numbered breakdown for sign-off.",
+    "expectations": [
+      {
+        "text": "Sequences the rename as expand then contract across several issues",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not propose the rename as a single big-rewrite issue",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Shows the breakdown for sign-off before creating issues",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  }
+]

@@ -1,0 +1,132 @@
+[
+  {
+    "id": 1,
+    "query": "Before anyone writes code, roast this idea: add rate limiting to the login endpoint in the API repo.",
+    "should_trigger": true,
+    "expected_output": "Runs the docs lane and the code lane together, diffs them, then interrogates the design one question per message with a recommendation each, pushing on edge cases (concurrency, partial failure, idempotency, load at target scale). Touches no code. On approval writes a short spec under docs/specs/ with problem, goals/non-goals, numbered decisions with rejected alternatives, vertical slices, edge cases, user-owned questions, plus Sources consulted, Self-answered questions and Docs drift fixed. Then passes the spec to to-plan.",
+    "expectations": [
+      {
+        "text": "Runs a docs-lane and a code-lane recon before asking the user anything",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Asks one question per message, waits for the answer, and states its recommendation with each question",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not modify code or hand off the work before the design is approved",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "The spec contains numbered decisions with the rejected alternative, vertical slices smallest first, and the sections Sources consulted, Self-answered questions and Docs drift fixed",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "The spec at docs/specs/2026-09-01-export-design.md is approved. Write the implementation plan now.",
+    "should_trigger": false,
+    "expected_output": "Design is settled; this is `to-plan`'s job (synthesis, no interview). Roast should not re-interrogate an approved spec.",
+    "expectations": [
+      {
+        "text": "Does not start a new round of design questions",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Routes the request to `to-plan`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Writes no spec and asks the user no design questions about the already-approved spec",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Roast adding retries to the webhook consumer in the API repo. I don't remember which queue client we use or what the current retry limit is.",
+    "should_trigger": true,
+    "expected_output": "Answers both facts itself from the code or config (sending a scout if the search is wide), cites the file and location, and does not ask the user for them; records them under Self-answered questions. Only product or trade-off decisions (e.g. how long a customer may wait) reach the user, one per message with a recommendation.",
+    "expectations": [
+      {
+        "text": "Finds the queue client and the current retry limit in the code or config and cites the file",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not ask the user for either fact and does not state them as guesses",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Lists them in the spec's Self-answered questions with their source",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Any question that does reach the user is a product, priority, cost or context decision, asked one per message with a recommendation",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Roast moving session cleanup to a new scheme. docs/runbooks/sessions.md says a nightly cleanup job deletes expired sessions.",
+    "should_trigger": true,
+    "expected_output": "Checks the code; when the code shows sessions expire through native TTL and no cleanup job exists, records a docs-drift item (what the doc says, what the code does, file and line for both), bases the design on the code, and fixes the runbook as part of the roast (or hands the fix to the implementer if it lives elsewhere), listing it under Docs drift fixed.",
+    "expectations": [
+      {
+        "text": "Compares the runbook's claim against the code rather than trusting the document",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Records a docs-drift item with what the doc says, what the code does, and file and line for both",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not bend the design toward the stale document",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Fixes the document (or hands the fix off) and lists it under Docs drift fixed",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "query": "Roast idempotent webhook delivery. We have no precedent for it in this codebase; should we just switch to the message broker the big projects use?",
+    "should_trigger": true,
+    "expected_output": "Looks outward at credible open-source projects using the same technologies (widely adopted, active in the last year, known license), reads the actual code path, maps the pattern onto this codebase and writes down what is not adopted. Treats the stack and architecture as fixed inputs: it borrows the pattern, never the stack, so it does not recommend switching broker.",
+    "expectations": [
+      {
+        "text": "Uses credible open-source references (or a reference-scout) and reads their actual code path",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not propose changing the stack or the message broker; states the stack is a fixed input",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Maps the reference pattern onto this codebase and records what was deliberately not adopted under Reference projects",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  }
+]

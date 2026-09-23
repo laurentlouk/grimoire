@@ -1,0 +1,122 @@
+[
+  {
+    "id": 1,
+    "query": "Start the API engineer on EXPORT-2.",
+    "should_trigger": true,
+    "expected_output": "Reads AGENTS.md for the agent's model, tools and brief; reads memory/agents/<agent>.md and pastes its entries verbatim under '## Your memory' at the top; pastes the full task text, spec excerpt, files, success criteria and ticket; includes the explore-before-asking rule, the no-interactive-channel/NEEDS_CONTEXT reminder, incremental commits and the four end states; notes any orchestrator-owned gate.",
+    "expectations": [
+      {
+        "text": "Takes the agent's configuration from AGENTS.md instead of improvising",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Pastes the agent's memory entries verbatim under a `## Your memory` heading at the top of the brief",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Pastes the full task text rather than telling the agent to go read the plan",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "The brief carries the explore-before-asking rule, the `NEEDS_CONTEXT` reminder, and the end states `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, `BLOCKED`",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "The plan is agreed; break it into tracker issues.",
+    "should_trigger": false,
+    "expected_output": "Slicing a plan into issues is `to-issues`; no agent needs launching from the roster.",
+    "expectations": [
+      {
+        "text": "Does not dispatch a team agent or scout",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Routes the request to `to-issues`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Writes no issues to the tracker",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Launch the reviewer on PR #214. Its memory file has three entries; just summarise them in a sentence to keep the brief short.",
+    "should_trigger": true,
+    "expected_output": "Pastes the reviewer's memory entries verbatim (all three, unedited) under '## Your memory' at the top of the brief; does not summarise.",
+    "expectations": [
+      {
+        "text": "Reads the reviewer's memory store before dispatching",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Pastes all three entries verbatim, not a summary or paraphrase",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Places them under a `## Your memory` heading at the top of the brief",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Send the API engineer on EXPORT-3, and tell it to save anything it learns to its memory file as it goes.",
+    "should_trigger": true,
+    "expected_output": "Dispatches the engineer but does not ask it to write memory; explains that crystallize writes memory, after the PR.",
+    "expectations": [
+      {
+        "text": "The brief does not instruct the agent to write to its memory file",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Explains that `crystallize` writes memory after the PR",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Still dispatches the API engineer with its memory pasted into the brief",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "query": "Send scouts to find where exports are serialized and which endpoints paginate.",
+    "should_trigger": true,
+    "expected_output": "Dispatches two independent read-only scouts in one message so they run together; scouts get no memory; each brief carries the explore-before-asking rule.",
+    "expectations": [
+      {
+        "text": "Dispatches both scouts in one message so they run in parallel",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Pastes no memory into the scout briefs",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Each scout brief carries the explore-before-asking rule",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  }
+]

@@ -101,7 +101,7 @@ as they go, and its terminal slot ends at the quality sweep.
 | `maxReplans` | `3` | replans before the run halts |
 | `maxContextResolves` | `2` | scout-answered `NEEDS_CONTEXT` questions per dispatch (`0` escalates immediately) |
 | `agentTimeoutMin` | `40` | per-agent hang backstop (`0` disables) |
-| `memoryDir` | `.claude/memory` | `harness.md` + `agents/<agent>.md` |
+| `memoryDir` | `memory` | `harness.md` + `agents/<agent>.md` |
 | `runsDir` | `runs` | where run ledgers are written |
 | `briefsDir` | `workflows/briefs` | where the dispatch briefs live |
 | `personasDir` | `workflows/personas` | where the review lenses live |
@@ -109,6 +109,18 @@ as they go, and its terminal slot ends at the quality sweep.
 | `baseBranch` | `origin/main` | the integration branch lanes branch from and reviews/sweeps diff against (`origin/master`, `origin/trunk`, …) |
 | `requireHook` | `null` | `{name, check, fix?}` — refuse to execute unless a tool hook is installed and registered in this session |
 | `skipHookCheck` | `false` | explicit, logged escape hatch for `requireHook` |
+| `precheck` | `true` | the haiku structural check between implementer and panel (`false` disables) |
+| `maxPrecheckFixes` | `1` | fix dispatches a precheck FAIL may buy before the task fails as `PRECHECK_FAILED` |
+| `verifyFindings` | `true` | verify each gating finding against the code before a fix is bought (`false` disables) |
+| `escalateAtFixRound` | `2` | from this fix round on, the implementer runs on opus whatever tier was chosen (`0` disables) |
+| `specialists` | `[]` | `[{agent, repos: ['*'] \| [names], use}]` — implementers the selector may route a repo's tasks to instead of its owner |
+| `maxOutputTokens` | — | cost fuse: this run's output tokens, counted across resumed sessions; reaching it halts as `budget_exhausted` |
+| `budgetFloor` | `80000` | stop dispatching when the turn's remaining token budget drops below this |
+| `claim` | — | `{identity}` — claim issues at hydration, never build one someone else started, release what did not land |
+| `telemetry` | `{enabled: true}` | the decision journal: `{enabled, dir: '.grimoire/runs', flushEvery: 40}` (`retentionDays` is read by `/grimoire:logs`) |
+| `runId` · `runMeta` | set by `/orchestrate` | the journal directory name, and `{grimoireVersion, briefsHash, personasHash, configHash}` every event of the run is tagged with |
+| `resumeState` | — | the `checkpoint` from an earlier session's `run.json`, so a new session keeps the replans, fix rounds, learnings, sequence and spend already used |
+| `guard` | — | not read by the loop: the `PreToolUse` guard hook's config (`hooks/README.md`) |
 
 The canonical `requireHook` is [rtk](https://github.com/rtk-ai/rtk), which condenses every Bash result before it reaches an agent: `{ name: 'rtk hook claude', check: 'command -v rtk && rtk hook check "git status" | grep -q "^rtk "', fix: 'brew install rtk-ai/tap/rtk && rtk init -g' }`. A run that would dispatch dozens of agents without it reads raw output everywhere, so refusing is cheaper than running.
 | `finalCheck` | `null` | `{repos:[…], prompt, agentType?}` — one read-only cross-repo check when every named repo landed work (e.g. API-contract drift between a client and its server) |
@@ -214,6 +226,65 @@ the repo's single run branch are serialized, and a merge conflict is a first-cla
 `MERGE_CONFLICT` failure routed to the replanner — a reviewed diff is never silently
 rewritten.
 
+## The rungs added around the panel
+
+**Precheck.** Between the implementer and the first review, one haiku dispatch
+(`briefs/precheck.md`) checks that there is something reviewable: a commit range, a non-empty
+diff, no conflict or stub markers added, tests moved with behaviour, no undeclared files, no
+stray artifacts. A FAIL goes back to the same implementer (`maxPrecheckFixes`), before any
+reviewer is paid. A dead precheck passes through — it is an optimisation, not a gate.
+
+**Finding verification.** Every failing review round sends its gating findings to one sonnet
+verifier (`briefs/verify.md`) before a fix is bought. A finding is overturned only when the
+verifier cites the code that proves it false; overturned findings are reported in
+`overturnedFindings`, never reworked. A dead verifier keeps every finding.
+
+**The selector.** Hydration already reads each issue in full, so it also routes it: `agent`
+(the repo's owner, or a specialist enabled for that repo) × `model` (haiku · sonnet · opus by
+the rubric in `briefs/hydrate.md`) with a `routeReason`. The engine accepts only an agent the
+routing table allows — anything else is dispatched as the owner, counted as a fallback — and
+escalates to opus from `escalateAtFixRound` and for every replanned task. Only review fix
+rounds count toward escalation; a precheck fix is structural and does not. `NEEDS_CONTEXT`
+questions go to the scout their shape calls for: contract → `contract-checker`, security →
+`security-scout`, performance → `perf-scout`, otherwise `codebase-scout`.
+
+**Learnings by relevance.** Learnings are stored as `{text, repos}`. Each hydration carries
+at most 12: those about its own repos first, then pipeline-wide ones — not the last N of
+everything. Older ledgers' bare strings are tagged with that ledger's repos.
+
+**Claims.** With `claim.identity`, the index reports each issue's assignee; an issue someone
+else has started is never dispatched (its dependents wait, `claimedElsewhere` says why);
+hydration assigns the issues it is about to build (a replan that re-enters an unclaimed
+tracker issue claims it through `briefs/claim.md`); at the end one dispatch
+(`briefs/claim.md`) hands back every claimed issue that did not land.
+
+**Cost fuse.** `maxOutputTokens` is checked before every dispatch, counting what earlier
+sessions of the same run spent. At 80% the run logs a warning; at the cap it stops
+dispatching, lets in-flight work settle and halts as `budget_exhausted`. The script only
+sees output tokens (`budget.spent()`); input and cache tokens are not visible to it.
+
+## The decision journal
+
+Every decision is an event: `run.start`, `route`, `dispatch`, `precheck`, `review` (one per
+reviewer), `verify`, `fix`, `escalate`, `guard`, `resolve`, `integrate`, `settle`, `replan`,
+`terminal`, `gate`, `claim`, `budget`, `halt`, `run.end`. Each carries a gap-free `seq`, the
+cumulative output tokens `tok`, and its fields (reasons included). The script has no clock
+and no filesystem, so events are buffered and one haiku writer per chunk (`briefs/journal.md`)
+runs a fixed shell script that:
+
+- writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
+  replayed flush overwrites the same file, never appends duplicates;
+- stamps wall time into each line (`at`) in the shell;
+- rewrites `run.json`: `runId`, `project`, `meta`, `status`, `summary`, and the `checkpoint`
+  a new session resumes from;
+- prints the line and byte counts, which the engine compares with what it sent — a
+  mismatch is logged and counted, never trusted.
+
+Chunks flush every `flushEvery` events, at every replan, before the final wave and at the
+end (before the ledger, so `crystallize` can read the finished journal). The directory is
+local and gitignored; `/grimoire:logs` renders it, and its `summary` is the cross-run evidence
+`crystallize` reads, grouped by grimoire version and briefs hash.
+
 ## What it returns
 
 `done` · `needsAttention` · `blocked` (never ran) · `alreadyDone` (absorbed) · `deferred` ·
@@ -221,7 +292,10 @@ rewritten.
 (landed work with no PR yet) · `prs` · `replans` + `learnings` + `halt` · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·
-`telemetry` · `harness` (the ledger written and what crystallize produced).
+`precheckStats` · `overturnedFindings` · `routing` (picks by agent and model, fallbacks,
+escalations) · `claimedElsewhere` · `claimsReleased` · `meta` · `telemetry` (output tokens,
+this run's spend against `maxOutputTokens`, and the journal's receipt) · `harness` (the ledger
+written and what crystallize produced).
 
 The run stops at PRs. Merging and deploying stay yours.
 
@@ -250,7 +324,8 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
 ## Token economy (built in)
 
 - The terminal sweep reads **by lens**: each persona takes the branch `--stat` and reads only the files its Scope section names, never the whole branch.
-- Mechanical dispatches (index, harness-context, integrate, ledger) run with `effort: 'low'`; index and hydration run on sonnet, the replanner and implementers stay on opus.
+- Mechanical dispatches (index, harness-context, integrate, precheck, journal, claim release, ledger) run with `effort: 'low'`; index and hydration run on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
+- A precheck stops an unreviewable diff before the panel; a verifier stops a false-positive finding before it buys a fix.
 - The first review of a stage is the full panel; after a fix a sonnet guard decides whether the panel re-runs.
 - Briefs and memory are pasted as a stable prefix so prompt caching hits across dispatches; volatile values (task, SHAs) come last.
 - `requireHook` (rtk) refuses to execute without output compression.

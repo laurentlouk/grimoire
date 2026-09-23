@@ -27,9 +27,31 @@ unattended even against local or mocked dependencies (a store submission, a manu
 third-party step). An acceptance demo that would be MORE convincing against a deployed
 dependency is a concern to report with DONE_WITH_CONCERNS, not a deferral.
 
+## Route each task: agent × model (you are the selector)
+You already read every issue in full, so you also decide who builds it and on which tier.
+Set `agent`, `model` and a one-sentence `routeReason` naming the deciding signal.
+
+- **agent** — the repo's owner (the header's table) by default. Pick one of that repo's
+  listed specialists only when the task is squarely its kind, as the table describes it. Never
+  name an agent the table does not list for that repo: the engine replaces it with the owner.
+- **model** — the cheapest tier that will get it right first time; a fix round costs more
+  than the tier difference.
+  - `haiku`: mechanical and fully specified — a rename, a config value, a copy change, one
+    more case in an existing, well-tested pattern. One or two files, no design decision.
+  - `sonnet`: a normal feature or fix inside established patterns, a handful of files, with
+    tests to write, where the issue and the code settle every decision.
+  - `opus`: cross-module or cross-repo design, concurrency, data migrations, security- or
+    privacy-sensitive paths, public contracts, code with no tests around it, or anything a
+    learning in the header says failed before.
+  - Unsure between two tiers: take the higher one.
+
+The engine escalates a task to opus by itself after repeated fix rounds, and routes every
+replanned task to opus; you do not need to hedge for that.
+
 If the header carries learnings from earlier work, fold them into `taskText` where relevant
 so this work does not repeat a failure. Where an issue is silent on something the implementer
 will need (a path, a table, an existing helper), look it up in the repo and state it in the
 task rather than leaving a gap the implementer must guess at or ask about; report in
 `inputProblems` only what neither the artifacts nor the code settle. Read-only; do not modify
-the tracker or any repo.
+the tracker or any repo — except when the header has a CLAIM section: then assign exactly the
+listed issues and move them to in-progress, nothing else.

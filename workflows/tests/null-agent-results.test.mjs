@@ -63,7 +63,10 @@ const REPOS = [
   { name: 'mobile', agent: 'app-engineer', tags: ['mobile'], gate: { kind: 'command', run: 'npm run smoke', when: { pathsMatching: ['native/'] } } },
   { name: 'infra', agent: 'infra-engineer', tags: ['infra'], gate: null },
 ]
-const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-600', repos: REPOS }
+// The newer rungs (precheck, finding verification, decision journal) are OFF here so these
+// cases keep asserting the exact dispatch sequence they were written for; they are covered
+// on their own in harness-v06.test.mjs.
+const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-600', repos: REPOS, precheck: false, verifyFindings: false, telemetry: { enabled: false } }
 const task = (id, n, dependsOn = []) => ({
   id, ticket: id, repo: 'mobile', agent: 'app-engineer', slice: 1, sliceLabel: 'v',
   order: n, taskText: 'Build the thing', deferred: false, branch: 'feat/x', dependsOn,

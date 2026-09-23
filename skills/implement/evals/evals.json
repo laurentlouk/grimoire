@@ -1,0 +1,127 @@
+[
+  {
+    "id": 1,
+    "query": "Implement EXPORT-2 (slice 2, touches only the API repo).",
+    "should_trigger": true,
+    "expected_output": "Dispatches the team agent that owns the API repo from AGENTS.md via launch-agent with its memory pasted in; builds test-first per tdd; runs the repo's exact CI commands as written before declaring done; commits to the issue branch, opens one PR titled with the ticket, updates the issue status, and stops at the PR with Next: review.",
+    "expectations": [
+      {
+        "text": "Dispatches the owning team agent from AGENTS.md via launch-agent, with its memory pasted into the brief",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Builds test-first per `tdd`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Runs the repository's exact CI commands (lint with zero warnings, typecheck, full test suite in CI mode) before declaring done",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Opens one PR titled with the ticket, updates the issue status, and stops at the PR pointing to `review` next",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "The PR for EXPORT-2 is open. Check it does exactly what the ticket says and meets our quality bar.",
+    "should_trigger": false,
+    "expected_output": "Gating an open PR is `review`'s job, with an independent reviewer; the implementer never reviews its own work.",
+    "expectations": [
+      {
+        "text": "Does not dispatch an implementer or change code",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Routes the request to `review`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not let the implementer review its own diff",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "EXPORT-4 and EXPORT-5 both touch the API repo and don't depend on each other. Launch two implementers on the API checkout at the same time to go faster.",
+    "should_trigger": true,
+    "expected_output": "Refuses to put two implementers on one checkout; within a repository tasks run one at a time in dependency order (parallel work inside one repo would need separate worktrees).",
+    "expectations": [
+      {
+        "text": "Does not dispatch two implementers onto the same checkout",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Runs the two tasks one at a time within the repository, or explains that parallel work needs separate worktrees",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "States the rule 'never two implementers on one checkout'",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Implement EXPORT-6 in the mobile repo. That repo has an emulator test suite the orchestrator owns as its gate.",
+    "should_trigger": true,
+    "expected_output": "The implementer never runs the owned gate and never opens that repo's PR: it finishes the whole change, makes the final commit and reports DONE_PENDING_GATE; the orchestrator runs the gate once on the final committed tree and opens the PR on green.",
+    "expectations": [
+      {
+        "text": "The implementer does not run the emulator test suite",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "The implementer does not open the mobile repo's PR",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Reports `DONE_PENDING_GATE` after the final commit",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "The gate is run once by the orchestrator on the final committed tree, only when nothing is left to fix",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "query": "Implement EXPORT-7. The ticket says 'use the standard pagination' but doesn't say which one.",
+    "should_trigger": true,
+    "expected_output": "The implementer first explores the code, contracts and docs for the project's pagination convention; if it is still unclear it returns NEEDS_CONTEXT with one specific question naming what it checked. A scout answers from the codebase when it can; only a product or trade-off decision reaches the user.",
+    "expectations": [
+      {
+        "text": "Explores the code, contracts and docs for the existing pagination convention before asking",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not guess a pagination style",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "If still unclear, returns `NEEDS_CONTEXT` with one specific question that says what it checked and what is unknown",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  }
+]

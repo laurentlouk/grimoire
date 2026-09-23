@@ -5,7 +5,7 @@ description: Implement one tracker issue end to end through the team agent that 
 
 # Implement one issue
 
-Implement exactly one issue. Dispatch the team agent that owns the repository it touches (from `AGENTS.md`, via `launch-agent`, with its memory pasted in). Within a slice, repositories run in parallel; within a repository, tasks run one at a time in dependency order. Never two implementers on one checkout.
+Implement exactly one issue. Dispatch the team agent that owns the repository it touches (from `AGENTS.md`, via `launch-agent`, with its memory pasted in). A specialist from the roster (`migration-engineer`, `test-engineer`) builds instead only when the issue is squarely its kind and the project enables it for that repository. It gets the owner's memory too, because those facts are about the repository. Within a slice, repositories run in parallel; within a repository, tasks run one at a time in dependency order. Never two implementers on one checkout.
 
 Build test-first per `tdd`: red, green, refactor, one behaviour at a time, through the public seam, with independent expected values. Assert the full output, not its shape, and type everything fully. Finish the whole change, not the happy path: handle the edge cases and failure modes it introduces, verify end to end, and delete the code it obsoletes.
 

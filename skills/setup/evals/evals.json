@@ -1,0 +1,109 @@
+[
+  {
+    "id": 1,
+    "query": "I just installed grimoire. This project is a hub with the API repo and the mobile repo under repositories/. Set up the harness for us.",
+    "should_trigger": true,
+    "expected_output": "Explores read-only in one fan-out (layout, each repo's language, test/lint/typecheck commands and CI jobs, existing instructions, expensive gates with their exact commands, tracker and design tools, rtk, deploy facts); shows a single one-screen proposal (a team agent per repo from templates/team-agent.md, grimoire.config.json with repos and gates, team pinning, memory stores, AGENTS.md roster, CLAUDE.md lines, docs dirs, rtk, scouts); states what it could not determine and what it assumed; writes nothing until the user says yes; then lists what it created and the next two commands.",
+    "expectations": [
+      {
+        "text": "Explores the repositories read-only before proposing anything, including CI commands and any expensive gate with its exact command",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Presents one proposal with a team agent per repository, a grimoire.config.json repos entry with its gate, memory stores, an AGENTS.md roster and the CLAUDE.md lines, and asks for one yes or corrections",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Writes no file before the user approves the proposal",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Seeds memory only with facts actually found in the docs, dated and declarative, never with guesses",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "States what it could not determine and what it assumed, and finishes by naming `/roast <idea>` and `/orchestrate` as the next commands",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "Grimoire is already set up here. Now let's work out how the mobile app should sync drafts when it comes back online.",
+    "should_trigger": false,
+    "expected_output": "This is design work, not first-run setup: it belongs to `roast`. Setup must not re-run or rewrite the harness files.",
+    "expectations": [
+      {
+        "text": "Does not run the setup exploration or propose harness files",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Routes the request to `roast` (design stress-test) instead",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Writes no CLAUDE.md, AGENTS.md, config or memory file",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Set up grimoire here. We already have a CLAUDE.md with our invariants, an AGENTS.md listing a backend-engineer, and an old copy of the roast skill in .claude/skills/roast/.",
+    "should_trigger": true,
+    "expected_output": "Treats this as migration mode: lists .claude/skills/roast/ as a duplicate the plugin now provides and proposes deleting it, without deleting on its own; keeps the existing backend-engineer definition and, if it lacks the 'Explore before asking; don't guess' section, proposes appending it; points at the existing invariants rather than duplicating them; never overwrites CLAUDE.md or AGENTS.md, it appends or shows the diff for the user to apply.",
+    "expectations": [
+      {
+        "text": "Lists .claude/skills/roast/ as a duplicate the plugin now provides and proposes deleting it, but does not delete it without the user's yes",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not overwrite the existing CLAUDE.md or AGENTS.md; appends or shows a diff for the user to apply",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Keeps the existing backend-engineer definition and proposes appending the 'Explore before asking; don't guess' section only if it is missing",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Points at the invariants already written down instead of duplicating them",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Set up grimoire, and please add a line to CLAUDE.md telling every agent to explore before asking and not to guess.",
+    "should_trigger": true,
+    "expected_output": "Proposes the normal CLAUDE.md lines (the @memory/harness.md import and the pointer to AGENTS.md) but explains the explore-before-asking rule needs no CLAUDE.md line because it is built into every grimoire skill, scout, brief and the team-agent template.",
+    "expectations": [
+      {
+        "text": "Explains that the explore-before-asking rule is already built into the plugin's skills, scouts, briefs and team-agent template, so no CLAUDE.md line is needed",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Proposes the @memory/harness.md import and the pointer to AGENTS.md as the CLAUDE.md lines",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not write CLAUDE.md before the user approves",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  }
+]

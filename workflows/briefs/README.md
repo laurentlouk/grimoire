@@ -13,17 +13,24 @@ skills in all but name and evolve the same way. Personas (review lenses) live in
 
 | Brief | Dispatch | Model |
 |---|---|---|
-| `index.md` | verify design artifacts + slice index | opus |
-| `hydrate.md` | per-cycle just-in-time task hydration | opus |
-| `implement.md` | implementer + fix rounds (owning repo agent) | opus |
-| `resolve.md` | read-only scout answering NEEDS_CONTEXT | cheap |
+| `index.md` | verify design artifacts + slice index | sonnet |
+| `hydrate.md` | per-cycle just-in-time task hydration + the selector (agent × model per task) | sonnet |
+| `implement.md` | implementer + fix rounds (owning repo agent or an enabled specialist) | per task |
+| `resolve.md` | read-only scout answering NEEDS_CONTEXT (picked by question shape) | cheap |
+| `precheck.md` | structural check between implementer and panel | haiku |
 | `review.md` | every review persona (spec · quality · terminal) | sonnet |
+| `verify.md` | checks each gating finding before a fix is bought | sonnet |
 | `guard.md` | post-fix guard | sonnet |
 | `integrate.md` | lane → run-branch merge | cheap |
 | `gate.md` | the repo's gate command + PR | opus |
 | `replan.md` | adaptive re-planner | opus |
+| `journal.md` | one chunk of the decision log (runs a fixed script) | haiku |
+| `claim.md` | hands back tracker issues the run claimed and did not land | haiku |
 | `ledger.md` | run ledger writer | cheap |
 | `crystallize.md` | post-PR learning (runs the `crystallize` skill) | opus |
+
+`per task` is the selector's pick (haiku, sonnet or opus; opus when unset), escalated to opus
+from the configured fix round and for every replanned task.
 
 Nothing here names a language, framework, tracker or CI system: anything stack-specific
 arrives in the header the JS builds from `args` (the repo's checkout path, its gate command,

@@ -92,7 +92,10 @@ const REPOS = [
   },
   { name: 'infra', agent: 'infra-engineer', tags: ['infra'], gate: null },
 ]
-const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-600', repos: REPOS }
+// The newer rungs (precheck, finding verification, decision journal) are OFF here so these
+// cases keep asserting the exact dispatch sequence they were written for; they are covered
+// on their own in harness-v06.test.mjs.
+const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-600', repos: REPOS, precheck: false, verifyFindings: false, telemetry: { enabled: false } }
 
 // The slice index the 'parse-index' agent would return for a scenario's tasks.
 const indexOf = (tasks) => ({
@@ -806,7 +809,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
     ok(labels.filter((l) => l === 'harness-context').length === 1, 'exactly one harness-context loader dispatch')
     ok(labels.indexOf('harness-context') === 1 && labels[0] === 'parse-index', 'the loader runs right after the slice index, before any hydration/implementer')
     const loader = calls.find((c) => c.label === 'harness-context')
-    ok(loader.opts.model === 'haiku' && /\.claude\/memory\/harness\.md/.test(loader.prompt) && /runs\/\*\.json/.test(loader.prompt), 'the loader is cheap and reads the memory stores + the run ledgers')
+    ok(loader.opts.model === 'haiku' && /`memory\/harness\.md`/.test(loader.prompt) && /runs\/\*\.json/.test(loader.prompt), 'the loader is cheap and reads the memory stores + the run ledgers')
     ok(/backend-engineer, app-engineer, infra-engineer, reviewer/.test(loader.prompt), 'the agent list is derived from the configured repos, plus the reviewer')
     const impl = calls.find((c) => c.label === 'impl:PROJ-900')
     ok(impl.prompt.startsWith('## Your memory') && impl.prompt.includes('App engineers always run the linter before DONE (2026-09-01).'), "the implementer brief opens with ITS agent's memory entries, verbatim")

@@ -6,7 +6,7 @@
     {
       "name": "grimoire",
       "source": "./",
-      "description": "The whole spellbook: roast · to-plan · to-issues · implement · review · crystallize · orchestrate · launch-agent · tdd · adaptive-replanning, with the scouts, the reviewer, the memory stores and the build loop."
+      "description": "The whole spellbook: roast · to-plan · to-issues · implement · review · crystallize · orchestrate · launch-agent · tdd · adaptive-replanning · logs, with the scouts, the specialists, the reviewer, the guard hook, the memory stores and the build loop."
     }
   ]
 }

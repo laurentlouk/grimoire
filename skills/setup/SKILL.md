@@ -8,7 +8,7 @@ description: First-run setup of the grimoire harness in an existing project. Use
 Everything the harness needs is derivable from the project except the decisions that are the owner's. Explore first, propose once, write on a yes.
 
 ## 0 · Migration mode
-If the project already carries copies of what the plugin ships — skills named like grimoire's (`roast`, `to-plan`, `to-issues`, `implement`, `review`, `crystallize`, `orchestrate`, `launch-agent`, `tdd`, `adaptive-replanning`, `setup`), agents named like grimoire's scouts and reviewer, a `.claude/workflows/` with `orchestrate-loop.js`, or a memory README — list them as **duplicates the plugin now provides** and propose deleting them, so a plugin update reaches the project without a second copy drifting. Keep anything project-specific: team-agent definitions, memory data files, stack skills, hooks, docs. Never delete without the user's yes.
+If the project already carries copies of what the plugin ships — skills named like grimoire's (`roast`, `to-plan`, `to-issues`, `implement`, `review`, `crystallize`, `orchestrate`, `launch-agent`, `tdd`, `adaptive-replanning`, `setup`, `logs`), agents named like grimoire's scouts, specialists and reviewer, a `.claude/workflows/` with `orchestrate-loop.js`, or a memory README — list them as **duplicates the plugin now provides** and propose deleting them, so a plugin update reaches the project without a second copy drifting. Keep anything project-specific: team-agent definitions, memory data files, stack skills, hooks, docs. Never delete without the user's yes.
 
 ## 1 · Explore (read-only, in one fan-out)
 
@@ -24,14 +24,20 @@ If the project already carries copies of what the plugin ships — skills named 
 Show the user a single proposal and ask for one yes, or corrections:
 
 - **Team agents**, one per repository, from `templates/team-agent.md`: name, stack line, the skills it owns (existing project skills plus any grimoire skill that fits), the gate it must never run, its default model. A team agent the project already has keeps its definition, but if it lacks the template's *Explore before asking; don't guess* section, propose appending it: the rule ships in the plugin's agents, briefs and skills, and the project's own agents must carry it too.
-- **`grimoire.config.json`** at the project root, for `/orchestrate`: `repos` (`{ name, path, agent, tags, gate: { run, stamp?, timeoutMin?, when? } | null, laneSetup?, prBy }`), `requireHook` (rtk, when installed), `baseBranch` if not `origin/main`, `memoryDir`, `runsDir`. Follow `grimoire.config.example.json` in the plugin.
+- **`grimoire.config.json`** at the project root, for `/orchestrate`: `repos` (`{ name, path, agent, tags, gate: { run, stamp?, when? } | null, timeoutMin?, laneSetup?, prBy }`), `requireHook` (rtk, when installed), `baseBranch` if not `origin/main`, `memoryDir`, `runsDir`. Follow `grimoire.config.example.json` in the plugin. Also propose:
+  - `specialists`: enable `migration-engineer` for repos that own a schema or migrations, and `test-engineer` where large parts of the code have no tests. Leave it out when neither applies.
+  - `maxOutputTokens`: a per-run cost cap. Propose one and say it is the user's call.
+  - `claim.identity`: only when the tracker has an account the loop can act as. The loop writes to the tracker, so it is off unless the user says yes.
+  - `telemetry`: the defaults (`.grimoire/runs`, 183 days of retention), and `.grimoire/` added to `.gitignore`.
+  - `guard`: the protected branches, when they are not `main`/`master`/`trunk`/`develop`/`release/*`. The plugin's guard hook reads this.
 - **Team pinning** in `.claude/settings.json`: `extraKnownMarketplaces.grimoire` (github `laurentlouk/grimoire`) and `enabledPlugins["grimoire@grimoire"] = true`, so every teammate who trusts the folder gets the plugin without prompts, and `/plugin update grimoire@grimoire` is the whole upgrade path.
-- **Memory stores**: `memory/harness.md` and `memory/agents/<agent>.md` per team agent plus the reviewer, seeded only with facts you actually found in the docs (dated, declarative, within the caps), never with guesses.
+- **Memory stores**: `memory/harness.md` and `memory/agents/<agent>.md` per team agent, per enabled specialist, plus the reviewer, seeded only with facts you actually found in the docs (dated, declarative, within the caps), never with guesses.
 - **Roster**: `AGENTS.md` with the rows filled in.
 - **Instructions**: the lines to add to `CLAUDE.md` (the `@memory/harness.md` import, the pointer to `AGENTS.md`). The explore-before-asking rule needs no `CLAUDE.md` line: it is built into every grimoire skill, scout, brief and the team-agent template.
 - **Docs**: `docs/specs/`, `docs/plans/`, `docs/crystallize/` if missing.
 - **rtk**: if installed but not registered for the project, the `PreToolUse(Bash)` hook entry (`rtk hook claude`) to add to `.claude/settings.json`; if not installed, the one-line install; either way the `requireHook` block for `/orchestrate` so an execute run refuses to dispatch without compression.
-- **Scouts**: which grimoire scouts apply (tracker-scout needs a tracker, design-scout a design tool, contract-checker a shared contract) and any project-specific scout worth adding.
+- **Scouts**: which grimoire scouts apply (tracker-scout needs a tracker, design-scout a design tool, contract-checker a shared contract; security-scout and perf-scout apply everywhere) and any project-specific scout worth adding.
+- **Guard hook**: the plugin's `PreToolUse` guard is on once the plugin is enabled. Say what it blocks, in one line (pushes to protected branches, recursive deletes outside the project, agent edits to `.claude/settings*.json` and `.claude/hooks/`), and how to turn it off (`guard.enabled: false`).
 
 State what you could not determine and what you assumed. Do not ask a question you could answer from the repository.
 

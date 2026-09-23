@@ -25,6 +25,9 @@ value statement), and per issue ONLY:
   (Canceled / Won't do / Duplicate) · started (In Progress / In Review) · todo (anything
   else). done/canceled issues are absorbed — counted as landed dependencies, never
   re-implemented.
+- `assignee` — only when the header says claims are ON: the tracker handle the issue is
+  assigned to, or "" when unassigned. A started issue assigned to someone else is never
+  built by this run.
 
 Do NOT fetch or return issue bodies, descriptions, or comments — a per-cycle hydration step
 does that just-in-time. Read-only; do not modify the tracker or any repo.

@@ -1,0 +1,48 @@
+[
+  {
+    "id": 1,
+    "query": "Why did the loop use opus on PROJ-12?",
+    "should_trigger": true,
+    "expected_output": "Reads grimoire.config.json for the telemetry dir, picks the run whose project or events mention PROJ-12 (saying which run it picked), greps that run's events/*.jsonl chunks (or its legacy events.jsonl) for PROJ-12's route and escalate events, and answers with the selector's reason, whether it was a fallback, and any escalation's from, to and reason, citing the seq numbers. Does not render the HTML page, because the user did not ask for it.",
+    "expectations": [
+      { "text": "Locates the run from the telemetry dir (telemetry.dir or .grimoire/runs) and names the run it used, instead of asking which run", "passed": null, "evidence": "" },
+      { "text": "Filters the run's events for PROJ-12's route and escalate events (reading events/*.jsonl chunks in name order, or events.jsonl on an older run)", "passed": null, "evidence": "" },
+      { "text": "Answers with the route event's reason and fallback flag, and any escalate event's from, to and reason, citing seq numbers", "passed": null, "evidence": "" },
+      { "text": "Does not render the HTML page", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "Open the run log for last night's run so I can browse it.",
+    "should_trigger": true,
+    "expected_output": "Finds the plugin root two directories above the SKILL.md, runs node <root>/scripts/render-logs.mjs from the project root (with --run <runId> for last night's run), takes the path it prints (default .grimoire/logs.html) and opens it locally with open or xdg-open. Does not publish, upload or share the page, because the log holds code details and review findings.",
+    "expectations": [
+      { "text": "Runs scripts/render-logs.mjs from the plugin root, optionally with --run set to the chosen run", "passed": null, "evidence": "" },
+      { "text": "Opens the printed file locally with open or xdg-open", "passed": null, "evidence": "" },
+      { "text": "Does not publish, upload or share the page, and says it stays local", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Review this PR before I merge it.",
+    "should_trigger": false,
+    "expected_output": "Reviewing a diff belongs to the review skill and the reviewer scout, not to the logs skill. The logs skill is not used: no events are read and no page is rendered.",
+    "expectations": [
+      { "text": "Does not use the logs skill; routes to review", "passed": null, "evidence": "" },
+      { "text": "No render-logs command is run and no telemetry file is read", "passed": null, "evidence": "" },
+      { "text": "Nothing is pruned or deleted", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Prune the old logs, but only keep 30 days.",
+    "should_trigger": true,
+    "expected_output": "Runs node <root>/scripts/render-logs.mjs prune --days 30 --dry-run first and shows what would go, then prune --days 30. Only run directories (holding run.json, events/ or events.jsonl) inside the telemetry dir are removed; the committed ledgers in runsDir and any other directory are untouched. Mentions telemetry.retentionDays in grimoire.config.json for a permanent change.",
+    "expectations": [
+      { "text": "Passes --days 30 to prune, rather than editing the default retention", "passed": null, "evidence": "" },
+      { "text": "Shows a --dry-run listing before deleting", "passed": null, "evidence": "" },
+      { "text": "Only run directories inside the telemetry dir are removed; committed ledgers and other directories are untouched", "passed": null, "evidence": "" },
+      { "text": "Mentions telemetry.retentionDays in grimoire.config.json as the way to make the retention permanent", "passed": null, "evidence": "" }
+    ]
+  }
+]
