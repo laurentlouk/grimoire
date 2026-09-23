@@ -26,9 +26,12 @@
 //   7 config     grimoire.config.example.json parses; every top-level key and repos[] key is
 //                documented as `key` in workflows/README.md; gate.timeoutMin is flagged (the
 //                engine reads timeoutMin at repo level).
+//   8 harness    .harness/mcp-policy.json keeps defaultDeny, auditLog, requireApprovalForDangerous;
+//                approvedServers == the .mcp.json servers; .harness/manifest.json is current.
 // Plain Node, no dependencies.
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { SURFACE, sha256 } from './harness-manifest.mjs'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const rel = (...p) => path.join(ROOT, ...p)
@@ -223,6 +226,17 @@ group('config · grimoire.config.example.json documented in workflows/README.md'
     if (r.gate && typeof r.gate === 'object' && 'timeoutMin' in r.gate) bad(`repos[${r.name ?? '?'}].gate.timeoutMin: the engine reads timeoutMin at repo level (repos[].timeoutMin), this one is ignored`)
   }
   for (const k of repoKeys) if (!documented(k)) bad(`repos[] key \`${k}\` is not documented in workflows/README.md`)
+})
+
+// ─────────────────────────── 8 · harness ───────────────────────────
+group('harness · .harness/ policy and manifest', (bad) => {
+  let policy, manifest, mcp, plugin
+  try { policy = JSON.parse(read('.harness', 'mcp-policy.json')); manifest = JSON.parse(read('.harness', 'manifest.json')); mcp = JSON.parse(read('.mcp.json')); plugin = JSON.parse(read('.claude-plugin', 'plugin.json')) } catch (e) { bad(e.message); return }
+  for (const k of ['defaultDeny', 'auditLog', 'requireApprovalForDangerous']) if (policy[k] !== true) bad(`.harness/mcp-policy.json: ${k} must be true`)
+  if (Object.keys(mcp.mcpServers || {}).sort().join() !== [...(policy.approvedServers || [])].sort().join()) bad('.harness/mcp-policy.json: approvedServers differs from the .mcp.json servers')
+  const stale = SURFACE.filter((f) => manifest.files?.[f] !== sha256(f))
+  if (manifest.version !== plugin.version) stale.push('version')
+  if (stale.length) bad(`.harness/manifest.json is stale (${stale.join(', ')}): npm run harness:manifest`)
 })
 
 // ─────────────────────────── report ───────────────────────────

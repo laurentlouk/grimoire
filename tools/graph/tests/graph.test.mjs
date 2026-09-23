@@ -196,6 +196,9 @@ ok(bad.result?.isError === true, 'tools/call: an unknown tool is an error result
 const unknown = await rpc(5, 'no/such/method', {})
 ok(unknown.error?.code === -32601, 'unknown methods get JSON-RPC -32601')
 mcp.kill()
+const calls = readFileSync(path.join(PROJ, '.grimoire/graph/calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+ok(calls.some((c) => c.tool === 'graph_callers' && c.ok === true && typeof c.ms === 'number') && calls.some((c) => c.tool === 'graph_nope' && c.ok === false), 'audit log: one line per tools/call, success and failure')
+ok(calls.every((c) => !('arguments' in c)), 'audit log: arguments are not logged')
 
 rmSync(SANDBOX, { recursive: true, force: true })
 console.log(`\n${PASS} passed, ${FAIL} failed`)

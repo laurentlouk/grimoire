@@ -138,6 +138,7 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`workflows/`](workflows/README.md) | `orchestrate-loop.js` (engine, tested), `briefs/` and `personas/` (everything a dispatched agent reads) |
 | [`hooks/`](hooks/README.md) | the session-start hint and the `PreToolUse` guard |
 | [`tools/graph/`](tools/graph/README.md) | the code graph: indexer, MCP server (`.mcp.json`) and CLI, research-only |
+| [`.harness/`](.harness/README.md) | the MCP policy and a manifest of the files that decide what agents may do; checked in CI |
 | [`scripts/`](scripts) · [`evals/`](evals/README.md) | the log renderer, the drift check CI runs, and the skill evals (`skills/*/evals/evals.json`, generated into `evals/` for `claude plugin eval`) |
 
 ## 🧪 Developing grimoire

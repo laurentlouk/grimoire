@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "harnessId": "grimoire",
+
+  "defaultDeny": true,
+  "approvedServers": ["graph"],
+
+  "allowShell": true,
+  "allowNetwork": true,
+  "allowFileWrite": true,
+
+  "requireApprovalForDangerous": true,
+  "auditLog": true,
+
+  "toolTimeoutMs": 600000,
+  "maxToolCallsPerTurn": 200,
+  "turnWindowMs": 60000,
+
+  "dangerousPatterns": [
+    "Bash\\(rm\\s+(-[a-zA-Z]*[rR]|--recursive)\\b",
+    "Bash\\(sudo\\b",
+    "Bash\\(curl.+\\|\\s*(sh|bash)\\b",
+    "Bash\\(git\\s+push\\b.*(--force|--mirror|--all)\\b",
+    "Bash\\(git\\s+push\\b.*\\b(main|master|trunk|develop)\\b",
+    "Bash\\(npm\\s+publish\\b",
+    "(Write|Edit|MultiEdit)\\(.*\\.claude/(settings(\\.local)?\\.json|hooks/)"
+  ],
+
+  "servers": {
+    "graph": {
+      "shell": "git ls-files / log / rev-parse (read-only); npm ci --ignore-scripts on the first index",
+      "network": "npm registry, first index only, integrity-checked against tools/graph/package-lock.json",
+      "fileWrite": [".grimoire/graph/", "<user cache>/grimoire/graph-deps/"],
+      "auditLog": ".grimoire/graph/calls.jsonl"
+    }
+  }
+}
