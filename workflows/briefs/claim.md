@@ -17,6 +17,12 @@ Mode **RELEASE** (the header says so), for each issue listed:
 2. Unassign it and move it back to the tracker's to-do (unstarted) state.
 3. Add one comment: that the automated run stopped short of it, and the reason in the header.
 
-Use your tracker's tool or MCP. Change nothing else — not the description, labels, links,
+Use the tracker's tools (see below). Change nothing else — not the description, labels, links,
 estimates, or any other issue. Return the ids you released, and under `failed` each id you
 could not update with the reason.
+
+## Which tracker tools
+If the header has a **Tracker tools** section, use exactly those tools. Otherwise prefer an
+authenticated connector over a server picked by its name; if a server reports that it needs
+authentication, search for the other tracker tools available (ToolSearch, by the tracker's
+name) and use one that works. Only when none works is it a problem to report.

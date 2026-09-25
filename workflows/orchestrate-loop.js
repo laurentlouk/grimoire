@@ -89,6 +89,21 @@ const repoTimeout = (repo) => {
 // the repo's owner or a specialist enabled for that repo — anything else falls back to the
 // owner, logged.
 let specialists = [] // [{agent, repos: ['*'] | [names], use}]
+
+// Plugin agent names. Installed as a plugin, the agents this repo ships in agents/*.md are
+// registered as `<plugin>:<name>` (e.g. `grimoire:reviewer`); a bare name is "not found" and
+// every such dispatch dies. {agentNamespace} (default 'grimoire') is the prefix; '' keeps bare
+// names for a project that copied agents/ into its own .claude/agents/. Repo/team agents and
+// project-defined specialists are never namespaced, and a name that already carries ':' is
+// used as given. Memory stays keyed by the bare name (`<memoryDir>/agents/reviewer.md`).
+const PLUGIN_AGENTS = ['codebase-scout', 'contract-checker', 'design-scout', 'migration-engineer', 'perf-scout', 'reference-scout', 'reviewer', 'security-scout', 'test-engineer', 'tracker-scout']
+let AGENT_NS = 'grimoire'
+let tracker = null // {kind, tools, note} — see trackerBlock
+const pluginAgent = (name) => (!name || name.includes(':') || !AGENT_NS ? name : `${AGENT_NS}:${name}`)
+// For names that may be either a plugin agent or a project agent (specialists, finalCheck).
+const resolveAgent = (name) => (PLUGIN_AGENTS.includes(name) ? pluginAgent(name) : name)
+// The memory-store key of an agent: its bare name (`grimoire:reviewer` → `reviewer`).
+const memName = (name) => (name ? name.slice(name.lastIndexOf(':') + 1) : name)
 const specialistsFor = (repo) => specialists.filter((s) => s.repos.includes('*') || s.repos.includes(repo))
 const MODELS = ['haiku', 'sonnet', 'opus']
 
@@ -462,8 +477,9 @@ Missing files/dirs are normal on a fresh harness — return empty values, never 
 // The "## Your memory" block pasted at the top of every brief, per agent.
 function memoryBlock(agent) {
   if (!agent) return ''
-  const entries = (agentMemory[agent] || '').trim()
-  return `## Your memory (\`${MEMORY_DIR}/agents/${agent}.md\` — curated facts from earlier PRs; binding unless the task contradicts them, then report the contradiction; you never write it)
+  const key = memName(agent)
+  const entries = (agentMemory[key] || '').trim()
+  return `## Your memory (\`${MEMORY_DIR}/agents/${key}.md\` — curated facts from earlier PRs; binding unless the task contradicts them, then report the contradiction; you never write it)
 ${entries || '(no entries yet)'}
 
 `
@@ -473,6 +489,14 @@ ${entries || '(no entries yet)'}
 // whole pipeline — the way repo agents get their own store.
 const harnessBlock = () => (harnessMemory.trim() ? `## Harness memory (\`${MEMORY_DIR}/harness.md\` — facts about this pipeline; you never write it)\n${harnessMemory.trim()}\n\n` : '')
 const brief = (name) => `## Brief\nYour FIRST action: Read \`${BRIEFS_DIR}/${name}.md\` — it is the binding rest of this brief (rules, definition of done, how to decide). The header below holds only what is specific to THIS dispatch.\nExplore before asking; don't guess: a fact discoverable in the design artifacts, docs, code, schemas, contracts, config or git history is looked up, never assumed and never asked.\n\n`
+// The configured tracker tools ({tracker:{kind?, tools, note?}}), pasted into the header of
+// every dispatch that reads or writes the tracker, so the agent uses the connector the caller
+// named instead of guessing a server by its name (an unauthenticated one refused a live run).
+// Unset: the briefs' own rule applies (prefer an authenticated connector, look for others).
+const trackerBlock = () =>
+  tracker
+    ? `## Tracker tools (configured for this run — use these, not a server picked by its name)\n${tracker.kind ? `- Kind: ${tracker.kind}\n` : ''}- Tools: \`${tracker.tools}\` (load them with ToolSearch)\n${tracker.note ? `- Note: ${tracker.note}\n` : ''}\n`
+    : ''
 const artifacts = () => `Design artifacts (in the orchestrating workspace, NOT inside a cloned repo): spec \`${specPath}\` · plan \`${planPath}\`.`
 const ticketTag = (task) => `[${task.ticket || 'NO_TICKET'}]`
 
@@ -507,7 +531,7 @@ ${contextQuestions.length ? contextQuestions.map((q) => `  - [${q.task}] ${q.que
 // Phase A: the slice index. The required-hook probe is DYNAMIC (execute runs only).
 function indexPrompt(project, specPath, planPath, hook, claimOn) {
   const repoList = [...repoConfig.values()].map((r) => `${r.name} (${r.path})`).join(' · ')
-  return `${brief('index')}- Approved spec (\`roast\`): ${specPath}
+  return `${brief('index')}${trackerBlock()}- Approved spec (\`roast\`): ${specPath}
 - Plan (\`to-plan\`): ${planPath}
 - Slice-tagged issues (\`to-issues\`): tracker project / parent ticket ${project}
 - Repos in this run — map every issue onto exactly one of these names: ${repoList}
@@ -538,7 +562,7 @@ function routingTable() {
 // the SELECTOR: it already reads each issue in full, so choosing agent × model there costs
 // no extra dispatch.
 function hydratePrompt(project, issues, learnings, claim) {
-  return `${harnessBlock()}${brief('hydrate')}${artifacts()} Tracker project ${project}.
+  return `${harnessBlock()}${brief('hydrate')}${trackerBlock()}${artifacts()} Tracker project ${project}.
 
 ## Fetch the FULL bodies of exactly these issues — no others
 ${issues.map((i) => `- ${i.id} (${i.repo}, slice ${i.slice ?? 0})${i.title ? ` — ${i.title}` : ''}`).join('\n')}
@@ -579,8 +603,8 @@ function implPrompt(task, fixFindings, resolved) {
   // whoever builds in it.
   const owner = agentFor(task.repo)
   const ownerFacts =
-    owner && agent !== owner && (agentMemory[owner] || '').trim()
-      ? `## Repo facts (\`${MEMORY_DIR}/agents/${owner}.md\` — the owning agent's memory; binding in this repo)\n${agentMemory[owner].trim()}\n\n`
+    owner && agent !== owner && (agentMemory[memName(owner)] || '').trim()
+      ? `## Repo facts (\`${MEMORY_DIR}/agents/${memName(owner)}.md\` — the owning agent's memory; binding in this repo)\n${agentMemory[memName(owner)].trim()}\n\n`
       : ''
   let out = `${memoryBlock(agent)}${ownerFacts}${brief('implement')}## Task (${task.id} · ${task.ticket || 'NO_TICKET'}) — from the plan, verbatim
 ${task.taskText}
@@ -780,7 +804,7 @@ echo "RUNDIR $DIR"
 
 // The CLAIM for issues a replan re-enters without hydration (hydration claims the rest).
 function claimPrompt(issues, identity) {
-  return `${brief('claim')}Mode: **CLAIM**. Tracker identity of this run: \`${identity}\`.
+  return `${brief('claim')}${trackerBlock()}Mode: **CLAIM**. Tracker identity of this run: \`${identity}\`.
 
 ## Claim these issues — a replan is about to build them
 ${issues.map((i) => `- ${i.id} (${i.repo})`).join('\n')}`
@@ -788,7 +812,7 @@ ${issues.map((i) => `- ${i.id} (${i.repo})`).join('\n')}`
 
 // The claim RELEASE — hand back tracker issues this run claimed but did not land.
 function releasePrompt(issues, identity, reason) {
-  return `${brief('claim')}Mode: **RELEASE**. Tracker identity of this run: \`${identity}\`.
+  return `${brief('claim')}${trackerBlock()}Mode: **RELEASE**. Tracker identity of this run: \`${identity}\`.
 
 ## Hand these issues back — they were claimed by this run and did not land
 ${issues.map((i) => `- ${i.id} (${i.repo}) — ${i.status}`).join('\n')}
@@ -808,7 +832,7 @@ function integratePrompt(task) {
 
 // The re-planner — A* from the CURRENT state when the scheduler is stuck.
 function replanPrompt({ goal, done, failures, blocked, learnings, replanNo, maxReplans }) {
-  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans}.
+  return `${harnessBlock()}${brief('replan')}${trackerBlock()}Replan ${replanNo}/${maxReplans}.
 
 ## Goal
 ${goal}
@@ -1145,6 +1169,13 @@ const resumeOpt = opts.resumeState && typeof opts.resumeState === 'object' ? opt
 // Tracker claims: {claim:{identity}} — claim issues at hydration, skip issues someone else
 // has started, hand back what this run claimed and did not land. OFF unless configured.
 const claim = opts.claim && typeof opts.claim === 'object' && str(opts.claim.identity) ? { identity: opts.claim.identity.trim() } : null
+// Tracker tools: {tracker:{kind?, tools, note?}} — which tools reach the tracker (e.g. an
+// authenticated connector with an opaque server id). Without `tools` there is nothing to point at.
+tracker = opts.tracker && typeof opts.tracker === 'object' && str(opts.tracker.tools)
+  ? { kind: str(opts.tracker.kind), tools: opts.tracker.tools.trim(), note: str(opts.tracker.note) }
+  : null
+// Plugin agent namespace (see pluginAgent): a string, '' for bare names; anything else → default.
+if (typeof opts.agentNamespace === 'string') AGENT_NS = opts.agentNamespace.trim().replace(/:+$/, '')
 
 // Paths — defaults are the repo layout, but a skill installed under .claude/skills/ can
 // point the brief/persona directories at wherever it landed.
@@ -1188,7 +1219,7 @@ specialists = Array.isArray(opts.specialists)
   ? opts.specialists
       .filter((s) => s && str(s.agent))
       .map((s) => ({
-        agent: s.agent.trim(),
+        agent: resolveAgent(s.agent.trim()),
         repos: Array.isArray(s.repos) && s.repos.length ? s.repos.filter((r) => typeof r === 'string') : ['*'],
         use: str(s.use) || '',
       }))
@@ -1374,7 +1405,7 @@ if (!execute) {
   const repoView = Object.fromEntries(
     repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null, prBy: prByGate(r.name) ? 'gate' : 'implementer' }]),
   )
-  return { preview: true, note: 'PREVIEW ONLY — index level (no hydration), no implementers ran. Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.', inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
+  return { preview: true, note: 'PREVIEW ONLY — index level (no hydration), no implementers ran. Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.', inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
 }
 
 // ═══════════════════════ 1 · per-task lifecycle ═══════════════════════
@@ -1412,7 +1443,7 @@ async function verifyFindings(task, mode, findings, range, attempt, phaseName) {
     label: `verify:${task.id}:${mode}#${attempt}`,
     phase: phaseName,
     model: 'sonnet',
-    agentType: 'reviewer',
+    agentType: pluginAgent('reviewer'),
     schema: VERIFY_SCHEMA,
   })
   if (!v || !Array.isArray(v.results)) {
@@ -1442,7 +1473,7 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
             label: `${p.id}:${task.id}${attempt ? `#${attempt}` : ''}`,
             phase: phaseName,
             model: 'sonnet',
-            agentType: 'reviewer',
+            agentType: pluginAgent('reviewer'),
             schema: VERDICT_SCHEMA,
           }).then((v) => (v ? { persona: p.name, v } : null)),
         ),
@@ -1527,7 +1558,7 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
         label: `guard:${task.id}#${attempt + 1}`,
         phase: phaseName,
         model: 'sonnet',
-        agentType: 'reviewer',
+        agentType: pluginAgent('reviewer'),
         schema: GUARD_SCHEMA,
       })
       emit('guard', { task: task.id, stage: mode, round: attempt + 1, decision: g ? g.decision : 'RE_REVIEW', reason: g ? g.reason : 'guard died — failing safe to the full panel' })
@@ -1563,7 +1594,7 @@ const SECURITY_Q = /\b(auth\w*|permissions?|roles?|secrets?|credentials?|csrf|xs
 const PERF_Q = /\b(latency|throughput|slow\w*|performance|perf|profil\w*|benchmarks?|hot ?path|n\+1|memory (?:leak|usage))\b/i
 // Contract first (a contract question is also often a security or perf one, and the contract
 // checker reads both sides), then security, then performance, else the codebase scout.
-const scoutFor = (q) => (CONTRACT_Q.test(q) ? 'contract-checker' : SECURITY_Q.test(q) ? 'security-scout' : PERF_Q.test(q) ? 'perf-scout' : 'codebase-scout')
+const scoutFor = (q) => pluginAgent(CONTRACT_Q.test(q) ? 'contract-checker' : SECURITY_Q.test(q) ? 'security-scout' : PERF_Q.test(q) ? 'perf-scout' : 'codebase-scout')
 // Rung telemetry. A high `asked` means the SPEC was underspecified — that is a signal for
 // roast/to-issues, not a fault of this rung. `escalated` is what actually reached a human.
 const contextResolves = { asked: 0, answered: 0, escalated: 0, questions: [] }
@@ -1701,7 +1732,7 @@ async function runTask(task) {
         phase: 'Spec review',
         model: 'haiku',
         effort: 'low',
-        agentType: 'reviewer',
+        agentType: pluginAgent('reviewer'),
         schema: PRECHECK_SCHEMA,
       })
       const problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
@@ -1766,7 +1797,7 @@ async function runTask(task) {
 // memory — the agent definitions still tell each agent to read its own file.
 {
   const repos = [...new Set(pendingIndex.map((i) => i.repo).filter(Boolean))]
-  const agents = [...new Set([...repoList.map((r) => r.agent), ...specialists.map((sp) => sp.agent), 'reviewer'])]
+  const agents = [...new Set([...repoList.map((r) => r.agent), ...specialists.map((sp) => sp.agent), 'reviewer'].map(memName))]
   const ctx = await step('harness context — memory stores + prior run ledgers', () =>
     agentT(harnessContextPrompt(project, repos, agents), {
       label: 'harness-context',
@@ -1968,6 +1999,8 @@ const downstreamOf = (() => {
 function routeTask(t, cycle) {
   const owner = agentFor(t.repo)
   const allowed = [owner, ...specialistsFor(t.repo).map((sp) => sp.agent)].filter(Boolean)
+  // A bare pick of a plugin specialist (`migration-engineer`) means its registered name.
+  if (t.agent && !allowed.includes(t.agent) && allowed.includes(resolveAgent(t.agent))) t.agent = resolveAgent(t.agent)
   let fallback = false
   if (!allowed.includes(t.agent)) {
     if (t.agent) {
@@ -2410,7 +2443,7 @@ phase('Final pass')
 const touched = new Set(doneTasks.map((t) => t.repo))
 const finalCheck =
   opts.finalCheck && typeof opts.finalCheck === 'object' && typeof opts.finalCheck.prompt === 'string' && opts.finalCheck.prompt.trim()
-    ? { repos: Array.isArray(opts.finalCheck.repos) ? opts.finalCheck.repos : [], prompt: opts.finalCheck.prompt, agentType: typeof opts.finalCheck.agentType === 'string' ? opts.finalCheck.agentType : 'contract-checker' }
+    ? { repos: Array.isArray(opts.finalCheck.repos) ? opts.finalCheck.repos : [], prompt: opts.finalCheck.prompt, agentType: resolveAgent(str(opts.finalCheck.agentType) || 'contract-checker') }
     : null
 let contract = null
 if (finalCheck && finalCheck.repos.every((r) => touched.has(r))) {

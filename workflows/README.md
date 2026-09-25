@@ -114,6 +114,8 @@ as they go, and its terminal slot ends at the quality sweep.
 | `verifyFindings` | `true` | verify each gating finding against the code before a fix is bought (`false` disables) |
 | `escalateAtFixRound` | `2` | from this fix round on, the implementer runs on opus whatever tier was chosen (`0` disables) |
 | `specialists` | `[]` | `[{agent, repos: ['*'] \| [names], use}]` — implementers the selector may route a repo's tasks to instead of its owner |
+| `agentNamespace` | `'grimoire'` | the prefix of the plugin-shipped agents (`agents/*.md`): the reviewer, the scouts, the `finalCheck` default and plugin specialists dispatch as `<ns>:<name>` (`grimoire:reviewer`). `''` keeps bare names, for a project that copied `agents/` into its own `.claude/agents/`. Repo/team agents, project-defined specialists and names that already contain `:` are used as given; memory stays at `agents/<bare name>.md` |
+| `tracker` | — | `{kind?, tools, note?}` — the tools that reach the tracker, e.g. `{kind: 'linear', tools: 'mcp__<server-id>__*', note: 'the claude.ai Linear connector'}`. Pasted into the header of every dispatch that reads or writes the tracker (index · hydrate · claim/release · replan) so it uses that connector instead of a server picked by its name. Unset, those briefs prefer an authenticated connector and look for other tracker tools before reporting a problem |
 | `maxOutputTokens` | — | cost fuse: this run's output tokens, counted across resumed sessions; reaching it halts as `budget_exhausted` |
 | `budgetFloor` | `80000` | stop dispatching when the turn's remaining token budget drops below this |
 | `claim` | — | `{identity}` — claim issues at hydration, never build one someone else started, release what did not land |

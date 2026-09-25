@@ -12,8 +12,8 @@ docs/plans/x.md does not exist — run to-plan first"). NEVER invent an index fr
 inputs.
 
 ## Then return the SLICE INDEX — lightweight, NO issue bodies
-Using your tracker's tool or MCP (Jira, Linear, GitHub Issues, or whatever this project
-uses), list ALL slice-tagged issues for the project — the WHOLE project, however many slices
+Using the tracker's tools (Jira, Linear, GitHub Issues, or whatever this project uses; see
+"Which tracker tools" below), list ALL slice-tagged issues for the project — the WHOLE project, however many slices
 it has. Return every slice in ascending order with its `slice` number and `sliceLabel` (the
 value statement), and per issue ONLY:
 - `id` (the tracker identifier, e.g. PROJ-123) and `title`
@@ -31,3 +31,10 @@ value statement), and per issue ONLY:
 
 Do NOT fetch or return issue bodies, descriptions, or comments — a per-cycle hydration step
 does that just-in-time. Read-only; do not modify the tracker or any repo.
+
+## Which tracker tools
+If the header has a **Tracker tools** section, use exactly those tools. Otherwise prefer an
+authenticated connector over a server picked by its name; if a server reports that it needs
+authentication, search for the other tracker tools available (ToolSearch, by the tracker's
+name) and use one that works. Only when none works is it an `inputProblems` entry; never
+refuse the run over one unauthenticated server.
