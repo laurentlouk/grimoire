@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "grimoire",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "host": "claude-code",
   "files": {
     ".harness/mcp-policy.json": "6ed274eb105556410a08835aff94971f678bdc86d6541aea83ac42209f75f010",

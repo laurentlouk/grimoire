@@ -165,10 +165,10 @@ const learning = (label) => {
     return PASSV
   }, { extraArgs: { ...QUIET, specialists: [{ agent: 'migration-engineer', repos: ['api'], use: 'schema and data migrations' }] } })
   const impl = calls.find((c) => c.label === 'impl:PROJ-1')
-  ok(impl.opts.agentType === 'migration-engineer' && impl.opts.model === 'sonnet', 'agentType = the specialist, model = sonnet')
+  ok(impl.opts.agentType === 'grimoire:migration-engineer' && impl.opts.model === 'sonnet', 'agentType = the specialist (plugin-namespaced), model = sonnet')
   const hyd = calls.find((c) => c.label.startsWith('hydrate:'))
-  ok(/specialists: `migration-engineer` \(schema and data migrations\)/.test(hyd.prompt), 'hydration is shown the specialist for that repo')
-  ok(result.routing.byAgent['migration-engineer'] === 1 && result.routing.fallbacks === 0, 'routing stats record the pick')
+  ok(/specialists: `grimoire:migration-engineer` \(schema and data migrations\)/.test(hyd.prompt), 'hydration is shown the specialist for that repo')
+  ok(result.routing.byAgent['grimoire:migration-engineer'] === 1 && result.routing.fallbacks === 0, 'routing stats record the pick')
 }
 {
   const ROGUE = { ...TASK, agent: 'migration-engineer', model: 'haiku' }
@@ -230,7 +230,7 @@ const learning = (label) => {
     if (label.startsWith('resolve:')) { asked.push(opts.agentType); return { answered: true, answer: 'x at a.ts:1' } }
     return PASSV
   }, { extraArgs: { ...QUIET, maxContextResolves: 4 } })
-  ok(JSON.stringify(asked) === JSON.stringify(['contract-checker', 'security-scout', 'perf-scout', 'codebase-scout']), `contract · security · perf · codebase (got ${asked.join(', ')})`)
+  ok(JSON.stringify(asked) === JSON.stringify(['grimoire:contract-checker', 'grimoire:security-scout', 'grimoire:perf-scout', 'grimoire:codebase-scout']), `contract · security · perf · codebase (got ${asked.join(', ')})`)
 }
 
 // ── 5 · the cost fuse ──
