@@ -98,7 +98,7 @@ let specialists = [] // [{agent, repos: ['*'] | [names], use}]
 // used as given. Memory stays keyed by the bare name (`<memoryDir>/agents/reviewer.md`).
 const PLUGIN_AGENTS = ['codebase-scout', 'contract-checker', 'design-scout', 'migration-engineer', 'perf-scout', 'reference-scout', 'reviewer', 'security-scout', 'test-engineer', 'tracker-scout']
 let AGENT_NS = 'grimoire'
-let tracker = null // {kind, tools, note} — see trackerBlock
+let toolHints = {} // capability → hint, e.g. {tracker: 'mcp__abc__* (Linear)'} — see toolHintsBlock
 const pluginAgent = (name) => (!name || name.includes(':') || !AGENT_NS ? name : `${AGENT_NS}:${name}`)
 // For names that may be either a plugin agent or a project agent (specialists, finalCheck).
 const resolveAgent = (name) => (PLUGIN_AGENTS.includes(name) ? pluginAgent(name) : name)
@@ -488,15 +488,18 @@ ${entries || '(no entries yet)'}
 // Orchestrator-level dispatches (hydrate, replan) get the HARNESS memory — facts about the
 // whole pipeline — the way repo agents get their own store.
 const harnessBlock = () => (harnessMemory.trim() ? `## Harness memory (\`${MEMORY_DIR}/harness.md\` — facts about this pipeline; you never write it)\n${harnessMemory.trim()}\n\n` : '')
-const brief = (name) => `## Brief\nYour FIRST action: Read \`${BRIEFS_DIR}/${name}.md\` — it is the binding rest of this brief (rules, definition of done, how to decide). The header below holds only what is specific to THIS dispatch.\nExplore before asking; don't guess: a fact discoverable in the design artifacts, docs, code, schemas, contracts, config or git history is looked up, never assumed and never asked.\n\n`
-// The configured tracker tools ({tracker:{kind?, tools, note?}}), pasted into the header of
-// every dispatch that reads or writes the tracker, so the agent uses the connector the caller
-// named instead of guessing a server by its name (an unauthenticated one refused a live run).
-// Unset: the briefs' own rule applies (prefer an authenticated connector, look for others).
-const trackerBlock = () =>
-  tracker
-    ? `## Tracker tools (configured for this run — use these, not a server picked by its name)\n${tracker.kind ? `- Kind: ${tracker.kind}\n` : ''}- Tools: \`${tracker.tools}\` (load them with ToolSearch)\n${tracker.note ? `- Note: ${tracker.note}\n` : ''}\n`
-    : ''
+// Every dispatch is framed by the same preamble: explore before asking, and the generic
+// fallback when a tool is unavailable — a live run refused to start because the agent tried
+// one unauthenticated tracker server while an authenticated connector for the same thing was
+// connected. The rule is capability-generic (tracker, design, errors, anything).
+const TOOL_FALLBACK = `When a tool or MCP server you need fails (not authenticated, not connected, missing, erroring), do not stop at the first one. Find another route to the same capability, in order: (1) the tool hints below for that capability, if any; (2) any other available server or connector offering it (ToolSearch by capability keywords: "issue list", "jira", "linear", "figma", "error tracking"…); (3) a CLI or API already authenticated on this machine (\`gh\`, \`glab\`, \`jira\`, \`linear\`, \`curl\` with existing credentials; never ask for or type credentials); (4) only then report it, naming every route tried and the fix (e.g. "authorize connector X"). Never refuse a whole run over one unauthenticated server while another route works.`
+const brief = (name) => `## Brief\nYour FIRST action: Read \`${BRIEFS_DIR}/${name}.md\` — it is the binding rest of this brief (rules, definition of done, how to decide). The header below holds only what is specific to THIS dispatch.\nExplore before asking; don't guess: a fact discoverable in the design artifacts, docs, code, schemas, contracts, config or git history is looked up, never assumed and never asked.\n${TOOL_FALLBACK}\n\n${toolHintsBlock()}`
+// {toolHints:{<capability>: <hint>}} — which tools reach a capability in THIS project (e.g. an
+// authenticated connector with an opaque server id). Short, so every dispatch gets all of them.
+const toolHintsBlock = () => {
+  const e = Object.entries(toolHints)
+  return e.length ? `## Tool hints (configured for this run — try these first for each capability)\n${e.map(([k, v]) => `- ${k}: ${v}`).join('\n')}\n\n` : ''
+}
 const artifacts = () => `Design artifacts (in the orchestrating workspace, NOT inside a cloned repo): spec \`${specPath}\` · plan \`${planPath}\`.`
 const ticketTag = (task) => `[${task.ticket || 'NO_TICKET'}]`
 
@@ -531,7 +534,7 @@ ${contextQuestions.length ? contextQuestions.map((q) => `  - [${q.task}] ${q.que
 // Phase A: the slice index. The required-hook probe is DYNAMIC (execute runs only).
 function indexPrompt(project, specPath, planPath, hook, claimOn) {
   const repoList = [...repoConfig.values()].map((r) => `${r.name} (${r.path})`).join(' · ')
-  return `${brief('index')}${trackerBlock()}- Approved spec (\`roast\`): ${specPath}
+  return `${brief('index')}- Approved spec (\`roast\`): ${specPath}
 - Plan (\`to-plan\`): ${planPath}
 - Slice-tagged issues (\`to-issues\`): tracker project / parent ticket ${project}
 - Repos in this run — map every issue onto exactly one of these names: ${repoList}
@@ -562,7 +565,7 @@ function routingTable() {
 // the SELECTOR: it already reads each issue in full, so choosing agent × model there costs
 // no extra dispatch.
 function hydratePrompt(project, issues, learnings, claim) {
-  return `${harnessBlock()}${brief('hydrate')}${trackerBlock()}${artifacts()} Tracker project ${project}.
+  return `${harnessBlock()}${brief('hydrate')}${artifacts()} Tracker project ${project}.
 
 ## Fetch the FULL bodies of exactly these issues — no others
 ${issues.map((i) => `- ${i.id} (${i.repo}, slice ${i.slice ?? 0})${i.title ? ` — ${i.title}` : ''}`).join('\n')}
@@ -804,7 +807,7 @@ echo "RUNDIR $DIR"
 
 // The CLAIM for issues a replan re-enters without hydration (hydration claims the rest).
 function claimPrompt(issues, identity) {
-  return `${brief('claim')}${trackerBlock()}Mode: **CLAIM**. Tracker identity of this run: \`${identity}\`.
+  return `${brief('claim')}Mode: **CLAIM**. Tracker identity of this run: \`${identity}\`.
 
 ## Claim these issues — a replan is about to build them
 ${issues.map((i) => `- ${i.id} (${i.repo})`).join('\n')}`
@@ -812,7 +815,7 @@ ${issues.map((i) => `- ${i.id} (${i.repo})`).join('\n')}`
 
 // The claim RELEASE — hand back tracker issues this run claimed but did not land.
 function releasePrompt(issues, identity, reason) {
-  return `${brief('claim')}${trackerBlock()}Mode: **RELEASE**. Tracker identity of this run: \`${identity}\`.
+  return `${brief('claim')}Mode: **RELEASE**. Tracker identity of this run: \`${identity}\`.
 
 ## Hand these issues back — they were claimed by this run and did not land
 ${issues.map((i) => `- ${i.id} (${i.repo}) — ${i.status}`).join('\n')}
@@ -832,7 +835,7 @@ function integratePrompt(task) {
 
 // The re-planner — A* from the CURRENT state when the scheduler is stuck.
 function replanPrompt({ goal, done, failures, blocked, learnings, replanNo, maxReplans }) {
-  return `${harnessBlock()}${brief('replan')}${trackerBlock()}Replan ${replanNo}/${maxReplans}.
+  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans}.
 
 ## Goal
 ${goal}
@@ -1169,11 +1172,17 @@ const resumeOpt = opts.resumeState && typeof opts.resumeState === 'object' ? opt
 // Tracker claims: {claim:{identity}} — claim issues at hydration, skip issues someone else
 // has started, hand back what this run claimed and did not land. OFF unless configured.
 const claim = opts.claim && typeof opts.claim === 'object' && str(opts.claim.identity) ? { identity: opts.claim.identity.trim() } : null
-// Tracker tools: {tracker:{kind?, tools, note?}} — which tools reach the tracker (e.g. an
-// authenticated connector with an opaque server id). Without `tools` there is nothing to point at.
-tracker = opts.tracker && typeof opts.tracker === 'object' && str(opts.tracker.tools)
-  ? { kind: str(opts.tracker.kind), tools: opts.tracker.tools.trim(), note: str(opts.tracker.note) }
-  : null
+// Tool hints: {toolHints:{capability: hint}}, free-form strings, all optional. The older
+// {tracker:{kind?, tools, note?}} still works and becomes toolHints.tracker (unless set).
+toolHints = Object.fromEntries(
+  Object.entries(opts.toolHints && typeof opts.toolHints === 'object' ? opts.toolHints : {})
+    .filter(([k, v]) => str(k) && str(v))
+    .map(([k, v]) => [k.trim(), v.trim()]),
+)
+if (!toolHints.tracker && opts.tracker && typeof opts.tracker === 'object' && str(opts.tracker.tools)) {
+  const extra = [str(opts.tracker.kind), str(opts.tracker.note)].filter(Boolean).join(' — ')
+  toolHints.tracker = `${opts.tracker.tools.trim()}${extra ? ` (${extra})` : ''}`
+}
 // Plugin agent namespace (see pluginAgent): a string, '' for bare names; anything else → default.
 if (typeof opts.agentNamespace === 'string') AGENT_NS = opts.agentNamespace.trim().replace(/:+$/, '')
 

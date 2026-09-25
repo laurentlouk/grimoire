@@ -1,7 +1,7 @@
 # Brief · hydrate — turn this cycle's ready issues into executable tasks
 
 Fetch the FULL bodies of exactly the issues listed in the header — no others — from your
-issue tracker (see "Which tracker tools" below).
+issue tracker (use its tool or MCP).
 
 For each issue return one task. Set `id` to the tracker identifier EXACTLY as listed (e.g.
 PROJ-123) — NEVER a plan-style slice.task number like 1.1; the scheduler matches on it — and
@@ -55,9 +55,3 @@ task rather than leaving a gap the implementer must guess at or ask about; repor
 `inputProblems` only what neither the artifacts nor the code settle. Read-only; do not modify
 the tracker or any repo — except when the header has a CLAIM section: then assign exactly the
 listed issues and move them to in-progress, nothing else.
-
-## Which tracker tools
-If the header has a **Tracker tools** section, use exactly those tools. Otherwise prefer an
-authenticated connector over a server picked by its name; if a server reports that it needs
-authentication, search for the other tracker tools available (ToolSearch, by the tracker's
-name) and use one that works. Only when none works is it a problem to report.

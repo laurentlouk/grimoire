@@ -29,9 +29,3 @@ Always return `learnings`: the durable lesson(s) this failure taught, phrased so
 can apply them — they are folded into every later hydration AND into the run ledger that the
 next run reads. Read-only PLANNING — do NOT modify any repo or the tracker. Prefer REVISE; HALT
 only when truly stuck.
-
-## Which tracker tools (only if you need to read an issue)
-If the header has a **Tracker tools** section, use exactly those tools. Otherwise prefer an
-authenticated connector over a server picked by its name; if a server reports that it needs
-authentication, search for the other tracker tools available (ToolSearch, by the tracker's
-name) and use one that works. Only when none works is it a problem to report.

@@ -11,7 +11,7 @@
   "maxOutputTokens": 4000000,
   "telemetry": { "enabled": true, "dir": ".grimoire/runs", "retentionDays": 183 },
   "claim": { "identity": "grimoire-bot" },
-  "tracker": { "kind": "linear", "tools": "mcp__<server-id>__*", "note": "the authenticated claude.ai Linear connector; ignore unauthenticated linear servers" },
+  "toolHints": { "tracker": "mcp__<server-id>__* (Linear, the authenticated claude.ai connector)", "design": "mcp__<server-id>__* (Figma)", "errors": "the error tracker CLI (already authenticated)" },
   "specialists": [
     { "agent": "migration-engineer", "repos": ["api"], "use": "schema and data migrations, expand/contract steps" },
     { "agent": "test-engineer", "repos": ["*"], "use": "putting untested code under test before changing it" }

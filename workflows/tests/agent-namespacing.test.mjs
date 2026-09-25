@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  Plugin agent names + the tracker tool hint — orchestrate-loop.js
+//  Plugin agent names + the generic tool-unavailable fallback — orchestrate-loop.js
 // ════════════════════════════════════════════════════════════════════════════
 //
 //  Run:  node workflows/tests/agent-namespacing.test.mjs
@@ -21,8 +21,9 @@
 //      and a bare pick of a plugin specialist is normalized, not bounced to the owner
 //    • memory stays keyed by the bare name (`agents/reviewer.md`, `agents/migration-engineer.md`)
 //    • the engine's plugin-agent list matches agents/*.md
-//    • `tracker` is pasted verbatim into every tracker-touching header (index · hydrate ·
-//      claim · release · replan) and is absent when not configured
+//    • every dispatch's framing carries ONE generic tool-unavailable fallback (any capability,
+//      not just the tracker); `toolHints` render as a `## Tool hints` block when set, are absent
+//      otherwise, and the legacy `tracker.tools` maps to the tracker hint
 //
 //  Same stubbed runtime as harness-v06.test.mjs.
 import { readFileSync, readdirSync } from 'node:fs'
@@ -193,67 +194,80 @@ const REVIEW_PREFIXES = ['precheck:', 'spec-hawk:', 'break-it:', 'verify:', 'gua
   eq(listed, shipped, 'every shipped agent is known to the resolver, and nothing else')
 }
 
-// ══════ 6 · the tracker tool hint ══════
-const TRACKER = { kind: 'linear', tools: 'mcp__055f8362-1877__*', note: 'the claude.ai Linear connector — authenticated' }
-const HINT = [
-  '## Tracker tools (configured for this run — use these, not a server picked by its name)',
-  '- Kind: linear',
-  '- Tools: `mcp__055f8362-1877__*` (load them with ToolSearch)',
-  '- Note: the claude.ai Linear connector — authenticated',
-].join('\n')
-{
-  // PROJ-7 sits behind PROJ-8, so hydration never sees it and the replan re-enters it (claim#);
-  // PROJ-9 blocks on every attempt → release-claims at the end.
+// ══════ 6 · the generic tool-unavailable fallback + tool hints ══════
+// Written out here, not imported: the test pins the exact text every agent is framed with.
+const FALLBACK = 'When a tool or MCP server you need fails (not authenticated, not connected, missing, erroring), do not stop at the first one. Find another route to the same capability, in order: (1) the tool hints below for that capability, if any; (2) any other available server or connector offering it (ToolSearch by capability keywords: "issue list", "jira", "linear", "figma", "error tracking"…); (3) a CLI or API already authenticated on this machine (`gh`, `glab`, `jira`, `linear`, `curl` with existing credentials; never ask for or type credentials); (4) only then report it, naming every route tried and the fix (e.g. "authorize connector X"). Never refuse a whole run over one unauthenticated server while another route works.'
+// A run that reaches every dispatch kind: index, hydrate, a scout (NEEDS_CONTEXT), implement,
+// precheck, review, replan, claim (a replan re-enters a never-hydrated issue), integrate,
+// release (PROJ-9 never lands), ledger, crystallize.
+function allKindsRun(label, extraArgs) {
   const A = { ...API_TASK, id: 'PROJ-8', ticket: 'PROJ-8', files: ['src/h.ts'] }
   const B = { ...API_TASK, id: 'PROJ-7', ticket: 'PROJ-7', dependsOn: ['PROJ-8'], files: ['src/g.ts'] }
   const C = { ...API_TASK, id: 'PROJ-9', ticket: 'PROJ-9', repo: 'mobile', agent: 'app-engineer', files: ['app/z.tsx'] }
-  let a = 0
-  let rp = 0
-  const responder = (label) => {
-    if (label === 'harness-context') return EMPTY_CTX
-    if (label === 'impl:PROJ-8') return a++ === 0 ? { status: 'BLOCKED', summary: 'x' } : IMPL_OK
-    if (label === 'impl:PROJ-9') return { status: 'BLOCKED', summary: 'needs a human' }
-    if (label.startsWith('impl:')) return IMPL_OK
-    if (label.startsWith('replan')) return rp++ === 0
+  let a = 0, rp = 0, q = 0
+  return run(label, [A, B, C], (l) => {
+    if (l === 'harness-context') return EMPTY_CTX
+    if (l === 'impl:PROJ-8') return a++ === 0 ? { status: 'BLOCKED', summary: 'x' } : IMPL_OK
+    if (l === 'impl:PROJ-9') return { status: 'BLOCKED', summary: 'needs a human' }
+    if (l === 'impl:PROJ-7') return q++ === 0 ? { status: 'NEEDS_CONTEXT', summary: 'q', question: 'Where is the retry helper?' } : IMPL_OK
+    if (l.startsWith('resolve:')) return { answered: true, answer: 'src/retry.ts:1' }
+    if (l.startsWith('precheck:')) return { verdict: 'PASS', problems: [] }
+    if (l.startsWith('replan')) return rp++ === 0
       ? { decision: 'REVISE', reason: 'split', learnings: [], tasks: [{ ...A, taskText: 'retry' }, { ...B, dependsOn: [] }] }
       : { decision: 'HALT', reason: 'needs a human', learnings: [] }
-    if (label.startsWith('claim#')) return { released: ['PROJ-7'] }
-    if (label === 'release-claims') return { released: ['PROJ-9'] }
-    if (label.startsWith('integrate:')) return { status: 'MERGED', headSha: 'ccccccc' }
+    if (l.startsWith('claim#')) return { released: ['PROJ-7'] }
+    if (l === 'release-claims') return { released: ['PROJ-9'] }
+    if (l.startsWith('integrate:')) return { status: 'MERGED', headSha: 'ccccccc' }
     return PASSV
-  }
-  const TRACKER_LABELS = ['parse-index', 'hydrate:', 'claim#', 'replan#', 'release-claims']
-  const base = { precheck: false, verifyFindings: false, claim: { identity: 'grimoire-bot' } }
-  const withHint = await run('T1 · tracker set → its hint is in every tracker-touching header', [A, B, C], responder, { ...base, tracker: TRACKER })
-  for (const p of TRACKER_LABELS) {
-    const hits = withHint.calls.filter((c) => c.label.startsWith(p))
-    ok(hits.length > 0 && hits.every((c) => c.prompt.includes(HINT)), `${p} carries the tracker hint verbatim (${hits.length} dispatch(es))`)
-  }
-  const nonTracker = withHint.calls.filter((c) => /^(impl|spec-hawk|integrate|ledger|crystallize|harness-context):?/.test(c.label))
-  ok(nonTracker.length > 0 && nonTracker.every((c) => !c.prompt.includes('## Tracker tools')), 'dispatches that never touch the tracker do not carry it')
-
-  a = 0; rp = 0
-  const without = await run('T2 · tracker unset → no hint anywhere', [A, B, C], responder, base)
-  for (const p of TRACKER_LABELS) {
-    const hits = without.calls.filter((c) => c.label.startsWith(p))
-    ok(hits.length > 0 && hits.every((c) => !c.prompt.includes('## Tracker tools')), `${p} has no tracker block`)
-  }
+  }, { verifyFindings: false, claim: { identity: 'grimoire-bot' }, ...extraArgs })
+}
+const KIND = (l) => l.replace(/[:#].*$/, '')
+const REQUIRED_KINDS = ['parse-index', 'hydrate', 'resolve', 'impl', 'precheck', 'spec-hawk', 'replan', 'claim', 'integrate', 'release-claims', 'ledger']
+{
+  const { calls } = await allKindsRun('F1 · every dispatch kind is framed with the same generic fallback', {})
+  const kinds = [...new Set(calls.map((c) => KIND(c.label)))]
+  ok(REQUIRED_KINDS.every((k) => kinds.includes(k)), `the run reached every sampled kind (got ${kinds.join(', ')})`)
+  // harness-context is a plain file-read loader with no brief; every briefed dispatch gets the rule.
+  const briefed = calls.filter((c) => c.label !== 'harness-context')
+  const missing = briefed.filter((c) => !c.prompt.includes(`don't guess: a fact discoverable in the design artifacts, docs, code, schemas, contracts, config or git history is looked up, never assumed and never asked.\n${FALLBACK}\n\n`))
+  eq(missing.map((c) => c.label), [], 'every briefed dispatch carries the fallback right after the explore-before-asking preamble')
+  ok(briefed.every((c) => !c.prompt.includes('## Tool hints')), 'no tool-hints block when none is configured')
 }
 {
-  const { calls } = await run('T3 · a tracker without tools is ignored (nothing to point at)', [API_TASK], (label) => {
+  const HINTS = { tracker: 'mcp__055f8362__* (Linear, claude.ai connector)', design: 'mcp__f2c5fb33__* (Figma)', errors: '   ', bogus: 7 }
+  const BLOCK = '## Tool hints (configured for this run — try these first for each capability)\n- tracker: mcp__055f8362__* (Linear, claude.ai connector)\n- design: mcp__f2c5fb33__* (Figma)\n\n'
+  const { calls } = await allKindsRun('H1 · toolHints render in every dispatch header (blank / non-string hints dropped)', { toolHints: HINTS })
+  const briefed = calls.filter((c) => c.label !== 'harness-context')
+  eq(briefed.filter((c) => !c.prompt.includes(`${FALLBACK}\n\n${BLOCK}`)).map((c) => c.label), [], 'every briefed dispatch carries the exact hint block right after the fallback')
+}
+{
+  const { calls } = await run('H2 · legacy tracker.tools maps to the tracker hint', [API_TASK], (label) => {
     if (label === 'harness-context') return EMPTY_CTX
     if (label.startsWith('impl:')) return IMPL_OK
     return PASSV
-  }, { precheck: false, verifyFindings: false, tracker: { kind: 'linear' } })
-  ok(!calls.find((c) => c.label === 'parse-index').prompt.includes('## Tracker tools'), 'no block without a tools pattern')
+  }, { precheck: false, verifyFindings: false, tracker: { kind: 'linear', tools: 'mcp__abc__*', note: 'authenticated connector' } })
+  ok(calls.find((c) => c.label === 'parse-index').prompt.includes('## Tool hints (configured for this run — try these first for each capability)\n- tracker: mcp__abc__* (linear — authenticated connector)\n\n'), 'rendered as "- tracker: <tools> (<kind> — <note>)"')
 }
 {
-  const { calls } = await run('T4 · kind and note are optional', [API_TASK], (label) => {
+  const { calls } = await run('H3 · an explicit toolHints.tracker wins over the legacy key; tools-only legacy has no suffix', [API_TASK], (label) => {
+    if (label === 'harness-context') return EMPTY_CTX
+    if (label.startsWith('impl:')) return IMPL_OK
+    return PASSV
+  }, { precheck: false, verifyFindings: false, toolHints: { tracker: 'jira CLI' }, tracker: { tools: 'mcp__abc__*' } })
+  const p = calls.find((c) => c.label === 'parse-index').prompt
+  ok(p.includes('## Tool hints (configured for this run — try these first for each capability)\n- tracker: jira CLI\n\n') && !p.includes('mcp__abc__*'), 'toolHints.tracker is used, the legacy one ignored')
+  const { calls: c2 } = await run('H4 · legacy tracker with tools only', [API_TASK], (label) => {
     if (label === 'harness-context') return EMPTY_CTX
     if (label.startsWith('impl:')) return IMPL_OK
     return PASSV
   }, { precheck: false, verifyFindings: false, tracker: { tools: 'mcp__abc__*' } })
-  ok(calls.find((c) => c.label === 'parse-index').prompt.includes('## Tracker tools (configured for this run — use these, not a server picked by its name)\n- Tools: `mcp__abc__*` (load them with ToolSearch)\n\n'), 'only the tools line is written')
+  ok(c2.find((c) => c.label === 'parse-index').prompt.includes('\n- tracker: mcp__abc__*\n\n'), 'no empty parentheses')
+  const { calls: c3 } = await run('H5 · a legacy tracker without tools adds nothing', [API_TASK], (label) => {
+    if (label === 'harness-context') return EMPTY_CTX
+    if (label.startsWith('impl:')) return IMPL_OK
+    return PASSV
+  }, { precheck: false, verifyFindings: false, tracker: { kind: 'linear' } })
+  ok(!c3.find((c) => c.label === 'parse-index').prompt.includes('## Tool hints'), 'no block')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)

@@ -32,6 +32,10 @@ skills in all but name and evolve the same way. Personas (review lenses) live in
 `per task` is the selector's pick (haiku, sonnet or opus; opus when unset), escalated to opus
 from the configured fix round and for every replanned task.
 
+Every header also opens with a shared preamble the engine prepends: explore before asking, and
+the tool-unavailable fallback (configured tool hint → another server or connector with the same
+capability → an already-authenticated CLI or API → report every route tried).
+
 Nothing here names a language, framework, tracker or CI system: anything stack-specific
 arrives in the header the JS builds from `args` (the repo's checkout path, its gate command,
 its agent). Rule for editing: a change here changes every future run. Keep each file
