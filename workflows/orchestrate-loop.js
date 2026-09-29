@@ -384,7 +384,12 @@ const PRECHECK_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { file: { type: 'string' }, line: { type: 'integer' }, issue: { type: 'string' } },
+        properties: {
+          check: { type: 'string', enum: ['change', 'conflict', 'stub', 'tests', 'footprint', 'stray', 'ancestry'], description: 'which check of the brief failed' },
+          file: { type: 'string' },
+          line: { type: 'integer' },
+          issue: { type: 'string' },
+        },
       },
       description: 'one entry per failed check from the brief; empty on PASS',
     },
@@ -597,7 +602,10 @@ function implPrompt(task, fixFindings, resolved) {
   \`\`\`${cfg.laneSetup ? `\n  Lane setup for this repo: ${cfg.laneSetup.replace(/<lane>/g, `${WORKTREE_DIR}/${wtName(task)}`)}` : ''}
   Commit to \`${task.laneBranch}\` ONLY — no merge into \`${task.runBranch}\`, no push, no PR (this overrides the PR rule in the brief).
 `
-      : ''
+      : task.lane === 'direct' && task.runBranch
+        ? `- **RUN BRANCH \`${task.runBranch}\`** — every task of this repo in this run lands on it, so commit there: check it out if it exists (it already holds the work earlier tasks landed), otherwise create it off \`${BASE_BRANCH}\`. Never start another branch: work committed anywhere else is never integrated.
+`
+        : ''
   const gate = gateOf(task.repo)
   const gated = prByGate(task.repo)
     ? `- GATED REPO: the PR is opened by the gate dispatch at PROJECT END. Do NOT run \`gh pr create\` here${gate && gate.run ? `, and do NOT run the repo gate (\`${gate.run}\`)` : ''}; commit everything and return.\n`
@@ -743,7 +751,22 @@ ${declared}
 ## Files the implementer reported changing
 ${reported}
 
-${rangeBlock(task, range)}`
+${rangeBlock(task, range)}${ancestryBlock(task, range)}`
+}
+// A direct task commits straight onto the run branch, so its head MUST be reachable from it —
+// a head that is not was committed on a stray branch and would settle DONE without ever being
+// integrated. Lanes are exempt: their integrate step is what puts them on the run branch.
+function ancestryBlock(task, range) {
+  if (task.lane !== 'direct' || !task.runBranch) return ''
+  const head = (range && range.headSha) || 'HEAD'
+  return `
+
+## On the run branch (check 7)
+This task commits directly onto the run branch \`${task.runBranch}\`. Verify it:
+\`\`\`bash
+git -C ${repoPath(task.repo)} merge-base --is-ancestor ${head} ${task.runBranch}
+\`\`\`
+A non-zero exit is a FAIL with \`check: "ancestry"\`: the work is on another branch and would never be integrated.`
 }
 
 // The finding VERIFIER — one dispatch per failing review round, before any fix is bought.
@@ -2240,8 +2263,13 @@ while (true) {
             t.laneBranch = `${runBranch}--${String(t.id).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
             t.branch = t.laneBranch // implementer, reviewers and fix dispatches all look at the lane
           } else {
+            // A direct task works ON the run branch, never on its own: hydration fills
+            // `branch` from the tracker's per-issue branch name, and a task committed there
+            // "lands" without ever reaching the branch its dependents, the sweep and the gate
+            // build on (only lanes have an integrate step). The tracker name may only SEED the
+            // run branch's name (runBranchFor, first task of the repo).
             t.lane = 'direct'
-            t.branch = t.branch || runBranch
+            t.branch = runBranch
             t.runBranch = runBranch
           }
         }

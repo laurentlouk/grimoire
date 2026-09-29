@@ -224,7 +224,9 @@ next run reads. See the `adaptive-replanning` skill.
 
 **Parallelism comes from declared files.** `dependsOn` decides what is *ready*; declared
 `files` decide what may run *together* in one repo. Disjoint footprints get their own worktree
-lane; overlap, or an undeclared footprint, is held until the conflict clears. Lane merges into
+lane; overlap, or an undeclared footprint, is held until the conflict clears. A task running
+alone in its repo works directly on the repo's run branch — never on its tracker branch, whose
+name only seeds the run branch's. Lane merges into
 the repo's single run branch are serialized, and a merge conflict is a first-class
 `MERGE_CONFLICT` failure routed to the replanner — a reviewed diff is never silently
 rewritten.
@@ -234,7 +236,8 @@ rewritten.
 **Precheck.** Between the implementer and the first review, one haiku dispatch
 (`briefs/precheck.md`) checks that there is something reviewable: a commit range, a non-empty
 diff, no conflict or stub markers added, tests moved with behaviour, no undeclared files, no
-stray artifacts. A FAIL goes back to the same implementer (`maxPrecheckFixes`), before any
+stray artifacts, and — for a task committed directly onto the run branch — that its head is
+reachable from that branch, so work on a stray branch fails fast instead of settling DONE. A FAIL goes back to the same implementer (`maxPrecheckFixes`), before any
 reviewer is paid. A dead precheck passes through — it is an optimisation, not a gate.
 
 **Finding verification.** Every failing review round sends its gating findings to one sonnet

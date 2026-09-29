@@ -28,9 +28,12 @@ already settled there.
   a way to silence the compiler.
 
 ## Working rules
-- Never work on the default branch. Append commits to the repo's EXISTING open PR for this
-  ticket; don't open a duplicate. The PR title carries the ticket, e.g. `[PROJ-123] …`. (A
-  parallel lane or a gated repo overrides this — the header says so.)
+- Never work on the default branch. Work on the branch the header names: every task of a
+  repo in one run lands on its ONE run branch, so when the header says RUN BRANCH, check that
+  branch out and commit there — never start a branch of your own (it would never be
+  integrated). Append commits to the EXISTING open PR for that branch (an earlier task of the
+  run may have opened it); don't open a duplicate. The PR title carries the ticket, e.g.
+  `[PROJ-123] …`. (A parallel lane or a gated repo overrides the PR rule — the header says so.)
 - **Explore before asking; don't guess.** If a fact is discoverable in the design artifacts,
   the docs, the code, schemas, contracts, config or git history, find it yourself before
   asking, and never state a discoverable fact as a guess. Only decisions the owner holds
