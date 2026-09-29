@@ -248,7 +248,7 @@ for (const maxPrecheckFixes of [1, 3]) {
   ok(result.halt && /^reviewers unavailable/.test(result.halt.reason) && /grimoire:reviewer/.test(result.halt.reason), `the halt names the reviewers (got: ${result.halt && result.halt.reason})`)
   eq(result.needsAttention.map((r) => [r.id, r.status]), [['PROJ-1', 'REVIEWERS_UNAVAILABLE']], 'the task is REVIEWERS_UNAVAILABLE, never SPEC_FAILED')
   eq(result.blocked.map((b) => b.id), ['PROJ-2'], 'its dependent never ran')
-  ok(logs.some((m) => /retrying the round/.test(m)), 'the retry is logged')
+  ok(logs.some((m) => /reviewer\(s\) returned nothing — Spec Hawk; retrying them/.test(m)), 'the retry is logged, naming the lens')
 }
 {
   let n = 0
@@ -270,6 +270,26 @@ for (const maxPrecheckFixes of [1, 3]) {
   ok(!labels.some((l) => l.startsWith('replan')) && result.halt && /^reviewers unavailable/.test(result.halt.reason), 'halted on the reviewers, no replan')
   eq(result.needsAttention.map((r) => [r.id, r.status]), [['api:final', 'REVIEWERS_UNAVAILABLE']], 'the terminal slot is REVIEWERS_UNAVAILABLE')
   eq(result.ungatedRepos, ['api'], 'the repo is reported ungated')
+}
+
+{
+  let n = 0
+  const { result, labels } = await run('5d · ONE of two quality reviewers dead twice → REVIEWERS_UNAVAILABLE naming its lens (fail closed)', [T('PROJ-1')], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    if (label.startsWith('break-it:')) return null
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'should never be asked', learnings: [] }
+    return PASSV
+  }, { extraArgs: QUIET })
+  eq(labels.filter((l) => /^(break-it|data-integrity):/.test(l)), ['data-integrity:PROJ-1', 'break-it:PROJ-1', 'break-it:PROJ-1~r1'], 'only the missing persona is retried')
+  eq(result.needsAttention.map((r) => [r.id, r.status]), [['PROJ-1', 'REVIEWERS_UNAVAILABLE']], 'the stage does not pass on the surviving reviewer')
+  ok(result.halt && /Adversarial QA & Integrity/.test(result.halt.reason) && !/Eventing/.test(result.halt.reason), `the halt names the missing lens only (got: ${result.halt && result.halt.reason})`)
+  const again = await run('5e · the missing reviewer answers on its retry → the stage proceeds', [T('PROJ-1')], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    if (label.startsWith('break-it:')) return n++ === 0 ? null : PASSV
+    return PASSV
+  }, { extraArgs: QUIET })
+  eq(again.labels.filter((l) => /^(break-it|data-integrity):/.test(l)), ['data-integrity:PROJ-1', 'break-it:PROJ-1', 'break-it:PROJ-1~r1'], 'one retry of the missing persona')
+  eq(again.result.done.map((d) => [d.id, d.status]), [['PROJ-1', 'DONE']], 'landed')
 }
 
 // ══════ 6 · a replanned task escalates to opus only after a CODE failure ══════

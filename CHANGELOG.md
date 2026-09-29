@@ -19,9 +19,10 @@ brief-level and stack-agnostic.
 - **Agent preflight** (`preflight`, default on). Before any hydration or implementer, every
   agent type the run can dispatch answers one trivial haiku prompt; any that returns nothing
   refuses the run as `agents_unavailable`, naming the types.
-- **Dead reviewers are a harness failure.** When every reviewer of a stage returns nothing,
-  the round is retried once, then the run halts as `reviewers unavailable`
-  (`REVIEWERS_UNAVAILABLE`): no replan spent, no code marked failed.
+- **Dead reviewers are a harness failure.** A reviewer that returns nothing is retried once
+  (only the missing persona); if any required lens is still absent the stage fails closed and
+  the run halts as `reviewers unavailable` (`REVIEWERS_UNAVAILABLE`), naming the lens: no
+  replan spent, no code marked failed, and no stage passes on its surviving reviewers.
 - **Escalation only for code failures.** A replanned task moves to opus only when its last
   failure was code-kind; harness failures (dead agent, merge conflict, footprint or ancestry
   precheck, reviewers unavailable) keep the selector's tier. The replanner is told which

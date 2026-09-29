@@ -222,9 +222,10 @@ panel's job.
 stuck, the replanner searches from the current state rather than restarting the original plan,
 and returns `learnings` that are folded into every later hydration and into the run ledger the
 next run reads. See the `adaptive-replanning` skill. A harness failure is not code
-information: when every reviewer of a stage returns nothing, the round is retried once and
-the run then halts as `reviewers unavailable` — no replan is spent and the task is reported
-`REVIEWERS_UNAVAILABLE`, never as failed review.
+information: when a reviewer of a stage returns nothing, that persona alone is retried once;
+if any lens is still missing, the stage fails closed and the run halts as `reviewers
+unavailable`, naming the lens — no replan is spent and the task is reported
+`REVIEWERS_UNAVAILABLE`, never as failed review and never passed on the surviving reviewers.
 
 **Parallelism comes from declared files.** `dependsOn` decides what is *ready*; declared
 `files` decide what may run *together* in one repo. Disjoint footprints get their own worktree

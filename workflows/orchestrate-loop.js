@@ -1568,10 +1568,10 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
   log(`   · ${task.id} (${task.repo}): ${mode} review — ${personas.length} reviewer(s)…`)
   let aggregate = null
   for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-    const round = async (retry) =>
+    const round = async (who, retry) =>
       (
         await parallel(
-          personas.map((p) => () =>
+          who.map((p) => () =>
             agentT(reviewPrompt(task, mode, p, range), {
               label: `${p.id}:${task.id}${attempt ? `#${attempt}` : ''}${retry ? `~r${retry}` : ''}`,
               phase: phaseName,
@@ -1582,16 +1582,21 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
           ),
         )
       ).filter(Boolean)
-    let reviews = await round(0)
-    // EVERY reviewer returning nothing says nothing about the code — the reviewer agent is not
-    // dispatching (unresolvable type, outage, spend limit). Booking it as a failed stage bought
-    // replans for correct code; retry the round, then report UNAVAILABLE so the run halts.
-    for (let retry = 1; !reviews.length && retry <= REVIEWER_RETRIES; retry++) {
-      log(`⚠ ${task.id}: every ${mode} reviewer returned nothing — retrying the round (${retry}/${REVIEWER_RETRIES})`)
-      reviews = await round(retry)
+    const reviews = await round(personas, 0)
+    // A reviewer returning nothing says nothing about the code — the agent is not dispatching
+    // (unresolvable type, outage, spend limit). Booking it as a failed stage bought replans for
+    // correct code; and a stage that PASSES on its surviving reviewers skipped a lens it
+    // requires. So: retry only the missing personas, and if any is still absent the stage is
+    // UNAVAILABLE (fail closed) and the run halts, naming the missing lens(es).
+    const missing = () => personas.filter((p) => !reviews.some((r) => r.persona === p.name))
+    for (let retry = 1; missing().length && retry <= REVIEWER_RETRIES; retry++) {
+      log(`⚠ ${task.id}: ${mode} reviewer(s) returned nothing — ${missing().map((p) => p.name).join(', ')}; retrying them (${retry}/${REVIEWER_RETRIES})`)
+      reviews.push(...(await round(missing(), retry)))
     }
-    if (reviews.length === 0)
-      return { verdict: 'UNAVAILABLE', findings: [], advisory: [], summary: `every ${mode} reviewer (${personas.map((p) => p.name).join(', ')}) returned nothing, ${REVIEWER_RETRIES + 1} time(s)` }
+    if (missing().length) {
+      for (const p of missing()) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: attempt })
+      return { verdict: 'UNAVAILABLE', findings: [], advisory: [], summary: `the ${mode} lens(es) ${missing().map((p) => p.name).join(', ')} returned nothing, ${REVIEWER_RETRIES + 1} time(s)` }
+    }
 
     for (const r of reviews)
       emit('review', { task: task.id, stage: mode, persona: r.persona, verdict: r.v.verdict, gating: (r.v.findings || []).filter(isGating).length, advisory: (r.v.findings || []).filter((f) => !isGating(f)).length, round: attempt })
