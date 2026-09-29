@@ -117,6 +117,33 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
   ok(/branch feat\/proj-600-api\b/.test(s2.prompt('impl:PROJ-2')), "session 2's implementer is told that branch")
 }
 
+// ══════ 1d · one PR per repo run branch, pushed and opened at project end — gate or not ══════
+// Lanes and the integrate step never push, so an ungated repo whose implementers "opened PRs as
+// they went" ended the run with unpushed local merges. Every repo's terminal slot now pushes the
+// run branch and opens (or updates) its ONE PR; implementers never push or open PRs.
+{
+  const I = (id, extra) => T(id, { repo: 'infra', agent: 'infra-engineer', ...extra })
+  const D = I('PROJ-10', { files: ['main.tf — base'] })
+  const L1 = I('PROJ-11', { files: ['a.tf — a'], dependsOn: ['PROJ-10'] })
+  const L2 = I('PROJ-12', { files: ['b.tf — b'], dependsOn: ['PROJ-10'] })
+  const { result, calls, labels } = await run('1d · ungated repo: a direct task + two lanes → exactly one push/PR dispatch at the end', [D, L1, L2], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    if (label.startsWith('integrate:')) return { status: 'MERGED', headSha: 'ccccccc' }
+    if (label.startsWith('gate:')) return { status: 'DONE', summary: 'pushed, PR open', prUrl: 'https://x/infra/pull/1' }
+    return PASSV
+  }, { extraArgs: QUIET })
+  const impls = calls.filter((c) => c.label.startsWith('impl:'))
+  eq(impls.map((c) => [c.label, /PARALLEL LANE/.test(c.prompt)]), [['impl:PROJ-10', false], ['impl:PROJ-11', true], ['impl:PROJ-12', true]], 'one direct task, then two lanes')
+  ok(impls.every((c) => /PR: opened ONCE, at PROJECT END/.test(c.prompt) && /Do NOT push and do NOT run `gh pr create`/.test(c.prompt)), 'no implementer pushes or opens a PR')
+  const pr = calls.filter((c) => c.label.startsWith('gate:'))
+  eq(pr.map((c) => c.label), ['gate:infra'], 'exactly one terminal push/PR dispatch')
+  ok(labels.indexOf('gate:infra') > labels.findIndex((l) => l.startsWith('reliability-sre:infra:final')), 'after the terminal sweep')
+  ok(/git -C repositories\/infra push -u origin feat\/proj-600-infra/.test(pr[0].prompt) && /gh pr create/.test(pr[0].prompt) && /There is no gate command for this repo/.test(pr[0].prompt), 'it pushes the run branch and opens the PR, no gate command')
+  eq(result.prs.map((p) => [p.repo, p.pr]), [['infra', 'https://x/infra/pull/1']], 'one PR for the repo')
+  const brief = readFileSync(`${DIR}/briefs/implement.md`, 'utf8')
+  ok(!/EXISTING open PR/.test(brief) && /never push/i.test(brief), 'the implement brief no longer tells implementers to open or append to PRs')
+}
+
 // ══════ 2 · the review range starts where the implementer STARTED ══════
 {
   let spec = 0
@@ -292,13 +319,13 @@ for (const maxPrecheckFixes of [1, 3]) {
   const { result, labels, prompt } = await run('8a · a gated implementer returns DONE_PENDING_GATE → landed, dependents unblock, the gate ships', [A, B, C], (label) => {
     if (label.startsWith('impl:PROJ-3')) return impl('ccccccc')
     if (label.startsWith('impl:')) return impl('aaaaaaa', { status: 'DONE_PENDING_GATE' })
-    if (label.startsWith('gate:')) return { status: 'DONE', summary: 'gate green, PR open', prUrl: 'https://x/pr/9' }
+    if (label.startsWith('gate:')) return { status: 'DONE', summary: 'gate green, PR open', prUrl: `https://x/${label.slice(5)}/pr/9` }
     return PASSV
   }, { extraArgs: { ...QUIET, repos: GATED } })
   ok(labels.includes('impl:PROJ-2'), 'the dependent was dispatched')
   eq(result.done.map((d) => [d.id, d.status]).sort(), [['PROJ-1', 'DONE_PENDING_GATE'], ['PROJ-2', 'DONE_PENDING_GATE'], ['PROJ-3', 'DONE']], 'all three land')
   eq(result.needsAttention, [], 'nothing needs attention')
-  eq(result.prs.map((p) => p.pr), ['https://x/pr/9'], 'the gate ran and opened the PR')
+  eq(result.prs.map((p) => p.pr).sort(), ['https://x/api/pr/9', 'https://x/infra/pr/9'], 'the gate ran and opened the PR (and the ungated repo got its PR from its slot)')
   ok(/return \*\*DONE_PENDING_GATE\*\*/.test(prompt('impl:PROJ-1')), 'the gated implementer is told to return DONE_PENDING_GATE')
   ok(!/DONE_PENDING_GATE/.test(prompt('impl:PROJ-3')), 'an ungated implementer is not')
 }
@@ -336,7 +363,7 @@ for (const maxPrecheckFixes of [1, 3]) {
     return PASSV
   }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
   const briefed = calls.filter((c) => /## Brief\nYour FIRST action/.test(c.prompt))
-  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'spec-hawk'], 'the briefed dispatch kinds of this run')
+  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'spec-hawk'], 'the briefed dispatch kinds of this run')
   eq(briefed.filter((c) => !c.prompt.includes(`\n${UNATTENDED}\nExplore before asking`)).map((c) => c.label), [], 'each carries the boundary, right before the explore-before-asking rule')
 }
 

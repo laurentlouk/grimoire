@@ -1,4 +1,4 @@
-# Brief · gate — run the repo's gate ONCE on the final tree, then open the PR
+# Brief · gate — run the repo's gate ONCE on the final tree (if it has one), then push and open the PR
 
 Every code change of this run in this repo is already committed AND has passed every per-task
 review plus the repo's terminal quality sweep — the WHOLE project's task queue is drained.
@@ -19,10 +19,12 @@ command, and the stamp file it writes.
    step (rebuilding a vendored artifact, say), do that first and commit the result — the gate
    certifies what is committed, not your sources.
    **If it does NOT apply**, do not run it — there is nothing for it to certify. Go to step 3.
-3. Open the PR with `gh pr create` (or your forge's equivalent), ticket in the title, using a
+3. Push the run branch exactly as the header gives it. Nothing earlier in the run pushed it:
+   lanes and integrations are local, and implementers never push.
+4. Open the PR with `gh pr create` (or your forge's equivalent), ticket in the title, using a
    literal absolute `cd /path/to/checkout && …` so any pre-commit hook reads the command's own
-   arguments. If a PR is already open for this ticket, push to it instead of opening a
-   duplicate.
+   arguments. This is the repo's ONE PR for the run branch: if a PR is already open for the
+   branch, the push updated it — do not open a duplicate.
 
 ## Hard rules
 - This is the ONLY gate run for this repo in this run — the review fixes are already in the

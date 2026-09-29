@@ -69,16 +69,17 @@ let TELEMETRY_DIR = DEFAULT_TELEMETRY_DIR
 const DEFAULT_BASE_BRANCH = 'origin/main' // the integration branch every lane, range and sweep diffs against
 let BASE_BRANCH = DEFAULT_BASE_BRANCH
 
-// repo name → { name, path, agent, tags, gate, prBy, timeoutMin, laneSetup }
+// repo name → { name, path, agent, tags, gate, timeoutMin, laneSetup }
 let repoConfig = new Map()
 const repoCfg = (repo) => repoConfig.get(repo) || null
 const agentFor = (repo) => (repoCfg(repo) || {}).agent || null
 const repoPath = (repo) => (repoCfg(repo) || {}).path || `${DEFAULT_REPO_ROOT}/${repo}`
 const tagsOf = (repo) => (repoCfg(repo) || {}).tags || []
 const gateOf = (repo) => (repoCfg(repo) || {}).gate || null
-// Who opens this repo's PR: the terminal GATE dispatch (default when the repo has a gate)
-// or the implementer, per ticket, as it goes (default when it does not).
-const prByGate = (repo) => ((repoCfg(repo) || {}).prBy || (gateOf(repo) ? 'gate' : 'implementer')) === 'gate'
+// Whether the repo has a gate COMMAND to run at project end. Every repo's PR — gated or not —
+// is pushed and opened once, by its terminal slot: lanes and the integrate step never push, so
+// PRs opened per ticket by implementers left an ungated repo's run with unpushed local merges.
+const hasGateCommand = (repo) => !!(gateOf(repo) && gateOf(repo).run)
 const repoTimeout = (repo) => {
   const v = (repoCfg(repo) || {}).timeoutMin
   return Number.isFinite(v) && v > 0 ? v : undefined
@@ -630,9 +631,8 @@ function implPrompt(task, fixFindings, resolved) {
 `
         : ''
   const gate = gateOf(task.repo)
-  const gated = prByGate(task.repo)
-    ? `- GATED REPO: the PR is opened by the gate dispatch at PROJECT END. Do NOT run \`gh pr create\` here${gate && gate.run ? `, and do NOT run the repo gate (\`${gate.run}\`)` : ''}; commit everything and return **DONE_PENDING_GATE** when the task is done (the pending gate is not a concern: keep DONE_WITH_CONCERNS for real ones).\n`
-    : ''
+  const gated = hasGateCommand(task.repo)
+  const prRule = `- PR: opened ONCE, at PROJECT END, by this repo's terminal slot, which pushes the run branch. Do NOT push and do NOT run \`gh pr create\` here${gated ? `, and do NOT run the repo gate (\`${gate.run}\`) — GATED REPO: return **DONE_PENDING_GATE** when the task is done (the pending gate is not a concern: keep DONE_WITH_CONCERNS for real ones)` : ''}; commit everything and return.\n`
   // A specialist also gets the OWNER's memory: those facts are about the repo, and they bind
   // whoever builds in it.
   const owner = agentFor(task.repo)
@@ -655,7 +655,7 @@ ${task.successCriteria || '(tests pass + the steps above)'}
 
 ## This dispatch
 - Repo: ${path}; branch ${task.branch || `(create the feature branch off ${BASE_BRANCH})`}; base branch \`${BASE_BRANCH}\` (your \`baseSha\` = \`git merge-base ${BASE_BRANCH} HEAD\`); PR title tag ${ticketTag(task)}.
-${lane}${gated}- ${rawOutputRule()}
+${lane}${prRule}- ${rawOutputRule()}
 - Return the structured status (DONE / DONE_WITH_CONCERNS${gated ? ' / DONE_PENDING_GATE' : ''} / NEEDS_CONTEXT / BLOCKED) with baseSha · startSha · commits · headSha.`
   // Answers the resolver already fetched for THIS task, carried into every later dispatch
   // so a re-dispatched implementer never re-asks what has been settled.
@@ -705,7 +705,8 @@ function gatePrompt(task, gate, hits) {
         : ' There is no gate command for this repo — go straight to the PR.'
   }
 - ${rawOutputRule()}
-- Then \`gh pr create\` with the ticket in the title, using a literal absolute \`cd /path/to/checkout && …\`.`
+- Push the run branch — nothing earlier in the run pushed it (lanes and integrations are local): \`git -C ${repoPath(task.repo)} push -u origin ${task.branch}\`.
+- Then \`gh pr create\` with the ticket in the title, using a literal absolute \`cd /path/to/checkout && …\` — or, when a PR is already open for \`${task.branch}\`, the push has updated it: do not open a duplicate.`
 }
 
 function reviewPrompt(task, mode, persona, range) {
@@ -1292,7 +1293,7 @@ const requireHook =
     : null
 
 // ── repo configuration: the ONLY place a stack enters this workflow ──
-// [{ name, path?, agent, tags?, gate?, prBy?, timeoutMin?, laneSetup? }]
+// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup? }]
 const repoList = Array.isArray(opts.repos)
   ? opts.repos
       .filter((r) => r && typeof r.name === 'string' && r.name.trim() && typeof r.agent === 'string' && r.agent.trim())
@@ -1302,12 +1303,13 @@ const repoList = Array.isArray(opts.repos)
         agent: r.agent.trim(),
         tags: Array.isArray(r.tags) ? r.tags.filter((t) => typeof t === 'string') : [],
         gate: r.gate && typeof r.gate === 'object' ? r.gate : null,
-        prBy: r.prBy === 'gate' || r.prBy === 'implementer' ? r.prBy : undefined,
         timeoutMin: Number.isFinite(r.timeoutMin) ? r.timeoutMin : undefined,
         laneSetup: typeof r.laneSetup === 'string' ? r.laneSetup : undefined,
       }))
   : []
 repoConfig = new Map(repoList.map((r) => [r.name, r]))
+// `prBy` is gone (0.8.0): every repo's PR is pushed and opened by its terminal slot.
+if (Array.isArray(opts.repos) && opts.repos.some((r) => r && r.prBy !== undefined)) log('⚠ repos[].prBy is ignored since 0.8.0 — every repo\'s run branch is pushed and its one PR opened by its terminal slot')
 specialists = Array.isArray(opts.specialists)
   ? opts.specialists
       .filter((s) => s && str(s.agent))
@@ -1389,7 +1391,7 @@ const missingInputs = [
   !specPath && 'specPath — the approved spec from `roast` (docs/specs/<file>.md)',
   !planPath && 'planPath — the plan from `to-plan` (docs/plans/<file>.md)',
   !project && 'project — the slice-tagged tracker project / parent ticket from `to-issues`',
-  !repoList.length && 'repos — [{name, path?, agent, tags?, gate?, prBy?}] for every repo this project touches',
+  !repoList.length && 'repos — [{name, path?, agent, tags?, gate?}] for every repo this project touches',
 ].filter(Boolean)
 if (missingInputs.length) {
   log(`⛔ not started — missing input(s): ${missingInputs.map((m) => m.split(' — ')[0]).join(', ')}`)
@@ -1502,7 +1504,7 @@ if (!execute) {
     [...new Set(pendingIndex.map((i) => i.repo))].map((repo) => [repo, { spec: panelFor(repo, 'spec').map((p) => p.name), quality: panelFor(repo, 'quality').map((p) => p.name), terminal: panelFor(repo, 'terminal').map((p) => p.name) }]),
   )
   const repoView = Object.fromEntries(
-    repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null, prBy: prByGate(r.name) ? 'gate' : 'implementer' }]),
+    repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null }]),
   )
   return { preview: true, note: 'PREVIEW ONLY — index level (no hydration), no implementers ran. Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.', inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
 }
@@ -2023,7 +2025,7 @@ const deferred = [] // tasks hydration or a replan marked deferred (blocked on d
 const landedIds = new Set(alreadyDoneIds) // satisfied dependencies: absorbed + landed this run
 const pendingById = new Map(pendingIndex.map((i) => [i.id, i])) // id → index entry still to run
 const hydratedById = new Map() // id → full task, from hydration or a replan REVISE
-const gateDone = new Set() // repos whose terminal slot (sweep + gate/PR where gated) already succeeded
+const gateDone = new Set() // repos whose terminal slot (sweep → gate where configured → push + PR) already succeeded
 const gateHold = new Set() // repos whose terminal slot FAILED — held until a replan lands new repo work, else the drained project re-dispatches the same failing slot forever
 const repoRef = {} // repo → {ticket, branch} from its most recent landed task (briefs the terminal slot)
 // The ONE run branch every task of a repo lands on (lanes merge into it). DETERMINISTIC from the
@@ -2252,7 +2254,7 @@ function settle(r) {
       // `failures` would keep feeding the replanner a problem that no longer exists.
       // Matched by repo, not id: a `:final` failure is resolved by a later `:gate` pass.
       for (let fi; (fi = failures.findIndex((f) => f.repo === r.repo && (f.status === 'GATE_FAILED' || f.status === 'TERMINAL_REVIEW_FAILED'))) >= 0; ) failures.splice(fi, 1)
-      log(`   · ${r.repo}: terminal slot green${prByGate(r.repo) ? ' (sweep + gate)' : ' (sweep)'}${r.prUrl ? ` · ${r.prUrl}` : ''}`)
+      log(`   · ${r.repo}: terminal slot green${hasGateCommand(r.repo) ? ' (sweep + gate + PR)' : ' (sweep + PR)'}${r.prUrl ? ` · ${r.prUrl}` : ''}`)
     }
     return
   }
@@ -2278,7 +2280,7 @@ function settle(r) {
   }
 }
 
-// ── the repo's TERMINAL slot: quality sweep first, then (where configured) gate + PR ──
+// ── the repo's TERMINAL slot: quality sweep first, then (where configured) the gate, then push + PR ──
 // The sweep runs BEFORE the gate so any sweep-fix commit lands before a gate stamp is
 // paid — a commit after the stamp would staleness its tree hash.
 async function terminalSlot(repo) {
@@ -2288,10 +2290,6 @@ async function terminalSlot(repo) {
   if (terminal.verdict === 'UNAVAILABLE') return { id: ft.id, repo, gateStep: true, status: 'REVIEWERS_UNAVAILABLE', review: terminal }
   if (terminal.verdict !== 'PASS')
     return { id: ft.id, repo, gateStep: true, status: 'TERMINAL_REVIEW_FAILED', review: terminal, advisory: terminal.advisory }
-  if (!prByGate(repo))
-    // this repo's PRs were opened per ticket by the implementers, and any sweep fix has
-    // already been committed onto them — the slot ends at the sweep.
-    return { id: ft.id, repo, gateStep: true, status: 'DONE', review: terminal, advisory: terminal.advisory }
   const gateCfg = gateOf(repo)
   const pseudo = { id: `${repo}:gate`, ticket: repoRef[repo].ticket, branch: repoRef[repo].branch, repo }
   // decided AFTER the sweep: a sweep fix can pull in a matching path (recordTouched runs
@@ -2481,11 +2479,11 @@ while (true) {
   // pending and nothing is in flight. One final wave: every repo's sweep + gate/PR in
   // parallel, the gate paid exactly once, on the tree that is genuinely final. (A
   // gate/sweep FAILURE still replans → new tasks → pendingById refills → the held slot
-  // retries at the next full drain.) An ungated repo runs the sweep only — its PRs are
-  // already open per ticket from the implementers.
+  // retries at the next full drain.) An ungated repo runs the sweep, then the push + PR
+  // dispatch without a gate command.
   const finals = !pendingById.size ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r)) : []
   if (finals.length) {
-    log(`▶ final wave: terminal sweep${finals.some((r) => prByGate(r)) ? ' → gate+PR' : ''}: ${finals.join(', ')}`)
+    log(`▶ final wave: terminal sweep → ${finals.some(hasGateCommand) ? 'gate + ' : ''}push + PR: ${finals.join(', ')}`)
     flushJournal()
     const results = await step(`final wave — terminal slots (${finals.join(', ')})`, () => parallel(finals.map((repo) => () => terminalSlot(repo))))
     // A null slot is an agent the runtime lost to a terminal error — map it back to
@@ -2841,7 +2839,7 @@ return {
     journal: journal.enabled ? { runDir: journal.runDir, events: journal.seq, written: journal.written, chunks: journal.flushes, mismatches: journal.mismatches, lost: journal.dead } : null,
   },
   note:
-    'Absorbed the WHOLE tracker project: a lightweight slice index up front, each dispatch cycle hydrated just-in-time, already-done issues skipped. Scheduling was CONTINUOUS and dependsOn-driven straight from the tickets — each issue dispatched the moment its dependencies landed (no wave barrier), parallel across repos AND within a repo where declared files were disjoint (worktree lanes, integrations serialized into one run branch per repo); ready order was slice, then downstream-unlocked (critical path). A failed issue blocked only its dependents, and when failures left work stuck the loop re-planned from the current state. Reviews were SCOPED: per task, spec review + the build-safety quality core gated whether dependents could build on the change; once per repo, AT PROJECT END (one final wave, repos in parallel), the TERMINAL quality sweep reviewed the whole integrated run branch before the PR — implementation never paid a gate. Gated on blocker/major only, so any minor/nit finding is in advisoryNotes and was NOT reworked; a cheap guard decided whether a multi-reviewer panel re-reviewed each fix (guardChecks). Gated repos had their PR opened by a gate dispatch after the sweep passed (the gate command run exactly ONCE, on the final tree; ungatedRepos lists any repo a halt left without its gate/PR). ' +
+    'Absorbed the WHOLE tracker project: a lightweight slice index up front, each dispatch cycle hydrated just-in-time, already-done issues skipped. Scheduling was CONTINUOUS and dependsOn-driven straight from the tickets — each issue dispatched the moment its dependencies landed (no wave barrier), parallel across repos AND within a repo where declared files were disjoint (worktree lanes, integrations serialized into one run branch per repo); ready order was slice, then downstream-unlocked (critical path). A failed issue blocked only its dependents, and when failures left work stuck the loop re-planned from the current state. Reviews were SCOPED: per task, spec review + the build-safety quality core gated whether dependents could build on the change; once per repo, AT PROJECT END (one final wave, repos in parallel), the TERMINAL quality sweep reviewed the whole integrated run branch before the PR — implementation never paid a gate. Gated on blocker/major only, so any minor/nit finding is in advisoryNotes and was NOT reworked; a cheap guard decided whether a multi-reviewer panel re-reviewed each fix (guardChecks). Every repo had its run branch pushed and its ONE PR opened by its terminal slot after the sweep passed (a configured gate command run exactly ONCE, on the final tree, first; ungatedRepos lists any repo a halt left without its gate/PR). ' +
     (halt ? `Stopped early: ${halt.reason}. ` : 'Ran the project start to finish. ') +
     'Merge and deploy left to you. ' +
     (harnessLearning && harnessLearning.crystallize

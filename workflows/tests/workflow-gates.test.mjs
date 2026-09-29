@@ -331,8 +331,8 @@ const GATE_OK = { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x
     'the preview shows each repo its own terminal panel')
   ok(result.reviewPanels['mobile'].quality.includes('Adversarial QA & Integrity') && !result.reviewPanels['mobile'].quality.includes('App Store Reviewer'),
     'the per-task quality core excludes the terminal lenses')
-  ok(result.repos.api.gate === 'make e2e' && result.repos.api.prBy === 'gate' && result.repos.infra.gate === null && result.repos.infra.prBy === 'implementer',
-    'the preview echoes the resolved repo config (path, agent, tags, gate, prBy)')
+  ok(result.repos.api.gate === 'make e2e' && result.repos.infra.gate === null && !('prBy' in result.repos.api),
+    'the preview echoes the resolved repo config (path, agent, tags, gate)')
   ok(result.repos.mobile.path === 'repositories/mobile', 'a repo with no explicit path defaults to repositories/<name>')
 }
 
@@ -355,27 +355,29 @@ const GATE_OK = { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x
   ok(JSON.stringify(docs.spec) === JSON.stringify(['Spec Hawk']), 'spec review is universal')
 }
 
-// ══════════════ W · a repo with gate:null — no gate dispatch, PR from the implementer ══════════════
+// ══════════════ W · a repo with gate:null — no gate command, PR from its terminal slot ══════════════
 {
   const INFRA_TASK = { ...APP_TASK, id: 'PROJ-905', ticket: 'PROJ-905', repo: 'infra', agent: 'infra-engineer' }
-  const { result, calls } = await run('W · gate:null → no gate dispatch, PR from the implementer', [INFRA_TASK],
+  const { result, calls } = await run('W · gate:null → push + PR-only terminal dispatch', [INFRA_TASK],
     (label) => {
-      if (label.startsWith('impl:')) return { ...IMPL_OK, prUrl: 'https://github.com/x/infra/pull/3' }
+      if (label.startsWith('impl:')) return IMPL_OK
+      if (label === 'gate:infra') return { status: 'DONE', summary: 'pr', prUrl: 'https://github.com/x/infra/pull/3' }
       return V('PASS')
     })
-  ok(!calls.some((c) => c.label.startsWith('gate:')), 'no gate dispatch for a repo configured with gate: null')
+  const gate = calls.find((c) => c.label === 'gate:infra')
+  ok(!!gate && /There is no gate command for this repo/.test(gate.prompt) && /push -u origin/.test(gate.prompt), 'one PR-only dispatch: push, no gate command')
   const impl = calls.find((c) => c.label.startsWith('impl:'))
-  ok(!/do NOT run `gh pr create`/i.test(impl.prompt), 'the implementer is not told to withhold the PR')
-  ok(result.prs.length === 1 && result.prs[0].pr.endsWith('/pull/3'), 'the PR comes back from the implementer')
+  ok(/do NOT run `gh pr create`/i.test(impl.prompt), 'the implementer is told to leave the PR to the terminal slot')
+  ok(result.prs.length === 1 && result.prs[0].pr.endsWith('/pull/3'), 'the PR comes back from the terminal slot')
   ok(calls.filter((c) => c.label.startsWith('reliability-sre')).length === 1, 'no gate ≠ no sweep: the repo still gets the terminal quality sweep')
   ok(calls.filter((c) => c.label.startsWith('data-integrity')).length === 1, 'and its infra tag puts the data-integrity lens in its per-task core')
 }
 
-// ══════════════ W2 · a repo with gate:null but prBy:'gate' still opens its PR from the slot ══════════════
+// ══════════════ W2 · a leftover prBy (removed in 0.8.0) is ignored, with a warning ══════════════
 {
-  const repos = REPOS.map((r) => (r.name === 'infra' ? { ...r, prBy: 'gate' } : r))
+  const repos = REPOS.map((r) => (r.name === 'infra' ? { ...r, prBy: 'implementer' } : r))
   const INFRA_TASK = { ...APP_TASK, id: 'PROJ-906', ticket: 'PROJ-906', repo: 'infra', agent: 'infra-engineer' }
-  const { result, calls } = await run('W2 · prBy:gate with no gate command → PR-only gate dispatch', [INFRA_TASK],
+  const { result, calls, logs } = await run('W2 · prBy:implementer is ignored → still the PR-only terminal dispatch', [INFRA_TASK],
     (label) => {
       if (label.startsWith('impl:')) return IMPL_OK
       if (label.startsWith('gate:')) return { status: 'DONE', summary: 'pr', prUrl: 'https://github.com/x/infra/pull/9' }
@@ -387,6 +389,7 @@ const GATE_OK = { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x
     'the dispatch is told there is no command, only a PR to open')
   ok(/gh pr create/.test(gate.prompt), 'it still opens the PR')
   ok(result.prs.length === 1 && result.prs[0].pr.endsWith('/pull/9'), 'and the PR URL comes back from it')
+  ok(logs.some((l) => /prBy is ignored since 0\.8\.0/.test(l)), 'the ignored key is logged')
 }
 
 // ══════════════ T1 · the scope split itself: core per task, sweep once per repo ══════════════
@@ -609,7 +612,7 @@ const appTask = (o) => ({ ...APP_TASK, ...o })
   ok(labels.findIndex((l) => l.includes(':mobile:final')) > lastImpl, 'the mobile terminal sweep also waited for the full drain')
   ok(labels.filter((l) => l === 'gate:mobile').length === 1 && labels.filter((l) => l === 'gate:api').length === 1,
     'exactly ONE gate per repo — each gate command paid once')
-  ok(logs.some((l) => /terminal sweep → gate\+PR: /.test(l) && l.includes('mobile') && l.includes('api')),
+  ok(logs.some((l) => /terminal sweep → gate \+ push \+ PR: /.test(l) && l.includes('mobile') && l.includes('api')),
     'both repos took the terminal wave TOGETHER (sweeps + gates in parallel)')
   ok(result.done.length === 3 && result.prs.length === 2 && result.ungatedRepos.length === 0, 'all landed, both PRs shipped, nothing ungated')
 }

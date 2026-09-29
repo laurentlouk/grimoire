@@ -67,7 +67,6 @@ task list would bypass `roast`, which is the point of requiring the artifacts.
 | `path` | `repositories/<name>` | the checkout every command runs against |
 | `tags` | `[]` | drives **persona selection**: `backend`, `mobile`, `web`, `infra`, or your own |
 | `gate` | `null` | the command that certifies the final tree; see below |
-| `prBy` | `'gate'` if a gate exists, else `'implementer'` | who opens the PR |
 | `timeoutMin` | the global `agentTimeoutMin` | a longer hang backstop for this repo's dispatches (a gate that queues for a shared lock) |
 | `laneSetup` | — | a shell line run when a parallel lane's worktree is created; `<lane>` is substituted with the worktree path (e.g. symlinking `node_modules`) |
 
@@ -89,8 +88,9 @@ because a pre-PR hook's unit is the whole branch, not one task. Absent means the
 runs. Matching is substring containment and deliberately loose: a false positive costs one
 gate run, a false negative gets the PR blocked by your own hook.
 
-`gate: null` means no gate command; the repo's PRs are opened per ticket by its implementers
-as they go, and its terminal slot ends at the quality sweep.
+`gate: null` means no gate command. Either way, the repo's terminal slot pushes the run branch
+and opens (or updates) its ONE PR at project end, after the quality sweep; implementers never
+push or open PRs. (`prBy` was removed in 0.8.0 and is ignored, with a warning.)
 
 ### Optional knobs
 
@@ -193,8 +193,7 @@ flowchart TB
     drained["PROJECT DRAINED\n(nothing pending anywhere, nothing in flight —\nevery task landed &amp; integrated on its repo's ONE run branch)"]
     drained --> sweep["TERMINAL QUALITY SWEEP — per repo, all repos in PARALLEL\nSRE · human interface · a11y · privacy · store review (by TAG)\nsubject: the ENTIRE integrated run branch — cross-task consistency,\nthe assembled user flow, release-readiness\nfix ⇄ guard ⇄ re-review loop as above (fixes commit to the run branch)"]
     sweep -- "FAIL → TERMINAL_REVIEW_FAILED\nheld · replanner · gate NOT paid" --> replan["scheduler blocks → replanner\n(slot retries at the next full drain)"]
-    sweep -- "PASS · prBy = gate" --> gate["GATE + PR dispatch\nrun the repo's gate command ONCE on the final tree\n(skipped when gate.when does not match)\nopens the repo's ONE PR"]
-    sweep -- "PASS · prBy = implementer" --> open["done — PRs already open per ticket\n(sweep fixes were appended to them)"]
+    sweep -- "PASS" --> gate["GATE + PR dispatch\nrun the repo's gate command ONCE on the final tree\n(none configured, or gate.when does not match → skipped)\npushes the run branch · opens or updates the repo's ONE PR"]
 ```
 
 The sweep runs **before** the gate so its fix commits land before any tree-hash stamp is

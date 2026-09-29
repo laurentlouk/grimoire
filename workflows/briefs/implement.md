@@ -38,9 +38,10 @@ already settled there.
 - Never work on the default branch. Work on the branch the header names: every task of a
   repo in one run lands on its ONE run branch, so when the header says RUN BRANCH, check that
   branch out and commit there — never start a branch of your own (it would never be
-  integrated). Append commits to the EXISTING open PR for that branch (an earlier task of the
-  run may have opened it); don't open a duplicate. The PR title carries the ticket, e.g.
-  `[PROJ-123] …`. (A parallel lane or a gated repo overrides the PR rule — the header says so.)
+  integrated).
+- **Never push, never open or update a PR.** Each repo's run branch is pushed and its ONE PR
+  opened (or updated) once, at PROJECT END, by the repo's terminal slot — for every repo,
+  gated or not. You commit; the loop ships.
 - **Explore before asking; don't guess.** If a fact is discoverable in the design artifacts,
   the docs, the code, schemas, contracts, config or git history, find it yourself before
   asking, and never state a discoverable fact as a guess. Only decisions the owner holds
@@ -76,12 +77,13 @@ edits becomes a merge conflict that FAILS this task at integration; if you genui
 an undeclared file, report it in `filesChanged`.
 
 ## Gated repos
-Some repos open their PR from a dedicated GATE dispatch at PROJECT END, after the WHOLE
-project's last task lands — never from an implementer. The header says whether yours is one,
-and names the exact commands you must NOT run. Why: a gate command is typically expensive and
-its stamp is a tree hash, so any later commit would invalidate it. The gate dispatch runs it
-ONCE, on the repo's final reviewed tree, and opens the PR. When your task is done, return
-DONE_PENDING_GATE: it lands exactly like DONE. Keep DONE_WITH_CONCERNS for a real concern.
+Some repos have a gate command that certifies the tree before the PR opens. It runs in the
+terminal slot at PROJECT END, after the WHOLE project's last task lands — never from an
+implementer. The header says whether yours is one, and names the exact command you must NOT
+run. Why: a gate command is typically expensive and its stamp is a tree hash, so any later
+commit would invalidate it. The terminal slot runs it ONCE, on the repo's final reviewed
+tree, then pushes and opens the PR. When your task is done, return DONE_PENDING_GATE: it lands
+exactly like DONE. Keep DONE_WITH_CONCERNS for a real concern.
 
 End by returning the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED;
 in a gated repo, DONE_PENDING_GATE instead of DONE — the gate still to run is not a concern).
