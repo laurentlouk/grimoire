@@ -1860,7 +1860,9 @@ async function runTask(task) {
       // and the panel judges the change. Any other check (ancestry included) keeps gating.
       const footprintOnly = problems.length > 0 && problems.every((x) => x.check === 'footprint')
       const files = [...new Set(problems.map((x) => fileKey(x.file) || '?'))].sort().join('\n')
-      const repeat = footprintOnly && lastFail && lastFail.files === files && lastFail.head === range.headSha
+      // "No new commit" needs a KNOWN head on both rounds: two unreported heads (null === null)
+      // prove nothing about what the fix did.
+      const repeat = footprintOnly && lastFail && !!range.headSha && lastFail.head === range.headSha && lastFail.files === files
       emit('precheck', { task: task.id, verdict: pc ? (repeat ? 'ADVISORY' : problems.length ? 'FAIL' : 'PASS') : 'DIED', problems: problems.map((x) => `${x.file || '?'}:${x.line || '?'} — ${x.issue}`) })
       if (repeat) {
         precheckStats.advisory++

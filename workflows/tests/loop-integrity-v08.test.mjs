@@ -206,6 +206,17 @@ for (const maxPrecheckFixes of [1, 3]) {
   eq(result.needsAttention.map((r) => [r.id, r.status]), [['PROJ-1', 'PRECHECK_FAILED']], 'PRECHECK_FAILED (the fix changed the tree)')
 }
 
+{
+  const { result } = await run('3e · no headSha reported on either round → never demoted (null is not "no new commit")', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return { status: 'DONE', summary: 's' }
+    if (label.startsWith('fix:')) return { status: 'DONE', summary: 'nothing' }
+    if (label.startsWith('precheck:')) return FOOTPRINT
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop', learnings: [] }
+    return PASSV
+  }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
+  eq(result.needsAttention.map((r) => [r.id, r.status]), [['PROJ-1', 'PRECHECK_FAILED']], 'PRECHECK_FAILED')
+}
+
 // ══════ 4 · the startup agent preflight ══════
 {
   const { result, calls, labels } = await run('4a · one agent type that does not resolve → the run refuses, nothing is built', [T('PROJ-1')], (label, prompt, opts) => {
