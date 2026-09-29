@@ -20,6 +20,8 @@
 //      implement and gate prompts now say how to re-run a command raw before concluding
 //    • NO STATUS FOR "DONE, GATE PENDING" — gated-repo implementers reported DONE_WITH_CONCERNS
 //      with no concern; DONE_PENDING_GATE is landed-equivalent everywhere DONE is
+//    • PRE-EXISTING FAILURES BLAMED ON THE CHANGE — implementers "fixed" (or stalled on) a red
+//      check that was already red on the base; the implement brief says how to tell
 //
 //  Same stubbed runtime as harness-v06.test.mjs (agent / parallel / log / phase / args /
 //  budget); every scenario asserts the dispatches the engine actually made.
@@ -289,6 +291,18 @@ for (const maxPrecheckFixes of [1, 3]) {
     return PASSV
   }, { extraArgs: { ...QUIET, repos: GATED } })
   eq(result.needsAttention.map((r) => [r.id, r.status]), [['api:gate', 'GATE_FAILED']], 'GATE_FAILED')
+}
+
+// ══════ 9 · the implement brief: check a failure on the base before owning it ══════
+{
+  console.log('\n── 9 · the implement brief carries the pre-existing-failure rule (every build and fix round reads it)')
+  const brief = readFileSync(`${DIR}/briefs/implement.md`, 'utf8')
+  const rule = (/\*\*Pre-existing failures are not yours\.\*\*[\s\S]*?(?=\n- \*\*|\n\n)/.exec(brief) || [''])[0]
+  ok(/run it on the base/.test(rule) && /throwaway worktree/.test(rule) && /baseSha/.test(rule), 'run the failing check on the base, in a throwaway worktree of baseSha')
+  ok(/never `git stash`/.test(rule), 'never by stashing or checking out in the working tree')
+  ok(/`concerns`/.test(rule) && /pre-existing/.test(rule) && /unrelated/.test(rule), 'report it as pre-existing in concerns; do not fix unrelated failures')
+  const { prompt } = await run('9b · build and fix dispatches point at that brief', [T('PROJ-1')], (label) => (label.startsWith('impl:') ? impl('aaaaaaa') : PASSV), { extraArgs: QUIET })
+  ok(prompt('impl:PROJ-1').includes('Read `workflows/briefs/implement.md`'), 'the implementer reads briefs/implement.md')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)

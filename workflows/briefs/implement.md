@@ -21,6 +21,13 @@ already settled there.
 - Keep the red→green loop TIGHT: iterate on the FOCUSED test(s) for the behaviour you are
   building (name/path filters), not the whole suite. Run the FULL suite plus lint and type
   checks ONCE, at the end, before you return DONE — that is the gate, the inner loop is not.
+- **Pre-existing failures are not yours.** Before attributing a failing check, lint or test
+  to your change (in a build or a fix round), run it on the base: in a throwaway worktree of
+  your `baseSha` (`git worktree add --detach <tmp dir> <baseSha>`, run the same command there,
+  then `git worktree remove --force <tmp dir>`), or compare with the base branch's own CI
+  result — never `git stash` or a checkout in your working tree, which can lose work. Red on
+  the base too: report it in `concerns` as pre-existing (the command and the failing names)
+  and do not fix unrelated failures. Red only with your change: it is yours to fix.
 - Test the full OUTPUT, not its shape: assert the actual value (the complete list, the whole
   struct), never its type or "non-empty"; cover the complex-logic branches.
 - In a typed language, type it fully — real types on schemas, signatures and state. An escape
