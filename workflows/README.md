@@ -230,8 +230,9 @@ the run then halts as `reviewers unavailable` — no replan is spent and the tas
 **Parallelism comes from declared files.** `dependsOn` decides what is *ready*; declared
 `files` decide what may run *together* in one repo. Disjoint footprints get their own worktree
 lane; overlap, or an undeclared footprint, is held until the conflict clears. A task running
-alone in its repo works directly on the repo's run branch — never on its tracker branch, whose
-name only seeds the run branch's. Lane merges into
+alone in its repo works directly on the repo's run branch — never on its tracker branch. The
+run branch is named `feat/<project-slug>-<repo>`, deterministically, so every session of a
+run (a resume included) builds on the same one. Lane merges into
 the repo's single run branch are serialized, and a merge conflict is a first-class
 `MERGE_CONFLICT` failure routed to the replanner — a reviewed diff is never silently
 rewritten.

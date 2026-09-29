@@ -7,9 +7,11 @@ brief-level and stack-agnostic.
 
 - **Direct tasks work on the run branch.** A task running alone in its repo used the tracker's
   per-issue branch, so it settled DONE without ever reaching the run branch its dependents,
-  the sweep and the gate build on. It now always commits on the run branch (the tracker name
-  only seeds that branch's name), and the precheck verifies a direct task's head is an
-  ancestor of the run branch (new check `ancestry`).
+  the sweep and the gate build on. It now always commits on the run branch, and the precheck
+  verifies a direct task's head is an ancestor of the run branch (new check `ancestry`). The
+  run branch is named deterministically, `feat/<project-slug>-<repo>`, never after a tracker
+  branch, so a resumed session builds on the same branch as the session before it. Work that
+  0.7.x landed on per-issue branches is not merged into it automatically.
 - **Review range `startSha..headSha`.** Implementers report `startSha` (HEAD before their
   first change); precheck, panel, guard and verifier judge from there instead of `firstSha^`,
   so a merge task is no longer blamed for every lane merged before it. A footprint-only

@@ -406,7 +406,7 @@ const GATE_OK = { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x
   ok(labels.findIndex((l) => l.startsWith('hig')) > labels.indexOf('impl:PROJ-900'), 'the sweep ran after the work landed')
   ok(gateIdx > labels.findIndex((l) => l.startsWith('hig')), 'and the gate only after the sweep')
   const sweep = calls.find((c) => c.label.startsWith('hig'))
-  ok(/diff origin\/main\.\.\.feat\/x/.test(sweep.prompt), 'sweep reviewers are pointed at the ENTIRE integrated run branch')
+  ok(/diff origin\/main\.\.\.feat\/proj-600-mobile/.test(sweep.prompt), 'sweep reviewers are pointed at the ENTIRE integrated run branch (feat/<project>-<repo>)')
   ok(result.done.length === 1 && result.prs.length === 1, 'task landed and the PR shipped')
 }
 
@@ -658,11 +658,11 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
   const impl = calls.find((c) => c.label === 'impl:PROJ-920')
   ok(/PARALLEL LANE/.test(impl.prompt), 'lane implementers are briefed for worktree isolation')
   ok(/\.worktrees\/mobile--proj-920/.test(impl.prompt), 'the brief names the lane worktree path')
-  ok(/-b feat\/x--proj-920/.test(impl.prompt), 'the lane branch derives from the run branch')
+  ok(/-b feat\/proj-600-mobile--proj-920/.test(impl.prompt), 'the lane branch derives from the run branch')
   const integ = calls.find((c) => c.label === 'integrate:PROJ-920')
-  ok(/merge --no-ff feat\/x--proj-920/.test(integ.prompt) && /checkout feat\/x\b/.test(integ.prompt), 'integration merges the lane into the run branch')
+  ok(/merge --no-ff feat\/proj-600-mobile--proj-920/.test(integ.prompt) && /checkout feat\/proj-600-mobile\b/.test(integ.prompt), 'integration merges the lane into the run branch')
   const gate = calls.find((c) => c.label.startsWith('gate:'))
-  ok(/branch feat\/x /.test(gate.prompt), 'the gate is briefed on the RUN branch, not a lane')
+  ok(/branch feat\/proj-600-mobile /.test(gate.prompt), 'the gate is briefed on the RUN branch, not a lane')
   ok(result.done.length === 2 && result.prs.length === 1, 'both landed; still ONE PR per repo')
 }
 {

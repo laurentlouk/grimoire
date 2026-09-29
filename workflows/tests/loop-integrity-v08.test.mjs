@@ -54,7 +54,7 @@ const indexOf = (tasks) => ({
   slices: [...new Set(tasks.map((t) => t.slice ?? 1))].sort((a, b) => a - b).map((s) => ({
     slice: s,
     sliceLabel: 'v',
-    issues: tasks.filter((t) => (t.slice ?? 1) === s).map((t) => ({ id: t.id, title: 't', repo: t.repo, state: 'todo', assignee: '', dependsOn: t.dependsOn || [] })),
+    issues: tasks.filter((t) => (t.slice ?? 1) === s).map((t) => ({ id: t.id, title: 't', repo: t.repo, state: t.state || 'todo', assignee: '', dependsOn: t.dependsOn || [] })),
   })),
   hookProblems: [],
 })
@@ -65,7 +65,7 @@ async function run(scenario, tasks, responder, { extraArgs = {} } = {}) {
     const label = opts.label || '?'
     calls.push({ label, prompt, opts })
     if (label === 'parse-index') return indexOf(tasks)
-    if (label.startsWith('hydrate:')) return { tasks: tasks.filter((t) => prompt.includes(`- ${t.id} `)).map((t) => ({ ...t })) }
+    if (label.startsWith('hydrate:')) return { tasks: tasks.filter((t) => prompt.includes(`- ${t.id} `)).map(({ state, ...t }) => t) }
     if (label === 'harness-context') return { harnessMemory: '', agentMemory: {}, priorLearnings: [], priorLedgers: [] }
     if (label === 'ledger') return { path: 'runs/x.json', branch: 'harness/run-x' }
     if (label === 'crystallize') return { reports: [], skillsCreated: [], skillsPatched: [], memoryEntriesAdded: 0, docsSynced: [], prUrl: '', summary: '' }
@@ -86,8 +86,9 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
 
 // ══════ 1 · a direct task always works ON the run branch ══════
 // Hydration fills `branch` from the tracker's per-issue branch name. Two sequential direct
-// tasks with distinct tracker branches must both commit on the ONE run branch (named after the
-// first); a direct task on its own branch "lands" but is never integrated.
+// tasks with distinct tracker branches must both commit on the ONE run branch; a direct task on
+// its own branch "lands" but is never integrated. The run branch's name is DETERMINISTIC —
+// `feat/<project-slug>-<repo>` — never a tracker branch, so every session of a run agrees on it.
 {
   const A = T('PROJ-1', { branch: 'feat/proj-1' })
   const B = T('PROJ-2', { branch: 'feat/proj-2', dependsOn: ['PROJ-1'] })
@@ -98,11 +99,22 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
     return PASSV
   }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
   eq(labels.filter((l) => l.startsWith('impl:')), ['impl:PROJ-1', 'impl:PROJ-2'], 'both tasks dispatched, one after the other')
-  ok(/branch feat\/proj-1\b/.test(prompt('impl:PROJ-2')) && !/feat\/proj-2/.test(prompt('impl:PROJ-2')), 'the second implementer is told the run branch, never its tracker branch')
-  ok(/RUN BRANCH `feat\/proj-1`/.test(prompt('impl:PROJ-2')), 'and told to commit on it (check it out, never start another branch)')
-  ok(/merge-base --is-ancestor bbbbbbb feat\/proj-1/.test(prompt('precheck:PROJ-2')), "the precheck verifies the direct task's head is on the run branch")
+  ok(/branch feat\/proj-600-api\b/.test(prompt('impl:PROJ-2')) && !/feat\/proj-[12]\b/.test(prompt('impl:PROJ-2')), 'the second implementer is told the run branch, never a tracker branch')
+  ok(/RUN BRANCH `feat\/proj-600-api`/.test(prompt('impl:PROJ-2')), 'and told to commit on it (check it out, never start another branch)')
+  ok(/merge-base --is-ancestor bbbbbbb feat\/proj-600-api/.test(prompt('precheck:PROJ-2')), "the precheck verifies the direct task's head is on the run branch")
   ok(!/is-ancestor/.test(prompt('spec-hawk:PROJ-2')), 'reviewers are not asked the ancestry question')
-  eq(result.done.map((d) => [d.id, d.runBranch]), [['PROJ-1', 'feat/proj-1'], ['PROJ-2', 'feat/proj-1']], 'both land on the one run branch')
+  eq(result.done.map((d) => [d.id, d.runBranch]), [['PROJ-1', 'feat/proj-600-api'], ['PROJ-2', 'feat/proj-600-api']], 'both land on the one run branch')
+}
+{
+  // Session 1 lands PROJ-1 (first dispatched: tracker branch feat/proj-1). Session 2 resumes: the
+  // tracker now says PROJ-1 is done (absorbed), so the FIRST task it dispatches is PROJ-2, with a
+  // different tracker branch. Both sessions must build on the same run branch.
+  const A = T('PROJ-1', { branch: 'feat/proj-1' })
+  const B = T('PROJ-2', { branch: 'feat/proj-2', dependsOn: ['PROJ-1'] })
+  const s1 = await run('1b · session 1 of a run', [A], (label) => (label.startsWith('impl:') ? impl('aaaaaaa') : PASSV), { extraArgs: QUIET })
+  const s2 = await run('1c · session 2 (resume) dispatches a different first task', [{ ...A, state: 'done' }, B], (label) => (label.startsWith('impl:') ? impl('bbbbbbb') : PASSV), { extraArgs: { ...QUIET, resumeState: { replansUsed: 0, lastSeq: 0 } } })
+  eq([s1.result.done[0].runBranch, s2.result.done[0].runBranch], ['feat/proj-600-api', 'feat/proj-600-api'], 'the same run branch in both sessions')
+  ok(/branch feat\/proj-600-api\b/.test(s2.prompt('impl:PROJ-2')), "session 2's implementer is told that branch")
 }
 
 // ══════ 2 · the review range starts where the implementer STARTED ══════

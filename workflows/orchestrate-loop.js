@@ -219,7 +219,6 @@ const TASK_ITEM_SCHEMA = {
     agent: { type: 'string', description: "the agent that builds it — the repo's owning agent, or a specialist the header enables for that repo" },
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'the build tier for the impl/fix agents, chosen by the routing rubric in the brief; opus when unset. Escalates to opus automatically on a later fix round, or on a replan after a code failure' },
     routeReason: { type: 'string', description: 'one sentence: the signal that decided agent × model (logged, and read by crystallize to tune the rubric)' },
-    branch: { type: 'string' },
     slice: { type: 'integer', description: 'the vertical slice this task belongs to (0 = a thin shared enabler; 1, 2, … = increments of value, smallest-valuable-first)' },
     sliceLabel: { type: 'string', description: "the slice's value statement, e.g. 'user earns and sees points'" },
     order: { type: 'integer', description: 'execution order WITHIN its repo, INSIDE its slice (topological)' },
@@ -2027,8 +2026,11 @@ const hydratedById = new Map() // id → full task, from hydration or a replan R
 const gateDone = new Set() // repos whose terminal slot (sweep + gate/PR where gated) already succeeded
 const gateHold = new Set() // repos whose terminal slot FAILED — held until a replan lands new repo work, else the drained project re-dispatches the same failing slot forever
 const repoRef = {} // repo → {ticket, branch} from its most recent landed task (briefs the terminal slot)
-const repoBranch = {} // repo → the ONE run branch every task of that repo lands on (lanes merge into it)
-const runBranchFor = (t) => (repoBranch[t.repo] ||= t.branch || `feat/${String(project).toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${t.repo}`)
+// The ONE run branch every task of a repo lands on (lanes merge into it). DETERMINISTIC from the
+// project and the repo, never from a tracker branch: a name seeded by whichever task happened to
+// dispatch first differs between sessions, and a resumed session would then build on a branch
+// that lacks the work an earlier session landed.
+const runBranchFor = (repo) => `feat/${String(project).toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${repo}`
 
 // The pseudo-task the TERMINAL quality sweep runs against: the subject is the repo's whole
 // integrated run branch, not one issue. Its taskText briefs BOTH sides of runReviewStage —
@@ -2420,7 +2422,7 @@ while (true) {
           lane.push(t)
         }
         if (!lane.length) continue
-        const runBranch = runBranchFor(lane[0])
+        const runBranch = runBranchFor(repo)
         const shared = busy.length > 0 || lane.length > 1
         for (const t of lane) {
           if (shared) {
@@ -2432,8 +2434,7 @@ while (true) {
             // A direct task works ON the run branch, never on its own: hydration fills
             // `branch` from the tracker's per-issue branch name, and a task committed there
             // "lands" without ever reaching the branch its dependents, the sweep and the gate
-            // build on (only lanes have an integrate step). The tracker name may only SEED the
-            // run branch's name (runBranchFor, first task of the repo).
+            // build on (only lanes have an integrate step).
             t.lane = 'direct'
             t.branch = runBranch
             t.runBranch = runBranch
