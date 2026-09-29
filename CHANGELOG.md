@@ -28,7 +28,9 @@ brief-level and stack-agnostic.
 - **One PR per repo, pushed by the loop.** Lanes and integrations never pushed, so an ungated
   repo ended with unpushed merges. Every repo's terminal slot now runs the gate command if it
   has one, pushes the run branch and opens (or updates) the repo's one PR; implementers never
-  push or open PRs. `repos[].prBy` is removed (ignored, with a warning).
+  push or open PRs. `repos[].prBy` is removed (ignored, with a warning). When the push or PR
+  step itself fails (auth, a protected branch, the network) the slot is `SHIP_FAILED`: never
+  replanned, the repo is listed in `ungatedRepos` with the cause in `ungatedReasons`.
 - **Escalation only for code failures.** A replanned task moves to opus only when its last
   failure was code-kind (gating findings, BLOCKED, a structural precheck defect, a failed gate
   or sweep); harness failures (dead agent, merge conflict, footprint or ancestry precheck)
@@ -61,7 +63,8 @@ brief-level and stack-agnostic.
   `agentNamespace` or the agent names, or opt out with `{preflight: false}`.
 - **New statuses for consumers of the result, the ledger and the journal.** `DONE_PENDING_GATE`
   is landed (count it with `DONE` and `DONE_WITH_CONCERNS`). `REVIEWERS_UNAVAILABLE` is not a
-  code failure; the run halts with a reason starting `reviewers unavailable`. Precheck events
+  code failure; the run halts with a reason starting `reviewers unavailable`. `SHIP_FAILED` is a
+  terminal slot whose push or PR step failed (see `ungatedReasons`). Precheck events
   can carry the verdict `ADVISORY`, review events the verdict `UNAVAILABLE`.
 - **Journal readers**: events and `run.json` have an `attempt` field (absent = 1), chunks from
   a second attempt onward are named `<seq>.a<N>.jsonl`, and `seq` is unique per attempt, not

@@ -335,7 +335,7 @@ main{padding:16px;max-width:1200px;margin:0 auto}section{margin:0 0 22px}h2{font
 .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:600;font-size:12px}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}td.txt{overflow-wrap:anywhere;min-width:220px}td.mono{font-family:var(--mono);font-size:12px;white-space:nowrap}
-.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY{color:var(--warn)}
+.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.SHIP_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY{color:var(--warn)}
 .lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.lane .task{border-top:1px solid var(--line);padding:6px 0;cursor:pointer}.lane .task:hover{color:var(--acc)}
 details{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--card)}summary{cursor:pointer;padding:8px 10px;font-weight:600;overflow-wrap:anywhere}
 details ol{margin:0;padding:0 10px 10px 30px}details li{margin:3px 0;overflow-wrap:anywhere}.k{font-family:var(--mono);font-size:12px;color:var(--mut)}
@@ -356,7 +356,7 @@ function client() {
     for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c))
     return el
   }
-  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'answered']
+  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'SHIP_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'answered']
   const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
   const cls = (v) => (STATUS.includes(String(v)) ? String(v) : null)
   const s = (v) => (v == null ? '' : typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(v))

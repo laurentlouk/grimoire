@@ -373,6 +373,30 @@ for (const maxPrecheckFixes of [1, 3]) {
   eq(died.calls.filter((c) => c.label === 'impl:FIX-2').map((c) => c.opts.model), ['haiku'], 'haiku')
 }
 
+{
+  // A push or PR step that fails (auth, a protected branch, the network) is not a code failure:
+  // no replan, no opus repair — the repo is reported ungated, with the reason.
+  const GATED = [{ name: 'api', agent: 'backend-engineer', tags: ['backend'], gate: { kind: 'command', run: 'make e2e' } }]
+  for (const step of ['push', 'pr']) {
+    const { result, labels } = await run(`6g · the ${step} step fails in the terminal slot → ungated with the reason, no replan`, [T('PROJ-1')], (label) => {
+      if (label.startsWith('impl:')) return impl('aaaaaaa', { status: 'DONE_PENDING_GATE' })
+      if (label.startsWith('gate:')) return { status: 'BLOCKED', failedStep: step, summary: 'rejected: protected branch' }
+      if (label.startsWith('replan')) return { decision: 'HALT', reason: 'should never be asked', learnings: [] }
+      return PASSV
+    }, { extraArgs: { ...QUIET, repos: GATED } })
+    ok(!labels.some((l) => l.startsWith('replan')) && labels.filter((l) => l === 'gate:api').length === 1, 'no replan, the slot is not re-dispatched')
+    eq(result.needsAttention.map((r) => [r.id, r.status]), [['api:gate', 'SHIP_FAILED']], 'booked SHIP_FAILED, not GATE_FAILED')
+    eq({ ungated: result.ungatedRepos, reasons: result.ungatedReasons }, { ungated: ['api'], reasons: { api: `the ${step} step failed: rejected: protected branch` } }, 'surfaced in ungatedRepos with the reason')
+  }
+  const { labels } = await run('6h · the GATE COMMAND step fails → GATE_FAILED, replanned as before', [T('PROJ-1')], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa', { status: 'DONE_PENDING_GATE' })
+    if (label.startsWith('gate:')) return { status: 'BLOCKED', failedStep: 'gate', summary: 'e2e red' }
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop', learnings: [] }
+    return PASSV
+  }, { extraArgs: { ...QUIET, repos: GATED } })
+  ok(labels.includes('replan#1'), 'the replanner is asked')
+}
+
 // ══════ 7 · the raw-output escape in the implement and gate prompts ══════
 {
   const GATED = [{ name: 'api', agent: 'backend-engineer', tags: ['backend'], gate: { kind: 'command', run: 'make e2e' } }]

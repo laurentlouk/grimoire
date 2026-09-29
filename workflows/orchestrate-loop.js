@@ -323,6 +323,7 @@ const IMPL_SCHEMA = {
     concerns: { type: 'string' },
     question: { type: 'string', description: 'set only when status is NEEDS_CONTEXT' },
     prUrl: { type: 'string' },
+    failedStep: { type: 'string', enum: ['gate', 'push', 'pr'], description: 'terminal-slot (gate) dispatch only, when BLOCKED: the step that failed — the gate command, pushing the run branch, or opening/updating the PR' },
   },
 }
 
@@ -2076,6 +2077,7 @@ const landedIds = new Set(alreadyDoneIds) // satisfied dependencies: absorbed + 
 const pendingById = new Map(pendingIndex.map((i) => [i.id, i])) // id → index entry still to run
 const hydratedById = new Map() // id → full task, from hydration or a replan REVISE
 const gateDone = new Set() // repos whose terminal slot (sweep → gate where configured → push + PR) already succeeded
+const ungatedReasons = {} // repo → why its certified tree could not be shipped (push / PR step failed)
 const gateHold = new Set() // repos whose terminal slot FAILED — held until a replan lands new repo work, else the drained project re-dispatches the same failing slot forever
 const repoRef = {} // repo → {ticket, branch} from its most recent landed task (briefs the terminal slot)
 // The ONE run branch every task of a repo lands on (lanes merge into it). DETERMINISTIC from the
@@ -2281,6 +2283,14 @@ function settle(r) {
   // cannot make an agent dispatch) and nothing is booked as failed code. The work stays
   // unlanded — its dependents wait, a gated repo stays ungated — and the run halts at
   // quiescence; re-invoking once reviewers dispatch again resumes it.
+  if (r.status === 'SHIP_FAILED') {
+    emit('gate', { repo: r.repo, status: r.status, applies: !!r.gateApplies, prUrl: '' })
+    gateHold.add(r.repo) // never re-dispatched on the same tree; a replan that lands new work releases it
+    ungatedReasons[r.repo] = r.reason
+    lastFailure.set(r.id, { kind: 'harness', status: r.status })
+    log(`⛔ ${r.repo}: reviewed and certified, but ${r.reason} — not replanned (no code change fixes it); reported in ungatedRepos`)
+    return
+  }
   if (r.status === 'REVIEWERS_UNAVAILABLE') {
     if (r.gateStep) emit('terminal', { repo: r.repo, verdict: 'UNAVAILABLE' })
     else {
@@ -2361,6 +2371,13 @@ async function terminalSlot(repo) {
   })
   // A gate that reports its gate still PENDING certified nothing — it is the gate.
   const failed = !gate || gate.status === 'BLOCKED' || gate.status === 'NEEDS_CONTEXT' || gate.status === 'DONE_PENDING_GATE'
+  // The tree is certified but it could not be SHIPPED (auth, a protected branch, the network):
+  // no code change fixes that, so it is never replanned — the repo is reported ungated, with
+  // the reason, for a human to push.
+  if (failed && gate && (gate.failedStep === 'push' || gate.failedStep === 'pr')) {
+    emit('terminal', { repo, verdict: 'PASS' })
+    return { id: pseudo.id, repo, gateStep: true, status: 'SHIP_FAILED', gate, gateApplies: applies, reason: `the ${gate.failedStep} step failed: ${gate.summary || gate.concerns || '(no detail)'}`, advisory: terminal.advisory }
+  }
   emit('terminal', { repo, verdict: 'PASS' })
   return { id: pseudo.id, repo, gateStep: true, status: failed ? 'GATE_FAILED' : gate.status, gate, gateApplies: applies, prUrl: gate && gate.prUrl, advisory: terminal.advisory }
 }
@@ -2834,7 +2851,7 @@ const advisoryNotes = allResults.flatMap((r) =>
 // branches hold reviewed commits but NO PR: re-invoking the project resumes, drains, and
 // gates then (paying a gate on a pre-halt tree that a resume would staleness is waste).
 const ungatedRepos = Object.keys(repoRef).filter((r) => !gateDone.has(r))
-if (ungatedRepos.length) log(`⚠ ${ungatedRepos.length} repo(s) landed work but never gated (no PR yet): ${ungatedRepos.join(', ')} — re-invoke the project to drain and gate`)
+if (ungatedRepos.length) log(`⚠ ${ungatedRepos.length} repo(s) landed work but never gated (no PR yet): ${ungatedRepos.map((r) => (ungatedReasons[r] ? `${r} (${ungatedReasons[r]} — push it by hand)` : r)).join(', ')} — re-invoke the project to drain and gate`)
 log(
   `■ done: ${allResults.filter((r) => !r.gateStep && ok(r)).length} · needs-attention: ${allResults.filter((r) => !ok(r)).length} · blocked (never ran): ${blocked.length} · absorbed: ${alreadyDone.length} · ` +
     `waves: ${waves} · advisory (not reworked): ${advisoryNotes.length} · ` +
@@ -2860,6 +2877,8 @@ return {
   // repos whose reviewed work is on a run branch but whose terminal sweep/gate/PR never
   // ran green (halt before the project drained, or an unrepaired slot failure)
   ungatedRepos,
+  // repo → why a certified tree was not shipped (the push or PR step failed) — push it by hand
+  ungatedReasons,
   contract,
   // The harness learning step (execute runs): the ledger written + what crystallize
   // created/patched and the ONE PR carrying it.

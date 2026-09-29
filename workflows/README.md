@@ -319,7 +319,8 @@ local and gitignored; `/grimoire:logs` renders it, and its `summary` is the cros
 `done` · `needsAttention` · `blocked` (never ran) · `alreadyDone` (absorbed) · `deferred` ·
 `advisoryNotes` (the minor/nit findings not reworked, plus any repeated footprint-only
 precheck problems demoted to advisory — triage them by hand) · `ungatedRepos`
-(landed work with no PR yet) · `prs` · `replans` + `learnings` + `halt` · `contextResolves`
+(landed work with no PR yet) · `ungatedReasons` (repo → why a certified tree was not shipped:
+the push or PR step failed; never replanned, push it by hand) · `prs` · `replans` + `learnings` + `halt` · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·
 `precheckStats` · `overturnedFindings` · `routing` (picks by agent and model, fallbacks,
