@@ -159,6 +159,21 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
   ok(/diff ccccccc\.\.ddddddd /.test(prompt('spec-hawk:PROJ-1#1')), "the re-review keeps the task's origin and advances only the head")
 }
 {
+  let pc = 0
+  const { calls, labels, prompt, result } = await run('2c · a startSha that is not an ancestor of headSha → range falls back to firstSha^, no fix bought', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return impl('bbbbbbb', { commits: ['aaaaaaa', 'bbbbbbb'], startSha: 'ccccccc' })
+    if (label.startsWith('precheck:')) return pc++ === 0 ? { verdict: 'FAIL', problems: [{ check: 'range', file: '?', issue: 'ccccccc is not an ancestor of bbbbbbb' }] } : { verdict: 'PASS', problems: [] }
+    return PASSV
+  }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
+  const pcs = calls.filter((c) => c.label.startsWith('precheck:'))
+  ok(/merge-base --is-ancestor ccccccc bbbbbbb/.test(pcs[0].prompt) && /check: "range"/.test(pcs[0].prompt), 'the precheck verifies startSha is an ancestor of headSha')
+  eq(pcs.map((c) => c.label), ['precheck:PROJ-1', 'precheck:PROJ-1~range'], 'one re-check, under its own label')
+  ok(pcs.length === 2 && /diff aaaaaaa\^\.\.bbbbbbb /.test(pcs[1].prompt) && !/ccccccc/.test(pcs[1].prompt), 'the re-check judges firstSha^..headSha')
+  ok(!labels.some((l) => l.startsWith('fix:')), 'no fix is bought for a bad range report')
+  ok(/diff aaaaaaa\^\.\.bbbbbbb /.test(prompt('spec-hawk:PROJ-1')), 'the panel gets the fallback range')
+  eq(result.done.map((d) => d.id), ['PROJ-1'], 'landed')
+}
+{
   const { prompt } = await run('2b · without startSha the range falls back to firstSha^', [T('PROJ-1')], (label) => {
     if (label === 'impl:PROJ-1') return impl('bbbbbbb', { commits: ['aaaaaaa', 'bbbbbbb'] })
     return PASSV

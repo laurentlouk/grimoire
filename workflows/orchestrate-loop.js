@@ -392,7 +392,7 @@ const PRECHECK_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          check: { type: 'string', enum: ['change', 'conflict', 'stub', 'tests', 'footprint', 'stray', 'ancestry'], description: 'which check of the brief failed' },
+          check: { type: 'string', enum: ['change', 'conflict', 'stub', 'tests', 'footprint', 'stray', 'ancestry', 'range'], description: 'which check of the brief failed' },
           file: { type: 'string' },
           line: { type: 'integer' },
           issue: { type: 'string' },
@@ -777,7 +777,22 @@ ${declared}
 ## Files the implementer reported changing
 ${reported}
 
-${rangeBlock(task, range)}${ancestryBlock(task, range)}`
+${rangeBlock(task, range)}${startCheckBlock(task, range)}${ancestryBlock(task, range)}`
+}
+// The implementer's `startSha` is a claim, and the whole review range hangs on it: a start that
+// is not an ancestor of the head (a typo, a SHA from another branch) would hand the panel a
+// diff that is not this task's. The precheck verifies it; on a FAIL the engine drops it and
+// falls back to firstSha^ (see runTask).
+function startCheckBlock(task, range) {
+  if (!range || !range.startSha || !range.headSha) return ''
+  return `
+
+## The range's start (check 8)
+The range above starts at the implementer's reported \`startSha\`. Verify it:
+\`\`\`bash
+git -C ${repoPath(task.repo)} merge-base --is-ancestor ${range.startSha} ${range.headSha}
+\`\`\`
+A non-zero exit is a FAIL with \`check: "range"\`: the reported start is not where this change began.`
 }
 // A direct task commits straight onto the run branch, so its head MUST be reachable from it —
 // a head that is not was committed on a stray branch and would settle DONE without ever being
@@ -1843,17 +1858,32 @@ async function runTask(task) {
   const precheckAdvisory = [] // footprint problems demoted to advisory (see below)
   if (PRECHECK) {
     let lastFail = null // {files, head} of the previous footprint-only FAIL
+    let recheck = '' // label suffix of the one re-check a range-only FAIL buys
     for (let p = 0; ; p++) {
       precheckStats.checked++
       const pc = await agentT(precheckPrompt(task, range, impl), {
-        label: `precheck:${task.id}${p ? `#${p}` : ''}`,
+        label: `precheck:${task.id}${p ? `#${p}` : ''}${recheck}`,
         phase: 'Spec review',
         model: 'haiku',
         effort: 'low',
         agentType: pluginAgent('reviewer'),
         schema: PRECHECK_SCHEMA,
       })
-      const problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
+      let problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
+      // A bad `startSha` is the REPORT's defect, not the code's: drop it and judge from firstSha^
+      // (never demoted, never a fix of its own). A range-only FAIL re-checks the corrected range
+      // at once; alongside other problems it rides with them into the fix.
+      if (range.startSha && problems.some((x) => x.check === 'range')) {
+        log(`   · ${task.id}: reported startSha ${range.startSha} is not an ancestor of ${range.headSha} — the range falls back to firstSha^`)
+        emit('precheck', { task: task.id, verdict: 'FAIL', problems: problems.map((x) => `${x.file || '?'}:${x.line || '?'} — ${x.issue}`) })
+        range.startSha = null
+        problems = problems.filter((x) => x.check !== 'range')
+        if (!problems.length) {
+          recheck = '~range'
+          p--
+          continue
+        }
+      }
       // The same footprint-only problem set, twice, with no commit in between: another fix (or a
       // replan) cannot change the answer — the flagged files are typically inherited from a
       // merge. The precheck is an optimisation, not a gate, so the problems become advisory

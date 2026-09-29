@@ -29,6 +29,9 @@ the exact diff range (or, when the implementer reported no usable SHAs, how to f
    section: the task committed directly onto the run branch, so its head must be an ancestor
    of it. Run the command the header gives; a non-zero exit is a FAIL (the work sits on a
    stray branch and would never be integrated).
+8. **The range's start** (`range`) — only when the header has a "The range's start" section:
+   the implementer's reported start must be an ancestor of the head. Run the command the
+   header gives; a non-zero exit is a FAIL (the engine then judges from the first commit).
 
 ## Return
 - **PASS** with `problems: []` when every check holds.
