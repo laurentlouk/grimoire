@@ -311,7 +311,8 @@ local and gitignored; `/grimoire:logs` renders it, and its `summary` is the cros
 ## What it returns
 
 `done` · `needsAttention` · `blocked` (never ran) · `alreadyDone` (absorbed) · `deferred` ·
-`advisoryNotes` (the minor/nit findings not reworked — triage them by hand) · `ungatedRepos`
+`advisoryNotes` (the minor/nit findings not reworked, plus any repeated footprint-only
+precheck problems demoted to advisory — triage them by hand) · `ungatedRepos`
 (landed work with no PR yet) · `prs` · `replans` + `learnings` + `halt` · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·

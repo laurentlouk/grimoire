@@ -47,7 +47,7 @@ If any check fails, say which artifact is missing and which skill produces it. D
 
 ## Read the result back
 
-Report `done`, `needsAttention`, `blocked`, `ungatedRepos`, the PRs, the advisory findings to triage by hand, the replans and their learnings, and any halt reason. Also report:
+Report `done`, `needsAttention`, `blocked`, `ungatedRepos`, the PRs, the advisory findings to triage by hand, the replans and their learnings, and any halt reason. A halt reading `reviewers unavailable` (tasks marked `REVIEWERS_UNAVAILABLE`) is a harness failure, not failed code: check that the reviewer agent resolves and dispatches, then resume. Also report:
 - `overturnedFindings`: blocking findings the verifier disproved, with its evidence;
 - `routing`: the model mix, escalations, and fallbacks to the owner;
 - `claimedElsewhere`: issues someone else had started;

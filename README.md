@@ -155,6 +155,8 @@ npm run evals:check    # evals/ is up to date with skills/*/evals/evals.json
 claude plugin eval .   # run the skill evals (paid; see evals/README.md)
 ```
 
+What changed in each release: [CHANGELOG.md](CHANGELOG.md).
+
 ## 📄 License
 
 [MIT](LICENSE)
