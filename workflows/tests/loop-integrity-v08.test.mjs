@@ -10,6 +10,8 @@
 //    • PRECHECK FALSE-POSITIVE LOOP — an integration task's range started at its first commit,
 //      so the merged lane's older commits dragged other lanes' files into its "footprint"; the
 //      run spent six prechecks and three replans on correct code
+//    • UNRESOLVABLE AGENT TYPES — a bare plugin agent name is "not found", every dispatch of it
+//      dies, and the loop used to find out one task at a time; a preflight refuses up front
 //
 //  Same stubbed runtime as harness-v06.test.mjs (agent / parallel / log / phase / args /
 //  budget); every scenario asserts the dispatches the engine actually made.
@@ -145,6 +147,33 @@ for (const maxPrecheckFixes of [1, 3]) {
     return PASSV
   }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
   eq(result.needsAttention.map((r) => [r.id, r.status]), [['PROJ-1', 'PRECHECK_FAILED']], 'PRECHECK_FAILED (the fix changed the tree)')
+}
+
+// ══════ 4 · the startup agent preflight ══════
+{
+  const { result, calls, labels } = await run('4a · one agent type that does not resolve → the run refuses, nothing is built', [T('PROJ-1')], (label, prompt, opts) => {
+    if (label.startsWith('preflight:')) return opts.agentType === 'grimoire:security-scout' ? null : { ok: true }
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    return PASSV
+  }, { extraArgs: { ...QUIET, specialists: [{ agent: 'migration-engineer', repos: ['api'] }], finalCheck: { repos: ['api'], prompt: 'check', agentType: 'contract-auditor' } } })
+  const pre = calls.filter((c) => c.label.startsWith('preflight:'))
+  eq(pre.map((c) => c.opts.agentType).sort(), ['backend-engineer', 'contract-auditor', 'grimoire:codebase-scout', 'grimoire:contract-checker', 'grimoire:migration-engineer', 'grimoire:perf-scout', 'grimoire:reviewer', 'grimoire:security-scout'], 'every agent type the run can use is probed once (owner of each repo in the project, specialists, reviewer, scouts, finalCheck)')
+  ok(pre.length > 0 && pre.every((c) => c.opts.model === 'haiku' && c.opts.effort === 'low' && c.opts.schema && /reply/i.test(c.prompt)), 'each probe is a trivial schema-bound reply on haiku')
+  eq({ error: result.error, problems: result.problems }, { error: 'agents_unavailable', problems: ['grimoire:security-scout'] }, 'refused with the unresolvable type named')
+  ok(/agentNamespace/.test(result.note) && /preflight:false/.test(result.note), 'the note names the likely cause and the escape hatch')
+  ok(!labels.some((l) => l.startsWith('hydrate:') || l.startsWith('impl:')), 'no hydration, no implementer')
+}
+{
+  const { result, labels } = await run('4b · every type answers → the run proceeds; {preflight:false} skips the probe', [T('PROJ-1')], (label) => {
+    if (label.startsWith('preflight:')) return { ok: true }
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    return PASSV
+  }, { extraArgs: QUIET })
+  ok(labels.some((l) => l.startsWith('preflight:')) && result.done.length === 1, 'probed, then built')
+  const off = await run('4c · preflight off', [T('PROJ-1')], (label) => (label.startsWith('impl:') ? impl('aaaaaaa') : PASSV), { extraArgs: { ...QUIET, preflight: false } })
+  ok(!off.labels.some((l) => l.startsWith('preflight:')) && off.result.done.length === 1, 'no probe, still built')
+  const prev = await run('4d · a preview never probes', [T('PROJ-1')], () => PASSV, { extraArgs: { execute: false } })
+  ok(!prev.labels.some((l) => l.startsWith('preflight:')), 'preview: nothing probed')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)

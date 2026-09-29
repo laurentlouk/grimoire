@@ -420,6 +420,13 @@ const VERIFY_SCHEMA = {
   },
 }
 
+// The startup PREFLIGHT's reply: an agent type that cannot answer this cannot answer anything.
+const PREFLIGHT_SCHEMA = {
+  type: 'object',
+  required: ['ok'],
+  properties: { ok: { type: 'boolean', description: 'always true' } },
+}
+
 // The telemetry WRITER's receipt. The engine compares both counts against what it sent, so
 // a writer that dropped or altered lines is detected instead of trusted.
 const JOURNAL_SCHEMA = {
@@ -1168,6 +1175,9 @@ const MAX_CONTEXT_RESOLVES =
 const AGENT_TIMEOUT_MIN = Number.isFinite(opts.agentTimeoutMin) && opts.agentTimeoutMin >= 0 ? opts.agentTimeoutMin : DEFAULT_AGENT_TIMEOUT_MIN
 // Within-repo parallelism cap: tasks in flight per repo.
 const MAX_PER_REPO = Number.isInteger(opts.maxPerRepo) && opts.maxPerRepo >= 1 ? opts.maxPerRepo : DEFAULT_MAX_PER_REPO
+// Startup agent preflight (execute runs): every agent type the run can dispatch answers one
+// trivial prompt before any work starts. ON unless {preflight:false}.
+const PREFLIGHT = opts.preflight !== false
 // Precheck rung (cheap structural check before the panel). ON unless {precheck:false}.
 const PRECHECK = opts.precheck !== false
 const MAX_PRECHECK_FIXES =
@@ -1265,6 +1275,12 @@ specialists = Array.isArray(opts.specialists)
         use: str(s.use) || '',
       }))
   : []
+// Optional final cross-repo check (see "final cross-repo pass"); parsed here because the
+// startup preflight must know its agent type.
+const finalCheck =
+  opts.finalCheck && typeof opts.finalCheck === 'object' && typeof opts.finalCheck.prompt === 'string' && opts.finalCheck.prompt.trim()
+    ? { repos: Array.isArray(opts.finalCheck.repos) ? opts.finalCheck.repos : [], prompt: opts.finalCheck.prompt, agentType: resolveAgent(str(opts.finalCheck.agentType) || 'contract-checker') }
+    : null
 // Teach the schemas which repos/agents exist, so an agent cannot invent one.
 if (repoList.length) {
   const names = repoList.map((r) => r.name)
@@ -1872,6 +1888,49 @@ async function runTask(task) {
     const withMem = Object.entries(agentMemory).filter(([, v]) => v && v.trim()).map(([k]) => k)
     log(`◎ harness context: ${priorLearnings.length} prior learning(s) from ${(ctx.priorLedgers || []).length} ledger(s) · memory for ${withMem.length ? withMem.join(', ') : 'no agent yet'}`)
   } else log('⚠ harness-context loader died — running with empty memory (agents still read their own memory files)')
+}
+
+// ── the startup agent PREFLIGHT (execute runs): can every agent type be spawned at all? ──
+// An agent type the runtime cannot resolve (a bare plugin name, a typo, an uninstalled plugin)
+// makes EVERY dispatch of it die, and the loop used to discover that one task at a time —
+// dead reviewers read as failed code and bought replans. One trivial, schema-bound reply per
+// distinct type, in parallel, on the cheapest tier, before any hydration or implementer: any
+// type that returns nothing refuses the run, like a missing required hook.
+if (PREFLIGHT) {
+  const repos = [...new Set(pendingIndex.map((i) => i.repo).filter((r) => repoConfig.has(r)))]
+  const types = [
+    ...new Set([
+      ...repos.map(agentFor),
+      ...repos.flatMap((r) => specialistsFor(r).map((sp) => sp.agent)),
+      pluginAgent('reviewer'), // panel, precheck, verifier, guard
+      ...(MAX_CONTEXT_RESOLVES > 0 ? ['codebase-scout', 'contract-checker', 'security-scout', 'perf-scout'].map(pluginAgent) : []), // the resolve rung
+      ...(finalCheck ? [finalCheck.agentType] : []),
+    ].filter(Boolean)),
+  ]
+  const replies = await step(`agent preflight — ${types.length} agent type(s)`, () =>
+    parallel(
+      types.map((agentType) => () =>
+        agentT('Preflight check for an automated run: reply with {"ok": true}. Do nothing else: read no files, run no commands.', {
+          label: `preflight:${agentType}`,
+          phase: 'Parse plan',
+          model: 'haiku',
+          effort: 'low',
+          agentType,
+          schema: PREFLIGHT_SCHEMA,
+        }),
+      ),
+    ),
+  )
+  const unresolved = types.filter((_, i) => !(replies || [])[i])
+  if (unresolved.length) {
+    log(`⛔ not started — agent type(s) did not answer the preflight: ${unresolved.join(', ')}`)
+    return {
+      error: 'agents_unavailable',
+      problems: unresolved,
+      note: `NOT STARTED — no implementers dispatched. These agent types returned nothing to a trivial dispatch, so every task routed to them would die: ${unresolved.join(', ')}. Usually the name does not resolve: plugin agents are registered as \`<agentNamespace>:<name>\` (set {agentNamespace} to match how the plugin is installed, or '' for agents copied into .claude/agents/), and repo agents must exist in this session. Fix the name(s) and re-invoke, or pass {preflight:false} to skip the probe on purpose.`,
+    }
+  }
+  log(`✓ agent preflight — ${types.length} agent type(s) answered`)
 }
 
 // ── telemetry on (execute runs) + cross-session resume ──
@@ -2504,10 +2563,6 @@ if (claim && claimedByRun.size) {
 // between a client and its server. Absent = skipped.
 phase('Final pass')
 const touched = new Set(doneTasks.map((t) => t.repo))
-const finalCheck =
-  opts.finalCheck && typeof opts.finalCheck === 'object' && typeof opts.finalCheck.prompt === 'string' && opts.finalCheck.prompt.trim()
-    ? { repos: Array.isArray(opts.finalCheck.repos) ? opts.finalCheck.repos : [], prompt: opts.finalCheck.prompt, agentType: resolveAgent(str(opts.finalCheck.agentType) || 'contract-checker') }
-    : null
 let contract = null
 if (finalCheck && finalCheck.repos.every((r) => touched.has(r))) {
   contract = await step('final cross-repo check', () =>

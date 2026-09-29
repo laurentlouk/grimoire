@@ -109,6 +109,7 @@ as they go, and its terminal slot ends at the quality sweep.
 | `baseBranch` | `origin/main` | the integration branch lanes branch from and reviews/sweeps diff against (`origin/master`, `origin/trunk`, …) |
 | `requireHook` | `null` | `{name, check, fix?}` — refuse to execute unless a tool hook is installed and registered in this session |
 | `skipHookCheck` | `false` | explicit, logged escape hatch for `requireHook` |
+| `preflight` | `true` | execute runs: before any hydration or implementer, every agent type the run can dispatch (each project repo's owner, its enabled specialists, the reviewer, the resolve-rung scouts, the `finalCheck` agent) answers one trivial haiku prompt in parallel; any that returns nothing refuses the run as `agents_unavailable`, naming the types (`false` skips it) |
 | `precheck` | `true` | the haiku structural check between implementer and panel (`false` disables) |
 | `maxPrecheckFixes` | `1` | fix dispatches a precheck FAIL may buy before the task fails as `PRECHECK_FAILED` |
 | `verifyFindings` | `true` | verify each gating finding against the code before a fix is bought (`false` disables) |
@@ -143,6 +144,7 @@ flowchart TB
     idx -- "requireHook configured &amp; failing" --> ref3["REFUSED — required_hook_missing\n{skipHookCheck:true} overrides, loudly"]
     idx --> ctx["HARNESS CONTEXT — cheap, read-only (execute only)\nmemory stores verbatim + prior run-ledger learnings\n→ pasted into every brief"]
     ctx --> exec{"execute:true?\n(preview is the default)"}
+    exec -- "yes · an agent type does not answer the preflight" --> ref4["REFUSED — agents_unavailable\nthe unresolvable types named · {preflight:false} overrides"]
     exec -- "no" --> prev["PREVIEW — dependency DAG, startable issues,\nper-repo review panels, resolved repo config"]
     exec -- "yes" --> disp["CONTINUOUS DISPATCH — no wave barrier\nstart EVERY issue whose own dependsOn landed\nslice → downstream-unlocked → id · ≤ maxPerRepo in flight\nhydrate just-in-time · disjoint files → worktree lanes"]
     disp --> race["RACE — first settle wins\nper task: lifecycle below\nlanded → dependents unblock · failed → blocks only its dependents\n3 consecutive agent deaths → stop dispatching, drain"]
@@ -334,7 +336,7 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
 ## Token economy (built in)
 
 - The terminal sweep reads **by lens**: each persona takes the branch `--stat` and reads only the files its Scope section names, never the whole branch.
-- Mechanical dispatches (index, harness-context, integrate, precheck, journal, claim release, ledger) run with `effort: 'low'`; index and hydration run on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
+- Mechanical dispatches (index, harness-context, agent preflight, integrate, precheck, journal, claim release, ledger) run with `effort: 'low'`; index and hydration run on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
 - A precheck stops an unreviewable diff before the panel; a verifier stops a false-positive finding before it buys a fix.
 - The first review of a stage is the full panel; after a fix a sonnet guard decides whether the panel re-runs.
 - Briefs and memory are pasted as a stable prefix so prompt caching hits across dispatches; volatile values (task, SHAs) come last.
