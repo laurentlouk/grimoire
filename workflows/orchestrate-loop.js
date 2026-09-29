@@ -1999,11 +1999,11 @@ if (PREFLIGHT) {
       ...(finalCheck ? [finalCheck.agentType] : []),
     ].filter(Boolean)),
   ]
-  const replies = await step(`agent preflight — ${types.length} agent type(s)`, () =>
+  const probe = (list, suffix) =>
     parallel(
-      types.map((agentType) => () =>
+      list.map((agentType) => () =>
         agentT('Preflight check for an automated run: reply with {"ok": true}. Do nothing else: read no files, run no commands.', {
-          label: `preflight:${agentType}`,
+          label: `preflight:${agentType}${suffix}`,
           phase: 'Parse plan',
           model: 'haiku',
           effort: 'low',
@@ -2011,15 +2011,21 @@ if (PREFLIGHT) {
           schema: PREFLIGHT_SCHEMA,
         }),
       ),
-    ),
-  )
-  const unresolved = types.filter((_, i) => !(replies || [])[i])
+    )
+  const replies = await step(`agent preflight — ${types.length} agent type(s)`, () => probe(types, ''))
+  let unresolved = types.filter((_, i) => !(replies || [])[i])
+  // One silent reply can be a transient spawn failure; a type that is silent twice is not.
+  if (unresolved.length) {
+    log(`⚠ agent preflight: no reply from ${unresolved.join(', ')} — probing once more`)
+    const again = await probe(unresolved, '~r1')
+    unresolved = unresolved.filter((_, i) => !(again || [])[i])
+  }
   if (unresolved.length) {
     log(`⛔ not started — agent type(s) did not answer the preflight: ${unresolved.join(', ')}`)
     return {
       error: 'agents_unavailable',
       problems: unresolved,
-      note: `NOT STARTED — no implementers dispatched. These agent types returned nothing to a trivial dispatch, so every task routed to them would die: ${unresolved.join(', ')}. Usually the name does not resolve: plugin agents are registered as \`<agentNamespace>:<name>\` (set {agentNamespace} to match how the plugin is installed, or '' for agents copied into .claude/agents/), and repo agents must exist in this session. Fix the name(s) and re-invoke, or pass {preflight:false} to skip the probe on purpose.`,
+      note: `NOT STARTED — no implementers dispatched. These agent types returned nothing to a trivial dispatch, twice, so every task routed to them would die: ${unresolved.join(', ')}. Usually the name does not resolve: plugin agents are registered as \`<agentNamespace>:<name>\` (set {agentNamespace} to match how the plugin is installed, or '' for agents copied into .claude/agents/), and repo agents must exist in this session. Fix the name(s) and re-invoke, or pass {preflight:false} to skip the probe on purpose.`,
     }
   }
   log(`✓ agent preflight — ${types.length} agent type(s) answered`)

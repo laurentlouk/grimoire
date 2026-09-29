@@ -239,7 +239,8 @@ for (const maxPrecheckFixes of [1, 3]) {
     if (label.startsWith('impl:')) return impl('aaaaaaa')
     return PASSV
   }, { extraArgs: { ...QUIET, specialists: [{ agent: 'migration-engineer', repos: ['api'] }], finalCheck: { repos: ['api'], prompt: 'check', agentType: 'contract-auditor' } } })
-  const pre = calls.filter((c) => c.label.startsWith('preflight:'))
+  const pre = calls.filter((c) => c.label.startsWith('preflight:') && !c.label.endsWith('~r1'))
+  eq(calls.filter((c) => c.label.endsWith('~r1') && c.label.startsWith('preflight:')).map((c) => c.label), ['preflight:grimoire:security-scout~r1'], 'the silent type is probed once more before the run refuses')
   eq(pre.map((c) => c.opts.agentType).sort(), ['backend-engineer', 'contract-auditor', 'grimoire:codebase-scout', 'grimoire:contract-checker', 'grimoire:migration-engineer', 'grimoire:perf-scout', 'grimoire:reviewer', 'grimoire:security-scout'], 'every agent type the run can use is probed once (owner of each repo in the project, specialists, reviewer, scouts, finalCheck)')
   ok(pre.length > 0 && pre.every((c) => c.opts.model === 'haiku' && c.opts.effort === 'low' && c.opts.schema && /reply/i.test(c.prompt)), 'each probe is a trivial schema-bound reply on haiku')
   eq({ error: result.error, problems: result.problems }, { error: 'agents_unavailable', problems: ['grimoire:security-scout'] }, 'refused with the unresolvable type named')
@@ -253,6 +254,13 @@ for (const maxPrecheckFixes of [1, 3]) {
     return PASSV
   }, { extraArgs: QUIET })
   ok(labels.some((l) => l.startsWith('preflight:')) && result.done.length === 1, 'probed, then built')
+  let once = 0
+  const flaky = await run('4b2 · a type that answers on its retry → the run proceeds', [T('PROJ-1')], (label, prompt, opts) => {
+    if (label.startsWith('preflight:')) return opts.agentType === 'grimoire:perf-scout' && once++ === 0 ? null : { ok: true }
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    return PASSV
+  }, { extraArgs: QUIET })
+  ok(flaky.labels.includes('preflight:grimoire:perf-scout~r1') && !flaky.result.error && flaky.result.done.length === 1, 'retried once, then built')
   const off = await run('4c · preflight off', [T('PROJ-1')], (label) => (label.startsWith('impl:') ? impl('aaaaaaa') : PASSV), { extraArgs: { ...QUIET, preflight: false } })
   ok(!off.labels.some((l) => l.startsWith('preflight:')) && off.result.done.length === 1, 'no probe, still built')
   const prev = await run('4d · a preview never probes', [T('PROJ-1')], () => PASSV, { extraArgs: { execute: false } })
