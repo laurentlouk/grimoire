@@ -57,7 +57,11 @@ brief-level and stack-agnostic.
 - **One deterministic run branch per repo**, `feat/<project-slug>-<repo>`, and one PR per repo
   opened at project end. Per-ticket branches and per-ticket PRs are gone; drop `prBy` from
   `grimoire.config.json`. Work a 0.7.x run landed on per-issue branches is not merged into the
-  new run branch automatically: merge or re-run it by hand.
+  new run branch automatically: merge or re-run it by hand. A repo whose 0.7.x run already
+  opened per-ticket PRs on tracker branches gets one NEW PR, from the run branch, at the end of
+  the next run: close the old per-ticket PRs or retarget them, or they stay open alongside it.
+  The run branch name is slugged (`feat/<project-slug>-<repo-slug>`); a name with no
+  sluggable characters becomes `x<hash>`.
 - **The agent preflight is on by default.** An execute run that cannot spawn one of its agent
   types refuses with `error: 'agents_unavailable'` and `problems: [<types>]`. Fix
   `agentNamespace` or the agent names, or opt out with `{preflight: false}`.
