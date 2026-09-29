@@ -45,6 +45,7 @@ const DEFAULT_AGENT_TIMEOUT_MIN = 40 // per-agent wall-clock backstop (minutes).
 const DEFAULT_MAX_PER_REPO = 3 // within-repo parallelism: how many of a repo's tasks may be IN FLIGHT at once. Whether a ready task actually joins is decided at dispatch by declared-file overlap against the repo's running tasks — disjoint files → parallel worktree lanes, any overlap or an undeclared footprint → held until the conflict clears. {maxPerRepo:1} restores strict serialization.
 const DEFAULT_MAX_PRECHECK_FIXES = 1 // precheck rung: cheap structural check between the implementer and the panel. A FAIL buys this many fix dispatches before the task fails as PRECHECK_FAILED. {precheck:false} disables the rung.
 const DEFAULT_ESCALATE_AT_FIX_ROUND = 2 // model escalation: from this fix round on (counted per task, across stages), the implementer runs on opus whatever tier the selector chose. {escalateAtFixRound:0} disables.
+const REVIEWER_RETRIES = 1 // a review round where EVERY reviewer returned nothing is re-dispatched this many times before the run halts as 'reviewers unavailable' (a harness failure, never a verdict on the code)
 const DEFAULT_BUDGET_FLOOR = 80000 // stop dispatching when the turn's remaining token budget drops below this. {budgetFloor:N} overrides.
 const DEFAULT_JOURNAL_FLUSH_EVERY = 40 // telemetry: decision events buffered before one cheap writer puts them on disk (also flushed at every replan, the final wave and the end)
 
@@ -1524,21 +1525,30 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
   log(`   · ${task.id} (${task.repo}): ${mode} review — ${personas.length} reviewer(s)…`)
   let aggregate = null
   for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-    const reviews = (
-      await parallel(
-        personas.map((p) => () =>
-          agentT(reviewPrompt(task, mode, p, range), {
-            label: `${p.id}:${task.id}${attempt ? `#${attempt}` : ''}`,
-            phase: phaseName,
-            model: 'sonnet',
-            agentType: pluginAgent('reviewer'),
-            schema: VERDICT_SCHEMA,
-          }).then((v) => (v ? { persona: p.name, v } : null)),
-        ),
-      )
-    ).filter(Boolean)
-
-    if (reviews.length === 0) return { verdict: 'FAIL', findings: [], advisory: [], summary: 'reviewers unavailable (all died)' }
+    const round = async (retry) =>
+      (
+        await parallel(
+          personas.map((p) => () =>
+            agentT(reviewPrompt(task, mode, p, range), {
+              label: `${p.id}:${task.id}${attempt ? `#${attempt}` : ''}${retry ? `~r${retry}` : ''}`,
+              phase: phaseName,
+              model: 'sonnet',
+              agentType: pluginAgent('reviewer'),
+              schema: VERDICT_SCHEMA,
+            }).then((v) => (v ? { persona: p.name, v } : null)),
+          ),
+        )
+      ).filter(Boolean)
+    let reviews = await round(0)
+    // EVERY reviewer returning nothing says nothing about the code — the reviewer agent is not
+    // dispatching (unresolvable type, outage, spend limit). Booking it as a failed stage bought
+    // replans for correct code; retry the round, then report UNAVAILABLE so the run halts.
+    for (let retry = 1; !reviews.length && retry <= REVIEWER_RETRIES; retry++) {
+      log(`⚠ ${task.id}: every ${mode} reviewer returned nothing — retrying the round (${retry}/${REVIEWER_RETRIES})`)
+      reviews = await round(retry)
+    }
+    if (reviews.length === 0)
+      return { verdict: 'UNAVAILABLE', findings: [], advisory: [], summary: `every ${mode} reviewer (${personas.map((p) => p.name).join(', ')}) returned nothing, ${REVIEWER_RETRIES + 1} time(s)` }
 
     for (const r of reviews)
       emit('review', { task: task.id, stage: mode, persona: r.persona, verdict: r.v.verdict, gating: (r.v.findings || []).filter(isGating).length, advisory: (r.v.findings || []).filter((f) => !isGating(f)).length, round: attempt })
@@ -1831,9 +1841,11 @@ async function runTask(task) {
   }
 
   const spec = await runReviewStage(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', resolved, range)
+  if (spec.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: spec }
   if (spec.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'SPEC_FAILED', impl, review: spec }
 
   const quality = await runReviewStage(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', resolved, range)
+  if (quality.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: quality }
   if (quality.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'QUALITY_FAILED', impl, review: quality }
 
   const advisory = precheckAdvisory.concat(spec.advisory || [], quality.advisory || [])
@@ -2160,6 +2172,20 @@ function startTask(t) {
 // Book one settled result — task or terminal slot — into the run state.
 function settle(r) {
   allResults.push(r)
+  // Reviewers that never answered are a HARNESS failure: no replan is spent on it (a new plan
+  // cannot make an agent dispatch) and nothing is booked as failed code. The work stays
+  // unlanded — its dependents wait, a gated repo stays ungated — and the run halts at
+  // quiescence; re-invoking once reviewers dispatch again resumes it.
+  if (r.status === 'REVIEWERS_UNAVAILABLE') {
+    if (r.gateStep) emit('terminal', { repo: r.repo, verdict: 'UNAVAILABLE' })
+    else {
+      pendingById.delete(r.id)
+      emit('settle', { task: r.id, repo: r.repo, status: r.status })
+    }
+    if (!halt) halt = { reason: `reviewers unavailable: ${(r.review && r.review.summary) || 'every reviewer returned nothing'} on ${r.id} — the reviewer agent (${pluginAgent('reviewer')}) is not dispatching; a harness failure, not a verdict on the code` }
+    log(`⛔ ${r.id} (${r.repo}) → reviewers unavailable — halting at quiescence (no replan spent)`)
+    return
+  }
   if (r.gateStep) {
     if (/:final$/.test(r.id)) emit('terminal', { repo: r.repo, verdict: r.status === 'TERMINAL_REVIEW_FAILED' ? 'FAIL' : 'PASS' })
     else emit('gate', { repo: r.repo, status: r.status, applies: !!r.gateApplies, prUrl: r.prUrl || '' })
@@ -2205,6 +2231,7 @@ async function terminalSlot(repo) {
   const ft = terminalTask(repo)
   log(`   · ${repo}: project drained → terminal quality sweep (${panelFor(repo, 'terminal').map((p) => p.name).join(' · ')}) on ${ft.branch}…`)
   const terminal = await runReviewStage(ft, 'terminal', panelFor(repo, 'terminal'), 'Terminal review', [], null)
+  if (terminal.verdict === 'UNAVAILABLE') return { id: ft.id, repo, gateStep: true, status: 'REVIEWERS_UNAVAILABLE', review: terminal }
   if (terminal.verdict !== 'PASS')
     return { id: ft.id, repo, gateStep: true, status: 'TERMINAL_REVIEW_FAILED', review: terminal, advisory: terminal.advisory }
   if (!prByGate(repo))

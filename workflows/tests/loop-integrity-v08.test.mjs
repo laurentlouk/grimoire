@@ -12,6 +12,8 @@
 //      run spent six prechecks and three replans on correct code
 //    • UNRESOLVABLE AGENT TYPES — a bare plugin agent name is "not found", every dispatch of it
 //      dies, and the loop used to find out one task at a time; a preflight refuses up front
+//    • DEAD REVIEWERS READ AS FAILED CODE — when every reviewer of a stage returned nothing the
+//      stage settled SPEC_FAILED and bought a replan; it is a harness failure: retry, then halt
 //
 //  Same stubbed runtime as harness-v06.test.mjs (agent / parallel / log / phase / args /
 //  budget); every scenario asserts the dispatches the engine actually made.
@@ -174,6 +176,45 @@ for (const maxPrecheckFixes of [1, 3]) {
   ok(!off.labels.some((l) => l.startsWith('preflight:')) && off.result.done.length === 1, 'no probe, still built')
   const prev = await run('4d · a preview never probes', [T('PROJ-1')], () => PASSV, { extraArgs: { execute: false } })
   ok(!prev.labels.some((l) => l.startsWith('preflight:')), 'preview: nothing probed')
+}
+
+// ══════ 5 · every reviewer of a stage dead → retry once, then halt; never a replan ══════
+{
+  const A = T('PROJ-1')
+  const B = T('PROJ-2', { dependsOn: ['PROJ-1'] })
+  const { result, labels, logs } = await run('5a · all spec reviewers dead twice → halt "reviewers unavailable", no replan, code not failed', [A, B], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    if (label.startsWith('spec-hawk:')) return null
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'should never be asked', learnings: [] }
+    return PASSV
+  }, { extraArgs: QUIET })
+  eq(labels.filter((l) => l.startsWith('spec-hawk:')), ['spec-hawk:PROJ-1', 'spec-hawk:PROJ-1~r1'], 'the stage is retried exactly once')
+  ok(!labels.some((l) => l.startsWith('replan')) && result.replans === 0, 'no replan is spent')
+  ok(result.halt && /^reviewers unavailable/.test(result.halt.reason) && /grimoire:reviewer/.test(result.halt.reason), `the halt names the reviewers (got: ${result.halt && result.halt.reason})`)
+  eq(result.needsAttention.map((r) => [r.id, r.status]), [['PROJ-1', 'REVIEWERS_UNAVAILABLE']], 'the task is REVIEWERS_UNAVAILABLE, never SPEC_FAILED')
+  eq(result.blocked.map((b) => b.id), ['PROJ-2'], 'its dependent never ran')
+  ok(logs.some((m) => /retrying the round/.test(m)), 'the retry is logged')
+}
+{
+  let n = 0
+  const { result } = await run('5b · reviewers back on the retry → the stage proceeds', [T('PROJ-1')], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    if (label.startsWith('spec-hawk:')) return n++ === 0 ? null : PASSV
+    return PASSV
+  }, { extraArgs: QUIET })
+  eq(result.done.map((d) => [d.id, d.status]), [['PROJ-1', 'DONE']], 'landed')
+  ok(!result.halt, 'no halt')
+}
+{
+  const { result, labels } = await run('5c · all TERMINAL reviewers dead → halt, no replan, repo left ungated', [T('PROJ-1')], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    if (label.startsWith('reliability-sre:') || label.startsWith('privacy:')) return null
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'should never be asked', learnings: [] }
+    return PASSV
+  }, { extraArgs: QUIET })
+  ok(!labels.some((l) => l.startsWith('replan')) && result.halt && /^reviewers unavailable/.test(result.halt.reason), 'halted on the reviewers, no replan')
+  eq(result.needsAttention.map((r) => [r.id, r.status]), [['api:final', 'REVIEWERS_UNAVAILABLE']], 'the terminal slot is REVIEWERS_UNAVAILABLE')
+  eq(result.ungatedRepos, ['api'], 'the repo is reported ungated')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)
