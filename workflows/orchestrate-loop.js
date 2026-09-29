@@ -1053,7 +1053,8 @@ const isGating = (f) => GATING_SEVERITY.has(String((f && f.severity) || '').toLo
 // tier was too weak; a HARNESS failure (an agent that died, reviewers that never answered, a
 // merge the integrate step could not do, a footprint or ancestry precheck on correct code) says
 // nothing about the model, and escalating it only multiplies the cost of the next attempt.
-const HARNESS_FAILURES = new Set(['DIED', 'ERROR', 'HYDRATION_MISSING', 'MERGE_CONFLICT', 'REVIEWERS_UNAVAILABLE'])
+// (REVIEWERS_UNAVAILABLE never reaches here: it halts the run instead of becoming a failure.)
+const HARNESS_FAILURES = new Set(['DIED', 'ERROR', 'HYDRATION_MISSING', 'MERGE_CONFLICT'])
 const HARNESS_PRECHECKS = new Set(['footprint', 'ancestry'])
 function failureKind(r) {
   if (HARNESS_FAILURES.has(r.status)) return 'harness'
@@ -2241,7 +2242,8 @@ function routeTask(t, cycle) {
   let reason = str(t.routeReason) || (MODELS.includes(t.model) ? '(no reason given)' : 'tier unset → opus')
   if (!MODELS.includes(t.model)) t.model = 'opus'
   if (t.replanned && t.model !== 'opus') {
-    const last = lastFailure.get(t.id)
+    // its own last failure, else — for a task the replan invented — the failure it repairs
+    const last = lastFailure.get(t.id) || t.repairs
     if (last && last.kind === 'code') {
       reason = `replanned after a code failure (${last.status}) → opus (selector chose ${t.model})`
       t.model = 'opus'
@@ -2293,8 +2295,10 @@ function settle(r) {
     if (/:final$/.test(r.id)) emit('terminal', { repo: r.repo, verdict: r.status === 'TERMINAL_REVIEW_FAILED' ? 'FAIL' : 'PASS' })
     else emit('gate', { repo: r.repo, status: r.status, applies: !!r.gateApplies, prUrl: r.prUrl || '' })
     if (r.status === 'GATE_FAILED' || r.status === 'TERMINAL_REVIEW_FAILED') {
-      // the sweep/gate caught what per-task review did not → replannable
-      failures.push({ id: r.id, repo: r.repo, status: r.status, detail: failureDetail(r) })
+      // the sweep/gate caught what per-task review did not → replannable, and a CODE failure:
+      // the repair a replan queues for it escalates like any other code failure
+      lastFailure.set(r.id, { kind: 'code', status: r.status })
+      failures.push({ id: r.id, repo: r.repo, status: r.status, kind: 'code', detail: failureDetail(r) })
       gateHold.add(r.repo) // held until new repo work lands — never re-dispatch a failing slot on the same tree
       log(`⛔ ${r.repo}: ${r.status === 'GATE_FAILED' ? 'gate' : 'terminal sweep'} failed — a replan can queue a repair task (the slot retries at the next full project drain)`)
     } else {
@@ -2598,6 +2602,7 @@ while (true) {
       const revisedDeferred = revised.filter((t) => t.deferred)
       deferred.push(...revisedDeferred)
       let requeued = 0
+      const replannedFailures = [...failures] // snapshot: the loop below retires the ones it retries
       for (const t of revised.filter((x) => !x.deferred)) {
         // a replanned task re-enters the DAG fully specified — no hydration round-trip.
         // A retry of an in-project issue must land under its tracker id, or its dependents
@@ -2606,6 +2611,13 @@ while (true) {
         pendingById.set(t.id, { id: t.id, title: '', repo: t.repo, state: 'todo', slice: t.slice ?? 0, sliceLabel: t.sliceLabel || '', dependsOn: t.dependsOn || [] })
         inProject.add(t.id)
         t.replanned = true
+        // A task the replanner INVENTED has no failure of its own: it repairs this replan's
+        // failures in its repo, code-kind if any of them was.
+        if (!lastFailure.has(t.id)) {
+          const inRepo = replannedFailures.filter((f) => f.repo === t.repo)
+          const code = inRepo.find((f) => f.kind === 'code')
+          if (inRepo.length) t.repairs = code ? { kind: 'code', status: code.status } : { kind: 'harness', status: inRepo[0].status }
+        }
         t.routed = false // a replanned task is routed afresh (opus after a code failure)
         hydratedById.set(t.id, t)
         if (t.ticket && t.ticket !== 'NO_TICKET') hydratedById.set(t.ticket, t)

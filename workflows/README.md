@@ -263,8 +263,9 @@ the rubric in `briefs/hydrate.md`) with a `routeReason`. The engine accepts only
 routing table allows — anything else is dispatched as the owner, counted as a fallback — and
 escalates to opus from `escalateAtFixRound` and for a task replanned after a CODE failure
 (gating findings, an implementer that could not do it, a structural precheck defect); a
-replan after a HARNESS failure (a dead agent, reviewers that never answered, a merge
-conflict, a footprint or ancestry precheck) keeps the chosen tier. Only review fix
+replan after a HARNESS failure (a dead agent, a merge conflict, a footprint or ancestry
+precheck) keeps the chosen tier. A gate or terminal-sweep failure is a code failure, and a
+task the replanner invents inherits the kind of the failures it repairs in its repo. Only review fix
 rounds count toward escalation; a precheck fix is structural and does not. `NEEDS_CONTEXT`
 questions go to the scout their shape calls for: contract → `contract-checker`, security →
 `security-scout`, performance → `perf-scout`, otherwise `codebase-scout`.

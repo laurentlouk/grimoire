@@ -350,6 +350,29 @@ for (const maxPrecheckFixes of [1, 3]) {
   }
 }
 
+{
+  // A replan-invented repair task has no failure of its own: it inherits the kind of the
+  // failure it repairs in its repo. A gate or terminal-sweep failure is a CODE failure.
+  const GATED = [{ name: 'api', agent: 'backend-engineer', tags: ['backend'], gate: { kind: 'command', run: 'make e2e' } }]
+  let g = 0
+  const { calls, logs } = await run('6e · a repair task for a GATE_FAILED repo escalates to opus', [T('PROJ-1')], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa', { status: 'DONE_PENDING_GATE' })
+    if (label.startsWith('gate:')) return g++ === 0 ? { status: 'BLOCKED', summary: 'e2e red: test_x' } : { status: 'DONE', summary: 'ok', prUrl: 'https://x/pr/1' }
+    if (label.startsWith('replan')) return { decision: 'REVISE', reason: 'repair', learnings: [], tasks: [T('FIX-1', { model: 'haiku', ticket: 'NO_TICKET', taskText: 'make test_x pass' })] }
+    return PASSV
+  }, { extraArgs: { ...QUIET, repos: GATED } })
+  eq(calls.filter((c) => c.label === 'impl:FIX-1').map((c) => c.opts.model), ['opus'], 'the repair runs on opus')
+  ok(logs.some((m) => /FIX-1: replanned after a code failure \(GATE_FAILED\)/.test(m)), 'because it repairs a code failure (GATE_FAILED)')
+  let n = 0
+  const died = await run('6f · a repair task after a DIED failure keeps its tier', [T('PROJ-1')], (label) => {
+    if (label.startsWith('impl:PROJ-1')) return n++ === 0 ? null : impl('aaaaaaa')
+    if (label.startsWith('impl:')) return impl('bbbbbbb')
+    if (label.startsWith('replan')) return label === 'replan#1' ? { decision: 'REVISE', reason: 'retry', learnings: [], tasks: [T('FIX-2', { model: 'haiku', ticket: 'NO_TICKET' })] } : { decision: 'HALT', reason: 'enough', learnings: [] }
+    return PASSV
+  }, { extraArgs: QUIET })
+  eq(died.calls.filter((c) => c.label === 'impl:FIX-2').map((c) => c.opts.model), ['haiku'], 'haiku')
+}
+
 // ══════ 7 · the raw-output escape in the implement and gate prompts ══════
 {
   const GATED = [{ name: 'api', agent: 'backend-engineer', tags: ['backend'], gate: { kind: 'command', run: 'make e2e' } }]
