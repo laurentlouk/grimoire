@@ -232,7 +232,8 @@ unavailable`, naming the lens — no replan is spent and the task is reported
 `files` decide what may run *together* in one repo. Disjoint footprints get their own worktree
 lane; overlap, or an undeclared footprint, is held until the conflict clears. A task running
 alone in its repo works directly on the repo's run branch — never on its tracker branch. The
-run branch is named `feat/<project-slug>-<repo>`, deterministically, so every session of a
+run branch is named `feat/<project-slug>-<repo-slug>` (accents folded, other characters
+collapsed to dashes; a name with nothing sluggable left becomes `x<hash>`), deterministically, so every session of a
 run (a resume included) builds on the same one. Lane merges into
 the repo's single run branch are serialized, and a merge conflict is a first-class
 `MERGE_CONFLICT` failure routed to the replanner — a reviewed diff is never silently

@@ -2084,7 +2084,18 @@ const repoRef = {} // repo → {ticket, branch} from its most recent landed task
 // project and the repo, never from a tracker branch: a name seeded by whichever task happened to
 // dispatch first differs between sessions, and a resumed session would then build on a branch
 // that lacks the work an earlier session landed.
-const runBranchFor = (repo) => `feat/${String(project).toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${repo}`
+// Each part is slugged into a valid ref component whatever the name holds (accents folded,
+// every other run of non-[a-z0-9] collapsed to one dash, dashes trimmed, capped); a name with
+// nothing sluggable left (all non-Latin script, emoji) becomes a stable token from a hash of
+// it — FNV-1a, since the runtime forbids Math.random and a relaunch must pick the same name.
+const fnv1a = (v) => {
+  let h = 0x811c9dc5
+  for (const c of String(v)) h = Math.imul(h ^ c.codePointAt(0), 0x01000193) >>> 0
+  return h.toString(16).padStart(8, '0')
+}
+const refToken = (v) =>
+  String(v).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60).replace(/^-+|-+$/g, '') || `x${fnv1a(v)}`
+const runBranchFor = (repo) => `feat/${refToken(project)}-${refToken(repo)}`
 
 // The pseudo-task the TERMINAL quality sweep runs against: the subject is the repo's whole
 // integrated run branch, not one issue. Its taskText briefs BOTH sides of runReviewStage —
@@ -2496,7 +2507,7 @@ while (true) {
           if (shared) {
             t.lane = 'worktree'
             t.runBranch = runBranch
-            t.laneBranch = `${runBranch}--${String(t.id).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+            t.laneBranch = `${runBranch}--${refToken(t.id)}`
             t.branch = t.laneBranch // implementer, reviewers and fix dispatches all look at the lane
           } else {
             // A direct task works ON the run branch, never on its own: hydration fills

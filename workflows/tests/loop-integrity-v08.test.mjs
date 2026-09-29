@@ -117,6 +117,24 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
   ok(/branch feat\/proj-600-api\b/.test(s2.prompt('impl:PROJ-2')), "session 2's implementer is told that branch")
 }
 
+// ══════ 1e · the run branch is a valid git ref for ANY project or repo name ══════
+// Slugged (accents folded, anything else collapsed to one dash, dashes trimmed); a name with
+// nothing sluggable left falls back to a stable token (x + 8 hex of an FNV-1a hash of it).
+{
+  const cases = [
+    ['Ünïcödé Prøject', 'api', 'feat/unicode-pr-ject-api'],
+    ['日本語', 'api', 'feat/x5406374e-api'],
+    ['  --Hello!!  World?? (v2)--  ', 'api', 'feat/hello-world-v2-api'],
+    ['Q3 roadmap', 'My Repo', 'feat/q3-roadmap-my-repo'],
+    ['Q3 roadmap', '🚀✨', 'feat/q3-roadmap-x26e7ae15'],
+  ]
+  for (const [project, repo, want] of cases) {
+    const REPO = [{ name: repo, agent: 'backend-engineer', tags: ['backend'], gate: null }]
+    const { result } = await run(`1e · project ${JSON.stringify(project)} · repo ${JSON.stringify(repo)}`, [T('PROJ-1', { repo })], (label) => (label.startsWith('impl:') ? impl('aaaaaaa') : label.startsWith('gate:') ? { status: 'DONE', summary: 'ok' } : PASSV), { extraArgs: { ...QUIET, project, repos: REPO } })
+    eq(result.done.map((d) => d.runBranch), [want], want)
+  }
+}
+
 // ══════ 1d · one PR per repo run branch, pushed and opened at project end — gate or not ══════
 // Lanes and the integrate step never push, so an ungated repo whose implementers "opened PRs as
 // they went" ended the run with unpushed local merges. Every repo's terminal slot now pushes the
