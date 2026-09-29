@@ -16,9 +16,10 @@
 //  node scripts/render-logs.mjs summary [--dir .grimoire/runs] [--version <v>] [--json]
 //      → cross-run aggregate per grimoire version / briefsHash, for crystallize
 //
-//  Input contract: <dir>/<runId>/run.json + events/<8-digit firstSeq>.jsonl chunks (and/or a
-//  legacy single events.jsonl), one JSON object per line; merged, deduped by seq (first seen
-//  wins), sorted by seq.
+//  Input contract: <dir>/<runId>/run.json + events/<8-digit firstSeq>.jsonl chunks (from the
+//  second attempt under one runId: <firstSeq>.a<N>.jsonl), and/or a legacy single events.jsonl,
+//  one JSON object per line; merged, deduped by (attempt, seq) (first seen wins; events without
+//  `attempt` are attempt 1), sorted by attempt then seq. `at` is the chunk's flush time.
 //  Unknown event types and fields are tolerated and shown raw; lines that fail to
 //  parse are counted and skipped, never fatal.
 import { readFileSync, writeFileSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync } from 'node:fs'
@@ -82,6 +83,9 @@ function eventFiles(p) {
   return files
 }
 
+// The session an event came from under its runId (1 for journals written before attempts).
+const attemptOf = (ev) => num(ev.attempt) ?? 1
+
 export function loadRuns(dir) {
   const runs = []
   for (const name of subdirs(dir)) {
@@ -103,13 +107,16 @@ export function loadRuns(dir) {
         if (!isObj(ev)) { badLines++; continue }
         const seq = num(ev.seq)
         if (seq !== null) {
-          if (seen.has(seq)) { duplicates++; continue } // a retried flush: first seen wins
-          seen.add(seq)
+          // a retried flush: first seen wins. Keyed per attempt — a relaunch under the same
+          // runId restarts its own sequence, and those events are not duplicates.
+          const key = `${attemptOf(ev)}:${seq}`
+          if (seen.has(key)) { duplicates++; continue }
+          seen.add(key)
         }
         events.push(ev)
       }
     }
-    events.sort((a, b) => (num(a.seq) ?? Infinity) - (num(b.seq) ?? Infinity))
+    events.sort((a, b) => attemptOf(a) - attemptOf(b) || (num(a.seq) ?? Infinity) - (num(b.seq) ?? Infinity))
     const start = events.find((e) => e.type === 'run.start') || {}
     const meta = { ...(isObj(start.meta) ? start.meta : {}), ...(isObj(run.meta) ? run.meta : {}) }
     let mtime = null

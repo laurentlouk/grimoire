@@ -811,7 +811,10 @@ ${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}`
 // The telemetry WRITER — a fixed shell script, so the cheap agent only has to run it. Each
 // flush writes its own chunk file named by its first sequence number: a replayed or retried
 // flush OVERWRITES the same file instead of appending duplicates. `__AT__` / `__STARTED__`
-// are stamped by the shell (a workflow script has no clock).
+// are stamped by the shell (a workflow script has no clock). So is `__ATTEMPT__`: the first
+// flush of a session bumps the attempt read back from run.json, later flushes reuse it — so a
+// relaunch under the same runId (resumed or not) is distinguishable, and its chunks
+// (`<firstSeq>.a<N>.jsonl` from attempt 2 on) never overwrite an earlier attempt's.
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 function utf8Bytes(s) {
   let n = 0
@@ -826,7 +829,7 @@ function utf8Bytes(s) {
   }
   return n
 }
-function journalPrompt(lines, runJson, firstSeq, runDir, slug) {
+function journalPrompt(lines, runJson, firstSeq, runDir, slug, firstOfSession) {
   const dir = runDir ? `DIR=${shq(runDir)}` : `DIR=${shq(TELEMETRY_DIR)}/"$(date -u +%Y%m%d-%H%M%S)"-${shq(slug)}`
   const chunk = String(firstSeq).padStart(8, '0')
   return `${brief('journal')}Run this script ONCE, VERBATIM, in one Bash call from the orchestrating workspace root. Do not edit, reformat, re-indent or re-encode any line of it.
@@ -837,19 +840,22 @@ ${dir}
 case "$DIR" in /*) ;; *) C=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true); if [ "\${C##*/}" = .git ]; then DIR="\${C%/.git}/$DIR"; else DIR="$PWD/$DIR"; fi ;; esac
 mkdir -p "$DIR/events"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+PREV=$(sed -n 's/^{"runId":[^,]*,"attempt":\\([0-9][0-9]*\\).*/\\1/p' "$DIR/run.json" 2>/dev/null | head -n 1)
+${firstOfSession ? 'ATTEMPT=$(( ${PREV:-0} + 1 ))' : 'ATTEMPT=${PREV:-1}'}
 F="$DIR/events/${chunk}.jsonl"
+[ "$ATTEMPT" -gt 1 ] && F="$DIR/events/${chunk}.a$ATTEMPT.jsonl"
 cat > "$F.tmp" <<'GRIMOIRE_EOF'
 ${lines.join('\n')}
 GRIMOIRE_EOF
 echo "LINES $(wc -l < "$F.tmp" | tr -d ' ')"
 echo "BYTES $(wc -c < "$F.tmp" | tr -d ' ')"
-sed "s/__AT__/$NOW/g" "$F.tmp" > "$F" && rm -f "$F.tmp"
+sed -e "s/__AT__/$NOW/g" -e "s/\\"__ATTEMPT__\\"/$ATTEMPT/g" "$F.tmp" > "$F" && rm -f "$F.tmp"
 STARTED=$(sed -n 's/.*"startedAt": *"\\([^"]*\\)".*/\\1/p' "$DIR/run.json" 2>/dev/null | head -n 1)
 [ -n "$STARTED" ] || STARTED=$NOW
 cat > "$DIR/run.json.tmp" <<'GRIMOIRE_EOF'
 ${JSON.stringify(runJson)}
 GRIMOIRE_EOF
-sed -e "s/__AT__/$NOW/g" -e "s/__STARTED__/$STARTED/g" "$DIR/run.json.tmp" > "$DIR/run.json" && rm -f "$DIR/run.json.tmp"
+sed -e "s/__AT__/$NOW/g" -e "s/__STARTED__/$STARTED/g" -e "s/\\"__ATTEMPT__\\"/$ATTEMPT/g" "$DIR/run.json.tmp" > "$DIR/run.json" && rm -f "$DIR/run.json.tmp"
 echo "RUNDIR $DIR"
 \`\`\``
 }
@@ -1112,8 +1118,10 @@ async function step(label, thunk) {
 // `emit` records one event: routing, dispatch, precheck, each reviewer verdict, finding
 // verification, fixes and escalations, the guard, context resolves, integration, settles,
 // replans, terminal slots, gates, claims, budget actions, halts. Events carry a sequence
-// number and the cumulative output-token count (the script has no clock; the writer stamps
-// wall time per chunk). They are buffered and flushed by ONE cheap writer per chunk into
+// number and the cumulative output-token count. The script has no clock, so `at` is the
+// FLUSH time the writer stamps per chunk — every event of a chunk shares it; order within a
+// chunk is `seq`. `attempt` is stamped by the writer too: the session number under this runId
+// (see journalPrompt), so a relaunch never mixes with the attempt before it. They are buffered and flushed by ONE cheap writer per chunk into
 // `<telemetryDir>/<runId>/events/<firstSeq>.jsonl`, with `run.json` (meta, status,
 // checkpoint) rewritten on every flush — the checkpoint is what a NEW session resumes from.
 // Local and gitignored by design: /grimoire:logs renders it, crystallize reads it.
@@ -1133,7 +1141,7 @@ const journal = {
 const clip = (v) => (typeof v === 'string' && v.length > 300 ? v.slice(0, 297) + '…' : v)
 function emit(type, data) {
   if (!journal.enabled) return
-  const ev = { seq: ++journal.seq, type, tok: spentTokens(), at: '__AT__' }
+  const ev = { seq: ++journal.seq, type, tok: spentTokens(), at: '__AT__', attempt: '__ATTEMPT__' }
   for (const [k, v] of Object.entries(data || {})) ev[k] = Array.isArray(v) ? v.map(clip) : clip(v)
   journal.pending.push(ev)
   if (journal.pending.length >= JOURNAL_FLUSH_EVERY) flushJournal()
@@ -1146,7 +1154,7 @@ function flushJournal() {
   journal.chain = journal.chain.then(async () => {
     const lines = batch.map((e) => JSON.stringify(e))
     const firstSeq = batch[0].seq
-    const r = await agentT(journalPrompt(lines, runJsonFor(journal.final), firstSeq, journal.runDir, projectSlug), {
+    const r = await agentT(journalPrompt(lines, runJsonFor(journal.final), firstSeq, journal.runDir, projectSlug, n === 1), {
       label: `journal#${n}`,
       phase: 'Implement',
       model: 'haiku',
@@ -2061,6 +2069,7 @@ let waves = 0 // dispatch cycles (historical name — reported in the summary)
 // resumes from (the orchestrate skill passes it back as {resumeState}).
 runJsonFor = (final) => ({
   runId: runId || null,
+  attempt: '__ATTEMPT__', // second key, on purpose: the writer reads it back with a fixed-shape sed
   project,
   meta: runMeta,
   startedAt: '__STARTED__',

@@ -292,8 +292,13 @@ runs a fixed shell script that:
 
 - writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
   replayed flush overwrites the same file, never appends duplicates;
-- stamps wall time into each line (`at`) in the shell;
-- rewrites `run.json`: `runId`, `project`, `meta`, `status`, `summary`, and the `checkpoint`
+- stamps the flush time into each line (`at`) in the shell — every event of one chunk shares
+  it (the script has no clock; order within a chunk is `seq`);
+- stamps the `attempt`: the session number under this `runId`, bumped by a session's first
+  flush from the value in `run.json`. A relaunch under the same `runId` (resumed or not) is
+  therefore distinguishable, and from attempt 2 on its chunks are `<first seq>.a<N>.jsonl`,
+  so they never overwrite an earlier attempt's;
+- rewrites `run.json`: `runId`, `attempt`, `project`, `meta`, `status`, `summary`, and the `checkpoint`
   a new session resumes from;
 - prints the line and byte counts, which the engine compares with what it sent — a
   mismatch is logged and counted, never trusted.

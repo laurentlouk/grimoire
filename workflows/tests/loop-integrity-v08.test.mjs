@@ -24,10 +24,16 @@
 //      check that was already red on the base; the implement brief says how to tell
 //    • SESSION CHAT LEAKING INTO AGENTS — the runtime can forward the user's chat to running
 //      agents; a replanner answered "what are all these errors?" in its replan reason
+//    • ATTEMPTS INDISTINGUISHABLE — a relaunch under the same runId restarted seq at 1 and
+//      overwrote the first attempt's chunk files; events now carry the session's `attempt`
 //
 //  Same stubbed runtime as harness-v06.test.mjs (agent / parallel / log / phase / args /
 //  budget); every scenario asserts the dispatches the engine actually made.
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { loadRuns } from '../../scripts/render-logs.mjs'
 
 const DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -320,6 +326,54 @@ for (const maxPrecheckFixes of [1, 3]) {
   const briefed = calls.filter((c) => /## Brief\nYour FIRST action/.test(c.prompt))
   eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'spec-hawk'], 'the briefed dispatch kinds of this run')
   eq(briefed.filter((c) => !c.prompt.includes(`\n${UNATTENDED}\nExplore before asking`)).map((c) => c.label), [], 'each carries the boundary, right before the explore-before-asking rule')
+}
+
+// ══════ 11 · the journal: `attempt` per session, chunks never overwritten across attempts ══════
+// The writer's script is RUN here, in bash, against a temp telemetry dir — the attempt counter
+// and the file naming live in that script, so only running it proves them.
+{
+  const TEL = mkdtempSync(join(tmpdir(), 'grimoire-attempt-'))
+  const bashWriter = (prompt) => {
+    const script = (/```bash\n([\s\S]*?)\n```/.exec(prompt) || [])[1]
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    const num = (k) => Number((new RegExp(`^${k} (\\d+)$`, 'm').exec(r.stdout) || [])[1])
+    return { runDir: (/^RUNDIR (.+)$/m.exec(r.stdout) || [])[1], lines: num('LINES'), bytes: num('BYTES') }
+  }
+  // the second session takes a different path (blocked → halt), so an overwrite of the first
+  // session's chunks would change their content
+  const session = (name, extra, blocked = false) => run(name, [T('PROJ-1')], (label, prompt) => {
+    if (label.startsWith('journal#')) return bashWriter(prompt)
+    if (label.startsWith('impl:')) return blocked ? { status: 'BLOCKED', summary: 'x' } : impl('aaaaaaa')
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop', learnings: [] }
+    return PASSV
+  }, { extraArgs: { precheck: false, verifyFindings: false, runId: 'run-a', telemetry: { dir: TEL, flushEvery: 4 }, ...extra } })
+  const dir = join(TEL, 'run-a')
+  const events = () => readdirSync(join(dir, 'events')).sort().map((f) => [f, readFileSync(join(dir, 'events', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l))])
+  const runJson = () => JSON.parse(readFileSync(join(dir, 'run.json'), 'utf8'))
+
+  const one = await session('11a · first session → attempt 1', {})
+  const first = events()
+  ok(one.result.telemetry.journal.mismatches === 0 && first.length >= 2, `written in ${first.length} chunk(s), every receipt matched`)
+  ok(first.every(([f, evs]) => /^\d{8}\.jsonl$/.test(f) && evs.every((e) => e.attempt === 1 && /^\d{4}-\d\d-\d\dT/.test(e.at))), 'attempt 1: plain <firstSeq>.jsonl chunks, every event attempt 1, `at` stamped')
+  ok(runJson().attempt === 1, 'run.json attempt 1')
+
+  await session('11b · relaunch under the SAME runId, no resumeState → attempt 2, attempt 1 untouched', {}, true)
+  const second = events()
+  eq(second.filter(([f]) => /^\d{8}\.jsonl$/.test(f)), first, "attempt 1's chunks are byte-for-byte what they were")
+  const a2 = second.filter(([f]) => /^\d{8}\.a2\.jsonl$/.test(f))
+  ok(a2.length >= 2 && a2.every(([, evs]) => evs.every((e) => e.attempt === 2)) && a2[0][1][0].seq === 1, 'attempt 2 writes its own .a2 chunks, restarting at seq 1')
+  ok(runJson().attempt === 2, 'run.json attempt 2')
+
+  await session('11c · a resume with the checkpoint → attempt 3, sequence continues', { resumeState: runJson().checkpoint })
+  const a3 = events().filter(([f]) => /\.a3\.jsonl$/.test(f))
+  ok(a3.length >= 1 && a3.every(([, evs]) => evs.every((e) => e.attempt === 3)) && a3[0][1][0].seq === runJson().checkpoint.lastSeq - a3.flatMap(([, e]) => e).length + 1, 'attempt 3 continues the sequence')
+  ok(runJson().attempt === 3, 'run.json attempt 3')
+
+  const [loaded] = loadRuns(TEL)
+  const all = events().flatMap(([, evs]) => evs)
+  eq({ events: loaded.events.length, duplicates: loaded.duplicates }, { events: all.length, duplicates: 0 }, 'render-logs keeps every attempt: no event dropped as a duplicate')
+  eq(loaded.events.map((e) => e.attempt), [...all].sort((x, y) => x.attempt - y.attempt || x.seq - y.seq).map((e) => e.attempt), 'ordered by attempt, then seq')
+  rmSync(TEL, { recursive: true, force: true })
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)
