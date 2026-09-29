@@ -34,7 +34,7 @@ The fix loop retries the same work. Only the replan loop changes the plan. A sli
 3. Otherwise replan from the current state, given the goal, the finished work (left untouched), the failure and its cause, the queue that remains, and the lessons so far.
 4. The replanner either returns a revised set of remaining tasks, which replace the queue, or decides to stop and says why.
 
-Revised tasks use the same shape as the original ones, so they run through the same build and review machinery. The one difference: a replanned task runs on the strongest model tier, because the cheaper path has already failed once. The fix loop has its own escalation, moving a task to the strongest tier after repeated fix rounds.
+Revised tasks use the same shape as the original ones, so they run through the same build and review machinery. The one difference: a task replanned after a code failure runs on the strongest model tier, because the cheaper path has already failed on the code; after a harness failure (a dead agent, a merge conflict, a footprint false positive) it keeps its tier, since a stronger model would not have changed the outcome. The fix loop has its own escalation, moving a task to the strongest tier after repeated fix rounds.
 
 ## Reading the result
 

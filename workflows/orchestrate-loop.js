@@ -19,7 +19,7 @@
 export const meta = {
   name: 'orchestrate-loop',
   description:
-    'OPTIONAL adaptive build LOOP: run the `implement` ⇄ `review` half of the design pipeline unattended over a FULL tracker project from `to-issues` — dispatching one owning agent per repo (implement) and a diverse-lens review panel SPLIT BY SCOPE: per task, spec review + a build-safety core (adversarial QA, + data-integrity on backend/infra repos) gates whether dependents may build on the change; once per repo, AT PROJECT END (one final wave, all repos in parallel), a TERMINAL quality sweep (SRE · human-interface · a11y · privacy · store review) reviews the whole integrated run branch, then the repo\'s own gate command + PR — the expensive gates are paid exactly ONCE, on the final tree, never while implementation runs. Scheduling is CONTINUOUS and dependsOn-driven, straight from the tickets: an issue dispatches the MOMENT everything blocking it has landed — no wave barrier, so a slow task in one repo never idles ready dependents elsewhere — parallel across repos AND within a repo when declared files are disjoint (worktree lanes merged by a serialized integrate step, up to maxPerRepo in flight); ready order is slice, then transitive downstream unlocked (critical path), never a barrier. Parsing is two-phase so any project size fits — a lightweight slice INDEX up front, then per-cycle just-in-time hydration; issues already done/canceled in the tracker are absorbed, so re-invoking resumes. The first review of a stage is always its full panel; after a fix, a cheap GUARD verifies the fix diff against the blocking findings and either passes the stage (no panel re-run) or triggers a full re-review. When failures leave work blocked it RE-PLANS from the current state (A* from where we are, not a restart) — failures become learning. Hydration doubles as the SELECTOR (agent × model per task, validated against the roster, escalated to opus on repeated fixes or a replan); a cheap PRECHECK stops an unreviewable diff before the panel, and a VERIFIER checks each blocking finding against the code before it buys a fix. Every decision is written to a local DECISION JOURNAL (chunked, receipt-checked, with a resume checkpoint) that /grimoire:logs renders; a run-level output-token cap and optional tracker claims make unattended runs safer. LEARNS across runs: loads harness + per-agent memory and prior run ledgers at start, pastes each agent\'s memory into its brief, writes a run ledger at the end, and — after the PRs — runs the `crystallize` skill once to patch/create skills, add memory facts and sync docs in ONE reviewable PR. REQUIRES the design half\'s three artifacts — {specPath} (roast), {planPath} (to-plan), {project} (to-issues) — plus {repos} (the repo/agent/gate config), and refuses to start when any is missing. Stops at PRs — merge and deploy stay manual.',
+    'OPTIONAL adaptive build LOOP: run the `implement` ⇄ `review` half of the design pipeline unattended over a FULL tracker project from `to-issues` — dispatching one owning agent per repo (implement) and a diverse-lens review panel SPLIT BY SCOPE: per task, spec review + a build-safety core (adversarial QA, + data-integrity on backend/infra repos) gates whether dependents may build on the change; once per repo, AT PROJECT END (one final wave, all repos in parallel), a TERMINAL quality sweep (SRE · human-interface · a11y · privacy · store review) reviews the whole integrated run branch, then the repo\'s own gate command + PR — the expensive gates are paid exactly ONCE, on the final tree, never while implementation runs. Scheduling is CONTINUOUS and dependsOn-driven, straight from the tickets: an issue dispatches the MOMENT everything blocking it has landed — no wave barrier, so a slow task in one repo never idles ready dependents elsewhere — parallel across repos AND within a repo when declared files are disjoint (worktree lanes merged by a serialized integrate step, up to maxPerRepo in flight); ready order is slice, then transitive downstream unlocked (critical path), never a barrier. Parsing is two-phase so any project size fits — a lightweight slice INDEX up front, then per-cycle just-in-time hydration; issues already done/canceled in the tracker are absorbed, so re-invoking resumes. The first review of a stage is always its full panel; after a fix, a cheap GUARD verifies the fix diff against the blocking findings and either passes the stage (no panel re-run) or triggers a full re-review. When failures leave work blocked it RE-PLANS from the current state (A* from where we are, not a restart) — failures become learning. Hydration doubles as the SELECTOR (agent × model per task, validated against the roster, escalated to opus on repeated fixes or a replan after a code failure); a cheap PRECHECK stops an unreviewable diff before the panel, and a VERIFIER checks each blocking finding against the code before it buys a fix. Every decision is written to a local DECISION JOURNAL (chunked, receipt-checked, with a resume checkpoint) that /grimoire:logs renders; a run-level output-token cap and optional tracker claims make unattended runs safer. LEARNS across runs: loads harness + per-agent memory and prior run ledgers at start, pastes each agent\'s memory into its brief, writes a run ledger at the end, and — after the PRs — runs the `crystallize` skill once to patch/create skills, add memory facts and sync docs in ONE reviewable PR. REQUIRES the design half\'s three artifacts — {specPath} (roast), {planPath} (to-plan), {project} (to-issues) — plus {repos} (the repo/agent/gate config), and refuses to start when any is missing. Stops at PRs — merge and deploy stay manual.',
   whenToUse:
     'After the FULL design half has run (`roast` → spec, `to-plan` → plan, `to-issues` → slice-tagged issues): execute the WHOLE project start to finish with your repo agents (implement + scoped review panel: per-task build-safety core, per-repo terminal sweep), scheduled by the tickets\' own dependsOn links — parallel where the tickets allow, waiting where they block — instead of running `implement`/`review` by hand. When failures leave work blocked it adaptively re-plans from the current state rather than looping the original plan. The design half stays interactive, and its three artifacts are REQUIRED inputs ({specPath, planPath, project}), alongside {repos}. PREVIEWS BY DEFAULT — pass {execute:true} to dispatch implementers. Heavy mode; stops at PRs.',
   phases: [
@@ -217,7 +217,7 @@ const TASK_ITEM_SCHEMA = {
     ticket: { type: 'string', description: 'the tracker issue id, or NO_TICKET' },
     repo: { type: 'string', description: 'the owning repo — one of the configured repo names' },
     agent: { type: 'string', description: "the agent that builds it — the repo's owning agent, or a specialist the header enables for that repo" },
-    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'the build tier for the impl/fix agents, chosen by the routing rubric in the brief; opus when unset. Escalates to opus automatically on a later fix round or a replan' },
+    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'the build tier for the impl/fix agents, chosen by the routing rubric in the brief; opus when unset. Escalates to opus automatically on a later fix round, or on a replan after a code failure' },
     routeReason: { type: 'string', description: 'one sentence: the signal that decided agent × model (logged, and read by crystallize to tune the rubric)' },
     branch: { type: 'string' },
     slice: { type: 'integer', description: 'the vertical slice this task belongs to (0 = a thin shared enabler; 1, 2, … = increments of value, smallest-valuable-first)' },
@@ -880,7 +880,7 @@ ${[...repoConfig.values()].map((r) => `- ${r.name} → agent \`${r.agent}\``).jo
 ${done.length ? done.map((d) => `- ${d.id} (${d.repo}) ${d.status} — ${d.summary || ''}`).join('\n') : '- (nothing landed yet)'}
 
 ## What FAILED (the reason to replan)
-${failures.map((f) => `- ${f.id} (${f.repo}) → ${f.status}\n${f.detail}`).join('\n')}
+${failures.map((f) => `- ${f.id} (${f.repo}) → ${f.status}${f.kind === 'harness' ? ' — a HARNESS failure, not a verdict on the code' : ''}\n${f.detail}`).join('\n')}
 
 ## Still BLOCKED behind those failures (index level — do NOT re-emit; they run on their own once unblocked)
 ${(blocked || []).length ? blocked.map((b) => `- ${b.id} (${b.repo}) slice ${b.slice}${(b.dependsOn || []).length ? ` — blocked on: ${b.dependsOn.join(', ')}` : ''}`).join('\n') : '(none — the failures are the only open work)'}
@@ -1007,6 +1007,22 @@ ${
 // naming nit from buying one.
 const GATING_SEVERITY = new Set(['blocker', 'major'])
 const isGating = (f) => GATING_SEVERITY.has(String((f && f.severity) || '').toLowerCase())
+
+// What KIND of failure a settled result is. Only a CODE failure (a panel's gating findings, an
+// implementer that could not do the task, a structural defect the precheck caught) says the
+// tier was too weak; a HARNESS failure (an agent that died, reviewers that never answered, a
+// merge the integrate step could not do, a footprint or ancestry precheck on correct code) says
+// nothing about the model, and escalating it only multiplies the cost of the next attempt.
+const HARNESS_FAILURES = new Set(['DIED', 'ERROR', 'HYDRATION_MISSING', 'MERGE_CONFLICT', 'REVIEWERS_UNAVAILABLE'])
+const HARNESS_PRECHECKS = new Set(['footprint', 'ancestry'])
+function failureKind(r) {
+  if (HARNESS_FAILURES.has(r.status)) return 'harness'
+  if (r.status === 'PRECHECK_FAILED') {
+    const found = (r.review && r.review.findings) || []
+    return found.length && found.every((f) => HARNESS_PRECHECKS.has(f.check)) ? 'harness' : 'code'
+  }
+  return 'code'
+}
 
 // Turn a failed task result into a compact, actionable brief for the re-planner.
 function failureDetail(r) {
@@ -1823,7 +1839,7 @@ async function runTask(task) {
       if (!problems.length) break
       lastFail = footprintOnly ? { files, head: range.headSha } : null
       precheckStats.failed++
-      const asFindings = problems.map((x) => ({ severity: 'major', persona: 'Precheck', file: x.file || '?', line: x.line || 0, issue: x.issue }))
+      const asFindings = problems.map((x) => ({ severity: 'major', persona: 'Precheck', check: x.check, file: x.file || '?', line: x.line || 0, issue: x.issue }))
       if (p >= MAX_PRECHECK_FIXES) {
         precheckStats.exhausted++
         log(`   · ${task.id}: precheck FAIL after ${p} fix(es) — ${problems.length} problem(s); the panel is not paid`)
@@ -1976,7 +1992,8 @@ const doneTasks = [] // {id, repo, status, summary} — immutable input to every
 const learnings = [] // [{text, repos}] durable lessons failures taught — carried into replans AND every later hydration
 if (resumeOpt && Array.isArray(resumeOpt.learnings)) learnings.push(...resumeOpt.learnings.map((l) => toLearning(l, [])).filter(Boolean))
 const allResults = [] // every task + gate result, flat
-const failures = [] // {id, repo, status, detail} — unlanded work (a replan can requeue it)
+const failures = [] // {id, repo, status, kind, detail} — unlanded work (a replan can requeue it)
+const lastFailure = new Map() // task id → {kind: 'code'|'harness', status} of its latest failure — decides a replanned task's tier
 const deferred = [] // tasks hydration or a replan marked deferred (blocked on deploy/other repo)
 const landedIds = new Set(alreadyDoneIds) // satisfied dependencies: absorbed + landed this run
 const pendingById = new Map(pendingIndex.map((i) => [i.id, i])) // id → index entry still to run
@@ -2123,8 +2140,10 @@ const downstreamOf = (() => {
 // Hydration (or a replan) proposed an agent and a tier with a reason. The engine accepts an
 // agent only if it is the repo's owner or a specialist enabled for that repo — anything else
 // falls back to the owner, logged, so a hallucinated agent never gets dispatched. An unset or
-// unknown tier is opus (the safe default); a replanned task runs on opus (it already failed
-// once on the cheaper path). Earlier sessions' fix rounds carry over on resume.
+// unknown tier is opus (the safe default); a replanned task runs on opus only when its last
+// failure was a CODE failure (it already failed once on the cheaper path) — a harness failure
+// keeps the tier the selector chose (see failureKind). Earlier sessions' fix rounds carry over
+// on resume.
 function routeTask(t, cycle) {
   const owner = agentFor(t.repo)
   const allowed = [owner, ...specialistsFor(t.repo).map((sp) => sp.agent)].filter(Boolean)
@@ -2142,8 +2161,12 @@ function routeTask(t, cycle) {
   let reason = str(t.routeReason) || (MODELS.includes(t.model) ? '(no reason given)' : 'tier unset → opus')
   if (!MODELS.includes(t.model)) t.model = 'opus'
   if (t.replanned && t.model !== 'opus') {
-    reason = `replanned task → opus (selector chose ${t.model})`
-    t.model = 'opus'
+    const last = lastFailure.get(t.id)
+    if (last && last.kind === 'code') {
+      reason = `replanned after a code failure (${last.status}) → opus (selector chose ${t.model})`
+      t.model = 'opus'
+    } else reason = `replanned after ${last ? `a harness failure (${last.status})` : 'no failure of its own'} → kept ${t.model}; ${reason}`
+    log(`   · ${t.id}: ${reason}`)
   }
   if (!Number.isInteger(t.fixRounds) && Number.isInteger(resumeFixRounds[t.id])) t.fixRounds = resumeFixRounds[t.id]
   routingStats.byAgent[t.agent] = (routingStats.byAgent[t.agent] || 0) + 1
@@ -2219,7 +2242,9 @@ function settle(r) {
     // Circuit-breaker input: DIED means the agent returned NOTHING (spend limit /
     // API outage), not a judgement on the task. Any real result resets the streak.
     consecutiveDied = r.status === 'DIED' ? consecutiveDied + 1 : 0
-    failures.push({ id: r.id, repo: r.repo, status: r.status, detail: failureDetail(r) })
+    const kind = failureKind(r)
+    lastFailure.set(r.id, { kind, status: r.status })
+    failures.push({ id: r.id, repo: r.repo, status: r.status, kind, detail: failureDetail(r) })
     log(`⛔ ${r.id} (${r.repo}) → ${r.status} — its dependents stay blocked until a replan lands it`)
   }
 }
@@ -2322,7 +2347,8 @@ while (true) {
         const t = hydratedById.get(i.id)
         if (!t) {
           pendingById.delete(i.id)
-          failures.push({ id: i.id, repo: i.repo, status: 'HYDRATION_MISSING', detail: '  hydration returned no task for this issue' })
+          lastFailure.set(i.id, { kind: 'harness', status: 'HYDRATION_MISSING' })
+          failures.push({ id: i.id, repo: i.repo, status: 'HYDRATION_MISSING', kind: 'harness', detail: '  hydration returned no task for this issue' })
           log(`⛔ ${i.id}: hydration returned no task — treated as failed`)
           continue
         }
@@ -2504,7 +2530,7 @@ while (true) {
         pendingById.set(t.id, { id: t.id, title: '', repo: t.repo, state: 'todo', slice: t.slice ?? 0, sliceLabel: t.sliceLabel || '', dependsOn: t.dependsOn || [] })
         inProject.add(t.id)
         t.replanned = true
-        t.routed = false // a replanned task is routed afresh (and on opus)
+        t.routed = false // a replanned task is routed afresh (opus after a code failure)
         hydratedById.set(t.id, t)
         if (t.ticket && t.ticket !== 'NO_TICKET') hydratedById.set(t.ticket, t)
         const fi = failures.findIndex((f) => f.id === t.id)

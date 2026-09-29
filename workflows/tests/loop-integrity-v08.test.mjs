@@ -14,6 +14,8 @@
 //      dies, and the loop used to find out one task at a time; a preflight refuses up front
 //    • DEAD REVIEWERS READ AS FAILED CODE — when every reviewer of a stage returned nothing the
 //      stage settled SPEC_FAILED and bought a replan; it is a harness failure: retry, then halt
+//    • ESCALATION ON HARNESS FAILURES — every replanned task was forced onto opus, even when
+//      its failure was a dead agent or a footprint false positive a stronger model cannot fix
 //
 //  Same stubbed runtime as harness-v06.test.mjs (agent / parallel / log / phase / args /
 //  budget); every scenario asserts the dispatches the engine actually made.
@@ -215,6 +217,30 @@ for (const maxPrecheckFixes of [1, 3]) {
   ok(!labels.some((l) => l.startsWith('replan')) && result.halt && /^reviewers unavailable/.test(result.halt.reason), 'halted on the reviewers, no replan')
   eq(result.needsAttention.map((r) => [r.id, r.status]), [['api:final', 'REVIEWERS_UNAVAILABLE']], 'the terminal slot is REVIEWERS_UNAVAILABLE')
   eq(result.ungatedRepos, ['api'], 'the repo is reported ungated')
+}
+
+// ══════ 6 · a replanned task escalates to opus only after a CODE failure ══════
+{
+  const cases = [
+    { name: '6a · DIED (harness) → keeps the selector tier', first: () => null, want: 'haiku', why: /harness failure \(DIED\)/ },
+    { name: '6b · PRECHECK_FAILED on ancestry (harness) → keeps the tier', first: () => impl('aaaaaaa'), precheck: { verdict: 'FAIL', problems: [{ check: 'ancestry', file: '?', issue: 'head not on the run branch' }] }, want: 'haiku', why: /harness failure \(PRECHECK_FAILED\)/ },
+    { name: '6c · PRECHECK_FAILED on tests (code) → opus', first: () => impl('aaaaaaa'), precheck: { verdict: 'FAIL', problems: [{ check: 'tests', file: 'src/a.ts', issue: 'behaviour change with no test' }] }, want: 'opus', why: /code failure \(PRECHECK_FAILED\)/ },
+    { name: '6d · BLOCKED (code) → opus', first: () => ({ status: 'BLOCKED', summary: 'the approach does not work' }), want: 'opus', why: /code failure \(BLOCKED\)/ },
+  ]
+  for (const c of cases) {
+    let n = 0, pc = 0
+    const CHEAP = T('PROJ-1', { model: 'haiku' })
+    const { calls, logs, result } = await run(c.name, [CHEAP], (label) => {
+      if (label.startsWith('impl:')) return n++ === 0 ? c.first() : impl('bbbbbbb')
+      if (label.startsWith('fix:')) return impl('aaaaaaa', { commits: [] })
+      if (label.startsWith('precheck:')) return c.precheck && pc++ < 2 ? c.precheck : { verdict: 'PASS', problems: [] }
+      if (label.startsWith('replan')) return { decision: 'REVISE', reason: 'again', learnings: [], tasks: [{ ...CHEAP, taskText: 'Build it again' }] }
+      return PASSV
+    }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false }, precheck: !!c.precheck } })
+    eq(calls.filter((x) => x.label === 'impl:PROJ-1').map((x) => x.opts.model), ['haiku', c.want], `first attempt haiku, replanned attempt ${c.want}`)
+    ok(logs.some((m) => /PROJ-1: replanned after a/.test(m) && c.why.test(m)), 'the routing reason names the failure kind')
+    ok(result.done.length === 1 && result.routing.byModel[c.want] >= 1, 'the retry lands')
+  }
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)
