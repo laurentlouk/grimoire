@@ -311,6 +311,7 @@ const IMPL_SCHEMA = {
     // being asked a task-scoped question.
     commits: { type: 'array', items: { type: 'string' }, description: 'the commit SHAs you created, OLDEST FIRST — SHAs, not messages (the review panel is handed exactly this range)' },
     baseSha: { type: 'string', description: 'git merge-base <base branch> HEAD — where this branch left the integration branch (the brief names it)' },
+    startSha: { type: 'string', description: 'git rev-parse HEAD BEFORE your first change in this dispatch — the commit you started from (for a merge or integration task: the branch head before the merge). The review range begins here' },
     headSha: { type: 'string', description: 'git rev-parse HEAD after your last commit' },
     filesChanged: { type: 'array', items: { type: 'string' } },
     concerns: { type: 'string' },
@@ -632,7 +633,7 @@ ${task.successCriteria || '(tests pass + the steps above)'}
 
 ## This dispatch
 - Repo: ${path}; branch ${task.branch || `(create the feature branch off ${BASE_BRANCH})`}; base branch \`${BASE_BRANCH}\` (your \`baseSha\` = \`git merge-base ${BASE_BRANCH} HEAD\`); PR title tag ${ticketTag(task)}.
-${lane}${gated}- Return the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED) with baseSha · commits · headSha.`
+${lane}${gated}- Return the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED) with baseSha · startSha · commits · headSha.`
   // Answers the resolver already fetched for THIS task, carried into every later dispatch
   // so a re-dispatched implementer never re-asks what has been settled.
   if (resolved && resolved.length)
@@ -731,7 +732,7 @@ ${
       ? `\`\`\`bash
 git -C ${path} diff ${fixFrom}..${r.headSha}        # ← the fix you are judging
 \`\`\`
-${r.firstSha ? `Whole-task context when you need it: \`git -C ${path} diff ${r.firstSha}^..${r.headSha}\`` : ''}`
+${rangeFrom(r) ? `Whole-task context when you need it: \`git -C ${path} diff ${rangeFrom(r)}..${r.headSha}\`` : ''}`
       : `The implementer did not report usable SHAs — establish the fix commits yourself before judging:
 \`\`\`bash
 git -C ${path} log --oneline ${BASE_BRANCH}..HEAD
@@ -950,37 +951,45 @@ const asSha = (v) => {
   return SHA_RE.test(s) ? s : null
 }
 
-// Fold an implementer result into the range. `prev` pins the task's ORIGIN (base + first
-// commit) so a fix dispatch only ever advances HEAD — the panel keeps reviewing the whole
-// task, including its fixes, and never narrows to just the last fix.
+// Fold an implementer result into the range. `prev` pins the task's ORIGIN (base, start and
+// first commit) so a fix dispatch only ever advances HEAD — the panel keeps reviewing the whole
+// task, including its fixes, and never narrows to just the last fix. `startSha` (where the
+// implementer STARTED) beats `firstSha^`: an integration task's commits include the merged
+// lane's older ones, and `firstSha^` then predates every lane merged since — their files
+// showed up as this task's undeclared footprint and looped the precheck on correct code. Only
+// the FIRST dispatch sets it: a fix's own start would narrow the range to the fix.
 function reviewRange(impl, prev) {
   const commits = (((impl && impl.commits) || []).map(asSha)).filter(Boolean)
   return {
     baseSha: (prev && prev.baseSha) || asSha(impl && impl.baseSha),
+    startSha: prev ? prev.startSha || null : asSha(impl && impl.startSha),
     firstSha: (prev && prev.firstSha) || commits[0] || null,
     headSha: asSha(impl && impl.headSha) || commits[commits.length - 1] || (prev && prev.headSha) || null,
   }
 }
+// Where the judged diff begins: the implementer's start, else the parent of its first commit.
+const rangeFrom = (r) => (r && r.startSha) || (r && r.firstSha ? `${r.firstSha}^` : null)
 
 function rangeBlock(task, range) {
   const r = range || {}
   const path = repoPath(task.repo)
-  if (!r.firstSha || !r.headSha)
+  const from = rangeFrom(r)
+  if (!from || !r.headSha)
     return `## The diff to judge
 The implementer did not report usable commit SHAs, so establish the range yourself before reviewing:
 \`\`\`bash
 git -C ${path} log --oneline ${BASE_BRANCH}..HEAD
 \`\`\`
 Read the ACTUAL diff — do not trust a summary of it.`
-  const from = `${r.firstSha}^`
+  const origin = r.startSha || r.firstSha
   return `## The exact diff to judge — it is handed to you, do not go hunting for it
 \`\`\`bash
 git -C ${path} diff ${from}..${r.headSha}        # ← THIS is the change you are judging
 git -C ${path} log --oneline ${from}..${r.headSha}
 \`\`\`
 ${
-    r.baseSha && r.baseSha !== r.firstSha
-      ? `Commits before \`${r.firstSha}\` on this branch (back to the branch point \`${r.baseSha}\`) belong to EARLIER tasks. They are context, not your subject — do not re-report findings against them.\n`
+    r.baseSha && r.baseSha !== origin
+      ? `Commits ${r.startSha ? `up to \`${r.startSha}\`` : `before \`${r.firstSha}\``} on this branch (back to the branch point \`${r.baseSha}\`) belong to EARLIER tasks or were merged in. They are context, not your subject — do not re-report findings against them.\n`
       : ''
   }Read surrounding files freely for context, but your verdict is about the range above. Do not trust a summary of it.`
 }
@@ -1457,7 +1466,8 @@ const guardChecks = { checked: 0, passed: 0, reReviewed: 0 }
 // mostly produce gates (load-bearing) or advisory notes (candidates for slimming).
 const reviewStats = { stages: 0, passedFirstRound: 0, fixDispatches: 0, gatingFindings: 0, advisoryFindings: 0, verifyChecks: 0, overturnedFindings: 0 }
 // Precheck telemetry: panel rounds it saved (a FAIL caught before any reviewer ran).
-const precheckStats = { checked: 0, failed: 0, fixDispatches: 0, exhausted: 0 }
+// `advisory` counts repeated footprint-only FAILs demoted to advisory notes.
+const precheckStats = { checked: 0, failed: 0, fixDispatches: 0, exhausted: 0, advisory: 0 }
 // Routing telemetry: what the selector chose, and what the engine had to correct.
 const routingStats = { byAgent: {}, byModel: {}, fallbacks: 0, escalations: 0 }
 const overturned = [] // gating findings the verifier REJECTED with evidence — reported, not reworked
@@ -1756,7 +1766,9 @@ async function runTask(task) {
   // discover an empty diff, a missing commit range, conflict markers or a stub. A FAIL goes
   // back to the SAME implementer (bounded); a dead precheck passes through (it is an
   // optimisation, never a gate the reviewers depend on).
+  const precheckAdvisory = [] // footprint problems demoted to advisory (see below)
   if (PRECHECK) {
+    let lastFail = null // {files, head} of the previous footprint-only FAIL
     for (let p = 0; ; p++) {
       precheckStats.checked++
       const pc = await agentT(precheckPrompt(task, range, impl), {
@@ -1768,8 +1780,22 @@ async function runTask(task) {
         schema: PRECHECK_SCHEMA,
       })
       const problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
-      emit('precheck', { task: task.id, verdict: pc ? (problems.length ? 'FAIL' : 'PASS') : 'DIED', problems: problems.map((x) => `${x.file || '?'}:${x.line || '?'} — ${x.issue}`) })
+      // The same footprint-only problem set, twice, with no commit in between: another fix (or a
+      // replan) cannot change the answer — the flagged files are typically inherited from a
+      // merge. The precheck is an optimisation, not a gate, so the problems become advisory
+      // and the panel judges the change. Any other check (ancestry included) keeps gating.
+      const footprintOnly = problems.length > 0 && problems.every((x) => x.check === 'footprint')
+      const files = [...new Set(problems.map((x) => fileKey(x.file) || '?'))].sort().join('\n')
+      const repeat = footprintOnly && lastFail && lastFail.files === files && lastFail.head === range.headSha
+      emit('precheck', { task: task.id, verdict: pc ? (repeat ? 'ADVISORY' : problems.length ? 'FAIL' : 'PASS') : 'DIED', problems: problems.map((x) => `${x.file || '?'}:${x.line || '?'} — ${x.issue}`) })
+      if (repeat) {
+        precheckStats.advisory++
+        precheckAdvisory.push(...problems.map((x) => ({ severity: 'minor', persona: 'Precheck', file: x.file || '?', line: x.line || 0, issue: `footprint (advisory: flagged twice with no new commit in between): ${x.issue}` })))
+        log(`   · ${task.id}: the same footprint problem(s) again with no new commit — recorded as advisory, on to the panel`)
+        break
+      }
       if (!problems.length) break
+      lastFail = footprintOnly ? { files, head: range.headSha } : null
       precheckStats.failed++
       const asFindings = problems.map((x) => ({ severity: 'major', persona: 'Precheck', file: x.file || '?', line: x.line || 0, issue: x.issue }))
       if (p >= MAX_PRECHECK_FIXES) {
@@ -1794,7 +1820,7 @@ async function runTask(task) {
   const quality = await runReviewStage(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', resolved, range)
   if (quality.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'QUALITY_FAILED', impl, review: quality }
 
-  const advisory = (spec.advisory || []).concat(quality.advisory || [])
+  const advisory = precheckAdvisory.concat(spec.advisory || [], quality.advisory || [])
 
   // A parallel lane is not landed until its reviewed branch is IN the run branch — the
   // gate stamp certifies the integrated tree, never a stray lane.

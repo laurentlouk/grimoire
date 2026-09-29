@@ -44,8 +44,10 @@ already settled there.
   be cut off by the per-agent timeout: anything COMMITTED survives and a re-dispatch resumes
   from it; anything uncommitted is redone from scratch.
 - **Report the review range in your return**: `baseSha` (`git merge-base <base branch> HEAD`, the base branch is named in the header),
-  `commits` (the SHAs you created, oldest first — SHAs, not messages), and `headSha`
-  (`git rev-parse HEAD`). The review panel is handed exactly that range.
+  `startSha` (`git rev-parse HEAD` on your branch BEFORE your first change — for a merge or
+  integration task, the branch head before you merged), `commits` (the SHAs you created,
+  oldest first — SHAs, not messages), and `headSha` (`git rev-parse HEAD`). The review panel
+  is handed exactly `startSha..headSha`, so a merge brings in only what it adds to the branch.
 - **Never poll-loop or babysit a long command.** No watch loops, and never background a job
   then poll for it — run it in the FOREGROUND and wait. Wrap anything that could hang in
   `timeout <seconds> …`.

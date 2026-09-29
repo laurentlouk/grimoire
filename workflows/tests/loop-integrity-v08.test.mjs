@@ -7,6 +7,9 @@
 //  Grounded in a real unattended run whose journal showed each of these defects:
 //    • DIRECT TASKS OFF THE RUN BRANCH — a lone task committed on its tracker branch, so it
 //      "landed" without ever reaching the run branch its dependents and the gate build on
+//    • PRECHECK FALSE-POSITIVE LOOP — an integration task's range started at its first commit,
+//      so the merged lane's older commits dragged other lanes' files into its "footprint"; the
+//      run spent six prechecks and three replans on correct code
 //
 //  Same stubbed runtime as harness-v06.test.mjs (agent / parallel / log / phase / args /
 //  budget); every scenario asserts the dispatches the engine actually made.
@@ -80,6 +83,68 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
   ok(/merge-base --is-ancestor bbbbbbb feat\/proj-1/.test(prompt('precheck:PROJ-2')), "the precheck verifies the direct task's head is on the run branch")
   ok(!/is-ancestor/.test(prompt('spec-hawk:PROJ-2')), 'reviewers are not asked the ancestry question')
   eq(result.done.map((d) => [d.id, d.runBranch]), [['PROJ-1', 'feat/proj-1'], ['PROJ-2', 'feat/proj-1']], 'both land on the one run branch')
+}
+
+// ══════ 2 · the review range starts where the implementer STARTED ══════
+{
+  let spec = 0
+  const { prompt } = await run('2a · startSha..headSha is the range; a fix never moves its origin', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return impl('bbbbbbb', { commits: ['aaaaaaa', 'bbbbbbb'], startSha: 'ccccccc' })
+    if (label === 'fix:PROJ-1:spec#1') return impl('ddddddd', { commits: ['ddddddd'], startSha: 'bbbbbbb' })
+    if (label.startsWith('precheck:')) return { verdict: 'PASS', problems: [] }
+    if (label.startsWith('spec-hawk:')) return spec++ === 0 ? { verdict: 'FAIL', findings: [{ severity: 'major', file: 'src/a.ts', line: 1, issue: 'x' }], summary: 'f' } : PASSV
+    return PASSV
+  }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
+  ok(/diff ccccccc\.\.bbbbbbb /.test(prompt('precheck:PROJ-1')) && !/aaaaaaa\^/.test(prompt('precheck:PROJ-1')), 'the precheck judges startSha..headSha, not firstSha^')
+  ok(/diff ccccccc\.\.bbbbbbb /.test(prompt('spec-hawk:PROJ-1')), 'so does the panel')
+  ok(/diff ccccccc\.\.ddddddd /.test(prompt('spec-hawk:PROJ-1#1')), "the re-review keeps the task's origin and advances only the head")
+}
+{
+  const { prompt } = await run('2b · without startSha the range falls back to firstSha^', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return impl('bbbbbbb', { commits: ['aaaaaaa', 'bbbbbbb'] })
+    return PASSV
+  }, { extraArgs: QUIET })
+  ok(/diff aaaaaaa\^\.\.bbbbbbb /.test(prompt('spec-hawk:PROJ-1')), 'aaaaaaa^..bbbbbbb')
+}
+
+// ══════ 3 · a repeated footprint-only precheck FAIL with no new commit is advisory ══════
+// The precheck is an optimisation, not a gate: when the same files are flagged for footprint
+// twice and the fix added nothing, another fix (or a replan) cannot change the answer.
+const FOOTPRINT = { verdict: 'FAIL', problems: [{ check: 'footprint', file: 'lib/projection.rs', issue: 'changed but not declared' }], summary: 'f' }
+for (const maxPrecheckFixes of [1, 3]) {
+  const { result, labels } = await run(`3${maxPrecheckFixes === 1 ? 'a' : 'b'} · identical footprint FAIL twice, no new commit → advisory, panel runs (maxPrecheckFixes ${maxPrecheckFixes})`, [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return impl('aaaaaaa', { startSha: '0000000' })
+    if (label.startsWith('fix:PROJ-1:precheck')) return impl('aaaaaaa', { commits: [], summary: 'nothing to change: the file is inherited' })
+    if (label.startsWith('precheck:')) return FOOTPRINT
+    return PASSV
+  }, { extraArgs: { maxPrecheckFixes, verifyFindings: false, telemetry: { enabled: false } } })
+  eq(labels.filter((l) => l.startsWith('precheck:') || l.startsWith('fix:')), ['precheck:PROJ-1', 'fix:PROJ-1:precheck#1', 'precheck:PROJ-1#1'], 'one fix, then the repeat is demoted — no further fix')
+  ok(labels.includes('spec-hawk:PROJ-1') && !labels.some((l) => l.startsWith('replan')), 'the panel runs; no replan')
+  eq(result.done.map((d) => [d.id, d.status]), [['PROJ-1', 'DONE']], 'the task lands, never PRECHECK_FAILED')
+  eq(result.advisoryNotes.filter((n) => n.persona === 'Precheck'), [{ task: 'PROJ-1', repo: 'api', severity: 'minor', persona: 'Precheck', where: 'lib/projection.rs:?', issue: 'footprint (advisory: flagged twice with no new commit in between): changed but not declared' }], 'the footprint problem is reported as an advisory note')
+  eq({ failed: result.precheckStats.failed, advisory: result.precheckStats.advisory }, { failed: 1, advisory: 1 }, 'precheckStats count one catch and one demotion')
+}
+{
+  const ANCESTRY = { verdict: 'FAIL', problems: [{ check: 'ancestry', file: '?', issue: 'head not on the run branch' }] }
+  const { result } = await run('3c · a repeated ANCESTRY failure is never demoted', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return impl('aaaaaaa')
+    if (label.startsWith('fix:')) return impl('aaaaaaa', { commits: [] })
+    if (label.startsWith('precheck:')) return ANCESTRY
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop', learnings: [] }
+    return PASSV
+  }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
+  eq(result.needsAttention.map((r) => [r.id, r.status]), [['PROJ-1', 'PRECHECK_FAILED']], 'PRECHECK_FAILED')
+}
+{
+  let n = 0
+  const { result } = await run('3d · a footprint FAIL after a fix that DID commit still counts', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return impl('aaaaaaa')
+    if (label.startsWith('fix:')) return impl('bbbbbbb')
+    if (label.startsWith('precheck:')) return n++ < 2 ? FOOTPRINT : { verdict: 'PASS', problems: [] }
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop', learnings: [] }
+    return PASSV
+  }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
+  eq(result.needsAttention.map((r) => [r.id, r.status]), [['PROJ-1', 'PRECHECK_FAILED']], 'PRECHECK_FAILED (the fix changed the tree)')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)

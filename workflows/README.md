@@ -169,7 +169,7 @@ without its gate/PR is listed in `ungatedRepos`.
 
 ```mermaid
 flowchart TB
-    impl["IMPLEMENT — the repo's owning agent\nTDD · incremental commits · reports baseSha/commits/headSha\nspec + plan in the brief — consulted BEFORE NEEDS_CONTEXT"]
+    impl["IMPLEMENT — the repo's owning agent\nTDD · incremental commits · reports baseSha/startSha/commits/headSha\nspec + plan in the brief — consulted BEFORE NEEDS_CONTEXT"]
     impl -- "NEEDS_CONTEXT (question)" --> scout["RESOLVE RUNG — read-only scout\nspec &amp; plan = established answers · ≤ maxContextResolves"]
     scout -- "answer → re-dispatch" --> impl
     scout -. "unanswerable → escalate" .-> esc["task fails → dependents blocked\n→ replanner when work is stuck"]
@@ -237,7 +237,11 @@ rewritten.
 (`briefs/precheck.md`) checks that there is something reviewable: a commit range, a non-empty
 diff, no conflict or stub markers added, tests moved with behaviour, no undeclared files, no
 stray artifacts, and — for a task committed directly onto the run branch — that its head is
-reachable from that branch, so work on a stray branch fails fast instead of settling DONE. A FAIL goes back to the same implementer (`maxPrecheckFixes`), before any
+reachable from that branch, so work on a stray branch fails fast instead of settling DONE.
+The range it (and the panel) judges is `startSha..headSha`, where the implementer started,
+so a merge task is not blamed for the files of every lane merged before it. When the same
+footprint-only problems come back with no commit in between, they are recorded as advisory
+notes and the panel runs: another fix cannot change that answer. A FAIL goes back to the same implementer (`maxPrecheckFixes`), before any
 reviewer is paid. A dead precheck passes through — it is an optimisation, not a gate.
 
 **Finding verification.** Every failing review round sends its gating findings to one sonnet
