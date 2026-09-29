@@ -508,6 +508,12 @@ const harnessBlock = () => (harnessMemory.trim() ? `## Harness memory (\`${MEMOR
 // connected. The rule is capability-generic (tracker, design, errors, anything).
 const TOOL_FALLBACK = `When a tool or MCP server you need fails (not authenticated, not connected, missing, erroring), do not stop at the first one. Find another route to the same capability, in order: (1) the tool hints below for that capability, if any; (2) any other available server or connector offering it (ToolSearch by capability keywords: "issue list", "jira", "linear", "figma", "error tracking"…); (3) a CLI or API already authenticated on this machine (\`gh\`, \`glab\`, \`jira\`, \`linear\`, \`curl\` with existing credentials; never ask for or type credentials); (4) only then report it, naming every route tried and the fix (e.g. "authorize connector X"). Never refuse a whole run over one unauthenticated server while another route works.`
 const brief = (name) => `## Brief\nYour FIRST action: Read \`${BRIEFS_DIR}/${name}.md\` — it is the binding rest of this brief (rules, definition of done, how to decide). The header below holds only what is specific to THIS dispatch.\nExplore before asking; don't guess: a fact discoverable in the design artifacts, docs, code, schemas, contracts, config or git history is looked up, never assumed and never asked.\n${TOOL_FALLBACK}\n\n${toolHintsBlock()}`
+// Output compression (the canonical requireHook) can hand back an empty or garbled result, and
+// an agent that trusts it concludes a test passed or a file is empty. Implement and gate
+// dispatches — the ones that act on command output — carry the escape: the configured raw
+// prefix ({requireHook:{raw}}) when there is one, else the generic rule.
+const rawOutputRule = () =>
+  `If a command's output is empty, garbled or contradicts its exit code, re-run it ${requireHook && requireHook.raw ? `as \`${requireHook.raw} <cmd>\`` : 'with its raw, unfiltered output (bypassing any output-compression hook)'} before drawing a conclusion.`
 // {toolHints:{<capability>: <hint>}} — which tools reach a capability in THIS project (e.g. an
 // authenticated connector with an opaque server id). Short, so every dispatch gets all of them.
 const toolHintsBlock = () => {
@@ -641,7 +647,8 @@ ${task.successCriteria || '(tests pass + the steps above)'}
 
 ## This dispatch
 - Repo: ${path}; branch ${task.branch || `(create the feature branch off ${BASE_BRANCH})`}; base branch \`${BASE_BRANCH}\` (your \`baseSha\` = \`git merge-base ${BASE_BRANCH} HEAD\`); PR title tag ${ticketTag(task)}.
-${lane}${gated}- Return the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED) with baseSha · startSha · commits · headSha.`
+${lane}${gated}- ${rawOutputRule()}
+- Return the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED) with baseSha · startSha · commits · headSha.`
   // Answers the resolver already fetched for THIS task, carried into every later dispatch
   // so a re-dispatched implementer never re-asks what has been settled.
   if (resolved && resolved.length)
@@ -689,6 +696,7 @@ function gatePrompt(task, gate, hits) {
         ? ` This branch touches NO path matching ${gate.when.pathsMatching.map((p) => `\`${p}\``).join(', ')}, so there is nothing for it to certify. Do **NOT** run it.`
         : ' There is no gate command for this repo — go straight to the PR.'
   }
+- ${rawOutputRule()}
 - Then \`gh pr create\` with the ticket in the title, using a literal absolute \`cd /path/to/checkout && …\`.`
 }
 
@@ -1263,6 +1271,7 @@ const requireHook =
         name: opts.requireHook.name,
         check: opts.requireHook.check,
         fix: typeof opts.requireHook.fix === 'string' && opts.requireHook.fix.trim() ? opts.requireHook.fix.trim() : `install the tool and register the \`${opts.requireHook.name}\` PreToolUse hook, then restart the session`,
+        raw: str(opts.requireHook.raw), // the prefix that runs a command with its output uncompressed, e.g. 'rtk proxy'
       }
     : null
 

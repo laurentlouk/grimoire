@@ -110,9 +110,12 @@ brew install rtk-ai/tap/rtk && rtk init -g     # registers `rtk hook claude` as 
 "requireHook": {
   "name": "rtk hook claude",
   "check": "command -v rtk && rtk hook check \"git status\" | grep -q '^rtk '",
-  "fix": "brew install rtk-ai/tap/rtk && rtk init -g, then restart the session"
+  "fix": "brew install rtk-ai/tap/rtk && rtk init -g, then restart the session",
+  "raw": "rtk proxy"
 }
 ```
+
+`raw` is the prefix that runs one command with its output uncompressed. Implementers and the gate are told to re-run a command that way when its condensed output is empty, garbled or contradicts its exit code, before drawing a conclusion (without `raw` they get the same rule, phrased generically).
 
 Without rtk everything still works; it just costs more.
 

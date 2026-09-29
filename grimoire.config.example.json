@@ -6,7 +6,8 @@
   "requireHook": {
     "name": "rtk hook claude",
     "check": "command -v rtk && rtk hook check \"git status\" | grep -q '^rtk '",
-    "fix": "brew install rtk-ai/tap/rtk && rtk init -g, then restart the session"
+    "fix": "brew install rtk-ai/tap/rtk && rtk init -g, then restart the session",
+    "raw": "rtk proxy"
   },
   "maxOutputTokens": 4000000,
   "telemetry": { "enabled": true, "dir": ".grimoire/runs", "retentionDays": 183 },

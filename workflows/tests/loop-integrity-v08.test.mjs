@@ -16,6 +16,8 @@
 //      stage settled SPEC_FAILED and bought a replan; it is a harness failure: retry, then halt
 //    • ESCALATION ON HARNESS FAILURES — every replanned task was forced onto opus, even when
 //      its failure was a dead agent or a footprint false positive a stronger model cannot fix
+//    • COMPRESSED OUTPUT TRUSTED — an output-compression hook can blank or garble a result;
+//      implement and gate prompts now say how to re-run a command raw before concluding
 //
 //  Same stubbed runtime as harness-v06.test.mjs (agent / parallel / log / phase / args /
 //  budget); every scenario asserts the dispatches the engine actually made.
@@ -241,6 +243,20 @@ for (const maxPrecheckFixes of [1, 3]) {
     ok(logs.some((m) => /PROJ-1: replanned after a/.test(m) && c.why.test(m)), 'the routing reason names the failure kind')
     ok(result.done.length === 1 && result.routing.byModel[c.want] >= 1, 'the retry lands')
   }
+}
+
+// ══════ 7 · the raw-output escape in the implement and gate prompts ══════
+{
+  const GATED = [{ name: 'api', agent: 'backend-engineer', tags: ['backend'], gate: { kind: 'command', run: 'make e2e' } }]
+  const HOOK = { name: 'rtk hook claude', check: 'command -v rtk', raw: 'rtk proxy' }
+  const responder = (label) => (label.startsWith('impl:') ? impl('aaaaaaa') : label.startsWith('gate:') ? { status: 'DONE', summary: 'shipped', prUrl: 'https://x/pr/1' } : PASSV)
+  const RAW = "If a command's output is empty, garbled or contradicts its exit code, re-run it as `rtk proxy <cmd>` before drawing a conclusion."
+  const GENERIC = "If a command's output is empty, garbled or contradicts its exit code, re-run it with its raw, unfiltered output (bypassing any output-compression hook) before drawing a conclusion."
+  const on = await run('7a · requireHook.raw set → the exact re-run command', [T('PROJ-1')], responder, { extraArgs: { ...QUIET, repos: GATED, requireHook: HOOK } })
+  ok(on.prompt('impl:PROJ-1').includes(RAW) && on.prompt('gate:api').includes(RAW), 'implement and gate prompts carry the raw re-run line')
+  const off = await run('7b · no raw configured → the generic rule, no command', [T('PROJ-1')], responder, { extraArgs: { ...QUIET, repos: GATED } })
+  ok(off.prompt('impl:PROJ-1').includes(GENERIC) && off.prompt('gate:api').includes(GENERIC), 'implement and gate prompts carry the generic line')
+  ok(!/rtk proxy/.test(off.prompt('impl:PROJ-1')), 'and name no command')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)
