@@ -300,11 +300,16 @@ const TASK_LIST_SCHEMA = {
   },
 }
 
+// The statuses that count as LANDED: settle, dependents, the ledger and the summary all read
+// this one set. DONE_PENDING_GATE is a gated repo's DONE — its gate runs once, at project end —
+// and reporting it as DONE_WITH_CONCERNS invented a concern that did not exist.
+const LANDED = new Set(['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'])
+const landed = (r) => !!r && LANDED.has(r.status)
 const IMPL_SCHEMA = {
   type: 'object',
   required: ['status', 'summary'],
   properties: {
-    status: { type: 'string', enum: ['DONE', 'DONE_WITH_CONCERNS', 'NEEDS_CONTEXT', 'BLOCKED'] },
+    status: { type: 'string', enum: ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'NEEDS_CONTEXT', 'BLOCKED'], description: 'DONE_PENDING_GATE: done, in a gated repo whose gate runs at project end — not a concern' },
     summary: { type: 'string' },
     // The review range. Workflow scripts have no shell, so these SHAs are the ONLY way the
     // script can tell the panel what to look at — without them every reviewer burns its
@@ -623,7 +628,7 @@ function implPrompt(task, fixFindings, resolved) {
         : ''
   const gate = gateOf(task.repo)
   const gated = prByGate(task.repo)
-    ? `- GATED REPO: the PR is opened by the gate dispatch at PROJECT END. Do NOT run \`gh pr create\` here${gate && gate.run ? `, and do NOT run the repo gate (\`${gate.run}\`)` : ''}; commit everything and return.\n`
+    ? `- GATED REPO: the PR is opened by the gate dispatch at PROJECT END. Do NOT run \`gh pr create\` here${gate && gate.run ? `, and do NOT run the repo gate (\`${gate.run}\`)` : ''}; commit everything and return **DONE_PENDING_GATE** when the task is done (the pending gate is not a concern: keep DONE_WITH_CONCERNS for real ones).\n`
     : ''
   // A specialist also gets the OWNER's memory: those facts are about the repo, and they bind
   // whoever builds in it.
@@ -648,7 +653,7 @@ ${task.successCriteria || '(tests pass + the steps above)'}
 ## This dispatch
 - Repo: ${path}; branch ${task.branch || `(create the feature branch off ${BASE_BRANCH})`}; base branch \`${BASE_BRANCH}\` (your \`baseSha\` = \`git merge-base ${BASE_BRANCH} HEAD\`); PR title tag ${ticketTag(task)}.
 ${lane}${gated}- ${rawOutputRule()}
-- Return the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED) with baseSha · startSha · commits · headSha.`
+- Return the structured status (DONE / DONE_WITH_CONCERNS${gated ? ' / DONE_PENDING_GATE' : ''} / NEEDS_CONTEXT / BLOCKED) with baseSha · startSha · commits · headSha.`
   // Answers the resolver already fetched for THIS task, carried into every later dispatch
   // so a re-dispatched implementer never re-asks what has been settled.
   if (resolved && resolved.length)
@@ -2238,7 +2243,7 @@ function settle(r) {
   }
   pendingById.delete(r.id)
   emit('settle', { task: r.id, repo: r.repo, status: r.status })
-  if (r.status === 'DONE' || r.status === 'DONE_WITH_CONCERNS') {
+  if (landed(r)) {
     consecutiveDied = 0
     landedIds.add(r.id)
     gateHold.delete(r.repo) // new work landed on this repo's tree — its gate may retry
@@ -2288,7 +2293,8 @@ async function terminalSlot(repo) {
     schema: IMPL_SCHEMA,
     timeoutMin: repoTimeout(repo),
   })
-  const failed = !gate || gate.status === 'BLOCKED' || gate.status === 'NEEDS_CONTEXT'
+  // A gate that reports its gate still PENDING certified nothing — it is the gate.
+  const failed = !gate || gate.status === 'BLOCKED' || gate.status === 'NEEDS_CONTEXT' || gate.status === 'DONE_PENDING_GATE'
   emit('terminal', { repo, verdict: 'PASS' })
   return { id: pseudo.id, repo, gateStep: true, status: failed ? 'GATE_FAILED' : gate.status, gate, gateApplies: applies, prUrl: gate && gate.prUrl, advisory: terminal.advisory }
 }
@@ -2648,10 +2654,9 @@ const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo
 
 // ── the journal's last chunk, BEFORE the ledger: crystallize reads it ──
 {
-  const isOk = (r) => r.status === 'DONE' || r.status === 'DONE_WITH_CONCERNS'
   const endSummary = {
-    done: allResults.filter((r) => !r.gateStep && isOk(r)).length,
-    failed: allResults.filter((r) => !isOk(r)).length,
+    done: allResults.filter((r) => !r.gateStep && landed(r)).length,
+    failed: allResults.filter((r) => !landed(r)).length,
     blocked: blocked.length,
     prs: prsOpened.length,
     tokens: runSpent(),
@@ -2678,7 +2683,7 @@ if (execute) {
     inputs: { specPath, planPath },
     repos: [...new Set(doneTasks.map((t) => t.repo))],
     done: doneTasks.map((t) => ({ id: t.id, repo: t.repo, status: t.status })),
-    needsAttention: allResults.filter((r) => !(r.status === 'DONE' || r.status === 'DONE_WITH_CONCERNS')).map((r) => ({ id: r.id, repo: r.repo, status: r.status })),
+    needsAttention: allResults.filter((r) => !landed(r)).map((r) => ({ id: r.id, repo: r.repo, status: r.status })),
     blocked: blocked.map((b) => b.id),
     prs: prsOpened,
     learnings, // [{text, repos}] — the next run's loader filters them by repo
@@ -2745,7 +2750,7 @@ if (execute) {
 // The main session reads this and reports. Merge and deploy are deliberately NOT
 // automated. `replans`, `learnings`, and `halt` make the adaptive path auditable;
 // `telemetry` makes the cost visible.
-const ok = (r) => r.status === 'DONE' || r.status === 'DONE_WITH_CONCERNS'
+const ok = landed
 // Advisory notes are the minor/nit findings the gate deliberately did NOT rework. They are a
 // deliverable, not debris: this list is the only place they surface, so it must be reported.
 const advisoryNotes = allResults.flatMap((r) =>

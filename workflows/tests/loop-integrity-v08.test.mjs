@@ -18,6 +18,8 @@
 //      its failure was a dead agent or a footprint false positive a stronger model cannot fix
 //    • COMPRESSED OUTPUT TRUSTED — an output-compression hook can blank or garble a result;
 //      implement and gate prompts now say how to re-run a command raw before concluding
+//    • NO STATUS FOR "DONE, GATE PENDING" — gated-repo implementers reported DONE_WITH_CONCERNS
+//      with no concern; DONE_PENDING_GATE is landed-equivalent everywhere DONE is
 //
 //  Same stubbed runtime as harness-v06.test.mjs (agent / parallel / log / phase / args /
 //  budget); every scenario asserts the dispatches the engine actually made.
@@ -257,6 +259,36 @@ for (const maxPrecheckFixes of [1, 3]) {
   const off = await run('7b · no raw configured → the generic rule, no command', [T('PROJ-1')], responder, { extraArgs: { ...QUIET, repos: GATED } })
   ok(off.prompt('impl:PROJ-1').includes(GENERIC) && off.prompt('gate:api').includes(GENERIC), 'implement and gate prompts carry the generic line')
   ok(!/rtk proxy/.test(off.prompt('impl:PROJ-1')), 'and name no command')
+}
+
+// ══════ 8 · DONE_PENDING_GATE lands like DONE ══════
+{
+  const GATED = [{ name: 'api', agent: 'backend-engineer', tags: ['backend'], gate: { kind: 'command', run: 'make e2e' } }, { name: 'infra', agent: 'infra-engineer', tags: ['infra'], gate: null }]
+  const A = T('PROJ-1')
+  const B = T('PROJ-2', { dependsOn: ['PROJ-1'] })
+  const C = T('PROJ-3', { repo: 'infra', agent: 'infra-engineer', files: ['main.tf — x'] })
+  const { result, labels, prompt } = await run('8a · a gated implementer returns DONE_PENDING_GATE → landed, dependents unblock, the gate ships', [A, B, C], (label) => {
+    if (label.startsWith('impl:PROJ-3')) return impl('ccccccc')
+    if (label.startsWith('impl:')) return impl('aaaaaaa', { status: 'DONE_PENDING_GATE' })
+    if (label.startsWith('gate:')) return { status: 'DONE', summary: 'gate green, PR open', prUrl: 'https://x/pr/9' }
+    return PASSV
+  }, { extraArgs: { ...QUIET, repos: GATED } })
+  ok(labels.includes('impl:PROJ-2'), 'the dependent was dispatched')
+  eq(result.done.map((d) => [d.id, d.status]).sort(), [['PROJ-1', 'DONE_PENDING_GATE'], ['PROJ-2', 'DONE_PENDING_GATE'], ['PROJ-3', 'DONE']], 'all three land')
+  eq(result.needsAttention, [], 'nothing needs attention')
+  eq(result.prs.map((p) => p.pr), ['https://x/pr/9'], 'the gate ran and opened the PR')
+  ok(/return \*\*DONE_PENDING_GATE\*\*/.test(prompt('impl:PROJ-1')), 'the gated implementer is told to return DONE_PENDING_GATE')
+  ok(!/DONE_PENDING_GATE/.test(prompt('impl:PROJ-3')), 'an ungated implementer is not')
+}
+{
+  const GATED = [{ name: 'api', agent: 'backend-engineer', tags: ['backend'], gate: { kind: 'command', run: 'make e2e' } }]
+  const { result } = await run('8b · a GATE dispatch that returns DONE_PENDING_GATE did not certify anything', [T('PROJ-1')], (label) => {
+    if (label.startsWith('impl:')) return impl('aaaaaaa', { status: 'DONE_PENDING_GATE' })
+    if (label.startsWith('gate:')) return { status: 'DONE_PENDING_GATE', summary: 'left it for later' }
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop', learnings: [] }
+    return PASSV
+  }, { extraArgs: { ...QUIET, repos: GATED } })
+  eq(result.needsAttention.map((r) => [r.id, r.status]), [['api:gate', 'GATE_FAILED']], 'GATE_FAILED')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)

@@ -182,7 +182,7 @@ flowchart TB
     qr -- "PASS" --> done
     qr -- "blocking findings" --> fix["FIX — same implementer\nfix brief = the gating findings only"]
     fix --> guard{{"GUARD — cheap · read-only · multi-reviewer stages only\nreads the fix's OWN diff (pre-fix HEAD‥new HEAD)\nverifies every finding truly fixed &amp; fix contained\nbinary — NEW defects stay the panel's job"}}
-    guard -- "PASS — panel NOT re-run" --> done["DONE / DONE_WITH_CONCERNS\nlane? → serialized integrate into the run branch\nunblocks dependents · advisory notes ride into the summary"]
+    guard -- "PASS — panel NOT re-run" --> done["DONE / DONE_WITH_CONCERNS / DONE_PENDING_GATE\nlane? → serialized integrate into the run branch\nunblocks dependents · advisory notes ride into the summary"]
     guard -- "RE_REVIEW · guard died → full panel again" --> qr
 ```
 

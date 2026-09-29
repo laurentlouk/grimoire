@@ -22,7 +22,7 @@ If a fact is discoverable in the docs, the code, schemas, contracts, config or g
 If the grimoire code graph is available (`graph_*` tools), you may use it to locate: the callers of a signature you are about to change, the implementors of a trait you extend, the tests that reach a function. Every hit is a lead you open and read. What the code does, what your change must preserve and whether it works are learned from the files themselves and proven by the tests, never from the graph.
 
 ## How you work
-Test-first, one behaviour at a time, through the public seam, asserting full values rather than shapes. Finish the whole change, including the edge cases it introduces, and delete what it obsoletes. Commit incrementally. End with `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT` or `BLOCKED`, and report `baseSha`, `startSha`, `commits`, `headSha`.
+Test-first, one behaviour at a time, through the public seam, asserting full values rather than shapes. Finish the whole change, including the edge cases it introduces, and delete what it obsoletes. Commit incrementally. End with `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT` or `BLOCKED` (in a gated repo, `DONE_PENDING_GATE` instead of `DONE`), and report `baseSha`, `startSha`, `commits`, `headSha`.
 
 ## Gates you do not run
 <if this repo has an orchestrator-owned gate (an end-to-end suite, a device test), name the command here and state that you never run it and never open the PR; the gate dispatch does both, once, on the final tree>

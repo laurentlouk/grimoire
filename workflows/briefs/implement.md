@@ -73,6 +73,8 @@ Some repos open their PR from a dedicated GATE dispatch at PROJECT END, after th
 project's last task lands — never from an implementer. The header says whether yours is one,
 and names the exact commands you must NOT run. Why: a gate command is typically expensive and
 its stamp is a tree hash, so any later commit would invalidate it. The gate dispatch runs it
-ONCE, on the repo's final reviewed tree, and opens the PR.
+ONCE, on the repo's final reviewed tree, and opens the PR. When your task is done, return
+DONE_PENDING_GATE: it lands exactly like DONE. Keep DONE_WITH_CONCERNS for a real concern.
 
-End by returning the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED).
+End by returning the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED;
+in a gated repo, DONE_PENDING_GATE instead of DONE — the gate still to run is not a concern).

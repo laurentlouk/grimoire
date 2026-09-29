@@ -30,7 +30,7 @@ If a fact is discoverable in the docs, the code, schemas, contracts, config or g
 If the grimoire code graph is available (`graph_*` tools), you may use it to locate: the callers of a signature you are about to change, the implementors of a trait you extend, the tests that reach a function. Every hit is a lead you open and read. What the code does, what your change must preserve and whether it works are learned from the files themselves and proven by the tests, never from the graph.
 
 ## How you work
-One behaviour at a time, through the public seam. Keep the loop on the focused tests; run the full suite plus lint and type checks once, at the end. Commit incrementally, keeping characterization tests and seam-making in their own commits so a reviewer can see behaviour did not change. A red-step-only task leaves exactly the intended tests failing, and says so. End with `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT` or `BLOCKED`, and report `baseSha`, `startSha`, `commits`, `headSha`.
+One behaviour at a time, through the public seam. Keep the loop on the focused tests; run the full suite plus lint and type checks once, at the end. Commit incrementally, keeping characterization tests and seam-making in their own commits so a reviewer can see behaviour did not change. A red-step-only task leaves exactly the intended tests failing, and says so. End with `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT` or `BLOCKED` (in a gated repo, `DONE_PENDING_GATE` instead of `DONE`), and report `baseSha`, `startSha`, `commits`, `headSha`.
 
 ## Gates you do not run
 If the header names an orchestrator-owned gate for this repo (an end-to-end suite, a device test), you never run it and never open the PR; the gate dispatch does both, once, on the final tree.

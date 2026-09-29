@@ -39,4 +39,5 @@ command, and the stamp file it writes.
   branch DOES touch a path the gate condition did not account for: return BLOCKED naming the
   file the hook reported, so the condition can be fixed.
 - Never poll-loop or babysit a command: run it in the foreground and wait.
-- Return the structured status, and put the PR URL in `prUrl`.
+- Return the structured status, and put the PR URL in `prUrl`. Never DONE_PENDING_GATE: you
+  are the gate, and that status from you counts as a failed gate.
