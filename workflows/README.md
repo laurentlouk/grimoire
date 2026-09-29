@@ -126,8 +126,9 @@ push or open PRs. (`prBy` was removed in 0.8.0 and is ignored, with a warning.)
 | `guard` | — | not read by the loop: the `PreToolUse` guard hook's config (`hooks/README.md`) |
 | `graph` | `{enabled: true}` | not read by the loop: the code graph's config, `{enabled, repos?, dir: '.grimoire/graph', exclude?, maxFileKB: 512}` (`tools/graph/README.md`); scouts use it for research, never for what code does |
 
-The canonical `requireHook` is [rtk](https://github.com/rtk-ai/rtk), which condenses every Bash result before it reaches an agent: `{ name: 'rtk hook claude', check: 'command -v rtk && rtk hook check "git status" | grep -q "^rtk "', fix: 'brew install rtk-ai/tap/rtk && rtk init -g', raw: 'rtk proxy' }`. A run that would dispatch dozens of agents without it reads raw output everywhere, so refusing is cheaper than running.
 | `finalCheck` | `null` | `{repos:[…], prompt, agentType?}` — one read-only cross-repo check when every named repo landed work (e.g. API-contract drift between a client and its server) |
+
+The canonical `requireHook` is [rtk](https://github.com/rtk-ai/rtk), which condenses every Bash result before it reaches an agent: `{ name: 'rtk hook claude', check: 'command -v rtk && rtk hook check "git status" | grep -q "^rtk "', fix: 'brew install rtk-ai/tap/rtk && rtk init -g', raw: 'rtk proxy' }`. A run that would dispatch dozens of agents without it reads raw output everywhere, so refusing is cheaper than running.
 
 ## How a run flows
 
