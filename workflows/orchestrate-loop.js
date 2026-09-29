@@ -827,7 +827,8 @@ ${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}`
 // flush writes its own chunk file named by its first sequence number: a replayed or retried
 // flush OVERWRITES the same file instead of appending duplicates. `__AT__` / `__STARTED__`
 // are stamped by the shell (a workflow script has no clock). So is `__ATTEMPT__`: the first
-// flush of a session bumps the attempt read back from run.json, later flushes reuse it — so a
+// flush of a session that LANDS bumps the attempt read back from run.json (a run.json with no
+// attempt, as 0.7.x wrote, was attempt 1), later flushes reuse it — so a
 // relaunch under the same runId (resumed or not) is distinguishable, and its chunks
 // (`<firstSeq>.a<N>.jsonl` from attempt 2 on) never overwrite an earlier attempt's.
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
@@ -856,6 +857,7 @@ case "$DIR" in /*) ;; *) C=$(git rev-parse --path-format=absolute --git-common-d
 mkdir -p "$DIR/events"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 PREV=$(sed -n 's/^{"runId":[^,]*,"attempt":\\([0-9][0-9]*\\).*/\\1/p' "$DIR/run.json" 2>/dev/null | head -n 1)
+[ -n "$PREV" ] || { [ -f "$DIR/run.json" ] && PREV=1; }
 ${firstOfSession ? 'ATTEMPT=$(( ${PREV:-0} + 1 ))' : 'ATTEMPT=${PREV:-1}'}
 F="$DIR/events/${chunk}.jsonl"
 [ "$ATTEMPT" -gt 1 ] && F="$DIR/events/${chunk}.a$ATTEMPT.jsonl"
@@ -1152,6 +1154,7 @@ const journal = {
   mismatches: 0,
   dead: 0,
   final: null, // {status, summary} once the run is over — the last flush writes it into run.json
+  bumped: false, // a flush of THIS session has landed, so the attempt number is already bumped
 }
 const clip = (v) => (typeof v === 'string' && v.length > 300 ? v.slice(0, 297) + '…' : v)
 function emit(type, data) {
@@ -1169,13 +1172,16 @@ function flushJournal() {
   journal.chain = journal.chain.then(async () => {
     const lines = batch.map((e) => JSON.stringify(e))
     const firstSeq = batch[0].seq
-    const r = await agentT(journalPrompt(lines, runJsonFor(journal.final), firstSeq, journal.runDir, projectSlug, n === 1), {
+    // The bump rides on the first flush that LANDS, not on flush #1: a lost first chunk would
+    // otherwise leave the whole session writing under the previous attempt's number.
+    const r = await agentT(journalPrompt(lines, runJsonFor(journal.final), firstSeq, journal.runDir, projectSlug, !journal.bumped), {
       label: `journal#${n}`,
       phase: 'Implement',
       model: 'haiku',
       effort: 'low', // runs one fixed script
       schema: JOURNAL_SCHEMA,
     })
+    if (r) journal.bumped = true
     if (!r) {
       journal.dead++
       if (journal.dead === 1) log('⚠ telemetry writer died — events of this chunk are lost; the run itself is unaffected')

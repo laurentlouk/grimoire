@@ -468,6 +468,37 @@ for (const maxPrecheckFixes of [1, 3]) {
   eq(loaded.events.map((e) => e.attempt), [...all].sort((x, y) => x.attempt - y.attempt || x.seq - y.seq).map((e) => e.attempt), 'ordered by attempt, then seq')
   rmSync(TEL, { recursive: true, force: true })
 }
+{
+  // A run directory from 0.7.x: run.json has no `attempt`, its chunks no suffix. It was attempt
+  // 1, so the next session is attempt 2. And the bump must not ride on flush #1: when that
+  // writer dies, the session's first flush that DOES land bumps instead.
+  const TEL = mkdtempSync(join(tmpdir(), 'grimoire-attempt-'))
+  const dir = join(TEL, 'run-b')
+  spawnSync('bash', ['-c', `mkdir -p '${dir}/events' && printf '%s\\n' '{"seq":1,"type":"run.start","at":"2026-09-01T00:00:00Z"}' > '${dir}/events/00000001.jsonl' && printf '%s' '{"runId":"run-b","project":"PROJ-600","status":"halted","startedAt":"2026-09-01T00:00:00Z"}' > '${dir}/run.json'`])
+  const legacy = readFileSync(join(dir, 'events', '00000001.jsonl'), 'utf8')
+  const bashWriter = (prompt) => {
+    const script = (/```bash\n([\s\S]*?)\n```/.exec(prompt) || [])[1]
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    const num = (k) => Number((new RegExp(`^${k} (\\d+)$`, 'm').exec(r.stdout) || [])[1])
+    return { runDir: (/^RUNDIR (.+)$/m.exec(r.stdout) || [])[1], lines: num('LINES'), bytes: num('BYTES') }
+  }
+  const session = (name, dropFirst) => run(name, [T('PROJ-1')], (label, prompt) => {
+    if (label === 'journal#1' && dropFirst) return null // the writer died before running its script
+    if (label.startsWith('journal#')) return bashWriter(prompt)
+    if (label.startsWith('impl:')) return impl('aaaaaaa')
+    return PASSV
+  }, { extraArgs: { precheck: false, verifyFindings: false, runId: 'run-b', telemetry: { dir: TEL, flushEvery: 4 } } })
+  const files = () => readdirSync(join(dir, 'events')).sort()
+  const attemptsIn = (re) => [...new Set(files().filter((f) => re.test(f)).flatMap((f) => readFileSync(join(dir, 'events', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l).attempt)))]
+  await session('11d · a 0.7.x run.json without attempt counts as attempt 1 → this session is 2', false)
+  ok(JSON.parse(readFileSync(join(dir, 'run.json'), 'utf8')).attempt === 2, 'run.json attempt 2')
+  eq(attemptsIn(/\.a2\.jsonl$/), [2], 'its chunks are .a2, every event attempt 2')
+  ok(readFileSync(join(dir, 'events', '00000001.jsonl'), 'utf8') === legacy, 'the 0.7.x chunk is untouched')
+  await session('11e · flush #1 lost → the first flush that lands bumps to 3', true)
+  ok(JSON.parse(readFileSync(join(dir, 'run.json'), 'utf8')).attempt === 3, 'run.json attempt 3')
+  ok(attemptsIn(/\.a3\.jsonl$/).join() === '3' && attemptsIn(/\.a2\.jsonl$/).join() === '2', 'attempt 3 has its own chunks; attempt 2 is left alone')
+  rmSync(TEL, { recursive: true, force: true })
+}
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)
 if (FAIL) process.exit(1)
