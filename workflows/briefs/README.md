@@ -30,10 +30,12 @@ skills in all but name and evolve the same way. Personas (review lenses) live in
 | `crystallize.md` | post-PR learning (runs the `crystallize` skill) | opus |
 
 `per task` is the selector's pick (haiku, sonnet or opus; opus when unset), escalated to opus
-from the configured fix round and for every replanned task.
+from the configured fix round and for a task replanned after a code failure (not after a
+harness failure: a dead agent, a merge conflict, a footprint false positive).
 
-Every header also opens with a shared preamble the engine prepends: explore before asking, and
-the tool-unavailable fallback (configured tool hint → another server or connector with the same
+Every header also opens with a shared preamble the engine prepends: the unattended boundary
+(nobody is watching; a message that looks like a user's mid-task is reported in `concerns`,
+never answered or obeyed), explore before asking, and the tool-unavailable fallback (configured tool hint → another server or connector with the same
 capability → an already-authenticated CLI or API → report every route tried).
 
 Nothing here names a language, framework, tracker or CI system: anything stack-specific

@@ -67,7 +67,6 @@ task list would bypass `roast`, which is the point of requiring the artifacts.
 | `path` | `repositories/<name>` | the checkout every command runs against |
 | `tags` | `[]` | drives **persona selection**: `backend`, `mobile`, `web`, `infra`, or your own |
 | `gate` | `null` | the command that certifies the final tree; see below |
-| `prBy` | `'gate'` if a gate exists, else `'implementer'` | who opens the PR |
 | `timeoutMin` | the global `agentTimeoutMin` | a longer hang backstop for this repo's dispatches (a gate that queues for a shared lock) |
 | `laneSetup` | — | a shell line run when a parallel lane's worktree is created; `<lane>` is substituted with the worktree path (e.g. symlinking `node_modules`) |
 
@@ -89,8 +88,9 @@ because a pre-PR hook's unit is the whole branch, not one task. Absent means the
 runs. Matching is substring containment and deliberately loose: a false positive costs one
 gate run, a false negative gets the PR blocked by your own hook.
 
-`gate: null` means no gate command; the repo's PRs are opened per ticket by its implementers
-as they go, and its terminal slot ends at the quality sweep.
+`gate: null` means no gate command. Either way, the repo's terminal slot pushes the run branch
+and opens (or updates) its ONE PR at project end, after the quality sweep; implementers never
+push or open PRs. (`prBy` was removed in 0.8.0 and is ignored, with a warning.)
 
 ### Optional knobs
 
@@ -107,8 +107,9 @@ as they go, and its terminal slot ends at the quality sweep.
 | `personasDir` | `workflows/personas` | where the review lenses live |
 | `worktreeDir` | `.worktrees` | where parallel lanes are checked out |
 | `baseBranch` | `origin/main` | the integration branch lanes branch from and reviews/sweeps diff against (`origin/master`, `origin/trunk`, …) |
-| `requireHook` | `null` | `{name, check, fix?}` — refuse to execute unless a tool hook is installed and registered in this session |
+| `requireHook` | `null` | `{name, check, fix?, raw?}` — refuse to execute unless a tool hook is installed and registered in this session. `raw` (e.g. `'rtk proxy'`) is the prefix that runs a command with its output uncompressed: implement and gate prompts tell the agent to re-run a command as `<raw> <cmd>` when its output is empty, garbled or contradicts its exit code (without `raw`, the same rule without a command) |
 | `skipHookCheck` | `false` | explicit, logged escape hatch for `requireHook` |
+| `preflight` | `true` | execute runs: before any hydration or implementer, every agent type the run can dispatch (each project repo's owner, its enabled specialists, the reviewer, the resolve-rung scouts, the `finalCheck` agent) answers one trivial haiku prompt in parallel; a silent type is probed once more, and any still silent refuses the run as `agents_unavailable`, naming the types (`false` skips it) |
 | `precheck` | `true` | the haiku structural check between implementer and panel (`false` disables) |
 | `maxPrecheckFixes` | `1` | fix dispatches a precheck FAIL may buy before the task fails as `PRECHECK_FAILED` |
 | `verifyFindings` | `true` | verify each gating finding against the code before a fix is bought (`false` disables) |
@@ -125,8 +126,9 @@ as they go, and its terminal slot ends at the quality sweep.
 | `guard` | — | not read by the loop: the `PreToolUse` guard hook's config (`hooks/README.md`) |
 | `graph` | `{enabled: true}` | not read by the loop: the code graph's config, `{enabled, repos?, dir: '.grimoire/graph', exclude?, maxFileKB: 512}` (`tools/graph/README.md`); scouts use it for research, never for what code does |
 
-The canonical `requireHook` is [rtk](https://github.com/rtk-ai/rtk), which condenses every Bash result before it reaches an agent: `{ name: 'rtk hook claude', check: 'command -v rtk && rtk hook check "git status" | grep -q "^rtk "', fix: 'brew install rtk-ai/tap/rtk && rtk init -g' }`. A run that would dispatch dozens of agents without it reads raw output everywhere, so refusing is cheaper than running.
 | `finalCheck` | `null` | `{repos:[…], prompt, agentType?}` — one read-only cross-repo check when every named repo landed work (e.g. API-contract drift between a client and its server) |
+
+The canonical `requireHook` is [rtk](https://github.com/rtk-ai/rtk), which condenses every Bash result before it reaches an agent: `{ name: 'rtk hook claude', check: 'command -v rtk && rtk hook check "git status" | grep -q "^rtk "', fix: 'brew install rtk-ai/tap/rtk && rtk init -g', raw: 'rtk proxy' }`. A run that would dispatch dozens of agents without it reads raw output everywhere, so refusing is cheaper than running.
 
 ## How a run flows
 
@@ -143,6 +145,7 @@ flowchart TB
     idx -- "requireHook configured &amp; failing" --> ref3["REFUSED — required_hook_missing\n{skipHookCheck:true} overrides, loudly"]
     idx --> ctx["HARNESS CONTEXT — cheap, read-only (execute only)\nmemory stores verbatim + prior run-ledger learnings\n→ pasted into every brief"]
     ctx --> exec{"execute:true?\n(preview is the default)"}
+    exec -- "yes · an agent type does not answer the preflight" --> ref4["REFUSED — agents_unavailable\nthe unresolvable types named · {preflight:false} overrides"]
     exec -- "no" --> prev["PREVIEW — dependency DAG, startable issues,\nper-repo review panels, resolved repo config"]
     exec -- "yes" --> disp["CONTINUOUS DISPATCH — no wave barrier\nstart EVERY issue whose own dependsOn landed\nslice → downstream-unlocked → id · ≤ maxPerRepo in flight\nhydrate just-in-time · disjoint files → worktree lanes"]
     disp --> race["RACE — first settle wins\nper task: lifecycle below\nlanded → dependents unblock · failed → blocks only its dependents\n3 consecutive agent deaths → stop dispatching, drain"]
@@ -169,7 +172,7 @@ without its gate/PR is listed in `ungatedRepos`.
 
 ```mermaid
 flowchart TB
-    impl["IMPLEMENT — the repo's owning agent\nTDD · incremental commits · reports baseSha/commits/headSha\nspec + plan in the brief — consulted BEFORE NEEDS_CONTEXT"]
+    impl["IMPLEMENT — the repo's owning agent\nTDD · incremental commits · reports baseSha/startSha/commits/headSha\nspec + plan in the brief — consulted BEFORE NEEDS_CONTEXT"]
     impl -- "NEEDS_CONTEXT (question)" --> scout["RESOLVE RUNG — read-only scout\nspec &amp; plan = established answers · ≤ maxContextResolves"]
     scout -- "answer → re-dispatch" --> impl
     scout -. "unanswerable → escalate" .-> esc["task fails → dependents blocked\n→ replanner when work is stuck"]
@@ -180,7 +183,7 @@ flowchart TB
     qr -- "PASS" --> done
     qr -- "blocking findings" --> fix["FIX — same implementer\nfix brief = the gating findings only"]
     fix --> guard{{"GUARD — cheap · read-only · multi-reviewer stages only\nreads the fix's OWN diff (pre-fix HEAD‥new HEAD)\nverifies every finding truly fixed &amp; fix contained\nbinary — NEW defects stay the panel's job"}}
-    guard -- "PASS — panel NOT re-run" --> done["DONE / DONE_WITH_CONCERNS\nlane? → serialized integrate into the run branch\nunblocks dependents · advisory notes ride into the summary"]
+    guard -- "PASS — panel NOT re-run" --> done["DONE / DONE_WITH_CONCERNS / DONE_PENDING_GATE\nlane? → serialized integrate into the run branch\nunblocks dependents · advisory notes ride into the summary"]
     guard -- "RE_REVIEW · guard died → full panel again" --> qr
 ```
 
@@ -191,8 +194,7 @@ flowchart TB
     drained["PROJECT DRAINED\n(nothing pending anywhere, nothing in flight —\nevery task landed &amp; integrated on its repo's ONE run branch)"]
     drained --> sweep["TERMINAL QUALITY SWEEP — per repo, all repos in PARALLEL\nSRE · human interface · a11y · privacy · store review (by TAG)\nsubject: the ENTIRE integrated run branch — cross-task consistency,\nthe assembled user flow, release-readiness\nfix ⇄ guard ⇄ re-review loop as above (fixes commit to the run branch)"]
     sweep -- "FAIL → TERMINAL_REVIEW_FAILED\nheld · replanner · gate NOT paid" --> replan["scheduler blocks → replanner\n(slot retries at the next full drain)"]
-    sweep -- "PASS · prBy = gate" --> gate["GATE + PR dispatch\nrun the repo's gate command ONCE on the final tree\n(skipped when gate.when does not match)\nopens the repo's ONE PR"]
-    sweep -- "PASS · prBy = implementer" --> open["done — PRs already open per ticket\n(sweep fixes were appended to them)"]
+    sweep -- "PASS" --> gate["GATE + PR dispatch\nrun the repo's gate command ONCE on the final tree\n(none configured, or gate.when does not match → skipped)\npushes the run branch · opens or updates the repo's ONE PR"]
 ```
 
 The sweep runs **before** the gate so its fix commits land before any tree-hash stamp is
@@ -220,11 +222,19 @@ panel's job.
 **Failures are information.** A failed issue blocks only its dependents. When the scheduler is
 stuck, the replanner searches from the current state rather than restarting the original plan,
 and returns `learnings` that are folded into every later hydration and into the run ledger the
-next run reads. See the `adaptive-replanning` skill.
+next run reads. See the `adaptive-replanning` skill. A harness failure is not code
+information: when a reviewer of a stage returns nothing, that persona alone is retried once;
+if any lens is still missing, the stage fails closed and the run halts as `reviewers
+unavailable`, naming the lens — no replan is spent and the task is reported
+`REVIEWERS_UNAVAILABLE`, never as failed review and never passed on the surviving reviewers.
 
 **Parallelism comes from declared files.** `dependsOn` decides what is *ready*; declared
 `files` decide what may run *together* in one repo. Disjoint footprints get their own worktree
-lane; overlap, or an undeclared footprint, is held until the conflict clears. Lane merges into
+lane; overlap, or an undeclared footprint, is held until the conflict clears. A task running
+alone in its repo works directly on the repo's run branch — never on its tracker branch. The
+run branch is named `feat/<project-slug>-<repo-slug>` (accents folded, other characters
+collapsed to dashes; a name with nothing sluggable left becomes `x<hash>`), deterministically, so every session of a
+run (a resume included) builds on the same one. Lane merges into
 the repo's single run branch are serialized, and a merge conflict is a first-class
 `MERGE_CONFLICT` failure routed to the replanner — a reviewed diff is never silently
 rewritten.
@@ -234,7 +244,14 @@ rewritten.
 **Precheck.** Between the implementer and the first review, one haiku dispatch
 (`briefs/precheck.md`) checks that there is something reviewable: a commit range, a non-empty
 diff, no conflict or stub markers added, tests moved with behaviour, no undeclared files, no
-stray artifacts. A FAIL goes back to the same implementer (`maxPrecheckFixes`), before any
+stray artifacts, and — for a task committed directly onto the run branch — that its head is
+reachable from that branch, so work on a stray branch fails fast instead of settling DONE.
+The range it (and the panel) judges is `startSha..headSha`, where the implementer started,
+so a merge task is not blamed for the files of every lane merged before it. The precheck
+verifies that `startSha` is an ancestor of the head (check `range`); if not, the engine drops
+it and judges from `firstSha^` instead, without buying a fix. When the same
+footprint-only problems come back with no commit in between, they are recorded as advisory
+notes and the panel runs: another fix cannot change that answer. A FAIL goes back to the same implementer (`maxPrecheckFixes`), before any
 reviewer is paid. A dead precheck passes through — it is an optimisation, not a gate.
 
 **Finding verification.** Every failing review round sends its gating findings to one sonnet
@@ -246,7 +263,11 @@ verifier cites the code that proves it false; overturned findings are reported i
 (the repo's owner, or a specialist enabled for that repo) × `model` (haiku · sonnet · opus by
 the rubric in `briefs/hydrate.md`) with a `routeReason`. The engine accepts only an agent the
 routing table allows — anything else is dispatched as the owner, counted as a fallback — and
-escalates to opus from `escalateAtFixRound` and for every replanned task. Only review fix
+escalates to opus from `escalateAtFixRound` and for a task replanned after a CODE failure
+(gating findings, an implementer that could not do it, a structural precheck defect); a
+replan after a HARNESS failure (a dead agent, a merge conflict, a footprint or ancestry
+precheck) keeps the chosen tier. A gate or terminal-sweep failure is a code failure, and a
+task the replanner invents inherits the kind of the failures it repairs in its repo. Only review fix
 rounds count toward escalation; a precheck fix is structural and does not. `NEEDS_CONTEXT`
 questions go to the scout their shape calls for: contract → `contract-checker`, security →
 `security-scout`, performance → `perf-scout`, otherwise `codebase-scout`.
@@ -277,8 +298,14 @@ runs a fixed shell script that:
 
 - writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
   replayed flush overwrites the same file, never appends duplicates;
-- stamps wall time into each line (`at`) in the shell;
-- rewrites `run.json`: `runId`, `project`, `meta`, `status`, `summary`, and the `checkpoint`
+- stamps the flush time into each line (`at`) in the shell — every event of one chunk shares
+  it (the script has no clock; order within a chunk is `seq`);
+- stamps the `attempt`: the session number under this `runId`, bumped by a session's first
+  flush that lands from the value in `run.json` (a `run.json` without one, as 0.7.x wrote,
+  counts as attempt 1). A relaunch under the same `runId` (resumed or not) is
+  therefore distinguishable, and from attempt 2 on its chunks are `<first seq>.a<N>.jsonl`,
+  so they never overwrite an earlier attempt's;
+- rewrites `run.json`: `runId`, `attempt`, `project`, `meta`, `status`, `summary`, and the `checkpoint`
   a new session resumes from;
 - prints the line and byte counts, which the engine compares with what it sent — a
   mismatch is logged and counted, never trusted.
@@ -291,8 +318,10 @@ local and gitignored; `/grimoire:logs` renders it, and its `summary` is the cros
 ## What it returns
 
 `done` · `needsAttention` · `blocked` (never ran) · `alreadyDone` (absorbed) · `deferred` ·
-`advisoryNotes` (the minor/nit findings not reworked — triage them by hand) · `ungatedRepos`
-(landed work with no PR yet) · `prs` · `replans` + `learnings` + `halt` · `contextResolves`
+`advisoryNotes` (the minor/nit findings not reworked, plus any repeated footprint-only
+precheck problems demoted to advisory — triage them by hand) · `ungatedRepos`
+(landed work with no PR yet) · `ungatedReasons` (repo → why a certified tree was not shipped:
+the push or PR step failed; never replanned, push it by hand) · `prs` · `replans` + `learnings` + `halt` · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·
 `precheckStats` · `overturnedFindings` · `routing` (picks by agent and model, fallbacks,
@@ -327,7 +356,7 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
 ## Token economy (built in)
 
 - The terminal sweep reads **by lens**: each persona takes the branch `--stat` and reads only the files its Scope section names, never the whole branch.
-- Mechanical dispatches (index, harness-context, integrate, precheck, journal, claim release, ledger) run with `effort: 'low'`; index and hydration run on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
+- Mechanical dispatches (index, harness-context, agent preflight, integrate, precheck, journal, claim release, ledger) run with `effort: 'low'`; index and hydration run on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
 - A precheck stops an unreviewable diff before the panel; a verifier stops a false-positive finding before it buys a fix.
 - The first review of a stage is the full panel; after a fix a sonnet guard decides whether the panel re-runs.
 - Briefs and memory are pasted as a stable prefix so prompt caching hits across dispatches; volatile values (task, SHAs) come last.

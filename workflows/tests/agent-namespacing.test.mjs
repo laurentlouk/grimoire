@@ -222,13 +222,15 @@ function allKindsRun(label, extraArgs) {
   }, { verifyFindings: false, claim: { identity: 'grimoire-bot' }, ...extraArgs })
 }
 const KIND = (l) => l.replace(/[:#].*$/, '')
+const isBriefed = (c) => c.label !== 'harness-context' && !c.label.startsWith('preflight:')
 const REQUIRED_KINDS = ['parse-index', 'hydrate', 'resolve', 'impl', 'precheck', 'spec-hawk', 'replan', 'claim', 'integrate', 'release-claims', 'ledger']
 {
   const { calls } = await allKindsRun('F1 · every dispatch kind is framed with the same generic fallback', {})
   const kinds = [...new Set(calls.map((c) => KIND(c.label)))]
   ok(REQUIRED_KINDS.every((k) => kinds.includes(k)), `the run reached every sampled kind (got ${kinds.join(', ')})`)
-  // harness-context is a plain file-read loader with no brief; every briefed dispatch gets the rule.
-  const briefed = calls.filter((c) => c.label !== 'harness-context')
+  // harness-context (a plain file-read loader) and the agent preflight (a one-line reply) carry
+  // no brief; every briefed dispatch gets the rule.
+  const briefed = calls.filter(isBriefed)
   const missing = briefed.filter((c) => !c.prompt.includes(`don't guess: a fact discoverable in the design artifacts, docs, code, schemas, contracts, config or git history is looked up, never assumed and never asked.\n${FALLBACK}\n\n`))
   eq(missing.map((c) => c.label), [], 'every briefed dispatch carries the fallback right after the explore-before-asking preamble')
   ok(briefed.every((c) => !c.prompt.includes('## Tool hints')), 'no tool-hints block when none is configured')
@@ -237,7 +239,7 @@ const REQUIRED_KINDS = ['parse-index', 'hydrate', 'resolve', 'impl', 'precheck',
   const HINTS = { tracker: 'mcp__055f8362__* (Linear, claude.ai connector)', design: 'mcp__f2c5fb33__* (Figma)', errors: '   ', bogus: 7 }
   const BLOCK = '## Tool hints (configured for this run — try these first for each capability)\n- tracker: mcp__055f8362__* (Linear, claude.ai connector)\n- design: mcp__f2c5fb33__* (Figma)\n\n'
   const { calls } = await allKindsRun('H1 · toolHints render in every dispatch header (blank / non-string hints dropped)', { toolHints: HINTS })
-  const briefed = calls.filter((c) => c.label !== 'harness-context')
+  const briefed = calls.filter(isBriefed)
   eq(briefed.filter((c) => !c.prompt.includes(`${FALLBACK}\n\n${BLOCK}`)).map((c) => c.label), [], 'every briefed dispatch carries the exact hint block right after the fallback')
 }
 {

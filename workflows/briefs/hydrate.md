@@ -45,8 +45,8 @@ Set `agent`, `model` and a one-sentence `routeReason` naming the deciding signal
     learning in the header says failed before.
   - Unsure between two tiers: take the higher one.
 
-The engine escalates a task to opus by itself after repeated fix rounds, and routes every
-replanned task to opus; you do not need to hedge for that.
+The engine escalates a task to opus by itself after repeated fix rounds, and routes a task
+replanned after a code failure to opus; you do not need to hedge for that.
 
 If the header carries learnings from earlier work, fold them into `taskText` where relevant
 so this work does not repeat a failure. Where an issue is silent on something the implementer

@@ -16,9 +16,10 @@
 //  node scripts/render-logs.mjs summary [--dir .grimoire/runs] [--version <v>] [--json]
 //      → cross-run aggregate per grimoire version / briefsHash, for crystallize
 //
-//  Input contract: <dir>/<runId>/run.json + events/<8-digit firstSeq>.jsonl chunks (and/or a
-//  legacy single events.jsonl), one JSON object per line; merged, deduped by seq (first seen
-//  wins), sorted by seq.
+//  Input contract: <dir>/<runId>/run.json + events/<8-digit firstSeq>.jsonl chunks (from the
+//  second attempt under one runId: <firstSeq>.a<N>.jsonl), and/or a legacy single events.jsonl,
+//  one JSON object per line; merged, deduped by (attempt, seq) (first seen wins; events without
+//  `attempt` are attempt 1), sorted by attempt then seq. `at` is the chunk's flush time.
 //  Unknown event types and fields are tolerated and shown raw; lines that fail to
 //  parse are counted and skipped, never fatal.
 import { readFileSync, writeFileSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync } from 'node:fs'
@@ -82,6 +83,9 @@ function eventFiles(p) {
   return files
 }
 
+// The session an event came from under its runId (1 for journals written before attempts).
+const attemptOf = (ev) => num(ev.attempt) ?? 1
+
 export function loadRuns(dir) {
   const runs = []
   for (const name of subdirs(dir)) {
@@ -103,13 +107,16 @@ export function loadRuns(dir) {
         if (!isObj(ev)) { badLines++; continue }
         const seq = num(ev.seq)
         if (seq !== null) {
-          if (seen.has(seq)) { duplicates++; continue } // a retried flush: first seen wins
-          seen.add(seq)
+          // a retried flush: first seen wins. Keyed per attempt — a relaunch under the same
+          // runId restarts its own sequence, and those events are not duplicates.
+          const key = `${attemptOf(ev)}:${seq}`
+          if (seen.has(key)) { duplicates++; continue }
+          seen.add(key)
         }
         events.push(ev)
       }
     }
-    events.sort((a, b) => (num(a.seq) ?? Infinity) - (num(b.seq) ?? Infinity))
+    events.sort((a, b) => attemptOf(a) - attemptOf(b) || (num(a.seq) ?? Infinity) - (num(b.seq) ?? Infinity))
     const start = events.find((e) => e.type === 'run.start') || {}
     const meta = { ...(isObj(start.meta) ? start.meta : {}), ...(isObj(run.meta) ? run.meta : {}) }
     let mtime = null
@@ -328,7 +335,7 @@ main{padding:16px;max-width:1200px;margin:0 auto}section{margin:0 0 22px}h2{font
 .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:600;font-size:12px}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}td.txt{overflow-wrap:anywhere;min-width:220px}td.mono{font-family:var(--mono);font-size:12px;white-space:nowrap}
-.PASS,.DONE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION{color:var(--warn)}
+.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.SHIP_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY{color:var(--warn)}
 .lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.lane .task{border-top:1px solid var(--line);padding:6px 0;cursor:pointer}.lane .task:hover{color:var(--acc)}
 details{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--card)}summary{cursor:pointer;padding:8px 10px;font-weight:600;overflow-wrap:anywhere}
 details ol{margin:0;padding:0 10px 10px 30px}details li{margin:3px 0;overflow-wrap:anywhere}.k{font-family:var(--mono);font-size:12px;color:var(--mut)}
@@ -349,7 +356,8 @@ function client() {
     for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c))
     return el
   }
-  const STATUS = ['PASS', 'FAIL', 'DONE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'NEEDS_ATTENTION', 'answered']
+  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'SHIP_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'answered']
+  const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
   const cls = (v) => (STATUS.includes(String(v)) ? String(v) : null)
   const s = (v) => (v == null ? '' : typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(v))
   const list = (v) => (Array.isArray(v) ? v.map(s).join('; ') : s(v))
@@ -409,7 +417,7 @@ function client() {
     const sm = r.summary || {}
     const count = (t) => ev.filter((e) => e.type === t).length
     const settles = ev.filter((e) => e.type === 'settle')
-    const done = end.done ?? sm.done ?? settles.filter((e) => e.status === 'DONE').length
+    const done = end.done ?? sm.done ?? settles.filter((e) => LANDED.includes(e.status)).length
     const failed = end.failed ?? (Array.isArray(sm.needsAttention) ? sm.needsAttention.length : sm.needsAttention)
     const blocked = end.blocked ?? (Array.isArray(sm.blocked) ? sm.blocked.length : sm.blocked)
     const prUrls = uniq([...(Array.isArray(sm.prs) ? sm.prs.map((p) => (typeof p === 'string' ? p : p && (p.url || p.prUrl))) : []),

@@ -331,8 +331,8 @@ const GATE_OK = { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x
     'the preview shows each repo its own terminal panel')
   ok(result.reviewPanels['mobile'].quality.includes('Adversarial QA & Integrity') && !result.reviewPanels['mobile'].quality.includes('App Store Reviewer'),
     'the per-task quality core excludes the terminal lenses')
-  ok(result.repos.api.gate === 'make e2e' && result.repos.api.prBy === 'gate' && result.repos.infra.gate === null && result.repos.infra.prBy === 'implementer',
-    'the preview echoes the resolved repo config (path, agent, tags, gate, prBy)')
+  ok(result.repos.api.gate === 'make e2e' && result.repos.infra.gate === null && !('prBy' in result.repos.api),
+    'the preview echoes the resolved repo config (path, agent, tags, gate)')
   ok(result.repos.mobile.path === 'repositories/mobile', 'a repo with no explicit path defaults to repositories/<name>')
 }
 
@@ -355,27 +355,29 @@ const GATE_OK = { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x
   ok(JSON.stringify(docs.spec) === JSON.stringify(['Spec Hawk']), 'spec review is universal')
 }
 
-// ══════════════ W · a repo with gate:null — no gate dispatch, PR from the implementer ══════════════
+// ══════════════ W · a repo with gate:null — no gate command, PR from its terminal slot ══════════════
 {
   const INFRA_TASK = { ...APP_TASK, id: 'PROJ-905', ticket: 'PROJ-905', repo: 'infra', agent: 'infra-engineer' }
-  const { result, calls } = await run('W · gate:null → no gate dispatch, PR from the implementer', [INFRA_TASK],
+  const { result, calls } = await run('W · gate:null → push + PR-only terminal dispatch', [INFRA_TASK],
     (label) => {
-      if (label.startsWith('impl:')) return { ...IMPL_OK, prUrl: 'https://github.com/x/infra/pull/3' }
+      if (label.startsWith('impl:')) return IMPL_OK
+      if (label === 'gate:infra') return { status: 'DONE', summary: 'pr', prUrl: 'https://github.com/x/infra/pull/3' }
       return V('PASS')
     })
-  ok(!calls.some((c) => c.label.startsWith('gate:')), 'no gate dispatch for a repo configured with gate: null')
+  const gate = calls.find((c) => c.label === 'gate:infra')
+  ok(!!gate && /There is no gate command for this repo/.test(gate.prompt) && /push -u origin/.test(gate.prompt), 'one PR-only dispatch: push, no gate command')
   const impl = calls.find((c) => c.label.startsWith('impl:'))
-  ok(!/do NOT run `gh pr create`/i.test(impl.prompt), 'the implementer is not told to withhold the PR')
-  ok(result.prs.length === 1 && result.prs[0].pr.endsWith('/pull/3'), 'the PR comes back from the implementer')
+  ok(/do NOT run `gh pr create`/i.test(impl.prompt), 'the implementer is told to leave the PR to the terminal slot')
+  ok(result.prs.length === 1 && result.prs[0].pr.endsWith('/pull/3'), 'the PR comes back from the terminal slot')
   ok(calls.filter((c) => c.label.startsWith('reliability-sre')).length === 1, 'no gate ≠ no sweep: the repo still gets the terminal quality sweep')
   ok(calls.filter((c) => c.label.startsWith('data-integrity')).length === 1, 'and its infra tag puts the data-integrity lens in its per-task core')
 }
 
-// ══════════════ W2 · a repo with gate:null but prBy:'gate' still opens its PR from the slot ══════════════
+// ══════════════ W2 · a leftover prBy (removed in 0.8.0) is ignored, with a warning ══════════════
 {
-  const repos = REPOS.map((r) => (r.name === 'infra' ? { ...r, prBy: 'gate' } : r))
+  const repos = REPOS.map((r) => (r.name === 'infra' ? { ...r, prBy: 'implementer' } : r))
   const INFRA_TASK = { ...APP_TASK, id: 'PROJ-906', ticket: 'PROJ-906', repo: 'infra', agent: 'infra-engineer' }
-  const { result, calls } = await run('W2 · prBy:gate with no gate command → PR-only gate dispatch', [INFRA_TASK],
+  const { result, calls, logs } = await run('W2 · prBy:implementer is ignored → still the PR-only terminal dispatch', [INFRA_TASK],
     (label) => {
       if (label.startsWith('impl:')) return IMPL_OK
       if (label.startsWith('gate:')) return { status: 'DONE', summary: 'pr', prUrl: 'https://github.com/x/infra/pull/9' }
@@ -387,6 +389,7 @@ const GATE_OK = { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x
     'the dispatch is told there is no command, only a PR to open')
   ok(/gh pr create/.test(gate.prompt), 'it still opens the PR')
   ok(result.prs.length === 1 && result.prs[0].pr.endsWith('/pull/9'), 'and the PR URL comes back from it')
+  ok(logs.some((l) => /prBy is ignored since 0\.8\.0/.test(l)), 'the ignored key is logged')
 }
 
 // ══════════════ T1 · the scope split itself: core per task, sweep once per repo ══════════════
@@ -406,7 +409,7 @@ const GATE_OK = { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x
   ok(labels.findIndex((l) => l.startsWith('hig')) > labels.indexOf('impl:PROJ-900'), 'the sweep ran after the work landed')
   ok(gateIdx > labels.findIndex((l) => l.startsWith('hig')), 'and the gate only after the sweep')
   const sweep = calls.find((c) => c.label.startsWith('hig'))
-  ok(/diff origin\/main\.\.\.feat\/x/.test(sweep.prompt), 'sweep reviewers are pointed at the ENTIRE integrated run branch')
+  ok(/diff origin\/main\.\.\.feat\/proj-600-mobile/.test(sweep.prompt), 'sweep reviewers are pointed at the ENTIRE integrated run branch (feat/<project>-<repo>)')
   ok(result.done.length === 1 && result.prs.length === 1, 'task landed and the PR shipped')
 }
 
@@ -609,7 +612,7 @@ const appTask = (o) => ({ ...APP_TASK, ...o })
   ok(labels.findIndex((l) => l.includes(':mobile:final')) > lastImpl, 'the mobile terminal sweep also waited for the full drain')
   ok(labels.filter((l) => l === 'gate:mobile').length === 1 && labels.filter((l) => l === 'gate:api').length === 1,
     'exactly ONE gate per repo — each gate command paid once')
-  ok(logs.some((l) => /terminal sweep → gate\+PR: /.test(l) && l.includes('mobile') && l.includes('api')),
+  ok(logs.some((l) => /terminal sweep → gate \+ push \+ PR: /.test(l) && l.includes('mobile') && l.includes('api')),
     'both repos took the terminal wave TOGETHER (sweeps + gates in parallel)')
   ok(result.done.length === 3 && result.prs.length === 2 && result.ungatedRepos.length === 0, 'all landed, both PRs shipped, nothing ungated')
 }
@@ -658,11 +661,11 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
   const impl = calls.find((c) => c.label === 'impl:PROJ-920')
   ok(/PARALLEL LANE/.test(impl.prompt), 'lane implementers are briefed for worktree isolation')
   ok(/\.worktrees\/mobile--proj-920/.test(impl.prompt), 'the brief names the lane worktree path')
-  ok(/-b feat\/x--proj-920/.test(impl.prompt), 'the lane branch derives from the run branch')
+  ok(/-b feat\/proj-600-mobile--proj-920/.test(impl.prompt), 'the lane branch derives from the run branch')
   const integ = calls.find((c) => c.label === 'integrate:PROJ-920')
-  ok(/merge --no-ff feat\/x--proj-920/.test(integ.prompt) && /checkout feat\/x\b/.test(integ.prompt), 'integration merges the lane into the run branch')
+  ok(/merge --no-ff feat\/proj-600-mobile--proj-920/.test(integ.prompt) && /checkout feat\/proj-600-mobile\b/.test(integ.prompt), 'integration merges the lane into the run branch')
   const gate = calls.find((c) => c.label.startsWith('gate:'))
-  ok(/branch feat\/x /.test(gate.prompt), 'the gate is briefed on the RUN branch, not a lane')
+  ok(/branch feat\/proj-600-mobile /.test(gate.prompt), 'the gate is briefed on the RUN branch, not a lane')
   ok(result.done.length === 2 && result.prs.length === 1, 'both landed; still ONE PR per repo')
 }
 {
@@ -814,7 +817,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
     const impl = calls.find((c) => c.label === 'impl:PROJ-900')
     ok(impl.prompt.startsWith('## Your memory') && impl.prompt.includes('App engineers always run the linter before DONE (2026-09-01).'), "the implementer brief opens with ITS agent's memory entries, verbatim")
     ok(!impl.prompt.includes('Reviewers re-check prior Fixed dispositions'), "the implementer does not get the reviewer's memory")
-    const review = calls.find((c) => c.opts.agentType === 'grimoire:reviewer')
+    const review = calls.find((c) => c.opts.agentType === 'grimoire:reviewer' && !c.label.startsWith('preflight:'))
     ok(review && review.prompt.includes('Reviewers re-check prior Fixed dispositions at HEAD.'), 'reviewer briefs carry the reviewer memory')
     const gate = calls.find((c) => c.label.startsWith('gate:'))
     ok(gate && /## Your memory/.test(gate.prompt), 'the gate brief carries a memory block too')
@@ -906,7 +909,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
   ok(refs.size >= 6, `dispatches reference Markdown briefs/personas (${refs.size} distinct)`)
   const missing = [...refs].filter((r) => !existsSync(`${DIR}/${r}.md`))
   ok(missing.length === 0, `every referenced file exists${missing.length ? ' — MISSING: ' + missing.join(', ') : ''}`)
-  const withBrief = calls.filter((c) => !['parse-index', 'harness-context', 'ledger', 'crystallize', 'contract-check'].includes(c.label) && !c.label.startsWith('hydrate:'))
+  const withBrief = calls.filter((c) => !['parse-index', 'harness-context', 'ledger', 'crystallize', 'contract-check'].includes(c.label) && !c.label.startsWith('hydrate:') && !c.label.startsWith('preflight:'))
   ok(withBrief.every((c) => /## Brief\nYour FIRST action: Read `workflows\/briefs\//.test(c.prompt)), 'every implementer/reviewer/guard/gate/fix dispatch opens with its brief pointer')
   const src = readFileSync(`${DIR}/orchestrate-loop.js`, 'utf8')
   const personaIds = [...src.matchAll(/\{ id: '([a-z-]+)', name: '/g)].map((m) => m[1])
@@ -922,7 +925,8 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
     'briefs/resolve.md', 'briefs/review.md', 'briefs/guard.md', 'briefs/integrate.md', 'briefs/gate.md', 'briefs/replan.md',
     'briefs/ledger.md', 'briefs/crystallize.md', 'personas/README.md', 'personas/spec-hawk.md', 'personas/break-it.md',
     'personas/data-integrity.md', 'personas/reliability-sre.md', 'personas/hig.md', 'personas/accessibility.md',
-    'personas/privacy.md', 'personas/app-store.md']
+    'personas/privacy.md', 'personas/app-store.md', 'briefs/precheck.md', 'briefs/verify.md', 'briefs/journal.md', 'briefs/claim.md',
+    'tests/loop-integrity-v08.test.mjs', '../CHANGELOG.md']
   // Product, vendor and stack names that must not reappear when someone edits the prose.
   const BANNED = /\b(odyyy|linear mcp|claude\.md|redpanda|dynamodb|redisearch|drizzle|expo|nativewind|terragrunt|sentry|codex|laurent|e2e-green|smoke:android|smoke:ios)\b/i
   const offenders = files.filter((f) => BANNED.test(readFileSync(`${DIR}/${f}`, 'utf8')))

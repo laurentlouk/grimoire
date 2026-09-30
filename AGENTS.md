@@ -37,7 +37,7 @@ Agents never write memory mid-task. The lesson is extracted afterwards by `cryst
 
 **Decision rule per step.** Need a fact with no follow-up → scout (parallel when independent). Advancing a plan task with a commit → team agent. Trivial and cross-cutting → do it inline. Reviewing a diff → the `reviewer` scout; you own the gate, never review inline, never let the implementer review its own work.
 
-**The selector.** In the loop, the hydrate step picks an implementer and a model tier per task, from the task's tags, declared files, slice and risk: the candidates are the repo's owning team agent plus the specialists enabled for that repo. It logs why. The engine validates the choice against this roster; an unknown or not-enabled agent falls back to the repo's owner, and the fallback is logged. The model escalates to opus on the second fix round of a task or when the task was replanned. When an implementer returns `NEEDS_CONTEXT`, the resolve rung picks the scout by the question's shape (where/how → `codebase-scout`, contract → `contract-checker`, security → `security-scout`, performance → `perf-scout`, …).
+**The selector.** In the loop, the hydrate step picks an implementer and a model tier per task, from the task's tags, declared files, slice and risk: the candidates are the repo's owning team agent plus the specialists enabled for that repo. It logs why. The engine validates the choice against this roster; an unknown or not-enabled agent falls back to the repo's owner, and the fallback is logged. The model escalates to opus on the second fix round of a task, or when a task is replanned after a code failure (a harness failure, such as a dead agent or a footprint false positive, keeps the chosen tier). When an implementer returns `NEEDS_CONTEXT`, the resolve rung picks the scout by the question's shape (where/how → `codebase-scout`, contract → `contract-checker`, security → `security-scout`, performance → `perf-scout`, …).
 
 ## Team agents
 
@@ -62,7 +62,7 @@ Create one from `templates/team-agent.md` per repository. Interactive dispatches
 
 ## Specialists
 
-Implementers with a narrower lens than the repo's owner, dispatched into that repo with the same brief and the same return contract (`DONE` / `DONE_WITH_CONCERNS` / `NEEDS_CONTEXT` / `BLOCKED`, `baseSha` / `commits` / `headSha`). They follow the repo's own conventions. Off by default: enable one per repo in `grimoire.config.json`, e.g. `"specialists": [{ "agent": "migration-engineer", "repos": ["api"] }]`.
+Implementers with a narrower lens than the repo's owner, dispatched into that repo with the same brief and the same return contract (`DONE` / `DONE_WITH_CONCERNS` / `DONE_PENDING_GATE` (a gated repo's DONE) / `NEEDS_CONTEXT` / `BLOCKED`, `baseSha` / `startSha` / `commits` / `headSha`). They follow the repo's own conventions. Off by default: enable one per repo in `grimoire.config.json`, e.g. `"specialists": [{ "agent": "migration-engineer", "repos": ["api"] }]`.
 
 | Agent | Default model | Owns |
 | --- | --- | --- |
