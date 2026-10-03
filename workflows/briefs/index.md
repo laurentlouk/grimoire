@@ -31,3 +31,10 @@ value statement), and per issue ONLY:
 
 Do NOT fetch or return issue bodies, descriptions, or comments — a per-cycle hydration step
 does that just-in-time. Read-only; do not modify the tracker or any repo.
+
+## When the header asks you to PROBE the session
+Run its two Bash calls exactly as written, in two separate messages: the second must wait for
+the first's output, or the measurement reads zero whatever the hooks cost. Report the numbers
+as they came back; never round a slow result down or retry until it looks fast. The run uses
+them to refuse a session whose every command waits on a hanging hook, and to write
+repo-relative paths in what it publishes.

@@ -47,6 +47,9 @@ const DEFAULT_MAX_PRECHECK_FIXES = 1 // precheck rung: cheap structural check be
 const DEFAULT_ESCALATE_AT_FIX_ROUND = 2 // model escalation: from this fix round on (counted per task, across stages), the implementer runs on opus whatever tier the selector chose. {escalateAtFixRound:0} disables.
 const REVIEWER_RETRIES = 1 // a review round where EVERY reviewer returned nothing is re-dispatched this many times before the run halts as 'reviewers unavailable' (a harness failure, never a verdict on the code)
 const DEFAULT_BUDGET_FLOOR = 80000 // stop dispatching when the turn's remaining token budget drops below this. {budgetFloor:N} overrides.
+const DEFAULT_MAX_TOOL_LATENCY_SEC = 15 // startup probe (execute runs): when a trivial Bash call waits this long before it runs, refuse to start. Every agent inherits the session's PreToolUse hooks, and one hanging until its timeout (30 s) on each of a run's ~800 Bash calls once took 6.4 h of a 9.2 h run. {maxToolLatencySec:0} disables the refusal (the warning stays).
+const TOOL_LATENCY_WARN_SEC = 8 // from here on the probe's number is logged as a warning: two back-to-back calls normally sit 2–6 s apart
+const CRYSTALLIZE_TIMEOUT_MIN = 90 // crystallize reads every review thread, patches skills and runs their evals: the longest single dispatch of a run, and the 40-min backstop killed it before it wrote anything
 const DEFAULT_JOURNAL_FLUSH_EVERY = 40 // telemetry: decision events buffered before one cheap writer puts them on disk (also flushed at every replan, the final wave and the end)
 
 // Paths. All overridable through args — a skill installed with `npx skills add` lands under
@@ -68,6 +71,9 @@ let WORKTREE_DIR = DEFAULT_WORKTREE_DIR
 let TELEMETRY_DIR = DEFAULT_TELEMETRY_DIR
 const DEFAULT_BASE_BRANCH = 'origin/main' // the integration branch every lane, range and sweep diffs against
 let BASE_BRANCH = DEFAULT_BASE_BRANCH
+// Session facts the startup probe measures (execute runs) and every later prompt can use.
+let toolLatencySec = null // seconds a trivial Bash call waits before it runs (PreToolUse hooks included)
+const timedOut = [] // labels of dispatches the wall-clock backstop gave up on — their agents may still be running
 
 // repo name → { name, path, agent, tags, gate, timeoutMin, laneSetup }
 let repoConfig = new Map()
@@ -281,6 +287,24 @@ const SLICE_INDEX_SCHEMA = {
       description:
         'one entry per FAILED required-hook check (empty array when all pass, and ALWAYS an empty array when the prompt did not ask you to probe). Name the check and the fix verbatim as instructed. Independent of the slice index — still return the full index.',
     },
+    toolLatencySec: {
+      type: 'number',
+      description: 'ONLY when the prompt asks you to measure it: the second timestamp minus the first, in whole seconds — how long a trivial Bash call waits before it runs in this session. Omit otherwise.',
+    },
+    repoRoots: {
+      type: 'array',
+      description: 'ONLY when the prompt asks: where each repo is checked out, so the run can write repo-relative paths. Omit otherwise.',
+      items: {
+        type: 'object',
+        required: ['name', 'root'],
+        properties: {
+          name: { type: 'string', description: 'the repo name as the prompt lists it' },
+          root: { type: 'string', description: 'absolute path, from `git -C <path> rev-parse --show-toplevel`' },
+          branch: { type: 'string', description: 'the branch checked out there now (`git -C <path> branch --show-current`), "" when detached' },
+        },
+      },
+    },
+    home: { type: 'string', description: 'ONLY when the prompt asks: the value of $HOME. Omit otherwise.' },
   },
 }
 
@@ -535,17 +559,18 @@ const ticketTag = (task) => `[${task.ticket || 'NO_TICKET'}]`
 
 // The run LEDGER writer — deterministic content, one cheap agent to put it on disk + push.
 function ledgerPrompt(payload) {
-  return `${brief('ledger')}- Base branch: \`${BASE_BRANCH}\`
+  return `${brief('ledger')}- Base: the remote's DEFAULT branch (\`git remote set-head origin -a\`, then \`origin/HEAD\`) — never the run's base branch \`${BASE_BRANCH}\`: the ledger is one standalone file, and a branch cut from an unmerged base drags that base's commits into whatever PR carries it
 - Branch: \`harness/run-<date>-${payload.projectSlug}\` (date = \`date +%F\`)
 - File: \`${RUNS_DIR}/<date>-${payload.projectSlug}.json\`
 - Commit message: \`[NO_TICKET] harness: run ledger ${payload.project} <date>\`
 
 \`\`\`json
-${JSON.stringify(payload, null, 2)}
+${scrubPaths(JSON.stringify(payload, null, 2))}
 \`\`\``
 }
 // The CRYSTALLIZE dispatch — the harness learning step, once per run, over every PR opened.
 function crystallizePrompt({ project, prs, ledger, learnings, contextQuestions, advisoryNotes, halt, telemetryDir }) {
+  const harnessNotes = advisoryNotes.filter((n) => n.harness)
   return `${brief('crystallize')}- Tracker project: ${project}
 - Ledger branch: \`${ledger.branch}\` · ledger file: \`${ledger.path}\`
 - Brief/persona prose this run used: \`${BRIEFS_DIR}/\` · \`${PERSONAS_DIR}/\` · memory: \`${MEMORY_DIR}/\`
@@ -555,15 +580,29 @@ ${prs.map((p) => `  - ${p.repo} — ${p.pr} (task ${p.id})`).join('\n')}
 ${learnings.length ? learnings.map((l) => `  - ${l}`).join('\n') : '  - (none)'}
 - NEEDS_CONTEXT questions implementers asked (candidate roast misses):
 ${contextQuestions.length ? contextQuestions.map((q) => `  - [${q.task}] ${q.question} (answered by ${q.resolvedBy || 'escalation'})`).join('\n') : '  - (none)'}
-- Advisory (minor/nit) findings not reworked: ${advisoryNotes.length}
+- Advisory (minor/nit) findings not reworked: ${advisoryNotes.length - harnessNotes.length}
+- Harness findings the terminal sweep routed to YOU instead of a product fix round (blocker/major on harness files — fix each in this PR, or say why not):
+${harnessNotes.length ? harnessNotes.map((n) => `  - [${n.severity}${n.persona ? ` · ${n.persona}` : ''}] ${scrubPaths(n.where)} — ${n.issue}`).join('\n') : '  - (none)'}
 - ${halt ? `The run HALTED: ${halt.reason}` : 'The run drained the project.'}
 - Decision journal: ${telemetryDir ? `\`${telemetryDir}\` (this run) under \`${telemetryDir.startsWith('/') ? telemetryDir.replace(/\/[^/]+$/, '') : TELEMETRY_DIR}/\` (earlier runs, local) — cross-run evidence per version/briefs hash. It lives in the main checkout, not in your worktree: read it at that path and pass it to render-logs as \`--dir\`` : '(telemetry off this run)'}
 - PR title: \`[NO_TICKET] crystallize: ${project} — ${prs.length} PR(s)\``
 }
 
-// Phase A: the slice index. The required-hook probe is DYNAMIC (execute runs only).
-function indexPrompt(project, specPath, planPath, hook, claimOn) {
+// Phase A: the slice index. The required-hook probe and the session probe are DYNAMIC
+// (execute runs only).
+function indexPrompt(project, specPath, planPath, hook, claimOn, probeSession) {
   const repoList = [...repoConfig.values()].map((r) => `${r.name} (${r.path})`).join(' · ')
+  const sessionProbe = probeSession
+    ? `
+## Also PROBE this session — two Bash calls, strictly one after the other
+Every agent this run dispatches inherits the session's PreToolUse hooks, and a hook that hangs
+until its timeout slows EVERY command of the run, so measure how long a trivial command waits.
+The second call needs the first one's output: never send the two in the same message.
+1. \`${[...repoConfig.values()].map((r) => `git -C ${r.path} rev-parse --show-toplevel; git -C ${r.path} branch --show-current`).join('; ')}; echo "$HOME"; date +%s\`
+2. \`echo <the last number call 1 printed>; date +%s\`
+Return "toolLatencySec" = the second call's \`date\` minus the first call's, "repoRoots" =
+{name, root, branch} for each repo from call 1, and "home" = the $HOME it printed.`
+    : ''
   return `${brief('index')}- Approved spec (\`roast\`): ${specPath}
 - Plan (\`to-plan\`): ${planPath}
 - Slice-tagged issues (\`to-issues\`): tracker project / parent ticket ${project}
@@ -578,7 +617,48 @@ failure — still return the slice index.
 2. Registered for this session: the exact string \`${hook.name}\` must appear under
    hooks.PreToolUse in your user settings (~/.claude/settings.json) or in this project's
    .claude/settings.json / .claude/settings.local.json (check with grep). Fix: "${hook.fix}".
-   Hooks load only at session start, so a hook added mid-session does not count.` : `Return "hookProblems": [] — this run does not probe for a required hook.`}`
+   Hooks load only at session start, so a hook added mid-session does not count.` : `Return "hookProblems": [] — this run does not probe for a required hook.`}${sessionProbe}`
+}
+
+// ── where the checkouts are: repo-relative paths in everything the run publishes ──
+// Reviewers and implementers report absolute paths (`/Users/<name>/<repo>/src/x.ts`), and the
+// ledger is committed to the orchestrating repo — public, sometimes. The indexer reports each
+// checkout's root and $HOME (execute runs); `scrubPaths` turns a root prefix into a repo-relative
+// path (dropping a lane or isolated-worktree prefix under it) and the home directory into `~`.
+let checkoutRoots = [] // absolute roots, longest first
+let homeDir = null
+const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+function scrubPaths(text) {
+  if (typeof text !== 'string' || (!checkoutRoots.length && !homeDir)) return text
+  let out = text
+  for (const root of checkoutRoots) {
+    // `<root>/x` → `x`; the bare root → `.`, but never a sibling that merely shares the prefix
+    out = out.split(`${root}/`).join('').replace(new RegExp(`${escRe(root)}(?![\\w./-])`, 'g'), '.')
+  }
+  // a lane (`.worktrees/<lane>/`) or a runtime-isolated worktree (`.claude/worktrees/<name>/`)
+  // under a checkout: the path inside it is what a reader can open
+  out = out.replace(new RegExp(`(^|[\\s"'\`(])(?:${escRe(WORKTREE_DIR)}|\\.claude/worktrees)/[^/\\s"'\`]+/`, 'g'), '$1')
+  if (homeDir) out = out.split(`${homeDir}/`).join('~/')
+  return out
+}
+// Paths that configure the HARNESS rather than the product. A defect there is crystallize's to
+// fix in the harness PR, never a fix round on the product branch: a terminal sweep once spent 37
+// minutes and three commits of a product PR on the loop's own lane configuration.
+function isHarnessPath(file) {
+  if (typeof file !== 'string' || !file.trim()) return false
+  const p = scrubPaths(file.trim()).replace(/^\.\//, '')
+  // root unknown (no probe): only names that cannot be product code
+  if (p.startsWith('/') || p.startsWith('~/')) return /\/grimoire\.config(\.example)?\.json$/.test(p) || /\/\.claude\//.test(p) || /\/\.grimoire\//.test(p)
+  return [
+    /^grimoire\.config(\.example)?\.json$/,
+    /^(AGENTS|CLAUDE)\.md$/,
+    /^\.claude\//,
+    /^\.grimoire\//,
+    /^\.harness\//,
+    /^docs\/crystallize\//,
+    new RegExp(`^${escRe(MEMORY_DIR)}/`),
+    new RegExp(`^${escRe(RUNS_DIR)}/`),
+  ].some((re) => re.test(p))
 }
 
 // The agents a task in `repo` may be routed to: its owner first, then enabled specialists.
@@ -689,7 +769,14 @@ ${(task.files || []).length ? `Files it was pointed at:\n${(task.files || []).ma
 // open the repo's PR. Runs once, at PROJECT END, on the final reviewed tree.
 // `hits` = the paths this RUN touched that match `gate.when.pathsMatching`; an empty list
 // with a `when` condition configured means the gate command does NOT apply this run.
-function gatePrompt(task, gate, hits) {
+// `landedHere` = this repo's landed tasks ({id, ticket, title, summary}): the PR closes their
+// issues and carries what they recorded — a gate briefed without them wrote a one-line PR body
+// that linked no issue, so merging it would have closed none.
+const trim = (s, n) => {
+  const t = String(s || '').replace(/\s+/g, ' ').trim()
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t
+}
+function gatePrompt(task, gate, hits, landedHere = []) {
   const cond = gate && gate.when && Array.isArray(gate.when.pathsMatching) && gate.when.pathsMatching.length
   const applies = !!(gate && gate.run) && (!cond || hits.length > 0)
   const cmdLine = gate && gate.run ? `\`${gate.run}\`` : '(this repo has no gate command)'
@@ -707,7 +794,9 @@ function gatePrompt(task, gate, hits) {
   }
 - ${rawOutputRule()}
 - Push the run branch — nothing earlier in the run pushed it (lanes and integrations are local): \`git -C ${repoPath(task.repo)} push -u origin ${task.branch}\`.
-- Then \`gh pr create\` with the ticket in the title, using a literal absolute \`cd /path/to/checkout && …\` — or, when a PR is already open for \`${task.branch}\`, the push has updated it: do not open a duplicate.`
+- Then \`gh pr create\` with the ticket in the title, using a literal absolute \`cd /path/to/checkout && …\` — or, when a PR is already open for \`${task.branch}\`, the push has updated it: do not open a duplicate.
+- Tracker project: ${project}. Landed in this repo this run — the PR closes each one's issue and carries what it recorded (the brief's "PR title and body" rules; implementers' reports, trimmed):
+${landedHere.length ? landedHere.map((d) => `  - ${d.id}${d.ticket && d.ticket !== d.id && d.ticket !== 'NO_TICKET' ? ` (ticket ${d.ticket})` : ''}${d.title ? ` — ${d.title}` : ''}: ${scrubPaths(trim(d.summary, 700)) || '(no report)'}`).join('\n') : '  - (no task summaries recorded)'}`
 }
 
 function reviewPrompt(task, mode, persona, range) {
@@ -927,7 +1016,14 @@ ${failures.map((f) => `- ${f.id} (${f.repo}) → ${f.status}${f.kind === 'harnes
 ${(blocked || []).length ? blocked.map((b) => `- ${b.id} (${b.repo}) slice ${b.slice}${(b.dependsOn || []).length ? ` — blocked on: ${b.dependsOn.join(', ')}` : ''}`).join('\n') : '(none — the failures are the only open work)'}
 
 ## Learnings carried (earlier replans + prior runs)
-${learnings.length ? learnings.map((l) => `- ${l}`).join('\n') : '- (none yet)'}`
+${learnings.length ? learnings.map((l) => `- ${l}`).join('\n') : '- (none yet)'}
+${
+    Number.isFinite(toolLatencySec)
+      ? `
+## Measured in this session at start
+- A trivial Bash call waited ~${toolLatencySec}s before it ran (PreToolUse hooks included). Count that in before you blame a slow or timed-out agent on its work: a duration you put in a learning comes from this number or from a timing you take yourself, never from an estimate.`
+      : ''
+  }`
 }
 
 // ═══════════════════════════════ helpers ═══════════════════════════════
@@ -1047,7 +1143,9 @@ ${
 // A fix round costs a full implementation dispatch, so this predicate is what stops a
 // naming nit from buying one.
 const GATING_SEVERITY = new Set(['blocker', 'major'])
-const isGating = (f) => GATING_SEVERITY.has(String((f && f.severity) || '').toLowerCase())
+// A finding tagged `harness` (a terminal-sweep blocker/major on a harness file, routed to
+// crystallize) never gates the product branch, whatever its severity.
+const isGating = (f) => !(f && f.harness) && GATING_SEVERITY.has(String((f && f.severity) || '').toLowerCase())
 
 // What KIND of failure a settled result is. Only a CODE failure (a panel's gating findings, an
 // implementer that could not do the task, a structural defect the precheck caught) says the
@@ -1069,6 +1167,8 @@ function failureKind(r) {
 // Turn a failed task result into a compact, actionable brief for the re-planner.
 function failureDetail(r) {
   if (r.status === 'NEEDS_CONTEXT') return `  question: ${r.impl?.question || '(unspecified)'}`
+  if (r.status === 'DIED' && timedOut.some((l) => l === `impl:${r.id}` || l.startsWith(`fix:${r.id}:`)))
+    return `  the implementer hit the ${AGENT_TIMEOUT_MIN}-min wall-clock backstop and was booked as died — but the backstop does NOT stop the agent: it may still be running in the checkout, and may commit after this replan starts. Before re-dispatching, inspect \`git log ${BASE_BRANCH}..<run branch>\`, \`git status\` and live build/test/server processes. If its work landed, requeue the task as verify-and-report (startSha = the commit before the task), never as a redo that would rebuild or regenerate committed work.`
   if (r.status === 'DIED')
     return '  the implementer agent died without returning a result — a terminal API error (spend limit / outage) or a user skip, NOT a judgement on the task itself; safe to requeue once the dispatches succeed again'
   // Checked BEFORE r.review: a GATE_FAILED result carries a PASSING review, so the review
@@ -1238,6 +1338,8 @@ const MAX_CONTEXT_RESOLVES =
   Number.isInteger(opts.maxContextResolves) && opts.maxContextResolves >= 0 ? opts.maxContextResolves : DEFAULT_MAX_CONTEXT_RESOLVES
 // Per-agent HANG backstop (see withTimeout). Feature-detected, so it never regresses a run.
 const AGENT_TIMEOUT_MIN = Number.isFinite(opts.agentTimeoutMin) && opts.agentTimeoutMin >= 0 ? opts.agentTimeoutMin : DEFAULT_AGENT_TIMEOUT_MIN
+// Startup session probe: refuse to execute when a trivial Bash call waits this long (0 = never refuse).
+const MAX_TOOL_LATENCY_SEC = Number.isFinite(opts.maxToolLatencySec) && opts.maxToolLatencySec >= 0 ? opts.maxToolLatencySec : DEFAULT_MAX_TOOL_LATENCY_SEC
 // Within-repo parallelism cap: tasks in flight per repo.
 const MAX_PER_REPO = Number.isInteger(opts.maxPerRepo) && opts.maxPerRepo >= 1 ? opts.maxPerRepo : DEFAULT_MAX_PER_REPO
 // Startup agent preflight (execute runs): every agent type the run can dispatch answers one
@@ -1331,6 +1433,12 @@ const repoList = Array.isArray(opts.repos)
       }))
   : []
 repoConfig = new Map(repoList.map((r) => [r.name, r]))
+// `timeoutMin` can only LENGTHEN the backstop for a repo (see agentT). A value at or under the
+// global one silently did nothing — and a replan once "fixed" a timeout by proposing a higher
+// value for a key that was never in effect.
+for (const r of repoList)
+  if (Number.isFinite(r.timeoutMin) && AGENT_TIMEOUT_MIN > 0 && r.timeoutMin <= AGENT_TIMEOUT_MIN)
+    log(`⚠ repos[${r.name}].timeoutMin ${r.timeoutMin} has no effect: it can only RAISE the ${AGENT_TIMEOUT_MIN}-min backstop (agentTimeoutMin) for this repo — drop it, or set it above ${AGENT_TIMEOUT_MIN}`)
 // `prBy` is gone (0.8.0): every repo's PR is pushed and opened by its terminal slot.
 if (Array.isArray(opts.repos) && opts.repos.some((r) => r && r.prBy !== undefined)) log('⚠ repos[].prBy is ignored since 0.8.0 — every repo\'s run branch is pushed and its one PR opened by its terminal slot')
 specialists = Array.isArray(opts.specialists)
@@ -1377,7 +1485,8 @@ function withTimeout(promise, ms, label, mins) {
       // The EFFECTIVE minutes, not the global — a step with a longer allowance
       // must not report the global number and send someone hunting for a
       // timeout that never fired at that value.
-      log(`⏳ [timeout] ${label} exceeded ${mins}m — treating as died (routes to fix/replan)`)
+      log(`⏳ [timeout] ${label} exceeded ${mins}m — treating as died (routes to fix/replan); the agent itself is NOT stopped and may still commit`)
+      timedOut.push(label)
       done(null)
     }, ms)
     promise.then((v) => done(v), () => done(null))
@@ -1434,7 +1543,7 @@ const projectSlug = String(project).replace(/[^A-Za-z0-9._-]+/g, '-')
 // full issue body verbatim), so the indexer only verifies the artifacts and lists every
 // issue's id/repo/state/dependsOn — the scheduler hydrates each cycle just-in-time.
 const index = await step('verify design artifacts + slice index (whole project)', () =>
-  agentT(indexPrompt(project, specPath, planPath, execute && !skipHookCheck ? requireHook : null, !!claim), {
+  agentT(indexPrompt(project, specPath, planPath, execute && !skipHookCheck ? requireHook : null, !!claim, execute), {
     label: 'parse-index',
     phase: 'Parse plan',
     model: 'sonnet', // verification + listing: extraction, not judgement
@@ -1471,6 +1580,30 @@ if (execute && requireHook && !skipHookCheck) {
   log(`⚠ skipHookCheck=true — ${requireHook.name} NOT verified, running unverified on purpose`)
 }
 
+// The session probe. Where the checkouts are (for repo-relative paths in the ledger and PR
+// bodies), and how long a trivial Bash call waits before it runs. A run makes hundreds of Bash
+// calls — six tasks made 836 — so a hook that hangs until its timeout on each of them costs
+// hours, and nothing else in the run can tell: it looks like slow builds.
+if (execute) {
+  const roots = Array.isArray(index.repoRoots) ? index.repoRoots.map((r) => r && str(r.root)).filter((r) => r && r.startsWith('/') && r.length > 1) : []
+  checkoutRoots = [...new Set(roots.map((r) => r.replace(/\/+$/, '')))].sort((a, b) => b.length - a.length)
+  homeDir = str(index.home) && index.home.trim().startsWith('/') && index.home.trim().length > 1 ? index.home.trim().replace(/\/+$/, '') : null
+  if (Number.isFinite(index.toolLatencySec) && index.toolLatencySec >= 0) {
+    toolLatencySec = Math.round(index.toolLatencySec)
+    if (MAX_TOOL_LATENCY_SEC > 0 && toolLatencySec >= MAX_TOOL_LATENCY_SEC) {
+      const hours = Math.round((toolLatencySec * 800) / 360) / 10
+      log(`⛔ not started — a trivial Bash call waits ~${toolLatencySec}s before it runs in this session (limit ${MAX_TOOL_LATENCY_SEC}s)`)
+      return {
+        error: 'slow_tool_calls',
+        toolLatencySec,
+        note: `NOT STARTED — no implementers dispatched. In this session a trivial Bash call waited ~${toolLatencySec}s before it ran. Every dispatched agent inherits the session's PreToolUse hooks, and a run makes hundreds of Bash calls (six tasks made 836), so this alone would add roughly ${hours} h. The usual cause is a hook that hangs until its own timeout — a password manager's, a scanner's — not the machine. Time \`git status\` here, list the hooks (\`/hooks\`, and the PreToolUse hooks of installed plugins), fix or disable the slow one, restart the session and re-invoke — or pass {maxToolLatencySec:0} to run anyway.`,
+      }
+    }
+    if (toolLatencySec >= TOOL_LATENCY_WARN_SEC) log(`⚠ session probe: a trivial Bash call waits ~${toolLatencySec}s before it runs — every command of the run pays it (look for a slow PreToolUse hook)`)
+    else log(`✓ session probe: ~${toolLatencySec}s per trivial Bash call`)
+  } else log('⚠ session probe: no tool latency reported — the run cannot tell a hanging hook from slow work')
+}
+
 // Issues already done/canceled in the tracker are ABSORBED: they count as landed
 // dependencies and are never re-implemented — re-invoking a partially-landed
 // project (an earlier run, a human, a halt) RESUMES instead of redoing.
@@ -1490,6 +1623,7 @@ for (const s of [...(index.slices || [])].sort((a, b) => (a.slice ?? 0) - (b.sli
   }
 }
 const alreadyDoneIds = new Set(alreadyDone.map((d) => d.id))
+const titleById = new Map(pendingIndex.map((i) => [i.id, str(i.title) || ''])) // the PR body names each landed issue
 const inProject = new Set([...pendingIndex.map((i) => i.id), ...alreadyDoneIds, ...claimedElsewhere.map((c) => c.id)])
 log(
   `${pendingIndex.length} issue(s) to run across ${new Set(pendingIndex.map((i) => i.slice)).size} slice(s) · ${alreadyDone.length} already done/canceled (absorbed) · ` +
@@ -1547,7 +1681,7 @@ const guardChecks = { checked: 0, passed: 0, reReviewed: 0 }
 // `passedFirstRound / stages` is the waved-through rate; `fixDispatches` is the real
 // rework (each one a full opus dispatch); the finding split says whether reviewers
 // mostly produce gates (load-bearing) or advisory notes (candidates for slimming).
-const reviewStats = { stages: 0, passedFirstRound: 0, fixDispatches: 0, gatingFindings: 0, advisoryFindings: 0, verifyChecks: 0, overturnedFindings: 0 }
+const reviewStats = { stages: 0, passedFirstRound: 0, fixDispatches: 0, gatingFindings: 0, advisoryFindings: 0, verifyChecks: 0, overturnedFindings: 0, harnessRouted: 0 }
 // Precheck telemetry: panel rounds it saved (a FAIL caught before any reviewer ran).
 // `advisory` counts repeated footprint-only FAILs demoted to advisory notes.
 const precheckStats = { checked: 0, failed: 0, fixDispatches: 0, exhausted: 0, advisory: 0 }
@@ -1623,7 +1757,17 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range) 
 
     for (const r of reviews)
       emit('review', { task: task.id, stage: mode, persona: r.persona, verdict: r.v.verdict, gating: (r.v.findings || []).filter(isGating).length, advisory: (r.v.findings || []).filter((f) => !isGating(f)).length, round: attempt })
-    const findings = reviews.flatMap((r) => (r.v.findings || []).map((f) => ({ ...f, persona: r.persona })))
+    // Terminal sweep: a blocker/major on a HARNESS file (isHarnessPath) goes to crystallize, not
+    // to a fix round on the product branch — it stays visible as an advisory note tagged
+    // `harness`, and crystallize's header lists it for the harness PR.
+    const toHarness = (f) => mode === 'terminal' && GATING_SEVERITY.has(String(f.severity || '').toLowerCase()) && isHarnessPath(f.file)
+    const findings = reviews.flatMap((r) => (r.v.findings || []).map((f) => ({ ...f, persona: r.persona, ...(toHarness(f) ? { harness: true } : {}) })))
+    const routedToHarness = findings.filter((f) => f.harness)
+    if (routedToHarness.length) {
+      reviewStats.harnessRouted += routedToHarness.length
+      log(`   · ${task.id}: ${routedToHarness.length} blocking finding(s) on harness files routed to crystallize, not fixed on ${task.branch || 'the run branch'}: ${routedToHarness.map((f) => scrubPaths(f.file)).join(', ')}`)
+      for (const f of routedToHarness) emit('harness-routed', { task: task.id, stage: mode, persona: f.persona, severity: f.severity, where: `${scrubPaths(f.file || '?')}:${f.line || '?'}` })
+    }
     // ── THE GATE: severity decides, not the verdict flag ──
     // blocker/major → rework. minor/nit → advisory, reported, no rework (a fix round costs a
     // full implementation dispatch, which a naming nit does not justify).
@@ -2372,10 +2516,16 @@ async function terminalSlot(repo) {
   const cond = gateCfg && gateCfg.when && Array.isArray(gateCfg.when.pathsMatching) && gateCfg.when.pathsMatching.length
   const applies = !!(gateCfg && gateCfg.run) && (!cond || hits.length > 0)
   log(`   · ${repo}: terminal sweep green → ${applies ? `gate + PR (\`${gateCfg.run}\`, one run, final tree${cond ? `, ${hits.length} matching path(s) touched` : ''})` : 'PR only (gate command does not apply)'}…`)
-  const gate = await agentT(gatePrompt(pseudo, gateCfg, hits), {
+  const landedHere = doneTasks
+    .filter((d) => d.repo === repo)
+    .map((d) => {
+      const t = hydratedById.get(d.id) || {}
+      return { id: d.id, ticket: t.ticket || d.id, title: titleById.get(d.id) || '', summary: d.summary || '' }
+    })
+  const gate = await agentT(gatePrompt(pseudo, gateCfg, hits, landedHere), {
     label: `gate:${repo}`,
     phase: 'Implement',
-    model: 'opus',
+    model: 'sonnet', // run one command, push, write the PR body: no design judgement left to buy with opus
     agentType: agentFor(repo),
     schema: IMPL_SCHEMA,
     timeoutMin: repoTimeout(repo),
@@ -2752,12 +2902,23 @@ if (finalCheck && finalCheck.repos.every((r) => touched.has(r))) {
 // nothing this phase writes is live before that PR merges.
 phase('Crystallize')
 const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo: r.repo, pr: r.prUrl }))
+// What still needs a human. A task that failed and was later requeued by a replan and LANDED is
+// recovered, not open work (a run once reported a task "DIED" in needsAttention after the same
+// task had landed and shipped in its PR); a terminal-slot failure is recovered once its repo
+// gated green. One entry per id: the latest attempt.
+const landedTaskIds = new Set(allResults.filter((r) => !r.gateStep && landed(r)).map((r) => r.id))
+const recoveredLater = (r) => (r.gateStep ? gateDone.has(r.repo) : landedTaskIds.has(r.id))
+const latestById = (list) => [...new Map(list.map((r) => [r.id, r])).values()]
+const openResults = latestById(allResults.filter((r) => !landed(r) && !recoveredLater(r)))
+const recovered = latestById(allResults.filter((r) => !landed(r) && recoveredLater(r))).map((r) => ({ id: r.id, repo: r.repo, failedAs: r.status }))
+const noteOf = (r, f) => ({ task: r.id, repo: r.repo, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue, ...(f.harness ? { harness: true } : {}) })
 
 // ── the journal's last chunk, BEFORE the ledger: crystallize reads it ──
 {
   const endSummary = {
     done: allResults.filter((r) => !r.gateStep && landed(r)).length,
-    failed: allResults.filter((r) => !landed(r)).length,
+    failed: openResults.length,
+    recovered: recovered.length,
     blocked: blocked.length,
     prs: prsOpened.length,
     tokens: runSpent(),
@@ -2770,9 +2931,7 @@ const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo
     log(`◎ decision journal: ${journal.written} event(s) written in ${journal.flushes} chunk(s) → ${journal.runDir || TELEMETRY_DIR}${journal.mismatches ? ` · ${journal.mismatches} chunk(s) failed the line/byte check` : ''}${journal.dead ? ` · ${journal.dead} chunk(s) lost (writer died)` : ''}`)
 }
 const contextQuestionsForLedger = (contextResolves.questions || []).map((q) => ({ task: q.task, question: q.question, resolvedBy: q.resolvedBy }))
-const advisoryForLedger = allResults.flatMap((r) =>
-  (r.advisory || []).map((f) => ({ task: r.id, repo: r.repo, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue })),
-)
+const advisoryForLedger = allResults.flatMap((r) => (r.advisory || []).map((f) => noteOf(r, f)))
 let harnessLearning = null
 if (execute) {
   const ledgerPayload = {
@@ -2784,7 +2943,10 @@ if (execute) {
     inputs: { specPath, planPath },
     repos: [...new Set(doneTasks.map((t) => t.repo))],
     done: doneTasks.map((t) => ({ id: t.id, repo: t.repo, status: t.status })),
-    needsAttention: allResults.filter((r) => !landed(r)).map((r) => ({ id: r.id, repo: r.repo, status: r.status })),
+    needsAttention: openResults.map((r) => ({ id: r.id, repo: r.repo, status: r.status })),
+    recovered,
+    toolLatencySec,
+    timedOut,
     blocked: blocked.map((b) => b.id),
     prs: prsOpened,
     learnings, // [{text, repos}] — the next run's loader filters them by repo
@@ -2827,6 +2989,7 @@ if (execute) {
         model: 'opus',
         isolation: 'worktree', // checks out the ledger branch in its own worktree
         schema: CRYSTALLIZE_SCHEMA,
+        timeoutMin: CRYSTALLIZE_TIMEOUT_MIN,
       }),
     )
     const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [])
@@ -2854,9 +3017,7 @@ if (execute) {
 const ok = landed
 // Advisory notes are the minor/nit findings the gate deliberately did NOT rework. They are a
 // deliverable, not debris: this list is the only place they surface, so it must be reported.
-const advisoryNotes = allResults.flatMap((r) =>
-  (r.advisory || []).map((f) => ({ task: r.id, repo: r.repo, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue })),
-)
+const advisoryNotes = allResults.flatMap((r) => (r.advisory || []).map((f) => noteOf(r, f)))
 // Repos with landed work whose terminal slot (sweep → gate → PR) never ran green — a halt
 // before the project drained, or a slot that failed and was never repaired. Their run
 // branches hold reviewed commits but NO PR: re-invoking the project resumes, drains, and
@@ -2864,7 +3025,7 @@ const advisoryNotes = allResults.flatMap((r) =>
 const ungatedRepos = Object.keys(repoRef).filter((r) => !gateDone.has(r))
 if (ungatedRepos.length) log(`⚠ ${ungatedRepos.length} repo(s) landed work but never gated (no PR yet): ${ungatedRepos.map((r) => (ungatedReasons[r] ? `${r} (${ungatedReasons[r]} — push it by hand)` : r)).join(', ')} — re-invoke the project to drain and gate`)
 log(
-  `■ done: ${allResults.filter((r) => !r.gateStep && ok(r)).length} · needs-attention: ${allResults.filter((r) => !ok(r)).length} · blocked (never ran): ${blocked.length} · absorbed: ${alreadyDone.length} · ` +
+  `■ done: ${allResults.filter((r) => !r.gateStep && ok(r)).length} · needs-attention: ${openResults.length}${recovered.length ? ` (+${recovered.length} recovered after a replan)` : ''} · blocked (never ran): ${blocked.length} · absorbed: ${alreadyDone.length} · ` +
     `waves: ${waves} · advisory (not reworked): ${advisoryNotes.length} · ` +
     `context-Qs: ${contextResolves.asked} (${contextResolves.answered} answered by a scout, ${contextResolves.escalated} escalated) · ` +
     `guard: ${guardChecks.passed}/${guardChecks.checked} fix(es) passed without a panel re-run · ` +
@@ -2876,7 +3037,10 @@ log(
 return {
   inputs: { specPath, planPath, project }, // the design artifacts this run was built from
   done: allResults.filter((r) => !r.gateStep && ok(r)),
-  needsAttention: allResults.filter((r) => !ok(r)),
+  // still open: the latest attempt of each task or slot that never landed
+  needsAttention: openResults,
+  // failed once, then landed after a replan (or the repo gated green): history, not work
+  recovered,
   // issues the scheduler never reached — blocked behind a failure or a halt. Re-invoking the
   // same project resumes here: landed work is absorbed via tracker state, these run next.
   blocked,
@@ -2927,6 +3091,10 @@ return {
     runOutputTokens: runSpent(),
     maxOutputTokens: MAX_OUTPUT_TOKENS,
     steps: telemetry,
+    // the session probe: seconds a trivial Bash call waited before it ran (null = not measured)
+    toolLatencySec,
+    // dispatches the wall-clock backstop gave up on — each agent may have kept running after it
+    timedOut,
     journal: journal.enabled ? { runDir: journal.runDir, events: journal.seq, written: journal.written, chunks: journal.flushes, mismatches: journal.mismatches, lost: journal.dead } : null,
   },
   note:
@@ -2935,7 +3103,9 @@ return {
     'Merge and deploy left to you. ' +
     (harnessLearning && harnessLearning.crystallize
       ? `HARNESS LEARNED: ${harnessLearning.crystallize.summary} — review its PR ${harnessLearning.crystallize.prUrl || '(none)'} before the next run.`
-      : harnessLearning
-        ? `Run ledger written at ${harnessLearning.ledger.path} (no PR this run, so no crystallize).`
-        : ''),
+      : harnessLearning && prsOpened.length
+        ? `Run ledger written at ${harnessLearning.ledger.path} on ${harnessLearning.ledger.branch}, but crystallize did NOT finish — nothing this run taught is applied yet: run the crystallize skill by hand over ${prsOpened.map((p) => p.pr).join(', ')}.`
+        : harnessLearning
+          ? `Run ledger written at ${harnessLearning.ledger.path} (no PR this run, so no crystallize).`
+          : ''),
 }
