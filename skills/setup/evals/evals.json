@@ -105,5 +105,28 @@
         "evidence": ""
       }
     ]
+  },
+  {
+    "query": "Set up grimoire in this repo: one Next.js 16 app at the root, npm, Playwright e2e tests that take about a minute.",
+    "should_trigger": true,
+    "expected_output": "Proposes grimoire.config.json without a repos[].timeoutMin (a minute-long suite fits the 40-minute backstop, and a value at or under 40 does nothing), and without a laneSetup that symlinks node_modules (Next.js 16 Turbopack refuses a symlinked node_modules pointing outside the project root): it clones it into the lane (cp -cR) or proposes none.",
+    "expectations": [
+      {
+        "text": "Does not propose a repos[].timeoutMin at or under 40",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not propose a laneSetup that symlinks node_modules for a Next.js 16 app",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Waits for the user to approve before writing the config",
+        "passed": null,
+        "evidence": ""
+      }
+    ],
+    "id": 5
   }
 ]

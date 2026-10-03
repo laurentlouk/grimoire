@@ -54,6 +54,13 @@ engine-, brief- and skill-level and stack-agnostic.
 - **`laneSetup` docs and setup** no longer suggest a symlinked `node_modules` without checking
   the bundler accepts one (Next.js 16's Turbopack does not); the setup skill proposes
   `timeoutMin` only above the 40-minute backstop.
+- **The Reliability lens checks the gate from a fresh clone.** That run's gate type-checked
+  before the build that writes the gitignored type declarations, so it passed only in a
+  checkout an earlier build had left them in; no reviewer read the gate. The persona's scope
+  now includes the gate command and the scripts it calls.
+- **Eval cases** from these failures: `orchestrate` does not launch while a trivial command
+  waits tens of seconds; `setup` proposes no no-op `timeoutMin` and no symlinked
+  `node_modules` for a Next.js 16 app.
 
 ### Upgrading from 0.8.0
 Nothing to change in `grimoire.config.json`. Drop a `repos[].timeoutMin` at or under 40 (the run
