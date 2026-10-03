@@ -67,8 +67,8 @@ task list would bypass `roast`, which is the point of requiring the artifacts.
 | `path` | `repositories/<name>` | the checkout every command runs against |
 | `tags` | `[]` | drives **persona selection**: `backend`, `mobile`, `web`, `infra`, or your own |
 | `gate` | `null` | the command that certifies the final tree; see below |
-| `timeoutMin` | the global `agentTimeoutMin` | a longer hang backstop for this repo's dispatches (a gate that queues for a shared lock) |
-| `laneSetup` | — | a shell line run when a parallel lane's worktree is created; `<lane>` is substituted with the worktree path (e.g. symlinking `node_modules`) |
+| `timeoutMin` | the global `agentTimeoutMin` | a longer hang backstop for this repo's dispatches (a gate that queues for a shared lock). It only RAISES the global value: one at or under it has no effect, and the run logs so |
+| `laneSetup` | — | a shell line run when a parallel lane's worktree is created; `<lane>` is substituted with the worktree path (e.g. giving the lane its dependencies). Some bundlers refuse a symlinked `node_modules` that points outside the project root (Next.js 16's Turbopack does); clone it instead (`cp -cR`, copy-on-write on APFS) |
 
 ### `repos[].gate`
 
@@ -100,7 +100,8 @@ push or open PRs. (`prBy` was removed in 0.8.0 and is ignored, with a warning.)
 | `maxFixAttempts` | `3` | fix rounds per review stage before it returns FAIL |
 | `maxReplans` | `3` | replans before the run halts |
 | `maxContextResolves` | `2` | scout-answered `NEEDS_CONTEXT` questions per dispatch (`0` escalates immediately) |
-| `agentTimeoutMin` | `40` | per-agent hang backstop (`0` disables) |
+| `agentTimeoutMin` | `40` | per-agent hang backstop (`0` disables). It books the dispatch as died but cannot stop the agent, which may keep working and commit; the replanner is told so, and `telemetry.timedOut` lists each one. `crystallize` has its own 90-minute allowance |
+| `maxToolLatencySec` | `15` | execute runs: the session probe refuses to start when a trivial Bash call waits this long before it runs (a PreToolUse hook hanging until its timeout, paid on every command of the run); from 8 s it warns. `0` never refuses |
 | `memoryDir` | `memory` | `harness.md` + `agents/<agent>.md` |
 | `runsDir` | `runs` | where run ledgers are written |
 | `briefsDir` | `workflows/briefs` | where the dispatch briefs live |
@@ -129,6 +130,15 @@ push or open PRs. (`prBy` was removed in 0.8.0 and is ignored, with a warning.)
 | `finalCheck` | `null` | `{repos:[…], prompt, agentType?}` — one read-only cross-repo check when every named repo landed work (e.g. API-contract drift between a client and its server) |
 
 The canonical `requireHook` is [rtk](https://github.com/rtk-ai/rtk), which condenses every Bash result before it reaches an agent: `{ name: 'rtk hook claude', check: 'command -v rtk && rtk hook check "git status" | grep -q "^rtk "', fix: 'brew install rtk-ai/tap/rtk && rtk init -g', raw: 'rtk proxy' }`. A run that would dispatch dozens of agents without it reads raw output everywhere, so refusing is cheaper than running.
+
+**The session probe** (execute runs) is the other side of hooks: the indexer makes two Bash
+calls one after the other and reports how long the second waited, plus each checkout's root,
+its current branch and `$HOME`. Every agent inherits the session's PreToolUse hooks, and a run
+makes hundreds of Bash calls, so one hook hanging until its timeout costs hours that look like
+slow builds: a six-task run once spent 6.4 of its 9.2 hours waiting on a 30-second hook before
+every command. Past `maxToolLatencySec` the run refuses to start as `slow_tool_calls`; the
+replanner always sees the measured number. The roots make every path the run publishes (the
+ledger, the gate's PR body, crystallize's header) repo-relative, with the home directory as `~`.
 
 ## How a run flows
 
@@ -254,6 +264,12 @@ footprint-only problems come back with no commit in between, they are recorded a
 notes and the panel runs: another fix cannot change that answer. A FAIL goes back to the same implementer (`maxPrecheckFixes`), before any
 reviewer is paid. A dead precheck passes through — it is an optimisation, not a gate.
 
+**Harness findings in the terminal sweep.** A blocker or major the terminal sweep finds in a
+harness file (`grimoire.config.json`, `.claude/`, `AGENTS.md`, the memory and runs
+directories, `docs/crystallize/`) does not buy a fix round on the product branch: it is kept as
+an advisory note tagged `harness` and listed in crystallize's header, which fixes it in the
+harness PR. A per-task review still gates a task's own change to such a file.
+
 **Finding verification.** Every failing review round sends its gating findings to one sonnet
 verifier (`briefs/verify.md`) before a fix is bought. A finding is overturned only when the
 verifier cites the code that proves it false; overturned findings are reported in
@@ -317,17 +333,22 @@ local and gitignored; `/grimoire:logs` renders it, and its `summary` is the cros
 
 ## What it returns
 
-`done` · `needsAttention` · `blocked` (never ran) · `alreadyDone` (absorbed) · `deferred` ·
+`done` · `needsAttention` (the latest attempt of each task or slot that never landed) ·
+`recovered` (attempts that failed before the same task landed after a replan, or before its
+repo gated green: history, not work) · `blocked` (never ran) · `alreadyDone` (absorbed) · `deferred` ·
 `advisoryNotes` (the minor/nit findings not reworked, plus any repeated footprint-only
-precheck problems demoted to advisory — triage them by hand) · `ungatedRepos`
+precheck problems demoted to advisory, plus terminal-sweep findings on harness files tagged
+`harness` — triage them by hand) · `ungatedRepos`
 (landed work with no PR yet) · `ungatedReasons` (repo → why a certified tree was not shipped:
 the push or PR step failed; never replanned, push it by hand) · `prs` · `replans` + `learnings` + `halt` · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·
 `precheckStats` · `overturnedFindings` · `routing` (picks by agent and model, fallbacks,
 escalations) · `claimedElsewhere` · `claimsReleased` · `meta` · `telemetry` (output tokens,
-this run's spend against `maxOutputTokens`, and the journal's receipt) · `harness` (the ledger
-written and what crystallize produced).
+this run's spend against `maxOutputTokens`, the session probe's `toolLatencySec`, the
+`timedOut` dispatches, and the journal's receipt) · `harness` (the ledger written and what
+crystallize produced; when PRs shipped but crystallize did not finish, the `note` says to run
+it by hand over them).
 
 The run stops at PRs. Merging and deploying stay yours.
 
