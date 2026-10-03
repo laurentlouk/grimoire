@@ -24,7 +24,34 @@ command, and the stamp file it writes.
 4. Open the PR with `gh pr create` (or your forge's equivalent), ticket in the title, using a
    literal absolute `cd /path/to/checkout && …` so any pre-commit hook reads the command's own
    arguments. This is the repo's ONE PR for the run branch: if a PR is already open for the
-   branch, the push updated it — do not open a duplicate.
+   branch, the push updated it — do not open a duplicate, but do bring its body up to the
+   rules below (`gh pr edit --body-file`).
+
+## PR title and body
+The PR is what a human reads before merging, and on most forges it is also what closes the
+tracker issues. A one-line body that linked no issue once left a whole project's issues open
+after its PR merged. Write a body file and pass it with `--body-file`.
+
+- **Title**: what the project delivers, in the project's own words (the parent ticket's title
+  when there is one), with the ticket tag — never a generic "changes" or "design updates".
+- **Body**, in this order:
+  1. **Closing lines.** One line per landed task the header lists, with the forge's closing
+     keyword and that task's issue: on GitHub or GitLab issues, `Closes #N` (or
+     `Closes owner/repo#N` when the issue lives in another repository). Use one keyword per
+     issue: "Closes #1, #2" closes only #1. For Jira or Linear, the issue key on its own line,
+     which their integration links. Also close the parent ticket when every one of its
+     sub-issues is in this PR.
+  2. **What changes**: one line per task, in the order they landed.
+  3. **What the tasks recorded**: facts an issue or the spec asked to keep in the PR or in
+     "the task output" (measured counts, before/after numbers, a decision and its evidence,
+     each residual risk and why it is accepted). Copy them from the reports in the header;
+     never invent one.
+  4. **How it was verified**: the gate command and its result (or why it did not apply).
+  5. **Before merging**: anything a human must check or know (what merging deploys, a preview
+     to look at, a merge order).
+- Never add a link you did not open, an absolute local path, or a co-author or attribution
+  line naming a model that did not write the change. Follow the session's own attribution
+  instructions when it has any.
 
 ## Hard rules
 - This is the ONLY gate run for this repo in this run — the review fixes are already in the

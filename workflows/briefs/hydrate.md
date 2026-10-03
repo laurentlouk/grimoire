@@ -55,3 +55,9 @@ task rather than leaving a gap the implementer must guess at or ask about; repor
 `inputProblems` only what neither the artifacts nor the code settle. Read-only; do not modify
 the tracker or any repo — except when the header has a CLAIM section: then assign exactly the
 listed issues and move them to in-progress, nothing else.
+
+You plan from reading. Do not run builds, test suites, dev servers or browsers to find out
+whether something works: that is the implementer's job, inside its own time budget. A hydration
+that ran builds and a browser probe to decide whether two tasks could share a repo spent twenty
+minutes, and the scheduler held one of them anyway; declaring each task's `files` precisely is
+what decides that.

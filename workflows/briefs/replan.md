@@ -25,7 +25,22 @@ A revised path may re-approach the work, but re-litigating the design is roast's
   a contract or git history can settle it, read it (or emit a task that does) and REVISE
   instead. Explore before asking; don't guess.
 
+## A DIED task may still be running
+An agent the wall-clock backstop gave up on is booked as DIED, but nothing stops it: it can
+keep working in the checkout and commit after you start. Its failure detail says so when that
+is the case. Before you requeue it, look: `git log <base>..<run branch>`, `git status`, and the
+build, test or server processes still running. If its work landed, requeue it as a short
+verify-and-report task (startSha = the commit before the task), never as a redo that rebuilds
+committed work or regenerates artifacts.
+
+## Learnings are measured, not estimated
 Always return `learnings`: the durable lesson(s) this failure taught, phrased so a later replan
 can apply them — they are folded into every later hydration AND into the run ledger that the
-next run reads. Read-only PLANNING — do NOT modify any repo or the tracker. Prefer REVISE; HALT
-only when truly stuck.
+next run reads. A duration or a cause in a learning comes from a measurement: the session's
+tool latency in the header, a timing you take yourself, the journal's timestamps. A learning
+once blamed slow tests for a timeout when a hook had added 30 s to every one of the agent's
+commands, and proposed a config value that could not take effect; check what a knob does
+before you recommend it.
+
+Read-only PLANNING — do NOT modify any repo or the tracker. Prefer REVISE; HALT only when
+truly stuck.

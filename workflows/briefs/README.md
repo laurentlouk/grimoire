@@ -22,7 +22,7 @@ skills in all but name and evolve the same way. Personas (review lenses) live in
 | `verify.md` | checks each gating finding before a fix is bought | sonnet |
 | `guard.md` | post-fix guard | sonnet |
 | `integrate.md` | lane → run-branch merge | cheap |
-| `gate.md` | the repo's gate command + PR | opus |
+| `gate.md` | the repo's gate command + PR (title and body) | sonnet |
 | `replan.md` | adaptive re-planner | opus |
 | `journal.md` | one chunk of the decision log (runs a fixed script) | haiku |
 | `claim.md` | hands back tracker issues the run claimed and did not land | haiku |

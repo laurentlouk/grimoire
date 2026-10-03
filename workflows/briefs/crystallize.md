@@ -2,8 +2,11 @@
 
 Invoke the `crystallize` skill (Skill tool) and follow it for THIS build run — you are the
 harness's post-PR learning step. You run in your OWN worktree of the orchestrating repo: `git
-fetch origin && git checkout <ledger branch>` (it already holds the run ledger); never work on
-the default branch or in the session's live checkout.
+fetch origin && git checkout <ledger branch>` (it already holds the run ledger, cut from the
+default branch); never work on the default branch or in the session's live checkout. When a
+PR in the header lives in this same repo and is not merged yet, merge its head into your branch
+(`git merge --no-ff origin/<its head branch>`) before you patch anything, so your changes stack
+on the code it ships; then say in your PR body that it merges AFTER that PR.
 
 The header lists the PRs this run opened (one report per PR), the ledger path, the directories
 holding the loop's briefs, personas and memory, the replanner's learnings, the NEEDS_CONTEXT
@@ -11,6 +14,13 @@ questions (each a candidate ROAST MISS), the advisory-finding count, and whether
 halted.
 
 ## Rules that bind here (the skill has the full list)
+- The header's "harness findings" are blocker/major defects the terminal sweep found in harness
+  files (the loop's config, agent definitions, memory). The run did not fix them on the product
+  branch so that its PR stays product-only: fix each one here, or say in the report why not.
+- Check every replanner learning before you keep it: a duration or a cause it states must match
+  the decision journal (timestamps, the session probe's tool latency, `timedOut`). Drop or
+  correct one that does not — a learning once blamed slow tests for a timeout that a hanging
+  hook had caused, and proposed a config value that had no effect.
 - Read EVERY review thread on each PR (bots and humans) and its disposition; untriaged threads
   are still signal — list them as such in the report.
 - Patch existing umbrella skills before creating new ones. This includes the loop's own briefs

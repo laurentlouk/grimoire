@@ -926,7 +926,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
     'briefs/ledger.md', 'briefs/crystallize.md', 'personas/README.md', 'personas/spec-hawk.md', 'personas/break-it.md',
     'personas/data-integrity.md', 'personas/reliability-sre.md', 'personas/hig.md', 'personas/accessibility.md',
     'personas/privacy.md', 'personas/app-store.md', 'briefs/precheck.md', 'briefs/verify.md', 'briefs/journal.md', 'briefs/claim.md',
-    'tests/loop-integrity-v08.test.mjs', '../CHANGELOG.md']
+    'tests/loop-integrity-v08.test.mjs', 'tests/run-efficiency-v081.test.mjs', '../CHANGELOG.md']
   // Product, vendor and stack names that must not reappear when someone edits the prose.
   const BANNED = /\b(odyyy|linear mcp|claude\.md|redpanda|dynamodb|redisearch|drizzle|expo|nativewind|terragrunt|sentry|codex|laurent|e2e-green|smoke:android|smoke:ios)\b/i
   const offenders = files.filter((f) => BANNED.test(readFileSync(`${DIR}/${f}`, 'utf8')))
@@ -948,7 +948,10 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
   const impl = calls.find((c) => c.label.startsWith('impl:'))
   ok(impl && /origin\/trunk/.test(impl.prompt) && !/origin\/main/.test(impl.prompt), 'the implementer is told the configured base branch, never a hard-coded main')
   const ledger = calls.find((c) => c.label === 'ledger')
-  ok(ledger && /Base branch: `origin\/trunk`/.test(ledger.prompt), 'the ledger writer is told which base branch to start from')
+  // 0.8.1: the ledger is one standalone file — it starts from the remote's default branch, and
+  // is told by name that the run's base is NOT where it starts (a ledger branch cut from an
+  // unmerged base carried that base's commits into its PR).
+  ok(ledger && /origin\/HEAD/.test(ledger.prompt) && /never the run's base branch `origin\/trunk`/.test(ledger.prompt), 'the ledger writer starts from the default branch, never the run base')
   const { calls: dflt } = await run('BB2 · default baseBranch is origin/main', [BE_TASK],
     (label) => (label.startsWith('impl:') ? IMPL_OK : label.startsWith('gate:') ? GATE_OK : V('PASS')))
   const impl2 = dflt.find((c) => c.label.startsWith('impl:'))

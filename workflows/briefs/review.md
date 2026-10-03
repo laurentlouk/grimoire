@@ -6,7 +6,10 @@ to read. The full design artifacts (spec, plan) are in the orchestrating workspa
 inside the cloned repo — read them when the excerpt is not enough to judge fidelity.
 
 ## Mode
-- **spec** — judge fidelity to the task only, through your lens.
+- **spec** — judge fidelity to the task only, through your lens. You read; you do not re-run
+  the full build or test suite — the quality stage and the repo's gate run them. Run a
+  targeted command only when a requirement can be checked no other way (a count, an exit code,
+  one test), and name it in your summary.
 - **quality / terminal** — run the project's code-review skill or command; add a security
   review if the change touches auth, sessions, user input, secrets, or the network. Apply
   your lens — stay in it; do not re-litigate spec fidelity.
@@ -30,4 +33,11 @@ the `--stat` first, then read only the files your persona's Scope section names.
 each reading the entire branch was the largest single input cost of a run, for verdicts that
 never depended on the files outside their scope.
 
-Return PASS/FAIL with findings (`path:line` + severity). Read-only — you diagnose, you do not fix.
+## Harness files in the terminal sweep
+A blocker or major on a harness file (the loop's `grimoire.config.json`, `.claude/`, agent
+rosters, memory, run ledgers) is still worth reporting, but the run routes it to the harness
+PR instead of fixing it on the product branch. Report it as usual; do not raise its severity to
+force a product fix.
+
+Return PASS/FAIL with findings (`path:line` + severity), with `path` repo-relative, as `git
+diff` prints it — never an absolute local path. Read-only — you diagnose, you do not fix.
