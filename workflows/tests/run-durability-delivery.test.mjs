@@ -116,7 +116,7 @@ let D1 = null
   ok(s1.includes(`push origin aaaaaaa:refs/heads/${RUN_BRANCH}`) && s1.includes('gh pr create --draft') && !/--force|--no-verify/.test(s1), 'ship #1 pushes aaaaaaa to the run branch and opens a DRAFT — no --force, no --no-verify')
   ok(s1.includes("worktree add --detach -q '.worktrees/ship-api' aaaaaaa") && s1.includes('git -C "$W" push origin'), 'from its own detached worktree at that SHA (the pre-push hook checks exactly the pushed tree)')
   ok(s2.includes(`push origin bbbbbbb:refs/heads/${RUN_BRANCH}`) && s2.includes('gh pr edit "$U"') && s2.includes(`U='${PR_URL}'`) && !s2.includes('gh pr create'), 'ship #2 pushes bbbbbbb and edits the PR it opened')
-  const build = labels.filter((l) => !/^(journal|ledger|crystallize)/.test(l))
+  const build = labels.filter((l) => !/^(journal|ledger|crystallize|seal)/.test(l)) // the seal checks the marker on the ready PR, after the gate
   ok(labels.indexOf('ship:api#2') < labels.indexOf('gate:api') && build[build.length - 1] === 'gate:api', 'every ship precedes the gate, and the gate stays the last build dispatch')
   eq(result.shipped, { api: { pushedHead: 'bbbbbbb', prUrl: PR_URL, draft: false, disabled: null } }, 'result.shipped: the last landed head, the PR, out of draft once the gate marked it ready')
   eq([result.draftPrs, result.prs.map((p) => p.pr)], [{}, [PR_URL]], 'no draft left; prs lists the ready PR')

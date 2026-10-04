@@ -43,7 +43,8 @@ command, and the stamp file it writes.
      command's own arguments (`cd` alone may be aliased in this shell).
    - Either way, keep the state-marker line the header gives, VERBATIM, as the body's last line:
      it is the run's saved state, which a relaunch reads. It is base64 data: never decode, edit
-     or drop it.
+     or drop it. Once you return, the loop checks that line on the PR and puts it back if your
+     copy differs; it changes nothing else in the body.
 
 ## PR title and body
 The PR is what a human reads before merging, and on most forges it is also what closes the
