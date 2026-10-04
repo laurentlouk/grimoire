@@ -128,7 +128,7 @@ ignored, with a warning.)
 | ----- | ------- | ------- |
 | `maxPerRepo` | `3` | tasks in flight per repo (`1` restores strict serialization) |
 | `maxFixAttempts` | `3` | fix rounds per review stage before it returns FAIL |
-| `maxReplans` | `3` | replans charged to the run before it halts. The replanner names a `cause`: `code` (or none) spends one; `harness` (a late or wedged agent, silent reviewers) is free up to `maxReplans` times, then spends one; `environment` halts the run with `kind: 'environment'` and spends none. `0` turns replanning off |
+| `maxReplans` | `3` | replans charged to the run before it halts. The replanner names a `cause`: `code` (or none) spends one; `harness` (an agent that died or ran late, a lane that would not merge) is free up to `maxReplans` times, then spends one; `environment` halts the run with `kind: 'environment'` and spends none. `0` turns replanning off |
 | `maxContextResolves` | `2` | scout-answered `NEEDS_CONTEXT` questions per dispatch (`0` escalates immediately) |
 | `agentTimeoutMin` | `40` | the SOFT limit per dispatch, in minutes (`0` disables every limit). Past it the dispatch is logged as late (event `late`, `telemetry.late`) and still awaited; a result that arrives later is accepted. An agent cannot be stopped, so a limit only decides how long the run waits. Mechanical kinds have shorter limits of their own (`timeouts`); `crystallize` has 90 minutes |
 | `agentHardTimeoutMin` | `180` | where waiting ends. A reader (reviewer, verifier, guard, replanner, …) is given up on at twice its soft limit, capped by this value (`telemetry.timedOut`). A writer (implementer, fix, integrate, gate) is never settled while it may still be running: it is marked wedged, its repo is fenced (nothing else is dispatched into that checkout, no replan requeues into it) and its result is still taken when it arrives. When only wedged work is left, the run halts with `kind: 'wedged'`. `0`: writers never wedge |
@@ -300,8 +300,9 @@ next run reads. See the `adaptive-replanning` skill. The replanner also names th
 `cause`, and only a code cause spends the replan budget: an environment cause (a hung tool or
 hook, a locked commit signer, a machine asleep) halts the run with `kind: 'environment'`,
 because requeuing the same work into the same machine fails the same way, and a harness cause
-(a late or wedged agent, silent reviewers) is free up to `maxReplans` times, then charged, so a
-harness loop still ends; a HALT it decides on a harness cause carries `kind: 'harness'`.
+(an agent that died or ran late, a lane that would not merge) is free up to `maxReplans`
+times, then charged, so a harness loop still ends; a HALT it decides on a harness cause carries
+`kind: 'harness'`.
 Silent reviewers never reach the replanner at all: when a reviewer of a stage returns nothing,
 that persona alone is retried once; if any lens is still missing, the stage fails closed and the
 run halts as `reviewers unavailable`, naming the lens — no replan is spent and the task is
