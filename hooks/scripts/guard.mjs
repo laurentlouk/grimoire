@@ -302,8 +302,10 @@ function checkBash(command, cwd, ctx, depth = 0) {
   const { segments, subs } = parseShell(command)
   let dir = cwd
   for (const seg of segments) {
-    const argv = strip(seg)
+    let argv = strip(seg)
     if (!argv.length) continue
+    // `builtin cd` / `command cd` change directory like `cd` (agents are told to use them: `cd` may be aliased)
+    if ((argv[0] === 'builtin' || argv[0] === 'command') && (argv[1] === 'cd' || argv[1] === 'pushd')) argv = argv.slice(1)
     const cmd = argv[0]
     if (cmd === 'cd' || cmd === 'pushd') {
       const d = argv.slice(1).find((a) => !a.startsWith('-'))

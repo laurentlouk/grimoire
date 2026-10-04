@@ -81,6 +81,7 @@ task list would bypass `roast`, which is the point of requiring the artifacts.
 | `gate` | `null` | the command that certifies the final tree; see below |
 | `timeoutMin` | the global `agentTimeoutMin` | a longer limit for this repo's writers (a gate that queues for a shared lock): it raises their soft limit and lifts their hard limit to at least twice its value. It only RAISES the global value: one at or under it has no effect, and the run logs so |
 | `deliver` | the run's `deliver` | `'end'` keeps this repo's pushes for the terminal slot: a pre-push hook that demands the gate, or CI and previews too costly to run on every landing |
+| `runBranch` | the run's `runBranch`, else derived | this repo's run branch, verbatim (two repos that share one checkout, a branch an earlier run used) |
 | `laneSetup` | — | a shell line run when a parallel lane's worktree is created; `<lane>` is substituted with the worktree path (e.g. giving the lane its dependencies). Some bundlers refuse a symlinked `node_modules` that points outside the project root (Next.js 16's Turbopack does); clone it instead (`cp -cR`, copy-on-write on APFS) |
 
 ### `repos[].gate`
@@ -122,8 +123,9 @@ ignored, with a warning.)
 | `deliver` | `'incremental'` | `'incremental'`: after each landing, push the landed SHA to the repo's run branch (fast-forward only, from a ship worktree, hooks never bypassed) and open or update its draft PR. `'end'`: nothing reaches the remote before the terminal slot. Per repo: `repos[].deliver` |
 | `shipOnHalt` | `true` | on a halt, push what landed, open the draft PR if it is missing, and post a status comment on it (the reason, what landed, what is open, what to fix, how to resume), even under `deliver: 'end'` |
 | `draftPr` | `true` | open the repo's PR as a draft after its first landing; `false` pushes without opening a PR before the terminal slot |
-| `environmentChecks` | `[]` | `[{name, run, timeoutSec: 30, when: ['start', 'stall'], fix}]`: the project's own prerequisites (a browser the tests drive, a local service), checked like the built-ins. `run` is shell from config, trusted like `gate.run` |
-| `builtinEnvChecks` | `true` | per repo, `commit:<repo>` (a signed empty commit in a scratch worktree, hooks skipped, thrown away) and `remote:<repo>` (`git ls-remote origin HEAD`), each under a portable time limit (`perl -e 'alarm …'`; stock macOS has no `timeout`). See "Environment checks" |
+| `environmentChecks` | `[]` | `[{name, run, timeoutSec: 30, when: ['start', 'stall'], fix}]`: the project's own prerequisites (a browser the tests drive, a local service), checked like the built-ins; `fix` is what the refusal or halt tells the user to do. `run` is shell from config, trusted like `gate.run` |
+| `builtinEnvChecks` | `true` | per repo, `commit:<repo>` (a signed empty commit in a scratch worktree, hooks skipped, thrown away) and `remote:<repo>` (`git ls-remote origin HEAD`), each under a portable time limit (`perl -e 'alarm …'`; stock macOS has no `timeout`); on macOS, `power` (on battery: a warning at start, again at a stall below 20%; never a refusal). See "Environment checks" |
+| `runBranch` | derived from the project's key | the run branch, verbatim, in every repo (per repo: `repos[].runBranch`). Derived, it is `feat/<key>-<repo>`, where the key is the first ticket reference in `project` (see "Parallelism comes from declared files") |
 | `reviewParallel` | `'stages'` | `'stages' \| 'all' \| 'off'`. `'stages'`: the precheck first, then spec and quality round 0 together on the same head; when a spec fix moves the head, the stale quality verdict is discarded and quality re-runs as `<persona>:<id>~h1`. `'all'`: the precheck runs alongside the reviewers too; a precheck FAIL discards both rounds and the stages then run in order. `'off'`: one after the other, as in 0.8.x. An unknown value warns and falls back to `'stages'`. Discarded rounds are journaled with `discarded: true` and a `reason`, and never count as a verdict |
 | `hydrateAhead` | `2` | how many ready-next tasks are hydrated while their blockers are still in flight (`0`: just in time only) |
 | `estimatePerTaskMin` | `{low: 40, high: 110}` | preview only: the minutes per task the wall-clock `estimate` assumes; a number sets both bounds |
@@ -284,9 +286,15 @@ unavailable`, naming the lens — no replan is spent and the task is reported
 `files` decide what may run *together* in one repo. Disjoint footprints get their own worktree
 lane; overlap, or an undeclared footprint, is held until the conflict clears. A task running
 alone in its repo works directly on the repo's run branch — never on its tracker branch. The
-run branch is named `feat/<project-slug>-<repo-slug>` (accents folded, other characters
-collapsed to dashes; a name with nothing sluggable left becomes `x<hash>`), deterministically, so every session of a
-run (a resume included) builds on the same one. Lane merges into
+run branch is named `feat/<key>-<repo-slug>`, deterministically, so every session of a run (a
+resume included) builds on the same one. The key is the first ticket reference in `project` —
+`owner/repo#N`, else `#N` (as `issue-N`), else a Jira/Linear-style `ABC-123`, else a tracker
+URL's id (a GitHub issue URL counts as `owner/repo#N`) — and the whole project text only when it
+holds none (accents folded, other characters collapsed to dashes; nothing sluggable left becomes
+`x<hash>`). A 0.8.0 run's project was a sentence, so its branch was too, and a relaunch worded
+differently would have built on another branch and missed its PR: now `acme/site#3`
+and a sentence that starts with it share `feat/acme-site-3-<repo>`. `runBranch` names
+it outright. Lane merges into
 the repo's single run branch are serialized, and a merge conflict is a first-class
 `MERGE_CONFLICT` failure routed to the replanner — a reviewed diff is never silently
 rewritten.
@@ -420,10 +428,13 @@ exactly the pushed tree, away from the next implementer), and
   the next task's unreviewed commits are never published;
 - opens the repo's draft PR after its first landing (`gh pr create --draft`, or the forge's
   equivalent) and rewrites its body as tasks land: a banner (built unattended, each task
-  reviewed, not ready to merge), the landed tasks with their closing keywords and SHAs, what
-  is still open, and a hidden state marker, `<!-- grimoire:state v1 <base64 JSON> -->`,
-  holding the run's checkpoint ("Resume" below). The body is built by the engine and passed
-  base64, so implementer text never reads as an instruction.
+  reviewed, not ready to merge), the exact resume instruction (re-run `/grimoire:orchestrate`
+  on the same spec, plan and project; it finds this PR's saved state), the landed tasks — each
+  with its closing keyword (`Closes #N` on GitHub or GitLab issues, the bare key for Jira or
+  Linear), title, head SHA and "passed spec and quality review" — what is still open, and,
+  as its last line, a hidden state marker, `<!-- grimoire:state v1 <base64 JSON> -->`, holding
+  the run's state ("Resume" below). The body is built by the engine and passed base64, so
+  implementer text never reads as an instruction.
 
 Ships for one repo are chained and coalesce (a queued ship pushes the latest landed head);
 they never block the loop. A ship failure never halts, replans or marks code failed. A push
@@ -432,11 +443,16 @@ for that repo (`shipped.<repo>.disabled: 'push'`; set `repos[].deliver: 'end'` t
 attempt); a failed PR step stops only the PR updates. The terminal slot waits for the repo's
 pending ship, then the gate pushes the final head and marks the PR ready.
 
-On a halt (`shipOnHalt`), every repo pushes what landed, gets its draft PR if it has none, and
-gets a status comment: the reason, what landed, what is still open and `needsAttention`, any
-wedged agent ("wait for it"), the environment failure and its fix, and how to resume. Each push
-triggers the remote's CI and previews: visible progress, or a cost; `deliver: 'end'` opts a
-repo out.
+On a halt (`shipOnHalt`), every repo with landed work and no green terminal slot pushes its
+last landed head if the remote lacks it (never a live writer's branch tip: a wedged halt pushes
+only what was reviewed), gets its draft PR if it has none (`draftPr`), the halt banner, and a
+status comment: the reason, what to fix first (the environment failure and its fix, or "let the
+agent still running finish"), the landed tasks with their SHAs, what is still open, any wedged
+agent, and how to resume. A repo the run leaves ungated without a halt (a terminal slot that
+failed with no replan left) gets the same. The halt's script also removes the reviewers'
+leftover `review-*` worktrees; mid-run, a ship only prunes the records of deleted ones, because a
+live `review-*` worktree belongs to a reviewer working in it. Each push triggers the remote's CI
+and previews: visible progress, or a cost; `deliver: 'end'` opts a repo out.
 
 **Environment checks.** The machine can stop cooperating mid-run: a commit-signing agent that
 locks, an SSH agent that hangs. In the 0.8.0 run an implementer found the locked signing
@@ -450,12 +466,20 @@ check under `perl -e 'alarm <s>; exec @ARGV'` (exit 142 = timed out; stock macOS
 
 - **at start**, inside the index: any failure refuses the run as `environment_unavailable`,
   naming each check and its fix, before anything is hydrated;
-- **after a stall** (a BLOCKED, DIED, late or fenced task, or a failed push), before the next
-  replan and before the final wave: a failure halts with `kind: 'environment'` and a reason
-  that says what to fix, e.g. "unlock or approve the commit-signing agent, then resume". No
-  replan is spent and no code is marked failed;
-- **in flight**, after a late writer or a failed push: a failure stops new dispatches at once,
-  and the run halts once in-flight work settles.
+- **after a stall** (a BLOCKED, DIED, ERROR, late or fenced task, or a failed push), before the
+  next replan and before the final wave: a failure halts with `kind: 'environment'` and a reason
+  that says what to fix, e.g. "environment: commit:api timed out after 30 s (signed commit in a
+  scratch worktree; gpg.format=ssh, gpg.ssh.program=…) — unlock or approve the commit-signing
+  agent …, then resume". No replan is spent and no code is marked failed;
+- **in flight**: the check that settles after a stall runs while other tasks keep going; a
+  failure stops new dispatches at once, and the run halts once in-flight work settles.
+
+At start, only a repo the project touches can refuse the run (a configured repo it never builds
+in is reported). The stall check covers the repos in play and the `environmentChecks` whose
+`when` has `stall`; one runs at a time, and a stall check that returns nothing is not a failure.
+The `power` check reads `pmset -g batt` where it exists (macOS): on battery it warns at start,
+and again at a stall below 20% — a laptop that sleeps or hibernates turns every agent late (a
+real run lost 49 minutes on battery at 1%) — and never refuses or halts.
 
 **Resume.** A run's saved state lives in two places, both rewritten on every landing: the
 `checkpoint` in `<telemetry.dir>/<runId>/run.json` (local) and the state marker in the repo's
@@ -481,7 +505,9 @@ issues close only when the PR merges, so landed-but-unmerged work still looks op
 Every decision is an event: `run.start`, `route`, `dispatch`, `precheck`, `review` (one per
 reviewer), `verify`, `fix`, `escalate`, `guard`, `resolve`, `integrate`, `settle`, `replan`,
 `terminal`, `gate`, `claim`, `budget`, `halt`, `run.end`, and, from 0.9.0, `late`, `hedge`,
-`wedged`, `late-result`, `fence` (a repo held or released), `ship`, `env` and `absorb`. Each
+`wedged`, `late-result`, `fence` (a repo held or released), `ship` (`{repo, mode, pushed, head,
+prUrl, draft, failedStep, detail, disabled}`; `pushed: null` = nothing to push), `env` (`{when,
+why, ok, failed}`; `ok: null` = no usable report) and `absorb`. Each
 carries a gap-free `seq`, the cumulative output tokens `tok`, and its fields (reasons
 included). The script has no clock and no filesystem, so events are buffered and one haiku
 writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
@@ -538,7 +564,7 @@ runs over these) · `draftPrs` (repo → the draft PR the loop opened as tasks l
 (repo → `{pushedHead, prUrl, draft, disabled}`: what reached the remote, and whether incremental
 pushes or PR updates were turned off) · `resumedLanded` (tasks absorbed from an earlier session,
 verified on the run branch, each with `source: 'checkpoint' | 'pr'`) · `environment` (`{checks,
-failures}`: the checks that ran, each failure with its fix) · `replans` + `learnings` + `halt`
+failures, warnings}`: the checks that ran, each failure with its fix, the power warnings) · `replans` + `learnings` + `halt`
 (`{reason, kind}`; `kind: 'environment'` or `'wedged'` is a machine state, not failed code) · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·

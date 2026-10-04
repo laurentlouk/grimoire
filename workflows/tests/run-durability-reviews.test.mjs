@@ -229,7 +229,7 @@ async function run(scenario, tasks, responder, { args = {}, repos = [APP] } = {}
     return p.includes('## Running commands') &&
       p.includes(`git -C repositories/api worktree add --detach .worktrees/review-${who} ${head}`) &&
       p.includes(`ln -sfn "$(cd repositories/api && pwd)/node_modules" ${wt(who)}/node_modules`) &&
-      p.includes(`(cd ${wt(who)} && <your command>)`) &&
+      p.includes(`(builtin cd ${wt(who)} && <your command>)`) &&
       p.includes(`git -C repositories/api worktree remove --force .worktrees/review-${who}`)
   }
   ok(has('spec-hawk:PROJ-1', 'api--proj-1-spec-hawk-r0', 'aaaaaaa'), 'spec review: its worktree at the implementer head, laneSetup substituted')

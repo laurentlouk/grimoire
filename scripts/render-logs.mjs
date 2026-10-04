@@ -390,8 +390,9 @@ function client() {
     wedged: (e) => `${s(e.label)} past its ${s(e.hardMin)}-min hard limit and still running${e.repo != null ? `: ${s(e.repo)} fenced` : ''}`,
     'late-result': (e) => `${s(e.label)} returned late${e.status ? ` (${s(e.status)})` : ''} → ${e.accepted ? 'accepted' : 'discarded'}`,
     fence: (e) => `${s(e.repo)} → ${e.action === 'release' ? 'released' : e.action === 'hold' ? 'held: no dispatch into it until the late writer returns' : s(e.action)}`,
-    ship: (e) => `${s(e.repo)}${e.mode ? ` · ${s(e.mode)}` : ''} → ${e.pushed === false ? `failed at ${s(e.failedStep || 'push')}${e.detail ? `: ${s(e.detail)}` : ''}` : `pushed ${s(e.head ?? e.remoteHead ?? e.pushedHead ?? '?')}`}${e.prUrl ? ` · ${s(e.prUrl)}${e.draft ? ' (draft)' : ''}` : ''}${e.disabled ? ` · incremental ${s(e.disabled)} disabled` : ''}`,
-    env: (e) => `${s(e.when)}${e.why ? ` (${s(e.why)})` : ''} → ${e.ok ? 'ok' : `FAILED: ${list(e.failed)}`}`,
+    // pushed: true · false (the push failed) · null (nothing to push: the head was already there)
+    ship: (e) => `${s(e.repo)}${e.mode ? ` · ${s(e.mode)}` : ''} → ${e.pushed === false ? `failed at ${s(e.failedStep || 'push')}${e.detail ? `: ${s(e.detail)}` : ''}` : `${e.pushed === null ? `${s(e.head ?? '?')} already on the remote` : `pushed ${s(e.head ?? e.remoteHead ?? e.pushedHead ?? '?')}`}${e.failedStep ? ` · ${s(e.failedStep)} step failed${e.detail ? `: ${s(e.detail)}` : ''}` : ''}`}${e.prUrl ? ` · ${s(e.prUrl)}${e.draft ? ' (draft)' : ''}` : ''}${e.disabled ? ` · incremental ${s(e.disabled)} disabled` : ''}`,
+    env: (e) => `${s(e.when)}${e.why ? ` (${s(e.why)})` : ''} → ${e.ok == null ? 'no usable report (not counted as a failure)' : e.ok ? 'ok' : `FAILED: ${list(e.failed)}`}`,
     absorb: (e) => `landed earlier, from ${s(e.source)}${e.head ? ` @ ${s(e.head)}` : ''}`,
     'run.end': (e) => `${s(e.status)} · done ${s(e.done)} · failed ${s(e.failed)} · blocked ${s(e.blocked)} · PRs ${s(e.prs)} · tokens ${s(e.tokens)}`,
   }

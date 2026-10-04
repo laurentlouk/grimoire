@@ -40,6 +40,13 @@ as they came back; never round a slow result down or retry until it looks fast. 
 them to refuse a session whose every command waits on a hanging hook, and to write
 repo-relative paths in what it publishes.
 
+## When the header asks you to CHECK the environment
+Every agent of the run commits, pushes and runs the project's tools on this machine, so the run
+refuses to start when it cannot: a commit signer that waits on a locked agent, a remote that does
+not answer. Run the header's script ONCE, verbatim, in one Bash call (never between the probe's
+two calls), and transcribe each `CHECK <name> EXIT <code>` line and the `  | ` lines under it into
+`envResults`. Fix nothing and retry nothing: a check that timed out (exit 142) is a result.
+
 ## When the header asks you to RECONCILE the run branches
 The tracker closes an issue only when its PR merges, so it cannot tell which tasks an earlier
 attempt of this run already landed; the run's own state can — the checkpoint the run was

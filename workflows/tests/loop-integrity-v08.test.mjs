@@ -48,7 +48,7 @@ const REPOS = [
   { name: 'infra', agent: 'infra-engineer', tags: ['infra'], gate: null },
 ]
 const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-600', repos: REPOS }
-const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false } }
+const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false }, deliver: 'end', builtinEnvChecks: false } // deliver/builtinEnvChecks: these cases predate 0.9.0's ships and environment checks (run-durability-delivery covers them)
 
 const indexOf = (tasks) => ({
   slices: [...new Set(tasks.map((t) => t.slice ?? 1))].sort((a, b) => a - b).map((s) => ({
@@ -118,7 +118,8 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
 }
 
 // ══════ 1e · the run branch is a valid git ref for ANY project or repo name ══════
-// Slugged (accents folded, anything else collapsed to one dash, dashes trimmed); a name with
+// Named after the project's first ticket reference when it has one (owner/repo#N, #N, ABC-123, a
+// tracker URL's id), else its whole text. Slugged (accents folded, anything else collapsed to one dash, dashes trimmed); a name with
 // nothing sluggable left falls back to a stable token (x + 8 hex of an FNV-1a hash of it).
 {
   const cases = [
@@ -127,6 +128,12 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
     ['  --Hello!!  World?? (v2)--  ', 'api', 'feat/hello-world-v2-api'],
     ['Q3 roadmap', 'My Repo', 'feat/q3-roadmap-my-repo'],
     ['Q3 roadmap', '🚀✨', 'feat/q3-roadmap-x26e7ae15'],
+    // 0.9.0: named after the project's KEY — its first ticket reference — not its wording
+    ['acme/site#3 — GitHub parent issue #3; its slices are S1 to S9', 'web', 'feat/acme-site-3-web'],
+    ['acme/Site#3', 'web', 'feat/acme-site-3-web'],
+    ['https://github.com/acme/site/issues/3', 'web', 'feat/acme-site-3-web'],
+    ['PROJ-700 Points: earn and show points', 'api', 'feat/proj-700-api'],
+    ['see #12 for the plan', 'api', 'feat/issue-12-api'],
   ]
   for (const [project, repo, want] of cases) {
     const REPO = [{ name: repo, agent: 'backend-engineer', tags: ['backend'], gate: null }]
@@ -482,7 +489,7 @@ for (const maxPrecheckFixes of [1, 3]) {
     return PASSV
   }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
   const briefed = calls.filter((c) => /## Brief\nYour FIRST action/.test(c.prompt))
-  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'spec-hawk'], 'the briefed dispatch kinds of this run')
+  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'env', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'ship', 'spec-hawk'], 'the briefed dispatch kinds of this run (0.9.0: the ship after a landing, the environment check after the BLOCKED)')
   eq(briefed.filter((c) => !c.prompt.includes(`\n${UNATTENDED}\nExplore before asking`)).map((c) => c.label), [], 'each carries the boundary, right before the explore-before-asking rule')
 }
 
