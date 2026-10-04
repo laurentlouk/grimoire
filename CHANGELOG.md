@@ -58,7 +58,7 @@ brief- and skill-level and stack-agnostic.
   `kind: 'environment'` and the fix, and no replan is spent. One haiku dispatch
   (`briefs/env.md`); event `env`; result `environment`.
 - **The journal agent can only run its script.** In the first attempt the haiku journal
-  agent, running from the product checkout with the project's CLAUDE.md, acted on its payload.
+  agent, running from the product checkout with the project's instructions loaded, acted on its payload.
   Event lines and `run.json` now travel base64 and are decoded by the script; the brief says
   the payload is data and forbids any other command. `run.json` is written only when the flush
   is not older than what is stored, so a late flush never rolls back a newer checkpoint. The

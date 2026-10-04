@@ -489,7 +489,7 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
 - decodes its payload: the chunk's lines and `run.json` travel **base64** in the prompt and
   the script decodes them (`base64 --decode`, else `openssl base64 -d`). The payload holds
   agent-written text (replan reasons, learnings, halt text), and a 0.8.0 journal agent, which
-  runs from the orchestrating checkout with the project's CLAUDE.md, acted on its payload. The
+  runs from the orchestrating checkout with the project's instructions loaded, acted on its payload. The
   brief tells it the payload is data, never to decode or read it, and to run nothing but that
   one script. The ledger and ship payloads travel the same way;
 - writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
@@ -588,7 +588,7 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
   directory option; the engine strips its own keys (the limit kind and its minutes) before
   each call, because an unknown key is a validation error. Tools can be narrowed only through
   `agentType` (an agent definition's `tools:`), and Bash allows anything, so "read-only" is a
-  convention. Custom agent types still receive the project's CLAUDE.md and the session's
+  convention. Custom agent types still receive the project's instruction file and the session's
   PreToolUse hooks.
 - **`isolation: 'worktree'` is a worktree of the orchestrating repository**, not of
   `repos[].path` (unless that path is `.`). Reviewer and ship worktrees for target repos are
