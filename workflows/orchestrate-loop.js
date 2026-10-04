@@ -799,7 +799,8 @@ function gatePrompt(task, gate, hits, landedHere = []) {
 ${landedHere.length ? landedHere.map((d) => `  - ${d.id}${d.ticket && d.ticket !== d.id && d.ticket !== 'NO_TICKET' ? ` (ticket ${d.ticket})` : ''}${d.title ? ` — ${d.title}` : ''}: ${scrubPaths(trim(d.summary, 700)) || '(no report)'}`).join('\n') : '  - (no task summaries recorded)'}`
 }
 
-function reviewPrompt(task, mode, persona, range) {
+// `who` names this dispatch's own worktree (see runBlock).
+function reviewPrompt(task, mode, persona, range, who) {
   return `${memoryBlock('reviewer')}${brief('review')}You are reviewing as: **${persona.name}** — your lens is \`${PERSONAS_DIR}/${persona.id}.md\` (read it, including its Scope section). Mode: **${mode}**.
 
 Repo: ${repoPath(task.repo)} (branch ${task.branch || '(feature branch)'}). ${artifacts()}
@@ -809,7 +810,7 @@ ${task.taskText}
 Spec excerpt:
 ${task.specExcerpt || '(see the spec/plan)'}
 
-${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}`
+${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${runBlock(task, who, reviewedHead(task, range))}`
 }
 
 // The TERMINAL sweep judges the whole integrated branch, but each persona reads only the
@@ -830,7 +831,7 @@ git -C ${path} log --oneline ${BASE_BRANCH}..${branch}
 }
 
 // The review GUARD — verifies a fix against the exact findings that gated.
-function guardPrompt(task, gate, fix, fixFrom, range) {
+function guardPrompt(task, gate, fix, fixFrom, range, round) {
   const r = range || {}
   const path = repoPath(task.repo)
   return `${brief('guard')}Task ${task.id} in \`${path}\` (branch ${task.branch || '(feature branch)'}).
@@ -852,7 +853,7 @@ ${rangeFrom(r) ? `Whole-task context when you need it: \`git -C ${path} diff ${r
 \`\`\`bash
 git -C ${path} log --oneline ${BASE_BRANCH}..HEAD
 \`\`\``
-  }`
+  }${runBlock(task, `guard-r${round || 1}`, reviewedHead(task, range))}`
 }
 
 // The PRECHECK — one cheap structural look between the implementer and the panel.
@@ -901,7 +902,7 @@ A non-zero exit is a FAIL with \`check: "ancestry"\`: the work is on another bra
 }
 
 // The finding VERIFIER — one dispatch per failing review round, before any fix is bought.
-function verifyPrompt(task, mode, findings, range) {
+function verifyPrompt(task, mode, findings, range, attempt) {
   return `${brief('verify')}Task ${task.id} in \`${repoPath(task.repo)}\` (branch ${task.branch || '(feature branch)'}) — ${mode} review. ${artifacts()}
 
 ## The gating findings to verify (numbered — return one result per number)
@@ -910,7 +911,7 @@ ${findings.map((f, i) => `${i + 1}. [${f.severity}${f.persona ? ` · ${f.persona
 ## Task (verbatim — what the change had to do)
 ${task.taskText}
 
-${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}`
+${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${runBlock(task, `verify-${mode}-r${attempt || 0}`, reviewedHead(task, range))}`
 }
 
 // The telemetry WRITER — a fixed shell script, so the cheap agent only has to run it. Each
@@ -1137,6 +1138,31 @@ ${
       ? `Commits ${r.startSha ? `up to \`${r.startSha}\`` : `before \`${r.firstSha}\``} on this branch (back to the branch point \`${r.baseSha}\`) belong to EARLIER tasks or were merged in. They are context, not your subject — do not re-report findings against them.\n`
       : ''
   }Read surrounding files freely for context, but your verdict is about the range above. Do not trust a summary of it.`
+}
+
+// ── where a reviewer RUNS things: its own detached worktree at the reviewed head ──
+// Reviewers ran builds and tests in the shared checkout, so no two could run at once — two
+// concurrent builds empty each other's output directory — and every stage queued behind the last.
+// Each review, verify, guard and sweep dispatch gets its own worktree, named after the dispatch
+// (`who` is unique per persona, round and retry, so a reviewer abandoned at its time limit never
+// shares one), and the repo's laneSetup with `<lane>` → that worktree. The precheck gets no
+// block: it runs git read commands only. The gate prunes what a dead reviewer left behind.
+const reviewedHead = (task, range) => (range && range.headSha) || task.laneBranch || task.runBranch || task.branch || 'HEAD'
+function runBlock(task, who, head) {
+  const path = repoPath(task.repo)
+  const rel = `${WORKTREE_DIR}/review-${wtName(task)}-${who}`
+  const wt = path === '.' ? rel : `${path}/${rel}`
+  const setup = (repoCfg(task.repo) || {}).laneSetup
+  return `
+
+## Running commands
+Read through git: the diff above, and \`git -C ${path} show ${head}:<file>\` for a whole file at the reviewed head. Run a build, a test, or anything else that writes files ONLY in your own worktree at the reviewed head — never in the shared checkout \`${path}\`, where another reviewer or an implementer may be building at the same time:
+\`\`\`bash
+git -C ${path} worktree add --detach ${rel} ${head}     # already there: git -C ${wt} checkout --detach -q ${head}
+${setup ? `${setup.replace(/<lane>/g, wt)}     # this repo's lane setup\n` : ''}(cd ${wt} && <your command>)
+git -C ${path} worktree remove --force ${rel}     # when you are done, pass or fail
+\`\`\`
+Nothing to run? Create nothing.`
 }
 
 // The severity contract: blocker/major GATE a task, minor/nit ride along as advisory.
@@ -1698,7 +1724,7 @@ const overturned = [] // gating findings the verifier REJECTED with evidence —
 async function verifyFindings(task, mode, findings, range, attempt, phaseName) {
   if (!VERIFY_FINDINGS || !findings.length) return { kept: findings, rejected: [] }
   reviewStats.verifyChecks++
-  const v = await agentT(verifyPrompt(task, mode, findings, range), {
+  const v = await agentT(verifyPrompt(task, mode, findings, range, attempt), {
     label: `verify:${task.id}:${mode}#${attempt}`,
     phase: phaseName,
     model: 'sonnet',
@@ -1726,7 +1752,7 @@ async function reviewRound(task, mode, personas, phaseName, range, attempt) {
     (
       await parallel(
         who.map((p) => () =>
-          agentT(reviewPrompt(task, mode, p, range), {
+          agentT(reviewPrompt(task, mode, p, range, `${p.id}-r${attempt}${retry ? `-retry${retry}` : ''}`), {
             label: `${p.id}:${task.id}${attempt ? `#${attempt}` : ''}${retry ? `~r${retry}` : ''}`,
             phase: phaseName,
             model: 'sonnet',
@@ -1845,7 +1871,7 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range, 
     // a fresh full-panel round.
     if (mode !== 'spec' && personas.length > 1) {
       guardChecks.checked++
-      const g = await agentT(guardPrompt(task, gate, fix, fixFrom, range), {
+      const g = await agentT(guardPrompt(task, gate, fix, fixFrom, range, attempt + 1), {
         label: `guard:${task.id}#${attempt + 1}`,
         phase: phaseName,
         model: 'sonnet',

@@ -12,6 +12,9 @@ command, and the stamp file it writes.
 1. Confirm the tree is clean and everything is committed on the branch — `git status
    --porcelain` must be empty. A gate stamp is a TREE HASH, so any uncommitted edit or later
    commit invalidates it. If something is uncommitted, commit it first.
+   Before that, remove the scratch worktrees reviewers left behind (detached, nothing to keep):
+   `git worktree remove --force` each `review-*` path `git worktree list` shows, then
+   `git worktree prune`. Never remove any other worktree.
 2. **If the gate command APPLIES**: run it ONCE, in the FOREGROUND, exactly as the header
    gives it, including any flags (a lock wait, a timeout, an environment variable) — those
    flags are not optional, they are what makes the command safe to run unattended. Do NOT
