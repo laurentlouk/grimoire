@@ -20,7 +20,9 @@
 //      refuses / , $HOME and anything outside the working directory; a dir holding
 //      only events/ chunks counts as a run dir
 //    • 0.9.0 run durability: the page summarizes late, hedge, wedged, late-result,
-//      fence, ship, env, absorb (each source) and harness-routed events in words,
+//      fence, ship (a ship skipped on a ready PR or a held lock never reads as a
+//      failed push), env (a re-check, transient or failing again, and a halt a later
+//      check lifted), seal, absorb (each source) and harness-routed events in words,
 //      shows a halt's kind and draft
 //      PRs, and the checkpoint card shows a v2 checkpoint's landedTasks with their
 //      heads (the renderer is executed against a minimal DOM, not just grepped)
@@ -277,9 +279,23 @@ try {
     { type: 'ship', repo: 'site', mode: 'land', pushed: true, head: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true },
     { type: 'ship', repo: 'site', mode: 'halt', pushed: null, head: 'bbbbbbb2222', failedStep: 'comment', detail: 'gh: rate limited', prUrl: 'https://example.invalid/pr/7', draft: true },
     { type: 'env', when: 'stall', why: 'a failed push of site', ok: null, failed: [] },
+    // the delivery fixes: a held ship lock, a PR out of draft (the gate's), the seal after a green gate
+    { type: 'ship', repo: 'site', mode: 'land', pushed: false, head: 'bbbbbbb2222', failedStep: null, skipped: 'lock', detail: 'LOCK busy: held by ship 4242 for 150 s', prUrl: 'https://example.invalid/pr/7', draft: true },
+    { type: 'seal', repo: 'app', ok: false, already: false, step: 'view', round: 1 },
+    { type: 'seal', repo: 'app', ok: true, already: false, step: null, round: 2 },
+    { type: 'seal', repo: 'web', ok: true, already: true, step: null, round: 1 },
+    { type: 'ship', repo: 'app', mode: 'land', pushed: null, head: 'eeeeeee5555', failedStep: null, skipped: 'ready', prUrl: 'https://example.invalid/pr/8', draft: false },
+    // a stall check that fails, re-checked: transient once; then latched, lifted by a later green check
+    { type: 'env', when: 'stall', why: '#6 → BLOCKED', ok: false, failed: ['remote:site'] },
+    { type: 'env', when: 'stall', why: '#6 → BLOCKED', ok: true, failed: [], recheck: true },
+    { type: 'env', when: 'stall', why: 'late writer: impl:#5', ok: false, failed: ['commit:site'] },
+    { type: 'env', when: 'stall', why: 'late writer: impl:#5', ok: false, failed: ['commit:site'], recheck: true },
+    { type: 'env', when: 'stall', why: '#7 → DIED', ok: true, failed: [], cleared: ['commit:site'] },
     { type: 'wedged', label: 'impl:#6', task: '#6', repo: 'site', hardMin: 180 },
     { type: 'fence', repo: 'site', action: 'hold' },
     { type: 'env', when: 'stall', why: 'late writer', ok: false, failed: ['commit:site'] },
+    { type: 'env', when: 'stall', why: 'late writer', ok: false, failed: ['commit:site'], recheck: true },
+    { type: 'ship', repo: 'app', mode: 'halt', pushed: null, head: 'eeeeeee5555', failedStep: null, skipped: 'ready', prUrl: 'https://example.invalid/pr/8', draft: false },
     { type: 'halt', reason: 'environment: commit:site timed out after 30 s', kind: 'environment' },
   ].map((e, i) => JSON.stringify({ seq: i + 1, at: iso(0), tok: (i + 1) * 100, ...e }))
   writeFileSync(join(RUNS5, 'events', '00000001.jsonl'), evD.join('\n') + '\n')
@@ -311,6 +327,16 @@ try {
   has(/site · halt → bbbbbbb2222 already on the remote · comment step failed: gh: rate limited · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship: nothing to push, a failed step after it')
   has(/stall \(a failed push of site\) → no usable report \(not counted as a failure\)/, 'env: a check that returned nothing usable')
   has(/start \(startup\) → ok/, 'env: a passing check')
+  has(/stall re-check \(#6 → BLOCKED\) → ok: the failure was transient, the run goes on/, 'env: a re-check that passes reads as a transient failure')
+  has(/stall re-check \(late writer\) → FAILED again on the re-check: commit:site/, 'env: a re-check that fails again')
+  has(/stall \(#7 → DIED\) → ok: commit:site answered again, the environment halt is lifted/, 'env: a later green check lifts the halt (cleared)')
+  has(/site · land → skipped: another ship or the gate held the ship lock — nothing pushed or rewritten, not a failed push: LOCK busy: held by ship 4242 for 150 s · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship skipped on a held lock: nothing moved, with the holder')
+  ok(!/site · land → failed at push/.test(text), 'ship skipped on a held lock: never read as a failed push (its pushed is false)')
+  has(/app · land → skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone · the new work waits for the next terminal slot · https:\/\/example\.invalid\/pr\/8 \(ready\)/, 'ship skipped on a ready PR: the new work waits for the gate')
+  has(/app · halt → skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone · status comment only · https:\/\/example\.invalid\/pr\/8 \(ready\)/, 'halt ship on a ready PR: the status comment only')
+  has(/app → the state marker could not be checked \(step view\), try 1/, 'seal: a failed try, with its step')
+  has(/app → the state marker was put back as the last line of the PR body \(the gate's copy differed\)/, 'seal: the marker put back')
+  has(/web → the state marker the gate kept is exact: nothing edited/, 'seal: an exact copy, nothing edited')
   has(/landed in an earlier attempt, verified on the run branch \(from the checkpoint\) @ aaaaaaa1111/, 'absorb from the checkpoint: verified on the run branch, with the head')
   has(/already on the branch, not reviewed for this task: sent to the panel as it stands @ ccccccc3333/, 'absorb verify-only: reviewed as it stands, never "landed earlier"')
   has(/already on the branch and reviewed for this task: landed with no new review @ ddddddd4444/, 'absorb reviewed-earlier: landed with no new review')
@@ -322,7 +348,7 @@ try {
   has(/pushed:\s+site @ bbbbbbb · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the checkpoint card shows what was pushed')
   has(/sign commits before launching/, 'a {text, repos} learning shows its text')
   has(/https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the overview tags the draft PR')
-  ok(!/\{"label"/.test(text) && !/\{"task"/.test(text), 'no new event type falls back to its raw JSON')
+  ok(!/\{"label"/.test(text) && !/\{"task"/.test(text) && !/\{"repo"/.test(text), 'no new event type falls back to its raw JSON')
   has(/quality · break-it → FAIL \(gating 1, advisory 0, round 0\) · discarded: a spec fix moved the head, not counted/, 'a discarded review round reads as discarded, with its reason')
   const s5 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json'], { cwd: ROOT5, encoding: 'utf8' })
   let S5 = null

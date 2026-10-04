@@ -23,9 +23,10 @@ Most questions are a filter over one run's events. Pick the run (newest `started
 
 - "Why did it pick opus for T-12?" → `cat events/*.jsonl | grep '"task":"T-12"' | grep -E '"type":"(route|escalate)"'`. The `route` event carries the selector's `reason` and whether it was a `fallback`; an `escalate` event carries `from`, `to` and `reason`.
 - "Why did T-12 take three fix rounds?" → that task's `review`, `verify`, `fix` and `guard` events, in `seq` order.
-- "Why did it halt?" → `grep -E '"type":"(halt|replan|budget|env)"'`, and the `status`, `summary.halt` and `checkpoint` in `run.json`. The `halt` event's `kind` says what kind of stop it was (`environment`, `wedged`, `harness`, or none), and each `replan` carries the `cause` the replanner named.
+- "Why did it halt?" → `grep -E '"type":"(halt|replan|budget|env)"'`, and the `status`, `summary.halt` and `checkpoint` in `run.json`. The `halt` event's `kind` says what kind of stop it was (`environment`, `wedged`, `harness`, `budget`, or none), and each `replan` carries the `cause` the replanner named. A failed stall check is re-checked once before it halts: the `env` event with `recheck: true` is that re-check (`ok: true` means the first failure was transient and the run went on), and one with `cleared` names the checks a later green check found answering, which lifted the environment halt.
 - "What did the resume take from the earlier attempt?" → `absorb` events: `source` `checkpoint` or `pr` for tasks absorbed at start, `reviewed-earlier` or `verify-only` for tasks an implementer found already on the branch.
-- "Which agents ran late?" → `late`, `hedge`, `late-result`, `wedged` and `fence` events, and the `ship` events for what reached the remote.
+- "Which agents ran late?" → `late`, `hedge`, `late-result`, `wedged` and `fence` events.
+- "What reached the remote?" → `ship` events (`pushed: null`: nothing to push). A ship with `skipped: 'ready'` found its PR out of draft, which only the gate pushes to, and one with `skipped: 'lock'` found the repo's ship lock held by another ship or the gate: neither moved anything, and neither is a failed push. After a green gate, the `seal` event says whether the ready PR's state marker was exact (`already`), put back, or could not be checked (`step`, `round`).
 - "What did the terminal sweep say about the API?" → `terminal` and `gate` events for that repo.
 - "Which reviewer's findings got overturned?" → `verify` events; each string in `reasons` starts with the persona's name.
 

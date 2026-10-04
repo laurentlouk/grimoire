@@ -411,9 +411,24 @@ function client() {
     wedged: (e) => `${s(e.label)} past its ${s(e.hardMin)}-min hard limit and still running${e.repo != null ? `: ${s(e.repo)} fenced` : ''}`,
     'late-result': (e) => `${s(e.label)} returned late${e.status ? ` (${s(e.status)})` : ''} → ${e.accepted ? 'accepted' : 'discarded'}`,
     fence: (e) => `${s(e.repo)} → ${e.action === 'release' ? 'released' : e.action === 'hold' ? 'held: no dispatch into it until the late writer returns' : s(e.action)}`,
-    // pushed: true · false (the push failed) · null (nothing to push: the head was already there)
-    ship: (e) => `${s(e.repo)}${e.mode ? ` · ${s(e.mode)}` : ''} → ${e.pushed === false ? `failed at ${s(e.failedStep || 'push')}${e.detail ? `: ${s(e.detail)}` : ''}` : `${e.pushed === null ? `${s(e.head ?? '?')} already on the remote` : `pushed ${s(e.head ?? e.remoteHead ?? e.pushedHead ?? '?')}`}${e.failedStep ? ` · ${s(e.failedStep)} step failed${e.detail ? `: ${s(e.detail)}` : ''}` : ''}`}${e.prUrl ? ` · ${s(e.prUrl)}${e.draft ? ' (draft)' : ''}` : ''}${e.disabled ? ` · incremental ${s(e.disabled)} disabled` : ''}`,
-    env: (e) => `${s(e.when)}${e.why ? ` (${s(e.why)})` : ''} → ${e.ok == null ? 'no usable report (not counted as a failure)' : e.ok ? 'ok' : `FAILED: ${list(e.failed)}`}`,
+    // pushed: true · false (the push failed) · null (nothing to push: the head was already there).
+    // skipped: 'ready' (the PR is out of draft, so it is the gate's: nothing pushed or rewritten) · 'lock'
+    // (another ship or the gate held the repo's ship lock: nothing moved). Neither is a failed push,
+    // whatever `pushed` says.
+    ship: (e) => `${s(e.repo)}${e.mode ? ` · ${s(e.mode)}` : ''} → ${e.skipped === 'ready'
+      ? `skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone${e.mode === 'halt' ? ` · ${e.failedStep === 'comment' ? 'the status comment failed' : 'status comment only'}` : ' · the new work waits for the next terminal slot'}`
+      : e.skipped === 'lock' ? `skipped: another ship or the gate held the ship lock — nothing pushed or rewritten, not a failed push${e.detail ? `: ${s(e.detail)}` : ''}`
+        : e.skipped ? `skipped (${s(e.skipped)})`
+          : e.pushed === false ? `failed at ${s(e.failedStep || 'push')}${e.detail ? `: ${s(e.detail)}` : ''}` : `${e.pushed === null ? `${s(e.head ?? '?')} already on the remote` : `pushed ${s(e.head ?? e.remoteHead ?? e.pushedHead ?? '?')}`}${e.failedStep ? ` · ${s(e.failedStep)} step failed${e.detail ? `: ${s(e.detail)}` : ''}` : ''}`}${e.prUrl ? ` · ${s(e.prUrl)}${e.draft ? ' (draft)' : e.draft === false ? ' (ready)' : ''}` : ''}${e.disabled ? ` · incremental ${s(e.disabled)} disabled` : ''}`,
+    // recheck: the one re-check of the checks a stall check found failing · cleared: the checks a later
+    // green check found answering, which lifted the environment halt their failed re-check had latched
+    env: (e) => `${s(e.when)}${e.recheck ? ' re-check' : ''}${e.why ? ` (${s(e.why)})` : ''} → ${Array.isArray(e.cleared) && e.cleared.length
+      ? `ok: ${list(e.cleared)} answered again, the environment halt is lifted`
+      : e.ok == null ? 'no usable report (not counted as a failure)'
+        : e.ok ? (e.recheck ? 'ok: the failure was transient, the run goes on' : 'ok')
+          : `FAILED${e.recheck ? ' again on the re-check' : ''}: ${list(e.failed)}`}`,
+    // after a green gate: the state marker is the ready PR body's last line, exactly, or it is put back
+    seal: (e) => `${s(e.repo)} → ${e.ok ? (e.already ? 'the state marker the gate kept is exact: nothing edited' : "the state marker was put back as the last line of the PR body (the gate's copy differed)") : `the state marker could not be checked${e.step ? ` (step ${s(e.step)})` : ''}${e.round != null ? `, try ${s(e.round)}` : ''}`}`,
     // checkpoint · pr: absorbed at start, verified on the run branch; reviewed-earlier · verify-only:
     // an implementer found the work already on the branch, reviewed for this task or not yet
     absorb: (e) => `${e.source === 'reviewed-earlier' ? 'already on the branch and reviewed for this task: landed with no new review'
