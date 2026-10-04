@@ -219,7 +219,7 @@ function allKindsRun(label, extraArgs) {
     if (l === 'release-claims') return { released: ['PROJ-9'] }
     if (l.startsWith('integrate:')) return { status: 'MERGED', headSha: 'ccccccc' }
     return PASSV
-  }, { verifyFindings: false, claim: { identity: 'grimoire-bot' }, ...extraArgs })
+  }, { verifyFindings: false, claim: { identity: 'grimoire-bot' }, hydrateAhead: 0, ...extraArgs }) // hydrateAhead 0: the claim# kind needs an issue hydration never saw (0.9.0 prefetches it)
 }
 const KIND = (l) => l.replace(/[:#].*$/, '')
 const isBriefed = (c) => c.label !== 'harness-context' && !c.label.startsWith('preflight:')

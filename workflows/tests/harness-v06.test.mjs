@@ -71,7 +71,7 @@ const IMPL_OK = { status: 'DONE', summary: 's', commits: ['aaaaaaa'], baseSha: '
 const FIX_OK = { status: 'DONE', summary: 'fixed', commits: ['bbbbbbb'], headSha: 'bbbbbbb' }
 const PASSV = { verdict: 'PASS', findings: [], summary: 'ok' }
 const MAJOR = { verdict: 'FAIL', findings: [{ severity: 'major', file: 'src/a.ts', line: 3, issue: 'unhandled null' }], summary: 'fail' }
-const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false } }
+const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false }, hydrateAhead: 0 } // hydrateAhead 0: C3 needs an issue hydration never saw (0.9.0 prefetches it)
 // The learning dispatches that follow every execute run.
 const learning = (label) => {
   if (label === 'harness-context') return { harnessMemory: '', agentMemory: {}, priorLearnings: [], priorLedgers: [] }
@@ -310,7 +310,8 @@ const learning = (label) => {
 // A faithful writer: parses the script it was handed, "runs" it, reports the counts it would print.
 const writes = []
 function journalWriter(prompt, { lie = false } = {}) {
-  const heredocs = [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/g)].map((m) => m[1])
+  // 0.9.0: the payloads travel base64 (the writer must copy them, never read them) — decode as the script does
+  const heredocs = [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/g)].map((m) => Buffer.from(m[1].replace(/\s+/g, ''), 'base64').toString('utf8').replace(/\n$/, ''))
   const lines = heredocs[0]
   const run = JSON.parse(heredocs[1])
   const file = (/F="\$DIR\/events\/(\d{8})\.jsonl"/.exec(prompt) || [])[1]

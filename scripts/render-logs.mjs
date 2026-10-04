@@ -21,7 +21,9 @@
 //  one JSON object per line; merged, deduped by (attempt, seq) (first seen wins; events without
 //  `attempt` are attempt 1), sorted by attempt then seq. `at` is the chunk's flush time.
 //  Unknown event types and fields are tolerated and shown raw; lines that fail to
-//  parse are counted and skipped, never fatal.
+//  parse are counted and skipped, never fatal. From 0.9.0, <dir>/<runId>/landed.jsonl holds
+//  each landed task's detail (summary, commits, files), one line per landing, appended once:
+//  run.json's checkpoint keeps only what a resume needs, and the checkpoint card joins the two.
 import { readFileSync, writeFileSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
@@ -86,6 +88,23 @@ function eventFiles(p) {
 // The session an event came from under its runId (1 for journals written before attempts).
 const attemptOf = (ev) => num(ev.attempt) ?? 1
 
+// landed.jsonl: one detail record per landing (a retried flush may append a task twice; the
+// card picks the line whose head matches the checkpoint, else the last one). Bad lines skipped.
+function landedDetail(p) {
+  let text = ''
+  try { text = readFileSync(join(p, 'landed.jsonl'), 'utf8') } catch { return [] }
+  const out = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    let d
+    try { d = JSON.parse(line) } catch { continue }
+    if (!isObj(d) || typeof d.id !== 'string') continue
+    out.push({ id: d.id, repo: d.repo ?? null, status: d.status ?? null, title: d.title ?? null, headSha: d.headSha ?? null, summary: d.summary ?? null,
+      commits: Array.isArray(d.commits) ? d.commits.length : null, files: Array.isArray(d.files) ? d.files.length : null, attempt: num(d.attempt), at: d.at ?? null })
+  }
+  return out
+}
+
 export function loadRuns(dir) {
   const runs = []
   for (const name of subdirs(dir)) {
@@ -107,8 +126,9 @@ export function loadRuns(dir) {
         if (!isObj(ev)) { badLines++; continue }
         const seq = num(ev.seq)
         if (seq !== null) {
-          // a retried flush: first seen wins. Keyed per attempt — a relaunch under the same
-          // runId restarts its own sequence, and those events are not duplicates.
+          // a retried flush: first seen wins. Keyed per attempt — a relaunch under the same runId
+          // without a checkpoint starts its sequence again at 1, and a resumed one continues from
+          // its checkpoint's, which an earlier attempt may have passed: those are not duplicates.
           const key = `${attemptOf(ev)}:${seq}`
           if (seen.has(key)) { duplicates++; continue }
           seen.add(key)
@@ -131,6 +151,7 @@ export function loadRuns(dir) {
       status: run.status ?? (events.some((e) => e.type === 'run.end') ? 'drained' : 'running'),
       summary: isObj(run.summary) ? run.summary : null,
       checkpoint: isObj(run.checkpoint) ? run.checkpoint : null,
+      landed: landedDetail(p),
       badLines,
       duplicates,
       events,
@@ -168,10 +189,12 @@ function runFacts(run) {
     if (e.task != null && e.repo != null && ['route', 'dispatch', 'settle'].includes(e.type)) taskRepo[e.task] = e.repo
     if (e.task != null && ['dispatch', 'settle'].includes(e.type)) tasks.add(String(e.task))
   }
-  // first-round pass: per (task, per-task stage), the reviews at the lowest round all PASS
+  // first-round pass: per (task, per-task stage), the reviews at the lowest round all PASS.
+  // A discarded round (reviewParallel: a quality verdict made stale by a spec fix that moved the
+  // head, or rounds started next to a precheck that failed) never counted, so it is skipped.
   const firstRound = {}
   for (const e of ev) {
-    if (e.type !== 'review' || e.task == null || e.stage === 'terminal') continue
+    if (e.type !== 'review' || e.task == null || e.stage === 'terminal' || e.discarded === true) continue
     const k = `${e.task}|${e.stage}`
     const r = num(e.round) ?? 0
     const f = firstRound[k]
@@ -194,7 +217,7 @@ function runFacts(run) {
     if (e.type !== 'verify') continue
     let who = e.persona
     if (who == null) {
-      const ps = [...new Set(ev.filter((r) => r.type === 'review' && r.task === e.task && r.stage === e.stage
+      const ps = [...new Set(ev.filter((r) => r.type === 'review' && r.discarded !== true && r.task === e.task && r.stage === e.stage
         && (num(r.round) ?? 0) === (num(e.round) ?? 0) && (num(r.gating) ?? 0) > 0).map((r) => r.persona))]
       who = ps.length === 1 ? ps[0] : ps.length ? `${e.stage} panel (${ps.join('+')})` : `${e.stage} (persona unknown)`
     }
@@ -335,7 +358,7 @@ main{padding:16px;max-width:1200px;margin:0 auto}section{margin:0 0 22px}h2{font
 .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:600;font-size:12px}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}td.txt{overflow-wrap:anywhere;min-width:220px}td.mono{font-family:var(--mono);font-size:12px;white-space:nowrap}
-.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.SHIP_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY{color:var(--warn)}
+.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.SHIP_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY,.STILL_RUNNING,.FENCED{color:var(--warn)}
 .lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.lane .task{border-top:1px solid var(--line);padding:6px 0;cursor:pointer}.lane .task:hover{color:var(--acc)}
 details{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--card)}summary{cursor:pointer;padding:8px 10px;font-weight:600;overflow-wrap:anywhere}
 details ol{margin:0;padding:0 10px 10px 30px}details li{margin:3px 0;overflow-wrap:anywhere}.k{font-family:var(--mono);font-size:12px;color:var(--mut)}
@@ -356,7 +379,7 @@ function client() {
     for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c))
     return el
   }
-  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'SHIP_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'answered']
+  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'SHIP_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'STILL_RUNNING', 'FENCED', 'answered']
   const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
   const cls = (v) => (STATUS.includes(String(v)) ? String(v) : null)
   const s = (v) => (v == null ? '' : typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(v))
@@ -368,7 +391,7 @@ function client() {
     route: (e) => `${s(e.agent)} × ${s(e.model)}${e.fallback ? ' (fallback)' : ''} — ${s(e.reason)}`,
     dispatch: (e) => `${s(e.agent)} × ${s(e.model)} · ${s(e.lane)} · cycle ${s(e.cycle)}`,
     precheck: (e) => `${s(e.verdict)}${Array.isArray(e.problems) && e.problems.length ? ': ' + list(e.problems) : ''}`,
-    review: (e) => `${s(e.stage)} · ${s(e.persona)} → ${s(e.verdict)} (gating ${s(e.gating)}, advisory ${s(e.advisory)}, round ${s(e.round)})`,
+    review: (e) => `${s(e.stage)} · ${s(e.persona)} → ${s(e.verdict)} (gating ${s(e.gating)}, advisory ${s(e.advisory)}, round ${s(e.round)})${e.discarded ? ` · discarded${e.reason ? `: ${s(e.reason)}` : ''}, not counted` : ''}`,
     verify: (e) => `${s(e.stage)} r${s(e.round)}: ${s(e.confirmed)} confirmed, ${s(e.overturned)} overturned${Array.isArray(e.reasons) && e.reasons.length ? ' — ' + list(e.reasons) : ''}`,
     fix: (e) => `${s(e.stage)} r${s(e.round)} · ${s(e.model)} · ${s(e.findings)} finding(s)`,
     escalate: (e) => `${s(e.from)} → ${s(e.to)}: ${s(e.reason)}`,
@@ -381,7 +404,38 @@ function client() {
     gate: (e) => `${s(e.repo)} → ${s(e.status)}${e.applies === false ? ' (not applicable)' : ''}${e.prUrl ? ' · ' + s(e.prUrl) : ''}`,
     claim: (e) => `${s(e.action)} by ${s(e.by)}`,
     budget: (e) => `${s(e.spent)} / ${s(e.cap)} → ${s(e.action)}`,
-    halt: (e) => s(e.reason),
+    halt: (e) => `${e.kind ? `[${s(e.kind)}] ` : ''}${s(e.reason)}`,
+    // 0.9.0 · run durability: late and wedged dispatches, incremental delivery, environment checks, resume
+    late: (e) => `${s(e.label)} past its ${s(e.softMin)}-min soft limit${e.kind ? ` (${s(e.kind)})` : ''}: still awaited, not stopped`,
+    hedge: (e) => `${s(e.label)}: a duplicate dispatch started; the first non-empty reply wins`,
+    wedged: (e) => `${s(e.label)} past its ${s(e.hardMin)}-min hard limit and still running${e.repo != null ? `: ${s(e.repo)} fenced` : ''}`,
+    'late-result': (e) => `${s(e.label)} returned late${e.status ? ` (${s(e.status)})` : ''} → ${e.accepted ? 'accepted' : 'discarded'}`,
+    fence: (e) => `${s(e.repo)} → ${e.action === 'release' ? 'released' : e.action === 'hold' ? 'held: no dispatch into it until the late writer returns' : s(e.action)}`,
+    // pushed: true · false (the push failed) · null (nothing to push: the head was already there).
+    // skipped: 'ready' (the PR is out of draft, so it is the gate's: nothing pushed or rewritten) · 'lock'
+    // (another ship or the gate held the repo's ship lock: nothing moved). Neither is a failed push,
+    // whatever `pushed` says.
+    ship: (e) => `${s(e.repo)}${e.mode ? ` · ${s(e.mode)}` : ''} → ${e.skipped === 'ready'
+      ? `skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone${e.mode === 'halt' ? ` · ${e.failedStep === 'comment' ? 'the status comment failed' : 'status comment only'}` : ' · the new work waits for the next terminal slot'}`
+      : e.skipped === 'lock' ? `skipped: another ship or the gate held the ship lock — nothing pushed or rewritten, not a failed push${e.detail ? `: ${s(e.detail)}` : ''}`
+        : e.skipped ? `skipped (${s(e.skipped)})`
+          : e.pushed === false ? `failed at ${s(e.failedStep || 'push')}${e.detail ? `: ${s(e.detail)}` : ''}` : `${e.pushed === null ? `${s(e.head ?? '?')} already on the remote` : `pushed ${s(e.head ?? e.remoteHead ?? e.pushedHead ?? '?')}`}${e.failedStep ? ` · ${s(e.failedStep)} step failed${e.detail ? `: ${s(e.detail)}` : ''}` : ''}`}${e.prUrl ? ` · ${s(e.prUrl)}${e.draft ? ' (draft)' : e.draft === false ? ' (ready)' : ''}` : ''}${e.disabled ? ` · incremental ${s(e.disabled)} disabled` : ''}`,
+    // recheck: the one re-check of the checks a stall check found failing · cleared: the checks a later
+    // green check found answering, which lifted the environment halt their failed re-check had latched
+    env: (e) => `${s(e.when)}${e.recheck ? ' re-check' : ''}${e.why ? ` (${s(e.why)})` : ''} → ${Array.isArray(e.cleared) && e.cleared.length
+      ? `ok: ${list(e.cleared)} answered again, the environment halt is lifted`
+      : e.ok == null ? 'no usable report (not counted as a failure)'
+        : e.ok ? (e.recheck ? 'ok: the failure was transient, the run goes on' : 'ok')
+          : `FAILED${e.recheck ? ' again on the re-check' : ''}: ${list(e.failed)}`}`,
+    // after a green gate: the state marker is the ready PR body's last line, exactly, or it is put back
+    seal: (e) => `${s(e.repo)} → ${e.ok ? (e.already ? 'the state marker the gate kept is exact: nothing edited' : "the state marker was put back as the last line of the PR body (the gate's copy differed)") : `the state marker could not be checked${e.step ? ` (step ${s(e.step)})` : ''}${e.round != null ? `, try ${s(e.round)}` : ''}`}`,
+    // checkpoint · pr: absorbed at start, verified on the run branch; reviewed-earlier · verify-only:
+    // an implementer found the work already on the branch, reviewed for this task or not yet
+    absorb: (e) => `${e.source === 'reviewed-earlier' ? 'already on the branch and reviewed for this task: landed with no new review'
+      : e.source === 'verify-only' ? 'already on the branch, not reviewed for this task: sent to the panel as it stands'
+        : e.source === 'checkpoint' || e.source === 'pr' ? `landed in an earlier attempt, verified on the run branch (from the ${e.source === 'pr' ? 'PR state marker' : 'checkpoint'})`
+          : `landed earlier, from ${s(e.source)}`}${e.head ? ` @ ${s(e.head)}` : ''}`,
+    'harness-routed': (e) => `${s(e.stage)} · ${s(e.persona)} · ${s(e.severity)} at ${s(e.where)}: a harness file, routed to crystallize, not fixed on the product branch`,
     'run.end': (e) => `${s(e.status)} · done ${s(e.done)} · failed ${s(e.failed)} · blocked ${s(e.blocked)} · PRs ${s(e.prs)} · tokens ${s(e.tokens)}`,
   }
   const summarize = (e) => { try { return SUM[e.type] ? SUM[e.type](e) : rest(e) } catch { return rest(e) } }
@@ -422,6 +476,8 @@ function client() {
     const blocked = end.blocked ?? (Array.isArray(sm.blocked) ? sm.blocked.length : sm.blocked)
     const prUrls = uniq([...(Array.isArray(sm.prs) ? sm.prs.map((p) => (typeof p === 'string' ? p : p && (p.url || p.prUrl))) : []),
       ...ev.filter((e) => e.type === 'gate' && e.prUrl).map((e) => e.prUrl)].filter(Boolean).map(String))
+    const drafts = uniq([...(isObj(sm.draftPrs) ? Object.values(sm.draftPrs) : []),
+      ...ev.filter((e) => e.type === 'ship' && e.prUrl && e.draft !== false).map((e) => e.prUrl)].filter(Boolean).map(String)).filter((u) => !prUrls.includes(u))
     const halt = ev.find((e) => e.type === 'halt')
     return h('section', null,
       h('h2', null, 'Overview'),
@@ -432,29 +488,50 @@ function client() {
         stat('status', s(r.status), r.status), stat('output tokens', fmt(D.tokens[r.runId])),
         stat('done', s(done ?? '—')), stat('failed / attention', s(failed ?? '—')), stat('blocked', s(blocked ?? '—')),
         stat('PRs', s(end.prs ?? prUrls.length)), stat('replans', s(count('replan'))), stat('events', s(ev.length))),
-      prUrls.length ? h('div', { class: 'tags' }, prUrls.map((u) => h('span', { class: 'tag' }, u))) : null,
-      halt || sm.halt ? h('p', { class: 'FAIL' }, `halt: ${s(halt ? halt.reason : sm.halt.reason ?? sm.halt)}`) : null,
-      r.checkpoint ? checkpoint(r.checkpoint) : null,
+      prUrls.length || drafts.length ? h('div', { class: 'tags' }, prUrls.map((u) => h('span', { class: 'tag' }, u)), drafts.map((u) => h('span', { class: 'tag' }, `${u} (draft)`))) : null,
+      halt || sm.halt ? h('p', { class: 'FAIL' }, `halt: ${haltText(halt || sm.halt)}`) : null,
+      r.checkpoint ? checkpoint(r.checkpoint, r.landed) : null,
       isObj(sm.telemetry) ? kvBlock('Telemetry (run summary)', sm.telemetry) : null,
       r.badLines ? h('p', { class: 'muted' }, `${r.badLines} malformed event line(s) skipped`) : null,
       r.duplicates ? h('p', { class: 'muted' }, `${r.duplicates} duplicate seq line(s) from retried flushes ignored`) : null)
   }
 
   const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  // a halt event or run.json's summary.halt: {reason, kind} (kind null when the halt has none), or a bare reason (before 0.9.0)
+  const haltText = (x) => (isObj(x) ? `${x.kind ? `[${s(x.kind)}] ` : ''}${s(x.reason)}` : s(x))
   function kvBlock(title, o) {
     return h('div', { class: 'card', style: 'margin-top:8px' }, h('h3', null, title),
       h('div', { class: 'scroll' }, h('table', null, h('tbody', null, Object.entries(o).map(([k, v]) =>
         h('tr', null, h('th', null, k), h('td', { class: 'txt' }, s(v))))))))
   }
-  function checkpoint(c) {
+  function checkpoint(c, detail) {
     const n = (v) => (Array.isArray(v) ? v.length : isObj(v) ? Object.keys(v).length : s(v ?? '—'))
     const fixes = isObj(c.fixRounds) ? Object.entries(c.fixRounds).map(([t, k]) => `${t} ${s(k)}`).join(', ') : ''
-    return h('div', { class: 'card', style: 'margin-top:8px' }, h('h3', null, 'Checkpoint'),
+    const short = (sha) => s(sha).slice(0, 7)
+    // checkpoint v2 (0.9.0): landedTasks carry the SHAs a resumed session verifies and absorbs
+    const landedTasks = Array.isArray(c.landedTasks) ? c.landedTasks.filter(isObj) : null
+    // their detail: landed.jsonl (the line whose head matches, else the task's last line), or the
+    // checkpoint itself (a 0.9.0 checkpoint written before landed.jsonl carried it inline)
+    const sameSha = (a, b) => !!a && !!b && (String(a).startsWith(String(b)) || String(b).startsWith(String(a)))
+    const detailOf = (t) => {
+      const lines = (detail || []).filter((d) => d.id === t.id)
+      const d = lines.filter((x) => sameSha(x.headSha, t.headSha)).pop() || lines.pop()
+      return d || (t.summary != null || Array.isArray(t.files) ? { title: t.title, summary: t.summary, files: Array.isArray(t.files) ? t.files.length : null, commits: Array.isArray(t.commits) ? t.commits.length : null } : null)
+    }
+    const details = (landedTasks || []).map((t) => [t, detailOf(t)]).filter(([, d]) => d)
+    const shipped = isObj(c.shipped) ? Object.entries(c.shipped).filter(([, v]) => isObj(v)) : []
+    return h('div', { class: 'card', style: 'margin-top:8px' }, h('h3', null, 'Checkpoint', c.version != null ? h('span', { class: 'muted' }, ` · v${s(c.version)}`) : null),
       h('div', { class: 'grid' }, stat('replans used', s(c.replansUsed ?? '—')), stat('output tokens spent', fmt(c.outputTokensSpent)),
-        stat('last seq', s(c.lastSeq ?? '—')), stat('landed', n(c.landed)), stat('pending', n(c.pending)), stat('learnings', n(c.learnings))),
+        stat('last seq', s(c.lastSeq ?? '—')), stat('landed', n(landedTasks ?? c.landed)), stat('pending', n(c.pending)), stat('learnings', n(c.learnings))),
+      landedTasks && landedTasks.length ? h('p', null, h('span', { class: 'muted' }, 'landed: '),
+        landedTasks.map((t) => `${s(t.id)} @ ${short(t.headSha) || '?'}${t.repo != null ? ` (${s(t.repo)}${t.runBranch ? ` · ${s(t.runBranch)}` : ''})` : ''}`).join(', ')) : null,
+      details.length ? h('ul', null, details.map(([t, d]) => h('li', null, `${s(t.id)}${d.title || t.title ? ` — ${s(d.title || t.title)}` : ''}: ${s(d.summary) || '(no summary)'}`,
+        d.files != null || d.commits != null ? h('span', { class: 'muted' }, ` · ${d.commits ?? '?'} commit(s), ${d.files ?? '?'} file(s)`) : null))) : null,
+      shipped.length ? h('p', null, h('span', { class: 'muted' }, 'pushed: '),
+        shipped.map(([repo, v]) => `${repo} @ ${short(v.pushedHead) || '—'}${v.prUrl ? ` · ${s(v.prUrl)}${v.draft ? ' (draft)' : ''}` : ''}`).join('; ')) : null,
       fixes ? h('p', null, h('span', { class: 'muted' }, 'fix rounds: '), fixes) : null,
       Array.isArray(c.pending) && c.pending.length ? h('p', null, h('span', { class: 'muted' }, 'pending: '), c.pending.map(s).join(', ')) : null,
-      Array.isArray(c.learnings) && c.learnings.length ? h('ul', null, c.learnings.map((l) => h('li', null, s(l)))) : null)
+      Array.isArray(c.learnings) && c.learnings.length ? h('ul', null, c.learnings.map((l) => h('li', null, s(isObj(l) && l.text != null ? l.text : l)))) : null)
   }
 
   function timeline(r) {
@@ -521,9 +598,11 @@ function client() {
           mine.length ? mine.map((t) => {
             const settle = lastOf(t, 'settle'), route = lastOf(t, 'route')
             const n = (type) => t.events.filter((e) => e.type === type).length
+            // a discarded review round never counted as a verdict (reviewParallel): shown apart
+            const discarded = t.events.filter((e) => e.type === 'review' && e.discarded === true).length
             return h('div', { class: 'task', role: 'button', tabindex: 0, onclick: () => { st.task = t.id; render(); const d = document.getElementById('drill'); if (d) d.scrollIntoView() } },
               h('b', null, t.id), ' ', h('span', { class: cls(settle && settle.status) }, settle ? s(settle.status) : 'unsettled'),
-              h('div', { class: 'muted' }, `${route ? `${s(route.agent)} × ${s(route.model)} · ` : ''}${n('review')} reviews · ${n('fix')} fixes · ${n('escalate')} escalations`))
+              h('div', { class: 'muted' }, `${route ? `${s(route.agent)} × ${s(route.model)} · ` : ''}${n('review') - discarded} reviews${discarded ? ` (+${discarded} discarded)` : ''} · ${n('fix')} fixes · ${n('escalate')} escalations`))
           }) : h('p', { class: 'empty' }, 'no tasks'))
       })))
   }

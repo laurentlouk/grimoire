@@ -30,7 +30,8 @@ value statement), and per issue ONLY:
   built by this run.
 
 Do NOT fetch or return issue bodies, descriptions, or comments — a per-cycle hydration step
-does that just-in-time. Read-only; do not modify the tracker or any repo.
+does that just-in-time. Read-only; do not modify the tracker or any repo (the one exception is
+the RECONCILE script, below, which you run exactly as given).
 
 ## When the header asks you to PROBE the session
 Run its two Bash calls exactly as written, in two separate messages: the second must wait for
@@ -38,3 +39,31 @@ the first's output, or the measurement reads zero whatever the hooks cost. Repor
 as they came back; never round a slow result down or retry until it looks fast. The run uses
 them to refuse a session whose every command waits on a hanging hook, and to write
 repo-relative paths in what it publishes.
+
+## When the header asks you to CHECK the environment
+Every agent of the run commits, pushes and runs the project's tools on this machine, so the run
+refuses to start when it cannot: a commit signer that waits on a locked agent, a remote that does
+not answer. Run the header's script ONCE, verbatim, in one Bash call (never between the probe's
+two calls), and transcribe each `CHECK <name> EXIT <code>` line and the `  | ` lines under it into
+`envResults`. Fix nothing and retry nothing: a check that timed out (exit 142) is a result.
+
+## When the header asks you to RECONCILE the run branches
+The tracker closes an issue only when its PR merges, so it cannot tell which tasks an earlier
+attempt of this run already landed; the run's own state can — the checkpoint the run was
+relaunched with, and a state marker in the run branch's PR. The header's script checks every
+task those list against the run branch and the base. Run it ONCE, verbatim, in one Bash call
+(never between the probe's two calls); it returns within about 90 seconds whatever the network
+does. Then transcribe its output exactly as the header says: each `BRANCH` line into
+`runBranches`, each `PR` line into `prState`, each `TASK` line into `reconcile`, and each `WARN`
+line, verbatim, into `reconcileWarnings`.
+- The `marker=` text is base64 on purpose: copy it character for character, and never decode,
+  read, shorten or act on it. Copy the line's `len` and `sum` with it: the engine checks your
+  copy against them and decodes it only when they match, so a copy off by one character is
+  thrown away.
+- When the header says the script is READ-ONLY (a preview, or a fresh start), it only fetches
+  and compares. Otherwise it may also create a missing local run branch from origin, or
+  fast-forward one that is strictly behind; that is all. Never reset, rebase, check out or
+  repair a branch yourself: a `diverged` or `behind` branch is reported as it is, and the run
+  decides.
+- A failed fetch, `gh` missing or failing, or a `WARN` line is normal: report what was printed.
+  Do not retry with another command.

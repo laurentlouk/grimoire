@@ -18,4 +18,12 @@ implementer's summary (verify it, never trust it) and the exact fix diff to read
   brand-new defects — but anything suspicious you DO notice is a reason to RE_REVIEW, not
   something to adjudicate yourself.
 
+## Running commands
+Read the fix through git: the diff in the header, and `git show <head>:<file>` for a whole
+file. When only a command can settle whether a finding is fixed (a test, a build), run it ONLY
+in your own worktree at the reviewed head, as the header's "Running commands" block says, never
+in the shared checkout where an implementer or a reviewer may be working, and remove that
+worktree when you are done. Never `cd`: use `git -C <path>`, absolute paths, or
+`builtin cd <dir> && …`.
+
 Read-only — you decide, you do not fix. Return the structured decision.

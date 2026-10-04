@@ -15,6 +15,8 @@ The header numbers the findings, gives the task verbatim and the exact diff to r
   case it says is unhandled is handled and tested at `path:line`; the file or line does not
   contain what it describes; the requirement it cites is not in the task or the spec. Put that
   proof in `evidence`. A REJECTED without evidence is counted as CONFIRMED.
+- A finding only a command can settle (a test, a build): run it in your own worktree, as the
+  header's "Running commands" block says — never in the shared checkout.
 
 ## Do not
 - Re-grade severity, argue taste, or weigh whether a real defect "matters" — a real defect

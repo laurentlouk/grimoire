@@ -48,7 +48,7 @@ const REPOS = [
   { name: 'infra', agent: 'infra-engineer', tags: ['infra'], gate: null },
 ]
 const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-600', repos: REPOS }
-const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false } }
+const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false }, deliver: 'end', builtinEnvChecks: false } // deliver/builtinEnvChecks: these cases predate 0.9.0's ships and environment checks (run-durability-delivery covers them)
 
 const indexOf = (tasks) => ({
   slices: [...new Set(tasks.map((t) => t.slice ?? 1))].sort((a, b) => a - b).map((s) => ({
@@ -59,12 +59,12 @@ const indexOf = (tasks) => ({
   hookProblems: [],
 })
 
-async function run(scenario, tasks, responder, { extraArgs = {} } = {}) {
+async function run(scenario, tasks, responder, { extraArgs = {}, index = {} } = {}) {
   const calls = []
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || '?'
     calls.push({ label, prompt, opts })
-    if (label === 'parse-index') return indexOf(tasks)
+    if (label === 'parse-index') return { ...indexOf(tasks), ...index }
     if (label.startsWith('hydrate:')) return { tasks: tasks.filter((t) => prompt.includes(`- ${t.id} `)).map(({ state, ...t }) => t) }
     if (label === 'harness-context') return { harnessMemory: '', agentMemory: {}, priorLearnings: [], priorLedgers: [] }
     if (label === 'ledger') return { path: 'runs/x.json', branch: 'harness/run-x' }
@@ -118,7 +118,8 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
 }
 
 // ══════ 1e · the run branch is a valid git ref for ANY project or repo name ══════
-// Slugged (accents folded, anything else collapsed to one dash, dashes trimmed); a name with
+// Named after the project's first ticket reference when it has one (owner/repo#N, #N, ABC-123, a
+// tracker URL's id), else its whole text. Slugged (accents folded, anything else collapsed to one dash, dashes trimmed); a name with
 // nothing sluggable left falls back to a stable token (x + 8 hex of an FNV-1a hash of it).
 {
   const cases = [
@@ -127,6 +128,12 @@ const impl = (sha, extra = {}) => ({ status: 'DONE', summary: 's', commits: [sha
     ['  --Hello!!  World?? (v2)--  ', 'api', 'feat/hello-world-v2-api'],
     ['Q3 roadmap', 'My Repo', 'feat/q3-roadmap-my-repo'],
     ['Q3 roadmap', '🚀✨', 'feat/q3-roadmap-x26e7ae15'],
+    // 0.9.0: named after the project's KEY — its first ticket reference — not its wording
+    ['acme/site#3 — GitHub parent issue #3; its slices are S1 to S9', 'web', 'feat/acme-site-3-web'],
+    ['acme/Site#3', 'web', 'feat/acme-site-3-web'],
+    ['https://github.com/acme/site/issues/3', 'web', 'feat/acme-site-3-web'],
+    ['PROJ-700 Points: earn and show points', 'api', 'feat/proj-700-api'],
+    ['see #12 for the plan', 'api', 'feat/issue-12-api'],
   ]
   for (const [project, repo, want] of cases) {
     const REPO = [{ name: repo, agent: 'backend-engineer', tags: ['backend'], gate: null }]
@@ -482,7 +489,7 @@ for (const maxPrecheckFixes of [1, 3]) {
     return PASSV
   }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
   const briefed = calls.filter((c) => /## Brief\nYour FIRST action/.test(c.prompt))
-  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'spec-hawk'], 'the briefed dispatch kinds of this run')
+  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'env', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'seal', 'ship', 'spec-hawk'], 'the briefed dispatch kinds of this run (0.9.0: the ship after a landing, the environment check after the BLOCKED, the seal after the gate)')
   eq(briefed.filter((c) => !c.prompt.includes(`\n${UNATTENDED}\nExplore before asking`)).map((c) => c.label), [], 'each carries the boundary, right before the explore-before-asking rule')
 }
 
@@ -498,13 +505,15 @@ for (const maxPrecheckFixes of [1, 3]) {
     return { runDir: (/^RUNDIR (.+)$/m.exec(r.stdout) || [])[1], lines: num('LINES'), bytes: num('BYTES') }
   }
   // the second session takes a different path (blocked → halt), so an overwrite of the first
-  // session's chunks would change their content
-  const session = (name, extra, blocked = false) => run(name, [T('PROJ-1')], (label, prompt) => {
+  // session's chunks would change their content. A relaunch's index sees the run branch where the
+  // session before it left it (`moved`): the session token hashes what a launch started from.
+  const MOVED = { runBranches: [{ repo: 'api', local: 'aaaaaaa', remote: '', sync: 'local-only' }] }
+  const session = (name, extra, blocked = false, moved = false) => run(name, [T('PROJ-1')], (label, prompt) => {
     if (label.startsWith('journal#')) return bashWriter(prompt)
     if (label.startsWith('impl:')) return blocked ? { status: 'BLOCKED', summary: 'x' } : impl('aaaaaaa')
     if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop', learnings: [] }
     return PASSV
-  }, { extraArgs: { precheck: false, verifyFindings: false, runId: 'run-a', telemetry: { dir: TEL, flushEvery: 4 }, ...extra } })
+  }, { extraArgs: { precheck: false, verifyFindings: false, runId: 'run-a', telemetry: { dir: TEL, flushEvery: 4 }, ...extra }, index: moved ? MOVED : {} })
   const dir = join(TEL, 'run-a')
   const events = () => readdirSync(join(dir, 'events')).sort().map((f) => [f, readFileSync(join(dir, 'events', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l))])
   const runJson = () => JSON.parse(readFileSync(join(dir, 'run.json'), 'utf8'))
@@ -515,14 +524,14 @@ for (const maxPrecheckFixes of [1, 3]) {
   ok(first.every(([f, evs]) => /^\d{8}\.jsonl$/.test(f) && evs.every((e) => e.attempt === 1 && /^\d{4}-\d\d-\d\dT/.test(e.at))), 'attempt 1: plain <firstSeq>.jsonl chunks, every event attempt 1, `at` stamped')
   ok(runJson().attempt === 1, 'run.json attempt 1')
 
-  await session('11b · relaunch under the SAME runId, no resumeState → attempt 2, attempt 1 untouched', {}, true)
+  await session('11b · relaunch under the SAME runId, no resumeState → attempt 2, attempt 1 untouched', {}, true, true)
   const second = events()
   eq(second.filter(([f]) => /^\d{8}\.jsonl$/.test(f)), first, "attempt 1's chunks are byte-for-byte what they were")
   const a2 = second.filter(([f]) => /^\d{8}\.a2\.jsonl$/.test(f))
   ok(a2.length >= 2 && a2.every(([, evs]) => evs.every((e) => e.attempt === 2)) && a2[0][1][0].seq === 1, 'attempt 2 writes its own .a2 chunks, restarting at seq 1')
   ok(runJson().attempt === 2, 'run.json attempt 2')
 
-  await session('11c · a resume with the checkpoint → attempt 3, sequence continues', { resumeState: runJson().checkpoint })
+  await session('11c · a resume with the checkpoint → attempt 3, sequence continues', { resumeState: runJson().checkpoint }, false, true)
   const a3 = events().filter(([f]) => /\.a3\.jsonl$/.test(f))
   ok(a3.length >= 1 && a3.every(([, evs]) => evs.every((e) => e.attempt === 3)) && a3[0][1][0].seq === runJson().checkpoint.lastSeq - a3.flatMap(([, e]) => e).length + 1, 'attempt 3 continues the sequence')
   ok(runJson().attempt === 3, 'run.json attempt 3')
@@ -552,7 +561,7 @@ for (const maxPrecheckFixes of [1, 3]) {
     if (label.startsWith('journal#')) return bashWriter(prompt)
     if (label.startsWith('impl:')) return impl('aaaaaaa')
     return PASSV
-  }, { extraArgs: { precheck: false, verifyFindings: false, runId: 'run-b', telemetry: { dir: TEL, flushEvery: 4 } } })
+  }, { extraArgs: { precheck: false, verifyFindings: false, runId: 'run-b', telemetry: { dir: TEL, flushEvery: 4 } }, index: dropFirst ? { runBranches: [{ repo: 'api', local: 'aaaaaaa', remote: '', sync: 'local-only' }] } : {} }) // 11e starts where 11d left the run branch
   const files = () => readdirSync(join(dir, 'events')).sort()
   const attemptsIn = (re) => [...new Set(files().filter((f) => re.test(f)).flatMap((f) => readFileSync(join(dir, 'events', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l).attempt)))]
   await session('11d · a 0.7.x run.json without attempt counts as attempt 1 → this session is 2', false)

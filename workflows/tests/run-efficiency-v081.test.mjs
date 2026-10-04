@@ -127,18 +127,34 @@ async function run(scenario, tasks, responder, { args = {}, index = PROBE, cryst
 }
 
 // ══════════════ 3 · a timed-out implementer may still be running ══════════════
+// 0.9.0: it is no longer booked DIED and replanned — it is waited for (late), and past its hard
+// limit it is WEDGED: its repo fenced, nothing re-dispatched into its checkout, the run halting
+// "still running". The new run-durability-timeouts test covers the rest (L1–L7).
 {
   let n = 0
-  const { calls, result, logs } = await run('3 · the replanner is told a timed-out agent may still commit, and sees the measured latency', [TASK], (label) => {
+  const { labels, result, logs } = await run('3a · an implementer past its hard limit is wedged: no replan, no second dispatch into its checkout', [TASK], (label) => {
     if (label.startsWith('impl:')) return n++ === 0 ? new Promise(() => {}) : IMPL_OK
     if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop here', learnings: [] }
     return happy(label)
-  }, { args: { ...QUIET, agentTimeoutMin: 0.001 }, index: { ...PROBE, toolLatencySec: 4 } })
-  const rp = (calls.find((c) => c.label === 'replan#1') || {}).prompt || ''
-  ok(/does NOT stop the agent/.test(rp) && /verify-and-report/.test(rp), 'the failure detail says it may still be running, and what to do')
+  }, { args: { ...QUIET, agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.005 } })
+  ok(/^still running: impl:PROJ-1 in api passed the 0\.005-min hard limit and has not returned; it may still commit/.test((result.halt || {}).reason || ''), 'the halt says the implementer is still running and may still commit')
+  eq((result.halt || {}).kind, 'wedged', 'halt kind is wedged')
+  ok(!labels.some((l) => l.startsWith('replan')), 'no replan is spent on it')
+  eq(labels.filter((l) => l.startsWith('impl:')), ['impl:PROJ-1'], 'nothing is re-dispatched into its checkout')
+  ok(logs.some((l) => /\[late\] impl:PROJ-1 past 0\.001m — still waiting .*the agent is not stopped/.test(l)), 'the late log says it is still awaited and not stopped')
+  ok(result.telemetry.wedged.includes('impl:PROJ-1') && !result.telemetry.timedOut.includes('impl:PROJ-1'), 'telemetry lists it as wedged, not as given up on')
+  eq(result.needsAttention, [{ id: 'PROJ-1', repo: 'api', status: 'STILL_RUNNING', label: 'impl:PROJ-1' }], 'needsAttention: STILL_RUNNING')
+}
+{
+  let n = 0
+  const { prompt } = await run('3b · a late implementer that then returns nothing: the replanner is told it may have committed, and sees the measured latency', [TASK], (label) => {
+    if (label.startsWith('impl:')) return n++ === 0 ? new Promise((r) => setTimeout(() => r(null), 150)) : IMPL_OK
+    if (label.startsWith('replan')) return { decision: 'HALT', reason: 'stop here', learnings: [] }
+    return happy(label)
+  }, { args: { ...QUIET, agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.05 }, index: { ...PROBE, toolLatencySec: 4 } })
+  const rp = prompt('replan#1')
+  ok(/may have committed before it ended/.test(rp) && /verify-and-report/.test(rp), 'the failure detail says it may have committed, and what to do')
   ok(/~4s before it ran/.test(rp), 'the replan prompt carries the measured tool latency')
-  ok(logs.some((l) => /\[timeout\] impl:PROJ-1 .*may still commit/.test(l)), 'the timeout log says the agent is not stopped')
-  ok(result.telemetry.timedOut.includes('impl:PROJ-1'), 'telemetry lists the timed-out dispatch')
 }
 
 // ══════════════ 4 · a repo timeoutMin under the backstop is a no-op, and said so ══════════════
@@ -199,10 +215,13 @@ async function run(scenario, tasks, responder, { args = {}, index = PROBE, cryst
     return happy(label)
   }, { args: { ...QUIET, baseBranch: 'origin/chore/setup' } })
   const lp = prompt('ledger')
-  ok(lp.includes('"where": "src/a.ts:3"'), 'a checkout path becomes repo-relative')
-  ok(lp.includes('"where": "src/b.ts:4"'), 'a lane prefix under the checkout is dropped')
-  ok(lp.includes('"where": "~/notes/c.md:1"'), 'the home directory becomes ~')
-  ok(!lp.includes('/home/ana'), 'no absolute home path is left anywhere in the payload')
+  // 0.9.0: the payload travels base64 — the writer copies it into the file and never reads it
+  const payload = Buffer.from(((/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/.exec(lp) || [])[1] || '').replace(/\s+/g, ''), 'base64').toString('utf8')
+  ok(payload.includes('"where": "src/a.ts:3"'), 'a checkout path becomes repo-relative')
+  ok(payload.includes('"where": "src/b.ts:4"'), 'a lane prefix under the checkout is dropped')
+  ok(payload.includes('"where": "~/notes/c.md:1"'), 'the home directory becomes ~')
+  ok(!payload.includes('/home/ana') && !lp.includes('/home/ana'), 'no absolute home path is left anywhere in the payload')
+  ok(!lp.includes('"where"') && !lp.includes('"advisoryNotes"'), 'the prompt itself carries no raw payload text')
   ok(/origin\/HEAD/.test(lp) && /never the run's base branch `origin\/chore\/setup`/.test(lp), 'the ledger branch is cut from the default branch')
 }
 

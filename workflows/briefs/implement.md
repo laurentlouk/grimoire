@@ -39,32 +39,52 @@ already settled there.
   repo in one run lands on its ONE run branch, so when the header says RUN BRANCH, check that
   branch out and commit there — never start a branch of your own (it would never be
   integrated).
-- **Never push, never open or update a PR.** Each repo's run branch is pushed and its ONE PR
-  opened (or updated) once, at PROJECT END, by the repo's terminal slot — for every repo,
-  gated or not. You commit; the loop ships.
+- **Never push, never open or update a PR.** The loop ships what you commit: once a task has
+  passed its review it pushes the landed head and keeps the repo's one draft PR up to date (or,
+  for a repo set to deliver at the end, pushes once, at PROJECT END), and the repo's terminal
+  slot marks the PR ready at PROJECT END. You commit; the loop ships.
 - **Explore before asking; don't guess.** If a fact is discoverable in the design artifacts,
   the docs, the code, schemas, contracts, config or git history, find it yourself before
   asking, and never state a discoverable fact as a guess. Only decisions the owner holds
   (product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase) may
   leave as a question. When exploration is inconclusive, your NEEDS_CONTEXT question says
   what you checked and what is still unknown.
-- **Commit incrementally** — every time you reach a green step, commit it. This dispatch can
-  be cut off by the per-agent timeout: anything COMMITTED survives and a re-dispatch resumes
-  from it; anything uncommitted is redone from scratch.
+- **Commit incrementally** — every time you reach a green step, commit it. This dispatch is
+  not cut off at its time limit; it is waited for. Commit at every green step so a later
+  session can absorb it: anything COMMITTED survives, anything uncommitted is redone from
+  scratch.
 - **Report the review range in your return**: `baseSha` (`git merge-base <base branch> HEAD`, the base branch is named in the header),
   `startSha` (`git rev-parse HEAD` on your branch BEFORE your first change — for a merge or
   integration task, the branch head before you merged), `commits` (the SHAs you created,
   oldest first — SHAs, not messages), and `headSha` (`git rev-parse HEAD`). The review panel
   is handed exactly `startSha..headSha`, so a merge brings in only what it adds to the branch.
 - **Never poll-loop or babysit a long command.** No watch loops, and never background a job
-  then poll for it — run it in the FOREGROUND and wait. Wrap anything that could hang in
-  `timeout <seconds> …`.
+  then poll for it — run it in the FOREGROUND and wait. Wrap anything that could hang (a browser
+  engine, a device, a network call) in a time limit: `perl -e 'alarm shift; exec @ARGV' <s> …`
+  (exit 142 = timed out; perl is on stock macOS, which has no `timeout`), or `timeout <s> …` /
+  `gtimeout <s> …` where one of those exists. Check that the one you use exists before relying
+  on it: a wrapper that is "command not found" guards nothing.
+- **Shell: never `cd`.** It may be aliased or replaced by a shell plugin's function (one such
+  replacement once made 147 commands of a run fail). Use `git -C <path>` and absolute paths, or `builtin cd` when
+  a tool must run from a directory. Read and search files with the Read and Grep tools rather than
+  `cat`, `head` or `grep` in Bash.
 - You have no interactive channel — a question can only travel as your return value. If,
   after exploring, the requirement or the right approach is still unclear, return status
   NEEDS_CONTEXT with ONE specific `question` — do NOT guess or ship a half-solution. A
   read-only scout tries to answer it from the codebase and you are re-dispatched with the
   answer; only genuine product/UX/cost decisions go to a human. Returning NEEDS_CONTEXT early
   is CHEAP and correct; burying the question and guessing is the expensive failure.
+
+## Already done when you start
+If HEAD already holds this task's work — an earlier attempt, or a predecessor that ran past its
+time limit, committed it — do not redo, regenerate or re-commit it. Verify it against the
+success criteria with the focused checks, then return DONE (DONE_PENDING_GATE in a gated repo)
+with `commits: []`, `startSha = headSha = HEAD`, and `landedBefore` = the SHAs that implement it,
+oldest first (`git log --reverse --format=%H <baseSha>..HEAD -- <declared files>`, keeping only
+this task's commits). The loop absorbs those SHAs if a panel already passed them, and otherwise
+reviews them as they stand: an empty diff is never a defect when you name them. If only part of
+the task is there, finish the rest as a normal change (its commits in `commits`) and leave
+`landedBefore` out.
 
 ## Parallel lane (only when the header says PARALLEL LANE)
 Other implementers are working in the shared checkout RIGHT NOW: do not touch that checkout,

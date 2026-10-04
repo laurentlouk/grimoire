@@ -19,6 +19,15 @@
 //    • prune --dry-run removes nothing; prune removes only the old run; prune
 //      refuses / , $HOME and anything outside the working directory; a dir holding
 //      only events/ chunks counts as a run dir
+//    • 0.9.0 run durability: the page summarizes late, hedge, wedged, late-result,
+//      fence, ship (a ship skipped on a ready PR or a held lock never reads as a
+//      failed push), env (a re-check, transient or failing again, and a halt a later
+//      check lifted), seal, absorb (each source) and harness-routed events in words,
+//      shows a halt's kind and draft
+//      PRs, and the checkpoint card shows a v2 checkpoint's landedTasks with their
+//      heads (the renderer is executed against a minimal DOM, not just grepped)
+//    • a review round discarded under reviewParallel (`discarded: true`) is shown as
+//      discarded and left out of the first-round pass rate and of a task's review count
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
@@ -234,6 +243,119 @@ try {
   ok(none.status === 0 && /no runs found/.test(none.stdout), 'summary over a missing dir says no runs found')
   const noneHtml = cli('--dir', 'nowhere', '--out', '.grimoire/empty.html')
   ok(noneHtml.status === 0 && existsSync(join(ROOT, '.grimoire', 'empty.html')), 'render over a missing dir still writes a page')
+
+  // ══════ 5 · 0.9.0 run durability events and checkpoint v2 ══════
+  section('5 · run-durability events read as sentences; the v2 checkpoint lists landed tasks and heads')
+  const ROOT5 = join(ROOT, 'durability')
+  const RUNS5 = join(ROOT5, '.grimoire', 'runs', 'run-delta')
+  mkdirSync(join(RUNS5, 'events'), { recursive: true })
+  const metaD = { grimoireVersion: '0.9.0', briefsHash: 'dddd444', personasHash: 'p4', configHash: 'c4' }
+  const checkpointD = {
+    version: 2, replansUsed: 0, lastSeq: 12, outputTokensSpent: 4000, learnings: [{ text: 'sign commits before launching', repos: ['site'] }], pending: ['#6'], landed: ['#4', '#5'],
+    landedTasks: [
+      { id: '#4', repo: 'site', status: 'DONE', runBranch: 'feat/proj-9-site', startSha: '0000000', firstSha: 'aaaaaaa1', headSha: 'aaaaaaa1111', commits: ['aaaaaaa1111'], summary: 'built A' },
+      { id: '#5', repo: 'site', status: 'DONE', runBranch: 'feat/proj-9-site', startSha: 'aaaaaaa1111', firstSha: 'bbbbbbb2', headSha: 'bbbbbbb2222', commits: ['bbbbbbb2222'], summary: 'built B' },
+    ],
+    shipped: { site: { pushedHead: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true } },
+  }
+  writeFileSync(join(RUNS5, 'run.json'), JSON.stringify({ runId: 'run-delta', project: 'PROJ-9', meta: metaD, startedAt: iso(0), updatedAt: iso(0), status: 'halted', checkpoint: checkpointD,
+    summary: { draftPrs: { site: 'https://example.invalid/pr/7' } } }))
+  const evD = [
+    { type: 'run.start', project: 'PROJ-9', mode: 'execute', meta: metaD, knobs: {}, repos: ['site'] },
+    { type: 'absorb', task: '#4', source: 'checkpoint', head: 'aaaaaaa1111' },
+    { type: 'env', when: 'start', why: 'startup', ok: true, failed: [] },
+    { type: 'late', label: 'impl:#5', task: '#5', kind: 'writer', softMin: 40 },
+    { type: 'hedge', label: 'precheck:#5' },
+    { type: 'late-result', label: 'impl:#5', task: '#5', accepted: true, status: 'DONE' },
+    { type: 'review', task: '#5', stage: 'spec', persona: 'spec-hawk', verdict: 'FAIL', gating: 1, advisory: 0, round: 0 },
+    { type: 'review', task: '#5', stage: 'quality', persona: 'break-it', verdict: 'FAIL', gating: 1, advisory: 0, round: 0, discarded: true, reason: 'a spec fix moved the head' },
+    { type: 'fix', task: '#5', stage: 'spec', round: 1, model: 'sonnet', findings: 1 },
+    { type: 'review', task: '#5', stage: 'spec', persona: 'spec-hawk', verdict: 'PASS', gating: 0, advisory: 0, round: 1 },
+    { type: 'review', task: '#5', stage: 'quality', persona: 'break-it', verdict: 'PASS', gating: 0, advisory: 0, round: 0 },
+    { type: 'absorb', task: '#7', repo: 'site', source: 'verify-only', head: 'ccccccc3333' },
+    { type: 'absorb', task: '#8', repo: 'site', source: 'reviewed-earlier', head: 'ddddddd4444' },
+    { type: 'harness-routed', task: 'site:final', stage: 'terminal', persona: 'Privacy Engineer', severity: 'major', where: 'grimoire.config.json:3' },
+    { type: 'settle', task: '#5', repo: 'site', status: 'DONE' },
+    { type: 'ship', repo: 'site', mode: 'land', pushed: true, head: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true },
+    { type: 'ship', repo: 'site', mode: 'halt', pushed: null, head: 'bbbbbbb2222', failedStep: 'comment', detail: 'gh: rate limited', prUrl: 'https://example.invalid/pr/7', draft: true },
+    { type: 'env', when: 'stall', why: 'a failed push of site', ok: null, failed: [] },
+    // the delivery fixes: a held ship lock, a PR out of draft (the gate's), the seal after a green gate
+    { type: 'ship', repo: 'site', mode: 'land', pushed: false, head: 'bbbbbbb2222', failedStep: null, skipped: 'lock', detail: 'LOCK busy: held by ship 4242 for 150 s', prUrl: 'https://example.invalid/pr/7', draft: true },
+    { type: 'seal', repo: 'app', ok: false, already: false, step: 'view', round: 1 },
+    { type: 'seal', repo: 'app', ok: true, already: false, step: null, round: 2 },
+    { type: 'seal', repo: 'web', ok: true, already: true, step: null, round: 1 },
+    { type: 'ship', repo: 'app', mode: 'land', pushed: null, head: 'eeeeeee5555', failedStep: null, skipped: 'ready', prUrl: 'https://example.invalid/pr/8', draft: false },
+    // a stall check that fails, re-checked: transient once; then latched, lifted by a later green check
+    { type: 'env', when: 'stall', why: '#6 → BLOCKED', ok: false, failed: ['remote:site'] },
+    { type: 'env', when: 'stall', why: '#6 → BLOCKED', ok: true, failed: [], recheck: true },
+    { type: 'env', when: 'stall', why: 'late writer: impl:#5', ok: false, failed: ['commit:site'] },
+    { type: 'env', when: 'stall', why: 'late writer: impl:#5', ok: false, failed: ['commit:site'], recheck: true },
+    { type: 'env', when: 'stall', why: '#7 → DIED', ok: true, failed: [], cleared: ['commit:site'] },
+    { type: 'wedged', label: 'impl:#6', task: '#6', repo: 'site', hardMin: 180 },
+    { type: 'fence', repo: 'site', action: 'hold' },
+    { type: 'env', when: 'stall', why: 'late writer', ok: false, failed: ['commit:site'] },
+    { type: 'env', when: 'stall', why: 'late writer', ok: false, failed: ['commit:site'], recheck: true },
+    { type: 'ship', repo: 'app', mode: 'halt', pushed: null, head: 'eeeeeee5555', failedStep: null, skipped: 'ready', prUrl: 'https://example.invalid/pr/8', draft: false },
+    { type: 'halt', reason: 'environment: commit:site timed out after 30 s', kind: 'environment' },
+  ].map((e, i) => JSON.stringify({ seq: i + 1, at: iso(0), tok: (i + 1) * 100, ...e }))
+  writeFileSync(join(RUNS5, 'events', '00000001.jsonl'), evD.join('\n') + '\n')
+  const r5 = spawnSync(process.execPath, [SCRIPT, '--out', 'logs.html'], { cwd: ROOT5, encoding: 'utf8' })
+  ok(r5.status === 0, `render exits 0 (stderr: ${r5.stderr.trim() || 'none'})`)
+  const html5 = r5.status === 0 ? readFileSync(join(ROOT5, 'logs.html'), 'utf8') : ''
+  // Execute the page's renderer against a minimal DOM and read back the text it produced.
+  class El {
+    constructor(tag) { this.tag = tag; this.children = []; this.className = '' }
+    setAttribute() {}
+    addEventListener() {}
+    append(...kids) { this.children.push(...kids) }
+    replaceChildren(...kids) { this.children = kids }
+    get textContent() { return this.children.map((c) => (c instanceof El ? c.textContent : String(c))).join(' ') }
+  }
+  const blob5 = (html5.match(/<script type="application\/json" id="grimoire-data">([\s\S]*?)<\/script>/) || [])[1] || '{}'
+  const js5 = (html5.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || ''
+  const doc = { body: new El('body'), createElement: (t) => new El(t), getElementById: (id) => (id === 'grimoire-data' ? { textContent: blob5 } : null) }
+  let text = ''
+  try { new Function('document', 'Node', js5)(doc, El); text = doc.body.textContent } catch (e) { ok(false, `the renderer ran (${e.message})`) }
+  const has = (re, m) => ok(re.test(text), m)
+  has(/impl:#5 past its 40-min soft limit \(writer\): still awaited, not stopped/, 'late: the label, the soft limit and that it is still awaited')
+  has(/precheck:#5: a duplicate dispatch started/, 'hedge: a duplicate dispatch')
+  has(/impl:#6 past its 180-min hard limit and still running: site fenced/, 'wedged: the hard limit and the fenced repo')
+  has(/impl:#5 returned late \(DONE\) → accepted/, 'late-result: accepted, with its status')
+  has(/site → held: no dispatch into it/, 'fence: held')
+  has(/site · land → pushed bbbbbbb2222 · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship: the pushed head and the draft PR')
+  has(/stall \(late writer\) → FAILED: commit:site/, 'env: the failed check')
+  has(/site · halt → bbbbbbb2222 already on the remote · comment step failed: gh: rate limited · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship: nothing to push, a failed step after it')
+  has(/stall \(a failed push of site\) → no usable report \(not counted as a failure\)/, 'env: a check that returned nothing usable')
+  has(/start \(startup\) → ok/, 'env: a passing check')
+  has(/stall re-check \(#6 → BLOCKED\) → ok: the failure was transient, the run goes on/, 'env: a re-check that passes reads as a transient failure')
+  has(/stall re-check \(late writer\) → FAILED again on the re-check: commit:site/, 'env: a re-check that fails again')
+  has(/stall \(#7 → DIED\) → ok: commit:site answered again, the environment halt is lifted/, 'env: a later green check lifts the halt (cleared)')
+  has(/site · land → skipped: another ship or the gate held the ship lock — nothing pushed or rewritten, not a failed push: LOCK busy: held by ship 4242 for 150 s · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship skipped on a held lock: nothing moved, with the holder')
+  ok(!/site · land → failed at push/.test(text), 'ship skipped on a held lock: never read as a failed push (its pushed is false)')
+  has(/app · land → skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone · the new work waits for the next terminal slot · https:\/\/example\.invalid\/pr\/8 \(ready\)/, 'ship skipped on a ready PR: the new work waits for the gate')
+  has(/app · halt → skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone · status comment only · https:\/\/example\.invalid\/pr\/8 \(ready\)/, 'halt ship on a ready PR: the status comment only')
+  has(/app → the state marker could not be checked \(step view\), try 1/, 'seal: a failed try, with its step')
+  has(/app → the state marker was put back as the last line of the PR body \(the gate's copy differed\)/, 'seal: the marker put back')
+  has(/web → the state marker the gate kept is exact: nothing edited/, 'seal: an exact copy, nothing edited')
+  has(/landed in an earlier attempt, verified on the run branch \(from the checkpoint\) @ aaaaaaa1111/, 'absorb from the checkpoint: verified on the run branch, with the head')
+  has(/already on the branch, not reviewed for this task: sent to the panel as it stands @ ccccccc3333/, 'absorb verify-only: reviewed as it stands, never "landed earlier"')
+  has(/already on the branch and reviewed for this task: landed with no new review @ ddddddd4444/, 'absorb reviewed-earlier: landed with no new review')
+  has(/terminal · Privacy Engineer · major at grimoire\.config\.json:3: a harness file, routed to crystallize/, 'harness-routed: in words')
+  has(/#5\s+DONE\s+3 reviews \(\+1 discarded\) · 1 fixes/, "a task's review count leaves the discarded round out and shows it apart")
+  has(/\[environment\] environment: commit:site timed out/, 'halt: its kind')
+  has(/Checkpoint\s+· v2/, 'the checkpoint card shows its version')
+  has(/landed:\s+#4 @ aaaaaaa \(site · feat\/proj-9-site\), #5 @ bbbbbbb \(site · feat\/proj-9-site\)/, 'the checkpoint card lists landedTasks with their heads and run branch')
+  has(/pushed:\s+site @ bbbbbbb · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the checkpoint card shows what was pushed')
+  has(/sign commits before launching/, 'a {text, repos} learning shows its text')
+  has(/https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the overview tags the draft PR')
+  ok(!/\{"label"/.test(text) && !/\{"task"/.test(text) && !/\{"repo"/.test(text), 'no new event type falls back to its raw JSON')
+  has(/quality · break-it → FAIL \(gating 1, advisory 0, round 0\) · discarded: a spec fix moved the head, not counted/, 'a discarded review round reads as discarded, with its reason')
+  const s5 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json'], { cwd: ROOT5, encoding: 'utf8' })
+  let S5 = null
+  try { S5 = JSON.parse(s5.stdout) } catch {}
+  const g9 = S5 && S5.groups.find((g) => g.version === '0.9.0')
+  ok(g9 && g9.firstRound.total === 2 && g9.firstRound.passed === 1,
+    `first-round pass skips the discarded quality round: spec failed round 0, quality passed its re-run → 1/2 (got ${g9 ? `${g9.firstRound.passed}/${g9.firstRound.total}` : 'none'})`)
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }
