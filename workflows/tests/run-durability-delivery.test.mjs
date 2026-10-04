@@ -39,6 +39,10 @@ const heredocs = (prompt) => [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\n
 // is there, last and rebuilt, and prove what it holds by feeding it back to a relaunch (RT, B2).
 const markerLine = (text) => String(text).split('\n').find((l) => l.startsWith('<!-- grimoire:state ')) || ''
 const endsWithMarker = (text) => { const last = String(text).trimEnd().split('\n').pop(); return last.startsWith('<!-- grimoire:state v1 ') && last.endsWith(' -->') }
+// What the RECONCILE script prints next to a marker — its length and cksum — and the index agent
+// copies back: the engine refuses a marker copy that does not match them (the engine's own cksum).
+const { cksum } = new Function(`${body.slice(body.indexOf('const B64_CHARS'), body.indexOf('// A heredoc that lands as a decoded file'))}\nreturn { cksum }`)()
+const copied = (marker) => { const tok = (/grimoire:state v1 ([A-Za-z0-9+/=]+) -->/.exec(marker) || [])[1] || marker; return { marker, len: tok.length, sum: cksum(tok) } }
 const tick = (ms) => new Promise((r) => setTimeout(r, ms))
 const later = (v, ms = 15) => tick(ms).then(() => v)
 const deferred = () => { let resolve; const promise = new Promise((r) => (resolve = r)); return { promise, resolve } }
@@ -341,7 +345,7 @@ const BATT = (pct) => `Now drawing from 'Battery Power'\n -InternalBattery-0 (id
     by({ 'impl:PROJ-1': impl('aaaaaaa'), 'impl:PROJ-2': BLOCKED, 'replan#1': { decision: 'HALT', reason: 'x', learnings: [] } }), { args: { ...QUIET, repos: IDX, project: SENTENCE } })
   const marker = markerLine(heredocs(s1.prompt('ship:idealex#halt'))[0])
   ok(s1.prompt('ship:idealex#halt').includes('feat/awesome-lab-idealex-3-idealex') && !!marker, 'its halt ship carries the marker for feat/awesome-lab-idealex-3-idealex')
-  const index = { prState: [{ repo: 'idealex', url: PR_URL, state: 'OPEN', isDraft: true, marker }], reconcile: [{ id: 'PROJ-1', repo: 'idealex', sha: 'aaaaaaa', onBranch: true }], runBranches: [{ repo: 'idealex', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'same' }] }
+  const index = { prState: [{ repo: 'idealex', url: PR_URL, state: 'OPEN', isDraft: true, ...copied(marker) }], reconcile: [{ id: 'PROJ-1', repo: 'idealex', sha: 'aaaaaaa', onBranch: true, inBase: 'no' }], runBranches: [{ repo: 'idealex', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'same', fetch: 'ok' }] }
   const same = await run('B2 · session 2, the bare key "awesome-lab/iDealex#3": the same branch, the PR state resumes it', four, by({ 'impl:PROJ-2': impl('bbbbbbb', 'aaaaaaa') }),
     { args: { ...QUIET, repos: IDX, project: 'awesome-lab/iDealex#3' }, index })
   eq(same.result.resumedLanded, [{ id: 'PROJ-1', repo: 'idealex', headSha: 'aaaaaaa', source: 'pr' }], 'PROJ-1 absorbed from the PR')
@@ -357,7 +361,7 @@ const BATT = (pct) => `Now drawing from 'Battery Power'\n -InternalBattery-0 (id
   const haltBody = heredocs(s1.prompt('ship:api#halt'))[0]
   const marker = markerLine(haltBody)
   ok(endsWithMarker(haltBody) && haltBody.includes('### Landed (2/4)'), 'the halt body: two landed, and the state marker')
-  const index = { prState: [{ repo: 'api', url: PR_URL, state: 'OPEN', isDraft: true, marker }], reconcile: [{ id: 'PROJ-1', repo: 'api', sha: 'aaaaaaa', local: true, origin: true, onBranch: true }, { id: 'PROJ-2', repo: 'api', sha: 'bbbbbbb', local: true, origin: true, onBranch: true }], runBranches: [{ repo: 'api', local: 'bbbbbbb', remote: 'bbbbbbb', sync: 'same' }] }
+  const index = { prState: [{ repo: 'api', url: PR_URL, state: 'OPEN', isDraft: true, ...copied(marker) }], reconcile: [{ id: 'PROJ-1', repo: 'api', sha: 'aaaaaaa', local: true, origin: true, onBranch: true, inBase: 'no' }, { id: 'PROJ-2', repo: 'api', sha: 'bbbbbbb', local: true, origin: true, onBranch: true, inBase: 'no' }], runBranches: [{ repo: 'api', local: 'bbbbbbb', remote: 'bbbbbbb', sync: 'same', fetch: 'ok' }] }
   const s2 = await run('RT2 · session 2 (another machine, no resumeState): the PR marker alone resumes it', [A, B, C, D], by({ 'impl:PROJ-3': impl('ccccccc', 'bbbbbbb'), 'impl:PROJ-4': () => later(impl('ddddddd', 'ccccccc')) }), { args: QUIET, index })
   eq(s2.result.resumedLanded.map((r) => [r.id, r.headSha, r.source]), [['PROJ-1', 'aaaaaaa', 'pr'], ['PROJ-2', 'bbbbbbb', 'pr']], 'both landed tasks absorbed, verified on the run branch')
   ok(!s2.labels.includes('impl:PROJ-1') && !s2.labels.includes('impl:PROJ-2') && s2.labels.includes('impl:PROJ-3'), 'only PROJ-3 is built: nothing starts over')
@@ -367,7 +371,7 @@ const BATT = (pct) => `Now drawing from 'Battery Power'\n -InternalBattery-0 (id
   ok(heredocs(sh)[0].includes('### Landed (3/4)') && heredocs(s2.prompt('ship:api#2'))[0].includes('### Landed (4/4)'), 'whose body lists the absorbed tasks with the new ones')
   ok(s2.prompt('gate:api').includes(`gh pr ready ${PR_URL}`), 'and the gate marks that PR ready')
   const s3 = await run('RT3 · a remote run branch behind the last absorbed head is shipped at start', [A, B, C, D], by({ 'impl:PROJ-3': impl('ccccccc', 'bbbbbbb'), 'impl:PROJ-4': () => later(impl('ddddddd', 'ccccccc')) }),
-    { args: QUIET, index: { ...index, runBranches: [{ repo: 'api', local: 'bbbbbbb', remote: 'aaaaaaa', sync: 'ahead' }] } })
+    { args: QUIET, index: { ...index, runBranches: [{ repo: 'api', local: 'bbbbbbb', remote: 'aaaaaaa', sync: 'ahead', fetch: 'ok' }] } })
   ok(s3.labels.indexOf('ship:api#1') >= 0 && s3.labels.indexOf('ship:api#1') < s3.labels.indexOf('impl:PROJ-3') && headOf(s3.prompt('ship:api#1')) === 'bbbbbbb', 'ship:api#1 pushes bbbbbbb before PROJ-3 is implemented')
 }
 
