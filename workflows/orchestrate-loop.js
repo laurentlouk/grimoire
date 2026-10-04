@@ -1737,8 +1737,18 @@ const requireHook =
       }
     : null
 
+// An explicit run branch ({runBranch}, per repo repos[].runBranch): a git ref name, or ignored.
+const refName = (v, where) => {
+  if (v === undefined) return null
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (s && /^[A-Za-z0-9._/-]+$/.test(s) && !/^[-/.]|\/\/|\.\.|\.lock$|[/.]$|@\{/.test(s)) return s
+  log(`⚠ ${where} ${JSON.stringify(v)} is not a usable branch name — ignored (the run branch is derived from the project)`)
+  return null
+}
+const RUN_BRANCH_OPT = refName(opts.runBranch, 'runBranch')
+
 // ── repo configuration: the ONLY place a stack enters this workflow ──
-// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup? }]
+// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup?, runBranch? }]
 const repoList = Array.isArray(opts.repos)
   ? opts.repos
       .filter((r) => r && typeof r.name === 'string' && r.name.trim() && typeof r.agent === 'string' && r.agent.trim())
@@ -1750,6 +1760,7 @@ const repoList = Array.isArray(opts.repos)
         gate: r.gate && typeof r.gate === 'object' ? r.gate : null,
         timeoutMin: Number.isFinite(r.timeoutMin) ? r.timeoutMin : undefined,
         laneSetup: typeof r.laneSetup === 'string' ? r.laneSetup : undefined,
+        runBranch: refName(r.runBranch, `repos[${r.name.trim()}].runBranch`) || undefined,
       }))
   : []
 repoConfig = new Map(repoList.map((r) => [r.name, r]))
@@ -2059,7 +2070,30 @@ const fnv1a = (v) => {
 }
 const refToken = (v) =>
   String(v).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60).replace(/^-+|-+$/g, '') || `x${fnv1a(v)}`
-const runBranchFor = (repo) => `feat/${refToken(project)}-${refToken(repo)}`
+// The run branch is named after the project's KEY, not its wording: the first ticket reference in
+// the project text — `owner/repo#N`, else `#N`, else a Jira/Linear-style `ABC-123`, else a tracker
+// URL's id — and the whole text only when it holds none. A real run's project was a sentence
+// ("acme/site#3 — GitHub parent issue #3, its slices are …"), so its branch was that
+// sentence slugged, and a relaunch phrased differently would have built on another branch and
+// missed its PR and saved state. {runBranch} (per repo repos[].runBranch) names it outright.
+function projectKey(text) {
+  const s = String(text)
+  let m = /(?<![\w./-])([A-Za-z0-9][\w.-]*\/[\w.-]+)#(\d+)\b/.exec(s)
+  if (m) return `${m[1]}#${m[2]}`
+  if ((m = /(?<![\w&/#])#(\d+)\b/.exec(s))) return `#${m[1]}`
+  if ((m = /\b([A-Z][A-Z0-9_]{1,9}-\d+)\b/.exec(s))) return m[1]
+  if ((m = /https?:\/\/[^/\s]+\/([\w.-]+)\/([\w.-]+)(?:\/-)?\/(?:issues|pull|merge_requests)\/(\d+)/.exec(s))) return `${m[1]}/${m[2]}#${m[3]}`
+  if ((m = /https?:\/\/\S*\/(\d+)(?=[/?#\s]|$)/.exec(s))) return m[1]
+  return s
+}
+// `#12` alone would slug to a bare number: it reads `issue-12`.
+const keyToken = (text) => {
+  const k = projectKey(text)
+  return k.startsWith('#') ? `issue-${k.slice(1)}` : refToken(k)
+}
+const PROJECT_KEY = projectKey(project)
+const explicitRunBranch = (repo) => (repoCfg(repo) || {}).runBranch || RUN_BRANCH_OPT
+const runBranchFor = (repo) => explicitRunBranch(repo) || `feat/${keyToken(project)}-${refToken(repo)}`
 
 // A landed task as checkpoint v2 and the PR state marker record it, validated: a known repo and a
 // plausible head SHA, or it is dropped (it then simply runs again). Verified on the run branch
@@ -2189,7 +2223,8 @@ for (const p of prStates) {
   const raw = str(p.marker)
   if (!raw || raw === 'none') continue
   const s = parseStateMarker(raw.includes('<!--') ? raw : `<!-- grimoire:state v1 ${raw} -->`)
-  if (!s || (str(s.project) && s.project !== project) || (str(s.repo) && s.repo !== p.repo) || (str(s.runBranch) && s.runBranch !== runBranchFor(p.repo))) {
+  // the same project = the same KEY (a relaunch may word it differently); an explicit run branch is the identity itself
+  if (!s || (str(s.project) && !explicitRunBranch(p.repo) && keyToken(s.project) !== keyToken(project)) || (str(s.repo) && s.repo !== p.repo) || (str(s.runBranch) && s.runBranch !== runBranchFor(p.repo))) {
     log(`⚠ ${p.repo}: the state marker in ${str(p.url) || 'its PR'} is ${s ? 'for another project, repo or run branch' : 'unreadable'} — ignored`)
     continue
   }
