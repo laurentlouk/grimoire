@@ -4116,26 +4116,55 @@ function fenceHeld() {
 // The final wave, raced against "every slot still open is wedged": a gate (or a terminal fix)
 // past its hard limit must not hold the other repos' results, nor the run, forever.
 const STILL_RUNNING = { stillRunning: true }
+// repo → its terminal slot while it runs. A slot its wave booked as STILL_RUNNING keeps running:
+// its repo stays out of the next wave and out of dispatch until it returns (the gate pushes and
+// opens a PR — it must never run twice), and its result is booked when it arrives.
+const openSlots = new Map()
 async function finalWave(finals) {
   const out = finals.map(() => STILL_RUNNING)
   const done = new Set()
+  let returned = false // the wave has handed back its results: a slot ending later books its own
   // Every slot that ends wakes the wave: once another slot has wedged, nothing else would.
   const end = (repo, i) => (r) => {
     out[i] = r
     done.add(repo)
+    openSlots.delete(repo)
+    if (returned) bookLateSlot(repo, r)
     wake()
     return r
   }
-  const all = parallel(finals.map((repo, i) => () => terminalSlot(repo).then(end(repo, i), () => end(repo, i)(null))))
+  const all = parallel(
+    finals.map((repo, i) => () => {
+      const p = terminalSlot(repo).then(end(repo, i), () => end(repo, i)(null))
+      openSlots.set(repo, p)
+      return p
+    }),
+  )
   for (;;) {
     const r = await Promise.race([all, waker()])
     if (r !== WAKE) return r
     if (finals.every((repo) => done.has(repo) || wedged.some((w) => w.repo === repo))) {
       const open = finals.filter((repo) => !done.has(repo))
       if (open.length) log(`⛔ final wave: ${open.join(', ')} still running past the hard limit — booking the other slot(s) now`)
-      return out
+      returned = true
+      return out.slice() // a snapshot: a slot that ends later is booked once, by bookLateSlot
     }
   }
+}
+// A slot its final wave left STILL_RUNNING has returned: book it as any slot result (gateDone, its
+// PR, ungatedRepos) and wake the loop. Once the loop is over nothing acts on it, but it is still
+// this run's result: it leaves stillRunning, lands in the result and is flushed to the journal.
+function bookLateSlot(repo, r) {
+  if (!r) emit('terminal', { repo, verdict: 'DIED' })
+  const res = r || { id: `${repo}:gate`, repo, gateStep: true, status: 'GATE_FAILED', gate: null }
+  log(`◎ ${repo}: its terminal slot returned after its final wave — ${res.status}${res.prUrl ? ` · ${res.prUrl}` : ''}${dispatchClosed ? ' (recorded; the run had stopped dispatching)' : ''}`)
+  settle(res)
+  if (dispatchClosed) {
+    // stillRunning exists by now: it is built right after dispatchClosed is set, with no await between
+    for (let i; (i = stillRunning.findIndex((s) => s.id === `${repo}:final` || s.id === `${repo}:gate`)) >= 0; ) stillRunningIds.delete(stillRunning.splice(i, 1)[0].id)
+    flushJournal()
+  }
+  wake()
 }
 function stillRunningReason() {
   const parts = wedged.map((w) => `${w.label}${w.repo ? ` in ${w.repo}` : ''} passed the ${fmtMin(w.hardMin)}-min hard limit and has not returned; it may still commit`)
@@ -4183,7 +4212,7 @@ while (true) {
     const picks = []
     const picked = {}
     for (const i of eligible) {
-      if (fencedRepos.has(i.repo)) continue // a writer past its hard limit (or an abandoned reader) may still be working in it
+      if (fencedRepos.has(i.repo) || openSlots.has(i.repo)) continue // a writer past its hard limit, or a terminal slot, may still be working in it
       if (repoBusy(i.repo).length + (picked[i.repo] || 0) >= MAX_PER_REPO) continue
       if (repoBusy(i.repo).some((x) => x.exclusive)) continue // an undeclared footprint holds its whole repo
       picked[i.repo] = (picked[i.repo] || 0) + 1
@@ -4314,8 +4343,11 @@ while (true) {
   // ── 2 · anything running → wait for the FIRST settle, book it, rescan immediately ──
   // A wedge or a fence release wakes the loop too. When every task still in flight is a wedged
   // writer, nothing will settle on its own: fall through to the quiescent step for the rest.
+  // A terminal slot that outlived its wave and is no longer wedged is running work too: its end
+  // wakes the loop (bookLateSlot).
   const stuck = inFlight.size > 0 && [...inFlight.keys()].every((id) => wedged.some((w) => w.task === id))
-  if (inFlight.size && !stuck) {
+  const slotRunning = [...openSlots.keys()].some((repo) => !wedged.some((w) => w.repo === repo))
+  if ((inFlight.size && !stuck) || slotRunning) {
     const r = await Promise.race([...inFlight.values()].map((x) => x.promise).concat(waker()))
     if (r === WAKE) continue
     const ended = inFlight.get(r.id)
@@ -4359,7 +4391,7 @@ while (true) {
   // machine fit for the final wave, or a replan? A failure halts here — no replan spent.
   if (await envStall('the run went quiescent')) break
   const held = fenceHeld()
-  const finals = [...pendingById.keys()].every(held) ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r) && !fencedRepos.has(r) && ![...pendingById.values()].some((i) => i.repo === r)) : []
+  const finals = [...pendingById.keys()].every(held) ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r) && !fencedRepos.has(r) && !openSlots.has(r) && ![...pendingById.values()].some((i) => i.repo === r)) : []
   if (finals.length) {
     log(`▶ final wave: terminal sweep → ${finals.some(hasGateCommand) ? 'gate + ' : ''}push + PR: ${finals.join(', ')}`)
     flushJournal()
@@ -4616,7 +4648,9 @@ if (finalCheck && finalCheck.repos.every((r) => touched.has(r))) {
 // threads on those PRs are its primary signal. Everything lands on one branch + PR —
 // nothing this phase writes is live before that PR merges.
 phase('Crystallize')
-const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo: r.repo, pr: r.prUrl }))
+// prsNow/openNow are read again for the result: a slot that outlived its wave may return meanwhile (bookLateSlot)
+const prsNow = () => allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo: r.repo, pr: r.prUrl }))
+const prsOpened = prsNow()
 // What still needs a human. A task that failed and was later requeued by a replan and LANDED is
 // recovered, not open work (a run once reported a task "DIED" in needsAttention after the same
 // task had landed and shipped in its PR); a terminal-slot failure is recovered once its repo
@@ -4624,7 +4658,8 @@ const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo
 const landedTaskIds = new Set(allResults.filter((r) => !r.gateStep && landed(r)).map((r) => r.id))
 const recoveredLater = (r) => (r.gateStep ? gateDone.has(r.repo) : landedTaskIds.has(r.id))
 const latestById = (list) => [...new Map(list.map((r) => [r.id, r])).values()]
-const openResults = latestById(allResults.filter((r) => !landed(r) && !recoveredLater(r) && !stillRunningIds.has(r.id)))
+const openNow = () => latestById(allResults.filter((r) => !landed(r) && !recoveredLater(r) && !stillRunningIds.has(r.id)))
+const openResults = openNow()
 const recovered = latestById(allResults.filter((r) => !landed(r) && recoveredLater(r))).map((r) => ({ id: r.id, repo: r.repo, failedAs: r.status }))
 const noteOf = (r, f) => ({ task: r.id, repo: r.repo, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue, ...(f.harness ? { harness: true } : {}) })
 
@@ -4765,7 +4800,7 @@ return {
   done: allResults.filter((r) => !r.gateStep && ok(r)),
   // still open: the latest attempt of each task or slot that never landed, plus writers still
   // running past their hard limit (STILL_RUNNING — wait for them, they may still commit)
-  needsAttention: openResults.concat(stillRunning),
+  needsAttention: openNow().concat(stillRunning),
   // failed once, then landed after a replan (or the repo gated green): history, not work
   recovered,
   // issues the scheduler never reached — blocked behind a failure or a halt. Re-invoking the
@@ -4789,7 +4824,7 @@ return {
   // created/patched and the ONE PR carrying it.
   harness: harnessLearning,
   // READY PRs only (the terminal slot's): crystallize runs over these
-  prs: prsOpened,
+  prs: prsNow(),
   // repo → the draft PR the loop opened as tasks landed, still a draft (reviewed, ungated work)
   draftPrs,
   // repo → {pushedHead, prUrl, draft, disabled}: what reached the remote while the run went;

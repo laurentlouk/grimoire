@@ -41,6 +41,7 @@ const INFRA = { name: 'infra', path: 'repositories/infra', agent: 'infra-enginee
 const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-700', repos: [API] }
 const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false } }
 const FAST = { agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.005 } // soft 60 ms · writer hard 300 ms
+const PATIENT = { timeouts: { reader: { soft: 0.05, hard: 0.2 } } } // readers (replan, ledger) wait 3 s / 12 s under FAST
 const PROBE = { toolLatencySec: 3, repoRoots: [{ name: 'api', root: '/home/ana/ws/repositories/api', branch: 'main' }], home: '/home/ana' }
 
 const T = (id, extra = {}) => ({ id, ticket: id, repo: 'api', agent: 'backend-engineer', slice: 1, sliceLabel: 'v', order: 1, taskText: `Build ${id}`, deferred: false, files: [`src/${id.toLowerCase()}.ts — add it`], ...extra })
@@ -68,13 +69,16 @@ const indexOf = (tasks, extra) => ({
 })
 
 // `hydrate(label, prompt, def)` may override a hydration (return undefined to keep the default).
-// Hydrations return COPIES: the engine mutates the task objects it schedules.
-async function run(scenario, tasks, responder, { args = {}, index = PROBE, hydrate, guardMs = 8000 } = {}) {
+// Hydrations return COPIES: the engine mutates the task objects it schedules. `pre(label)` answers
+// before the built-in stubs (ledger, harness-context…) when it returns anything but undefined.
+async function run(scenario, tasks, responder, { args = {}, index = PROBE, hydrate, pre, guardMs = 8000 } = {}) {
   const calls = []
   const t0 = Date.now()
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || '?'
     calls.push({ label, prompt, opts, at: Date.now() - t0 })
+    const early = pre ? pre(label, prompt) : undefined
+    if (early !== undefined) return early
     if (label === 'parse-index') return indexOf(tasks, index)
     if (label.startsWith('hydrate:')) {
       const def = () => ({ tasks: tasks.filter((t) => prompt.includes(`- ${t.id} `)).map((t) => ({ ...t })) })
@@ -99,6 +103,19 @@ async function run(scenario, tasks, responder, { args = {}, index = PROBE, hydra
   return { result: hung ? null : result, hung, calls, logs, labels, ms: Date.now() - t0, prompt: (l) => (calls.find((c) => c.label === l) || {}).prompt || '' }
 }
 const prsOf = (result) => ((result && result.prs) || []).map((p) => `${p.repo} ${p.pr}`)
+const attention = (result) => ((result && result.needsAttention) || []).map((n) => `${n.id}:${n.status}`)
+
+// The decision journal's events, from every journal# prompt: the first heredoc holds the chunk
+// (JSON lines, or base64 of them once the payload is made opaque).
+function journalEvents(calls) {
+  const out = []
+  for (const c of calls.filter((x) => x.label.startsWith('journal#'))) {
+    const chunk = (/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/.exec(c.prompt) || [])[1] || ''
+    const text = chunk.trim().startsWith('{') ? chunk : Buffer.from(chunk.replace(/\s+/g, ''), 'base64').toString('utf8')
+    for (const line of text.split('\n').filter((l) => l.trim().startsWith('{'))) out.push(JSON.parse(line))
+  }
+  return out
+}
 
 // ══════════════ K-1 · a slot that finishes after another one wedged wakes the final wave ══════════════
 {
@@ -111,10 +128,44 @@ const prsOf = (result) => ((result && result.prs) || []).map((p) => `${p.repo} $
     return happy(label)
   }, { args: { ...QUIET, ...FAST, repos: [API, INFRA_SLOW] }, guardMs: 6000 })
   eq(prsOf(result), ['infra https://github.com/x/y/pull/10'], "infra's PR is booked")
-  eq(((result && result.needsAttention) || []).map((n) => `${n.id}:${n.status}`), ['api:gate:STILL_RUNNING'], 'api:gate is reported STILL_RUNNING')
+  eq(attention(result), ['api:gate:STILL_RUNNING'], 'api:gate is reported STILL_RUNNING')
   eq((result && result.halt && result.halt.kind) || null, 'wedged', 'the run halts as still running')
   ok(logs.some((l) => /⛔ final wave: api still running past the hard limit — booking the other slot\(s\) now/.test(l)), 'the wave returned once every open slot was wedged')
   eq(labels.filter((l) => l.startsWith('gate:')).sort(), ['gate:api', 'gate:infra'], 'each gate dispatched once')
+}
+
+// ══════════════ K-2 · a wedged slot's late result is booked, and its gate never dispatched twice ══════════════
+{
+  // api lands, infra fails. The final wave gates api; gate:api wedges at 300 ms and the wave returns.
+  // The replan for infra takes 500 ms; gate:api returns a valid PR meanwhile, at 600 ms.
+  let tries = 0
+  const { result, labels, logs } = await run('K-2a · gate:api returns during the replan: its PR is booked, api is not gated again', [T('PROJ-1'), IN('PROJ-2')], (label) => {
+    if (label === 'gate:api') return later(600, PR(9))
+    if (label === 'impl:PROJ-2') return tries++ === 0 ? { status: 'BLOCKED', summary: 'nope' } : IMPL_OK
+    if (label.startsWith('replan#')) return later(500, { decision: 'REVISE', cause: 'harness', reason: 'retry infra', learnings: [], tasks: [IN('PROJ-2')] })
+    if (label === 'gate:infra') return PR(10)
+    return happy(label)
+  }, { args: { ...QUIET, ...FAST, ...PATIENT, repos: [API, INFRA] } })
+  eq(labels.filter((l) => l === 'gate:api').length, 1, 'gate:api dispatched once — never again once the fence released')
+  eq(prsOf(result).sort(), ['api https://github.com/x/y/pull/9', 'infra https://github.com/x/y/pull/10'], 'both PRs are booked, the late one included')
+  eq(attention(result), [], 'nothing needs attention, nothing STILL_RUNNING')
+  eq((result && result.ungatedRepos) || null, [], 'no repo left ungated')
+  eq((result && result.halt) || null, null, 'no halt')
+  ok(logs.some((l) => /◎ api: its terminal slot returned after its final wave — DONE · https:\/\/github\.com\/x\/y\/pull\/9$/.test(l)), 'the late slot is logged as booked')
+}
+{
+  // One repo. gate:api wedges at 300 ms, the run halts as still running; the ledger write takes 800 ms
+  // and gate:api returns at 700 ms, after the loop has stopped dispatching.
+  const { result, calls, logs } = await run('K-2b · gate:api returns after the loop ended: recorded in the result and the journal', [T('PROJ-1')], (label) => {
+    if (label === 'gate:api') return later(700, PR(9))
+    return happy(label)
+  }, { args: { ...QUIET, ...FAST, ...PATIENT, telemetry: { enabled: true, flushEvery: 1000 } }, pre: (label) => (label === 'ledger' ? later(800, { path: 'runs/x.json', branch: 'harness/run-x' }) : undefined) })
+  eq((result && result.halt && result.halt.kind) || null, 'wedged', 'the run halted as still running (the gate had not returned)')
+  eq(prsOf(result), ['api https://github.com/x/y/pull/9'], 'its PR is in result.prs')
+  eq(attention(result), [], 'it is no longer reported STILL_RUNNING')
+  eq((result && result.ungatedRepos) || null, [], 'api is not reported ungated')
+  ok(journalEvents(calls).some((e) => e.type === 'gate' && e.repo === 'api' && e.prUrl === 'https://github.com/x/y/pull/9'), 'the journal records its gate event')
+  ok(logs.some((l) => /◎ api: its terminal slot returned after its final wave — DONE · .*\(recorded; the run had stopped dispatching\)/.test(l)), 'logged as recorded after the run stopped dispatching')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)
