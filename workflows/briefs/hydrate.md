@@ -61,3 +61,6 @@ whether something works: that is the implementer's job, inside its own time budg
 that ran builds and a browser probe to decide whether two tasks could share a repo spent twenty
 minutes, and the scheduler held one of them anyway; declaring each task's `files` precisely is
 what decides that.
+
+You may hydrate an issue before its blockers land (the loop prefetches the next ones while they
+run): state code facts as of now; the implementer re-checks them against the code it starts from.

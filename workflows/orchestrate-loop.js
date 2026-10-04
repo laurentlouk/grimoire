@@ -43,6 +43,7 @@ const DEFAULT_MAX_REPLANS = 3 // replan rung: how many times a failed slice may 
 const DEFAULT_MAX_CONTEXT_RESOLVES = 2 // resolve rung (cheapest): NEEDS_CONTEXT answers fetched from a read-only scout before the question is allowed to escalate to a replan. Override with {maxContextResolves:N}; 0 disables.
 const DEFAULT_AGENT_TIMEOUT_MIN = 40 // per-agent SOFT limit (minutes): past it a dispatch is logged LATE and still awaited — the runtime cannot cancel an agent, so a late valid result is accepted. Override with {agentTimeoutMin:N}; 0 disables every limit. A repo may raise it for ITS writers with {repos:[{timeoutMin:N}]} — e.g. a repo whose gate queues for a machine-global lock.
 const DEFAULT_AGENT_HARD_TIMEOUT_MIN = 180 // per-agent HARD limit (minutes): a reader is given up on (null) at min(2 × soft, this); a WRITER is never given up on — it is WEDGED: still awaited, its repo FENCED so nothing is re-dispatched into its checkout. Implementers booked "died" at a 40-min backstop once ran 78 and 115 more minutes and committed while retries were dispatched into the same checkout. {agentHardTimeoutMin:0}: writers never wedge. Per kind: {timeouts:{<kind>:{soft, hard, hedgeAfter}}}.
+const DEFAULT_HYDRATE_AHEAD = 2 // hydration PREFETCH: issues hydrated while the blockers they wait on are still in flight, so a strict blocked-by chain never waits for a hydration on its critical path. {hydrateAhead:0} hydrates only at dispatch.
 const DEFAULT_MAX_PER_REPO = 3 // within-repo parallelism: how many of a repo's tasks may be IN FLIGHT at once. Whether a ready task actually joins is decided at dispatch by declared-file overlap against the repo's running tasks — disjoint files → parallel worktree lanes, any overlap or an undeclared footprint → held until the conflict clears. {maxPerRepo:1} restores strict serialization.
 const DEFAULT_MAX_PRECHECK_FIXES = 1 // precheck rung: cheap structural check between the implementer and the panel. A FAIL buys this many fix dispatches before the task fails as PRECHECK_FAILED. {precheck:false} disables the rung.
 const DEFAULT_ESCALATE_AT_FIX_ROUND = 2 // model escalation: from this fix round on (counted per task, across stages), the implementer runs on opus whatever tier the selector chose. {escalateAtFixRound:0} disables.
@@ -727,7 +728,7 @@ ${task.taskText}
 
 ## Where it fits
 ${task.specExcerpt || '(see the spec/plan)'}
-${artifacts()}
+${artifacts()}${(task.prefetchedBefore || []).length ? `\nThis task was hydrated before ${task.prefetchedBefore.join(', ')} landed: facts about the current code in its text may predate them — check the code before relying on one.` : ''}
 
 ## Files
 ${(task.files || []).map((f) => '- ' + f).join('\n')}
@@ -1396,6 +1397,8 @@ for (const [k, v] of Object.entries(opts.timeouts && typeof opts.timeouts === 'o
       else timeoutOverrides[k][f] = v[f]
     }
 }
+// Hydration prefetch: issues hydrated ahead of their dispatch while their blockers run (0 = off).
+const HYDRATE_AHEAD = Number.isInteger(opts.hydrateAhead) && opts.hydrateAhead >= 0 ? opts.hydrateAhead : DEFAULT_HYDRATE_AHEAD
 // Startup session probe: refuse to execute when a trivial Bash call waits this long (0 = never refuse).
 const MAX_TOOL_LATENCY_SEC = Number.isFinite(opts.maxToolLatencySec) && opts.maxToolLatencySec >= 0 ? opts.maxToolLatencySec : DEFAULT_MAX_TOOL_LATENCY_SEC
 // Within-repo parallelism cap: tasks in flight per repo.
@@ -1873,7 +1876,7 @@ const titleById = new Map(pendingIndex.map((i) => [i.id, str(i.title) || ''])) /
 const inProject = new Set([...pendingIndex.map((i) => i.id), ...alreadyDoneIds, ...claimedElsewhere.map((c) => c.id)])
 log(
   `${pendingIndex.length} issue(s) to run across ${new Set(pendingIndex.map((i) => i.slice)).size} slice(s) · ${alreadyDone.length} already done/canceled (absorbed) · ` +
-    `mode=${execute ? 'EXECUTE' : 'PREVIEW (no implementers)'} · scheduling=dependsOn-driven · maxPerRepo=${MAX_PER_REPO} (disjoint-file lanes) · maxReplans=${MAX_REPLANS} · maxFixAttempts=${MAX_FIX_ATTEMPTS} · maxContextResolves=${MAX_CONTEXT_RESOLVES} · agentTimeout=${AGENT_TIMEOUT_MIN ? `${AGENT_TIMEOUT_MIN}m (hard ${AGENT_HARD_TIMEOUT_MIN ? `${AGENT_HARD_TIMEOUT_MIN}m` : 'off for writers'})` : 'off'}` +
+    `mode=${execute ? 'EXECUTE' : 'PREVIEW (no implementers)'} · scheduling=dependsOn-driven · maxPerRepo=${MAX_PER_REPO} (disjoint-file lanes) · maxReplans=${MAX_REPLANS} · maxFixAttempts=${MAX_FIX_ATTEMPTS} · maxContextResolves=${MAX_CONTEXT_RESOLVES} · agentTimeout=${AGENT_TIMEOUT_MIN ? `${AGENT_TIMEOUT_MIN}m (hard ${AGENT_HARD_TIMEOUT_MIN ? `${AGENT_HARD_TIMEOUT_MIN}m` : 'off for writers'})` : 'off'} · hydrateAhead=${HYDRATE_AHEAD || 'off'}` +
     ` · precheck=${PRECHECK ? 'on' : 'off'} · verifyFindings=${VERIFY_FINDINGS ? 'on' : 'off'} · escalateAtFixRound=${ESCALATE_AT_FIX_ROUND || 'off'}` +
     `${MAX_OUTPUT_TOKENS ? ` · maxOutputTokens=${fmtTok(MAX_OUTPUT_TOKENS)}` : ''}${specialists.length ? ` · specialists=${specialists.map((s) => s.agent).join(',')}` : ''}` +
     `${claimedElsewhere.length ? ` · ${claimedElsewhere.length} started by someone else (not dispatched): ${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}` : ''}`,
@@ -1909,7 +1912,7 @@ if (!execute) {
   const repoView = Object.fromEntries(
     repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null }]),
   )
-  return { preview: true, note: 'PREVIEW ONLY — index level (no hydration), no implementers ran. Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.', inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
+  return { preview: true, note: 'PREVIEW ONLY — index level (no hydration), no implementers ran. Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.', inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
 }
 
 // ═══════════════════════ 1 · per-task lifecycle ═══════════════════════
@@ -2466,7 +2469,7 @@ emit('run.start', {
   mode: 'execute',
   meta: runMeta,
   resumed: !!resumeOpt,
-  knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, budgetFloor: BUDGET_FLOOR, claims: !!claim },
+  knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, budgetFloor: BUDGET_FLOOR, claims: !!claim },
   repos: repoList.map((r) => r.name),
 })
 for (const c of claimedElsewhere) emit('claim', { task: c.id, action: 'skip', by: c.by })
@@ -2611,6 +2614,72 @@ const repoBusy = (repo) => [...inFlight.values()].filter((x) => x.repo === repo)
 const directDone = {} // repo → the in-flight DIRECT task's promise; lane integrations queue behind it
 let consecutiveDied = 0 // task settles in a row where the agent died without a result — see the circuit breaker
 
+// ── hydration PREFETCH: hydrate the next ready issues while their blockers are in flight ──
+// In a strict blocked-by chain each hydration (6–43 min in a real run) used to start only once the
+// task before it had landed, on the critical path. Up to HYDRATE_AHEAD issues whose every unmet
+// dependency is IN FLIGHT are hydrated ahead, one non-blocking dispatch at a time; a dispatch that
+// needs one of them awaits it. A null prefetch falls back to just-in-time hydration.
+const hydrating = new Map() // id → the prefetch promise hydrating it
+const prefetched = new Set() // ids hydrated ahead and not dispatched yet
+let prefetchN = 0
+let prefetchBusy = false
+let prefetchEpoch = 0 // bumped by every replan REVISE
+const invalidatedAt = {} // repo → the epoch whose REVISE made its prefetched hydrations stale (they lack the new learnings)
+// Ready order, shared by the dispatch picks and the prefetch: slice, then critical path, then id.
+const readyOrder = (a, b) =>
+  (a.slice ?? 0) - (b.slice ?? 0) || // vertical bias: smallest valuable slice first
+  downstreamOf(b.id) - downstreamOf(a.id) || // critical path: unlock the most downstream work
+  String(a.id).localeCompare(String(b.id))
+function prefetchCandidates() {
+  const ahead = [...pendingById.keys()].filter((id) => hydrating.has(id) || prefetched.has(id)).length
+  const room = HYDRATE_AHEAD - ahead
+  if (room <= 0) return []
+  const stuck = new Set(wedged.map((w) => w.task))
+  return [...pendingById.values()]
+    .filter((i) => !inFlight.has(i.id) && !hydratedById.has(i.id) && !hydrating.has(i.id))
+    .map((i) => ({ i, unmet: (i.dependsOn || []).filter((d) => !landedIds.has(d) && inProject.has(d)) }))
+    .filter(({ unmet }) => unmet.length && unmet.every((d) => inFlight.has(d) && !stuck.has(d)))
+    .sort((a, b) => readyOrder(a.i, b.i))
+    .slice(0, room)
+}
+function prefetchHydration(cands) {
+  if (!cands.length || prefetchBusy) return
+  const n = ++prefetchN
+  const epoch = prefetchEpoch
+  const issues = cands.map((c) => c.i)
+  const before = new Map(cands.map((c) => [c.i.id, c.unmet]))
+  prefetchBusy = true
+  log(`◌ prefetch: hydrating ${issues.map((i) => i.id).join(', ')} while ${[...new Set(cands.flatMap((c) => c.unmet))].join(', ')} run`)
+  const done = (hyd) => {
+    prefetchBusy = false
+    for (const i of issues) hydrating.delete(i.id)
+    if (!hyd || (Array.isArray(hyd.inputProblems) && hyd.inputProblems.length)) {
+      log(`⚠ prefetch hydrate:p${n} ${hyd ? 'reported input problems' : 'returned nothing'} — ${issues.map((i) => i.id).join(', ')} will hydrate at dispatch`)
+      return
+    }
+    // as the just-in-time path does: under both id and ticket
+    for (const t of hyd.tasks || []) {
+      if ((invalidatedAt[t.repo] || 0) > epoch) continue // a replan since: re-hydrated later, with its learnings
+      t.prefetchedBefore = before.get(t.id) || before.get(t.ticket) || []
+      hydratedById.set(t.id, t)
+      if (t.ticket && t.ticket !== 'NO_TICKET') hydratedById.set(t.ticket, t)
+    }
+    for (const i of issues) if (hydratedById.has(i.id)) prefetched.add(i.id)
+    if (claim)
+      for (const i of issues) {
+        claimedByRun.set(i.id, i.repo)
+        emit('claim', { task: i.id, action: 'claim', by: claim.identity })
+      }
+  }
+  const p = agentT(hydratePrompt(project, issues, relevantLearnings([...learnings, ...priorLearnings], [...new Set(issues.map((i) => i.repo))]), claim), {
+    label: `hydrate:p${n}`,
+    phase: 'Parse plan',
+    model: 'sonnet',
+    schema: TASK_LIST_SCHEMA,
+    kind: 'hydrate',
+  }).then(done, () => done(null))
+  for (const i of issues) hydrating.set(i.id, p)
+}
 
 // Critical-path bias: among equally-sliced ready issues, prefer the one that
 // transitively unblocks the MOST downstream work. Computed once from the phase-A
@@ -2685,6 +2754,7 @@ function startTask(t) {
   // lateMark: where this attempt's late dispatches start in lateLog (the circuit breaker reads it)
   const entry = { id: t.id, repo: t.repo, files: fs, exclusive: !fs.length, direct: t.lane !== 'worktree', lateMark: lateLog.length }
   taskRepo.set(t.id, t.repo)
+  prefetched.delete(t.id)
   entry.promise = (async () => {
     try {
       return (await runTask(t)) || { id: t.id, repo: t.repo, status: 'DIED' }
@@ -2870,14 +2940,7 @@ while (true) {
   // nothing new starts, and the run ends cleanly at quiescence.
   const stopping = budgetLow()
   if (!halt && !stopping) {
-    const eligible = [...pendingById.values()]
-      .filter((i) => depsMet(i) && !inFlight.has(i.id))
-      .sort(
-        (a, b) =>
-          (a.slice ?? 0) - (b.slice ?? 0) || // vertical bias: smallest valuable slice first
-          downstreamOf(b.id) - downstreamOf(a.id) || // critical path: unlock the most downstream work
-          String(a.id).localeCompare(String(b.id)),
-      )
+    const eligible = [...pendingById.values()].filter((i) => depsMet(i) && !inFlight.has(i.id)).sort(readyOrder)
     const picks = []
     const picked = {}
     for (const i of eligible) {
@@ -2890,6 +2953,9 @@ while (true) {
     if (picks.length) {
       waves++ // dispatch CYCLES — kept under the historical `waves` name for output continuity
       // ── phase B: hydrate this cycle's issues that don't have a task yet (one small agent) ──
+      // An issue already being prefetched is awaited, never hydrated twice.
+      const prefetching = [...new Set(picks.filter((i) => !hydratedById.has(i.id) && hydrating.has(i.id)).map((i) => hydrating.get(i.id)))]
+      if (prefetching.length) await Promise.all(prefetching)
       const toHydrate = picks.filter((i) => !hydratedById.has(i.id))
       if (toHydrate.length) {
         const hydrateOnce = (suffix) =>
@@ -3003,6 +3069,7 @@ while (true) {
         for (const t of admitted) startTask(t)
       }
     }
+    if (HYDRATE_AHEAD > 0) prefetchHydration(prefetchCandidates())
   }
 
   // ── 2 · anything running → wait for the FIRST settle, book it, rescan immediately ──
@@ -3116,6 +3183,17 @@ while (true) {
         halt = { reason: revision.reason }
         log(`⛔ replan #${replans}: HALT — ${revision.reason}`)
         break
+      }
+      // Prefetched hydrations of not-yet-dispatched tasks in the failing repos lack this replan's
+      // learnings: drop them, they hydrate again (an in-flight prefetch's result is discarded).
+      prefetchEpoch++
+      for (const r of failingRepos) invalidatedAt[r] = prefetchEpoch
+      for (const id of [...prefetched]) {
+        const t = hydratedById.get(id)
+        if (!t || !failingRepos.includes(t.repo) || inFlight.has(id)) continue
+        hydratedById.delete(id)
+        if (t.ticket) hydratedById.delete(t.ticket)
+        prefetched.delete(id)
       }
       const revised = revision.tasks || []
       const revisedDeferred = revised.filter((t) => t.deferred)

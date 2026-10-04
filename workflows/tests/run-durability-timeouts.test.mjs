@@ -18,6 +18,8 @@
 //    • A ONE-WORD PREFLIGHT TOOK 12 MINUTES — preflight and precheck get short limits and a
 //      hedged duplicate; the precheck runs one fact script instead of eight git calls; a hung
 //      journal writer no longer holds the end of the run (T-1 to T-3)
+//    • HYDRATION ON THE CRITICAL PATH — the next task's hydration waited for the current one to
+//      land; it is now prefetched while its blocker runs (H-1 to H-4)
 //
 //  Same stubbed runtime as the other loop tests (agent / parallel / log / phase / args / budget).
 //  Timers are real: limits are fractional minutes (0.001 min = 60 ms).
@@ -298,6 +300,65 @@ function journalEvents(calls) {
   ok(out.includes('src/a.ts:2: // TODO finish this') && out.includes('src/a.ts:3: ======='), 'added stub and conflict markers, as file:line')
   ok(!out.includes('pre-existing'), 'a marker the diff did not add is not listed')
   ok(/== range start \(check 8\)\nexit 0/.test(out) && /== on the run branch \(check 7\)\nexit (1|128)/.test(out), 'the ancestry exits are printed (the run branch does not exist in this scratch repo)')
+}
+
+// ══════════════ H · hydration prefetch ══════════════
+{
+  const d = deferred()
+  let prefetchedWhilePending = false
+  const { calls, labels, prompt } = await run('H-1 · the next task in a chain is hydrated while its blocker runs', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })], (label) => {
+    if (label === 'impl:PROJ-1') return Promise.race([d.promise.then(() => IMPL_OK), tick(1000).then(() => IMPL_OK)])
+    return happy(label)
+  }, {
+    args: QUIET,
+    hydrate: (label) => {
+      if (label === 'hydrate:p1') {
+        prefetchedWhilePending = true
+        setTimeout(d.resolve, 20)
+      }
+      return undefined
+    },
+  })
+  ok(prefetchedWhilePending && labels.indexOf('hydrate:p1') > labels.indexOf('impl:PROJ-1'), 'hydrate:p1 was dispatched while impl:PROJ-1 was still running')
+  ok(/- PROJ-2 /.test(prompt('hydrate:p1')) && !/- PROJ-1 /.test(prompt('hydrate:p1')), 'its prompt lists PROJ-2 only')
+  eq(calls.filter((c) => c.label.startsWith('hydrate:') && c.prompt.includes('- PROJ-2 ')).map((c) => c.label), ['hydrate:p1'], 'no other hydration lists PROJ-2')
+  ok(/This task was hydrated before PROJ-1 landed: facts about the current code in its text may predate them/.test(prompt('impl:PROJ-2')), 'the impl:PROJ-2 prompt says it was hydrated before PROJ-1 landed')
+  ok(!/hydrated before/.test(prompt('impl:PROJ-1')), 'a just-in-time task carries no such line')
+}
+{
+  const { calls, result } = await run('H-2 · a null prefetch falls back to just-in-time hydration', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })], happy, {
+    args: QUIET,
+    hydrate: (label) => (label === 'hydrate:p1' ? null : undefined),
+  })
+  eq(calls.filter((c) => c.label.startsWith('hydrate:') && c.prompt.includes('- PROJ-2 ')).map((c) => c.label), ['hydrate:p1', 'hydrate:w2'], 'PROJ-2 hydrated at dispatch (hydrate:w2) after the null prefetch')
+  ok(result.done.length === 2 && !result.halt, 'both landed')
+}
+{
+  let n = 0
+  const LEARNING = 'The retry helper lives in src/retry.ts; reuse it'
+  const { calls, labels, prompt, result } = await run('H-3 · a replan drops a prefetched hydration in its failing repo; the issue hydrates again, with the new learning', [T('PROJ-1'), T('PROJ-3', { dependsOn: ['PROJ-1'] })], (label) => {
+    if (label === 'impl:PROJ-1') return n++ === 0 ? { status: 'BLOCKED', summary: 'no retry helper found' } : IMPL_OK
+    if (label.startsWith('replan')) return { decision: 'REVISE', cause: 'code', reason: 'retry with the helper', learnings: [LEARNING], tasks: [T('PROJ-1', { taskText: 'Build PROJ-1 with src/retry.ts' })] }
+    return happy(label)
+  }, {
+    args: QUIET,
+    hydrate: (label, _p, def) => ({ tasks: def().tasks.map((t) => ({ ...t, taskText: `${t.taskText} [hydrated by ${label}]` })) }),
+  })
+  const r = labels.indexOf('replan#1')
+  const before = calls.findIndex((c, i) => i < r && c.label.startsWith('hydrate:') && c.prompt.includes('- PROJ-3 '))
+  const again = calls.find((c, i) => i > r && c.label.startsWith('hydrate:') && c.prompt.includes('- PROJ-3 '))
+  ok(before >= 0, 'PROJ-3 was prefetched before the replan')
+  ok(!!again && again.prompt.includes(LEARNING), `PROJ-3 hydrated again after the replan (${again && again.label}), and that prompt carries the new learning`)
+  ok(!!again && prompt('impl:PROJ-3').includes(`[hydrated by ${again.label}]`), 'impl:PROJ-3 is built from the fresh hydration, not the stale one')
+  ok(result.done.length === 2, 'both landed')
+}
+{
+  const chain = [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })]
+  const off = await run('H-4 · hydrateAhead:0 is the 0.8.1 label sequence', chain, happy, { args: { ...QUIET, hydrateAhead: 0 } })
+  const on = await run('H-4b · (the same chain with the default prefetch)', chain, happy, { args: QUIET })
+  eq(off.labels.filter((l) => l.startsWith('hydrate:')), ['hydrate:w1', 'hydrate:w2'], 'hydrateAhead:0 — one just-in-time hydration per cycle, no prefetch')
+  eq(on.labels.filter((l) => l.startsWith('hydrate:')), ['hydrate:w1', 'hydrate:p1'], 'default — PROJ-2 prefetched, no just-in-time hydration for it')
+  eq(off.labels.filter((l) => !l.startsWith('hydrate:')), on.labels.filter((l) => !l.startsWith('hydrate:')), 'every other dispatch is the same, in the same order')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)
