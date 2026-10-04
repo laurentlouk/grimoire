@@ -1644,6 +1644,25 @@ if (pendingIndex.length === 0) {
   }
 }
 
+// The longest dependsOn chain inside the project, counted in tasks. A strict blocked-by chain
+// runs one task at a time whatever maxPerRepo is, so it bounds the wall clock from below.
+// Dependencies outside `issues` (absorbed, or in another project) do not count; a cycle is cut.
+function longestChain(issues) {
+  const byId = new Map(issues.map((i) => [i.id, i]))
+  const depth = new Map()
+  const visit = (id, stack) => {
+    if (depth.has(id)) return depth.get(id)
+    if (stack.has(id)) return 0
+    stack.add(id)
+    const deps = (byId.get(id).dependsOn || []).filter((d) => byId.has(d))
+    const d = 1 + Math.max(0, ...deps.map((x) => visit(x, stack)))
+    stack.delete(id)
+    depth.set(id, d)
+    return d
+  }
+  return Math.max(0, ...issues.map((i) => visit(i.id, new Set())))
+}
+
 // DEFAULT = PREVIEW: stop after the index and show the dependency DAG + the review panel
 // each repo would draw. Implementers run ONLY when {execute:true} was explicitly passed —
 // so a forgotten or malformed flag can never trigger a real run (it fails safe to a preview).
@@ -1663,7 +1682,38 @@ if (!execute) {
   const repoView = Object.fromEntries(
     repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null }]),
   )
-  return { preview: true, note: 'PREVIEW ONLY — index level (no hydration), no implementers ran. Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.', inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
+  // Wall-clock estimate. The minutes per task (hydrate → implement → precheck → review) and for
+  // the terminal review + gate come from measured 0.8.x runs; {estimatePerTaskMin: N | {low, high}}
+  // overrides the per-task bounds. Declared files are unknown at index level, so `low` lets
+  // maxPerRepo of a repo's tasks run together and `high` runs them one after another.
+  const perTaskMin = { low: 40, high: 110 }
+  const terminalMin = { low: 30, high: 90 }
+  const startupMin = 10
+  const estOpt = opts.estimatePerTaskMin
+  const posMin = (v) => Number.isFinite(v) && v > 0
+  const estOverride = posMin(estOpt) || (!!estOpt && typeof estOpt === 'object' && (posMin(estOpt.low) || posMin(estOpt.high)))
+  if (posMin(estOpt)) perTaskMin.low = perTaskMin.high = estOpt
+  else if (estOverride) {
+    if (posMin(estOpt.low)) perTaskMin.low = estOpt.low
+    if (posMin(estOpt.high)) perTaskMin.high = estOpt.high
+    perTaskMin.high = Math.max(perTaskMin.low, perTaskMin.high)
+  } else if (estOpt !== undefined) log(`⚠ estimatePerTaskMin ignored — expected a positive number or {low, high} in minutes, got ${JSON.stringify(estOpt)}`)
+  const perRepoCount = {}
+  for (const i of pendingIndex) perRepoCount[i.repo] = (perRepoCount[i.repo] || 0) + 1
+  const largestRepo = Math.max(0, ...Object.values(perRepoCount))
+  const repoSerial = Math.max(0, ...Object.values(perRepoCount).map((c) => Math.ceil(c / MAX_PER_REPO)))
+  const criticalPath = longestChain(pendingIndex)
+  const toHours = (min) => Math.round(min / 6) / 10
+  const hours = {
+    low: toHours(startupMin + Math.max(criticalPath, repoSerial) * perTaskMin.low + terminalMin.low),
+    high: toHours(startupMin + Math.max(criticalPath, largestRepo) * perTaskMin.high + terminalMin.high),
+  }
+  const estimate = {
+    tasks: pendingIndex.length, criticalPath, repoSerial, largestRepo, perTaskMin, terminalMin, startupMin, hours,
+    basis: `${pendingIndex.length} task(s); critical path ${criticalPath} (the longest dependsOn chain: a blocked-by chain runs one task at a time whatever maxPerRepo is); largest repo ${largestRepo} task(s) at maxPerRepo ${MAX_PER_REPO}; ${perTaskMin.low}–${perTaskMin.high} min per task${estOverride ? ' (estimatePerTaskMin)' : ' (measured on 0.8.x runs)'}, ${terminalMin.low}–${terminalMin.high} min for the terminal review and gate, ${startupMin} min startup. Excludes time spent waiting on you and halts.`,
+  }
+  log(`⏱ estimated wall clock ≈ ${hours.low}–${hours.high} h — ${estimate.basis}`)
+  return { preview: true, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran. Estimated wall clock ≈ ${hours.low}–${hours.high} h (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
 }
 
 // ═══════════════════════ 1 · per-task lifecycle ═══════════════════════
