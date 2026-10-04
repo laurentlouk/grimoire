@@ -2293,7 +2293,6 @@ function withLimits(start, lim, label, meta) {
     let live = 1 // copies still out (the dispatch, plus its hedge)
     let late = null // its lateLog entry, once past soft
     let wedge = null // its wedged entry, once a writer passed hard
-    let holder = null // the fence an abandoned reader holds on its repo
     const timers = []
     const at = (min, fn) => {
       if (min > 0) timers.push(setTimeout(fn, min * 60 * 1000))
@@ -2308,7 +2307,6 @@ function withLimits(start, lim, label, meta) {
       const val = v == null ? null : v
       if (gaveUp) {
         emit('late-result', { label: which, task: m.task || null, accepted: false, status: statusOf(val) })
-        if (holder && !live) releaseFence(m.repo, holder)
         return
       }
       if (settled || (val === null && live > 0)) return // a copy already answered, or the other copy still may
@@ -2359,7 +2357,7 @@ function withLimits(start, lim, label, meta) {
       if (late) late.outcome = 'abandoned'
       // No fence for an abandoned reader: reviewers, verifiers and guards run commands only in
       // their own detached worktree (runBlock), never in the shared checkout.
-      log(`⏳ [timeout] ${label} passed its ${fmtMin(lim.hard)}m hard limit — no longer awaited (treated as no reply); the agent itself is NOT stopped and may still be running${holder ? `; ${m.repo} is fenced until it returns` : ''}`)
+      log(`⏳ [timeout] ${label} passed its ${fmtMin(lim.hard)}m hard limit — no longer awaited (treated as no reply); the agent itself is NOT stopped and may still be running`)
       finish(null)
     })
   })
@@ -4210,7 +4208,6 @@ function bookLateSlot(repo, r) {
 }
 function stillRunningReason() {
   const parts = wedged.map((w) => `${w.label}${w.repo ? ` in ${w.repo}` : ''} passed the ${fmtMin(w.hardMin)}-min hard limit and has not returned; it may still commit`)
-  for (const [repo, hs] of fencedRepos) for (const h of hs) if (h.kind !== 'writer') parts.push(`${h.label} in ${repo} was given up on at its ${fmtMin(h.hardMin)}-min hard limit and may still be running in that checkout`)
   return `still running: ${parts.join('; ') || 'a fenced repo'} — let it finish (git log, ps) before resuming`
 }
 
@@ -4595,7 +4592,7 @@ while (true) {
       }
       continue
     }
-    // A wedged writer, or an abandoned reader, still holds a repo with open work: say so precisely
+    // A wedged writer still holds a repo with open work: say so precisely
     // — it may still commit, and a resume must not start before it has finished.
     if (inFlight.size || [...fencedRepos.keys()].some((repo) => [...pendingById.values()].some((i) => i.repo === repo) || (repoRef[repo] && !gateDone.has(repo)))) {
       halt = { reason: stillRunningReason(), kind: 'wedged' }
