@@ -23,7 +23,7 @@ Two loops sit one inside the other, and it helps to keep them distinct.
 
 The fix loop is the inner one. It works on a single task: when a review comes back failing, the same task runs again with the findings in hand. It stops after a fixed number of attempts.
 
-The replan loop is the outer one. It works on the whole remaining plan: when a slice still won't land after the fix loop is spent, or a worker is blocked, or a task errors out, the loop rederives what to do next from the current state. It stops after a replan budget you set.
+The replan loop is the outer one. It works on the whole remaining plan: when a slice still won't land after the fix loop is spent, or a worker is blocked, or a task errors out, the loop rederives what to do next from the current state. It stops after a replan budget you set, which only failures of the work itself spend: the replanner names each replan's cause, and when the cause is the machine around the work (a hung tool or hook, a locked commit signer, a machine asleep) the run stops instead, since the same work would fail the same way there; when it is the loop itself (a late or stuck agent, reviewers that never answered) the replan is free up to the size of the budget, then charged.
 
 The fix loop retries the same work. Only the replan loop changes the plan. A slice counts as landed only once every track has finished all of its tasks.
 

@@ -26,11 +26,12 @@ Show the user a single proposal and ask for one yes, or corrections:
 
 - **Team agents**, one per repository, from `templates/team-agent.md`: name, stack line, the skills it owns (existing project skills plus any grimoire skill that fits), the gate it must never run, its default model. A team agent the project already has keeps its definition, but if it lacks the template's *Explore before asking; don't guess* section, propose appending it: the rule ships in the plugin's agents, briefs and skills, and the project's own agents must carry it too.
 - **`grimoire.config.json`** at the project root, for `/orchestrate`: `repos` (`{ name, path, agent, tags, gate: { run, stamp?, when? } | null, timeoutMin?, laneSetup? }`), `requireHook` (rtk, when installed, with `raw: "rtk proxy"`), `baseBranch` if not `origin/main`, `memoryDir`, `runsDir`. Follow `grimoire.config.example.json` in the plugin. Two fields need care:
-  - `timeoutMin` only RAISES the 40-minute per-agent backstop for that repo, so propose it only when one legitimate dispatch there needs longer (a gate that queues for a lock); a value at or under 40 does nothing.
+  - `timeoutMin` only RAISES the time limits of that repo's writers (implementer, fix, integrate, gate): their soft limit (`agentTimeoutMin`, 40 minutes by default; past it a dispatch is logged late and still awaited, never cut off) becomes `timeoutMin`, and their hard limit (180 minutes; past it a writer is marked wedged and fences the repo) becomes at least twice that. Propose it only when one legitimate writer there runs longer (a gate that queues for a lock); a value at or under 40 does nothing.
   - `laneSetup`: before proposing a symlinked `node_modules`, check that the stack's bundler accepts one pointing outside the project root (Next.js 16's Turbopack does not); otherwise clone it into the lane (`cp -cR`, copy-on-write on APFS).
 
   Also propose:
   - `specialists`: enable `migration-engineer` for repos that own a schema or migrations, and `test-engineer` where large parts of the code have no tests. Leave it out when neither applies.
+  - `deliver: 'end'` on a repo (`repos[].deliver`) whose pre-push hook demands the gate, or whose CI and previews are too costly to run on every landed task: by default the loop pushes each landed task to the repo's draft PR as it lands.
   - `maxOutputTokens`: a per-run cost cap. Propose one and say it is the user's call.
   - `claim.identity`: only when the tracker has an account the loop can act as. The loop writes to the tracker, so it is off unless the user says yes.
   - `telemetry`: the defaults (`.grimoire/runs`, 183 days of retention), and `.grimoire/` added to `.gitignore`.
