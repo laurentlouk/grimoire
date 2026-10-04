@@ -109,8 +109,10 @@ stack-agnostic.
   hung on that Mac; the run then halted on its exhausted budget. The replanner now names a
   `cause`: `code` spends a replan, `harness` (a dead or late agent, a lane that would not merge)
   is free up to `maxReplans` times and then charged, and `environment` halts the run with
-  `kind: 'environment'` without requeuing anything. A HALT on a harness cause carries
-  `kind: 'harness'`; the halt `kind` is in the `halt` event and in `run.json`'s `summary.halt`.
+  `kind: 'environment'` without requeuing anything. Every halt the loop itself causes carries
+  `kind: 'harness'` (silent reviewers, hydration dying twice, three quick deaths, the replanner
+  dying, a replanner HALT on a harness cause), a token-budget stop carries `kind: 'budget'`, and
+  the halt `kind` is in the `halt` event and in `run.json`'s `summary.halt`.
 - **A run branch named after the project's key** (`runBranch` overrides it, also per repo). The
   run's project text was a sentence ("acme/site#3 — GitHub parent issue #3; its slices are
   …"), so its branch was that sentence slugged and cut at 60 characters, and a relaunch worded

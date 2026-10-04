@@ -208,7 +208,7 @@ flowchart TB
     envq -- "ok" --> replan["REPLANNER — A* from CURRENT state\nrevised tasks re-enter the DAG fully specified\nnever requeues into a fenced repo\ncause: code spends a replan · harness free up to maxReplans"]
     envq -- "fails · no replan spent" --> halt
     replan -- "REVISE" --> disp
-    replan -- "HALT (reason) · cause: environment" --> halt["HALT — kind: environment · wedged · harness · or none\npush what landed · open the draft PR if missing (shipOnHalt)\nSTATUS COMMENT: reason · landed / open · what to fix · how to resume"]
+    replan -- "HALT (reason) · cause: environment" --> halt["HALT — kind: environment · wedged · harness · budget · or none\npush what landed · open the draft PR if missing (shipOnHalt)\nSTATUS COMMENT: reason · landed / open · what to fix · how to resume"]
     disp -- "QUIESCENT: only WEDGED writers left" --> halt
     halt --> ledger
     disp -- "QUIESCENT: project DRAINED" --> final["ONE FINAL WAVE — environment check, then terminal slots,\nrepos in PARALLEL: sweep → gate → the draft PR marked READY\ndiagram below"]
@@ -706,7 +706,10 @@ verified on the run branch, each with `source: 'checkpoint' | 'pr'`) · `environ
 failures, warnings}`: the checks that ran, each failure with its fix, the power warnings) ·
 `replans` (the ones charged to `maxReplans`) + `learnings` + `halt` (`{reason, kind}`; `kind:
 'environment'` is the machine and `'wedged'` a writer still running, neither failed code;
-`'harness'` is a replanner that halted on a harness cause; most halts have none) · `contextResolves`
+`'harness'` is the loop itself failing — reviewers that never answer, hydration dying twice, three
+quick deaths in a row, the replanner dying, or a replanner that halted on a harness cause; `'budget'`
+is the output-token cap or floor; the rest (replan budget exhausted, a replanner's code-cause HALT,
+input problems) have none) · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·
 `precheckStats` · `overturnedFindings` · `routing` (picks by agent and model, fallbacks,

@@ -861,6 +861,7 @@ cdir() { if command -v builtin >/dev/null 2>&1; then builtin cd "$1"; else cd "$
 rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it from origin when missing, fast-forward it when strictly behind
   F=failed
   late || { to git -C "$2" fetch -q origin "+refs/heads/\${3}:refs/remotes/origin/\${3}" >/dev/null 2>&1 && F=ok; }
+  case "$BASE" in origin/?*) late || to git -C "$2" fetch -q origin "+refs/heads/\${BASE#origin/}:refs/remotes/\${BASE}" >/dev/null 2>&1 ;; esac # a stale base would misjudge inBase and ahead
   L=$(git -C "$2" rev-parse -q --verify "refs/heads/\${3}^{commit}" 2>/dev/null); R=$(git -C "$2" rev-parse -q --verify "refs/remotes/origin/\${3}^{commit}" 2>/dev/null)
   if [ -z "$R" ]; then if [ -n "$L" ]; then S=local-only; else S=missing; fi
   elif [ -z "$L" ]; then S=remote-only; [ "$RO" = 0 ] && git -C "$2" branch -q "$3" "refs/remotes/origin/\${3}" >/dev/null 2>&1 && S=created
@@ -3108,7 +3109,8 @@ function longestChain(issues) {
 // each repo would draw. Implementers run ONLY when {execute:true} was explicitly passed —
 // so a forgotten or malformed flag can never trigger a real run (it fails safe to a preview).
 if (!execute) {
-  const startable = (i) => (i.dependsOn || []).every((d) => alreadyDoneIds.has(d) || !inProject.has(d))
+  const resumedIds = new Set(resumedLanded.map((r) => r.id)) // landed on the run branch by an earlier attempt: a met dependency, as in an execute run
+  const startable = (i) => (i.dependsOn || []).every((d) => alreadyDoneIds.has(d) || resumedIds.has(d) || !inProject.has(d))
   const planView = [...new Set(pendingIndex.map((i) => i.slice))].sort((a, b) => a - b).map((sliceNum) => {
     const issues = pendingIndex.filter((i) => i.slice === sliceNum)
     return {
@@ -4477,7 +4479,7 @@ function settle(r) {
       pendingById.delete(r.id)
       emit('settle', { task: r.id, repo: r.repo, status: r.status })
     }
-    if (!halt) halt = { reason: `reviewers unavailable: ${(r.review && r.review.summary) || 'every reviewer returned nothing'} on ${r.id} — the reviewer agent (${pluginAgent('reviewer')}) is not dispatching; a harness failure, not a verdict on the code` }
+    if (!halt) halt = { reason: `reviewers unavailable: ${(r.review && r.review.summary) || 'every reviewer returned nothing'} on ${r.id} — the reviewer agent (${pluginAgent('reviewer')}) is not dispatching; a harness failure, not a verdict on the code`, kind: 'harness' }
     log(`⛔ ${r.id} (${r.repo}) → reviewers unavailable — halting at quiescence (no replan spent)`)
     return
   }
@@ -4746,7 +4748,7 @@ while (true) {
           log(`⚠ hydration of cycle ${waves} returned nothing — retrying it once before the run stops`)
           hyd = await hydrateOnce('~r1')
         }
-        if (!hyd) halt = { reason: `hydration died on cycle ${waves} (${toHydrate.map((i) => i.id).join(', ')}), twice` }
+        if (!hyd) halt = { reason: `hydration died on cycle ${waves} (${toHydrate.map((i) => i.id).join(', ')}), twice`, kind: 'harness' }
         else if (Array.isArray(hyd.inputProblems) && hyd.inputProblems.length)
           halt = { reason: `hydration found input problems: ${hyd.inputProblems.join(' · ')}` }
         if (halt) {
@@ -4864,7 +4866,7 @@ while (true) {
     // mean the dispatches themselves are failing (spend limit / API outage) — stop
     // dispatching and drain rather than feed a dead API through replans.
     if (!halt && consecutiveDied >= 3) {
-      halt = { reason: 'three consecutive dispatches died without a single agent result — agents are dying instantly (spend limit or API outage?); halting instead of spinning' }
+      halt = { reason: 'three consecutive dispatches died without a single agent result — agents are dying instantly (spend limit or API outage?); halting instead of spinning', kind: 'harness' }
       log(`⛔ ${halt.reason}`)
     }
     continue
@@ -4880,6 +4882,7 @@ while (true) {
         budgetStop === 'cap'
           ? `budget_exhausted: this run's output-token cap (${fmtTok(MAX_OUTPUT_TOKENS)}) reached — stopped cleanly at quiescence`
           : `token budget floor (${BUDGET_FLOOR}) reached — stopped cleanly at quiescence`,
+      kind: 'budget',
     }
     log(`⛔ ${halt.reason}`)
     break
@@ -4956,7 +4959,7 @@ while (true) {
         )
       }
       if (!revision) {
-        halt = { reason: 'the re-planner died' }
+        halt = { reason: 'the re-planner died', kind: 'harness' }
         log(`⛔ replan #${replanNo}: planner died`)
         break
       }

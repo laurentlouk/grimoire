@@ -328,6 +328,8 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   ok(v.logs.includes('◎ resume: 2/3 landed, verified on feat/proj-700-api @ bbbbbbb (checkpoint+pr) — still to build: PROJ-3'), 'the one-line proof')
   ok(v.result.estimate.tasks === 1 && /1 task\(s\) still to build \(the 2 already landed and verified are not counted\)/.test(v.result.estimate.basis), 'the estimate covers the remaining task only, and says so')
   ok(v.result.preview === true && /no branch touched/.test(v.result.note) && /2\/3 landed/.test(v.result.note), 'the note carries the proof')
+  const p3 = v.result.plan.flatMap((sl) => sl.issues).find((i) => i.id === 'PROJ-3')
+  ok(p3 && p3.startable === true, 'PROJ-3, blocked only by the absorbed PROJ-2, shows as startable (as the execute run treats it)')
 }
 {
   const v = await run('V-2 · nothing saved: the proof says so', [A, B], () => { throw new Error('dispatch') }, { args: { ...QUIET, execute: false } })
@@ -568,6 +570,27 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     chmodSync(join(LIM, 'timeout'), 0o755)
     const viaTimeout = spawnSync(join(LIM, shells[0]), ['-c', script], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: LIM, GH_FAKE_JSON: '[]' } }).stdout
     ok(!/^WARN/m.test(viaTimeout) && existsSync(join(W0, 'timeout.log')) && readFileSync(join(W0, 'timeout.log'), 'utf8').trim().split('\n').every((n) => Number(n) >= 1 && Number(n) <= 30), 'timeout is used, each limit within 1–30 s')
+  }
+  console.log('\n── RC-8 · the base is fetched too: a stale origin/main never misjudges inBase or ahead')
+  {
+    // its own origin, so the other cases keep their base: the run branch is merged upstream after
+    // a clone fetched origin/main, so that clone's origin/main is stale
+    sh('git init -q --bare -b main o8.git && git clone -q o8.git p8 2>/dev/null')
+    const P8 = join(W0, 'p8')
+    commit(P8, 'base8')
+    sh('git push -q origin main', P8)
+    sh(`git checkout -q -b ${RUN_BRANCH}`, P8)
+    const d1 = commit(P8, 'd1')
+    sh(`git push -q origin ${RUN_BRANCH}`, P8)
+    for (const shell of shells) sh(`git clone -q o8.git stale8-${shell} 2>/dev/null && git -C stale8-${shell} branch -q ${RUN_BRANCH} origin/${RUN_BRANCH}`)
+    sh(`git checkout -q main && git merge -q --ff-only ${RUN_BRANCH} && git push -q origin main`, P8)
+    for (const shell of shells) {
+      const S8 = join(W0, `stale8-${shell}`)
+      ok(sh(`git rev-parse refs/remotes/origin/main`, S8) !== d1, `${shell}: the clone's origin/main predates the upstream merge`)
+      const { out } = exec(shell, await scriptFor(S8, [LANDED('PROJ-1', d1)]))
+      ok(out.includes(`BRANCH repo=api local=${d1} remote=${d1} sync=same fetch=ok ahead=0`), `${shell}: after fetching the base, origin's run branch is 0 commits past it`)
+      ok(out.includes(`TASK id=PROJ-1 repo=api sha=${d1} local=yes origin=yes onBranch=no inBase=yes`), `${shell}: the task merged upstream reads inBase=yes (the tracker absorbs it), never a branch-only landing`)
+    }
   }
   rmSync(W0, { recursive: true, force: true })
 }
