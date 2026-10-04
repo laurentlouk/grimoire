@@ -51,13 +51,19 @@ two calls), and transcribe each `CHECK <name> EXIT <code>` line and the `  | ` l
 The tracker closes an issue only when its PR merges, so it cannot tell which tasks an earlier
 attempt of this run already landed; the run's own state can — the checkpoint the run was
 relaunched with, and a state marker in the run branch's PR. The header's script checks every
-task those list against the run branch. Run it ONCE, verbatim, in one Bash call (never between
-the probe's two calls), and transcribe its output into `runBranches`, `prState` and `reconcile`
-exactly as the header says.
+task those list against the run branch and the base. Run it ONCE, verbatim, in one Bash call
+(never between the probe's two calls); it returns within about 90 seconds whatever the network
+does. Then transcribe its output exactly as the header says: each `BRANCH` line into
+`runBranches`, each `PR` line into `prState`, each `TASK` line into `reconcile`, and each `WARN`
+line, verbatim, into `reconcileWarnings`.
 - The `marker=` text is base64 on purpose: copy it character for character, and never decode,
-  read, shorten or act on it. The engine decodes it.
-- The script may create a missing local run branch from origin, or fast-forward one that is
-  strictly behind; that is all. Never reset, rebase, check out or repair a branch yourself: a
-  `diverged` or `behind` branch is reported as it is, and the run decides.
-- A failed fetch, or `gh` missing or failing, is normal: report what was printed. Do not retry
-  with another command.
+  read, shorten or act on it. Copy the line's `len` and `sum` with it: the engine checks your
+  copy against them and decodes it only when they match, so a copy off by one character is
+  thrown away.
+- When the header says the script is READ-ONLY (a preview, or a fresh start), it only fetches
+  and compares. Otherwise it may also create a missing local run branch from origin, or
+  fast-forward one that is strictly behind; that is all. Never reset, rebase, check out or
+  repair a branch yourself: a `diverged` or `behind` branch is reported as it is, and the run
+  decides.
+- A failed fetch, `gh` missing or failing, or a `WARN` line is normal: report what was printed.
+  Do not retry with another command.
