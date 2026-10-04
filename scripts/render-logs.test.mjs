@@ -19,6 +19,10 @@
 //    • prune --dry-run removes nothing; prune removes only the old run; prune
 //      refuses / , $HOME and anything outside the working directory; a dir holding
 //      only events/ chunks counts as a run dir
+//    • 0.9.0 run durability: the page summarizes late, hedge, wedged, late-result,
+//      fence, ship, env and absorb events in words, shows a halt's kind and draft
+//      PRs, and the checkpoint card shows a v2 checkpoint's landedTasks with their
+//      heads (the renderer is executed against a minimal DOM, not just grepped)
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
@@ -234,6 +238,74 @@ try {
   ok(none.status === 0 && /no runs found/.test(none.stdout), 'summary over a missing dir says no runs found')
   const noneHtml = cli('--dir', 'nowhere', '--out', '.grimoire/empty.html')
   ok(noneHtml.status === 0 && existsSync(join(ROOT, '.grimoire', 'empty.html')), 'render over a missing dir still writes a page')
+
+  // ══════ 5 · 0.9.0 run durability events and checkpoint v2 ══════
+  section('5 · run-durability events read as sentences; the v2 checkpoint lists landed tasks and heads')
+  const ROOT5 = join(ROOT, 'durability')
+  const RUNS5 = join(ROOT5, '.grimoire', 'runs', 'run-delta')
+  mkdirSync(join(RUNS5, 'events'), { recursive: true })
+  const metaD = { grimoireVersion: '0.9.0', briefsHash: 'dddd444', personasHash: 'p4', configHash: 'c4' }
+  const checkpointD = {
+    version: 2, replansUsed: 0, lastSeq: 12, outputTokensSpent: 4000, learnings: [{ text: 'sign commits before launching', repos: ['site'] }], pending: ['#6'], landed: ['#4', '#5'],
+    landedTasks: [
+      { id: '#4', repo: 'site', status: 'DONE', runBranch: 'feat/proj-9-site', startSha: '0000000', firstSha: 'aaaaaaa1', headSha: 'aaaaaaa1111', commits: ['aaaaaaa1111'], summary: 'built A' },
+      { id: '#5', repo: 'site', status: 'DONE', runBranch: 'feat/proj-9-site', startSha: 'aaaaaaa1111', firstSha: 'bbbbbbb2', headSha: 'bbbbbbb2222', commits: ['bbbbbbb2222'], summary: 'built B' },
+    ],
+    shipped: { site: { pushedHead: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true } },
+    wedged: ['impl:#6'],
+  }
+  writeFileSync(join(RUNS5, 'run.json'), JSON.stringify({ runId: 'run-delta', project: 'PROJ-9', meta: metaD, startedAt: iso(0), updatedAt: iso(0), status: 'halted', checkpoint: checkpointD,
+    summary: { draftPrs: { site: 'https://example.invalid/pr/7' } } }))
+  const evD = [
+    { type: 'run.start', project: 'PROJ-9', mode: 'execute', meta: metaD, knobs: {}, repos: ['site'] },
+    { type: 'absorb', task: '#4', source: 'checkpoint', head: 'aaaaaaa1111' },
+    { type: 'env', when: 'start', why: 'startup', ok: true, failed: [] },
+    { type: 'late', label: 'impl:#5', task: '#5', kind: 'writer', softMin: 40 },
+    { type: 'hedge', label: 'precheck:#5' },
+    { type: 'late-result', label: 'impl:#5', task: '#5', accepted: true, status: 'DONE' },
+    { type: 'settle', task: '#5', repo: 'site', status: 'DONE' },
+    { type: 'ship', repo: 'site', mode: 'land', pushed: true, head: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true },
+    { type: 'wedged', label: 'impl:#6', task: '#6', repo: 'site', hardMin: 180 },
+    { type: 'fence', repo: 'site', action: 'hold' },
+    { type: 'env', when: 'stall', why: 'late writer', ok: false, failed: ['commit:site'] },
+    { type: 'halt', reason: 'environment: commit:site timed out after 30 s', kind: 'environment' },
+  ].map((e, i) => JSON.stringify({ seq: i + 1, at: iso(0), tok: (i + 1) * 100, ...e }))
+  writeFileSync(join(RUNS5, 'events', '00000001.jsonl'), evD.join('\n') + '\n')
+  const r5 = spawnSync(process.execPath, [SCRIPT, '--out', 'logs.html'], { cwd: ROOT5, encoding: 'utf8' })
+  ok(r5.status === 0, `render exits 0 (stderr: ${r5.stderr.trim() || 'none'})`)
+  const html5 = r5.status === 0 ? readFileSync(join(ROOT5, 'logs.html'), 'utf8') : ''
+  // Execute the page's renderer against a minimal DOM and read back the text it produced.
+  class El {
+    constructor(tag) { this.tag = tag; this.children = []; this.className = '' }
+    setAttribute() {}
+    addEventListener() {}
+    append(...kids) { this.children.push(...kids) }
+    replaceChildren(...kids) { this.children = kids }
+    get textContent() { return this.children.map((c) => (c instanceof El ? c.textContent : String(c))).join(' ') }
+  }
+  const blob5 = (html5.match(/<script type="application\/json" id="grimoire-data">([\s\S]*?)<\/script>/) || [])[1] || '{}'
+  const js5 = (html5.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || ''
+  const doc = { body: new El('body'), createElement: (t) => new El(t), getElementById: (id) => (id === 'grimoire-data' ? { textContent: blob5 } : null) }
+  let text = ''
+  try { new Function('document', 'Node', js5)(doc, El); text = doc.body.textContent } catch (e) { ok(false, `the renderer ran (${e.message})`) }
+  const has = (re, m) => ok(re.test(text), m)
+  has(/impl:#5 past its 40-min soft limit \(writer\): still awaited, not stopped/, 'late: the label, the soft limit and that it is still awaited')
+  has(/precheck:#5: a duplicate dispatch started/, 'hedge: a duplicate dispatch')
+  has(/impl:#6 past its 180-min hard limit and still running: site fenced/, 'wedged: the hard limit and the fenced repo')
+  has(/impl:#5 returned late \(DONE\) → accepted/, 'late-result: accepted, with its status')
+  has(/site → held: no dispatch into it/, 'fence: held')
+  has(/site · land → pushed bbbbbbb2222 · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship: the pushed head and the draft PR')
+  has(/stall \(late writer\) → FAILED: commit:site/, 'env: the failed check')
+  has(/start \(startup\) → ok/, 'env: a passing check')
+  has(/landed earlier, from checkpoint @ aaaaaaa1111/, 'absorb: the source and the head')
+  has(/\[environment\] environment: commit:site timed out/, 'halt: its kind')
+  has(/Checkpoint\s+· v2/, 'the checkpoint card shows its version')
+  has(/landed:\s+#4 @ aaaaaaa \(site · feat\/proj-9-site\), #5 @ bbbbbbb \(site · feat\/proj-9-site\)/, 'the checkpoint card lists landedTasks with their heads and run branch')
+  has(/pushed:\s+site @ bbbbbbb · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the checkpoint card shows what was pushed')
+  has(/still running when the session stopped: impl:#6/, 'the checkpoint card shows wedged dispatches')
+  has(/sign commits before launching/, 'a {text, repos} learning shows its text')
+  has(/https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the overview tags the draft PR')
+  ok(!/\{"label"/.test(text), 'no new event type falls back to its raw JSON')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }
