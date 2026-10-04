@@ -772,7 +772,7 @@ failure — still return the slice index.
 const TO_FN = `to() { s=$1; shift; if command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$s" "$@"; else "$@"; fi; }`
 // The same limit, killing the command's whole PROCESS GROUP (exit 142): `alarm` + `exec` kills git
 // but leaves what it started — the ssh of a push, a pre-push hook and the test run it launched.
-const PERL_GROUP_TO = `perl -e '$t = shift; $p = fork; exit 125 unless defined $p; if (!$p) { setpgrp(0, 0); exec @ARGV; exit 127 } $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 142 }; alarm $t; waitpid($p, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)'`
+const PERL_GROUP_TO = `perl -e '$t = shift; $p = fork; exit 125 unless defined $p; if (!$p) { setpgrp(0, 0); exec @ARGV; exit 127 } $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 142 }; for my $s (qw(TERM HUP INT)) { $SIG{$s} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 143 } } alarm $t; waitpid($p, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)'`
 function builtinChecksFor(repos) {
   if (!BUILTIN_ENV) return []
   return [
@@ -1570,19 +1570,34 @@ const PR_VIEW_JQ = String.raw`"\(.isDraft) " + ((([(.body // "") | match("<!-- g
 // the function that takes it. GS=1: a gate's lock is stale (a halt: no gate runs any more).
 const shipLockPath = (repo) => `G=$(git -C "$P" rev-parse --git-common-dir 2>/dev/null); case "$G" in '') G="$P/.git" ;; /*) ;; *) G="$P/$G" ;; esac; LKP="$G/grimoire-ship-${refToken(repo)}.lock"; HELD=0`
 const SHIP_LOCK_FN = `shiplock() { # <ship|gate>: take the repo's ship lock — one ship, or the gate, moves the run branch and the PR at a time
-  _w=0
+  _t0=$(now); _n=0; _p=; _k=; _a=0
   while :; do
     if mkdir "$LKP" 2>/dev/null; then echo "$$ $(now) $1" >"$LKP/owner"; HELD=1; return 0; fi
+    [ -d "$LKP" ] || { echo "LOCK error: cannot create $LKP (not writable?) — nothing moves"; return 1; }
     _p=; _t=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null
     case "$_t" in ''|*[!0-9]*) _t=0 ;; esac
     _a=$(( $(now) - _t )); _x=0
-    if [ -z "$_p" ]; then [ "$_w" -ge 10 ] && _x=1
+    if [ -z "$_p" ]; then [ $(( $(now) - _t0 )) -ge 10 ] && _x=1
     elif [ "$_k" = gate ]; then { [ "$GS" = 1 ] || [ "$_a" -ge ${GATE_LOCK_STALE_SEC} ]; } && _x=1
     elif ! kill -0 "$_p" 2>/dev/null || [ "$_a" -ge ${SHIP_LOCK_STALE_SEC} ]; then _x=1
     fi
-    if [ "$_x" = 1 ]; then rm -rf "$LKP"; echo "LOCK stale: \${_k:-no owner} \${_p:-?} (\${_a} s) — taken over"; continue; fi
-    if [ "$_w" -ge "$LW" ]; then echo "LOCK busy: held by \${_k:-?} \${_p:-?} for \${_a} s"; return 1; fi
-    sleep 1; _w=$((_w + 1))
+    if [ "$_x" = 1 ]; then
+      # break a stale lock only under a second mutex, re-reading the owner there: two waiters that
+      # both saw the same dead holder must not each remove the lock the other has just taken
+      if mkdir "$LKP.brk" 2>/dev/null; then
+        echo "$(now)" >"$LKP.brk/t"
+        _q=; { read -r _q _r _s <"$LKP/owner"; } 2>/dev/null
+        if [ "$_q" = "$_p" ]; then rm -rf "$LKP"; echo "LOCK stale: \${_k:-no owner} \${_p:-?} (\${_a} s) — taken over"; fi
+        rm -rf "$LKP.brk"
+      else
+        _b=; { read -r _b <"$LKP.brk/t"; } 2>/dev/null; case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
+        [ $(( $(now) - _b )) -ge 5 ] && rm -rf "$LKP.brk"
+      fi
+      _n=$((_n + 1))
+      if [ "$_n" -ge 5 ]; then echo "LOCK error: could not take over $LKP after 5 tries — nothing moves"; return 1; fi
+    fi
+    if [ $(( $(now) - _t0 )) -ge "$LW" ]; then echo "LOCK busy: held by \${_k:-?} \${_p:-?} for \${_a} s"; return 1; fi
+    [ "$_x" = 1 ] || sleep 1
   done
 }
 shipunlock() { _p=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null; [ "$HELD" = 1 ] && [ "$_p" = "$$" ] && rm -rf "$LKP"; HELD=0; }`
@@ -1608,6 +1623,7 @@ function shipPrompt(repo, plan) {
     'GIT_TERMINAL_PROMPT=0; GH_PROMPT_DISABLED=1; export GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED',
     SHIP_HELPERS,
     SHIP_LOCK_FN,
+    "trap 'shipunlock; exit 143' TERM HUP INT",
     `T0=$(now); P=${shq(path)}; W=${shq(wt)}; O=$(mktemp); F=$(mktemp); C=$(mktemp); U=${shq(known)}; GS=${halting ? 1 : 0}`,
     `SES=${shq(journal.session || '-')}; GEN=${Number.isInteger(plan.gen) ? plan.gen : 0}; RD=0; NEWER=0; PUSHOK=1; DR=`,
     `# 0 · the repo's ship lock: a ship given up on at its hard limit may still be running`,
@@ -1682,7 +1698,7 @@ function shipPrompt(repo, plan) {
     else {
       if (cm.ok) branches.push(['[ "$RD" != 1 ] && [ "$PUSHOK" = 1 ]', cm.ok])
       if (cm.ready) branches.push(['[ "$RD" = 1 ]', cm.ready])
-      if (cm.failed) branches.push(['[ "$PUSHOK" != 1 ]', cm.failed])
+      if (cm.failed) branches.push(['[ "$PUSHOK" != 1 ] && [ "$LK" = 1 ]', cm.failed]) // lock busy: no push was tried, so no "FAILED" claim
     }
     L.push(`# 6 · the status comment: ${[cm.ok && 'pushed (or already there) → the proof', cm.ready && 'out of draft → why the PR was left alone', cm.failed && 'push failed → what the remote holds'].filter(Boolean).join('; ')}`, 'if [ -n "$U" ] && command -v gh >/dev/null 2>&1; then')
     branches.forEach(([cond, text], i) => L.push(`${i ? 'elif' : 'if'} ${cond}; then`, ...comment(text)))
@@ -1746,6 +1762,7 @@ function sealPrompt(repo, prUrl, marker) {
     'GH_PROMPT_DISABLED=1; export GH_PROMPT_DISABLED',
     SHIP_HELPERS,
     SHIP_LOCK_FN,
+    "trap 'shipunlock; exit 143' TERM HUP INT",
     `T0=$(now); P=${shq(repoPath(repo))}; U=${shq(str(prUrl) || '')}; B=$(mktemp); N=$(mktemp); K=$(mktemp); O=$(mktemp); GS=1`,
     shipLockPath(repo),
     'if shiplock ship; then LK=1; echo "LOCK ok"; else LK=0; fi',
@@ -2782,12 +2799,15 @@ async function runEnvChecks(why, only) {
     log(`⚠ environment check ${label} (after ${why}) returned nothing usable — not counted as a failure`)
     return { failed: [], checks: [] }
   }
-  const { failed } = judgeEnv(checks, r.results, 'stall')
-  for (const c of checks) if (c.type !== 'power') envState.ran.add(c.name)
+  const { failed, missing } = judgeEnv(checks, r.results, 'stall')
+  // only checks that reported a result count as answered: an absent one proves nothing, either way
+  const answered = checks.filter((c) => c.type !== 'power' && !missing.includes(c.name))
+  for (const c of answered) envState.ran.add(c.name)
+  if (missing.length) log(`⚠ environment check ${label}: ${missing.join(', ')} reported no result — not counted as answered`)
   emit('env', { when: 'stall', why, ok: !failed.length, failed: failed.map((f) => f.name), ...(recheck ? { recheck: true } : {}) })
   if (failed.length) log(`${recheck ? '⛔' : '⚠'} ${envReason(failed)}${recheck ? ' — failed again on the re-check' : ' — re-checking once before halting (no new dispatch meanwhile)'}`)
-  else log(`✓ environment ${recheck ? 're-check' : 'check'} after ${why}: ${checks.filter((c) => c.type !== 'power').map((c) => c.name).join(', ')} answered`)
-  return { failed, checks: checks.filter((c) => c.type !== 'power') }
+  else if (answered.length) log(`✓ environment ${recheck ? 're-check' : 'check'} after ${why}: ${answered.map((c) => c.name).join(', ')} answered`)
+  return { failed, checks: answered }
 }
 // Non-blocking: starts a stall check unless one is running (then returns that one). A failure is
 // RE-CHECKED once before it counts: new dispatches pause meanwhile (envState.suspect), and only a
@@ -2823,13 +2843,22 @@ function requestEnvCheck(why) {
       if (!first || !first.failed.length || dispatchClosed) return first
       envState.suspect = first.failed
       const names = new Set(first.failed.map((f) => f.name))
-      const again = await runEnvChecks(why, first.checks.filter((c) => names.has(c.name)))
+      const again = await runEnvChecks(why, stallChecks().filter((c) => names.has(c.name)))
       if (again.failed.length) return again // it held: the halt latches
-      if (again.checks.length) {
-        envState.transient.push(...first.failed.map((f) => ({ name: f.name, exit: f.exit })))
-        log(`◎ environment: ${[...names].join(', ')} answered on the re-check — a transient failure, the run goes on`)
+      // a failure is transient only when the re-check ANSWERED that very check and it passed; one the
+      // re-check did not answer (no reply, no result for it) keeps its first failure, and the halt latches
+      const passed = new Set(again.checks.map((c) => c.name))
+      const unproven = first.failed.filter((f) => !passed.has(f.name))
+      const cleared = first.failed.filter((f) => passed.has(f.name))
+      if (cleared.length) {
+        envState.transient.push(...cleared.map((f) => ({ name: f.name, exit: f.exit })))
+        log(`◎ environment: ${cleared.map((f) => f.name).join(', ')} answered on the re-check — a transient failure${unproven.length ? '' : ', the run goes on'}`)
       }
-      return { failed: [], checks: again.checks } // a re-check that returned nothing is not a failure either
+      if (unproven.length) {
+        log(`⛔ environment: the re-check did not answer ${unproven.map((f) => f.name).join(', ')} — its first failure stands`)
+        return { failed: unproven, checks: again.checks }
+      }
+      return { failed: [], checks: again.checks }
     })
     .then(done, (e) => {
       log(`⚠ environment check failed internally: ${String(e)}`)
@@ -3299,7 +3328,8 @@ const newerState = (a, b) => {
 // it is the run's own journal, and a PR body anyone with write access can edit never outranks it (a
 // verified but planted marker once set every counter to its ceiling). Without it, the newest verified
 // marker — by attempt, then lastSeq — carries them (another machine has nothing else).
-const resumeSafe = resumeOpt ? { ...stateCounters(resumeOpt, 'the resumeState passed in', true), landedTasks: Array.isArray(resumeOpt.landedTasks) ? resumeOpt.landedTasks : [] } : null
+const resumeShapedLikeMarker = !!resumeOpt && ['repo', 'runBranch', 'base'].some((k) => k in resumeOpt) // a PR marker passed as resumeState: its spend is not this run's own
+const resumeSafe = resumeOpt ? { ...stateCounters(resumeOpt, 'the resumeState passed in', !resumeShapedLikeMarker), landedTasks: Array.isArray(resumeOpt.landedTasks) ? resumeOpt.landedTasks : [] } : null
 let resumeBase = resumeSafe
 if (!resumeBase) for (const m of markerStates) if (!resumeBase || newerState(m, resumeBase)) resumeBase = m
 if (resumeBase && resumeBase !== resumeSafe) log(`◎ run state taken from the PR marker of ${resumeBase.repo}${resumeBase.url ? ` (${resumeBase.url})` : ''}: attempt ${stateRank(resumeBase)[0]}, seq ${stateRank(resumeBase)[1]}`)
@@ -4512,7 +4542,7 @@ function stateFor(repo, gen = 0) {
   }
   const build = (kept, firstLen, fr) => {
     const omitted = mine.length - kept.length
-    return { version: 2, runId: runId || null, project, repo, runBranch: runBranchFor(repo), base: BASE_BRANCH, attempt: sessionAttempt, lastSeq: journal.seq, replansUsed: replans, fixRounds: Object.fromEntries(fr.slice(0, MARKER_TASK_CAP)), outputTokensSpent: runSpent(), session: journal.session || null, ship: gen, landedTasks: kept.map((d) => rec(d, firstLen)), ...(omitted ? { omitted } : {}) }
+    return { version: 2, runId: runId || null, project: PROJECT_KEY === project ? trim(project, 200) : String(PROJECT_KEY), repo, runBranch: runBranchFor(repo), base: BASE_BRANCH, attempt: sessionAttempt, lastSeq: journal.seq, replansUsed: replans, fixRounds: Object.fromEntries(fr.slice(0, MARKER_TASK_CAP)), outputTokensSpent: runSpent(), session: journal.session || null, ship: gen, landedTasks: kept.map((d) => rec(d, firstLen)), ...(omitted ? { omitted } : {}) }
   }
   const size = (st) => Math.ceil(utf8Encode(scrubPaths(JSON.stringify(st))).length / 3) * 4
   let kept = mine.slice(0, MARKER_TASK_CAP)
