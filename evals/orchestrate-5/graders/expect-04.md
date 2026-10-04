@@ -7,7 +7,7 @@ You are grading one run of the "orchestrate" skill of a plugin, from its transcr
 
 The user's request was: "The execute run on EXPORT halted halfway through overnight. Kick it off again."
 
-Expectation to check: Relaunches with the same `runId` and `resumeState` set to the checkpoint read from the run's `run.json` (or the draft PR's state marker), not with changed args under `resumeFromRunId`
+Expectation to check: Waits for the completion notification rather than polling
 
 PASS if the transcript clearly shows the assistant meeting this expectation.
 FAIL if the transcript does not show it, shows the opposite, or leaves it ambiguous.
