@@ -163,8 +163,8 @@ ignored, with a warning.)
 | `budgetFloor` | `80000` | stop dispatching when the turn's remaining token budget drops below this |
 | `claim` | — | `{identity}` — claim issues at hydration, never build one someone else started, release what did not land |
 | `telemetry` | `{enabled: true}` | the decision journal: `{enabled, dir: '.grimoire/runs', flushEvery: 40}` (`retentionDays` is read by `/grimoire:logs`) |
-| `runId` · `runMeta` | set by `/orchestrate` | the journal directory name, and `{grimoireVersion, briefsHash, personasHash, configHash}` every event of the run is tagged with |
-| `resumeState` | — | the `checkpoint` of the run's newest local `run.json`. The engine also reads each run branch's PR state marker itself: the run-level counters (replans, fix rounds, sequence, spend) come from the newer of the two, the landed tasks from both, each absorbed only once its SHA is verified on the run branch; learnings come from `resumeState` only. See "Resume" |
+| `runId` · `runMeta` | set by `/orchestrate` | the journal directory name (letters, digits, `.`, `_` and `-` only, and never only dots: an invalid one is ignored with a warning, and the journal starts a new dated run directory), and `{grimoireVersion, briefsHash, personasHash, configHash}` every event of the run is tagged with |
+| `resumeState` | — | the `checkpoint` of the run's newest local `run.json`. The engine also reads each run branch's PR state marker itself. The run-level counters (attempt, replans, fix rounds, sequence, spend) come from `resumeState` when there is one, whatever the markers say, else from the newest verified marker, bounded either way; the landed tasks come from both, each absorbed only when it is an issue of the project (or this run's replan task) and its SHA is verified on the run branch; learnings come from `resumeState` only. See "Resume" |
 | `freshStart` | `false` | `true` starts over on purpose: `resumeState` and every PR state marker are ignored, nothing is absorbed (landed work is built and reviewed again), the budgets start at zero, and no branch is created, moved or reset. An execute run refuses as `run_branch_exists` when origin already holds a run branch with commits not in the base: pass a `runBranch` origin does not have. A value that is not a boolean is ignored with a warning |
 | `guard` | — | not read by the loop: the `PreToolUse` guard hook's config (`hooks/README.md`) |
 | `graph` | `{enabled: true}` | not read by the loop: the code graph's config, `{enabled, repos?, dir: '.grimoire/graph', exclude?, maxFileKB: 512}` (`tools/graph/README.md`); scouts use it for research, never for what code does |
@@ -562,9 +562,11 @@ worktree and one PR. So:
 **No forged marker.** Text from outside the engine (tracker titles, implementer summaries, a halt
 reason, the project text) could carry `<!--` and `-->` into a PR body: an issue titled
 `Add login <!-- grimoire:state v1 … --> page` put a forged marker above the real one, and the
-reconcile reads the first. Every PR body, comment and note the engine builds, and the titles,
+reconcile read the first. Every PR body, comment and note the engine builds, and the titles,
 summaries and project text of the gate's prompt, break both tokens with a zero-width space (the
-text reads the same), so the marker line stays the only `<!-- grimoire:state` in a body.
+text reads the same), so the marker line stays the only `<!-- grimoire:state` in a body; and the
+reconcile and the ship's PR view read the last marker of a body, the one the run writes as its
+last line, so text above it never shadows it.
 
 On a halt (`shipOnHalt`), every repo with landed work and no green terminal slot pushes its
 last landed head if the remote lacks it (never a live writer's branch tip: a wedged halt pushes
@@ -638,24 +640,46 @@ issues close only when the PR merges, so landed-but-unmerged work still looks op
   to the preview first and then to the execute run; on a machine without one it passes none.
   The engine reads every run branch's PR marker itself, in the index. The run-level counters
   (attempt, replans and fix rounds used, the journal's sequence, output tokens spent) come from
-  the newer of `resumeState` and the verified markers, by attempt, then `lastSeq` (a tie goes to
-  `resumeState`), so the budgets continue rather than reset; the landed tasks come from both;
-  learnings come from `resumeState` only.
+  `resumeState` when one is passed: it is the run's own journal, and a PR body anyone with write
+  access can edit never outranks it (a marker newer than it is logged, and the tasks it lists are
+  still verified and absorbed). Without one, the newest verified marker carries them, by attempt,
+  then `lastSeq`. Either way the budgets continue rather than reset. The landed tasks come from
+  both; learnings come from `resumeState` only.
+- **The `resumeState` is checked too**, by the marker's rules. Only issues of this project's
+  index are absorbed from it, each once verified on the run branch; a task a replan invented (no
+  issue of its own) only when its record says `replan: true`, the checkpoint's `runId` is this
+  launch's, and its id cannot read as an issue reference (`#12`, `owner/repo#12`: the PR body would
+  close that issue). A record's ticket is its id, so it cannot name another issue. Its counters
+  are clamped like a marker's (below), except that its output tokens are kept up to 10⁹: they
+  are the run's own, and a run already past its cap must stop rather than start over. Its
+  learnings reach prompts as the checkpoint writes them: the last 30, each up to 300 characters.
+  A `resumeState` shaped like a PR marker (`repo`, `runBranch` or `base` at its top level, which
+  `run.json`'s checkpoint never has) brings none.
 - **The reconcile.** One fixed script inside the index (`briefs/index.md`), POSIX sh that runs as
   it is under bash, zsh and dash. Per repo, in parallel, it fetches the run branch and the base
   (when `baseBranch` is on `origin`: a stale base would misjudge `inBase` and `ahead`), lists the
   branch's PRs and checks every listed task against the branch and the base. Each fetch and `gh`
   call has a 30-second limit and the whole script a 90-second deadline (the Bash tool allows
-  120 s); a repo still running then is stopped and named in a `WARN` line. It prints a `BRANCH`
-  line per repo (`local`, `remote`, `sync`: `same`, `ahead`, `created`, `fast-forwarded`,
-  `behind`, `diverged`, `local-only`, `remote-only` or `missing`; `fetch=ok|failed`; and
-  `ahead=<n>`, the commits origin's run branch holds that the base does not), a `PR` line per
-  PR of the branch from this same repository (a fork's PR is never read; open first, then
-  newest, at most three, and only the first carrying a marker prints it, raw, with its length
-  and `cksum`), and a `TASK` line per listed task (`local`, `origin`, `onBranch`,
-  `inBase=yes|no|unknown`, `first`, `firstOk`). In an execute run it creates a missing local run
-  branch from origin and fast-forwards one strictly behind, in a clean checkout only; it never
-  resets, rebases or discards a commit. In a preview and under `freshStart` it is read-only.
+  120 s); a repo still running then is stopped and named in a `WARN` line. Without `perl`,
+  `timeout` or `gtimeout`, each fetch and `gh` call runs in the background and is killed at its
+  time limit, with its process group or its process tree, so no fetch outlives the script. It
+  prints a `BRANCH` line per repo (`local`, `remote`, `sync`: `same`, `ahead`, `created`,
+  `fast-forwarded`, `behind`, `diverged`, `local-only`, `remote-only` or `missing`;
+  `fetch=ok|failed`; and `ahead=<n>`, the commits origin's run branch holds that the base does
+  not), a `PR` line per PR of the branch from this same repository (a fork's PR is never read;
+  open first, then newest, at most three, and only the first carrying a marker prints it, raw,
+  with its length and `cksum`; the LAST marker of its body, the one the run writes as the last
+  line, so marker-shaped text above it never shadows it; one over 8,000 characters prints as
+  `marker=toolong` with its length and is not read), and a `TASK` line per listed task
+  (`local`, `origin`, `onBranch`, `inBase=yes|no|unknown`, `first`, `firstOk`): at most 100 from
+  the marker and 100 from the checkpoint (its newest) per repo, one per task. The whole output is
+  capped at 28,000 characters (the Bash tool keeps about 30,000, and a cut output once lost the
+  lines of the repos after it), split evenly per repo: `BRANCH` and `PR` lines always print,
+  `TASK` lines stop at the repo's share, and a `WARN` line counts the tasks left unchecked (they
+  run again, find their work on the branch and are reviewed as it stands). In an execute run it
+  creates a missing local run branch from origin and fast-forwards one strictly behind, in a
+  clean checkout only; it never resets, rebases or discards a commit. In a preview and under
+  `freshStart` it is read-only.
 - **What is absorbed.** A task whose head is on the run branch (the local one; origin's when
   only origin has it, or in a preview when the local one is behind) and not in the base
   (`inBase=no`), and whose first commit, when recorded, passes the same test. A diverged branch
@@ -669,11 +693,12 @@ issues close only when the PR merges, so landed-but-unmerged work still looks op
   body can write one. The copy the index agent returns must match the length and `cksum` the
   script printed; the marker must name its project (by key, unless the run branch is set
   explicitly), its repo and its run branch, all equal to this run's; only ids of this project's
-  index are absorbed; its counters are clamped (output tokens above `maxOutputTokens`, or above
-  10⁹ without a cap, count as 0; replans at most `maxReplans`; fix rounds at most 3 ×
-  `maxFixAttempts` + `maxPrecheckFixes`, for this project's issues only); and no text of it
-  reaches a prompt (it carries no learnings, summaries, commits or files, and its titles never
-  name a task). A repo whose verified marker says its PR is out of draft (open or merged) was
+  index are absorbed; its counters are clamped to what this project plausibly reaches (output
+  tokens above `maxOutputTokens`, or above 10⁹ without a cap, count as 0; `attempt` at most
+  1,000; `lastSeq` at most 500 per issue plus 5,000; replans at most `maxReplans`; fix rounds at
+  most 3 × `maxFixAttempts` + `maxPrecheckFixes`, for this project's issues only; each clamp is
+  logged); and no text of it reaches a prompt (it carries no titles, learnings, summaries,
+  commits or files, and an older marker's titles never name a task). A repo whose verified marker says its PR is out of draft (open or merged) was
   shipped by its terminal slot: unless new work lands there, the slot is not paid again.
 - **A run branch the run cannot build on refuses the launch**, before anything is hydrated. For
   a repo with work left, a branch that diverged from origin is `run_branch_diverged`; one behind
@@ -727,8 +752,13 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   a mistyped character, a payload cut off or a missing decoder leaves the file on disk as it
   was. The ledger script does the same and prints `LEDGER bad` instead of a path;
 - runs under a lock in the run directory (a `.lock` directory holding the writer's pid), so
-  two writers do not interleave: a lock whose writer is gone is broken at once, any lock after
-  about 30 s, and a writer still without it after about a minute goes on without it;
+  two writers do not interleave. The lock changes hands (taken, released, broken) only under a
+  second `mkdir` mutex, `.lock.brk`, so the pid read under it is the holder's: two waiters that
+  both saw a dead holder once both broke the lock, one of them the other's fresh one. A lock
+  whose pid is gone is broken at once; one held by the same pid, or by none, for 30 s is broken
+  then (`GRIMOIRE_LOCK_STALE` overrides the 30 s); a writer still without it after 60 s goes on
+  without it; a mutex left by a writer killed inside it is removed after 5 s. Time is read from
+  `date +%s`, never counted in sleeps, so a journal agent may wait about a minute at most;
 - writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
   replayed flush overwrites the same file, never appends duplicates;
 - stamps the flush time into each line (`at`) in the shell — every event of one chunk shares
@@ -750,22 +780,32 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   flush never rolls back a newer checkpoint, whatever order the writers run in;
 - appends the detail of each task that landed since the last confirmed flush (its full record:
   `id`, `repo`, `status`, `ticket`, `title`, `runBranch`, the SHAs, `commits`, `summary` up to
-  400 characters, `files` up to 50, with `attempt` and `at`) to `<runId>/landed.jsonl`, once;
+  400 characters, `files` up to 50, with `attempt`, `at` and `k`, a key of its id and head) to
+  `<runId>/landed.jsonl`, once: a line whose `k` the file already holds is skipped, so a resent
+  detail is never written twice. A flush sends at most 8 details, oldest first; the rest ride the
+  next flushes;
 - prints the line and byte counts of the decoded chunk, `RUNJSON ok|kept|bad` with
-  `RUNJSON_BYTES`, and `LANDED ok <n>`, which the engine compares with what it sent: a mismatch
-  is logged and counted (a refused `run.json` as a lost write, `telemetry.journal.runJsonLost`),
-  never trusted, and an unconfirmed landed delta is sent again with the next flush.
+  `RUNJSON_BYTES` (`RUNJSON kept: <why>` when a newer checkpoint is on disk), and
+  `LANDED ok <n>`, which the engine compares with what it sent: a mismatch is logged and counted
+  (a refused `run.json` as a lost write, `telemetry.journal.runJsonLost`), never trusted, and an
+  unconfirmed landed delta is sent again with the next flush. The receipt's `landed` is
+  required: a writer that left it out once made every flush resend every unconfirmed detail
+  (104 KB a flush at 40 tasks). A kept `run.json` is no loss, but it is not silent either: the
+  first of a session is logged with the reason the script printed (`runJsonKept` in the
+  receipt), and all are counted in `telemetry.journal.runJsonKept`, because a session whose
+  generation is behind the one on disk keeps every write and its checkpoint never persists.
 
 A writer that returns nothing loses its chunk (`telemetry.journal.lost`, and `lostEvents`).
 After two lost in a row the writer is marked dead: later chunks are counted lost without being
 dispatched, since each would otherwise wait out its 8-minute limit at the end of the run, and
 only the final chunk (`run.end` and the final `run.json`) gets one more attempt.
 
-The checkpoint is version 2: `{version: 2, attempt, replansUsed, learnings, fixRounds,
+The checkpoint is version 2: `{version: 2, runId, attempt, replansUsed, learnings, fixRounds,
 outputTokensSpent, lastSeq, landed, pending, landedTasks, shipped}`. It travels in every flush
 and the writer retypes it, so it keeps only what a resume needs: each of `landedTasks` is `{id,
 repo, runBranch, headSha, firstSha, title}` (`status` when not `DONE`, `title` up to 120
-characters; tracker-absorbed issues are not in it), `learnings` are the last 30, each
+characters, `replan: true` on a task a replan invented, which a resume absorbs only from its own
+run's checkpoint, hence its `runId`; tracker-absorbed issues are not in it), `learnings` are the last 30, each
 `{text, repos}` up to 300 characters, and `shipped` is `{<repo>: {pushedHead, prUrl, draft}}`.
 `landed` and `pending` are id lists. A resume absorbs from `run.json` alone; summaries and paths
 are enrichment (an absorbed task without paths makes a conditional gate apply). A 0.8.x
@@ -777,16 +817,20 @@ none), like the `halt` event.
 The draft PR's state marker is not the checkpoint. It is one line,
 `<!-- grimoire:state v1 <base64 JSON> -->`, per repo: `{version: 2, runId, project, repo,
 runBranch, base, attempt, lastSeq, replansUsed, fixRounds, outputTokensSpent, session, ship,
-landedTasks}`, with `fixRounds` for that repo's tasks and each landed task as `{id, headSha,
-firstSha?, title?}` (`firstSha` only when it differs from the head, `title` up to 120
-characters). `session` and `ship` (the generation of the body it closes) let a ship that starts
-late see that a later ship, or the gate, already wrote the PR ("Incremental delivery"). It
-holds at most 40 tasks and 8,000 characters of base64, because the index agent copies it back
-verbatim: titles are shortened to 40 characters, then dropped, before the newest tasks are left
-out (`omitted` counts them); a task left out is not absorbed from the PR, so on another machine
-it runs again, finds its work on the branch (`landedBefore`) and is reviewed as it stands. It
-carries no learnings, summaries, commits or files: detail stays in the local `run.json` and
-`landed.jsonl`.
+landedTasks, omitted?}`, with `fixRounds` for that repo's tasks and each landed task in a compact
+form, `[id, headSha]`, or `[id, headSha, firstSha]` when its first commit is not its head
+(`firstSha` possibly abbreviated to 12 hex characters); the 0.9.0 object form `{id, headSha,
+firstSha?, title?}` is still read. `session` and `ship` (the generation of the body it closes)
+let a ship that starts late see that a later ship, or the gate, already wrote the PR
+("Incremental delivery"). It fills at most 8,000 characters of base64, because the index agent
+copies it back verbatim, and records at most 100 tasks (about 80 when every task has a first
+commit of its own), in this order: every task in full first; then first commits abbreviated;
+then the fix rounds of tasks that already landed dropped (those of tasks still to land keep
+their budget); only then the newest tasks left out (`omitted` counts them). A task left out is
+not absorbed from the PR, so on another machine it runs again, finds its work on the branch
+(`landedBefore`) and is reviewed as it stands. It carries no titles, learnings, summaries,
+commits or files: detail stays in the local `run.json` and `landed.jsonl`. The reconcile and the
+ship's PR view read the last marker of a body; one over 8,000 characters is not read.
 
 Chunks flush every `flushEvery` events, on every landing and after each ship, at every
 replan, before the final wave and at the end (before the ledger, so `crystallize` can read the
@@ -828,7 +872,7 @@ this run's spend against `maxOutputTokens`, the session probe's `toolLatencySec`
 dispatch past its soft limit, `{label, kind, softMin, outcome: 'accepted' | 'died' |
 'abandoned' | 'wedged' | 'pending'}`), `wedged` (the writers past their hard limit), `timedOut`
 (the readers given up on at their hard limit), and `journal`, the writer's receipt: `{runDir,
-events, written, chunks, mismatches, lost, lostEvents, runJsonLost}`) · `harness` (the ledger
+events, written, chunks, mismatches, lost, lostEvents, runJsonLost, runJsonKept}`) · `harness` (the ledger
 written and what crystallize produced; when PRs shipped but crystallize did not finish, the
 `note` says to run it by hand over them).
 
