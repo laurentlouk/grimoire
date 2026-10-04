@@ -414,7 +414,12 @@ was still writing. Every dispatch now has a soft and a hard limit for its kind
   marked wedged (`wedged`) and its repo is fenced (`fence`), so nothing is dispatched or
   requeued into that checkout. The task keeps its slot until the agent returns, then carries
   on with that result (precheck, review). When nothing but wedged writers is left, the run
-  halts with `kind: 'wedged'`, and the reason says the agent may still commit;
+  halts with `kind: 'wedged'`, and the reason says the agent may still commit. A writer that
+  returns after the run stopped dispatching is recorded (`late-result`, `accepted: false`) and
+  not used: its task goes no further. A terminal slot whose gate or fix wedges does not hold
+  the final wave: the other slots are booked, its repo stays out of the next wave and of
+  dispatch, and its result is booked when it returns (still in the result if the run has
+  ended by then), so its gate never runs twice;
 - side-effect-free kinds (preflight, precheck) start one duplicate at `hedgeAfter` (`hedge`)
   and take the first reply;
 - a hydration that returns nothing is retried once (`hydrate:w<N>~r1`) before the run halts;
