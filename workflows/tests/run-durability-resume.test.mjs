@@ -24,6 +24,9 @@
 //    • AN UNBOUNDED MARKER, a reconcile that took 181 s (Bash tool: 120 s), silent sync states, a
 //      preview that never reconciled (no resume proof, an estimate counting landed work), and no
 //      way to start over (S-1, RC-4, RC-5, B-1 … B-4, V-1 … V-3, F-1, F-2)
+//    • A FRESH START ON A BRANCH ORIGIN ALREADY HOLDS — its first push could not fast-forward the old
+//      branch, so the ship failed and stopped the repo's pushes. It now refuses at start
+//      (run_branch_exists) unless the run branch origin holds has nothing past the base (F-4 … F-7)
 //
 //  Same stubbed runtime as the other loop tests (agent / parallel / log / phase / args / budget);
 //  the RECONCILE script is also RUN — under bash, zsh and dash — against real git repositories and
@@ -325,6 +328,8 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   ok(v.logs.includes('◎ resume: 2/3 landed, verified on feat/proj-700-api @ bbbbbbb (checkpoint+pr) — still to build: PROJ-3'), 'the one-line proof')
   ok(v.result.estimate.tasks === 1 && /1 task\(s\) still to build \(the 2 already landed and verified are not counted\)/.test(v.result.estimate.basis), 'the estimate covers the remaining task only, and says so')
   ok(v.result.preview === true && /no branch touched/.test(v.result.note) && /2\/3 landed/.test(v.result.note), 'the note carries the proof')
+  const p3 = v.result.plan.flatMap((sl) => sl.issues).find((i) => i.id === 'PROJ-3')
+  ok(p3 && p3.startable === true, 'PROJ-3, blocked only by the absorbed PROJ-2, shows as startable (as the execute run treats it)')
 }
 {
   const v = await run('V-2 · nothing saved: the proof says so', [A, B], () => { throw new Error('dispatch') }, { args: { ...QUIET, execute: false } })
@@ -341,8 +346,9 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
 // ══════════════ F · {freshStart:true}: start over on purpose ══════════════
 {
   const resumeState = { version: 2, attempt: 3, lastSeq: 40, replansUsed: 2, learnings: [{ text: 'a lesson from before', repos: ['api'] }], landedTasks: [LANDED('PROJ-1', 'aaaaaaa')] }
+  // origin's run branch holds nothing beyond the base (ahead=0): a fresh start's pushes fast-forward it
   const f = await run('F-1 · freshStart: no resumeState, no marker, nothing absorbed, loud warning, branch untouched', [A, B], by({ 'impl:PROJ-2': impl('bbbbbbb', 'aaaaaaa') }),
-    { args: { ...QUIET, freshStart: true, maxReplans: 2, resumeState }, index: { prState: [PR(stateOf())], reconcile: [TASKLINE('PROJ-1', 'aaaaaaa')], runBranches: [BRANCH()] } })
+    { args: { ...QUIET, freshStart: true, maxReplans: 2, resumeState }, index: { prState: [PR(stateOf())], reconcile: [TASKLINE('PROJ-1', 'aaaaaaa')], runBranches: [BRANCH({ ahead: '0' })] } })
   ok(f.labels.includes('impl:PROJ-1') && f.labels.includes('impl:PROJ-2') && f.result.resumedLanded.length === 0, 'every task runs again')
   ok(f.logs.some((l) => /^⚠⚠ freshStart: the run's saved state is IGNORED — no resumeState, 1 PR state marker\(s\) unread, nothing absorbed\. Every task is built and reviewed AGAIN.*\(feat\/proj-700-api @ bbbbbbb\)\. The run branch is left exactly as it is/.test(l)), 'the loud warning names the existing branch')
   const ip = f.prompt('parse-index')
@@ -352,6 +358,31 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   ok(p.result.freshStart === true && p.result.resumedLanded.length === 0 && p.result.estimate.tasks === 2 && p.logs.includes('◎ resume: freshStart — nothing taken from the saved state, 0/2 landed — still to build: PROJ-1, PROJ-2'), 'freshStart: true, nothing landed, all estimated')
   const bad = await run('F-3 · a non-boolean freshStart is ignored, with a warning', [A], happy, { args: { ...QUIET, freshStart: 'yes', resumeState }, index: { reconcile: [TASKLINE('PROJ-1', 'aaaaaaa')], runBranches: [BRANCH()] } })
   ok(bad.logs.some((l) => /freshStart "yes" ignored/.test(l)) && !bad.labels.includes('impl:PROJ-1'), 'resumes as usual')
+}
+{
+  // An earlier run's branch on origin, absent here (another machine): a fresh start would build from
+  // the base and its first push would not be a fast-forward of origin's branch.
+  const old = BRANCH({ local: '', remote: 'bbbbbbb', sync: 'remote-only', ahead: '2' })
+  const r = await run('F-4 · freshStart while origin holds the run branch with commits not in the base → run_branch_exists, nothing dispatched', [A, B], happy,
+    { args: { ...QUIET, freshStart: true }, index: { prState: [PR(stateOf())], runBranches: [old] } })
+  ok(r.result.error === 'run_branch_exists' && JSON.stringify(r.labels) === '["parse-index"]', 'refused right after the index: no preflight, no hydration')
+  ok(r.result.problems.length === 1 && /^api: origin already has feat\/proj-700-api at bbbbbbb, 2 commit\(s\) not in origin\/main — .*Pass \{runBranch: '<a new name>'\} \(or repos\[\]\.runBranch for this repo\), or close the earlier run's PR and delete origin\/feat\/proj-700-api first/.test(r.result.problems[0]), 'the problem names the branch, its head, the commits and both ways out')
+  ok(/NOT STARTED/.test(r.result.note) && r.result.branches.api.ahead === 2, 'a NOT STARTED note and the branch view with ahead')
+  for (const [name, b] of [['same as local', BRANCH({ ahead: '3' })], ['not comparable with the base', BRANCH({ local: '', sync: 'remote-only', ahead: 'unknown' })], ['ahead not reported', BRANCH({ local: '', sync: 'remote-only' })]]) {
+    const x = await run(`F-4b · ${name} → refused too`, [A], happy, { args: { ...QUIET, freshStart: true }, index: { runBranches: [b] } })
+    ok(x.result.error === 'run_branch_exists' && !x.labels.includes('impl:PROJ-1'), 'refused')
+  }
+  const renamed = await run('F-5 · an explicit runBranch origin does not have → the fresh start runs', [A], happy,
+    { args: { ...QUIET, freshStart: true, runBranch: 'feat/proj-700-api-v2' }, index: { runBranches: [BRANCH({ local: '', remote: '', sync: 'missing', ahead: 'none' })] } })
+  ok(!renamed.result.error && renamed.labels.includes('impl:PROJ-1') && renamed.prompt('parse-index').includes("'feat/proj-700-api-v2'"), 'runs, on the new branch')
+  const taken = await run('F-5b · an explicit runBranch origin already holds is refused like the derived one', [A], happy,
+    { args: { ...QUIET, freshStart: true, runBranch: 'feat/old' }, index: { runBranches: [BRANCH({ local: '', sync: 'remote-only', ahead: '1' })] } })
+  ok(taken.result.error === 'run_branch_exists' && /feat\/old at bbbbbbb, 1 commit\(s\) .* \(this one is taken\)/.test(taken.result.problems[0]), 'refused, saying the name is taken')
+  const p = await run('F-6 · a freshStart preview warns that an execute run would refuse; it never refuses itself', [A], () => { throw new Error('dispatch') },
+    { args: { ...QUIET, execute: false, freshStart: true }, index: { runBranches: [BRANCH({ local: '', sync: 'remote-only', ahead: '2' })] } })
+  ok(!p.result.error && p.result.preview && p.logs.some((l) => /^⚠ api: origin already has feat\/proj-700-api at bbbbbbb, 2 commit\(s\) not in origin\/main .* An execute run with freshStart refuses \(run_branch_exists\)\.$/.test(l)), 'warned in the preview')
+  const resumed = await run('F-7 · without freshStart the same branch is resumed, never refused for it', [A], happy, { args: QUIET, index: { runBranches: [BRANCH({ ahead: '2' })] } })
+  ok(!resumed.result.error && resumed.labels.includes('impl:PROJ-1'), 'runs')
 }
 
 // ══════════════ RC · the RECONCILE script, RUN under bash, zsh and dash against real git ══════════════
@@ -401,7 +432,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     sh(`git clone -q --single-branch -b main origin.git fresh-${shell} 2>/dev/null`)
     ok(!sh(`git rev-parse -q --verify refs/remotes/origin/${RUN_BRANCH}`, F), `${shell}: the clone has no origin/${RUN_BRANCH} yet`)
     const { out } = exec(shell, await scriptFor(F, [LANDED('PROJ-1', c1), LANDED('PROJ-2', c2)]))
-    ok(out.includes(`BRANCH repo=api local=${c2} remote=${c2} sync=created fetch=ok`), `${shell}: fetched, local branch created from origin`)
+    ok(out.includes(`BRANCH repo=api local=${c2} remote=${c2} sync=created fetch=ok ahead=2`), `${shell}: fetched, local branch created from origin; origin's branch is 2 commits past the base`)
     ok(out.includes(`TASK id=PROJ-1 repo=api sha=${c1} local=yes origin=yes onBranch=yes inBase=no`) && out.includes(`TASK id=PROJ-2 repo=api sha=${c2} local=yes origin=yes onBranch=yes inBase=no`), `${shell}: both landed tasks verified — nothing runs again`)
   }
 
@@ -447,7 +478,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     const R = join(W0, `ro-${shell}`)
     sh(`git clone -q --single-branch -b main origin.git ro-${shell} 2>/dev/null`)
     const ro = exec(shell, await scriptFor(R, [LANDED('PROJ-1', c1)], { preview: true })).out
-    ok(ro.includes(`BRANCH repo=api local=none remote=${c2} sync=remote-only fetch=ok`) && !sh(`git rev-parse -q --verify refs/heads/${RUN_BRANCH}`, R), `${shell}: remote-only, no local branch created`)
+    ok(ro.includes(`BRANCH repo=api local=none remote=${c2} sync=remote-only fetch=ok ahead=2`) && !sh(`git rev-parse -q --verify refs/heads/${RUN_BRANCH}`, R), `${shell}: remote-only, no local branch created (ahead=2: a fresh start would refuse)`)
     ok(ro.includes(`TASK id=PROJ-1 repo=api sha=${c1} local=no origin=yes onBranch=yes inBase=no`), `${shell}: verified against origin`)
     sh(`git branch -q ${RUN_BRANCH} ${c1} && git checkout -q ${RUN_BRANCH}`, R)
     const behind = exec(shell, await scriptFor(R, [LANDED('PROJ-2', c2)], { preview: true })).out
@@ -495,7 +526,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
         c.on('close', () => res({ out, ms: Date.now() - t0 }))
       })
       ok(r.ms < 12000, `${shell}: three hanging repos return in ${Math.round(r.ms / 100) / 10} s (deadline 4 s; sequential 30-s limits took 181 s)`)
-      ok(['api', 'web', 'ios'].every((n) => r.out.includes(`BRANCH repo=${n} local=none remote=none sync=missing fetch=failed`)), `${shell}: a BRANCH line per repo, fetch=failed`)
+      ok(['api', 'web', 'ios'].every((n) => r.out.includes(`BRANCH repo=${n} local=none remote=none sync=missing fetch=failed ahead=none`)), `${shell}: a BRANCH line per repo, fetch=failed, ahead=none`)
       ok(lines(r.out, 'PR').length === 3 && lines(r.out, 'PR').every((l) => / none \(/.test(l)), `${shell}: a PR line per repo saying why there is none`)
     }
     srv.close()
@@ -539,6 +570,27 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     chmodSync(join(LIM, 'timeout'), 0o755)
     const viaTimeout = spawnSync(join(LIM, shells[0]), ['-c', script], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: LIM, GH_FAKE_JSON: '[]' } }).stdout
     ok(!/^WARN/m.test(viaTimeout) && existsSync(join(W0, 'timeout.log')) && readFileSync(join(W0, 'timeout.log'), 'utf8').trim().split('\n').every((n) => Number(n) >= 1 && Number(n) <= 30), 'timeout is used, each limit within 1–30 s')
+  }
+  console.log('\n── RC-8 · the base is fetched too: a stale origin/main never misjudges inBase or ahead')
+  {
+    // its own origin, so the other cases keep their base: the run branch is merged upstream after
+    // a clone fetched origin/main, so that clone's origin/main is stale
+    sh('git init -q --bare -b main o8.git && git clone -q o8.git p8 2>/dev/null')
+    const P8 = join(W0, 'p8')
+    commit(P8, 'base8')
+    sh('git push -q origin main', P8)
+    sh(`git checkout -q -b ${RUN_BRANCH}`, P8)
+    const d1 = commit(P8, 'd1')
+    sh(`git push -q origin ${RUN_BRANCH}`, P8)
+    for (const shell of shells) sh(`git clone -q o8.git stale8-${shell} 2>/dev/null && git -C stale8-${shell} branch -q ${RUN_BRANCH} origin/${RUN_BRANCH}`)
+    sh(`git checkout -q main && git merge -q --ff-only ${RUN_BRANCH} && git push -q origin main`, P8)
+    for (const shell of shells) {
+      const S8 = join(W0, `stale8-${shell}`)
+      ok(sh(`git rev-parse refs/remotes/origin/main`, S8) !== d1, `${shell}: the clone's origin/main predates the upstream merge`)
+      const { out } = exec(shell, await scriptFor(S8, [LANDED('PROJ-1', d1)]))
+      ok(out.includes(`BRANCH repo=api local=${d1} remote=${d1} sync=same fetch=ok ahead=0`), `${shell}: after fetching the base, origin's run branch is 0 commits past it`)
+      ok(out.includes(`TASK id=PROJ-1 repo=api sha=${d1} local=yes origin=yes onBranch=no inBase=yes`), `${shell}: the task merged upstream reads inBase=yes (the tracker absorbs it), never a branch-only landing`)
+    }
   }
   rmSync(W0, { recursive: true, force: true })
 }

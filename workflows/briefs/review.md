@@ -25,9 +25,9 @@ each other's build output. Remove your worktree when you are done, pass or fail.
 Never `cd`: it may be aliased or replaced by a shell plugin's function (one such
 replacement once made 147 commands of a run fail). Use `git -C <path>` and absolute paths, or `builtin cd <dir> && …`
 when a command must run from a directory. Read and search files with the Read and Grep tools
-rather than in Bash. Wrap a command that could hang in a time limit: `timeout <s> …` or
-`gtimeout <s> …`, and where neither exists (stock macOS) `perl -e 'alarm shift; exec @ARGV' <s> …`
-(exit 142 = timed out).
+rather than in Bash. Wrap a command that could hang in a time limit:
+`perl -e 'alarm shift; exec @ARGV' <s> …` (exit 142 = timed out; stock macOS has no `timeout`),
+or `timeout <s> …` / `gtimeout <s> …` where one of those exists.
 
 ## Severity is a GATE — calibrate it honestly
 Only **blocker** and **major** stop this task and send it back for rework. Reserve them for

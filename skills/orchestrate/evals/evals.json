@@ -100,10 +100,10 @@
     "id": 5,
     "query": "The execute run on EXPORT halted halfway through overnight. Kick it off again.",
     "should_trigger": true,
-    "expected_output": "Resumes by state rather than re-running: reads the run's <telemetry.dir>/<runId>/run.json fresh (or the draft PR's state marker when newer) and relaunches without resumeFromRunId, with the same runId and resumeState set to that checkpoint, so landed tasks are absorbed and the budgets kept; uses resumeFromRunId only for a byte-identical relaunch in the same session; reads the halt reason (the draft PR's status comment) before relaunching; then waits for the completion notification instead of polling.",
+    "expected_output": "Resumes by state rather than re-running: reads the run's <telemetry.dir>/<runId>/run.json fresh, right before launching, and relaunches without resumeFromRunId, with the same runId and resumeState set to its checkpoint (the engine reads the draft PR's state marker itself and verifies every landed SHA), so landed tasks are absorbed and the budgets kept; uses resumeFromRunId only for a byte-identical relaunch in the same session; reads the halt reason (the draft PR's status comment) before relaunching; then waits for the completion notification instead of polling.",
     "expectations": [
       {
-        "text": "Relaunches with the same `runId` and `resumeState` set to the checkpoint read from the run's `run.json` (or the draft PR's state marker), not with changed args under `resumeFromRunId`",
+        "text": "Relaunches with the same `runId` and `resumeState` set to the checkpoint read from the run's `run.json`, not with changed args under `resumeFromRunId`",
         "passed": null,
         "evidence": ""
       },
@@ -230,7 +230,7 @@
     "id": 10,
     "query": "New session. Re-run the orchestrator on the EXPORT spec and plan, same as before; it halted yesterday partway through.",
     "should_trigger": true,
-    "expected_output": "Before launching, finds the existing run: the matching <telemetry.dir>/*/run.json (newest by attempt, then lastSeq) or, failing that, the state marker in the draft PR on the run branch. Shows the proof (k/n landed, verified on the run branch at its head SHA, the draft PR) and what is still to build, and relaunches without resumeFromRunId, with the same runId and resumeState set to that checkpoint. Does not start a fresh run.",
+    "expected_output": "Before launching, finds the existing run: the matching <telemetry.dir>/*/run.json (the most recently updated) or, failing that, the state marker in the draft PR on the run branch. Runs the preview with that runId and resumeState and shows its proof (the '◎ resume:' line: k/n landed, verified on the run branch at its head SHA, the draft PR) and what is still to build, then relaunches without resumeFromRunId, with the same runId and resumeState set to that checkpoint. Does not start a fresh run.",
     "expectations": [
       {
         "text": "Looks for the earlier run in the local `run.json` files or the draft PR's state marker before launching",
@@ -238,7 +238,7 @@
         "evidence": ""
       },
       {
-        "text": "Shows how many tasks already landed, with their proof (run branch and SHA, or the draft PR), and what is still to build",
+        "text": "Shows, before the execute run, how many tasks already landed with their proof (the preview's resume line: run branch and SHA, or the draft PR) and what is still to build",
         "passed": null,
         "evidence": ""
       },
@@ -249,6 +249,57 @@
       },
       {
         "text": "Does not start a new run from scratch that would redo the landed work",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "query": "Launch the execute run on EXPORT. I'll keep chatting here while it runs and tell the agents to skip the WebKit tests if they get slow.",
+    "should_trigger": true,
+    "expected_output": "Before launching, warns that a message sent to this session while the workflow runs is relayed into the prompts of the agents it dispatches, so mid-run instructions can derail them (a probe once ran the build and the gate on one): instructions go in before the launch (as config or args) or after the run ends, or the run is stopped first. Does not plan to relay instructions to running agents.",
+    "expectations": [
+      {
+        "text": "Says that messages sent to the session during the run reach the dispatched agents' prompts",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Tells the user to give instructions before launching or after the run ends, or to stop the run first",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not offer to pass instructions to the agents while the run is in progress",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "query": "Forget the EXPORT run that halted yesterday: start it over completely from scratch, I don't trust what it built.",
+    "should_trigger": true,
+    "expected_output": "Treats starting over as an explicit request: warns that every landed task is built and reviewed again and the replan, fix and spend budgets reset, then launches with freshStart: true and a new runId (preview first), not by dropping resumeState alone (the engine would still absorb what the draft PR's marker lists). Says that if origin already holds the old run branch with commits not in the base, the run refuses as run_branch_exists, and that the way out is a new runBranch name or closing the old PR and deleting that branch, which is the user's call.",
+    "expectations": [
+      {
+        "text": "Warns that a fresh start rebuilds and re-reviews the landed work and resets the budgets before doing it",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Uses `freshStart: true` (with a new `runId`) rather than only omitting `resumeState`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Explains `run_branch_exists` or the need for a run branch origin does not have (a new `runBranch`, or the old branch and PR removed by the user)",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not delete the old branch, close the PR or reset anything itself",
         "passed": null,
         "evidence": ""
       }

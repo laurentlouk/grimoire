@@ -126,8 +126,9 @@ export function loadRuns(dir) {
         if (!isObj(ev)) { badLines++; continue }
         const seq = num(ev.seq)
         if (seq !== null) {
-          // a retried flush: first seen wins. Keyed per attempt — a relaunch under the same
-          // runId restarts its own sequence, and those events are not duplicates.
+          // a retried flush: first seen wins. Keyed per attempt — a relaunch under the same runId
+          // without a checkpoint starts its sequence again at 1, and a resumed one continues from
+          // its checkpoint's, which an earlier attempt may have passed: those are not duplicates.
           const key = `${attemptOf(ev)}:${seq}`
           if (seen.has(key)) { duplicates++; continue }
           seen.add(key)
@@ -413,7 +414,13 @@ function client() {
     // pushed: true · false (the push failed) · null (nothing to push: the head was already there)
     ship: (e) => `${s(e.repo)}${e.mode ? ` · ${s(e.mode)}` : ''} → ${e.pushed === false ? `failed at ${s(e.failedStep || 'push')}${e.detail ? `: ${s(e.detail)}` : ''}` : `${e.pushed === null ? `${s(e.head ?? '?')} already on the remote` : `pushed ${s(e.head ?? e.remoteHead ?? e.pushedHead ?? '?')}`}${e.failedStep ? ` · ${s(e.failedStep)} step failed${e.detail ? `: ${s(e.detail)}` : ''}` : ''}`}${e.prUrl ? ` · ${s(e.prUrl)}${e.draft ? ' (draft)' : ''}` : ''}${e.disabled ? ` · incremental ${s(e.disabled)} disabled` : ''}`,
     env: (e) => `${s(e.when)}${e.why ? ` (${s(e.why)})` : ''} → ${e.ok == null ? 'no usable report (not counted as a failure)' : e.ok ? 'ok' : `FAILED: ${list(e.failed)}`}`,
-    absorb: (e) => `landed earlier, from ${s(e.source)}${e.head ? ` @ ${s(e.head)}` : ''}`,
+    // checkpoint · pr: absorbed at start, verified on the run branch; reviewed-earlier · verify-only:
+    // an implementer found the work already on the branch, reviewed for this task or not yet
+    absorb: (e) => `${e.source === 'reviewed-earlier' ? 'already on the branch and reviewed for this task: landed with no new review'
+      : e.source === 'verify-only' ? 'already on the branch, not reviewed for this task: sent to the panel as it stands'
+        : e.source === 'checkpoint' || e.source === 'pr' ? `landed in an earlier attempt, verified on the run branch (from the ${e.source === 'pr' ? 'PR state marker' : 'checkpoint'})`
+          : `landed earlier, from ${s(e.source)}`}${e.head ? ` @ ${s(e.head)}` : ''}`,
+    'harness-routed': (e) => `${s(e.stage)} · ${s(e.persona)} · ${s(e.severity)} at ${s(e.where)}: a harness file, routed to crystallize, not fixed on the product branch`,
     'run.end': (e) => `${s(e.status)} · done ${s(e.done)} · failed ${s(e.failed)} · blocked ${s(e.blocked)} · PRs ${s(e.prs)} · tokens ${s(e.tokens)}`,
   }
   const summarize = (e) => { try { return SUM[e.type] ? SUM[e.type](e) : rest(e) } catch { return rest(e) } }
@@ -507,7 +514,6 @@ function client() {
         d.files != null || d.commits != null ? h('span', { class: 'muted' }, ` · ${d.commits ?? '?'} commit(s), ${d.files ?? '?'} file(s)`) : null))) : null,
       shipped.length ? h('p', null, h('span', { class: 'muted' }, 'pushed: '),
         shipped.map(([repo, v]) => `${repo} @ ${short(v.pushedHead) || '—'}${v.prUrl ? ` · ${s(v.prUrl)}${v.draft ? ' (draft)' : ''}` : ''}`).join('; ')) : null,
-      Array.isArray(c.wedged) && c.wedged.length ? h('p', { class: 'STILL_RUNNING' }, `still running when the session stopped: ${c.wedged.map(s).join(', ')}`) : null,
       fixes ? h('p', null, h('span', { class: 'muted' }, 'fix rounds: '), fixes) : null,
       Array.isArray(c.pending) && c.pending.length ? h('p', null, h('span', { class: 'muted' }, 'pending: '), c.pending.map(s).join(', ')) : null,
       Array.isArray(c.learnings) && c.learnings.length ? h('ul', null, c.learnings.map((l) => h('li', null, s(isObj(l) && l.text != null ? l.text : l)))) : null)
@@ -577,9 +583,11 @@ function client() {
           mine.length ? mine.map((t) => {
             const settle = lastOf(t, 'settle'), route = lastOf(t, 'route')
             const n = (type) => t.events.filter((e) => e.type === type).length
+            // a discarded review round never counted as a verdict (reviewParallel): shown apart
+            const discarded = t.events.filter((e) => e.type === 'review' && e.discarded === true).length
             return h('div', { class: 'task', role: 'button', tabindex: 0, onclick: () => { st.task = t.id; render(); const d = document.getElementById('drill'); if (d) d.scrollIntoView() } },
               h('b', null, t.id), ' ', h('span', { class: cls(settle && settle.status) }, settle ? s(settle.status) : 'unsettled'),
-              h('div', { class: 'muted' }, `${route ? `${s(route.agent)} × ${s(route.model)} · ` : ''}${n('review')} reviews · ${n('fix')} fixes · ${n('escalate')} escalations`))
+              h('div', { class: 'muted' }, `${route ? `${s(route.agent)} × ${s(route.model)} · ` : ''}${n('review') - discarded} reviews${discarded ? ` (+${discarded} discarded)` : ''} · ${n('fix')} fixes · ${n('escalate')} escalations`))
           }) : h('p', { class: 'empty' }, 'no tasks'))
       })))
   }

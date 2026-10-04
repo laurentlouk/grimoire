@@ -20,11 +20,12 @@
 //      refuses / , $HOME and anything outside the working directory; a dir holding
 //      only events/ chunks counts as a run dir
 //    • 0.9.0 run durability: the page summarizes late, hedge, wedged, late-result,
-//      fence, ship, env and absorb events in words, shows a halt's kind and draft
+//      fence, ship, env, absorb (each source) and harness-routed events in words,
+//      shows a halt's kind and draft
 //      PRs, and the checkpoint card shows a v2 checkpoint's landedTasks with their
 //      heads (the renderer is executed against a minimal DOM, not just grepped)
 //    • a review round discarded under reviewParallel (`discarded: true`) is shown as
-//      discarded and left out of the first-round pass rate
+//      discarded and left out of the first-round pass rate and of a task's review count
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
@@ -254,7 +255,6 @@ try {
       { id: '#5', repo: 'site', status: 'DONE', runBranch: 'feat/proj-9-site', startSha: 'aaaaaaa1111', firstSha: 'bbbbbbb2', headSha: 'bbbbbbb2222', commits: ['bbbbbbb2222'], summary: 'built B' },
     ],
     shipped: { site: { pushedHead: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true } },
-    wedged: ['impl:#6'],
   }
   writeFileSync(join(RUNS5, 'run.json'), JSON.stringify({ runId: 'run-delta', project: 'PROJ-9', meta: metaD, startedAt: iso(0), updatedAt: iso(0), status: 'halted', checkpoint: checkpointD,
     summary: { draftPrs: { site: 'https://example.invalid/pr/7' } } }))
@@ -270,6 +270,9 @@ try {
     { type: 'fix', task: '#5', stage: 'spec', round: 1, model: 'sonnet', findings: 1 },
     { type: 'review', task: '#5', stage: 'spec', persona: 'spec-hawk', verdict: 'PASS', gating: 0, advisory: 0, round: 1 },
     { type: 'review', task: '#5', stage: 'quality', persona: 'break-it', verdict: 'PASS', gating: 0, advisory: 0, round: 0 },
+    { type: 'absorb', task: '#7', repo: 'site', source: 'verify-only', head: 'ccccccc3333' },
+    { type: 'absorb', task: '#8', repo: 'site', source: 'reviewed-earlier', head: 'ddddddd4444' },
+    { type: 'harness-routed', task: 'site:final', stage: 'terminal', persona: 'Privacy Engineer', severity: 'major', where: 'grimoire.config.json:3' },
     { type: 'settle', task: '#5', repo: 'site', status: 'DONE' },
     { type: 'ship', repo: 'site', mode: 'land', pushed: true, head: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true },
     { type: 'ship', repo: 'site', mode: 'halt', pushed: null, head: 'bbbbbbb2222', failedStep: 'comment', detail: 'gh: rate limited', prUrl: 'https://example.invalid/pr/7', draft: true },
@@ -308,15 +311,18 @@ try {
   has(/site · halt → bbbbbbb2222 already on the remote · comment step failed: gh: rate limited · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship: nothing to push, a failed step after it')
   has(/stall \(a failed push of site\) → no usable report \(not counted as a failure\)/, 'env: a check that returned nothing usable')
   has(/start \(startup\) → ok/, 'env: a passing check')
-  has(/landed earlier, from checkpoint @ aaaaaaa1111/, 'absorb: the source and the head')
+  has(/landed in an earlier attempt, verified on the run branch \(from the checkpoint\) @ aaaaaaa1111/, 'absorb from the checkpoint: verified on the run branch, with the head')
+  has(/already on the branch, not reviewed for this task: sent to the panel as it stands @ ccccccc3333/, 'absorb verify-only: reviewed as it stands, never "landed earlier"')
+  has(/already on the branch and reviewed for this task: landed with no new review @ ddddddd4444/, 'absorb reviewed-earlier: landed with no new review')
+  has(/terminal · Privacy Engineer · major at grimoire\.config\.json:3: a harness file, routed to crystallize/, 'harness-routed: in words')
+  has(/#5\s+DONE\s+3 reviews \(\+1 discarded\) · 1 fixes/, "a task's review count leaves the discarded round out and shows it apart")
   has(/\[environment\] environment: commit:site timed out/, 'halt: its kind')
   has(/Checkpoint\s+· v2/, 'the checkpoint card shows its version')
   has(/landed:\s+#4 @ aaaaaaa \(site · feat\/proj-9-site\), #5 @ bbbbbbb \(site · feat\/proj-9-site\)/, 'the checkpoint card lists landedTasks with their heads and run branch')
   has(/pushed:\s+site @ bbbbbbb · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the checkpoint card shows what was pushed')
-  has(/still running when the session stopped: impl:#6/, 'the checkpoint card shows wedged dispatches')
   has(/sign commits before launching/, 'a {text, repos} learning shows its text')
   has(/https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the overview tags the draft PR')
-  ok(!/\{"label"/.test(text), 'no new event type falls back to its raw JSON')
+  ok(!/\{"label"/.test(text) && !/\{"task"/.test(text), 'no new event type falls back to its raw JSON')
   has(/quality · break-it → FAIL \(gating 1, advisory 0, round 0\) · discarded: a spec fix moved the head, not counted/, 'a discarded review round reads as discarded, with its reason')
   const s5 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json'], { cwd: ROOT5, encoding: 'utf8' })
   let S5 = null

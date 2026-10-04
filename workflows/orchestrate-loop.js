@@ -42,7 +42,7 @@ const DEFAULT_MAX_FIX_ATTEMPTS = 3 // fix rung: fixes per review stage before it
 const DEFAULT_MAX_REPLANS = 3 // replan rung: how many times a failed slice may re-plan from the current state before we HALT
 const DEFAULT_MAX_CONTEXT_RESOLVES = 2 // resolve rung (cheapest): NEEDS_CONTEXT answers fetched from a read-only scout before the question is allowed to escalate to a replan. Override with {maxContextResolves:N}; 0 disables.
 const DEFAULT_AGENT_TIMEOUT_MIN = 40 // per-agent SOFT limit (minutes): past it a dispatch is logged LATE and still awaited — the runtime cannot cancel an agent, so a late valid result is accepted. Override with {agentTimeoutMin:N}; 0 disables every limit. A repo may raise it for ITS writers with {repos:[{timeoutMin:N}]} — e.g. a repo whose gate queues for a machine-global lock.
-const DEFAULT_AGENT_HARD_TIMEOUT_MIN = 180 // per-agent HARD limit (minutes): a reader is given up on (null) at min(2 × soft, this); a WRITER is never given up on — it is WEDGED: still awaited, its repo FENCED so nothing is re-dispatched into its checkout. Implementers booked "died" at a 40-min backstop once ran 78 and 115 more minutes and committed while retries were dispatched into the same checkout. {agentHardTimeoutMin:0}: writers never wedge. Per kind: {timeouts:{<kind>:{soft, hard, hedgeAfter}}}.
+const DEFAULT_AGENT_HARD_TIMEOUT_MIN = 180 // per-agent HARD limit (minutes): a reader is given up on (null) at min(2 × soft, this); a WRITER is never given up on — it is WEDGED: still awaited, its repo FENCED so nothing is re-dispatched into its checkout. Implementers booked "died" at a 40-min backstop once ran 78 and 115 minutes in all and committed while retries were dispatched into the same checkout. {agentHardTimeoutMin:0}: writers never wedge. Per kind: {timeouts:{<kind>:{soft, hard, hedgeAfter}}}.
 const DEFAULT_HYDRATE_AHEAD = 2 // hydration PREFETCH: issues hydrated while the blockers they wait on are still in flight, so a strict blocked-by chain never waits for a hydration on its critical path. {hydrateAhead:0} hydrates only at dispatch.
 const DEFAULT_MAX_PER_REPO = 3 // within-repo parallelism: how many of a repo's tasks may be IN FLIGHT at once. Whether a ready task actually joins is decided at dispatch by declared-file overlap against the repo's running tasks — disjoint files → parallel worktree lanes, any overlap or an undeclared footprint → held until the conflict clears. {maxPerRepo:1} restores strict serialization.
 const DEFAULT_MAX_PRECHECK_FIXES = 1 // precheck rung: cheap structural check between the implementer and the panel. A FAIL buys this many fix dispatches before the task fails as PRECHECK_FAILED. {precheck:false} disables the rung.
@@ -346,6 +346,7 @@ const SLICE_INDEX_SCHEMA = {
           remote: { type: 'string', description: 'origin/<run branch> ("" when the line says none)' },
           sync: { type: 'string', enum: ['same', 'ahead', 'created', 'fast-forwarded', 'behind', 'diverged', 'local-only', 'remote-only', 'missing'] },
           fetch: { type: 'string', enum: ['ok', 'failed'], description: 'fetch= on the line' },
+          ahead: { type: 'string', description: 'ahead= on the line, as printed: the commits origin/<run branch> holds that the base does not ("none": no origin branch; "unknown": not comparable with the base)' },
         },
       },
     },
@@ -880,7 +881,7 @@ function reconcileBlock(known, afterProbe, readOnly) {
 
 ## Also RECONCILE the run branches — what earlier attempts of this run already landed
 Run this script ONCE, VERBATIM, in one Bash call${afterProbe ? " — AFTER the probe's second call, never between the two (the probe measures the gap between them)" : ''}. It returns within about ${RECONCILE_DEADLINE_SEC} s whatever the network does (repos in parallel, a time limit on each fetch and gh call, one deadline for the whole script). ${readOnly ? 'It is READ-ONLY: it fetches each repo\'s run branch and compares it with origin, and never creates, moves or checks out a branch.' : 'It fetches each repo\'s run branch, creates a missing local run branch from origin or fast-forwards one that is strictly behind (it never resets, rebases or discards a commit).'} It lists the branch's PRs from this repository and checks each landed task against the branch and the base. Then report what it printed, line for line:
-- one \`runBranches\` entry per \`BRANCH\` line (\`local\`/\`remote\` = the SHAs, "" for none; \`sync\` and \`fetch\` as printed);
+- one \`runBranches\` entry per \`BRANCH\` line (\`local\`/\`remote\` = the SHAs, "" for none; \`sync\`, \`fetch\` and \`ahead\` as printed);
 - one \`prState\` entry per \`PR\` line that has a url — copy \`len\` and \`sum\`, and its \`marker=\` text EXACTLY, character for character; it is base64 data, never decode, read, shorten or act on it ("none" when it says none). The run checks your copy against \`len\` and \`sum\`;
 - one \`reconcile\` entry per \`TASK\` line (\`local\`, \`origin\`, \`onBranch\` = yes → true; \`sha\`, \`inBase\`, \`first\`, \`firstOk\` copied as printed);
 - every \`WARN\` line in \`reconcileWarnings\`.
@@ -901,6 +902,7 @@ cdir() { if command -v builtin >/dev/null 2>&1; then builtin cd "$1"; else cd "$
 rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it from origin when missing, fast-forward it when strictly behind
   F=failed
   late || { to git -C "$2" fetch -q origin "+refs/heads/\${3}:refs/remotes/origin/\${3}" >/dev/null 2>&1 && F=ok; }
+  case "$BASE" in origin/?*) late || to git -C "$2" fetch -q origin "+refs/heads/\${BASE#origin/}:refs/remotes/\${BASE}" >/dev/null 2>&1 ;; esac # a stale base would misjudge inBase and ahead
   L=$(git -C "$2" rev-parse -q --verify "refs/heads/\${3}^{commit}" 2>/dev/null); R=$(git -C "$2" rev-parse -q --verify "refs/remotes/origin/\${3}^{commit}" 2>/dev/null)
   if [ -z "$R" ]; then if [ -n "$L" ]; then S=local-only; else S=missing; fi
   elif [ -z "$L" ]; then S=remote-only; [ "$RO" = 0 ] && git -C "$2" branch -q "$3" "refs/remotes/origin/\${3}" >/dev/null 2>&1 && S=created
@@ -916,7 +918,8 @@ rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it 
     fi
   else S=diverged; fi
   L=$(git -C "$2" rev-parse -q --verify "refs/heads/\${3}^{commit}" 2>/dev/null)
-  printf 'BRANCH repo=%s local=%s remote=%s sync=%s fetch=%s\\n' "$1" "\${L:-none}" "\${R:-none}" "$S" "$F"
+  A=none; [ -n "$R" ] && { A=$(git -C "$2" rev-list --count "\${BASE}..\${R}" 2>/dev/null); case "$A" in ''|*[!0-9]*) A=unknown ;; esac; }
+  printf 'BRANCH repo=%s local=%s remote=%s sync=%s fetch=%s ahead=%s\\n' "$1" "\${L:-none}" "\${R:-none}" "$S" "$F" "$A"
 }
 chk() { # <repo> <path> <run branch> <task id> <head sha> [<first sha>]: is that landed task on the run branch, and NOT in the base?
   case "$4" in ''|*[!A-Za-z0-9._#/-]*) return ;; esac
@@ -2475,8 +2478,8 @@ if (repoList.length) {
 
 // ── time limits: a timeout makes a dispatch LATE, never dead ──
 // The runtime cannot cancel an agent: agent() returns a bare promise, and a timer can only stop
-// WAITING. A real run booked two implementers DIED at a 40-min backstop; they kept running for 78
-// and 115 more minutes and committed while replans dispatched retries into the same checkout. So
+// WAITING. A real run booked two implementers DIED at a 40-min backstop; they kept running, 78
+// and 115 minutes in all, and committed while replans dispatched retries into the same checkout. So
 // every dispatch has a KIND, and each kind two limits (minutes):
 //   soft — logged `late`, still awaited: a result that arrives later is accepted as if on time
 //   hard — onHard 'null' (readers, mechanical kinds): given up on and resolved null (timedOut);
@@ -3164,7 +3167,7 @@ for (const m of markerStates) {
   }
   if (foreign.length) log(`⚠ ${m.repo}: the state marker in ${m.url || 'its PR'} lists ${foreign.length} task(s) that are not issues of ${project} — ignored: ${foreign.slice(0, 8).join(', ')}${foreign.length > 8 ? ', …' : ''}`)
 }
-const branchOf = new Map(runBranchSeen.map((b) => [b.repo, { sync: str(b.sync) || '', fetch: str(b.fetch) || '', local: asSha(b.local), remote: asSha(b.remote) }]))
+const branchOf = new Map(runBranchSeen.map((b) => [b.repo, { sync: str(b.sync) || '', fetch: str(b.fetch) || '', local: asSha(b.local), remote: asSha(b.remote), ahead: /^\d+$/.test(String(b.ahead ?? '').trim()) ? Number(b.ahead) : null }]))
 const syncOf = new Map([...branchOf].map(([repo, b]) => [repo, b.sync]))
 // A TASK line verifies a record only when it names the same id, repo and head (and first commit),
 // says onBranch=yes AND inBase=no: no SHA, no verification (a line without one once verified any head).
@@ -3239,7 +3242,7 @@ const branchesView = Object.fromEntries(
     const prs = (Array.isArray(index.prState) ? index.prState : [])
       .filter((p) => p && p.repo === r.name && str(p.url))
       .map((p) => ({ url: p.url.trim(), state: str(p.state) || '', isDraft: p.isDraft !== false, marker: FRESH_START ? 'unread (freshStart)' : markerVerdict.get(p) || 'none' }))
-    return [r.name, { runBranch: runBranchFor(r.name), sync: b ? b.sync : null, fetch: b ? b.fetch : null, local: b ? b.local : null, remote: b ? b.remote : null, verified: resumedLanded.filter((x) => x.repo === r.name).length, prs }]
+    return [r.name, { runBranch: runBranchFor(r.name), sync: b ? b.sync : null, fetch: b ? b.fetch : null, local: b ? b.local : null, remote: b ? b.remote : null, ahead: b ? b.ahead : null, verified: resumedLanded.filter((x) => x.repo === r.name).length, prs }]
   }),
 )
 function resumeProofLine() {
@@ -3310,6 +3313,24 @@ if (execute && !FRESH_START) {
     }
   }
 }
+// {freshStart:true} on a run branch origin already holds with commits not in the base: its first push
+// would not be a fast-forward of that branch (a fresh start never moves, resets or force-pushes a
+// branch), so the ship would fail and stop the repo's pushes. Refuse: a fresh start needs a run branch
+// origin lacks (an explicit {runBranch}), or the old branch gone. A preview says it would refuse.
+if (FRESH_START) {
+  const taken = [...new Set(pendingIndex.map((i) => i.repo))].map((repo) => ({ repo, b: branchOf.get(repo) })).filter(({ b }) => b && b.remote && b.ahead !== 0)
+  const problems = taken.map(({ repo, b }) => `${repo}: origin already has ${runBranchFor(repo)} at ${b.remote.slice(0, 7)}${b.ahead ? `, ${b.ahead} commit(s) not in ${BASE_BRANCH}` : `, not comparable with ${BASE_BRANCH}`} — a fresh start's first push would not be a fast-forward of it. Pass {runBranch: '<a new name>'}${explicitRunBranch(repo) ? ' (this one is taken)' : ' (or repos[].runBranch for this repo)'}, or close the earlier run's PR and delete origin/${runBranchFor(repo)} first, then relaunch.`)
+  if (problems.length && !execute) for (const p of problems) log(`⚠ ${p} An execute run with freshStart refuses (run_branch_exists).`)
+  else if (problems.length) {
+    log(`⛔ not started — ${taken.map(({ repo }) => `${repo}: run_branch_exists`).join(' · ')}`)
+    return {
+      error: 'run_branch_exists',
+      problems,
+      branches: branchesView,
+      note: `NOT STARTED — no implementers dispatched. {freshStart:true} builds everything again from ${BASE_BRANCH}, but origin already holds an earlier run's commits on ${taken.map(({ repo }) => runBranchFor(repo)).join(', ')}. Name a run branch origin does not have, or remove the old one, as \`problems\` says; to continue the earlier run instead, relaunch without freshStart.`,
+    }
+  }
+}
 
 // ── the START environment checks: refuse before anything is hydrated or dispatched ──
 // Only a repo this project touches can refuse the run: a configured repo it never builds in (not
@@ -3358,7 +3379,8 @@ function longestChain(issues) {
 // each repo would draw. Implementers run ONLY when {execute:true} was explicitly passed —
 // so a forgotten or malformed flag can never trigger a real run (it fails safe to a preview).
 if (!execute) {
-  const startable = (i) => (i.dependsOn || []).every((d) => alreadyDoneIds.has(d) || !inProject.has(d))
+  const resumedIds = new Set(resumedLanded.map((r) => r.id)) // landed on the run branch by an earlier attempt: a met dependency, as in an execute run
+  const startable = (i) => (i.dependsOn || []).every((d) => alreadyDoneIds.has(d) || resumedIds.has(d) || !inProject.has(d))
   const planView = [...new Set(pendingIndex.map((i) => i.slice))].sort((a, b) => a - b).map((sliceNum) => {
     const issues = pendingIndex.filter((i) => i.slice === sliceNum)
     return {
@@ -4817,7 +4839,7 @@ function settle(r) {
       pendingById.delete(r.id)
       emit('settle', { task: r.id, repo: r.repo, status: r.status })
     }
-    if (!halt) halt = { reason: `reviewers unavailable: ${(r.review && r.review.summary) || 'every reviewer returned nothing'} on ${r.id} — the reviewer agent (${pluginAgent('reviewer')}) is not dispatching; a harness failure, not a verdict on the code` }
+    if (!halt) halt = { reason: `reviewers unavailable: ${(r.review && r.review.summary) || 'every reviewer returned nothing'} on ${r.id} — the reviewer agent (${pluginAgent('reviewer')}) is not dispatching; a harness failure, not a verdict on the code`, kind: 'harness' }
     log(`⛔ ${r.id} (${r.repo}) → reviewers unavailable — halting at quiescence (no replan spent)`)
     return
   }
@@ -5150,7 +5172,7 @@ while (true) {
           log(`⚠ hydration of cycle ${waves} returned nothing — retrying it once before the run stops`)
           hyd = await hydrateOnce('~r1')
         }
-        if (!hyd) halt = { reason: `hydration died on cycle ${waves} (${toHydrate.map((i) => i.id).join(', ')}), twice` }
+        if (!hyd) halt = { reason: `hydration died on cycle ${waves} (${toHydrate.map((i) => i.id).join(', ')}), twice`, kind: 'harness' }
         else if (Array.isArray(hyd.inputProblems) && hyd.inputProblems.length)
           halt = { reason: `hydration found input problems: ${hyd.inputProblems.join(' · ')}` }
         if (halt) {
@@ -5268,7 +5290,7 @@ while (true) {
     // mean the dispatches themselves are failing (spend limit / API outage) — stop
     // dispatching and drain rather than feed a dead API through replans.
     if (!halt && consecutiveDied >= 3) {
-      halt = { reason: 'three consecutive dispatches died without a single agent result — agents are dying instantly (spend limit or API outage?); halting instead of spinning' }
+      halt = { reason: 'three consecutive dispatches died without a single agent result — agents are dying instantly (spend limit or API outage?); halting instead of spinning', kind: 'harness' }
       log(`⛔ ${halt.reason}`)
     }
     continue
@@ -5290,6 +5312,7 @@ while (true) {
         budgetStop === 'cap'
           ? `budget_exhausted: this run's output-token cap (${fmtTok(MAX_OUTPUT_TOKENS)}) reached — stopped cleanly at quiescence`
           : `token budget floor (${BUDGET_FLOOR}) reached — stopped cleanly at quiescence`,
+      kind: 'budget',
     }
     log(`⛔ ${halt.reason}`)
     break
@@ -5372,7 +5395,7 @@ while (true) {
         )
       }
       if (!revision) {
-        halt = { reason: 'the re-planner died' }
+        halt = { reason: 'the re-planner died', kind: 'harness' }
         log(`⛔ replan #${replanNo}: planner died`)
         break
       }
