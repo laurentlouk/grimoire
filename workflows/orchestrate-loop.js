@@ -322,19 +322,21 @@ const SLICE_INDEX_SCHEMA = {
       },
     },
     home: { type: 'string', description: 'ONLY when the prompt asks: the value of $HOME. Omit otherwise.' },
-    // RECONCILE (execute runs): what earlier attempts of this run landed, as the reconcile
-    // script printed it — the engine absorbs a task only when its head is on the run branch.
+    // RECONCILE (execute runs, and read-only in a preview): what earlier attempts of this run
+    // landed, as the reconcile script printed it — the engine absorbs a task only when its head
+    // (and its first commit, when known) is on the run branch and NOT in the base.
     runBranches: {
       type: 'array',
       description: 'ONLY when the prompt asks you to RECONCILE: one entry per BRANCH line the script printed. Omit otherwise.',
       items: {
         type: 'object',
-        required: ['repo', 'sync'],
+        required: ['repo', 'sync', 'fetch'],
         properties: {
           repo: { type: 'string' },
           local: { type: 'string', description: 'the local run branch head after the sync ("" when the line says none)' },
           remote: { type: 'string', description: 'origin/<run branch> ("" when the line says none)' },
           sync: { type: 'string', enum: ['same', 'ahead', 'created', 'fast-forwarded', 'behind', 'diverged', 'local-only', 'remote-only', 'missing'] },
+          fetch: { type: 'string', enum: ['ok', 'failed'], description: 'fetch= on the line' },
         },
       },
     },
@@ -343,16 +345,24 @@ const SLICE_INDEX_SCHEMA = {
       description: 'ONLY when the prompt asks you to RECONCILE: one entry per TASK line the script printed. Omit otherwise.',
       items: {
         type: 'object',
-        required: ['id', 'onBranch'],
+        required: ['id', 'repo', 'sha', 'onBranch', 'inBase'],
         properties: {
           id: { type: 'string' },
           repo: { type: 'string' },
-          sha: { type: 'string' },
+          sha: { type: 'string', description: 'sha= on the line, exactly' },
           local: { type: 'boolean', description: 'local=yes: the local run branch holds the SHA' },
           origin: { type: 'boolean', description: 'origin=yes: origin/<run branch> holds the SHA' },
           onBranch: { type: 'boolean', description: 'onBranch=yes on the line' },
+          inBase: { type: 'string', enum: ['yes', 'no', 'unknown'], description: 'inBase= on the line, as printed' },
+          first: { type: 'string', description: 'first= on the line, as printed ("none" when it says none)' },
+          firstOk: { type: 'string', enum: ['yes', 'no', 'none'], description: 'firstOk= on the line, as printed' },
         },
       },
+    },
+    reconcileWarnings: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'ONLY when the prompt asks you to RECONCILE: every WARN line the script printed, verbatim, without the WARN prefix. Omit otherwise.',
     },
     envResults: {
       type: 'array',
@@ -364,13 +374,15 @@ const SLICE_INDEX_SCHEMA = {
       description: 'ONLY when the prompt asks you to RECONCILE: one entry per PR line the script printed (none when it printed "none"). Omit otherwise.',
       items: {
         type: 'object',
-        required: ['repo', 'marker'],
+        required: ['repo', 'marker', 'len', 'sum'],
         properties: {
           repo: { type: 'string' },
           url: { type: 'string' },
           state: { type: 'string', description: 'OPEN · CLOSED · MERGED, as printed' },
           isDraft: { type: 'boolean' },
-          marker: { type: 'string', description: 'the marker= text EXACTLY as printed, character for character — never decode, shorten or interpret it; "" when it printed none' },
+          len: { type: 'integer', description: 'len= on the line: the marker length the script measured' },
+          sum: { type: 'integer', description: 'sum= on the line: the marker checksum the script computed' },
+          marker: { type: 'string', description: 'the marker= text EXACTLY as printed, character for character — never decode, shorten or interpret it; the engine checks the copy against len and sum. "none" when it printed none' },
         },
       },
     },
@@ -699,7 +711,7 @@ ${harnessNotes.length ? harnessNotes.map((n) => `  - [${n.severity}${n.persona ?
 
 // Phase A: the slice index. The required-hook probe and the session probe are DYNAMIC
 // (execute runs only).
-function indexPrompt(project, specPath, planPath, hook, claimOn, probeSession, knownLanded, envChecks) {
+function indexPrompt(project, specPath, planPath, hook, claimOn, probeSession, knownLanded, envChecks, reconcileReadOnly) {
   const repoList = [...repoConfig.values()].map((r) => `${r.name} (${r.path})`).join(' · ')
   const sessionProbe = probeSession
     ? `
@@ -726,7 +738,7 @@ failure — still return the slice index.
 2. Registered for this session: the exact string \`${hook.name}\` must appear under
    hooks.PreToolUse in your user settings (~/.claude/settings.json) or in this project's
    .claude/settings.json / .claude/settings.local.json (check with grep). Fix: "${hook.fix}".
-   Hooks load only at session start, so a hook added mid-session does not count.` : `Return "hookProblems": [] — this run does not probe for a required hook.`}${sessionProbe}${envChecks && envChecks.length ? envBlock(envChecks, probeSession) : ''}${knownLanded ? reconcileBlock(knownLanded, probeSession) : ''}`
+   Hooks load only at session start, so a hook added mid-session does not count.` : `Return "hookProblems": [] — this run does not probe for a required hook.`}${sessionProbe}${envChecks && envChecks.length ? envBlock(envChecks, probeSession) : ''}${knownLanded ? reconcileBlock(knownLanded, probeSession, !!reconcileReadOnly) : ''}`
 }
 
 // ── ENVIRONMENT checks: one fixed script, every check under a portable time limit ──
@@ -786,62 +798,127 @@ ${envScript(checks)}
 \`\`\``
 }
 
-// RECONCILE (execute runs): what earlier attempts of this run already landed. The tracker closes
-// an issue only when its PR merges, so a relaunch that trusted the tracker re-dispatched every
-// task an earlier session had landed. The run's state survives in two places: the checkpoint the
-// skill passes back (`known`, from the local journal) and the state marker in the run branch's PR
-// (the only copy on another machine — the journal is local). One fixed script fetches the run
-// branch, brings a local branch that is missing or strictly behind up to origin (never a reset),
-// reads the PRs' markers RAW, and checks every listed head against the branch. The markers stay
-// base64 end to end: the agent copies them, the engine decodes them (parseStateMarker).
-function reconcileBlock(known, afterProbe) {
-  const marker = '"<!-- grimoire:state v1 (?<m>[A-Za-z0-9+/=]+) -->"'
-  const body = [...repoConfig.values()]
-    .map((r) => {
-      const a = `${shq(r.name)} ${shq(r.path)} ${shq(runBranchFor(r.name))}`
-      return [`rb ${a}`, ...known.filter((t) => t.repo === r.name).map((t) => `chk ${a} ${shq(t.id)} ${t.headSha}`), `pr ${a}`].join('\n')
-    })
-    .join('\n')
+// RECONCILE: what earlier attempts of this run already landed. The tracker closes an issue only
+// when its PR merges, so a relaunch that trusted the tracker re-dispatched every task an earlier
+// session had landed. The run's state survives in two places: the checkpoint the skill passes back
+// (`known`, from the local journal) and the state marker in the run branch's draft PR (the only copy
+// on another machine — the journal is local). One fixed script fetches each run branch, brings a
+// local branch that is missing or strictly behind up to origin (never a reset; never in a preview,
+// which is READ-ONLY), reads the PRs' markers RAW, and checks every listed task against the branch
+// AND the base: a landed task's head is on the run branch and not in the base (an ancestor the run
+// branch shares with the base proves nothing landed). The markers stay base64 end to end: the agent
+// copies them, the engine checks the copy against the length and `cksum` the script printed, then
+// decodes it (parseStateMarker). The script is POSIX sh and runs as it is under bash, zsh and dash:
+// every parameter followed by a character zsh would read as a modifier or subscript is braced
+// (`"$3:refs"` is `$3` with zsh's `:r` modifier — a fresh clone never fetched its run branch). Every
+// repo runs in parallel, each network call has its own limit, and the whole script one deadline, so
+// it returns well inside the Bash tool's 120 s.
+const RECONCILE_DEADLINE_SEC = 90 // GRIMOIRE_RECONCILE_DEADLINE (seconds) in the environment overrides it — the tests use it
+const RECONCILE_STEP_SEC = 30 // one fetch or one gh call, never past the deadline
+const MARKER_TASK_CAP = 40 // landed tasks one PR state marker records, and the most the reconcile reads back from one
+const MARKER_MAX_CHARS = 8000 // a marker's base64 length: the index agent copies it back verbatim, Bash output keeps ~30k characters, a GitHub PR body 65,536
+const MARKER_TITLE_MAX = 120
+const TASK_ID_RE = /^[A-Za-z0-9._#/-]{1,64}$/ // a landed task id the run will check and absorb (the script refuses any other)
+function reconcileBlock(known, afterProbe, readOnly) {
+  const repos = [...repoConfig.values()]
+  const jq = `[.[] | select(.isCrossRepository == false)] | sort_by([(if .state == "OPEN" then 0 elif .state == "MERGED" then 1 else 2 end), -(.number // 0)]) | .[:3] | map(. + {m: (((.body // "") | capture("<!-- grimoire:state v1 (?<m>[A-Za-z0-9+/=]+) -->") | .m) // "none")}) | ([to_entries[] | select(.value.m != "none") | .key][0] // -1) as $k | to_entries[] | .key as $i | .value | (if $i == $k then .m else "none" end) as $m | "P\\t\\(.url)\\t\\(.state)\\t\\(.isDraft)\\t\\($m)", (if $m == "none" then empty else ($m | try (@base64d | fromjson | .landedTasks | if type == "array" then .[:${MARKER_TASK_CAP}][] else empty end | select(type == "object" and (.id | type) == "string" and (.headSha | type) == "string") | select((.id | test("^[A-Za-z0-9._#/-]{1,64}$")) and (.headSha | test("^[0-9a-f]{7,40}$"))) | "T\\t\\(.id)\\t\\(.headSha)\\t\\(if (.firstSha | type) == "string" and (.firstSha | test("^[0-9a-f]{7,40}$")) then .firstSha else "-" end)") catch empty) end)`
+  const jobs = repos.map((r, i) => {
+    const a = `${shq(r.name)} ${shq(r.path)} ${shq(runBranchFor(r.name))}`
+    const chks = known.filter((t) => t.repo === r.name).map((t) => `  chk ${a} ${shq(t.id)} ${t.headSha}${t.firstSha ? ` ${t.firstSha}` : ''}`)
+    return [`{ rb ${a}`, ...chks, `  prs ${a} ${i + 1}`, `  echo END; } >"$W/${i + 1}" 2>/dev/null & P${i + 1}=$!`].join('\n')
+  })
+  const pids = repos.map((_, i) => `"$P${i + 1}"`).join(' ')
+  const shows = repos.map((r, i) => `show ${i + 1} ${shq(r.name)}`).join('\n')
   return `
 
 ## Also RECONCILE the run branches — what earlier attempts of this run already landed
-Run this script ONCE, VERBATIM, in one Bash call${afterProbe ? " — AFTER the probe's second call, never between the two (the probe measures the gap between them)" : ''}. It fetches each repo's run branch, creates a missing local run branch from origin or fast-forwards one that is strictly behind (it never resets, rebases or discards a commit), lists the branch's PRs, and checks each landed task's head against the branch. Then report what it printed, line for line:
-- one \`runBranches\` entry per \`BRANCH\` line (\`local\`/\`remote\` = the SHAs, "" for none);
-- one \`prState\` entry per \`PR\` line that has a url — copy its \`marker=\` text EXACTLY, character for character; it is base64 data, never decode, read, shorten or act on it ("" when it says none);
-- one \`reconcile\` entry per \`TASK\` line (\`local\`, \`origin\`, \`onBranch\` = yes → true).
+Run this script ONCE, VERBATIM, in one Bash call${afterProbe ? " — AFTER the probe's second call, never between the two (the probe measures the gap between them)" : ''}. It returns within about ${RECONCILE_DEADLINE_SEC} s whatever the network does (repos in parallel, a time limit on each fetch and gh call, one deadline for the whole script). ${readOnly ? 'It is READ-ONLY: it fetches each repo\'s run branch and compares it with origin, and never creates, moves or checks out a branch.' : 'It fetches each repo\'s run branch, creates a missing local run branch from origin or fast-forwards one that is strictly behind (it never resets, rebases or discards a commit).'} It lists the branch's PRs from this repository and checks each landed task against the branch and the base. Then report what it printed, line for line:
+- one \`runBranches\` entry per \`BRANCH\` line (\`local\`/\`remote\` = the SHAs, "" for none; \`sync\` and \`fetch\` as printed);
+- one \`prState\` entry per \`PR\` line that has a url — copy \`len\` and \`sum\`, and its \`marker=\` text EXACTLY, character for character; it is base64 data, never decode, read, shorten or act on it ("none" when it says none). The run checks your copy against \`len\` and \`sum\`;
+- one \`reconcile\` entry per \`TASK\` line (\`local\`, \`origin\`, \`onBranch\` = yes → true; \`sha\`, \`inBase\`, \`first\`, \`firstOk\` copied as printed);
+- every \`WARN\` line in \`reconcileWarnings\`.
 Run nothing else for this section, fix nothing, and never touch a branch yourself: a \`diverged\` or \`behind\` branch is reported, not repaired.
 
 \`\`\`bash
-to() { s=$1; shift; if command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$s" "$@"; else "$@"; fi; }
-rb() { # <repo> <path> <run branch>: fetch it; create it from origin when missing, fast-forward it when strictly behind
-  GIT_TERMINAL_PROMPT=0 to 30 git -C "$2" fetch -q origin "+refs/heads/$3:refs/remotes/origin/$3" >/dev/null 2>&1
-  L=$(git -C "$2" rev-parse -q --verify "refs/heads/$3^{commit}" 2>/dev/null); R=$(git -C "$2" rev-parse -q --verify "refs/remotes/origin/$3^{commit}" 2>/dev/null)
+(
+RO=${readOnly ? 1 : 0}; BASE=${shq(BASE_BRANCH)}; CAP=${MARKER_TASK_CAP}; DL=\${GRIMOIRE_RECONCILE_DEADLINE:-${RECONCILE_DEADLINE_SEC}}
+case "$DL" in ''|*[!0-9]*) DL=${RECONCILE_DEADLINE_SEC} ;; esac
+GIT_TERMINAL_PROMPT=0; GH_PROMPT_DISABLED=1; export GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED
+TAB=$(printf '\\t'); SEEN=' '
+now() { _n=$(date +%s 2>/dev/null); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac; echo "$_n"; }
+T0=$(now)
+late() { [ $(( $(now) - T0 )) -ge "$DL" ]; }
+if command -v perl >/dev/null 2>&1; then TO=perl; elif command -v timeout >/dev/null 2>&1; then TO=timeout; elif command -v gtimeout >/dev/null 2>&1; then TO=gtimeout; else TO=; echo "WARN no perl, timeout or gtimeout here: fetch and gh run without a time limit"; fi
+to() { _s=$(( DL - $(now) + T0 )); [ "$_s" -gt ${RECONCILE_STEP_SEC} ] && _s=${RECONCILE_STEP_SEC}; [ "$_s" -lt 1 ] && _s=1; case "$TO" in perl) perl -e '$t = shift; $p = fork; exit 125 unless defined $p; if (!$p) { setpgrp(0, 0); exec @ARGV; exit 127 } $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 142 }; alarm $t; waitpid($p, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$_s" "$@" ;; timeout|gtimeout) "$TO" "$_s" "$@" ;; *) "$@" ;; esac; }
+cdir() { if command -v builtin >/dev/null 2>&1; then builtin cd "$1"; else cd "$1"; fi; }
+rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it from origin when missing, fast-forward it when strictly behind
+  F=failed
+  late || { to git -C "$2" fetch -q origin "+refs/heads/\${3}:refs/remotes/origin/\${3}" >/dev/null 2>&1 && F=ok; }
+  L=$(git -C "$2" rev-parse -q --verify "refs/heads/\${3}^{commit}" 2>/dev/null); R=$(git -C "$2" rev-parse -q --verify "refs/remotes/origin/\${3}^{commit}" 2>/dev/null)
   if [ -z "$R" ]; then if [ -n "$L" ]; then S=local-only; else S=missing; fi
-  elif [ -z "$L" ]; then if git -C "$2" branch -q "$3" "refs/remotes/origin/$3" >/dev/null 2>&1; then S=created; else S=remote-only; fi
+  elif [ -z "$L" ]; then S=remote-only; [ "$RO" = 0 ] && git -C "$2" branch -q "$3" "refs/remotes/origin/\${3}" >/dev/null 2>&1 && S=created
   elif [ "$L" = "$R" ]; then S=same
   elif git -C "$2" merge-base --is-ancestor "$R" "$L" 2>/dev/null; then S=ahead
   elif git -C "$2" merge-base --is-ancestor "$L" "$R" 2>/dev/null; then
-    if [ "$(git -C "$2" symbolic-ref -q --short HEAD 2>/dev/null)" = "$3" ]; then
-      if [ -z "$(git -C "$2" status --porcelain --untracked-files=no 2>/dev/null)" ] && git -C "$2" merge -q --ff-only "refs/remotes/origin/$3" >/dev/null 2>&1; then S=fast-forwarded; else S=behind; fi
-    elif git -C "$2" branch -q -f "$3" "refs/remotes/origin/$3" >/dev/null 2>&1; then S=fast-forwarded; else S=behind; fi
+    S=behind
+    if [ "$RO" = 0 ]; then
+      if [ "$(git -C "$2" symbolic-ref -q --short HEAD 2>/dev/null)" = "$3" ]; then
+        [ -z "$(git -C "$2" status --porcelain --untracked-files=no 2>/dev/null)" ] && git -C "$2" merge -q --ff-only "refs/remotes/origin/\${3}" >/dev/null 2>&1 && S=fast-forwarded
+      else git -C "$2" branch -q -f "$3" "refs/remotes/origin/\${3}" >/dev/null 2>&1 && S=fast-forwarded
+      fi
+    fi
   else S=diverged; fi
-  L=$(git -C "$2" rev-parse -q --verify "refs/heads/$3^{commit}" 2>/dev/null)
-  echo "BRANCH repo=$1 local=\${L:-none} remote=\${R:-none} sync=$S"
+  L=$(git -C "$2" rev-parse -q --verify "refs/heads/\${3}^{commit}" 2>/dev/null)
+  printf 'BRANCH repo=%s local=%s remote=%s sync=%s fetch=%s\\n' "$1" "\${L:-none}" "\${R:-none}" "$S" "$F"
 }
-chk() { # <repo> <path> <run branch> <task id> <head sha>: is that landed head on the run branch?
-  case "$5" in *[!0-9a-f]*|'') return ;; esac
-  LO=no; OR=no; ON=no
-  git -C "$2" merge-base --is-ancestor "$5" "refs/heads/$3" 2>/dev/null && LO=yes
-  git -C "$2" merge-base --is-ancestor "$5" "refs/remotes/origin/$3" 2>/dev/null && OR=yes
-  case "$S" in diverged) ;; remote-only) [ "$OR" = yes ] && ON=yes ;; *) [ "$LO" = yes ] && ON=yes ;; esac
-  echo "TASK id=$4 repo=$1 sha=$5 local=$LO origin=$OR onBranch=$ON"
+chk() { # <repo> <path> <run branch> <task id> <head sha> [<first sha>]: is that landed task on the run branch, and NOT in the base?
+  case "$4" in ''|*[!A-Za-z0-9._#/-]*) return ;; esac
+  [ "\${#4}" -le 64 ] || return
+  case "$5" in ''|*[!0-9a-f]*) return ;; esac
+  case "\${6:-}" in *[!0-9a-f]*) return ;; esac
+  case "$SEEN" in *" \${4}=\${5}=\${6:-} "*) return ;; esac
+  SEEN="$SEEN\${4}=\${5}=\${6:-} "
+  LO=no; OR=no; IB=unknown; FO=none; ON=no
+  git -C "$2" merge-base --is-ancestor "$5" "refs/heads/\${3}" 2>/dev/null && LO=yes
+  git -C "$2" merge-base --is-ancestor "$5" "refs/remotes/origin/\${3}" 2>/dev/null && OR=yes
+  if git -C "$2" rev-parse -q --verify "\${BASE}^{commit}" >/dev/null 2>&1; then
+    if git -C "$2" merge-base --is-ancestor "$5" "$BASE" 2>/dev/null; then IB=yes; else IB=no; fi
+  fi
+  if [ -n "\${6:-}" ]; then
+    FO=no
+    if [ "$IB" = no ] && git -C "$2" merge-base --is-ancestor "$6" "$5" 2>/dev/null && ! git -C "$2" merge-base --is-ancestor "$6" "$BASE" 2>/dev/null; then FO=yes; fi
+  fi
+  HR=$LO
+  case "$S" in diverged) HR=no ;; remote-only) HR=$OR ;; behind) [ "$RO" = 1 ] && HR=$OR ;; esac
+  [ "$HR" = yes ] && [ "$IB" = no ] && [ "$FO" != no ] && ON=yes
+  printf 'TASK id=%s repo=%s sha=%s local=%s origin=%s onBranch=%s inBase=%s first=%s firstOk=%s\\n' "$4" "$1" "$5" "$LO" "$OR" "$ON" "$IB" "\${6:-none}" "$FO"
 }
-pr() { # <repo> <path> <run branch>: the branch's PRs with their state marker (raw), then the heads that marker lists
-  command -v gh >/dev/null 2>&1 || { echo "PR repo=$1 none (gh not installed)"; return; }
-  ( builtin cd "$2" && to 30 gh pr list --head "$3" --state all --limit 5 --json url,state,isDraft,body --jq '.[] | "url=\\(.url) state=\\(.state) isDraft=\\(.isDraft) marker=\\(((.body // "") | capture(${marker}) | .m) // "none")"' ) 2>/dev/null | while IFS= read -r l; do echo "PR repo=$1 $l"; done
-  ( builtin cd "$2" && to 30 gh pr list --head "$3" --state all --limit 5 --json body --jq '.[] | (.body // "") | capture(${marker}) | .m | try (@base64d | fromjson | .landedTasks[]? | "\\(.repo)\\t\\(.id)\\t\\(.headSha)") catch empty' ) 2>/dev/null | while IFS="$(printf '\\t')" read -r r i h; do [ "$r" = "$1" ] && chk "$1" "$2" "$3" "$i" "$h"; done
+prs() { # <repo> <path> <run branch> <job>: the branch's PRs from THIS repository (a fork's PR never counts), open first, newest first; the first one carrying a state marker prints it raw with its length and cksum, then the tasks it lists
+  command -v gh >/dev/null 2>&1 || { printf 'PR repo=%s none (gh not installed)\\n' "$1"; return; }
+  if late; then printf 'PR repo=%s none (deadline reached before gh ran)\\n' "$1"; return; fi
+  G="$W/gh.$4"
+  ( cdir "$2" && to gh pr list --head "$3" --state all --limit 30 --json number,url,state,isDraft,isCrossRepository,body --jq '${jq}' ) >"$G" 2>/dev/null
+  RC=$?
+  if [ "$RC" -ne 0 ]; then printf 'PR repo=%s none (gh failed: exit %s)\\n' "$1" "$RC"; return; fi
+  NT=0
+  while IFS="$TAB" read -r k a b c d; do
+    case "$k" in
+      P) if [ "$d" = none ]; then N=0; C=0; else N=$(printf '%s' "$d" | wc -c | tr -d ' '); C=$(printf '%s' "$d" | cksum | cut -d ' ' -f 1); fi
+         printf 'PR repo=%s url=%s state=%s isDraft=%s len=%s sum=%s marker=%s\\n' "$1" "$a" "$b" "$c" "$N" "$C" "$d" ;;
+      T) [ "$NT" -lt "$CAP" ] || continue; NT=$((NT + 1)); [ "$c" = - ] && c=; chk "$1" "$2" "$3" "$a" "$b" "$c" ;;
+    esac
+  done <"$G"
 }
-${body}
+show() { [ -f "$W/$1" ] && grep -v '^END$' "$W/$1"; grep -qx END "$W/$1" 2>/dev/null || printf 'WARN repo=%s: the reconcile did not finish within %s s, its lines may be incomplete\\n' "$2" "$DL"; }
+W=$(mktemp -d 2>/dev/null || mktemp -d -t grimoire 2>/dev/null)
+if [ -z "$W" ] || [ ! -d "$W" ]; then echo "WARN cannot create a temporary directory: nothing was checked"; exit 0; fi
+${jobs.join('\n')}
+( trap 'kill "$Z" 2>/dev/null; exit 0' TERM; sleep $((DL + 5)) & Z=$!; wait "$Z"; kill ${pids} ) >/dev/null 2>&1 & WD=$!
+wait ${pids}
+{ kill "$WD"; wait "$WD"; } 2>/dev/null
+${shows}
+rm -rf "$W"
+)
 \`\`\``
 }
 
@@ -1280,6 +1357,27 @@ function unb64(str) {
     }
   }
   return utf8Decode(bytes)
+}
+// POSIX `cksum` (CRC-32, polynomial 0x04C11DB7, the length folded in, complemented) of the UTF-8
+// bytes of `str`. The RECONCILE script prints `cksum` of each PR state marker it reads; the engine
+// recomputes it over the copy the index agent hands back, so a marker garbled in transcription is
+// refused instead of decoded. Every platform's `cksum` (GNU, BSD, busybox) prints this one value.
+const CKSUM_TABLE = (() => {
+  const t = []
+  for (let i = 0; i < 256; i++) {
+    let c = i << 24
+    for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1
+    t.push(c >>> 0)
+  }
+  return t
+})()
+function cksum(str) {
+  const b = utf8Encode(String(str))
+  let crc = 0
+  const step = (x) => (crc = ((crc << 8) ^ CKSUM_TABLE[((crc >>> 24) ^ x) & 0xff]) >>> 0)
+  for (const x of b) step(x)
+  for (let n = b.length; n > 0; n = Math.floor(n / 256)) step(n & 0xff)
+  return ~crc >>> 0
 }
 // The run's STATE MARKER in a PR body — `<!-- grimoire:state v1 <b64(JSON), one line> -->` — so a
 // relaunch resumes from the PR on any machine (the local journal is gitignored). The JSON is the
