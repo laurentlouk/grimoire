@@ -25,13 +25,14 @@ A revised path may re-approach the work, but re-litigating the design is roast's
   a contract or git history can settle it, read it (or emit a task that does) and REVISE
   instead. Explore before asking; don't guess.
 
-## A DIED task may still be running
-An agent the wall-clock backstop gave up on is booked as DIED, but nothing stops it: it can
-keep working in the checkout and commit after you start. Its failure detail says so when that
-is the case. Before you requeue it, look: `git log <base>..<run branch>`, `git status`, and the
-build, test or server processes still running. If its work landed, requeue it as a short
-verify-and-report task (startSha = the commit before the task), never as a redo that rebuilds
-committed work or regenerates artifacts.
+## A late agent is waited for
+A dispatch past its time limit is not booked as dead: the loop keeps waiting for it, because
+nothing can stop an agent once it runs. A task listed as STILL_RUNNING, or a lane FENCED behind
+one, holds its repo: never requeue it or anything in its checkout — the loop holds whatever you
+emit for a fenced repo until the agent returns. A task that DIED after running late may have
+committed before it ended (its failure detail says so): look first — `git log <base>..<run
+branch>`, `git status`, live build or server processes — and if its work landed, requeue it as
+a short verify-and-report task (startSha = the commit before the task), never as a redo.
 
 ## Learnings are measured, not estimated
 Always return `learnings`: the durable lesson(s) this failure taught, phrased so a later replan

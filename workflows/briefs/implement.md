@@ -48,9 +48,10 @@ already settled there.
   (product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase) may
   leave as a question. When exploration is inconclusive, your NEEDS_CONTEXT question says
   what you checked and what is still unknown.
-- **Commit incrementally** — every time you reach a green step, commit it. This dispatch can
-  be cut off by the per-agent timeout: anything COMMITTED survives and a re-dispatch resumes
-  from it; anything uncommitted is redone from scratch.
+- **Commit incrementally** — every time you reach a green step, commit it. This dispatch is
+  not cut off at its time limit; it is waited for. Commit at every green step so a later
+  session can absorb it: anything COMMITTED survives, anything uncommitted is redone from
+  scratch.
 - **Report the review range in your return**: `baseSha` (`git merge-base <base branch> HEAD`, the base branch is named in the header),
   `startSha` (`git rev-parse HEAD` on your branch BEFORE your first change — for a merge or
   integration task, the branch head before you merged), `commits` (the SHAs you created,
