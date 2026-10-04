@@ -4119,21 +4119,20 @@ const STILL_RUNNING = { stillRunning: true }
 async function finalWave(finals) {
   const out = finals.map(() => STILL_RUNNING)
   const done = new Set()
-  const all = parallel(
-    finals.map((repo, i) => () =>
-      terminalSlot(repo).then((r) => {
-        out[i] = r
-        done.add(repo)
-        return r
-      }),
-    ),
-  )
+  // Every slot that ends wakes the wave: once another slot has wedged, nothing else would.
+  const end = (repo, i) => (r) => {
+    out[i] = r
+    done.add(repo)
+    wake()
+    return r
+  }
+  const all = parallel(finals.map((repo, i) => () => terminalSlot(repo).then(end(repo, i), () => end(repo, i)(null))))
   for (;;) {
     const r = await Promise.race([all, waker()])
     if (r !== WAKE) return r
-    const open = finals.filter((repo) => !done.has(repo))
-    if (open.length && open.every((repo) => wedged.some((w) => w.repo === repo))) {
-      log(`⛔ final wave: ${open.join(', ')} still running past the hard limit — booking the other slot(s) now`)
+    if (finals.every((repo) => done.has(repo) || wedged.some((w) => w.repo === repo))) {
+      const open = finals.filter((repo) => !done.has(repo))
+      if (open.length) log(`⛔ final wave: ${open.join(', ')} still running past the hard limit — booking the other slot(s) now`)
       return out
     }
   }
