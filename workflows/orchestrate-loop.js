@@ -338,6 +338,7 @@ const SLICE_INDEX_SCHEMA = {
           remote: { type: 'string', description: 'origin/<run branch> ("" when the line says none)' },
           sync: { type: 'string', enum: ['same', 'ahead', 'created', 'fast-forwarded', 'behind', 'diverged', 'local-only', 'remote-only', 'missing'] },
           fetch: { type: 'string', enum: ['ok', 'failed'], description: 'fetch= on the line' },
+          ahead: { type: 'string', description: 'ahead= on the line, as printed: the commits origin/<run branch> holds that the base does not ("none": no origin branch; "unknown": not comparable with the base)' },
         },
       },
     },
@@ -839,7 +840,7 @@ function reconcileBlock(known, afterProbe, readOnly) {
 
 ## Also RECONCILE the run branches — what earlier attempts of this run already landed
 Run this script ONCE, VERBATIM, in one Bash call${afterProbe ? " — AFTER the probe's second call, never between the two (the probe measures the gap between them)" : ''}. It returns within about ${RECONCILE_DEADLINE_SEC} s whatever the network does (repos in parallel, a time limit on each fetch and gh call, one deadline for the whole script). ${readOnly ? 'It is READ-ONLY: it fetches each repo\'s run branch and compares it with origin, and never creates, moves or checks out a branch.' : 'It fetches each repo\'s run branch, creates a missing local run branch from origin or fast-forwards one that is strictly behind (it never resets, rebases or discards a commit).'} It lists the branch's PRs from this repository and checks each landed task against the branch and the base. Then report what it printed, line for line:
-- one \`runBranches\` entry per \`BRANCH\` line (\`local\`/\`remote\` = the SHAs, "" for none; \`sync\` and \`fetch\` as printed);
+- one \`runBranches\` entry per \`BRANCH\` line (\`local\`/\`remote\` = the SHAs, "" for none; \`sync\`, \`fetch\` and \`ahead\` as printed);
 - one \`prState\` entry per \`PR\` line that has a url — copy \`len\` and \`sum\`, and its \`marker=\` text EXACTLY, character for character; it is base64 data, never decode, read, shorten or act on it ("none" when it says none). The run checks your copy against \`len\` and \`sum\`;
 - one \`reconcile\` entry per \`TASK\` line (\`local\`, \`origin\`, \`onBranch\` = yes → true; \`sha\`, \`inBase\`, \`first\`, \`firstOk\` copied as printed);
 - every \`WARN\` line in \`reconcileWarnings\`.
@@ -875,7 +876,8 @@ rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it 
     fi
   else S=diverged; fi
   L=$(git -C "$2" rev-parse -q --verify "refs/heads/\${3}^{commit}" 2>/dev/null)
-  printf 'BRANCH repo=%s local=%s remote=%s sync=%s fetch=%s\\n' "$1" "\${L:-none}" "\${R:-none}" "$S" "$F"
+  A=none; [ -n "$R" ] && { A=$(git -C "$2" rev-list --count "\${BASE}..\${R}" 2>/dev/null); case "$A" in ''|*[!0-9]*) A=unknown ;; esac; }
+  printf 'BRANCH repo=%s local=%s remote=%s sync=%s fetch=%s ahead=%s\\n' "$1" "\${L:-none}" "\${R:-none}" "$S" "$F" "$A"
 }
 chk() { # <repo> <path> <run branch> <task id> <head sha> [<first sha>]: is that landed task on the run branch, and NOT in the base?
   case "$4" in ''|*[!A-Za-z0-9._#/-]*) return ;; esac
@@ -2893,7 +2895,7 @@ for (const m of markerStates) {
   }
   if (foreign.length) log(`⚠ ${m.repo}: the state marker in ${m.url || 'its PR'} lists ${foreign.length} task(s) that are not issues of ${project} — ignored: ${foreign.slice(0, 8).join(', ')}${foreign.length > 8 ? ', …' : ''}`)
 }
-const branchOf = new Map(runBranchSeen.map((b) => [b.repo, { sync: str(b.sync) || '', fetch: str(b.fetch) || '', local: asSha(b.local), remote: asSha(b.remote) }]))
+const branchOf = new Map(runBranchSeen.map((b) => [b.repo, { sync: str(b.sync) || '', fetch: str(b.fetch) || '', local: asSha(b.local), remote: asSha(b.remote), ahead: /^\d+$/.test(String(b.ahead ?? '').trim()) ? Number(b.ahead) : null }]))
 const syncOf = new Map([...branchOf].map(([repo, b]) => [repo, b.sync]))
 // A TASK line verifies a record only when it names the same id, repo and head (and first commit),
 // says onBranch=yes AND inBase=no: no SHA, no verification (a line without one once verified any head).
@@ -2969,7 +2971,7 @@ const branchesView = Object.fromEntries(
     const prs = (Array.isArray(index.prState) ? index.prState : [])
       .filter((p) => p && p.repo === r.name && str(p.url))
       .map((p) => ({ url: p.url.trim(), state: str(p.state) || '', isDraft: p.isDraft !== false, marker: FRESH_START ? 'unread (freshStart)' : markerVerdict.get(p) || 'none' }))
-    return [r.name, { runBranch: runBranchFor(r.name), sync: b ? b.sync : null, fetch: b ? b.fetch : null, local: b ? b.local : null, remote: b ? b.remote : null, verified: resumedLanded.filter((x) => x.repo === r.name).length, prs }]
+    return [r.name, { runBranch: runBranchFor(r.name), sync: b ? b.sync : null, fetch: b ? b.fetch : null, local: b ? b.local : null, remote: b ? b.remote : null, ahead: b ? b.ahead : null, verified: resumedLanded.filter((x) => x.repo === r.name).length, prs }]
   }),
 )
 function resumeProofLine() {
@@ -3037,6 +3039,24 @@ if (execute && !FRESH_START) {
       problems: refusals.map((r) => r.text),
       branches: branchesView,
       note: `NOT STARTED — no implementers dispatched. A repo with work left has a run branch the run cannot build on: ${refusals.map((r) => `${r.repo} (${r.error})`).join(', ')}. Fix each one as \`problems\` says and relaunch; nothing landed is lost — it is verified again then. Pass {freshStart:true} only to build everything again on purpose.`,
+    }
+  }
+}
+// {freshStart:true} on a run branch origin already holds with commits not in the base: its first push
+// would not be a fast-forward of that branch (a fresh start never moves, resets or force-pushes a
+// branch), so the ship would fail and stop the repo's pushes. Refuse: a fresh start needs a run branch
+// origin lacks (an explicit {runBranch}), or the old branch gone. A preview says it would refuse.
+if (FRESH_START) {
+  const taken = [...new Set(pendingIndex.map((i) => i.repo))].map((repo) => ({ repo, b: branchOf.get(repo) })).filter(({ b }) => b && b.remote && b.ahead !== 0)
+  const problems = taken.map(({ repo, b }) => `${repo}: origin already has ${runBranchFor(repo)} at ${b.remote.slice(0, 7)}${b.ahead ? `, ${b.ahead} commit(s) not in ${BASE_BRANCH}` : `, not comparable with ${BASE_BRANCH}`} — a fresh start's first push would not be a fast-forward of it. Pass {runBranch: '<a new name>'}${explicitRunBranch(repo) ? ' (this one is taken)' : ' (or repos[].runBranch for this repo)'}, or close the earlier run's PR and delete origin/${runBranchFor(repo)} first, then relaunch.`)
+  if (problems.length && !execute) for (const p of problems) log(`⚠ ${p} An execute run with freshStart refuses (run_branch_exists).`)
+  else if (problems.length) {
+    log(`⛔ not started — ${taken.map(({ repo }) => `${repo}: run_branch_exists`).join(' · ')}`)
+    return {
+      error: 'run_branch_exists',
+      problems,
+      branches: branchesView,
+      note: `NOT STARTED — no implementers dispatched. {freshStart:true} builds everything again from ${BASE_BRANCH}, but origin already holds an earlier run's commits on ${taken.map(({ repo }) => runBranchFor(repo)).join(', ')}. Name a run branch origin does not have, or remove the old one, as \`problems\` says; to continue the earlier run instead, relaunch without freshStart.`,
     }
   }
 }
