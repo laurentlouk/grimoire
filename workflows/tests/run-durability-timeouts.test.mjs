@@ -20,6 +20,9 @@
 //      journal writer no longer holds the end of the run (T-1 to T-3)
 //    • HYDRATION ON THE CRITICAL PATH — the next task's hydration waited for the current one to
 //      land; it is now prefetched while its blocker runs (H-1 to H-4)
+//    • A LEARNING THAT TIME-BOXED THE WORK, AND REPLANS SPENT ON THE MACHINE — "limit every
+//      implementer to 30 minutes" made the next dispatch stop with 1 of 3 required test runs done;
+//      a replan now names its cause, and only a code cause spends the budget (C-1 to C-3)
 //
 //  Same stubbed runtime as the other loop tests (agent / parallel / log / phase / args / budget).
 //  Timers are real: limits are fractional minutes (0.001 min = 60 ms).
@@ -359,6 +362,38 @@ function journalEvents(calls) {
   eq(off.labels.filter((l) => l.startsWith('hydrate:')), ['hydrate:w1', 'hydrate:w2'], 'hydrateAhead:0 — one just-in-time hydration per cycle, no prefetch')
   eq(on.labels.filter((l) => l.startsWith('hydrate:')), ['hydrate:w1', 'hydrate:p1'], 'default — PROJ-2 prefetched, no just-in-time hydration for it')
   eq(off.labels.filter((l) => !l.startsWith('hydrate:')), on.labels.filter((l) => !l.startsWith('hydrate:')), 'every other dispatch is the same, in the same order')
+}
+
+// ══════════════ C · the replan names its cause; only code spends the budget ══════════════
+{
+  const { result, labels } = await run('C-1 · a replan whose cause is the environment halts, spends nothing, requeues nothing', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return { status: 'BLOCKED', summary: 'git commit hung for 25 s' }
+    if (label.startsWith('replan')) return { decision: 'REVISE', cause: 'environment', reason: 'commit signing hangs: the 1Password SSH agent is locked — unlock it, then resume', learnings: ['A signed commit in a scratch repo hung after 25 s'], tasks: [T('PROJ-1')] }
+    return happy(label)
+  }, { args: QUIET })
+  eq(result.replans, 0, 'the replan counter is not incremented')
+  eq((result.halt || {}).kind, 'environment', 'halt kind: environment')
+  ok(/^environment: commit signing hangs/.test((result.halt || {}).reason || ''), "the halt carries the replanner's reason")
+  eq(labels.filter((l) => l.startsWith('impl:')), ['impl:PROJ-1'], 'the same work is not requeued')
+  ok(result.learnings.includes('A signed commit in a scratch repo hung after 25 s'), 'its learning is kept')
+}
+{
+  let n = 0
+  const { result, labels } = await run('C-2 · a harness-cause replan does not spend the budget either', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return n++ < 2 ? { status: 'BLOCKED', summary: 'x' } : IMPL_OK
+    if (label === 'replan#1') return { decision: 'REVISE', cause: 'harness', reason: 'the agent ran late; verify and report', learnings: [], tasks: [T('PROJ-1')] }
+    if (label.startsWith('replan')) return { decision: 'REVISE', cause: 'code', reason: 'a different approach', learnings: [], tasks: [T('PROJ-1')] }
+    return happy(label)
+  }, { args: { ...QUIET, maxReplans: 1 } })
+  ok(labels.includes('replan#2'), 'a second replan ran although maxReplans is 1: the first was not charged')
+  eq(result.replans, 1, 'only the code-cause replan counts')
+  ok(result.done.some((d) => d.id === 'PROJ-1'), 'PROJ-1 landed')
+}
+{
+  console.log('\n── C-3 · the replan brief: learnings are facts, never time boxes; name the cause')
+  const brief = readFileSync(`${DIR}/briefs/replan.md`, 'utf8')
+  ok(/facts and measured durations, never limits/.test(brief) && /time limits belong to the engine/.test(brief) && /never\s+contradicts a task's acceptance criteria/.test(brief), 'a learning never time-boxes the work')
+  ok(/## Name the cause/.test(brief) && /`environment`/.test(brief) && /Only this kind spends/.test(brief), 'the brief asks for the cause, and only code spends a replan')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)

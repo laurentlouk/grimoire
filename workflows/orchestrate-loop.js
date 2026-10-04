@@ -503,6 +503,11 @@ const REPLAN_SCHEMA = {
   properties: {
     decision: { type: 'string', enum: ['REVISE', 'HALT'] },
     reason: { type: 'string', description: 'why REVISE (what the revised path fixes) or why HALT (what blocks us) — short prose ONLY, never a serialized task list' },
+    cause: {
+      type: 'string',
+      enum: ['code', 'environment', 'harness'],
+      description: "what the failures come from (brief: \"Name the cause\"): code — the work itself; environment — the machine around it (a hung tool or hook, commit signing, a browser engine hang, the machine asleep, network or auth); harness — the loop itself (a late or wedged agent, reviewers that did not answer). Only `code` spends a replan (a harness cause is free as many times as the budget allows, then charged); `environment` halts the run with your reason. Unset counts as code",
+    },
     learnings: { type: 'array', items: { type: 'string' }, description: 'durable lesson(s) from this failure, carried into any later replan' },
     tasks: { type: 'array', items: TASK_ITEM_SCHEMA, description: 'the revised REMAINING task list — REQUIRED and non-empty when decision=REVISE, as structured array items HERE (never inlined into reason); only work still to do — never DONE tasks' },
   },
@@ -1025,7 +1030,7 @@ function integratePrompt(task) {
 
 // The re-planner — A* from the CURRENT state when the scheduler is stuck.
 function replanPrompt({ goal, done, failures, blocked, learnings, replanNo, maxReplans }) {
-  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans}.
+  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans} (only a \`cause: code\` replan spends one).
 
 ## Goal
 ${goal}
@@ -2535,6 +2540,8 @@ Fix dispatches: address ONLY the findings listed, commit to \`${ref.branch}\`. T
   }
 }
 let replans = resumeOpt && Number.isInteger(resumeOpt.replansUsed) && resumeOpt.replansUsed > 0 ? Math.min(resumeOpt.replansUsed, MAX_REPLANS) : 0
+let replanNo = replans // every replan dispatched (its label number); only a code-cause replan spends one of MAX_REPLANS
+let freeReplans = 0 // harness-cause replans not charged to MAX_REPLANS (at most MAX_REPLANS of them, then they are charged)
 let halt = null // {reason} once we stop early
 const claimedByRun = new Map() // id → repo: issues this run claimed at hydration (released at the end if they did not land)
 let waves = 0 // dispatch cycles (historical name — reported in the summary)
@@ -3142,12 +3149,12 @@ while (true) {
     // A failure inside a fenced repo cannot be acted on until its fence is released.
     if (failures.some((f) => !fencedRepos.has(f.repo)) && replans < MAX_REPLANS) {
       // failures are blocking the rest (or are all that is left) → A* from current state
-      replans++
+      replanNo++
       phase('Replan')
       const blocked = [...pendingById.values()].filter((i) => !inFlight.has(i.id)).map((i) => ({ id: i.id, repo: i.repo, slice: i.slice, dependsOn: i.dependsOn || [] }))
-      let revision = await step(`replan #${replans} — A* from current state`, () =>
-        agentT(replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans, maxReplans: MAX_REPLANS }), {
-          label: `replan#${replans}`,
+      let revision = await step(`replan #${replanNo} — A* from current state`, () =>
+        agentT(replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans + 1, maxReplans: MAX_REPLANS }), {
+          label: `replan#${replanNo}`,
           phase: 'Replan',
           model: 'opus',
           schema: REPLAN_SCHEMA,
@@ -3156,13 +3163,13 @@ while (true) {
       // A REVISE with no tasks is malformed (the task list leaked into `reason` as text) —
       // retry the planner ONCE with an explicit correction before treating it as a halt.
       if (revision && revision.decision === 'REVISE' && !(revision.tasks || []).length) {
-        log(`⚠ replan #${replans}: REVISE returned zero tasks — retrying the planner once`)
-        revision = await step(`replan #${replans} — retry (REVISE had no tasks)`, () =>
+        log(`⚠ replan #${replanNo}: REVISE returned zero tasks — retrying the planner once`)
+        revision = await step(`replan #${replanNo} — retry (REVISE had no tasks)`, () =>
           agentT(
-            replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans, maxReplans: MAX_REPLANS }) +
+            replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans + 1, maxReplans: MAX_REPLANS }) +
               '\n\nIMPORTANT: a previous attempt chose REVISE but returned an EMPTY "tasks" array (its task list was serialized into "reason" as text, which the scheduler cannot use). Return the revised remaining tasks as structured items in the "tasks" array field; keep "reason" to short prose.',
             {
-              label: `replan#${replans}-retry`,
+              label: `replan#${replanNo}-retry`,
               phase: 'Replan',
               model: 'opus',
               schema: REPLAN_SCHEMA,
@@ -3172,16 +3179,31 @@ while (true) {
       }
       if (!revision) {
         halt = { reason: 'the re-planner died' }
-        log(`⛔ replan #${replans}: planner died`)
+        log(`⛔ replan #${replanNo}: planner died`)
         break
       }
       const failingRepos = [...new Set(failures.map((f) => f.repo).filter(Boolean))]
       const newLearnings = (revision.learnings || []).map((l) => toLearning(l, failingRepos)).filter(Boolean)
       learnings.push(...newLearnings)
+      // Only a CODE cause spends the replan budget. An environment cause (a hung tool or hook,
+      // commit signing, a browser engine hang, a machine asleep) halts: requeuing the same work
+      // into the same broken environment fails the same way, and a real run spent its whole
+      // budget like that. A harness cause (a late or wedged agent, silent reviewers) is free
+      // MAX_REPLANS times, then charged like code, so a harness loop still ends.
+      const cause = revision.cause === 'environment' || revision.cause === 'harness' ? revision.cause : 'code'
+      const charged = cause === 'code' || (cause === 'harness' && freeReplans >= MAX_REPLANS)
+      if (charged) replans++
+      else freeReplans++
+      if (cause === 'environment') {
+        emit('replan', { n: replanNo, decision: 'HALT', cause, reason: revision.reason, requeued: 0, learnings: newLearnings.map(learningText) })
+        halt = { reason: `environment: ${revision.reason}`, kind: 'environment' }
+        log(`⛔ replan #${replanNo}: the cause is the environment, not the code — halting without requeuing (no replan spent): ${revision.reason}`)
+        break
+      }
       if (revision.decision === 'HALT') {
-        emit('replan', { n: replans, decision: 'HALT', reason: revision.reason, requeued: 0, learnings: newLearnings.map(learningText) })
-        halt = { reason: revision.reason }
-        log(`⛔ replan #${replans}: HALT — ${revision.reason}`)
+        emit('replan', { n: replanNo, decision: 'HALT', cause, reason: revision.reason, requeued: 0, learnings: newLearnings.map(learningText) })
+        halt = { reason: revision.reason, ...(cause === 'harness' ? { kind: 'harness' } : {}) }
+        log(`⛔ replan #${replanNo}: HALT — ${revision.reason}`)
         break
       }
       // Prefetched hydrations of not-yet-dispatched tasks in the failing repos lack this replan's
@@ -3206,7 +3228,7 @@ while (true) {
         // never see it in landedIds — so ticket wins over a planner-invented id.
         if (t.ticket && t.ticket !== 'NO_TICKET' && inProject.has(t.ticket)) t.id = t.ticket
         if (inFlight.has(t.id)) {
-          log(`   · replan #${replans}: ${t.id} is still running past its hard limit — not requeued`)
+          log(`   · replan #${replanNo}: ${t.id} is still running past its hard limit — not requeued`)
           continue
         }
         pendingById.set(t.id, { id: t.id, title: '', repo: t.repo, state: 'todo', slice: t.slice ?? 0, sliceLabel: t.sliceLabel || '', dependsOn: t.dependsOn || [] })
@@ -3226,7 +3248,7 @@ while (true) {
         if (fi >= 0) failures.splice(fi, 1) // being retried with a NEW approach — no longer a standing failure
         requeued++
       }
-      emit('replan', { n: replans, decision: 'REVISE', reason: revision.reason, requeued, learnings: newLearnings.map(learningText) })
+      emit('replan', { n: replanNo, decision: 'REVISE', cause, reason: revision.reason, requeued, learnings: newLearnings.map(learningText) })
       flushJournal() // a replan is a checkpoint worth having on disk
       // A replan re-enters tasks WITHOUT hydration, so an in-project ticket it (re)uses that
       // hydration never claimed is claimed here — otherwise it would be built unclaimed.
@@ -3235,7 +3257,7 @@ while (true) {
           .filter((t) => !t.deferred && inProject.has(t.id) && !alreadyDoneIds.has(t.id) && !claimedByRun.has(t.id) && !claimedElsewhere.some((c) => c.id === t.id) && t.ticket && t.ticket !== 'NO_TICKET')
           .map((t) => ({ id: t.id, repo: t.repo }))
         if (unclaimed.length) {
-          const got = await agentT(claimPrompt(unclaimed, claim.identity), { label: `claim#${replans}`, phase: 'Replan', model: 'haiku', effort: 'low', schema: RELEASE_SCHEMA })
+          const got = await agentT(claimPrompt(unclaimed, claim.identity), { label: `claim#${replanNo}`, phase: 'Replan', model: 'haiku', effort: 'low', schema: RELEASE_SCHEMA })
           // Only what the tracker actually took counts as ours (and is released later). An
           // issue someone else holds is still built — the replanner chose it — but logged.
           const took = new Set(got && Array.isArray(got.released) ? got.released : [])
@@ -3246,9 +3268,9 @@ while (true) {
           if (took.size < unclaimed.length) log(`⚠ claim: ${unclaimed.length - took.size} replanned issue(s) could not be claimed — ${unclaimed.filter((u) => !took.has(u.id)).map((u) => u.id).join(', ')}`)
         }
       }
-      log(`↻ replan #${replans}: REVISE — ${revision.reason} · ${requeued} task(s) requeued${newLearnings.length ? ` · learned: ${newLearnings.map(learningText).join('; ')}` : ''}`)
+      log(`↻ replan #${replanNo}: REVISE${cause === 'code' ? '' : ` (${cause} cause${charged ? ', charged: its free replans are used up' : ' — no replan spent'})`} — ${revision.reason} · ${requeued} task(s) requeued${newLearnings.length ? ` · learned: ${newLearnings.map(learningText).join('; ')}` : ''}`)
       if (!requeued) {
-        halt = { reason: `replan #${replans} requeued nothing while work is still open` }
+        halt = { reason: `replan #${replanNo} requeued nothing while work is still open` }
         log(`⛔ ${halt.reason}`)
         break
       }

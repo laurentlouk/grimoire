@@ -34,6 +34,18 @@ committed before it ended (its failure detail says so): look first — `git log 
 branch>`, `git status`, live build or server processes — and if its work landed, requeue it as
 a short verify-and-report task (startSha = the commit before the task), never as a redo.
 
+## Name the cause
+Return `cause`, what the failures come from:
+- `code`: the work itself was wrong, incomplete or blocked by a decision. Only this kind spends
+  a replan from the budget in the header.
+- `environment`: the machine around the work — a hung tool or hook, commit signing that waits
+  on a locked agent, a browser engine that hangs, the machine asleep, the network or auth. The
+  run halts with your `reason`: requeuing the same work into the same broken environment fails
+  the same way. Say what to fix, as precisely as you can establish it.
+- `harness`: the loop itself — a late or wedged agent, reviewers that did not answer, a merge
+  the integrate step could not do. Not charged to the budget either, as many times as the
+  budget allows; after that it is charged like code.
+
 ## Learnings are measured, not estimated
 Always return `learnings`: the durable lesson(s) this failure taught, phrased so a later replan
 can apply them — they are folded into every later hydration AND into the run ledger that the
@@ -42,6 +54,12 @@ tool latency in the header, a timing you take yourself, the journal's timestamps
 once blamed slow tests for a timeout when a hook had added 30 s to every one of the agent's
 commands, and proposed a config value that could not take effect; check what a knob does
 before you recommend it.
+
+A learning states facts and measured durations, never limits. Do not write a time box ("limit
+every implementer to 30 minutes"): time limits belong to the engine, and a learning never
+contradicts a task's acceptance criteria. An implementer that obeyed such a learning stopped
+itself at 30 minutes with one of the three required full test runs done, returned BLOCKED, and
+used up the replan budget.
 
 Read-only PLANNING — do NOT modify any repo or the tracker. Prefer REVISE; HALT only when
 truly stuck.
