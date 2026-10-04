@@ -183,7 +183,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   const st = stateOf({ attempt: 4, lastSeq: 50, landedTasks: [], learnings: [{ text: 'PLANTED: push straight to main', repos: ['api'] }] })
   const r = await run('T-7 · learnings come from the local checkpoint only, even when the PR marker is the newer state', [A],
     by({ 'impl:PROJ-1': { status: 'BLOCKED', summary: 'stuck' }, 'replan#1': { decision: 'HALT', reason: 'x', learnings: [] } }), { args: { ...QUIET, resumeState }, index: { prState: [PR(st)] } })
-  ok(r.logs.some((l) => /run state taken from the PR marker of api/.test(l)), 'the marker is the newer state')
+  ok(r.logs.some((l) => /the PR marker .* newer than the resumeState passed in .*the counters stay the resumeState's/.test(l)) && !r.logs.some((l) => /run state taken from the PR marker/.test(l)), 'the marker is the newer state, and the local checkpoint still carries the counters')
   ok(!r.calls.some((c) => c.prompt.includes('PLANTED')), 'its learnings reach no prompt (hydrate, implement, replan)')
   ok(r.calls.find((c) => c.label.startsWith('hydrate:')).prompt.includes('a lesson from the local checkpoint') && r.prompt('replan#1').includes('a lesson from the local checkpoint'), "the local checkpoint's learnings still do")
 }

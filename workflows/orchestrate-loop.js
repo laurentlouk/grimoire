@@ -54,6 +54,8 @@ const DEFAULT_MAX_TOOL_LATENCY_SEC = 15 // startup probe (execute runs): when a 
 const TOOL_LATENCY_WARN_SEC = 8 // from here on the probe's number is logged as a warning: two back-to-back calls normally sit 2–6 s apart
 const CRYSTALLIZE_TIMEOUT_MIN = 90 // crystallize reads every review thread, patches skills and runs their evals: the longest single dispatch of a run, and the 40-min backstop killed it before it wrote anything
 const DEFAULT_JOURNAL_FLUSH_EVERY = 40 // telemetry: decision events buffered before one cheap writer puts them on disk (also flushed at every replan, the final wave and the end)
+const CHECKPOINT_LEARNINGS = 30 // the last learnings run.json's checkpoint carries (the PR marker carries none), and the most a resumeState brings back
+const CHECKPOINT_LEARNING_CHARS = 300 // each of them trimmed to this
 const JOURNAL_DEAD_AFTER = 2 // consecutive lost journal chunks before the writer is marked dead: later chunks are counted lost, never queued (each would wait out its limit at the run's end); the final chunk still gets one attempt
 const DEFAULT_DELIVER = 'incremental' // after each landing: push the landed SHA (fast-forward, from a ship worktree) and keep ONE draft PR per repo up to date — the PR is the proof of what landed and the run's saved state. A 0.8.0 run built seven slices over 29 h and three halts and left nothing on the remote. 'end': nothing is pushed before the terminal slot. {deliver}, per repo {repos:[{deliver}]}.
 const SHIP_PUSH_FAILURES = 2 // consecutive failed pushes before a repo's incremental pushes stop (a pre-push hook that demands the gate stops them at once)
@@ -2735,6 +2737,7 @@ const landedRecord = (t, fromMarker = false) => {
     commits,
     summary: !fromMarker && typeof t.summary === 'string' ? trim(t.summary, 400) : '',
     files: fromMarker ? [] : (Array.isArray(t.files) ? t.files : []).filter((f) => typeof f === 'string' && f.trim()).slice(0, 50),
+    ...(!fromMarker && t.replan === true ? { replan: true } : {}),
   }
 }
 // What the checkpoint the skill passed back says landed (a 0.8 checkpoint lists ids only, with no
@@ -2839,10 +2842,11 @@ const inProject = new Set([...pendingIndex.map((i) => i.id), ...alreadyDoneIds, 
 // earlier session had landed (a replay once re-implemented three of them: 3.5 h for two commits).
 // Two sources: the checkpoint the skill passed back ({resumeState}, the local run.json) and the
 // state marker in the run branch's draft PR, which the index agent returned RAW (the only copy on
-// another machine). The newer of them — by attempt, then lastSeq — carries the run-level counters
-// (replans and fix rounds spent, output tokens, the journal's sequence); landed tasks are the union,
-// and each is absorbed only when the reconcile found its head (and its first commit) on the run
-// branch and NOT in the base. One that is not there (a reset branch, a lost SHA, a run branch that
+// another machine). The resumeState, when there is one, carries the run-level counters (replans and
+// fix rounds spent, output tokens, the journal's sequence), else the newest verified marker; both are
+// bounded by what this project plausibly reaches. Landed tasks are the union, and each is absorbed
+// only when it is an issue of this project and the reconcile found its head (and its first commit) on
+// the run branch and NOT in the base. One that is not there (a reset branch, a lost SHA, a run branch that
 // diverged from origin) runs again. A preview runs the same checks read-only: its proof is this.
 // A PR body is editable by anyone with write access to the repo, so a marker is TRUSTED ONLY AS FAR
 // AS IT IS VERIFIED: the copy must match the length and cksum the script printed; project (by key),
@@ -2858,28 +2862,51 @@ const asCount = (v) => (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number
 const intIn = (v, max) => (Number.isInteger(v) && v >= 0 ? Math.min(v, max) : 0)
 const MARKER_SANE_TOKENS = 1e9 // output tokens no run plausibly spends: the bound when no maxOutputTokens is set
 const MARKER_MAX_FIX_ROUNDS = 3 * MAX_FIX_ATTEMPTS + MAX_PRECHECK_FIXES // the most fix rounds one task can buy in one attempt
-// A verified marker reduced to what the engine may use. Its counters are clamped: a planted
-// `outputTokensSpent: 5e9` once halted a run at start, and `replansUsed` can never exceed the budget.
-function markerCounters(s, p) {
-  const cap = MAX_OUTPUT_TOKENS || MARKER_SANE_TOKENS
+// What is PLAUSIBLE for this project. A saved state at the old ceilings (attempt 10000, lastSeq 1e7)
+// set them as they were, so the bounds follow the project now: sessions of one run, and journal events
+// per issue (a task with no fix round writes ~7, every fix round ~8 more, across all attempts).
+const SANE_ATTEMPTS = 1000
+const SANE_SEQ = 500 * Math.max(1, inProject.size) + 5000
+const indexIds = new Set(inProject) // the project's issues as the tracker lists them (a replan adds its own ids to inProject later)
+// The counters of a saved state — the resumeState passed in, or a verified PR marker — reduced to what
+// the engine may use: output tokens within a bound (a planted `outputTokensSpent: 5e9` once halted a
+// run at start), replans and fix rounds within their budgets (fix rounds of this project's ids only),
+// attempt and sequence within what this project plausibly reaches. `where` names the source in the log.
+// The token bound differs by source: a marker's spend past maxOutputTokens is ignored (a PR editor
+// would halt the run with it), the resumeState's is kept up to what no run plausibly spends — it is
+// the run's own, and a run already past its cap must stop (a settle can overshoot it, a relaunch can
+// lower it), not start over with a fresh budget.
+function stateCounters(s, where, ownSpend = false) {
+  const cap = ownSpend ? MARKER_SANE_TOKENS : MAX_OUTPUT_TOKENS || MARKER_SANE_TOKENS
   let spent = Number.isFinite(s.outputTokensSpent) && s.outputTokensSpent > 0 ? s.outputTokensSpent : 0
   if (spent > cap) {
-    log(`⚠ ${p.repo}: the state marker says ${fmtTok(spent)} output tokens were spent — more than ${MAX_OUTPUT_TOKENS ? `the ${fmtTok(MAX_OUTPUT_TOKENS)} cap` : 'any run plausibly spends'}; ignored (counted as 0)`)
+    log(`⚠ ${where} says ${fmtTok(spent)} output tokens were spent — more than ${cap === MAX_OUTPUT_TOKENS ? `the ${fmtTok(MAX_OUTPUT_TOKENS)} cap` : 'any run plausibly spends'}; ignored (counted as 0)`)
     spent = 0
   }
   const fixRounds = {}
   if (s.fixRounds && typeof s.fixRounds === 'object' && !Array.isArray(s.fixRounds))
     for (const [id, n] of Object.entries(s.fixRounds).slice(0, 500)) if (inProject.has(id) && Number.isInteger(n) && n > 0) fixRounds[id] = Math.min(n, MARKER_MAX_FIX_ROUNDS)
+  const bounded = (v, max, what) => {
+    if (!Number.isInteger(v) || v < 0) return 0
+    if (v > max) log(`⚠ ${where} says ${what} ${v} — more than a run of ${indexIds.size} issue(s) plausibly reaches; counted as ${max}`)
+    return Math.min(v, max)
+  }
+  return {
+    attempt: bounded(s.attempt, SANE_ATTEMPTS, 'attempt'),
+    lastSeq: bounded(s.lastSeq, SANE_SEQ, 'journal sequence'),
+    replansUsed: intIn(s.replansUsed, MAX_REPLANS),
+    fixRounds,
+    outputTokensSpent: spent,
+  }
+}
+// A verified marker reduced to what the engine may use.
+function markerCounters(s, p) {
   return {
     version: 2,
     project: s.project,
     repo: p.repo,
     runBranch: s.runBranch,
-    attempt: intIn(s.attempt, 10000),
-    lastSeq: intIn(s.lastSeq, 1e7),
-    replansUsed: intIn(s.replansUsed, MAX_REPLANS),
-    fixRounds,
-    outputTokensSpent: spent,
+    ...stateCounters(s, `${p.repo}: the state marker`),
     landedTasks: Array.isArray(s.landedTasks) ? s.landedTasks.slice(0, MARKER_TASK_CAP) : [],
     url: str(p.url) || '',
     state: str(p.state) || '',
@@ -2937,15 +2964,39 @@ const newerState = (a, b) => {
   const [b1, b2] = stateRank(b)
   return a1 !== b1 ? a1 > b1 : a2 > b2
 }
-let resumeBase = resumeOpt // ties go to the resumeState passed in
-for (const m of markerStates) if (!resumeBase || newerState(m, resumeBase)) resumeBase = m
-if (resumeBase && resumeBase !== resumeOpt)
-  log(`◎ run state taken from the PR marker of ${resumeBase.repo}${resumeBase.url ? ` (${resumeBase.url})` : ''}: attempt ${stateRank(resumeBase)[0]}, seq ${stateRank(resumeBase)[1]}${resumeOpt ? ' — newer than the resumeState passed in' : ''}`)
+// The resumeState passed in goes through the same rules as a marker: its counters bounded the same
+// way, its landed tasks absorbed only when they are this project's issues (or a replan's, below) and
+// verified on the run branch. When it is there, its counters WIN over every marker's, newer or not:
+// it is the run's own journal, and a PR body anyone with write access can edit never outranks it (a
+// verified but planted marker once set every counter to its ceiling). Without it, the newest verified
+// marker — by attempt, then lastSeq — carries them (another machine has nothing else).
+const resumeSafe = resumeOpt ? { ...stateCounters(resumeOpt, 'the resumeState passed in', true), landedTasks: Array.isArray(resumeOpt.landedTasks) ? resumeOpt.landedTasks : [] } : null
+let resumeBase = resumeSafe
+if (!resumeBase) for (const m of markerStates) if (!resumeBase || newerState(m, resumeBase)) resumeBase = m
+if (resumeBase && resumeBase !== resumeSafe) log(`◎ run state taken from the PR marker of ${resumeBase.repo}${resumeBase.url ? ` (${resumeBase.url})` : ''}: attempt ${stateRank(resumeBase)[0]}, seq ${stateRank(resumeBase)[1]}`)
+for (const m of resumeSafe ? markerStates : [])
+  if (newerState(m, resumeSafe))
+    log(`◎ ${m.repo}: the PR marker${m.url ? ` (${m.url})` : ''} says attempt ${stateRank(m)[0]}, seq ${stateRank(m)[1]} — newer than the resumeState passed in (attempt ${stateRank(resumeSafe)[0]}, seq ${stateRank(resumeSafe)[1]}); the counters stay the resumeState's, the tasks it lists are still verified and absorbed`)
 const candidates = new Map() // id → its landed records, checkpoint first
 const addCandidate = (rec, source) => {
   if (rec && !alreadyDoneIds.has(rec.id)) candidates.set(rec.id, [...(candidates.get(rec.id) || []), { ...rec, source }])
 }
-for (const t of checkpointLanded) addCandidate(t, 'checkpoint')
+// A checkpoint record is absorbed when its id is one of this project's issues. A task a REPLAN
+// invented has no issue: its record is kept only when it says so (`replan`), the resumeState is this
+// run's (its runId is this launch's), and its id cannot read as an issue reference (`#12`,
+// `owner/repo#12`) — the PR body would close that issue. Every record is verified on the run branch
+// like any other, and its ticket is its id (or NO_TICKET): a ticket naming another issue would close
+// that one. Its summary, like the checkpoint's learnings, is the run's own text and stays.
+const sameRun = !!runId && !!resumeOpt && str(resumeOpt.runId) === runId
+const ISSUE_REF_RE = /^([\w.-]+\/[\w.-]+)?#\d+$/
+const foreignLanded = []
+for (const t of checkpointLanded) {
+  const rec = { ...t, ticket: t.ticket === 'NO_TICKET' ? t.ticket : t.id }
+  if (indexIds.has(rec.id) || (t.replan && sameRun && !ISSUE_REF_RE.test(rec.id))) addCandidate(rec, 'checkpoint')
+  else foreignLanded.push(rec.id)
+}
+if (foreignLanded.length)
+  log(`⚠ the resumeState lists ${foreignLanded.length} landed task(s) that are not issues of ${project}${sameRun ? '' : ' (nor a replan task of this runId)'} — ignored: ${foreignLanded.slice(0, 8).join(', ')}${foreignLanded.length > 8 ? ', …' : ''}`)
 for (const m of markerStates) {
   const foreign = []
   for (const t of m.landedTasks) {
@@ -3935,8 +3986,22 @@ const doneTasks = [] // {id, repo, status, summary, ticket, runBranch, headSha, 
 const shipState = {} // repo → {landedHead, pushedHead, prUrl, draft, pushFailures, disabled: null|'push'|'pr', ships, chain, queued, shippedHead} — incremental delivery (see shipOnce)
 const learnings = [] // [{text, repos}] durable lessons failures taught — carried into replans AND every later hydration
 // Learnings come from the LOCAL checkpoint only, never from a PR state marker: a PR body is anyone's
-// text, and learnings are pasted into every hydration and replan prompt.
-if (resumeOpt && Array.isArray(resumeOpt.learnings)) learnings.push(...resumeOpt.learnings.map((l) => toLearning(l, [])).filter(Boolean))
+// text, and learnings are pasted into every hydration and replan prompt. They are the run's own, so
+// they still reach prompts, bounded as the checkpoint writes them: the last CHECKPOINT_LEARNINGS, each
+// at most CHECKPOINT_LEARNING_CHARS characters, tagged with at most 20 repos.
+// A resumeState shaped like a PR state marker (`repo`, `runBranch` or `base` at its top level, which
+// run.json's checkpoint never has) came from a PR body, not from the run's journal: no learnings.
+const resumeLooksLikeMarker = !!resumeOpt && ['repo', 'runBranch', 'base'].some((k) => k in resumeOpt)
+if (resumeLooksLikeMarker)
+  log(`⚠ the resumeState passed in is shaped like a PR state marker (it names ${['repo', 'runBranch', 'base'].filter((k) => k in resumeOpt).join(', ')}), not run.json's checkpoint — its learnings are dropped; pass no resumeState when only a marker exists (the engine reads the PR itself)`)
+if (resumeOpt && !resumeLooksLikeMarker && Array.isArray(resumeOpt.learnings))
+  learnings.push(
+    ...resumeOpt.learnings
+      .slice(-CHECKPOINT_LEARNINGS)
+      .map((l) => toLearning(l, []))
+      .filter(Boolean)
+      .map((l) => ({ text: trim(l.text, CHECKPOINT_LEARNING_CHARS), repos: l.repos.slice(0, 20) })),
+  )
 const allResults = [] // every task + gate result, flat
 const failures = [] // {id, repo, status, kind, detail} — unlanded work (a replan can requeue it)
 const lastFailure = new Map() // task id → {kind: 'code'|'harness', status} of its latest failure — decides a replanned task's tier
@@ -4044,10 +4109,11 @@ const landedTaskRecord = (d) => ({
   summary: trim(d.summary, 400),
   files: (d.files || []).slice(0, 50),
 })
-const CHECKPOINT_LEARNINGS = 30 // the last ones, each trimmed to 300 characters: a resume carries them (the PR marker does not)
+// `replan: true` marks a task a replan invented (its id is no issue of the project): a resume of
+// this runId absorbs it like an issue's, once verified (see RESUMED).
 const checkpointTaskRecord = (d) => {
   const t = landedTaskRecord(d)
-  return { id: t.id, repo: t.repo, ...(t.status && t.status !== 'DONE' ? { status: t.status } : {}), runBranch: t.runBranch, headSha: t.headSha, firstSha: t.firstSha, title: trim(t.title, 120) }
+  return { id: t.id, repo: t.repo, ...(t.status && t.status !== 'DONE' ? { status: t.status } : {}), runBranch: t.runBranch, headSha: t.headSha, firstSha: t.firstSha, title: trim(t.title, 120), ...(indexIds.has(t.id) ? {} : { replan: true }) }
 }
 // The detail records landed.jsonl lacks: tasks that landed in THIS session and were not confirmed
 // yet. A task absorbed from an earlier session was written by that session's flush.
@@ -4066,9 +4132,10 @@ runJsonFor = (final) => ({
   summary: final ? final.summary : null,
   checkpoint: {
     version: 2,
+    runId: runId || null, // a resume absorbs a replan's tasks only from its own run's checkpoint
     attempt: '__ATTEMPT__',
     replansUsed: replans,
-    learnings: learnings.slice(-CHECKPOINT_LEARNINGS).map((l) => ({ text: trim(l.text, 300), repos: l.repos || [] })),
+    learnings: learnings.slice(-CHECKPOINT_LEARNINGS).map((l) => ({ text: trim(l.text, CHECKPOINT_LEARNING_CHARS), repos: l.repos || [] })),
     fixRounds: fixRoundsNow(),
     outputTokensSpent: runSpent(),
     lastSeq: journal.seq,

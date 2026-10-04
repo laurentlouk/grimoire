@@ -308,12 +308,12 @@ const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/
   chunks.length = 0
   const resumeState = { version: 2, attempt: 2, lastSeq: 30, replansUsed: 0, learnings: [{ text: 'lesson from the checkpoint', repos: ['api'] }], landedTasks: [] }
   const marker = markerOf(stateOf({ attempt: 3, lastSeq: 5, replansUsed: 2, learnings: [{ text: 'lesson from the PR marker', repos: ['api'] }], landedTasks: [] }))
-  const a = await run('M2a · newer-of: the marker is a later attempt → its state wins (replans, learnings, sequence)', [TASK],
+  const a = await run('M2a · the marker is a later attempt, but a resumeState is there → the resumeState\'s counters win (replans, learnings, sequence)', [TASK],
     byLabel({ 'impl:PROJ-1': { status: 'BLOCKED', summary: 'stuck' } }), { args: { ...QUIET, maxReplans: 2, resumeState, runId: 'run-m2', telemetry: { flushEvery: 100 } }, index: { prState: [PR(marker)] } })
   const hyd = a.calls.find((c) => c.label.startsWith('hydrate:')).prompt
-  ok(a.result.replans === 2 && !a.labels.some((l) => l.startsWith('replan')), 'the replans the marker records are spent: no replan left')
+  ok(a.labels.includes('replan#1') && a.logs.some((l) => /the PR marker .* says attempt 3, seq 5 — newer than the resumeState passed in \(attempt 2, seq 30\); the counters stay the resumeState's/.test(l)), "the marker's 2 spent replans are not taken: the checkpoint spent none, a replan runs (a PR body never outranks the run's own journal)")
   ok(hyd.includes('lesson from the checkpoint') && !hyd.includes('lesson from the PR marker'), "learnings come from the local checkpoint only, never from the PR marker (0.9.0 review fix)")
-  ok(chunks[0].events[0].seq === 6, `the journal continues the marker's sequence (first event seq ${chunks[0].events[0].seq})`)
+  ok(chunks[0].events[0].seq === 31, `the journal continues the checkpoint's sequence (first event seq ${chunks[0].events[0].seq})`)
   chunks.length = 0
   const b = await run('M2b · same attempt, the checkpoint at a higher seq → the checkpoint wins', [TASK],
     byLabel({ 'impl:PROJ-1': { status: 'BLOCKED', summary: 'stuck' } }), { args: { ...QUIET, maxReplans: 2, resumeState: { ...resumeState, attempt: 3, lastSeq: 40 }, runId: 'run-m2', telemetry: { flushEvery: 100 } }, index: { prState: [PR(marker)] } })
