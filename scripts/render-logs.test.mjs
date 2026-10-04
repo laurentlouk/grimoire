@@ -23,6 +23,8 @@
 //      fence, ship, env and absorb events in words, shows a halt's kind and draft
 //      PRs, and the checkpoint card shows a v2 checkpoint's landedTasks with their
 //      heads (the renderer is executed against a minimal DOM, not just grepped)
+//    • a review round discarded under reviewParallel (`discarded: true`) is shown as
+//      discarded and left out of the first-round pass rate
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
@@ -263,6 +265,11 @@ try {
     { type: 'late', label: 'impl:#5', task: '#5', kind: 'writer', softMin: 40 },
     { type: 'hedge', label: 'precheck:#5' },
     { type: 'late-result', label: 'impl:#5', task: '#5', accepted: true, status: 'DONE' },
+    { type: 'review', task: '#5', stage: 'spec', persona: 'spec-hawk', verdict: 'FAIL', gating: 1, advisory: 0, round: 0 },
+    { type: 'review', task: '#5', stage: 'quality', persona: 'break-it', verdict: 'FAIL', gating: 1, advisory: 0, round: 0, discarded: true, reason: 'a spec fix moved the head' },
+    { type: 'fix', task: '#5', stage: 'spec', round: 1, model: 'sonnet', findings: 1 },
+    { type: 'review', task: '#5', stage: 'spec', persona: 'spec-hawk', verdict: 'PASS', gating: 0, advisory: 0, round: 1 },
+    { type: 'review', task: '#5', stage: 'quality', persona: 'break-it', verdict: 'PASS', gating: 0, advisory: 0, round: 0 },
     { type: 'settle', task: '#5', repo: 'site', status: 'DONE' },
     { type: 'ship', repo: 'site', mode: 'land', pushed: true, head: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true },
     { type: 'wedged', label: 'impl:#6', task: '#6', repo: 'site', hardMin: 180 },
@@ -306,6 +313,13 @@ try {
   has(/sign commits before launching/, 'a {text, repos} learning shows its text')
   has(/https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'the overview tags the draft PR')
   ok(!/\{"label"/.test(text), 'no new event type falls back to its raw JSON')
+  has(/quality · break-it → FAIL \(gating 1, advisory 0, round 0\) · discarded: a spec fix moved the head, not counted/, 'a discarded review round reads as discarded, with its reason')
+  const s5 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json'], { cwd: ROOT5, encoding: 'utf8' })
+  let S5 = null
+  try { S5 = JSON.parse(s5.stdout) } catch {}
+  const g9 = S5 && S5.groups.find((g) => g.version === '0.9.0')
+  ok(g9 && g9.firstRound.total === 2 && g9.firstRound.passed === 1,
+    `first-round pass skips the discarded quality round: spec failed round 0, quality passed its re-run → 1/2 (got ${g9 ? `${g9.firstRound.passed}/${g9.firstRound.total}` : 'none'})`)
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

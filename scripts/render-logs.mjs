@@ -168,10 +168,12 @@ function runFacts(run) {
     if (e.task != null && e.repo != null && ['route', 'dispatch', 'settle'].includes(e.type)) taskRepo[e.task] = e.repo
     if (e.task != null && ['dispatch', 'settle'].includes(e.type)) tasks.add(String(e.task))
   }
-  // first-round pass: per (task, per-task stage), the reviews at the lowest round all PASS
+  // first-round pass: per (task, per-task stage), the reviews at the lowest round all PASS.
+  // A discarded round (reviewParallel: a quality verdict made stale by a spec fix that moved the
+  // head, or rounds started next to a precheck that failed) never counted, so it is skipped.
   const firstRound = {}
   for (const e of ev) {
-    if (e.type !== 'review' || e.task == null || e.stage === 'terminal') continue
+    if (e.type !== 'review' || e.task == null || e.stage === 'terminal' || e.discarded === true) continue
     const k = `${e.task}|${e.stage}`
     const r = num(e.round) ?? 0
     const f = firstRound[k]
@@ -194,7 +196,7 @@ function runFacts(run) {
     if (e.type !== 'verify') continue
     let who = e.persona
     if (who == null) {
-      const ps = [...new Set(ev.filter((r) => r.type === 'review' && r.task === e.task && r.stage === e.stage
+      const ps = [...new Set(ev.filter((r) => r.type === 'review' && r.discarded !== true && r.task === e.task && r.stage === e.stage
         && (num(r.round) ?? 0) === (num(e.round) ?? 0) && (num(r.gating) ?? 0) > 0).map((r) => r.persona))]
       who = ps.length === 1 ? ps[0] : ps.length ? `${e.stage} panel (${ps.join('+')})` : `${e.stage} (persona unknown)`
     }
@@ -368,7 +370,7 @@ function client() {
     route: (e) => `${s(e.agent)} × ${s(e.model)}${e.fallback ? ' (fallback)' : ''} — ${s(e.reason)}`,
     dispatch: (e) => `${s(e.agent)} × ${s(e.model)} · ${s(e.lane)} · cycle ${s(e.cycle)}`,
     precheck: (e) => `${s(e.verdict)}${Array.isArray(e.problems) && e.problems.length ? ': ' + list(e.problems) : ''}`,
-    review: (e) => `${s(e.stage)} · ${s(e.persona)} → ${s(e.verdict)} (gating ${s(e.gating)}, advisory ${s(e.advisory)}, round ${s(e.round)})`,
+    review: (e) => `${s(e.stage)} · ${s(e.persona)} → ${s(e.verdict)} (gating ${s(e.gating)}, advisory ${s(e.advisory)}, round ${s(e.round)})${e.discarded ? ` · discarded${e.reason ? `: ${s(e.reason)}` : ''}, not counted` : ''}`,
     verify: (e) => `${s(e.stage)} r${s(e.round)}: ${s(e.confirmed)} confirmed, ${s(e.overturned)} overturned${Array.isArray(e.reasons) && e.reasons.length ? ' — ' + list(e.reasons) : ''}`,
     fix: (e) => `${s(e.stage)} r${s(e.round)} · ${s(e.model)} · ${s(e.findings)} finding(s)`,
     escalate: (e) => `${s(e.from)} → ${s(e.to)}: ${s(e.reason)}`,
