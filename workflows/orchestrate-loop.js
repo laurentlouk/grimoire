@@ -3845,14 +3845,19 @@ function prefetchHydration(cands) {
       log(`⚠ prefetch hydrate:p${n} ${hyd ? 'reported input problems' : 'returned nothing'} — ${issues.map((i) => i.id).join(', ')} will hydrate at dispatch`)
       return
     }
-    // as the just-in-time path does: under both id and ticket
+    // as the just-in-time path does: under both id and ticket — never over a task already there (a
+    // replan revised it while this ran: its version stands), and only for an issue still pending
+    const wrote = new Set()
     for (const t of hyd.tasks || []) {
       if ((invalidatedAt[t.repo] || 0) > epoch) continue // a replan since: re-hydrated later, with its learnings
+      const keys = [t.id, t.ticket && t.ticket !== 'NO_TICKET' ? t.ticket : null].filter(Boolean)
+      const issue = keys.find((k) => pendingById.has(k))
+      if (!issue || keys.some((k) => hydratedById.has(k))) continue
       t.prefetchedBefore = before.get(t.id) || before.get(t.ticket) || []
-      hydratedById.set(t.id, t)
-      if (t.ticket && t.ticket !== 'NO_TICKET') hydratedById.set(t.ticket, t)
+      for (const k of keys) hydratedById.set(k, t)
+      wrote.add(issue)
     }
-    for (const i of issues) if (hydratedById.has(i.id)) prefetched.add(i.id)
+    for (const i of issues) if (wrote.has(i.id)) prefetched.add(i.id)
     if (claim)
       for (const i of issues) {
         claimedByRun.set(i.id, i.repo)
@@ -4481,9 +4486,10 @@ while (true) {
         break
       }
       // Prefetched hydrations of not-yet-dispatched tasks in the failing repos lack this replan's
-      // learnings: drop them, they hydrate again (an in-flight prefetch's result is discarded).
+      // learnings: drop them, they hydrate again (an in-flight prefetch's result is discarded — in
+      // the repo of every revised task too: a REVISE can rewrite a cross-repo dependent).
       prefetchEpoch++
-      for (const r of failingRepos) invalidatedAt[r] = prefetchEpoch
+      for (const r of new Set([...failingRepos, ...(revision.tasks || []).map((t) => t && t.repo).filter(Boolean)])) invalidatedAt[r] = prefetchEpoch
       for (const id of [...prefetched]) {
         const t = hydratedById.get(id)
         if (!t || !failingRepos.includes(t.repo) || inFlight.has(id)) continue

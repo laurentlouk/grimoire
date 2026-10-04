@@ -176,6 +176,24 @@ function journalEvents(calls) {
   ok(logs.some((l) => /◎ api: its terminal slot returned after its final wave — DONE · .*\(recorded; the run had stopped dispatching\)/.test(l)), 'logged as recorded after the run stopped dispatching')
 }
 
+// ══════════════ K-3 · a late prefetch never overwrites what a replan revised ══════════════
+{
+  // PROJ-3 (infra) depends on PROJ-1 (api) and is prefetched while PROJ-1 runs; the prefetch takes 500 ms.
+  // PROJ-1 fails at 50 ms; the replan REVISES PROJ-3 (new text) and retries PROJ-1. infra did not fail.
+  let tries = 0
+  const { result, calls, prompt } = await run('K-3 · a prefetch that lands after a replan revised the same task (in a repo that did not fail) is dropped', [T('PROJ-1'), IN('PROJ-3', { dependsOn: ['PROJ-1'] })], (label, p) => {
+    if (label === 'impl:PROJ-1') return tries++ === 0 ? later(50, { status: 'BLOCKED', summary: 'no' }) : later(800, IMPL_OK)
+    if (label.startsWith('replan#')) return later(100, { decision: 'REVISE', cause: 'code', reason: 'retry; PROJ-3 changed', learnings: [], tasks: [T('PROJ-1'), IN('PROJ-3', { dependsOn: ['PROJ-1'], taskText: 'REVISED approach for PROJ-3' })] })
+    return happy(label, p)
+  }, { args: { ...QUIET, repos: [API, INFRA] }, hydrate: (label, _p, def) => (label === 'hydrate:p1' ? later(500, def()) : undefined) })
+  const at = (l) => calls.findIndex((c) => c.label === l)
+  const p1 = calls.find((c) => c.label === 'hydrate:p1')
+  ok(!!p1 && p1.prompt.includes('- PROJ-3 ') && at('hydrate:p1') < at('replan#1'), 'PROJ-3 was prefetched before the replan')
+  ok(/REVISED approach for PROJ-3/.test(prompt('impl:PROJ-3')), "impl:PROJ-3 is built from the replan's revision")
+  ok(!/Build PROJ-3/.test(prompt('impl:PROJ-3')), 'not from the stale prefetch')
+  ok(result && result.done.length === 2 && !result.halt, 'both landed')
+}
+
 // ══════════════ K-8 · a repo with a failed task is not gated before that failure is decided ══════════════
 {
   // One repo, the 0.9.0 defaults (incremental delivery, environment checks). PROJ-1 lands, PROJ-2 fails
