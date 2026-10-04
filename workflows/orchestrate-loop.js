@@ -46,6 +46,7 @@ const DEFAULT_MAX_PER_REPO = 3 // within-repo parallelism: how many of a repo's 
 const DEFAULT_MAX_PRECHECK_FIXES = 1 // precheck rung: cheap structural check between the implementer and the panel. A FAIL buys this many fix dispatches before the task fails as PRECHECK_FAILED. {precheck:false} disables the rung.
 const DEFAULT_ESCALATE_AT_FIX_ROUND = 2 // model escalation: from this fix round on (counted per task, across stages), the implementer runs on opus whatever tier the selector chose. {escalateAtFixRound:0} disables.
 const REVIEWER_RETRIES = 1 // a review round where EVERY reviewer returned nothing is re-dispatched this many times before the run halts as 'reviewers unavailable' (a harness failure, never a verdict on the code)
+const DEFAULT_REVIEW_PARALLEL = 'stages' // per-task review order: 'stages' = precheck, then spec ∥ quality round 0 on the same head · 'all' = precheck ∥ spec ∥ quality · 'off' = precheck → spec → quality. Each reviewer runs commands in its own worktree, so they no longer queue. Override with {reviewParallel}.
 const DEFAULT_BUDGET_FLOOR = 80000 // stop dispatching when the turn's remaining token budget drops below this. {budgetFloor:N} overrides.
 const DEFAULT_MAX_TOOL_LATENCY_SEC = 15 // startup probe (execute runs): when a trivial Bash call waits this long before it runs, refuse to start. Every agent inherits the session's PreToolUse hooks, and one hanging until its timeout (30 s) on each of a run's ~800 Bash calls once took 6.4 h of a 9.2 h run. {maxToolLatencySec:0} disables the refusal (the warning stays).
 const TOOL_LATENCY_WARN_SEC = 8 // from here on the probe's number is logged as a warning: two back-to-back calls normally sit 2–6 s apart
@@ -1377,6 +1378,11 @@ const MAX_PRECHECK_FIXES =
   Number.isInteger(opts.maxPrecheckFixes) && opts.maxPrecheckFixes >= 0 ? opts.maxPrecheckFixes : DEFAULT_MAX_PRECHECK_FIXES
 // Finding verification (each failing round's gating findings checked before a fix is bought). ON unless {verifyFindings:false}.
 const VERIFY_FINDINGS = opts.verifyFindings !== false
+// Review parallelism (see runTask): 'stages' (default) · 'all' · 'off'.
+const REVIEW_PARALLEL_MODES = ['stages', 'all', 'off']
+const REVIEW_PARALLEL = REVIEW_PARALLEL_MODES.includes(opts.reviewParallel) ? opts.reviewParallel : DEFAULT_REVIEW_PARALLEL
+if (opts.reviewParallel !== undefined && !REVIEW_PARALLEL_MODES.includes(opts.reviewParallel))
+  log(`⚠ reviewParallel ${JSON.stringify(opts.reviewParallel)} is not one of ${REVIEW_PARALLEL_MODES.join(' | ')} — using '${DEFAULT_REVIEW_PARALLEL}'`)
 // Model escalation: the fix round from which the implementer runs on opus. 0 disables.
 const ESCALATE_AT_FIX_ROUND =
   Number.isInteger(opts.escalateAtFixRound) && opts.escalateAtFixRound >= 0 ? opts.escalateAtFixRound : DEFAULT_ESCALATE_AT_FIX_ROUND
@@ -1746,14 +1752,15 @@ async function verifyFindings(task, mode, findings, range, attempt, phaseName) {
   return { kept, rejected }
 }
 // One review round of a stage: every persona at once, then the personas that returned nothing
-// once more. → {reviews} or {reviews, unavailable: [persona]}.
-async function reviewRound(task, mode, personas, phaseName, range, attempt) {
+// once more. → {reviews} or {reviews, unavailable: [persona]}. `tag` keeps the labels (and the
+// reviewers' worktrees) unique when a stage's round 0 runs again on a later head (see runTask).
+async function reviewRound(task, mode, personas, phaseName, range, attempt, tag = '') {
   const round = async (who, retry) =>
     (
       await parallel(
         who.map((p) => () =>
-          agentT(reviewPrompt(task, mode, p, range, `${p.id}-r${attempt}${retry ? `-retry${retry}` : ''}`), {
-            label: `${p.id}:${task.id}${attempt ? `#${attempt}` : ''}${retry ? `~r${retry}` : ''}`,
+          agentT(reviewPrompt(task, mode, p, range, `${p.id}-r${attempt}${tag ? `-${tag.replace(/^~/, '')}` : ''}${retry ? `-retry${retry}` : ''}`), {
+            label: `${p.id}:${task.id}${attempt ? `#${attempt}` : ''}${tag}${retry ? `~r${retry}` : ''}`,
             phase: phaseName,
             model: 'sonnet',
             agentType: pluginAgent('reviewer'),
@@ -1774,6 +1781,35 @@ async function reviewRound(task, mode, personas, phaseName, range, attempt) {
     reviews.push(...(await round(missing(), retry)))
   }
   return missing().length ? { reviews, unavailable: missing() } : { reviews }
+}
+// A round whose verdicts no longer count (the head it judged moved, or the precheck failed under
+// 'all'): journaled with `discarded: true` once it settles, never awaited, never gating.
+function discardRound(task, mode, round, why) {
+  Promise.resolve(round).then((r) => {
+    for (const x of (r && r.reviews) || [])
+      emit('review', { task: task.id, stage: mode, persona: x.persona, verdict: x.v.verdict, gating: (x.v.findings || []).filter(isGating).length, advisory: (x.v.findings || []).filter((f) => !isGating(f)).length, round: 0, discarded: true, reason: why })
+    for (const p of (r && r.unavailable) || []) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: 0, discarded: true, reason: why })
+  })
+}
+// reviewParallel 'all': round 0 of both stages starts NEXT TO the precheck, on the implementer's
+// head. It counts only if the precheck passes on its first look: the first precheck FAIL discards
+// both rounds, and the stages run in order once the precheck passes, as under 'off'.
+function earlyReviews(task, range) {
+  const r = { ...range } // the head these reviewers judge — a precheck fix advances `range` in place
+  const e = {
+    head: r.headSha,
+    discarded: false,
+    spec: reviewRound(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', r, 0),
+    quality: reviewRound(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', r, 0),
+    discard(why) {
+      if (e.discarded) return
+      e.discarded = true
+      log(`   · ${task.id}: ${why} — the spec and quality round 0 dispatched next to it is discarded; the stages run in order once the precheck passes`)
+      discardRound(task, 'spec', e.spec, why)
+      discardRound(task, 'quality', e.quality, why)
+    },
+  }
+  return e
 }
 // `first`: this stage's round 0 when the caller already dispatched it (a round, or a promise of
 // one). Every later round, the verifier, the fixes and the guard are unchanged.
@@ -2042,6 +2078,7 @@ async function runTask(task) {
   // back to the SAME implementer (bounded); a dead precheck passes through (it is an
   // optimisation, never a gate the reviewers depend on).
   const precheckAdvisory = [] // footprint problems demoted to advisory (see below)
+  const early = REVIEW_PARALLEL === 'all' && PRECHECK ? earlyReviews(task, range) : null // 'all': spec ∥ quality round 0 next to the precheck
   if (PRECHECK) {
     let lastFail = null // {files, head} of the previous footprint-only FAIL
     let recheck = '' // label suffix of the one re-check a range-only FAIL buys
@@ -2056,6 +2093,7 @@ async function runTask(task) {
         schema: PRECHECK_SCHEMA,
       })
       let problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
+      if (early && problems.length) early.discard('the precheck failed')
       // A bad `startSha` is the REPORT's defect, not the code's: drop it and judge from firstSha^
       // (never demoted, never a fix of its own). A range-only FAIL re-checks the corrected range
       // at once; alongside other problems it rides with them into the fix.
@@ -2106,11 +2144,42 @@ async function runTask(task) {
     }
   }
 
-  const spec = await runReviewStage(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', resolved, range)
+  // ── spec ∥ quality (reviewParallel) ──
+  // Spec and quality round 0 judge the SAME head at once ('stages': after the precheck; 'all':
+  // next to it, see earlyReviews). Each reviewer runs commands in its own worktree (runBlock), so
+  // neither waits for the other: the shorter stage's 8–36 min come off every task. The quality
+  // verdict holds only while the head it judged is still the head: a spec fix that moves HEAD
+  // (or one whose head is unknown) discards it, and quality starts over on the fixed head as
+  // `<persona>:<id>~h<n>`. 'off', or an 'all' whose precheck failed, runs spec, then quality.
+  const specPanel = panelFor(task.repo, 'spec')
+  const qualityPanel = panelFor(task.repo, 'quality')
+  const reruns = { spec: 0, quality: 0 }
+  const rerun = (mode) => `~h${++reruns[mode]}` // round 0 of a stage again, after a discarded one
+  let spec0 = null
+  let quality0 = null
+  let h0 = range.headSha
+  if (early && !early.discarded) ({ spec: spec0, quality: quality0, head: h0 } = early)
+  else if (early) spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', range, 0, rerun('spec'))
+  else if (REVIEW_PARALLEL !== 'off') {
+    log(`   · ${task.id}: spec ∥ quality review on ${h0 || 'the reported head'}…`)
+    spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', { ...range }, 0)
+    quality0 = reviewRound(task, 'quality', qualityPanel, 'Quality review', { ...range }, 0)
+  }
+  const fixesBefore = task.fixRounds || 0
+  const spec = await runReviewStage(task, 'spec', specPanel, 'Spec review', resolved, range, { first: spec0 })
+  if (spec.verdict !== 'PASS' && quality0) discardRound(task, 'quality', quality0, `the spec stage ended ${spec.verdict}`)
   if (spec.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: spec }
   if (spec.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'SPEC_FAILED', impl, review: spec }
 
-  const quality = await runReviewStage(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', resolved, range)
+  let qualityFirst = quality0
+  if (quality0 && (range.headSha !== h0 || (!range.headSha && (task.fixRounds || 0) > fixesBefore))) {
+    const tag = rerun('quality')
+    const moved = `a spec fix moved the head ${h0 || '(unreported)'} → ${range.headSha || '(unreported)'}`
+    log(`   · ${task.id}: ${moved} — the quality round-0 verdict is stale; quality reviews the fixed head (${tag})`)
+    discardRound(task, 'quality', quality0, moved)
+    qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, tag)
+  } else if (early && early.discarded) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, rerun('quality'))
+  const quality = await runReviewStage(task, 'quality', qualityPanel, 'Quality review', resolved, range, { first: qualityFirst })
   if (quality.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: quality }
   if (quality.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'QUALITY_FAILED', impl, review: quality }
 
