@@ -1720,6 +1720,8 @@ const asSha = (v) => {
   const s = typeof v === 'string' ? v.trim().toLowerCase() : ''
   return SHA_RE.test(s) ? s : null
 }
+// Two SHAs name the same commit when one is a prefix of the other (a short SHA meets its full form).
+const shaEq = (a, b) => !!a && !!b && (a.startsWith(b) || b.startsWith(a))
 
 // Fold an implementer result into the range. `prev` pins the task's ORIGIN (base, start and
 // first commit) so a fix dispatch only ever advances HEAD — the panel keeps reviewing the whole
@@ -2373,7 +2375,6 @@ function onLate(info) {
 // dispatches at once (envState.halt → halt at the top of the loop), and the run halts with
 // `kind: 'environment'` once in-flight work settles. No replan is spent and no code is marked
 // failed: requeuing work into a machine that cannot commit fails the same way.
-const shaEq = (a, b) => !!a && !!b && (a.startsWith(b) || b.startsWith(a))
 // Repos this run is building in: pending, in flight, or with landed work.
 const playRepos = () => [...new Set([...pendingById.values(), ...inFlight.values()].map((x) => x.repo).concat(Object.keys(repoRef)).filter((r) => repoConfig.has(r)))]
 const stallChecks = () => [...builtinChecksFor(playRepos()), ...userEnvChecks].filter((c) => c.when.includes('stall'))
@@ -2634,20 +2635,35 @@ const fnv1a = (v) => {
 const refToken = (v) =>
   String(v).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60).replace(/^-+|-+$/g, '') || `x${fnv1a(v)}`
 // The run branch is named after the project's KEY, not its wording: the first ticket reference in
-// the project text — `owner/repo#N`, else `#N`, else a Jira/Linear-style `ABC-123`, else a tracker
-// URL's id — and the whole text only when it holds none. A real run's project was a sentence
-// ("acme/site#3 — GitHub parent issue #3, its slices are …"), so its branch was that
+// the project text — `owner/repo#N`, else `#N`, else a tracker URL's id (an issue or PR URL, a
+// Jira/Linear URL's key, a trailing number), else a Jira/Linear-style `ABC-123` that is clearly the
+// project's own key — and the whole text only when it holds none. A real run's project was a
+// sentence ("acme/site#3 — GitHub parent issue #3, its slices are …"), so its branch was that
 // sentence slugged, and a relaunch phrased differently would have built on another branch and
 // missed its PR and saved state. {runBranch} (per repo repos[].runBranch) names it outright.
+// A bare `ABC-123` counts only as the whole text, at its start, or in brackets or parentheses, and
+// never with a standard's prefix: "Migrate to UTF-8 and ISO-8601 dates (PROJ-12)" once keyed on
+// `UTF-8`, so every project that mentions UTF-8 (or SHA-256, HTTP-2) shared one run branch, and the
+// state marker of one was accepted as the other's.
+const STANDARD_PREFIXES = new Set(['UTF', 'UTF8', 'ISO', 'SHA', 'HTTP', 'HTTPS', 'RFC', 'ES', 'TLS', 'SSL', 'IPV', 'CVE'])
+const BARE_KEY = '([A-Z][A-Z0-9_]{1,9})-(\\d+)'
+function bareKey(text) {
+  const t = String(text).trim()
+  const pick = (m) => (m && !STANDARD_PREFIXES.has(m[1]) ? `${m[1]}-${m[2]}` : null)
+  const lead = pick(new RegExp(`^${BARE_KEY}(?![\\w-])`).exec(t)) // the whole text, or its start
+  if (lead) return lead
+  for (const m of t.matchAll(new RegExp(`[[(]\\s*${BARE_KEY}\\s*[\\])]`, 'g'))) if (pick(m)) return pick(m) // [ABC-123] or (ABC-123)
+  return null
+}
 function projectKey(text) {
   const s = String(text)
   let m = /(?<![\w./-])([A-Za-z0-9][\w.-]*\/[\w.-]+)#(\d+)\b/.exec(s)
   if (m) return `${m[1]}#${m[2]}`
   if ((m = /(?<![\w&/#])#(\d+)\b/.exec(s))) return `#${m[1]}`
-  if ((m = /\b([A-Z][A-Z0-9_]{1,9}-\d+)\b/.exec(s))) return m[1]
   if ((m = /https?:\/\/[^/\s]+\/([\w.-]+)\/([\w.-]+)(?:\/-)?\/(?:issues|pull|merge_requests)\/(\d+)/.exec(s))) return `${m[1]}/${m[2]}#${m[3]}`
+  if ((m = /https?:\/\/\S*?\/(?:issue|issues|browse|ticket|tickets)\/([A-Z][A-Z0-9_]{1,9}-\d+)(?![\w-])/.exec(s)) && !STANDARD_PREFIXES.has(m[1].split('-')[0])) return m[1]
   if ((m = /https?:\/\/\S*\/(\d+)(?=[/?#\s]|$)/.exec(s))) return m[1]
-  return s
+  return bareKey(s) || s
 }
 // `#12` alone would slug to a bare number: it reads `issue-12`.
 const keyToken = (text) => {
@@ -2898,17 +2914,16 @@ const syncOf = new Map([...branchOf].map(([repo, b]) => [repo, b.sync]))
 // A TASK line verifies a record only when it names the same id, repo and head (and first commit),
 // says onBranch=yes AND inBase=no: no SHA, no verification (a line without one once verified any head).
 const reconciled = FRESH_START || !Array.isArray(index.reconcile) ? [] : index.reconcile.filter((x) => x && str(x.id) && str(x.repo) && asSha(x.sha))
-const sameSha = (a, b) => !!a && !!b && (a.startsWith(b) || b.startsWith(a))
 const onRunBranch = (rec) =>
   syncOf.get(rec.repo) !== 'diverged' &&
   reconciled.some(
     (x) =>
       x.id.trim() === rec.id &&
       x.repo === rec.repo &&
-      sameSha(asSha(x.sha), rec.headSha) &&
+      shaEq(asSha(x.sha), rec.headSha) &&
       x.onBranch === true &&
       x.inBase === 'no' &&
-      (!rec.firstSha || sameSha(rec.firstSha, rec.headSha) || (sameSha(asSha(x.first), rec.firstSha) && x.firstOk === 'yes')),
+      (!rec.firstSha || shaEq(rec.firstSha, rec.headSha) || (shaEq(asSha(x.first), rec.firstSha) && x.firstOk === 'yes')),
   )
 const candidateRepos = new Set([...candidates.values()].flat().map((r) => r.repo))
 // Every sync state says what it is: a silent `behind` or `missing` once looked like a fresh run.
