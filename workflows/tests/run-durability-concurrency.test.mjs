@@ -18,6 +18,8 @@
 //    • A DEAD JOURNAL WRITER — every queued chunk waited out its 8-minute limit at the end (K-5)
 //    • A MISLEADING HALT — a replan whose tasks were all still running said it "requeued nothing" (K-6)
 //    • A LEAKED CLAIM — issues a prefetch claimed were never handed back when the run halted (K-7)
+//    • A READY PR OVER A FAILURE — a failed task with no pending dependents left its repo "drained":
+//      the final wave gated it (and marked its PR ready) before the replan of that failure (K-8)
 //
 //  Same stubbed runtime as the other loop tests (agent / parallel / log / phase / args / budget).
 //  Timers are real: limits are fractional minutes (0.001 min = 60 ms). A run that does not return
@@ -39,7 +41,7 @@ const HANG = () => new Promise(() => {})
 const API = { name: 'api', path: 'repositories/api', agent: 'backend-engineer', tags: ['backend'], gate: null }
 const INFRA = { name: 'infra', path: 'repositories/infra', agent: 'infra-engineer', tags: ['infra'], gate: null }
 const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-700', repos: [API] }
-const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false } }
+const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false }, deliver: 'end', builtinEnvChecks: false } // ships and environment checks only where a case is about them
 const FAST = { agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.005 } // soft 60 ms · writer hard 300 ms
 const PATIENT = { timeouts: { reader: { soft: 0.05, hard: 0.2 } } } // readers (replan, ledger) wait 3 s / 12 s under FAST
 const PROBE = { toolLatencySec: 3, repoRoots: [{ name: 'api', root: '/home/ana/ws/repositories/api', branch: 'main' }], home: '/home/ana' }
@@ -49,8 +51,14 @@ const IN = (id, extra = {}) => T(id, { repo: 'infra', agent: 'infra-engineer', f
 const IMPL_OK = { status: 'DONE', summary: 'built it', commits: ['aaaaaaa'], baseSha: '0000000', startSha: '0000000', headSha: 'aaaaaaa', filesChanged: ['src/a.ts'] }
 const PR = (n) => ({ status: 'DONE', summary: 'green', prUrl: `https://github.com/x/y/pull/${n}` })
 const V = (verdict, findings = []) => ({ verdict, findings, summary: verdict })
-const happy = (label) => {
+// incremental delivery and environment checks (the 0.9.0 defaults), where a case needs them
+const headOf = (p) => (/landed head `([0-9a-f]+)`/.exec(p) || [])[1]
+const shipOk = (p) => ({ pushed: true, remoteHead: headOf(p), prUrl: 'https://github.com/x/y/pull/7', draft: true })
+const envOk = (p) => ({ results: [...p.matchAll(/\bsay (?:'([^']+)'|(power)) /g)].map((m) => ({ name: m[1] || m[2], exit: 0, output: '' })) })
+const happy = (label, p) => {
   if (label.startsWith('impl:') || label.startsWith('fix:')) return IMPL_OK
+  if (label.startsWith('ship:')) return shipOk(p)
+  if (label.startsWith('env:')) return envOk(p)
   if (label.startsWith('gate:')) return PR(9)
   if (label.startsWith('precheck:')) return { verdict: 'PASS', problems: [] }
   if (label.startsWith('integrate:')) return { status: 'MERGED', headSha: 'ccccccc' }
@@ -166,6 +174,41 @@ function journalEvents(calls) {
   eq((result && result.ungatedRepos) || null, [], 'api is not reported ungated')
   ok(journalEvents(calls).some((e) => e.type === 'gate' && e.repo === 'api' && e.prUrl === 'https://github.com/x/y/pull/9'), 'the journal records its gate event')
   ok(logs.some((l) => /◎ api: its terminal slot returned after its final wave — DONE · .*\(recorded; the run had stopped dispatching\)/.test(l)), 'logged as recorded after the run stopped dispatching')
+}
+
+// ══════════════ K-8 · a repo with a failed task is not gated before that failure is decided ══════════════
+{
+  // One repo, the 0.9.0 defaults (incremental delivery, environment checks). PROJ-1 lands, PROJ-2 fails
+  // and nothing depends on it: the project looks drained, but api still has a failure to replan.
+  const DELIVERY = { precheck: false, verifyFindings: false, telemetry: { enabled: false } }
+  const failing = (replan) => {
+    let tries = 0
+    return (label, p) => {
+      if (label === 'impl:PROJ-2') return tries++ === 0 ? { status: 'BLOCKED', summary: 'stuck' } : { ...IMPL_OK, commits: ['bbbbbbb'], startSha: 'aaaaaaa', headSha: 'bbbbbbb' }
+      if (label.startsWith('replan#')) return replan
+      return happy(label, p)
+    }
+  }
+  const a = await run('K-8a · PROJ-2 failed with no dependents: the environment check, then the replan, then the gate', [T('PROJ-1'), T('PROJ-2')],
+    failing({ decision: 'REVISE', cause: 'code', reason: 'retry PROJ-2', learnings: [], tasks: [T('PROJ-2')] }), { args: DELIVERY })
+  const at = (l) => a.labels.indexOf(l)
+  ok(at('replan#1') > 0 && at('gate:api') > at('replan#1'), `no gate before replan#1 (gate:api at ${at('gate:api')}, replan#1 at ${at('replan#1')})`)
+  ok(a.labels.some((l, i) => l.startsWith('env:') && i < at('replan#1')), 'the environment check ran before the replan')
+  eq(a.labels.filter((l) => l === 'gate:api').length, 1, 'gate:api once, after PROJ-2 landed')
+  ok(a.result && a.result.done.length === 2 && !a.result.halt, 'both landed, no halt')
+
+  const b = await run('K-8b · … and the replan HALTs: api is never gated, its PR stays a draft, the halt ship comments', [T('PROJ-1'), T('PROJ-2')],
+    failing({ decision: 'HALT', cause: 'code', reason: 'PROJ-2 needs a product decision', learnings: [] }), { args: DELIVERY })
+  eq(b.labels.filter((l) => l.startsWith('gate:')), [], 'no gate: dispatch at all')
+  eq((b.result && b.result.ungatedRepos) || null, ['api'], 'api is reported ungated')
+  eq((b.result && b.result.draftPrs) || null, { api: 'https://github.com/x/y/pull/7' }, 'its PR is still a draft')
+  ok(b.labels.includes('ship:api#halt') && (b.result && b.result.halt && b.result.halt.reason) === 'PROJ-2 needs a product decision', "the run halts with the replanner's reason; the halt ship ran for api")
+
+  const c = await run('K-8c · … and the replan budget is spent (maxReplans 0): api is never gated, the run says why', [T('PROJ-1'), T('PROJ-2')],
+    failing(null), { args: { ...DELIVERY, maxReplans: 0 } })
+  eq(c.labels.filter((l) => l.startsWith('gate:') || l.startsWith('replan')), [], 'no replan, no gate')
+  ok(/^exhausted replan budget \(0\) — PROJ-2 \(api\) BLOCKED did not land; api not gated$/.test((c.result && c.result.halt && c.result.halt.reason) || ''), `halt: exhausted budget, api not gated (got ${JSON.stringify(c.result && c.result.halt)})`)
+  ok(c.labels.includes('ship:api#halt'), 'the halt ship ran for api')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)

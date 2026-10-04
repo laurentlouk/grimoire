@@ -4120,6 +4120,7 @@ const STILL_RUNNING = { stillRunning: true }
 // its repo stays out of the next wave and out of dispatch until it returns (the gate pushes and
 // opens a PR — it must never run twice), and its result is booked when it arrives.
 const openSlots = new Map()
+const slotFailed = (f) => f.status === 'GATE_FAILED' || f.status === 'TERMINAL_REVIEW_FAILED' // a failure of a terminal slot, not of a task
 async function finalWave(finals) {
   const out = finals.map(() => STILL_RUNNING)
   const done = new Set()
@@ -4391,7 +4392,12 @@ while (true) {
   // machine fit for the final wave, or a replan? A failure halts here — no replan spent.
   if (await envStall('the run went quiescent')) break
   const held = fenceHeld()
-  const finals = [...pendingById.keys()].every(held) ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r) && !fencedRepos.has(r) && !openSlots.has(r) && ![...pendingById.values()].some((i) => i.repo === r)) : []
+  // A repo with a failed task still awaiting its replan (or the halt that ends the run) is not
+  // final, even with no pending dependents: its gate would mark the PR ready over the failure. Its
+  // failure is handled first (the environment check above, the replan below); a repo without one
+  // still gates now. A failed gate or sweep holds its repo through gateHold instead.
+  const failedRepos = new Set(failures.filter((f) => !slotFailed(f)).map((f) => f.repo))
+  const finals = [...pendingById.keys()].every(held) ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r) && !fencedRepos.has(r) && !openSlots.has(r) && !failedRepos.has(r) && ![...pendingById.values()].some((i) => i.repo === r)) : []
   if (finals.length) {
     log(`▶ final wave: terminal sweep → ${finals.some(hasGateCommand) ? 'gate + ' : ''}push + PR: ${finals.join(', ')}`)
     flushJournal()
@@ -4561,6 +4567,12 @@ while (true) {
               ? `${pendingById.size} issue(s) blocked behind work someone else has started (${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}) — re-invoke once it lands`
               : `${pendingById.size} issue(s) unschedulable — dependency cycle or dangling dependsOn in the tickets`,
       }
+      log(`⛔ ${halt.reason}`)
+    } else if (replans >= MAX_REPLANS && failures.some((f) => !slotFailed(f))) {
+      // nothing waits on them, but failed tasks are left that no replan can take: their repos were
+      // never gated (their PR stays a draft) — a halt, as with dependents waiting
+      const left = failures.filter((f) => !slotFailed(f))
+      halt = { reason: `exhausted replan budget (${MAX_REPLANS}) — ${left.map((f) => `${f.id} (${f.repo}) ${f.status}`).join(', ')} did not land; ${[...new Set(left.map((f) => f.repo))].join(', ')} not gated` }
       log(`⛔ ${halt.reason}`)
     }
     break // everything landed (possibly with reported failures and no replan budget left)

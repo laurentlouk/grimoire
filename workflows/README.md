@@ -209,7 +209,11 @@ flowchart TB
 Replans, terminal slots and halts happen **only at quiescence** (nothing in flight, or nothing
 in flight but wedged writers) — the coherence a wave barrier used to provide, without its idle
 time. A token-budget floor stops dispatching, lets in-flight work settle, then halts cleanly.
-A halt pushes what landed and comments on the repo's draft PR; any repo it left without its
+A repo with a failed task still awaiting its replan is not drained, even when nothing depends
+on that task: the environment check and the replan come first, and the repo gates (its PR
+marked ready) only once the failure has been replanned and landed, while repos without a
+failure gate as usual. If the replan halts or the budget is spent, the repo stays a draft and
+the halt's status comment says why. A halt pushes what landed and comments on the repo's draft PR; any repo it left without its
 gate and ready PR is listed in `ungatedRepos`. Re-invoking `/grimoire:orchestrate` on the same
 project resumes from the saved state ("Resume" below); the tracker alone cannot, because its
 issues close only when the PR merges.
