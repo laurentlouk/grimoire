@@ -65,6 +65,7 @@ let PASS = 0, FAIL = 0
 const LEARNING = new Set(['harness-context', 'ledger', 'crystallize'])
 const buildOnly = (order) => order.filter((l) => !LEARNING.has(l))
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
+const unb64 = (s) => Buffer.from(String(s).replace(/\s+/g, ''), 'base64').toString('utf8') // journal and ledger payloads travel base64
 
 // ── the fixture stack: three repos, three gate shapes ──
 const NATIVE_PATHS = ['native/', 'modules/native-bridge/']
@@ -832,8 +833,9 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
     const labels = calls.map((c) => c.label)
     ok(labels[labels.length - 2] === 'ledger' && labels[labels.length - 1] === 'crystallize', 'ledger then crystallize, after the gate/PR')
     const ledger = calls.find((c) => c.label === 'ledger')
-    ok(ledger.opts.model === 'haiku' && /"project": "PROJ-600"/.test(ledger.prompt) && /"prs"/.test(ledger.prompt) && /harness\/run-/.test(ledger.prompt), 'the ledger writer gets the full JSON payload and the harness branch name')
-    ok(!/"harnessMemory"/.test(ledger.prompt), 'the ledger does not re-embed the memory stores')
+    const payload = unb64((/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/.exec(ledger.prompt) || ['', ''])[1]) // base64 since 0.9.0: copied, never read
+    ok(ledger.opts.model === 'haiku' && /"project": "PROJ-600"/.test(payload) && /"prs"/.test(payload) && /harness\/run-/.test(ledger.prompt), 'the ledger writer gets the full JSON payload and the harness branch name')
+    ok(!/"harnessMemory"/.test(payload), 'the ledger does not re-embed the memory stores')
     const cry = calls.find((c) => c.label === 'crystallize')
     ok(cry.opts.model === 'opus' && cry.prompt.includes(GATE_OK.prUrl) && cry.prompt.includes(LEDGER.path) && cry.prompt.includes(LEDGER.branch), 'crystallize is briefed with the PR, the ledger path and its branch')
     ok(/Read `workflows\/briefs\/crystallize\.md`/.test(cry.prompt), 'crystallize is pointed at its brief')
@@ -843,7 +845,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
   {
     const ABS = '/Users/me/project/.grimoire/runs/run-wt'
     const { calls } = await run('L2b · crystallize in its own worktree gets the journal by its absolute path in the main checkout', [APP_TASK], (label, prompt) => {
-      if (label.startsWith('journal#')) return { runDir: ABS, lines: (prompt.match(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/) || ['', ''])[1].split('\n').length, bytes: 0 }
+      if (label.startsWith('journal#')) return { runDir: ABS, lines: unb64((prompt.match(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/) || ['', ''])[1]).replace(/\n$/, '').split('\n').length, bytes: 0 }
       return learner(label)
     }, { extraArgs: { runId: 'run-wt', telemetry: { flushEvery: 50 } } })
     const cry = calls.find((c) => c.label === 'crystallize')

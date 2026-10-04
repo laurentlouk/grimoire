@@ -199,10 +199,13 @@ async function run(scenario, tasks, responder, { args = {}, index = PROBE, cryst
     return happy(label)
   }, { args: { ...QUIET, baseBranch: 'origin/chore/setup' } })
   const lp = prompt('ledger')
-  ok(lp.includes('"where": "src/a.ts:3"'), 'a checkout path becomes repo-relative')
-  ok(lp.includes('"where": "src/b.ts:4"'), 'a lane prefix under the checkout is dropped')
-  ok(lp.includes('"where": "~/notes/c.md:1"'), 'the home directory becomes ~')
-  ok(!lp.includes('/home/ana'), 'no absolute home path is left anywhere in the payload')
+  // 0.9.0: the payload travels base64 — the writer copies it into the file and never reads it
+  const payload = Buffer.from(((/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/.exec(lp) || [])[1] || '').replace(/\s+/g, ''), 'base64').toString('utf8')
+  ok(payload.includes('"where": "src/a.ts:3"'), 'a checkout path becomes repo-relative')
+  ok(payload.includes('"where": "src/b.ts:4"'), 'a lane prefix under the checkout is dropped')
+  ok(payload.includes('"where": "~/notes/c.md:1"'), 'the home directory becomes ~')
+  ok(!payload.includes('/home/ana') && !lp.includes('/home/ana'), 'no absolute home path is left anywhere in the payload')
+  ok(!lp.includes('"where"') && !lp.includes('"advisoryNotes"'), 'the prompt itself carries no raw payload text')
   ok(/origin\/HEAD/.test(lp) && /never the run's base branch `origin\/chore\/setup`/.test(lp), 'the ledger branch is cut from the default branch')
 }
 

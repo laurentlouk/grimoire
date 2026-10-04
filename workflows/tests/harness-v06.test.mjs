@@ -310,7 +310,8 @@ const learning = (label) => {
 // A faithful writer: parses the script it was handed, "runs" it, reports the counts it would print.
 const writes = []
 function journalWriter(prompt, { lie = false } = {}) {
-  const heredocs = [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/g)].map((m) => m[1])
+  // 0.9.0: the payloads travel base64 (the writer must copy them, never read them) — decode as the script does
+  const heredocs = [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/g)].map((m) => Buffer.from(m[1].replace(/\s+/g, ''), 'base64').toString('utf8').replace(/\n$/, ''))
   const lines = heredocs[0]
   const run = JSON.parse(heredocs[1])
   const file = (/F="\$DIR\/events\/(\d{8})\.jsonl"/.exec(prompt) || [])[1]
