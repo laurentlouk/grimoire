@@ -3636,24 +3636,37 @@ runJsonFor = (final) => ({
   },
 })
 // The run's state as the run branch's PR carries it — `<!-- grimoire:state v1 <b64 JSON> -->`, one
-// line — read back by the next launch on any machine (RECONCILE + parseStateMarker). The checkpoint
-// v2 subset for ONE repo, paths scrubbed, summaries and learnings trimmed, so a PR body stays far
-// under the forge's limit (GitHub: 65,536 characters).
+// line, the last of the draft PR body — read back by the next launch on any machine (RECONCILE +
+// parseStateMarker). SMALL and BOUNDED, because the index agent copies it back verbatim (the
+// script prints its length and cksum, the engine checks the copy), Bash output keeps ~30k characters
+// and a GitHub PR body 65,536: per repo, the counters plus one {id, headSha, firstSha, title} per
+// landed task — firstSha only when it differs from the head, the title at most MARKER_TITLE_MAX
+// characters. No learnings, summaries, commits or files: a PR body is untrusted on the way back, so
+// the engine would drop them anyway (detail stays in the local run.json). At most MARKER_TASK_CAP
+// tasks, and at most MARKER_MAX_CHARS of base64: titles are shortened, then dropped, before any task
+// is; the tasks left out (`omitted`, newest first) are not absorbed from the PR on another machine —
+// each runs again, finds its work on the branch (`landedBefore`) and is reviewed as it stands,
+// never rebuilt. One marker per repo, never chunked.
 function stateFor(repo) {
-  return {
-    version: 2,
-    runId: runId || null,
-    project,
-    repo,
-    runBranch: runBranchFor(repo),
-    base: BASE_BRANCH,
-    attempt: sessionAttempt,
-    lastSeq: journal.seq,
-    replansUsed: replans,
-    fixRounds: fixRoundsNow(),
-    outputTokensSpent: runSpent(),
-    landedTasks: doneTasks.filter((d) => d.repo === repo).map(landedTaskRecord),
-    learnings: learnings.slice(-30).map((l) => ({ text: trim(l.text, 300), repos: l.repos || [] })),
+  const mine = doneTasks.filter((d) => d.repo === repo && asSha(d.headSha || (d.range && d.range.headSha)))
+  const repoOfId = (id) => (hydratedById.get(id) || pendingById.get(id) || mine.find((d) => d.id === id) || {}).repo
+  const fixRounds = Object.fromEntries(Object.entries(fixRoundsNow()).filter(([id, n]) => Number.isInteger(n) && n > 0 && repoOfId(id) === repo).slice(0, MARKER_TASK_CAP))
+  const rec = (d, titleMax) => {
+    const head = asSha(d.headSha || (d.range && d.range.headSha))
+    const first = asSha((d.range && d.range.firstSha) || (d.commits || [])[0])
+    const title = titleMax ? trim(titleById.get(d.id) || '', titleMax) : ''
+    return { id: d.id, headSha: head, ...(first && first !== head ? { firstSha: first } : {}), ...(title ? { title } : {}) }
+  }
+  const counters = { version: 2, runId: runId || null, project, repo, runBranch: runBranchFor(repo), base: BASE_BRANCH, attempt: sessionAttempt, lastSeq: journal.seq, replansUsed: replans, fixRounds, outputTokensSpent: runSpent() }
+  const size = (st) => Math.ceil(utf8Encode(scrubPaths(JSON.stringify(st))).length / 3) * 4
+  let kept = mine.slice(0, MARKER_TASK_CAP)
+  for (;;) {
+    for (const titleMax of [MARKER_TITLE_MAX, 40, 0]) {
+      const omitted = mine.length - kept.length
+      const st = { ...counters, landedTasks: kept.map((d) => rec(d, titleMax)), ...(omitted ? { omitted } : {}) }
+      if (size(st) <= MARKER_MAX_CHARS || (titleMax === 0 && !kept.length)) return st
+    }
+    kept = kept.slice(0, -1)
   }
 }
 const stateMarker = (repo) => `<!-- grimoire:state v1 ${b64(scrubPaths(JSON.stringify(stateFor(repo))), 0)} -->`
