@@ -1979,7 +1979,13 @@ const runMeta = {
 const runId = str(opts.runId) && /^[A-Za-z0-9._-]+$/.test(opts.runId.trim()) ? opts.runId.trim() : null
 // Cross-session resume: the checkpoint the journal last wrote (run.json → checkpoint), passed
 // back by the orchestrate skill, so a new session keeps the budgets the earlier one used.
-const resumeOpt = opts.resumeState && typeof opts.resumeState === 'object' ? opts.resumeState : null
+// {freshStart:true} starts over ON PURPOSE: the resumeState and every PR state marker are ignored,
+// nothing is absorbed (landed work is built and reviewed again), and the run branch is left exactly
+// as it is — no reset, no fast-forward, no creation from origin. Without it a relaunch always
+// resumes from the newest saved state it can verify.
+const FRESH_START = opts.freshStart === true
+if (opts.freshStart !== undefined && typeof opts.freshStart !== 'boolean') log(`⚠ freshStart ${JSON.stringify(opts.freshStart)} ignored — expected true or false; the run resumes from its saved state`)
+const resumeOpt = !FRESH_START && opts.resumeState && typeof opts.resumeState === 'object' ? opts.resumeState : null
 // Tracker claims: {claim:{identity}} — claim issues at hydration, skip issues someone else
 // has started, hand back what this run claimed and did not land. OFF unless configured.
 const claim = opts.claim && typeof opts.claim === 'object' && str(opts.claim.identity) ? { identity: opts.claim.identity.trim() } : null
@@ -2533,30 +2539,34 @@ const PROJECT_KEY = projectKey(project)
 const explicitRunBranch = (repo) => (repoCfg(repo) || {}).runBranch || RUN_BRANCH_OPT
 const runBranchFor = (repo) => explicitRunBranch(repo) || `feat/${keyToken(project)}-${refToken(repo)}`
 
-// A landed task as checkpoint v2 and the PR state marker record it, validated: a known repo and a
-// plausible head SHA, or it is dropped (it then simply runs again). Verified on the run branch
-// before anything is absorbed (see the RECONCILE section of the index prompt).
-const landedRecord = (t) => {
-  if (!t || typeof t !== 'object' || !str(t.id) || !repoConfig.has(t.repo) || !asSha(t.headSha)) return null
-  const commits = (Array.isArray(t.commits) ? t.commits : []).map(asSha).filter(Boolean)
+// A landed task as checkpoint v2 and the PR state marker record it, validated: a known repo, an id
+// the RECONCILE script will check (TASK_ID_RE: a newline in an id once forged a whole TASK line),
+// a plausible head SHA, or it is dropped (it then simply runs again). Lengths are capped. A record
+// from a PR state marker (`fromMarker`) is anyone-with-PR-edit-access's text: only its id, head,
+// first commit and a short title are kept — never a summary, commits or files, which would reach
+// prompts and the PR body. Absorbed only once verified on the run branch (see RECONCILE).
+const landedRecord = (t, fromMarker = false) => {
+  if (!t || typeof t !== 'object' || typeof t.id !== 'string' || !TASK_ID_RE.test(t.id.trim()) || !repoConfig.has(t.repo) || !asSha(t.headSha)) return null
+  const commits = fromMarker ? [] : (Array.isArray(t.commits) ? t.commits : []).map(asSha).filter(Boolean).slice(0, 200)
+  const id = t.id.trim()
   return {
-    id: t.id.trim(),
+    id,
     repo: t.repo,
-    status: LANDED.has(t.status) ? t.status : 'DONE',
-    ticket: str(t.ticket) || t.id.trim(),
-    title: str(t.title) || '',
+    status: !fromMarker && LANDED.has(t.status) ? t.status : 'DONE',
+    ticket: (!fromMarker && str(t.ticket) && trim(t.ticket, 64)) || id,
+    title: trim(str(t.title) || '', MARKER_TITLE_MAX),
     runBranch: runBranchFor(t.repo),
-    startSha: asSha(t.startSha),
+    startSha: fromMarker ? null : asSha(t.startSha),
     firstSha: asSha(t.firstSha) || commits[0] || null,
     headSha: asSha(t.headSha),
     commits,
-    summary: typeof t.summary === 'string' ? trim(t.summary, 400) : '',
-    files: (Array.isArray(t.files) ? t.files : []).filter((f) => typeof f === 'string' && f.trim()).slice(0, 50),
+    summary: !fromMarker && typeof t.summary === 'string' ? trim(t.summary, 400) : '',
+    files: fromMarker ? [] : (Array.isArray(t.files) ? t.files : []).filter((f) => typeof f === 'string' && f.trim()).slice(0, 50),
   }
 }
-// What the checkpoint the skill passed back says landed (execute runs; a 0.8 checkpoint lists ids
-// only, with no SHA to verify, so those tasks run again).
-const checkpointLanded = execute && resumeOpt && Array.isArray(resumeOpt.landedTasks) ? resumeOpt.landedTasks.map(landedRecord).filter(Boolean) : []
+// What the checkpoint the skill passed back says landed (a 0.8 checkpoint lists ids only, with no
+// SHA to verify, so those tasks run again). Read in a preview too: the preview proves the resume.
+const checkpointLanded = resumeOpt && Array.isArray(resumeOpt.landedTasks) ? resumeOpt.landedTasks.map((t) => landedRecord(t)).filter(Boolean) : []
 
 // The START environment checks run inside the index (it already runs Bash for the probe): every
 // configured repo's built-ins plus the project's checks with when 'start'. Judged once the index
@@ -2568,7 +2578,7 @@ const startEnvChecks = execute ? [...builtinChecksFor(repoList.map((r) => r.name
 // full issue body verbatim), so the indexer only verifies the artifacts and lists every
 // issue's id/repo/state/dependsOn — the scheduler hydrates each cycle just-in-time.
 const index = await step('verify design artifacts + slice index (whole project)', () =>
-  agentT(indexPrompt(project, specPath, planPath, execute && !skipHookCheck ? requireHook : null, !!claim, execute, execute ? checkpointLanded : null, startEnvChecks), {
+  agentT(indexPrompt(project, specPath, planPath, execute && !skipHookCheck ? requireHook : null, !!claim, execute, FRESH_START ? [] : checkpointLanded, startEnvChecks, !execute || FRESH_START), {
     label: 'parse-index',
     phase: 'Parse plan',
     model: 'sonnet', // verification + listing: extraction, not judgement
@@ -2654,24 +2664,89 @@ const inProject = new Set([...pendingIndex.map((i) => i.id), ...alreadyDoneIds, 
 // ── RESUMED: what an earlier attempt of THIS run landed, from the run's own state ──
 // The tracker closes an issue only when its PR merges, so it alone re-dispatched every task an
 // earlier session had landed (a replay once re-implemented three of them: 3.5 h for two commits).
-// Two sources: the checkpoint the skill passed back ({resumeState}) and the state marker in the
-// run branch's PR, which the index agent returned RAW (the only copy on another machine). The
-// newer of them — by attempt, then lastSeq — carries the run-level state (replans and fix rounds
-// spent, output tokens, learnings, the journal's sequence); landed tasks are the union, and each
-// is absorbed only when the index agent found its head on the run branch. One that is not there
-// (a reset branch, a lost SHA, a run branch that diverged from origin) runs again.
-const prStates = execute && Array.isArray(index.prState) ? index.prState.filter((p) => p && repoConfig.has(p.repo)) : []
+// Two sources: the checkpoint the skill passed back ({resumeState}, the local run.json) and the
+// state marker in the run branch's draft PR, which the index agent returned RAW (the only copy on
+// another machine). The newer of them — by attempt, then lastSeq — carries the run-level counters
+// (replans and fix rounds spent, output tokens, the journal's sequence); landed tasks are the union,
+// and each is absorbed only when the reconcile found its head (and its first commit) on the run
+// branch and NOT in the base. One that is not there (a reset branch, a lost SHA, a run branch that
+// diverged from origin) runs again. A preview runs the same checks read-only: its proof is this.
+// A PR body is editable by anyone with write access to the repo, so a marker is TRUSTED ONLY AS FAR
+// AS IT IS VERIFIED: the copy must match the length and cksum the script printed; project (by key),
+// repo and run branch must be named and match; only ids of this project's index are absorbed; its
+// counters are clamped; its learnings and summaries never reach a prompt; a fork's PR is never read.
+// `prStates`: the run branch's PRs (same repository only: the script never prints a fork's). Delivery
+// reuses the draft PR even on a fresh start; only its marker is then left unread.
+const prStates = Array.isArray(index.prState) ? index.prState.filter((p) => p && repoConfig.has(p.repo)) : []
+const runBranchSeen = (Array.isArray(index.runBranches) ? index.runBranches : []).filter((b) => b && repoConfig.has(b.repo))
+for (const w of (Array.isArray(index.reconcileWarnings) ? index.reconcileWarnings : []).filter((x) => typeof x === 'string' && x.trim())) log(`⚠ reconcile: ${trim(w, 300)}`)
 const markerStates = []
-for (const p of prStates) {
+const asCount = (v) => (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : v)
+const intIn = (v, max) => (Number.isInteger(v) && v >= 0 ? Math.min(v, max) : 0)
+const MARKER_SANE_TOKENS = 1e9 // output tokens no run plausibly spends: the bound when no maxOutputTokens is set
+const MARKER_MAX_FIX_ROUNDS = 3 * MAX_FIX_ATTEMPTS + MAX_PRECHECK_FIXES // the most fix rounds one task can buy in one attempt
+// A verified marker reduced to what the engine may use. Its counters are clamped: a planted
+// `outputTokensSpent: 5e9` once halted a run at start, and `replansUsed` can never exceed the budget.
+function markerCounters(s, p) {
+  const cap = MAX_OUTPUT_TOKENS || MARKER_SANE_TOKENS
+  let spent = Number.isFinite(s.outputTokensSpent) && s.outputTokensSpent > 0 ? s.outputTokensSpent : 0
+  if (spent > cap) {
+    log(`⚠ ${p.repo}: the state marker says ${fmtTok(spent)} output tokens were spent — more than ${MAX_OUTPUT_TOKENS ? `the ${fmtTok(MAX_OUTPUT_TOKENS)} cap` : 'any run plausibly spends'}; ignored (counted as 0)`)
+    spent = 0
+  }
+  const fixRounds = {}
+  if (s.fixRounds && typeof s.fixRounds === 'object' && !Array.isArray(s.fixRounds))
+    for (const [id, n] of Object.entries(s.fixRounds).slice(0, 500)) if (inProject.has(id) && Number.isInteger(n) && n > 0) fixRounds[id] = Math.min(n, MARKER_MAX_FIX_ROUNDS)
+  return {
+    version: 2,
+    project: s.project,
+    repo: p.repo,
+    runBranch: s.runBranch,
+    attempt: intIn(s.attempt, 10000),
+    lastSeq: intIn(s.lastSeq, 1e7),
+    replansUsed: intIn(s.replansUsed, MAX_REPLANS),
+    fixRounds,
+    outputTokensSpent: spent,
+    landedTasks: Array.isArray(s.landedTasks) ? s.landedTasks.slice(0, MARKER_TASK_CAP) : [],
+    url: str(p.url) || '',
+    state: str(p.state) || '',
+    isDraft: p.isDraft,
+  }
+}
+const markerVerdict = new Map() // prState entry → 'verified' | 'ignored: <why>' (the preview shows it)
+for (const p of FRESH_START ? [] : prStates) {
   const raw = str(p.marker)
   if (!raw || raw === 'none') continue
-  const s = parseStateMarker(raw.includes('<!--') ? raw : `<!-- grimoire:state v1 ${raw} -->`)
-  // the same project = the same KEY (a relaunch may word it differently); an explicit run branch is the identity itself
-  if (!s || (str(s.project) && !explicitRunBranch(p.repo) && keyToken(s.project) !== keyToken(project)) || (str(s.repo) && s.repo !== p.repo) || (str(s.runBranch) && s.runBranch !== runBranchFor(p.repo))) {
-    log(`⚠ ${p.repo}: the state marker in ${str(p.url) || 'its PR'} is ${s ? 'for another project, repo or run branch' : 'unreadable'} — ignored`)
+  const ignore = (why) => {
+    markerVerdict.set(p, `ignored: ${why}`)
+    log(`⚠ ${p.repo}: the state marker in ${str(p.url) || 'its PR'} is ${why} — ignored`)
+  }
+  // the script prints the base64 token; a whole marker line is accepted too
+  const tok = /^[A-Za-z0-9+/=]+$/.test(raw) ? raw : (STATE_MARKER_RE.exec(raw) || [])[1] || null
+  if (!tok) {
+    ignore('unreadable')
     continue
   }
-  markerStates.push({ ...s, repo: p.repo, url: str(p.url) || '' })
+  if (asCount(p.len) !== tok.length || asCount(p.sum) !== cksum(tok)) {
+    ignore(`not the copy the script printed (the copy has length ${tok.length} and cksum ${cksum(tok)}; the script printed ${p.len ?? 'none'} and ${p.sum ?? 'none'})`)
+    continue
+  }
+  const s = parseStateMarker(`<!-- grimoire:state v1 ${tok} -->`)
+  if (!s) {
+    ignore('unreadable')
+    continue
+  }
+  if (!str(s.project) || !str(s.repo) || !str(s.runBranch)) {
+    ignore('missing the project, repo or run branch it belongs to')
+    continue
+  }
+  // the same project = the same KEY (a relaunch may word it differently); an explicit run branch is the identity itself
+  if ((!explicitRunBranch(p.repo) && keyToken(s.project) !== keyToken(project)) || s.repo !== p.repo || s.runBranch !== runBranchFor(p.repo)) {
+    ignore('for another project, repo or run branch')
+    continue
+  }
+  markerVerdict.set(p, 'verified')
+  markerStates.push(markerCounters(s, p))
 }
 const stateRank = (s) => [Number.isInteger(s.attempt) ? s.attempt : 0, Number.isInteger(s.lastSeq) ? s.lastSeq : 0]
 const newerState = (a, b) => {
@@ -2688,23 +2763,56 @@ const addCandidate = (rec, source) => {
   if (rec && !alreadyDoneIds.has(rec.id)) candidates.set(rec.id, [...(candidates.get(rec.id) || []), { ...rec, source }])
 }
 for (const t of checkpointLanded) addCandidate(t, 'checkpoint')
-for (const m of markerStates)
-  for (const t of Array.isArray(m.landedTasks) ? m.landedTasks : []) {
-    const rec = landedRecord(t)
-    if (rec && rec.repo === m.repo) addCandidate(rec, 'pr')
+for (const m of markerStates) {
+  const foreign = []
+  for (const t of m.landedTasks) {
+    // a 0.9.0 marker record names no repo: it is its marker's
+    const rec = landedRecord(t && typeof t === 'object' && t.repo === undefined ? { ...t, repo: m.repo } : t, true)
+    if (!rec || rec.repo !== m.repo) continue
+    if (!inProject.has(rec.id)) foreign.push(rec.id)
+    else addCandidate(rec, 'pr')
   }
-const syncOf = new Map((execute && Array.isArray(index.runBranches) ? index.runBranches : []).filter((b) => b && repoConfig.has(b.repo)).map((b) => [b.repo, str(b.sync) || '']))
-const reconciled = execute && Array.isArray(index.reconcile) ? index.reconcile.filter((x) => x && str(x.id)) : []
-const sameSha = (a, b) => !a || !b || a.startsWith(b) || b.startsWith(a)
+  if (foreign.length) log(`⚠ ${m.repo}: the state marker in ${m.url || 'its PR'} lists ${foreign.length} task(s) that are not issues of ${project} — ignored: ${foreign.slice(0, 8).join(', ')}${foreign.length > 8 ? ', …' : ''}`)
+}
+const branchOf = new Map(runBranchSeen.map((b) => [b.repo, { sync: str(b.sync) || '', fetch: str(b.fetch) || '', local: asSha(b.local), remote: asSha(b.remote) }]))
+const syncOf = new Map([...branchOf].map(([repo, b]) => [repo, b.sync]))
+// A TASK line verifies a record only when it names the same id, repo and head (and first commit),
+// says onBranch=yes AND inBase=no: no SHA, no verification (a line without one once verified any head).
+const reconciled = FRESH_START || !Array.isArray(index.reconcile) ? [] : index.reconcile.filter((x) => x && str(x.id) && str(x.repo) && asSha(x.sha))
+const sameSha = (a, b) => !!a && !!b && (a.startsWith(b) || b.startsWith(a))
 const onRunBranch = (rec) =>
-  syncOf.get(rec.repo) !== 'diverged' && reconciled.some((x) => x.id.trim() === rec.id && (!str(x.repo) || x.repo === rec.repo) && sameSha(asSha(x.sha), rec.headSha) && x.onBranch === true)
-for (const [repo, sync] of syncOf)
-  if (sync === 'diverged') log(`⚠ ${repo}: the local run branch ${runBranchFor(repo)} and origin/${runBranchFor(repo)} have DIVERGED — nothing is absorbed from it; reconcile them by hand (the run never resets a branch)`)
+  syncOf.get(rec.repo) !== 'diverged' &&
+  reconciled.some(
+    (x) =>
+      x.id.trim() === rec.id &&
+      x.repo === rec.repo &&
+      sameSha(asSha(x.sha), rec.headSha) &&
+      x.onBranch === true &&
+      x.inBase === 'no' &&
+      (!rec.firstSha || sameSha(rec.firstSha, rec.headSha) || (sameSha(asSha(x.first), rec.firstSha) && x.firstOk === 'yes')),
+  )
+const candidateRepos = new Set([...candidates.values()].flat().map((r) => r.repo))
+// Every sync state says what it is: a silent `behind` or `missing` once looked like a fresh run.
+for (const b of runBranchSeen) {
+  const where = runBranchFor(b.repo)
+  const acting = execute && !FRESH_START // a launch that syncs branches (a preview and a fresh start never touch one)
+  if (b.fetch === 'failed') log(`⚠ ${b.repo}: could not fetch origin/${where} (offline, no access, or it timed out) — checked against the last known origin/${where}; a warning, not a refusal`)
+  if (b.sync === 'diverged') log(`⚠ ${b.repo}: the local run branch ${where} and origin/${where} have DIVERGED — nothing is absorbed from it; reconcile them by hand (the run never resets a branch)`)
+  else if (b.sync === 'behind') log(`⚠ ${b.repo}: the local ${where} is BEHIND origin/${where}${acting ? ' and could not be fast-forwarded (uncommitted changes in its checkout, or it is checked out in another worktree)' : ' — a launch fast-forwards it when its checkout is clean'}`)
+  else if (b.sync === 'remote-only') log(acting ? `⚠ ${b.repo}: ${where} exists only on origin and the local branch could not be created from it` : `◎ ${b.repo}: ${where} exists only on origin — a launch creates the local branch from it`)
+  else if (b.sync === 'local-only') log(`⚠ ${b.repo}: ${where} exists only locally — origin has no copy (never pushed, or deleted there), so another machine could not resume from it`)
+  else if (b.sync === 'missing') log(candidateRepos.has(b.repo) ? `⚠ ${b.repo}: ${where} exists neither locally nor on origin — what the saved state lists as landed there cannot be verified, and runs again` : `◎ ${b.repo}: ${where} does not exist yet, locally or on origin — a fresh start for this repo`)
+}
+for (const repo of candidateRepos) if (!FRESH_START && !branchOf.has(repo)) log(`⚠ ${repo}: the reconcile reported no BRANCH line — nothing landed there can be verified`)
+for (const repo of new Set(reconciled.filter((x) => x.inBase === 'unknown').map((x) => x.repo)))
+  log(`⚠ ${repo}: the base ${BASE_BRANCH} does not resolve in ${repoPath(repo)} — no landed head can be shown to be outside it, so nothing is absorbed there (set {baseBranch} to the integration branch)`)
 const resumedLanded = [] // {id, repo, headSha, source: 'checkpoint' | 'pr'} — absorbed, never re-run
 const absorbedRecords = []
+const unverifiedLanded = [] // listed as landed by the saved state, NOT verified on the run branch — they run again
 for (const [id, recs] of candidates) {
   const rec = recs.find(onRunBranch)
   if (!rec) {
+    unverifiedLanded.push({ id, repo: recs[0].repo, headSha: recs[0].headSha, source: [...new Set(recs.map((r) => r.source))].join('+') })
     log(`⚠ ${id}: the ${[...new Set(recs.map((r) => r.source))].join(' and ')} state lists it as landed (head ${recs[0].headSha}), but that head is not on ${recs[0].runBranch} — it runs again`)
     continue
   }
@@ -2712,11 +2820,18 @@ for (const [id, recs] of candidates) {
   resumedLanded.push({ id, repo: rec.repo, headSha: rec.headSha, source: rec.source })
   const at = pendingIndex.findIndex((i) => i.id === id)
   if (at >= 0) pendingIndex.splice(at, 1)
-  if (!titleById.get(id) && rec.title) titleById.set(id, rec.title)
+  if (!titleById.get(id) && rec.title && rec.source === 'checkpoint') titleById.set(id, rec.title) // a PR marker's title never names a task in a prompt
 }
 // A repo whose PR is out of draft (open or merged) was shipped by its terminal slot: unless new
-// work lands there, that slot is not paid again.
-const shippedRepos = new Set(prStates.filter((p) => p.isDraft === false && /^(open|merged)$/i.test(str(p.state) || '')).map((p) => p.repo))
+// work lands there, that slot is not paid again. Only a PR whose state marker VERIFIED says so.
+const shippedRepos = new Set(markerStates.filter((m) => m.isDraft === false && /^(open|merged)$/i.test(m.state)).map((m) => m.repo))
+if (FRESH_START) {
+  const existing = runBranchSeen.filter((b) => asSha(b.local) || asSha(b.remote))
+  const markers = (Array.isArray(index.prState) ? index.prState : []).filter((p) => p && str(p.marker) && p.marker.trim() !== 'none').length
+  log(
+    `⚠⚠ freshStart: the run's saved state is IGNORED — no resumeState, ${markers ? `${markers} PR state marker(s) unread` : 'no PR state marker'}, nothing absorbed. Every task is built and reviewed AGAIN, including work an earlier attempt already landed${existing.length ? ` (${existing.map((b) => `${runBranchFor(b.repo)} @ ${String(asSha(b.local) || asSha(b.remote)).slice(0, 7)}`).join(', ')})` : ''}. The run branch is left exactly as it is: nothing is reset, fast-forwarded or created from origin.`,
+  )
+}
 if (resumedLanded.length)
   log(`◎ resumed: ${resumedLanded.length} task(s) absorbed from the run's state, verified on the run branch — ${resumedLanded.map((r) => `${r.id}@${r.headSha.slice(0, 7)} (${r.source})`).join(', ')}`)
 log(
@@ -2726,9 +2841,41 @@ log(
     `${MAX_OUTPUT_TOKENS ? ` · maxOutputTokens=${fmtTok(MAX_OUTPUT_TOKENS)}` : ''}${specialists.length ? ` · specialists=${specialists.map((s) => s.agent).join(',')}` : ''}` +
     `${claimedElsewhere.length ? ` · ${claimedElsewhere.length} started by someone else (not dispatched): ${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}` : ''}`,
 )
+// The RESUME PROOF, before anything runs: what landed, verified on which branch head and from which
+// saved state, and what is still to build. A preview logs and returns it (the skill shows it before
+// it launches); the sync state and the PRs of each repo come with it.
+const branchesView = Object.fromEntries(
+  repoList.map((r) => {
+    const b = branchOf.get(r.name) || null
+    const prs = (Array.isArray(index.prState) ? index.prState : [])
+      .filter((p) => p && p.repo === r.name && str(p.url))
+      .map((p) => ({ url: p.url.trim(), state: str(p.state) || '', isDraft: p.isDraft !== false, marker: FRESH_START ? 'unread (freshStart)' : markerVerdict.get(p) || 'none' }))
+    return [r.name, { runBranch: runBranchFor(r.name), sync: b ? b.sync : null, fetch: b ? b.fetch : null, local: b ? b.local : null, remote: b ? b.remote : null, verified: resumedLanded.filter((x) => x.repo === r.name).length, prs }]
+  }),
+)
+function resumeProofLine() {
+  const total = resumedLanded.length + pendingIndex.length
+  const still = pendingIndex.map((i) => i.id)
+  const stillText = still.length ? `still to build: ${still.slice(0, 12).join(', ')}${still.length > 12 ? ` (+${still.length - 12} more)` : ''}` : 'nothing left to build'
+  const done = alreadyDone.length ? ` (+${alreadyDone.length} done or canceled in the tracker)` : ''
+  if (FRESH_START) return `◎ resume: freshStart — nothing taken from the saved state, 0/${total} landed${done} — ${stillText}`
+  const unverified = unverifiedLanded.length ? ` — ${unverifiedLanded.length} more listed as landed but NOT verified, built again: ${unverifiedLanded.slice(0, 8).map((u) => u.id).join(', ')}` : ''
+  if (!resumedLanded.length) return `◎ resume: 0/${total} landed${candidates.size ? '' : ' — no earlier attempt found (no checkpoint, no verified PR state marker)'}${unverified}${done} — ${stillText}`
+  const where = [...new Set(resumedLanded.map((x) => x.repo))]
+    .map((repo) => {
+      const b = branchOf.get(repo) || {}
+      const mine = resumedLanded.filter((x) => x.repo === repo)
+      const head = b.sync === 'remote-only' || (b.sync === 'behind' && !execute) ? b.remote : b.local || b.remote
+      return `${runBranchFor(repo)} @ ${String(head || mine[mine.length - 1].headSha).slice(0, 7)} (${[...new Set(mine.map((x) => x.source))].join('+')})`
+    })
+    .join('; ')
+  return `◎ resume: ${resumedLanded.length}/${total} landed, verified on ${where}${unverified}${done} — ${stillText}`
+}
 // With every issue absorbed, a repo whose PR is not out of draft still owes its terminal slot.
 if (pendingIndex.length === 0 && resumedLanded.every((r) => shippedRepos.has(r.repo))) {
+  if (!execute) log(resumeProofLine())
   return {
+    ...(execute ? {} : { preview: true, stillToBuild: [], branches: branchesView, ...(FRESH_START ? { freshStart: true } : {}) }),
     done: [],
     needsAttention: [],
     alreadyDone,
@@ -2739,6 +2886,39 @@ if (pendingIndex.length === 0 && resumedLanded.every((r) => shippedRepos.has(r.r
       : resumedLanded.length
         ? `Nothing to run — every issue is done or landed on its run branch (${resumedLanded.length} absorbed from the run's state), and every repo's PR is out of draft.`
         : 'Nothing to run — every issue in the project is already done or canceled.',
+  }
+}
+
+// ── a run branch the run cannot build on: refuse, like a missing hook ──
+// A repo that still has work (a pending task, or absorbed work whose PR is still a draft) builds on
+// its LOCAL run branch. Diverged from origin, or behind it with the fast-forward refused (uncommitted
+// changes, the branch checked out in another worktree), the run would redo or conflict with what
+// origin holds — and the run never resets a branch. Offline (fetch=failed) is only a warning.
+if (execute && !FRESH_START) {
+  const owes = new Set([...pendingIndex.map((i) => i.repo), ...absorbedRecords.filter((t) => !shippedRepos.has(t.repo)).map((t) => t.repo)])
+  const refusals = []
+  for (const repo of owes) {
+    const b = branchOf.get(repo)
+    if (!b) continue
+    const where = runBranchFor(repo)
+    const path = repoPath(repo)
+    const at = `local ${b.local ? b.local.slice(0, 7) : 'none'}, origin ${b.remote ? b.remote.slice(0, 7) : 'none'}`
+    if (b.sync === 'diverged')
+      refusals.push({ error: 'run_branch_diverged', repo, text: `${repo}: ${where} and origin/${where} have DIVERGED (${at}) — each holds commits the other lacks. Compare them (\`git -C ${path} log --oneline --left-right ${where}...origin/${where}\`), keep what is right (rebase or merge, then push; or reset the side that is wrong), then relaunch. The run never resets a branch.` })
+    else if (b.sync === 'behind')
+      refusals.push({ error: 'run_branch_behind', repo, text: `${repo}: ${where} is BEHIND origin/${where} (${at}) and could not be fast-forwarded — its checkout has uncommitted changes, or the branch is checked out in another worktree. Commit or stash them, run \`git merge --ff-only origin/${where}\` in the checkout that has ${where} checked out (\`git -C ${path} worktree list\`), then relaunch.` })
+    else if (b.sync === 'remote-only')
+      refusals.push({ error: 'run_branch_behind', repo, text: `${repo}: ${where} exists only on origin (${at}) and the local branch could not be created from it — run \`git -C ${path} branch ${where} origin/${where}\`, then relaunch.` })
+  }
+  if (refusals.length) {
+    const error = refusals.some((r) => r.error === 'run_branch_diverged') ? 'run_branch_diverged' : 'run_branch_behind'
+    log(`⛔ not started — ${refusals.map((r) => `${r.repo}: ${r.error}`).join(' · ')}`)
+    return {
+      error,
+      problems: refusals.map((r) => r.text),
+      branches: branchesView,
+      note: `NOT STARTED — no implementers dispatched. A repo with work left has a run branch the run cannot build on: ${refusals.map((r) => `${r.repo} (${r.error})`).join(', ')}. Fix each one as \`problems\` says and relaunch; nothing landed is lost — it is verified again then. Pass {freshStart:true} only to build everything again on purpose.`,
+    }
   }
 }
 
@@ -2832,10 +3012,12 @@ if (!execute) {
   }
   const estimate = {
     tasks: pendingIndex.length, criticalPath, repoSerial, largestRepo, perTaskMin, terminalMin, startupMin, hours,
-    basis: `${pendingIndex.length} task(s); critical path ${criticalPath} (the longest dependsOn chain: a blocked-by chain runs one task at a time whatever maxPerRepo is); largest repo ${largestRepo} task(s) at maxPerRepo ${MAX_PER_REPO}; ${perTaskMin.low}–${perTaskMin.high} min per task${estOverride ? ' (estimatePerTaskMin)' : ' (measured on 0.8.x runs)'}, ${terminalMin.low}–${terminalMin.high} min for the terminal review and gate, ${startupMin} min startup. Excludes time spent waiting on you and halts.`,
+    basis: `${pendingIndex.length} task(s) still to build${resumedLanded.length ? ` (the ${resumedLanded.length} already landed and verified are not counted)` : ''}; critical path ${criticalPath} (the longest dependsOn chain: a blocked-by chain runs one task at a time whatever maxPerRepo is); largest repo ${largestRepo} task(s) at maxPerRepo ${MAX_PER_REPO}; ${perTaskMin.low}–${perTaskMin.high} min per task${estOverride ? ' (estimatePerTaskMin)' : ' (measured on 0.8.x runs)'}, ${terminalMin.low}–${terminalMin.high} min for the terminal review and gate, ${startupMin} min startup. Excludes time spent waiting on you and halts.`,
   }
   log(`⏱ estimated wall clock ≈ ${hours.low}–${hours.high} h — ${estimate.basis}`)
-  return { preview: true, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran. Estimated wall clock ≈ ${hours.low}–${hours.high} h (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
+  log(resumeProofLine())
+  const stillToBuild = pendingIndex.map((i) => ({ id: i.id, repo: i.repo, title: i.title || '' }))
+  return { preview: true, ...(FRESH_START ? { freshStart: true } : {}), resumedLanded, unverifiedLanded, stillToBuild, branches: branchesView, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran, no branch touched (the reconcile ran read-only). ${resumeProofLine().replace(/^◎ /, '')}. Estimated wall clock ≈ ${hours.low}–${hours.high} h for what is still to build (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
 }
 
 // ═══════════════════════ 1 · per-task lifecycle ═══════════════════════
@@ -3510,7 +3692,9 @@ phase('Implement')
 const doneTasks = [] // {id, repo, status, summary, ticket, runBranch, headSha, commits, files, range} — immutable input to every replan
 const shipState = {} // repo → {landedHead, pushedHead, prUrl, draft, pushFailures, disabled: null|'push'|'pr', ships, chain, queued, shippedHead} — incremental delivery (see shipOnce)
 const learnings = [] // [{text, repos}] durable lessons failures taught — carried into replans AND every later hydration
-if (resumeBase && Array.isArray(resumeBase.learnings)) learnings.push(...resumeBase.learnings.map((l) => toLearning(l, [])).filter(Boolean))
+// Learnings come from the LOCAL checkpoint only, never from a PR state marker: a PR body is anyone's
+// text, and learnings are pasted into every hydration and replan prompt.
+if (resumeOpt && Array.isArray(resumeOpt.learnings)) learnings.push(...resumeOpt.learnings.map((l) => toLearning(l, [])).filter(Boolean))
 const allResults = [] // every task + gate result, flat
 const failures = [] // {id, repo, status, kind, detail} — unlanded work (a replan can requeue it)
 const lastFailure = new Map() // task id → {kind: 'code'|'harness', status} of its latest failure — decides a replanned task's tier
