@@ -41,7 +41,9 @@ export const meta = {
 const DEFAULT_MAX_FIX_ATTEMPTS = 3 // fix rung: fixes per review stage before it returns FAIL (letting the slice replan). Override with {maxFixAttempts:N}.
 const DEFAULT_MAX_REPLANS = 3 // replan rung: how many times a failed slice may re-plan from the current state before we HALT
 const DEFAULT_MAX_CONTEXT_RESOLVES = 2 // resolve rung (cheapest): NEEDS_CONTEXT answers fetched from a read-only scout before the question is allowed to escalate to a replan. Override with {maxContextResolves:N}; 0 disables.
-const DEFAULT_AGENT_TIMEOUT_MIN = 40 // per-agent wall-clock backstop (minutes). Must exceed the longest legit single-agent op so it fires only on a true hang. Override with {agentTimeoutMin:N}; 0 disables. A repo may raise it for ITS dispatches with {repos:[{timeoutMin:N}]} — e.g. a repo whose gate queues for a machine-global lock.
+const DEFAULT_AGENT_TIMEOUT_MIN = 40 // per-agent SOFT limit (minutes): past it a dispatch is logged LATE and still awaited — the runtime cannot cancel an agent, so a late valid result is accepted. Override with {agentTimeoutMin:N}; 0 disables every limit. A repo may raise it for ITS writers with {repos:[{timeoutMin:N}]} — e.g. a repo whose gate queues for a machine-global lock.
+const DEFAULT_AGENT_HARD_TIMEOUT_MIN = 180 // per-agent HARD limit (minutes): a reader is given up on (null) at min(2 × soft, this); a WRITER is never given up on — it is WEDGED: still awaited, its repo FENCED so nothing is re-dispatched into its checkout. Implementers booked "died" at a 40-min backstop once ran 78 and 115 more minutes and committed while retries were dispatched into the same checkout. {agentHardTimeoutMin:0}: writers never wedge. Per kind: {timeouts:{<kind>:{soft, hard, hedgeAfter}}}.
+const DEFAULT_HYDRATE_AHEAD = 2 // hydration PREFETCH: issues hydrated while the blockers they wait on are still in flight, so a strict blocked-by chain never waits for a hydration on its critical path. {hydrateAhead:0} hydrates only at dispatch.
 const DEFAULT_MAX_PER_REPO = 3 // within-repo parallelism: how many of a repo's tasks may be IN FLIGHT at once. Whether a ready task actually joins is decided at dispatch by declared-file overlap against the repo's running tasks — disjoint files → parallel worktree lanes, any overlap or an undeclared footprint → held until the conflict clears. {maxPerRepo:1} restores strict serialization.
 const DEFAULT_MAX_PRECHECK_FIXES = 1 // precheck rung: cheap structural check between the implementer and the panel. A FAIL buys this many fix dispatches before the task fails as PRECHECK_FAILED. {precheck:false} disables the rung.
 const DEFAULT_ESCALATE_AT_FIX_ROUND = 2 // model escalation: from this fix round on (counted per task, across stages), the implementer runs on opus whatever tier the selector chose. {escalateAtFixRound:0} disables.
@@ -74,7 +76,7 @@ const DEFAULT_BASE_BRANCH = 'origin/main' // the integration branch every lane, 
 let BASE_BRANCH = DEFAULT_BASE_BRANCH
 // Session facts the startup probe measures (execute runs) and every later prompt can use.
 let toolLatencySec = null // seconds a trivial Bash call waits before it runs (PreToolUse hooks included)
-const timedOut = [] // labels of dispatches the wall-clock backstop gave up on — their agents may still be running
+const timedOut = [] // labels of dispatches given up on at their HARD limit (readers) — their agents may still be running
 
 // repo name → { name, path, agent, tags, gate, timeoutMin, laneSetup }
 let repoConfig = new Map()
@@ -550,6 +552,11 @@ const REPLAN_SCHEMA = {
   properties: {
     decision: { type: 'string', enum: ['REVISE', 'HALT'] },
     reason: { type: 'string', description: 'why REVISE (what the revised path fixes) or why HALT (what blocks us) — short prose ONLY, never a serialized task list' },
+    cause: {
+      type: 'string',
+      enum: ['code', 'environment', 'harness'],
+      description: "what the failures come from (brief: \"Name the cause\"): code — the work itself; environment — the machine around it (a hung tool or hook, commit signing, a browser engine hang, the machine asleep, network or auth); harness — the loop itself (a late or wedged agent, reviewers that did not answer). Only `code` spends a replan (a harness cause is free as many times as the budget allows, then charged); `environment` halts the run with your reason. Unset counts as code",
+    },
     learnings: { type: 'array', items: { type: 'string' }, description: 'durable lesson(s) from this failure, carried into any later replan' },
     tasks: { type: 'array', items: TASK_ITEM_SCHEMA, description: 'the revised REMAINING task list — REQUIRED and non-empty when decision=REVISE, as structured array items HERE (never inlined into reason); only work still to do — never DONE tasks' },
   },
@@ -846,7 +853,7 @@ ${task.taskText}
 
 ## Where it fits
 ${task.specExcerpt || '(see the spec/plan)'}
-${artifacts()}
+${artifacts()}${(task.prefetchedBefore || []).length ? `\nThis task was hydrated before ${task.prefetchedBefore.join(', ')} landed: facts about the current code in its text may predate them — check the code before relying on one.` : ''}
 
 ## Files
 ${(task.files || []).map((f) => '- ' + f).join('\n')}
@@ -988,7 +995,33 @@ ${declared}
 ## Files the implementer reported changing
 ${reported}
 
-${rangeBlock(task, range)}${startCheckBlock(task, range)}${ancestryBlock(task, range)}`
+${rangeBlock(task, range)}${startCheckBlock(task, range)}${ancestryBlock(task, range)}${precheckFacts(task, range)}`
+}
+// The precheck's FACT SHEET: one Bash call that prints what every check is judged from. A
+// precheck of about eight git commands took 5–13 minutes in a real run, nearly all of it
+// per-call latency, not git. Only for a known range: without SHAs the brief's manual path stands.
+function precheckFacts(task, range) {
+  const r = range || {}
+  const from = rangeFrom(r)
+  if (!from || !r.headSha) return ''
+  const g = `git -C ${repoPath(task.repo)}`
+  const span = `${from}..${r.headSha}`
+  const lines = [
+    `echo "== commits"; ${g} rev-list --count ${span}`,
+    `echo "== files"; ${g} diff --name-status ${span}`,
+    // added lines only, as file:line: conflict markers and stub markers (candidates — the brief judges them)
+    String.raw`echo "== added conflict/stub markers"; ${g} diff -U0 ${span} | awk '/^\+\+\+ /{f=substr($0,7);next} /^@@/{split($3,a,",");l=substr(a[1],2)+0;next} /^\+/{if($0~/<<<<<<<|>>>>>>>|TODO|FIXME|XXX|not implemented|placeholder/||$0=="+======="){print f":"l": "substr($0,2)};l++}' | head -n 40`,
+    `echo "== added or modified files over 2 MB"; ${g} diff --name-only --diff-filter=AM ${span} | while IFS= read -r f; do s=$(${g} cat-file -s "${r.headSha}:$f" 2>/dev/null) && [ "$s" -gt 2097152 ] && echo "$s $f"; done`,
+  ]
+  if (r.startSha) lines.push(`echo "== range start (check 8)"; ${g} merge-base --is-ancestor ${r.startSha} ${r.headSha}; echo "exit $?"`)
+  if (task.lane === 'direct' && task.runBranch) lines.push(`echo "== on the run branch (check 7)"; ${g} merge-base --is-ancestor ${r.headSha} ${task.runBranch}; echo "exit $?"`)
+  return `
+
+## The fact sheet — run this ONCE, in one Bash call, then judge every check from its output
+\`\`\`bash
+${lines.join('\n')}
+\`\`\`
+It already runs the commands of the sections above. Run another command only when a check cannot be decided from this output.`
 }
 // The implementer's `startSha` is a claim, and the whole review range hangs on it: a start that
 // is not an ancestor of the head (a typo, a SHA from another branch) would hand the panel a
@@ -1221,7 +1254,7 @@ function integratePrompt(task) {
 
 // The re-planner — A* from the CURRENT state when the scheduler is stuck.
 function replanPrompt({ goal, done, failures, blocked, learnings, replanNo, maxReplans }) {
-  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans}.
+  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans} (only a \`cause: code\` replan spends one).
 
 ## Goal
 ${goal}
@@ -1238,7 +1271,15 @@ ${failures.map((f) => `- ${f.id} (${f.repo}) → ${f.status}${f.kind === 'harnes
 
 ## Still BLOCKED behind those failures (index level — do NOT re-emit; they run on their own once unblocked)
 ${(blocked || []).length ? blocked.map((b) => `- ${b.id} (${b.repo}) slice ${b.slice}${(b.dependsOn || []).length ? ` — blocked on: ${b.dependsOn.join(', ')}` : ''}`).join('\n') : '(none — the failures are the only open work)'}
-
+${
+    wedged.length
+      ? `
+## STILL_RUNNING — past their hard limit, still awaited; their repos are FENCED
+${wedged.map((w) => `- ${w.task || '?'} (${w.repo || '?'}) — \`${w.label}\` has not returned and may still commit`).join('\n')}
+Never requeue these, nor any task in a fenced repo's checkout: anything you emit for ${[...new Set(wedged.map((w) => w.repo).filter(Boolean))].join(', ')} is held until the fence is released.
+`
+      : ''
+  }
 ## Learnings carried (earlier replans + prior runs)
 ${learnings.length ? learnings.map((l) => `- ${l}`).join('\n') : '- (none yet)'}
 ${
@@ -1402,7 +1443,7 @@ const isGating = (f) => !(f && f.harness) && GATING_SEVERITY.has(String((f && f.
 // merge the integrate step could not do, a footprint or ancestry precheck on correct code) says
 // nothing about the model, and escalating it only multiplies the cost of the next attempt.
 // (REVIEWERS_UNAVAILABLE never reaches here: it halts the run instead of becoming a failure.)
-const HARNESS_FAILURES = new Set(['DIED', 'ERROR', 'HYDRATION_MISSING', 'MERGE_CONFLICT'])
+const HARNESS_FAILURES = new Set(['DIED', 'ERROR', 'HYDRATION_MISSING', 'MERGE_CONFLICT', 'FENCED'])
 const HARNESS_PRECHECKS = new Set(['footprint', 'ancestry'])
 function failureKind(r) {
   if (HARNESS_FAILURES.has(r.status)) return 'harness'
@@ -1416,8 +1457,10 @@ function failureKind(r) {
 // Turn a failed task result into a compact, actionable brief for the re-planner.
 function failureDetail(r) {
   if (r.status === 'NEEDS_CONTEXT') return `  question: ${r.impl?.question || '(unspecified)'}`
-  if (r.status === 'DIED' && timedOut.some((l) => l === `impl:${r.id}` || l.startsWith(`fix:${r.id}:`)))
-    return `  the implementer hit the ${AGENT_TIMEOUT_MIN}-min wall-clock backstop and was booked as died — but the backstop does NOT stop the agent: it may still be running in the checkout, and may commit after this replan starts. Before re-dispatching, inspect \`git log ${BASE_BRANCH}..<run branch>\`, \`git status\` and live build/test/server processes. If its work landed, requeue the task as verify-and-report (startSha = the commit before the task), never as a redo that would rebuild or regenerate committed work.`
+  if (r.status === 'DIED' && r.late)
+    return `  the implementer ran past its soft time limit (it was waited for, not cut off) and then returned NOTHING — a terminal API error or a user skip after long work, not a judgement on the task. It may have committed before it ended. Before re-dispatching, inspect \`git log ${BASE_BRANCH}..<run branch>\`, \`git status\` and live build/test/server processes. If its work landed, requeue the task as verify-and-report (startSha = the commit before the task), never as a redo that would rebuild or regenerate committed work.`
+  if (r.status === 'FENCED')
+    return `  the lane passed its review panel but was NOT integrated: its repo's primary checkout is FENCED behind a dispatch that passed its hard limit and is still running (${(r.integrate && r.integrate.detail) || 'see STILL_RUNNING'}). Its worktree and lane branch are intact. Do not requeue it while the repo is fenced; once the fence is released, a retry of the same id resumes in the existing worktree.`
   if (r.status === 'DIED')
     return '  the implementer agent died without returning a result — a terminal API error (spend limit / outage) or a user skip, NOT a judgement on the task itself; safe to requeue once the dispatches succeed again'
   // Checked BEFORE r.review: a GATE_FAILED result carries a PASSING review, so the review
@@ -1531,6 +1574,7 @@ function flushJournal() {
       model: 'haiku',
       effort: 'low', // runs one fixed script
       schema: JOURNAL_SCHEMA,
+      kind: 'journal', // short limits: a hung writer must not hold journal.chain (and the run's end) for 40 min
     })
     if (r) journal.bumped = true
     if (!r) {
@@ -1585,8 +1629,30 @@ const MAX_FIX_ATTEMPTS = Number.isInteger(opts.maxFixAttempts) && opts.maxFixAtt
 // Cheapest loop: scout-answered NEEDS_CONTEXT questions per implementer dispatch.
 const MAX_CONTEXT_RESOLVES =
   Number.isInteger(opts.maxContextResolves) && opts.maxContextResolves >= 0 ? opts.maxContextResolves : DEFAULT_MAX_CONTEXT_RESOLVES
-// Per-agent HANG backstop (see withTimeout). Feature-detected, so it never regresses a run.
+// Per-agent time limits (see withLimits): soft = logged late and still awaited; hard = a reader
+// is given up on, a writer is wedged (its repo fenced). Feature-detected, so they never regress a run.
 const AGENT_TIMEOUT_MIN = Number.isFinite(opts.agentTimeoutMin) && opts.agentTimeoutMin >= 0 ? opts.agentTimeoutMin : DEFAULT_AGENT_TIMEOUT_MIN
+const AGENT_HARD_TIMEOUT_MIN = Number.isFinite(opts.agentHardTimeoutMin) && opts.agentHardTimeoutMin >= 0 ? opts.agentHardTimeoutMin : DEFAULT_AGENT_HARD_TIMEOUT_MIN
+if (AGENT_TIMEOUT_MIN > 0 && AGENT_HARD_TIMEOUT_MIN > 0 && AGENT_HARD_TIMEOUT_MIN < AGENT_TIMEOUT_MIN)
+  log(`⚠ agentHardTimeoutMin ${AGENT_HARD_TIMEOUT_MIN} is under agentTimeoutMin ${AGENT_TIMEOUT_MIN} — a hard limit is never shorter than its soft limit, so writers wedge at ${AGENT_TIMEOUT_MIN} min`)
+// {timeouts:{<kind>:{soft, hard, hedgeAfter}}} — minutes, per dispatch kind (KIND_LIMITS below).
+const TIMEOUT_KINDS = ['writer', 'reader', 'hydrate', 'preflight', 'precheck', 'journal', 'ship', 'env', 'crystallize']
+const timeoutOverrides = {}
+for (const [k, v] of Object.entries(opts.timeouts && typeof opts.timeouts === 'object' ? opts.timeouts : {})) {
+  if (!TIMEOUT_KINDS.includes(k) || !v || typeof v !== 'object') {
+    log(`⚠ timeouts.${k} ignored — ${TIMEOUT_KINDS.includes(k) ? 'expected {soft, hard, hedgeAfter}' : `unknown dispatch kind (known: ${TIMEOUT_KINDS.join(', ')})`}`)
+    continue
+  }
+  timeoutOverrides[k] = {}
+  for (const f of ['soft', 'hard', 'hedgeAfter'])
+    if (v[f] !== undefined) {
+      if (!(Number.isFinite(v[f]) && v[f] > 0)) log(`⚠ timeouts.${k}.${f} ignored — must be a positive number of minutes`)
+      else if (f === 'hedgeAfter' && !['preflight', 'precheck', 'hydrate'].includes(k)) log(`⚠ timeouts.${k}.hedgeAfter ignored — only side-effect-free kinds hedge (preflight, precheck, and hydrate without claims)`)
+      else timeoutOverrides[k][f] = v[f]
+    }
+}
+// Hydration prefetch: issues hydrated ahead of their dispatch while their blockers run (0 = off).
+const HYDRATE_AHEAD = Number.isInteger(opts.hydrateAhead) && opts.hydrateAhead >= 0 ? opts.hydrateAhead : DEFAULT_HYDRATE_AHEAD
 // Startup session probe: refuse to execute when a trivial Bash call waits this long (0 = never refuse).
 const MAX_TOOL_LATENCY_SEC = Number.isFinite(opts.maxToolLatencySec) && opts.maxToolLatencySec >= 0 ? opts.maxToolLatencySec : DEFAULT_MAX_TOOL_LATENCY_SEC
 // Within-repo parallelism cap: tasks in flight per repo.
@@ -1687,12 +1753,12 @@ const repoList = Array.isArray(opts.repos)
       }))
   : []
 repoConfig = new Map(repoList.map((r) => [r.name, r]))
-// `timeoutMin` can only LENGTHEN the backstop for a repo (see agentT). A value at or under the
+// `timeoutMin` can only LENGTHEN a repo's writer limits (see limitsFor). A value at or under the
 // global one silently did nothing — and a replan once "fixed" a timeout by proposing a higher
 // value for a key that was never in effect.
 for (const r of repoList)
   if (Number.isFinite(r.timeoutMin) && AGENT_TIMEOUT_MIN > 0 && r.timeoutMin <= AGENT_TIMEOUT_MIN)
-    log(`⚠ repos[${r.name}].timeoutMin ${r.timeoutMin} has no effect: it can only RAISE the ${AGENT_TIMEOUT_MIN}-min backstop (agentTimeoutMin) for this repo — drop it, or set it above ${AGENT_TIMEOUT_MIN}`)
+    log(`⚠ repos[${r.name}].timeoutMin ${r.timeoutMin} has no effect: it can only RAISE the ${AGENT_TIMEOUT_MIN}-min soft limit (agentTimeoutMin) for this repo's writers — drop it, or set it above ${AGENT_TIMEOUT_MIN}`)
 // `prBy` is gone (0.8.0): every repo's PR is pushed and opened by its terminal slot.
 if (Array.isArray(opts.repos) && opts.repos.some((r) => r && r.prBy !== undefined)) log('⚠ repos[].prBy is ignored since 0.8.0 — every repo\'s run branch is pushed and its one PR opened by its terminal slot')
 specialists = Array.isArray(opts.specialists)
@@ -1719,43 +1785,230 @@ if (repoList.length) {
   INDEX_ISSUE_SCHEMA.properties.repo.enum = names
 }
 
-// Race an agent() against a wall-clock timer. If the timer wins we resolve to
-// null — the SAME value the runtime already returns when a subagent dies — so
-// every existing `if (!x)` / null-filter routes a HANG into the fix/replan
-// machinery instead of blocking the step forever. Feature-detected: with no
-// real timer (or {agentTimeoutMin:0}) it returns the promise untouched. The
-// timer uses no Date/Math.random, so resume + result-caching are unaffected.
-function withTimeout(promise, ms, label, mins) {
-  if (!(ms > 0) || typeof setTimeout !== 'function') return promise
+// ── time limits: a timeout makes a dispatch LATE, never dead ──
+// The runtime cannot cancel an agent: agent() returns a bare promise, and a timer can only stop
+// WAITING. A real run booked two implementers DIED at a 40-min backstop; they kept running for 78
+// and 115 more minutes and committed while replans dispatched retries into the same checkout. So
+// every dispatch has a KIND, and each kind two limits (minutes):
+//   soft — logged `late`, still awaited: a result that arrives later is accepted as if on time
+//   hard — onHard 'null' (readers, mechanical kinds): given up on and resolved null (timedOut);
+//          onHard 'wedge' (writers): NEVER given up on — markWedged fences the repo, the task keeps
+//          its slot so nothing is re-dispatched into its checkout, and when the agent returns the
+//          task continues with that result
+//   hedgeAfter (side-effect-free kinds only) — one duplicate dispatch `<label>~h1`; the first
+//          non-null answer wins, null only once every copy returned null
+// {agentTimeoutMin:0} disables every limit; {timeouts:{<kind>:{soft, hard, hedgeAfter}}} overrides
+// one kind. The runtime's queue time counts toward every limit, so a burst can look late. No
+// Date/Math.random: replay and result caching are unaffected.
+const KIND_LIMITS = {
+  writer: () => ({ soft: AGENT_TIMEOUT_MIN, hard: AGENT_HARD_TIMEOUT_MIN, onHard: 'wedge' }), // impl, fix, +ctx, integrate, gate, terminal fixes
+  reader: (cap) => ({ soft: AGENT_TIMEOUT_MIN, hard: cap(2 * AGENT_TIMEOUT_MIN), onHard: 'null' }), // reviewers, verify, guard, resolve, replan, index, harness-context, claims, ledger
+  hydrate: (cap) => ({ soft: AGENT_TIMEOUT_MIN, hard: cap(90), onHard: 'null' }),
+  preflight: () => ({ soft: 2, hard: 6, onHard: 'null', hedgeAfter: 2 }),
+  precheck: () => ({ soft: 6, hard: 15, onHard: 'null', hedgeAfter: 6 }),
+  journal: () => ({ soft: 4, hard: 8, onHard: 'null' }),
+  ship: () => ({ soft: 5, hard: 12, onHard: 'null' }),
+  env: () => ({ soft: 2, hard: 4, onHard: 'null' }),
+  crystallize: () => ({ soft: Math.max(CRYSTALLIZE_TIMEOUT_MIN, AGENT_TIMEOUT_MIN), hard: 180, onHard: 'null' }),
+}
+// A hedge runs the same prompt twice, so only a kind without side effects may hedge — hydration
+// only when it does not claim tracker issues.
+const hedgeable = (kind) => kind === 'preflight' || kind === 'precheck' || (kind === 'hydrate' && !claim)
+function limitsFor(kind, repo) {
+  if (!(AGENT_TIMEOUT_MIN > 0)) return null
+  const k = KIND_LIMITS[kind] ? kind : 'reader'
+  const cap = (m) => (AGENT_HARD_TIMEOUT_MIN > 0 ? Math.min(m, AGENT_HARD_TIMEOUT_MIN) : m)
+  const lim = { kind: k, ...KIND_LIMITS[k](cap), ...timeoutOverrides[k] }
+  // repos[].timeoutMin keeps its meaning: it raises its writers' soft limit, and their hard one to 2×
+  const rt = k === 'writer' ? repoTimeout(repo) : undefined
+  if (rt) {
+    lim.soft = Math.max(lim.soft, rt)
+    if (lim.hard > 0) lim.hard = Math.max(lim.hard, 2 * rt)
+  }
+  if (lim.hard > 0) lim.hard = Math.max(lim.hard, lim.soft)
+  if (!hedgeable(k)) delete lim.hedgeAfter
+  return lim
+}
+const fmtMin = (m) => String(Math.round(m * 1000) / 1000)
+const statusOf = (v) => (v == null ? 'null' : (typeof v === 'object' && (v.status || v.verdict || v.decision)) || 'ok')
+
+const lateLog = [] // [{label, task, kind, softMin, outcome: 'pending'|'accepted'|'died'|'abandoned'|'wedged'}] — every dispatch that passed its soft limit
+const wedged = [] // [{label, task, repo, hardMin}] — writers past their hard limit, still awaited
+const wedgedLog = [] // every label that ever wedged (telemetry)
+// repo → Set of holders {label, kind, hardMin, primary}. Nothing new is dispatched into a fenced
+// repo; a lane integration (primary checkout) is refused while a `primary` holder is there.
+const fencedRepos = new Map()
+const fenceWaiters = new Map() // repo → Set of callbacks fired when its primary checkout is fenced
+const taskRepo = new Map() // task id → repo, registered at dispatch: names the task of a dispatch whose call site passes only a label
+let dispatchClosed = false // the main loop is over: a late writer's task must not dispatch its next stage
+
+// The main loop sleeps on its in-flight tasks AND on this, so a wedge or a fence release
+// re-evaluates the schedule at once.
+const WAKE = { wake: true }
+let wakeP = null
+let wakeFn = null
+const waker = () => wakeP || (wakeP = new Promise((r) => (wakeFn = r)))
+function wake() {
+  const r = wakeFn
+  wakeP = wakeFn = null
+  if (r) r(WAKE)
+}
+const primaryFenced = (repo) => [...(fencedRepos.get(repo) || [])].some((h) => h.primary)
+function holdFence(repo, h) {
+  if (!fencedRepos.has(repo)) {
+    fencedRepos.set(repo, new Set())
+    emit('fence', { repo, action: 'hold' })
+  }
+  fencedRepos.get(repo).add(h)
+  if (h.primary) for (const fn of [...(fenceWaiters.get(repo) || [])]) fn()
+  wake()
+  return h
+}
+function releaseFence(repo, h) {
+  const s = fencedRepos.get(repo)
+  if (!s || !s.delete(h)) return
+  if (!s.size) {
+    fencedRepos.delete(repo)
+    emit('fence', { repo, action: 'release' })
+    log(`◎ ${repo}: fence released — ${h.label} returned`)
+  }
+  wake()
+}
+// Calls `fn` once the repo's primary checkout is fenced (at once if it already is); returns the unsubscribe.
+function onPrimaryFence(repo, fn) {
+  if (primaryFenced(repo)) {
+    fn()
+    return () => {}
+  }
+  if (!fenceWaiters.has(repo)) fenceWaiters.set(repo, new Set())
+  fenceWaiters.get(repo).add(fn)
+  return () => fenceWaiters.get(repo).delete(fn)
+}
+// A writer passed its hard limit: keep waiting, but fence its repo so no slot is reused and
+// nothing is dispatched into its checkout. Returns the entry `unwedge` takes back.
+function markWedged(label, meta, hardMin) {
+  const w = { label, task: meta.task || null, repo: meta.repo || null, hardMin }
+  w.holder = w.repo ? holdFence(w.repo, { label, kind: 'writer', hardMin, primary: !meta.lane }) : null
+  wedged.push(w)
+  wedgedLog.push(label)
+  emit('wedged', { label, task: w.task, repo: w.repo, hardMin })
+  log(`⛔ [wedged] ${label}${w.repo ? ` in ${w.repo}` : ''} passed its ${fmtMin(hardMin)}-min hard limit — still awaited, never re-dispatched${w.repo ? `; ${w.repo} is FENCED (nothing new starts there) until it returns` : ''}`)
+  wake()
+  return w
+}
+function unwedge(w) {
+  const i = wedged.indexOf(w)
+  if (i >= 0) wedged.splice(i, 1)
+  if (w.holder) releaseFence(w.repo, w.holder)
+  wake()
+}
+// Hook point, called once when a dispatch passes its soft limit (it is still awaited). The
+// environment-check lane fills it: a late WRITER fires its non-blocking check, because a `git
+// commit` hung behind a locked signing agent looks exactly like a slow implementer.
+function onLate(info) {} // eslint-disable-line no-unused-vars
+
+// Race one dispatch (and, for a hedgeable kind, its duplicate) against its kind's limits — see
+// KIND_LIMITS. `start(label)` dispatches; `meta` = {task, repo, lane}.
+function withLimits(start, lim, label, meta) {
+  const first = start(label)
+  if (!lim || typeof setTimeout !== 'function') return first
+  const m = meta || {}
   return new Promise((resolve) => {
-    let settled = false
-    const done = (v) => {
-      if (settled) return
+    let settled = false // the caller has its answer
+    let gaveUp = false // a reader past its hard limit: resolved null; its late answer is recorded, never used
+    let live = 1 // copies still out (the dispatch, plus its hedge)
+    let late = null // its lateLog entry, once past soft
+    let wedge = null // its wedged entry, once a writer passed hard
+    let holder = null // the fence an abandoned reader holds on its repo
+    const timers = []
+    const at = (min, fn) => {
+      if (min > 0) timers.push(setTimeout(fn, min * 60 * 1000))
+    }
+    const finish = (v) => {
       settled = true
-      if (typeof clearTimeout === 'function') clearTimeout(timer)
+      if (typeof clearTimeout === 'function') for (const t of timers) clearTimeout(t)
       resolve(v)
     }
-    const timer = setTimeout(() => {
-      // The EFFECTIVE minutes, not the global — a step with a longer allowance
-      // must not report the global number and send someone hunting for a
-      // timeout that never fired at that value.
-      log(`⏳ [timeout] ${label} exceeded ${mins}m — treating as died (routes to fix/replan); the agent itself is NOT stopped and may still commit`)
+    const arrive = (which) => (v) => {
+      live--
+      const val = v == null ? null : v
+      if (gaveUp) {
+        emit('late-result', { label: which, task: m.task || null, accepted: false, status: statusOf(val) })
+        if (holder && !live) releaseFence(m.repo, holder)
+        return
+      }
+      if (settled || (val === null && live > 0)) return // a copy already answered, or the other copy still may
+      if (late) {
+        const accepted = val !== null && !(wedge && dispatchClosed)
+        late.outcome = accepted ? 'accepted' : val === null ? 'died' : 'abandoned'
+        emit('late-result', { label: which, task: m.task || null, accepted, status: statusOf(val) })
+        if (wedge) log(`◎ [late] ${which} returned past its hard limit — ${accepted ? 'result accepted, the task continues' : val === null ? 'with nothing' : 'after the run had stopped dispatching'}`)
+      }
+      if (wedge) unwedge(wedge)
+      finish(val)
+    }
+    first.then(arrive(label), () => arrive(label)(null))
+    at(lim.soft, () => {
+      if (settled) return
+      late = { label, task: m.task || null, kind: lim.kind, softMin: lim.soft, outcome: 'pending' }
+      lateLog.push(late)
+      log(`⏳ [late] ${label} past ${fmtMin(lim.soft)}m — still waiting (${lim.hard > 0 ? `hard ${fmtMin(lim.hard)}m` : 'no hard limit'}); the agent is not stopped`)
+      emit('late', { label, task: m.task || null, kind: lim.kind, softMin: lim.soft })
+      try {
+        onLate({ label, task: m.task || null, repo: m.repo || null, kind: lim.kind, softMin: lim.soft })
+      } catch (e) {
+        log(`⚠ onLate hook failed for ${label}: ${String(e)}`)
+      }
+    })
+    at(lim.hedgeAfter, () => {
+      if (settled || gaveUp) return
+      const h = `${label}~h1`
+      live++
+      log(`⏳ [hedge] ${label} has not answered after ${fmtMin(lim.hedgeAfter)}m — racing a duplicate ${h}; the first answer wins`)
+      emit('hedge', { label: h })
+      Promise.resolve()
+        .then(() => start(h))
+        .then(arrive(h), () => arrive(h)(null))
+    })
+    at(lim.hard, () => {
+      if (settled) return
+      if (lim.onHard === 'wedge') {
+        if (late) late.outcome = 'wedged'
+        wedge = markWedged(label, m, lim.hard)
+        return
+      }
+      gaveUp = true
       timedOut.push(label)
-      done(null)
-    }, ms)
-    promise.then((v) => done(v), () => done(null))
+      if (late) late.outcome = 'abandoned'
+      // No fence for an abandoned reader: reviewers, verifiers and guards run commands only in
+      // their own detached worktree (runBlock), never in the shared checkout.
+      log(`⏳ [timeout] ${label} passed its ${fmtMin(lim.hard)}m hard limit — no longer awaited (treated as no reply); the agent itself is NOT stopped and may still be running${holder ? `; ${m.repo} is fenced until it returns` : ''}`)
+      finish(null)
+    })
   })
 }
-// Every agent dispatch goes through this so the hang backstop is uniform, except
-// where a step has a documented longer floor: pass `timeoutMin` to raise it for
-// THAT dispatch only. `timeoutMin` is stripped before agent() sees it — the
-// runtime's opts schema is closed, so an unknown key would be a validation error.
-// A globally disabled backstop ({agentTimeoutMin:0}) stays disabled: an override
-// may only lengthen a live timer, never resurrect one the caller turned off.
+// The task (and so the repo) a dispatch belongs to. Call sites that own the task pass it; the
+// others are read from the label, shaped `<kind>:<task id>[#n][~rN|~hN][:stage][+ctxN]`.
+function metaFor(label, o) {
+  if (o.task) return { task: o.task, repo: o.repo || taskRepo.get(o.task) || null, lane: !!o.lane }
+  const s = String(label || '')
+  let task = null
+  if (s.includes(':')) {
+    const rest = s.slice(s.indexOf(':') + 1)
+    for (const id of taskRepo.keys())
+      if ((rest === id || (rest.startsWith(id) && '#~:+'.includes(rest[id.length]))) && (!task || id.length > task.length)) task = id
+  }
+  return { task, repo: o.repo || (task && taskRepo.get(task)) || null, lane: !!o.lane }
+}
+// Every agent dispatch goes through this. `kind` picks its limits (default 'reader'); `task`,
+// `repo` and `lane` say what it works on. All four are stripped before agent() sees the opts —
+// the runtime's opts schema is closed, so an unknown key would be a validation error.
 const agentT = (prompt, o) => {
-  const { timeoutMin, ...rest } = o || {}
-  const mins = AGENT_TIMEOUT_MIN > 0 && Number.isFinite(timeoutMin) && timeoutMin > AGENT_TIMEOUT_MIN ? timeoutMin : AGENT_TIMEOUT_MIN
-  return withTimeout(agent(prompt, rest), mins * 60 * 1000, rest.label || 'agent', mins)
+  const { kind, task, repo, lane, ...rest } = o || {}
+  const label = rest.label || 'agent'
+  const meta = metaFor(label, { task, repo, lane })
+  if (dispatchClosed && meta.task) return Promise.resolve(null)
+  return withLimits((l) => agent(prompt, l === label ? rest : { ...rest, label: l }), limitsFor(kind, meta.repo), label, meta)
 }
 
 // ── the pipeline-input gate: no design artifacts, no run ──
@@ -1990,7 +2243,7 @@ if (resumedLanded.length)
   log(`◎ resumed: ${resumedLanded.length} task(s) absorbed from the run's state, verified on the run branch — ${resumedLanded.map((r) => `${r.id}@${r.headSha.slice(0, 7)} (${r.source})`).join(', ')}`)
 log(
   `${pendingIndex.length} issue(s) to run across ${new Set(pendingIndex.map((i) => i.slice)).size} slice(s) · ${alreadyDone.length} already done/canceled (absorbed) · ` +
-    `mode=${execute ? 'EXECUTE' : 'PREVIEW (no implementers)'} · scheduling=dependsOn-driven · maxPerRepo=${MAX_PER_REPO} (disjoint-file lanes) · maxReplans=${MAX_REPLANS} · maxFixAttempts=${MAX_FIX_ATTEMPTS} · maxContextResolves=${MAX_CONTEXT_RESOLVES} · agentTimeout=${AGENT_TIMEOUT_MIN ? AGENT_TIMEOUT_MIN + 'm' : 'off'}` +
+    `mode=${execute ? 'EXECUTE' : 'PREVIEW (no implementers)'} · scheduling=dependsOn-driven · maxPerRepo=${MAX_PER_REPO} (disjoint-file lanes) · maxReplans=${MAX_REPLANS} · maxFixAttempts=${MAX_FIX_ATTEMPTS} · maxContextResolves=${MAX_CONTEXT_RESOLVES} · agentTimeout=${AGENT_TIMEOUT_MIN ? `${AGENT_TIMEOUT_MIN}m (hard ${AGENT_HARD_TIMEOUT_MIN ? `${AGENT_HARD_TIMEOUT_MIN}m` : 'off for writers'})` : 'off'} · hydrateAhead=${HYDRATE_AHEAD || 'off'}` +
     ` · precheck=${PRECHECK ? 'on' : 'off'} · verifyFindings=${VERIFY_FINDINGS ? 'on' : 'off'} · escalateAtFixRound=${ESCALATE_AT_FIX_ROUND || 'off'}` +
     `${MAX_OUTPUT_TOKENS ? ` · maxOutputTokens=${fmtTok(MAX_OUTPUT_TOKENS)}` : ''}${specialists.length ? ` · specialists=${specialists.map((s) => s.agent).join(',')}` : ''}` +
     `${claimedElsewhere.length ? ` · ${claimedElsewhere.length} started by someone else (not dispatched): ${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}` : ''}`,
@@ -2080,7 +2333,7 @@ if (!execute) {
     basis: `${pendingIndex.length} task(s); critical path ${criticalPath} (the longest dependsOn chain: a blocked-by chain runs one task at a time whatever maxPerRepo is); largest repo ${largestRepo} task(s) at maxPerRepo ${MAX_PER_REPO}; ${perTaskMin.low}–${perTaskMin.high} min per task${estOverride ? ' (estimatePerTaskMin)' : ' (measured on 0.8.x runs)'}, ${terminalMin.low}–${terminalMin.high} min for the terminal review and gate, ${startupMin} min startup. Excludes time spent waiting on you and halts.`,
   }
   log(`⏱ estimated wall clock ≈ ${hours.low}–${hours.high} h — ${estimate.basis}`)
-  return { preview: true, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran. Estimated wall clock ≈ ${hours.low}–${hours.high} h (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
+  return { preview: true, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran. Estimated wall clock ≈ ${hours.low}–${hours.high} h (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
 }
 
 // ═══════════════════════ 1 · per-task lifecycle ═══════════════════════
@@ -2379,9 +2632,10 @@ function modelFor(task) {
   return base
 }
 async function dispatchImpl(task, fixFindings, resolved, label, stage) {
-  // A repo may declare a longer floor for ITS dispatches — e.g. one whose focused test runs
-  // share infrastructure with a machine-global-locked gate and can queue before starting.
-  const timeoutMin = repoTimeout(task.repo)
+  // A WRITER: past its hard limit it is wedged, never given up on (see KIND_LIMITS). A repo may
+  // raise its limits with timeoutMin — e.g. one whose focused test runs share infrastructure
+  // with a machine-global-locked gate and can queue before starting.
+  const writer = { kind: 'writer', task: task.id, repo: task.repo, lane: task.lane === 'worktree' }
   const model = modelFor(task)
   if (fixFindings && fixFindings.length) emit('fix', { task: task.id, stage: stage || '?', round: task.fixRounds || 0, model, findings: fixFindings.length })
   let out = await agentT(implPrompt(task, fixFindings, resolved), {
@@ -2390,7 +2644,7 @@ async function dispatchImpl(task, fixFindings, resolved, label, stage) {
     model,
     agentType: task.agent,
     schema: IMPL_SCHEMA,
-    timeoutMin,
+    ...writer,
   })
   for (let n = 1; out && out.status === 'NEEDS_CONTEXT' && n <= MAX_CONTEXT_RESOLVES; n++) {
     const q = ((out && out.question) || '').trim()
@@ -2407,7 +2661,7 @@ async function dispatchImpl(task, fixFindings, resolved, label, stage) {
       model,
       agentType: task.agent,
       schema: IMPL_SCHEMA,
-      timeoutMin,
+      ...writer,
     })
   }
   return out
@@ -2420,7 +2674,9 @@ async function dispatchImpl(task, fixFindings, resolved, label, stage) {
 // continuous dispatch a lane can also be admitted NEXT TO an in-flight DIRECT task,
 // which occupies the primary checkout the merge runs in — so the chain additionally
 // waits for that task (directDone, set by startTask) before merging. No deadlock:
-// a direct task never integrates, so it can never wait on this chain.
+// a direct task never integrates, so it can never wait on this chain. A wedged writer in the
+// primary checkout (the direct task, an integration) would hold the chain forever, so a lane
+// waiting behind a FENCED primary checkout settles FENCED instead, its worktree left in place.
 const mergeQueues = {} // repo → tail of that repo's integration chain
 function integrateLane(task) {
   const dispatch = () =>
@@ -2431,9 +2687,21 @@ function integrateLane(task) {
       effort: 'low', // mechanical merge; a conflict is reported, never resolved
       agentType: task.agent,
       schema: INTEGRATE_SCHEMA,
+      kind: 'writer',
+      task: task.id,
+      repo: task.repo,
     })
+  const fenced = () => ({ status: 'FENCED', detail: `held behind ${[...(fencedRepos.get(task.repo) || [])].map((h) => h.label).join(', ') || 'a fenced checkout'}` })
   const after = Promise.all([mergeQueues[task.repo] || null, directDone[task.repo] || null])
-  const p = after.then(dispatch, dispatch).then((r) => {
+  const turn = new Promise((resolve) => {
+    const off = onPrimaryFence(task.repo, () => resolve('fenced'))
+    const go = () => {
+      off()
+      resolve(primaryFenced(task.repo) ? 'fenced' : 'go')
+    }
+    after.then(go, go)
+  })
+  const p = turn.then((t) => (t === 'go' ? dispatch() : fenced())).then((r) => {
     emit('integrate', { task: task.id, status: r ? r.status : 'DIED' })
     return r
   })
@@ -2503,6 +2771,7 @@ async function runTask(task) {
         effort: 'low',
         agentType: pluginAgent('reviewer'),
         schema: PRECHECK_SCHEMA,
+        kind: 'precheck', // 6/15 min, hedged at 6
       })
       let problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
       if (early && problems.length) early.discard('the precheck failed')
@@ -2604,7 +2873,7 @@ async function runTask(task) {
     log(`   · ${task.id}: reviews passed — integrating lane ${task.laneBranch} into ${task.runBranch}…`)
     const integrate = await integrateLane(task)
     if (!integrate || integrate.status !== 'MERGED') {
-      return { id: task.id, repo: task.repo, status: 'MERGE_CONFLICT', impl, review: quality, integrate }
+      return { id: task.id, repo: task.repo, status: integrate && integrate.status === 'FENCED' ? 'FENCED' : 'MERGE_CONFLICT', impl, review: quality, integrate }
     }
     landedHead = asSha(integrate.headSha) || landedHead
   }
@@ -2671,13 +2940,14 @@ if (PREFLIGHT) {
   const probe = (list, suffix) =>
     parallel(
       list.map((agentType) => () =>
-        agentT('Preflight check for an automated run: reply with {"ok": true}. Do nothing else: read no files, run no commands.', {
+        agentT('Preflight check for an automated run. Your first and only action is the structured reply {"ok": true}. Do not read your memory, any file, or run any tool — whatever your own definition says to do first.', {
           label: `preflight:${agentType}${suffix}`,
           phase: 'Parse plan',
           model: 'haiku',
           effort: 'low',
           agentType,
           schema: PREFLIGHT_SCHEMA,
+          kind: 'preflight', // 2/6 min, hedged at 2: a one-word reply once took 12 minutes
         }),
       ),
     )
@@ -2724,7 +2994,7 @@ emit('run.start', {
   mode: 'execute',
   meta: runMeta,
   resumed: !!resumeBase || resumedLanded.length > 0,
-  knobs: { maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, budgetFloor: BUDGET_FLOOR, claims: !!claim },
+  knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, budgetFloor: BUDGET_FLOOR, claims: !!claim },
   repos: repoList.map((r) => r.name),
 })
 for (const c of claimedElsewhere) emit('claim', { task: c.id, action: 'skip', by: c.by })
@@ -2801,6 +3071,8 @@ Fix dispatches: address ONLY the findings listed, commit to \`${ref.branch}\`. T
   }
 }
 let replans = resumeBase && Number.isInteger(resumeBase.replansUsed) && resumeBase.replansUsed > 0 ? Math.min(resumeBase.replansUsed, MAX_REPLANS) : 0
+let replanNo = replans // every replan dispatched (its label number); only a code-cause replan spends one of MAX_REPLANS
+let freeReplans = 0 // harness-cause replans not charged to MAX_REPLANS (at most MAX_REPLANS of them, then they are charged)
 let halt = null // {reason} once we stop early
 const claimedByRun = new Map() // id → repo: issues this run claimed at hydration (released at the end if they did not land)
 let waves = 0 // dispatch cycles (historical name — reported in the summary)
@@ -2924,6 +3196,73 @@ const repoBusy = (repo) => [...inFlight.values()].filter((x) => x.repo === repo)
 const directDone = {} // repo → the in-flight DIRECT task's promise; lane integrations queue behind it
 let consecutiveDied = 0 // task settles in a row where the agent died without a result — see the circuit breaker
 
+// ── hydration PREFETCH: hydrate the next ready issues while their blockers are in flight ──
+// In a strict blocked-by chain each hydration (6–43 min in a real run) used to start only once the
+// task before it had landed, on the critical path. Up to HYDRATE_AHEAD issues whose every unmet
+// dependency is IN FLIGHT are hydrated ahead, one non-blocking dispatch at a time; a dispatch that
+// needs one of them awaits it. A null prefetch falls back to just-in-time hydration.
+const hydrating = new Map() // id → the prefetch promise hydrating it
+const prefetched = new Set() // ids hydrated ahead and not dispatched yet
+let prefetchN = 0
+let prefetchBusy = false
+let prefetchEpoch = 0 // bumped by every replan REVISE
+const invalidatedAt = {} // repo → the epoch whose REVISE made its prefetched hydrations stale (they lack the new learnings)
+// Ready order, shared by the dispatch picks and the prefetch: slice, then critical path, then id.
+const readyOrder = (a, b) =>
+  (a.slice ?? 0) - (b.slice ?? 0) || // vertical bias: smallest valuable slice first
+  downstreamOf(b.id) - downstreamOf(a.id) || // critical path: unlock the most downstream work
+  String(a.id).localeCompare(String(b.id))
+function prefetchCandidates() {
+  const ahead = [...pendingById.keys()].filter((id) => hydrating.has(id) || prefetched.has(id)).length
+  const room = HYDRATE_AHEAD - ahead
+  if (room <= 0) return []
+  const stuck = new Set(wedged.map((w) => w.task))
+  return [...pendingById.values()]
+    .filter((i) => !inFlight.has(i.id) && !hydratedById.has(i.id) && !hydrating.has(i.id))
+    .map((i) => ({ i, unmet: (i.dependsOn || []).filter((d) => !landedIds.has(d) && inProject.has(d)) }))
+    .filter(({ unmet }) => unmet.length && unmet.every((d) => inFlight.has(d) && !stuck.has(d)))
+    .sort((a, b) => readyOrder(a.i, b.i))
+    .slice(0, room)
+}
+function prefetchHydration(cands) {
+  if (!cands.length || prefetchBusy) return
+  const n = ++prefetchN
+  const epoch = prefetchEpoch
+  const issues = cands.map((c) => c.i)
+  const before = new Map(cands.map((c) => [c.i.id, c.unmet]))
+  prefetchBusy = true
+  log(`◌ prefetch: hydrating ${issues.map((i) => i.id).join(', ')} while ${[...new Set(cands.flatMap((c) => c.unmet))].join(', ')} run`)
+  const done = (hyd) => {
+    prefetchBusy = false
+    for (const i of issues) hydrating.delete(i.id)
+    if (!hyd || (Array.isArray(hyd.inputProblems) && hyd.inputProblems.length)) {
+      log(`⚠ prefetch hydrate:p${n} ${hyd ? 'reported input problems' : 'returned nothing'} — ${issues.map((i) => i.id).join(', ')} will hydrate at dispatch`)
+      return
+    }
+    // as the just-in-time path does: under both id and ticket
+    for (const t of hyd.tasks || []) {
+      if ((invalidatedAt[t.repo] || 0) > epoch) continue // a replan since: re-hydrated later, with its learnings
+      t.prefetchedBefore = before.get(t.id) || before.get(t.ticket) || []
+      hydratedById.set(t.id, t)
+      if (t.ticket && t.ticket !== 'NO_TICKET') hydratedById.set(t.ticket, t)
+    }
+    for (const i of issues) if (hydratedById.has(i.id)) prefetched.add(i.id)
+    if (claim)
+      for (const i of issues) {
+        claimedByRun.set(i.id, i.repo)
+        emit('claim', { task: i.id, action: 'claim', by: claim.identity })
+      }
+  }
+  const p = agentT(hydratePrompt(project, issues, relevantLearnings([...learnings, ...priorLearnings], [...new Set(issues.map((i) => i.repo))]), claim), {
+    label: `hydrate:p${n}`,
+    phase: 'Parse plan',
+    model: 'sonnet',
+    schema: TASK_LIST_SCHEMA,
+    kind: 'hydrate',
+  }).then(done, () => done(null))
+  for (const i of issues) hydrating.set(i.id, p)
+}
+
 // Critical-path bias: among equally-sliced ready issues, prefer the one that
 // transitively unblocks the MOST downstream work. Computed once from the phase-A
 // index; replan-invented ids default to 0 (the bias is a tiebreak, never a gate).
@@ -2994,7 +3333,10 @@ function routeTask(t, cycle) {
 // DIED through runTask's own null handling, an internal throw as ERROR.
 function startTask(t) {
   const fs = filesOf(t)
-  const entry = { id: t.id, repo: t.repo, files: fs, exclusive: !fs.length, direct: t.lane !== 'worktree' }
+  // lateMark: where this attempt's late dispatches start in lateLog (the circuit breaker reads it)
+  const entry = { id: t.id, repo: t.repo, files: fs, exclusive: !fs.length, direct: t.lane !== 'worktree', lateMark: lateLog.length }
+  taskRepo.set(t.id, t.repo)
+  prefetched.delete(t.id)
   entry.promise = (async () => {
     try {
       return (await runTask(t)) || { id: t.id, repo: t.repo, status: 'DIED' }
@@ -3071,8 +3413,10 @@ function settle(r) {
     flushJournal()
   } else {
     // Circuit-breaker input: DIED means the agent returned NOTHING (spend limit /
-    // API outage), not a judgement on the task. Any real result resets the streak.
-    consecutiveDied = r.status === 'DIED' ? consecutiveDied + 1 : 0
+    // API outage), not a judgement on the task. Any real result resets the streak. Only a QUICK
+    // null counts: an agent that ran past its soft limit first (r.late) was working, not failing
+    // to dispatch — three slow agents once read as an API outage.
+    consecutiveDied = r.status === 'DIED' ? consecutiveDied + (r.late ? 0 : 1) : 0
     const kind = failureKind(r)
     lastFailure.set(r.id, { kind, status: r.status })
     failures.push({ id: r.id, repo: r.repo, status: r.status, kind, detail: failureDetail(r) })
@@ -3085,6 +3429,8 @@ function settle(r) {
 // paid — a commit after the stamp would staleness its tree hash.
 async function terminalSlot(repo) {
   const ft = terminalTask(repo)
+  taskRepo.set(ft.id, repo)
+  taskRepo.set(`${repo}:gate`, repo)
   log(`   · ${repo}: project drained → terminal quality sweep (${panelFor(repo, 'terminal').map((p) => p.name).join(' · ')}) on ${ft.branch}…`)
   const terminal = await runReviewStage(ft, 'terminal', panelFor(repo, 'terminal'), 'Terminal review', [], null)
   if (terminal.verdict === 'UNAVAILABLE') return { id: ft.id, repo, gateStep: true, status: 'REVIEWERS_UNAVAILABLE', review: terminal }
@@ -3110,7 +3456,9 @@ async function terminalSlot(repo) {
     model: 'sonnet', // run one command, push, write the PR body: no design judgement left to buy with opus
     agentType: agentFor(repo),
     schema: IMPL_SCHEMA,
-    timeoutMin: repoTimeout(repo),
+    kind: 'writer',
+    task: pseudo.id,
+    repo,
   })
   // A gate that reports its gate still PENDING certified nothing — it is the gate.
   const failed = !gate || gate.status === 'BLOCKED' || gate.status === 'NEEDS_CONTEXT' || gate.status === 'DONE_PENDING_GATE'
@@ -3125,6 +3473,53 @@ async function terminalSlot(repo) {
   return { id: pseudo.id, repo, gateStep: true, status: failed ? 'GATE_FAILED' : gate.status, gate, gateApplies: applies, prUrl: gate && gate.prUrl, advisory: terminal.advisory }
 }
 
+// ── what wedged writers and fences hold ──
+// A pending issue is HELD when its repo is fenced, it is itself a wedged task, or it waits
+// (transitively) on a held one: nothing this session can do moves it.
+function fenceHeld() {
+  const memo = new Map()
+  const held = (id, seen) => {
+    if (memo.has(id)) return memo.get(id)
+    const i = pendingById.get(id)
+    if (!i || seen.has(id)) return false
+    seen.add(id)
+    const v = fencedRepos.has(i.repo) || inFlight.has(id) || (i.dependsOn || []).some((d) => !landedIds.has(d) && held(d, seen))
+    memo.set(id, v)
+    return v
+  }
+  return (id) => held(id, new Set())
+}
+// The final wave, raced against "every slot still open is wedged": a gate (or a terminal fix)
+// past its hard limit must not hold the other repos' results, nor the run, forever.
+const STILL_RUNNING = { stillRunning: true }
+async function finalWave(finals) {
+  const out = finals.map(() => STILL_RUNNING)
+  const done = new Set()
+  const all = parallel(
+    finals.map((repo, i) => () =>
+      terminalSlot(repo).then((r) => {
+        out[i] = r
+        done.add(repo)
+        return r
+      }),
+    ),
+  )
+  for (;;) {
+    const r = await Promise.race([all, waker()])
+    if (r !== WAKE) return r
+    const open = finals.filter((repo) => !done.has(repo))
+    if (open.length && open.every((repo) => wedged.some((w) => w.repo === repo))) {
+      log(`⛔ final wave: ${open.join(', ')} still running past the hard limit — booking the other slot(s) now`)
+      return out
+    }
+  }
+}
+function stillRunningReason() {
+  const parts = wedged.map((w) => `${w.label}${w.repo ? ` in ${w.repo}` : ''} passed the ${fmtMin(w.hardMin)}-min hard limit and has not returned; it may still commit`)
+  for (const [repo, hs] of fencedRepos) for (const h of hs) if (h.kind !== 'writer') parts.push(`${h.label} in ${repo} was given up on at its ${fmtMin(h.hardMin)}-min hard limit and may still be running in that checkout`)
+  return `still running: ${parts.join('; ') || 'a fenced repo'} — let it finish (git log, ps) before resuming`
+}
+
 while (true) {
   // ── 1 · dispatch — start EVERY issue whose own dependsOn have landed. No wave
   // barrier: a settle loops straight back here, so newly-unblocked work starts
@@ -3133,17 +3528,11 @@ while (true) {
   // nothing new starts, and the run ends cleanly at quiescence.
   const stopping = budgetLow()
   if (!halt && !stopping) {
-    const eligible = [...pendingById.values()]
-      .filter((i) => depsMet(i) && !inFlight.has(i.id))
-      .sort(
-        (a, b) =>
-          (a.slice ?? 0) - (b.slice ?? 0) || // vertical bias: smallest valuable slice first
-          downstreamOf(b.id) - downstreamOf(a.id) || // critical path: unlock the most downstream work
-          String(a.id).localeCompare(String(b.id)),
-      )
+    const eligible = [...pendingById.values()].filter((i) => depsMet(i) && !inFlight.has(i.id)).sort(readyOrder)
     const picks = []
     const picked = {}
     for (const i of eligible) {
+      if (fencedRepos.has(i.repo)) continue // a writer past its hard limit (or an abandoned reader) may still be working in it
       if (repoBusy(i.repo).length + (picked[i.repo] || 0) >= MAX_PER_REPO) continue
       if (repoBusy(i.repo).some((x) => x.exclusive)) continue // an undeclared footprint holds its whole repo
       picked[i.repo] = (picked[i.repo] || 0) + 1
@@ -3152,17 +3541,27 @@ while (true) {
     if (picks.length) {
       waves++ // dispatch CYCLES — kept under the historical `waves` name for output continuity
       // ── phase B: hydrate this cycle's issues that don't have a task yet (one small agent) ──
+      // An issue already being prefetched is awaited, never hydrated twice.
+      const prefetching = [...new Set(picks.filter((i) => !hydratedById.has(i.id) && hydrating.has(i.id)).map((i) => hydrating.get(i.id)))]
+      if (prefetching.length) await Promise.all(prefetching)
       const toHydrate = picks.filter((i) => !hydratedById.has(i.id))
       if (toHydrate.length) {
-        const hyd = await step(`cycle ${waves} — hydrate ${toHydrate.map((i) => i.id).join(', ')}`, () =>
-          agentT(hydratePrompt(project, toHydrate, relevantLearnings([...learnings, ...priorLearnings], [...new Set(toHydrate.map((i) => i.repo))]), claim), {
-            label: `hydrate:w${waves}`,
-            phase: 'Parse plan',
-            model: 'sonnet', // extraction from the tracker + spec excerpts; the replanner stays on opus,
-            schema: TASK_LIST_SCHEMA,
-          }),
-        )
-        if (!hyd) halt = { reason: `hydration died on cycle ${waves} (${toHydrate.map((i) => i.id).join(', ')})` }
+        const hydrateOnce = (suffix) =>
+          step(`cycle ${waves} — hydrate ${toHydrate.map((i) => i.id).join(', ')}${suffix ? ' (retry)' : ''}`, () =>
+            agentT(hydratePrompt(project, toHydrate, relevantLearnings([...learnings, ...priorLearnings], [...new Set(toHydrate.map((i) => i.repo))]), claim), {
+              label: `hydrate:w${waves}${suffix}`,
+              phase: 'Parse plan',
+              model: 'sonnet', // extraction from the tracker + spec excerpts; the replanner stays on opus,
+              schema: TASK_LIST_SCHEMA,
+              kind: 'hydrate', // a late hydration is accepted: one took 43 min and halted a whole run
+            }),
+          )
+        let hyd = await hydrateOnce('')
+        if (!hyd) {
+          log(`⚠ hydration of cycle ${waves} returned nothing — retrying it once before the run stops`)
+          hyd = await hydrateOnce('~r1')
+        }
+        if (!hyd) halt = { reason: `hydration died on cycle ${waves} (${toHydrate.map((i) => i.id).join(', ')}), twice` }
         else if (Array.isArray(hyd.inputProblems) && hyd.inputProblems.length)
           halt = { reason: `hydration found input problems: ${hyd.inputProblems.join(' · ')}` }
         if (halt) {
@@ -3258,12 +3657,20 @@ while (true) {
         for (const t of admitted) startTask(t)
       }
     }
+    if (HYDRATE_AHEAD > 0) prefetchHydration(prefetchCandidates())
   }
 
   // ── 2 · anything running → wait for the FIRST settle, book it, rescan immediately ──
-  if (inFlight.size) {
-    const r = await Promise.race([...inFlight.values()].map((x) => x.promise))
+  // A wedge or a fence release wakes the loop too. When every task still in flight is a wedged
+  // writer, nothing will settle on its own: fall through to the quiescent step for the rest.
+  const stuck = inFlight.size > 0 && [...inFlight.keys()].every((id) => wedged.some((w) => w.task === id))
+  if (inFlight.size && !stuck) {
+    const r = await Promise.race([...inFlight.values()].map((x) => x.promise).concat(waker()))
+    if (r === WAKE) continue
+    const ended = inFlight.get(r.id)
     inFlight.delete(r.id)
+    // a DIED after the agent ran past its soft limit was working, not failing to dispatch
+    if (r.status === 'DIED' && ended && lateLog.slice(ended.lateMark).some((l) => l.task === r.id)) r.late = true
     settle(r)
     // Circuit breaker: consecutive settles where the agent died without ANY result
     // mean the dispatches themselves are failing (spend limit / API outage) — stop
@@ -3275,8 +3682,9 @@ while (true) {
     continue
   }
 
-  // ── 3 · QUIESCENT (nothing in flight) — the ONLY place we stop, gate, or replan,
-  // which is exactly the coherence the old wave barrier existed to provide. ──
+  // ── 3 · QUIESCENT (nothing in flight, or only wedged writers) — the ONLY place we stop,
+  // gate, or replan, which is exactly the coherence the old wave barrier existed to provide.
+  // Wedged writers keep their repos FENCED: nothing there is gated, replanned into or dispatched. ──
   if (halt) break
   if (stopping) {
     halt = {
@@ -3294,15 +3702,20 @@ while (true) {
   // gate/sweep FAILURE still replans → new tasks → pendingById refills → the held slot
   // retries at the next full drain.) An ungated repo runs the sweep, then the push + PR
   // dispatch without a gate command.
-  const finals = !pendingById.size ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r)) : []
+  // "Drained" = nothing pending outside a fence: a repo whose work is all landed gates even while
+  // another repo's writer is wedged (it would not be gated before this session ends otherwise).
+  const held = fenceHeld()
+  const finals = [...pendingById.keys()].every(held) ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r) && !fencedRepos.has(r) && ![...pendingById.values()].some((i) => i.repo === r)) : []
   if (finals.length) {
     log(`▶ final wave: terminal sweep → ${finals.some(hasGateCommand) ? 'gate + ' : ''}push + PR: ${finals.join(', ')}`)
     flushJournal()
-    const results = await step(`final wave — terminal slots (${finals.join(', ')})`, () => parallel(finals.map((repo) => () => terminalSlot(repo))))
+    const results = await step(`final wave — terminal slots (${finals.join(', ')})`, () => finalWave(finals))
     // A null slot is an agent the runtime lost to a terminal error — map it back to
     // its repo by index and book it as GATE_FAILED (the existing dead-gate semantics).
+    // A slot whose writer is wedged is neither: it stays open, its repo fenced.
     ;(results || [])
       .map((r, i) => {
+        if (r === STILL_RUNNING) return null
         if (r || !finals[i]) return r
         emit('terminal', { repo: finals[i], verdict: 'DIED' })
         return { id: `${finals[i]}:gate`, repo: finals[i], gateStep: true, status: 'GATE_FAILED', gate: null }
@@ -3314,14 +3727,15 @@ while (true) {
 
   {
     // ── nothing schedulable ──
-    if (failures.length && replans < MAX_REPLANS) {
+    // A failure inside a fenced repo cannot be acted on until its fence is released.
+    if (failures.some((f) => !fencedRepos.has(f.repo)) && replans < MAX_REPLANS) {
       // failures are blocking the rest (or are all that is left) → A* from current state
-      replans++
+      replanNo++
       phase('Replan')
-      const blocked = [...pendingById.values()].map((i) => ({ id: i.id, repo: i.repo, slice: i.slice, dependsOn: i.dependsOn || [] }))
-      let revision = await step(`replan #${replans} — A* from current state`, () =>
-        agentT(replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans, maxReplans: MAX_REPLANS }), {
-          label: `replan#${replans}`,
+      const blocked = [...pendingById.values()].filter((i) => !inFlight.has(i.id)).map((i) => ({ id: i.id, repo: i.repo, slice: i.slice, dependsOn: i.dependsOn || [] }))
+      let revision = await step(`replan #${replanNo} — A* from current state`, () =>
+        agentT(replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans + 1, maxReplans: MAX_REPLANS }), {
+          label: `replan#${replanNo}`,
           phase: 'Replan',
           model: 'opus',
           schema: REPLAN_SCHEMA,
@@ -3330,13 +3744,13 @@ while (true) {
       // A REVISE with no tasks is malformed (the task list leaked into `reason` as text) —
       // retry the planner ONCE with an explicit correction before treating it as a halt.
       if (revision && revision.decision === 'REVISE' && !(revision.tasks || []).length) {
-        log(`⚠ replan #${replans}: REVISE returned zero tasks — retrying the planner once`)
-        revision = await step(`replan #${replans} — retry (REVISE had no tasks)`, () =>
+        log(`⚠ replan #${replanNo}: REVISE returned zero tasks — retrying the planner once`)
+        revision = await step(`replan #${replanNo} — retry (REVISE had no tasks)`, () =>
           agentT(
-            replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans, maxReplans: MAX_REPLANS }) +
+            replanPrompt({ goal: goalRef, done: doneTasks, failures, blocked, learnings: [...priorLearnings, ...learnings].map(learningText), replanNo: replans + 1, maxReplans: MAX_REPLANS }) +
               '\n\nIMPORTANT: a previous attempt chose REVISE but returned an EMPTY "tasks" array (its task list was serialized into "reason" as text, which the scheduler cannot use). Return the revised remaining tasks as structured items in the "tasks" array field; keep "reason" to short prose.',
             {
-              label: `replan#${replans}-retry`,
+              label: `replan#${replanNo}-retry`,
               phase: 'Replan',
               model: 'opus',
               schema: REPLAN_SCHEMA,
@@ -3346,17 +3760,43 @@ while (true) {
       }
       if (!revision) {
         halt = { reason: 'the re-planner died' }
-        log(`⛔ replan #${replans}: planner died`)
+        log(`⛔ replan #${replanNo}: planner died`)
         break
       }
       const failingRepos = [...new Set(failures.map((f) => f.repo).filter(Boolean))]
       const newLearnings = (revision.learnings || []).map((l) => toLearning(l, failingRepos)).filter(Boolean)
       learnings.push(...newLearnings)
-      if (revision.decision === 'HALT') {
-        emit('replan', { n: replans, decision: 'HALT', reason: revision.reason, requeued: 0, learnings: newLearnings.map(learningText) })
-        halt = { reason: revision.reason }
-        log(`⛔ replan #${replans}: HALT — ${revision.reason}`)
+      // Only a CODE cause spends the replan budget. An environment cause (a hung tool or hook,
+      // commit signing, a browser engine hang, a machine asleep) halts: requeuing the same work
+      // into the same broken environment fails the same way, and a real run spent its whole
+      // budget like that. A harness cause (a late or wedged agent, silent reviewers) is free
+      // MAX_REPLANS times, then charged like code, so a harness loop still ends.
+      const cause = revision.cause === 'environment' || revision.cause === 'harness' ? revision.cause : 'code'
+      const charged = cause === 'code' || (cause === 'harness' && freeReplans >= MAX_REPLANS)
+      if (charged) replans++
+      else freeReplans++
+      if (cause === 'environment') {
+        emit('replan', { n: replanNo, decision: 'HALT', cause, reason: revision.reason, requeued: 0, learnings: newLearnings.map(learningText) })
+        halt = { reason: `environment: ${revision.reason}`, kind: 'environment' }
+        log(`⛔ replan #${replanNo}: the cause is the environment, not the code — halting without requeuing (no replan spent): ${revision.reason}`)
         break
+      }
+      if (revision.decision === 'HALT') {
+        emit('replan', { n: replanNo, decision: 'HALT', cause, reason: revision.reason, requeued: 0, learnings: newLearnings.map(learningText) })
+        halt = { reason: revision.reason, ...(cause === 'harness' ? { kind: 'harness' } : {}) }
+        log(`⛔ replan #${replanNo}: HALT — ${revision.reason}`)
+        break
+      }
+      // Prefetched hydrations of not-yet-dispatched tasks in the failing repos lack this replan's
+      // learnings: drop them, they hydrate again (an in-flight prefetch's result is discarded).
+      prefetchEpoch++
+      for (const r of failingRepos) invalidatedAt[r] = prefetchEpoch
+      for (const id of [...prefetched]) {
+        const t = hydratedById.get(id)
+        if (!t || !failingRepos.includes(t.repo) || inFlight.has(id)) continue
+        hydratedById.delete(id)
+        if (t.ticket) hydratedById.delete(t.ticket)
+        prefetched.delete(id)
       }
       const revised = revision.tasks || []
       const revisedDeferred = revised.filter((t) => t.deferred)
@@ -3368,6 +3808,10 @@ while (true) {
         // A retry of an in-project issue must land under its tracker id, or its dependents
         // never see it in landedIds — so ticket wins over a planner-invented id.
         if (t.ticket && t.ticket !== 'NO_TICKET' && inProject.has(t.ticket)) t.id = t.ticket
+        if (inFlight.has(t.id)) {
+          log(`   · replan #${replanNo}: ${t.id} is still running past its hard limit — not requeued`)
+          continue
+        }
         pendingById.set(t.id, { id: t.id, title: '', repo: t.repo, state: 'todo', slice: t.slice ?? 0, sliceLabel: t.sliceLabel || '', dependsOn: t.dependsOn || [] })
         inProject.add(t.id)
         t.replanned = true
@@ -3385,7 +3829,7 @@ while (true) {
         if (fi >= 0) failures.splice(fi, 1) // being retried with a NEW approach — no longer a standing failure
         requeued++
       }
-      emit('replan', { n: replans, decision: 'REVISE', reason: revision.reason, requeued, learnings: newLearnings.map(learningText) })
+      emit('replan', { n: replanNo, decision: 'REVISE', cause, reason: revision.reason, requeued, learnings: newLearnings.map(learningText) })
       flushJournal() // a replan is a checkpoint worth having on disk
       // A replan re-enters tasks WITHOUT hydration, so an in-project ticket it (re)uses that
       // hydration never claimed is claimed here — otherwise it would be built unclaimed.
@@ -3394,7 +3838,7 @@ while (true) {
           .filter((t) => !t.deferred && inProject.has(t.id) && !alreadyDoneIds.has(t.id) && !claimedByRun.has(t.id) && !claimedElsewhere.some((c) => c.id === t.id) && t.ticket && t.ticket !== 'NO_TICKET')
           .map((t) => ({ id: t.id, repo: t.repo }))
         if (unclaimed.length) {
-          const got = await agentT(claimPrompt(unclaimed, claim.identity), { label: `claim#${replans}`, phase: 'Replan', model: 'haiku', effort: 'low', schema: RELEASE_SCHEMA })
+          const got = await agentT(claimPrompt(unclaimed, claim.identity), { label: `claim#${replanNo}`, phase: 'Replan', model: 'haiku', effort: 'low', schema: RELEASE_SCHEMA })
           // Only what the tracker actually took counts as ours (and is released later). An
           // issue someone else holds is still built — the replanner chose it — but logged.
           const took = new Set(got && Array.isArray(got.released) ? got.released : [])
@@ -3405,13 +3849,20 @@ while (true) {
           if (took.size < unclaimed.length) log(`⚠ claim: ${unclaimed.length - took.size} replanned issue(s) could not be claimed — ${unclaimed.filter((u) => !took.has(u.id)).map((u) => u.id).join(', ')}`)
         }
       }
-      log(`↻ replan #${replans}: REVISE — ${revision.reason} · ${requeued} task(s) requeued${newLearnings.length ? ` · learned: ${newLearnings.map(learningText).join('; ')}` : ''}`)
+      log(`↻ replan #${replanNo}: REVISE${cause === 'code' ? '' : ` (${cause} cause${charged ? ', charged: its free replans are used up' : ' — no replan spent'})`} — ${revision.reason} · ${requeued} task(s) requeued${newLearnings.length ? ` · learned: ${newLearnings.map(learningText).join('; ')}` : ''}`)
       if (!requeued) {
-        halt = { reason: `replan #${replans} requeued nothing while work is still open` }
+        halt = { reason: `replan #${replanNo} requeued nothing while work is still open` }
         log(`⛔ ${halt.reason}`)
         break
       }
       continue
+    }
+    // A wedged writer, or an abandoned reader, still holds a repo with open work: say so precisely
+    // — it may still commit, and a resume must not start before it has finished.
+    if (inFlight.size || [...fencedRepos.keys()].some((repo) => [...pendingById.values()].some((i) => i.repo === repo) || (repoRef[repo] && !gateDone.has(repo)))) {
+      halt = { reason: stillRunningReason(), kind: 'wedged' }
+      log(`⛔ ${halt.reason}`)
+      break
     }
     if (pendingById.size) {
       halt = {
@@ -3429,8 +3880,12 @@ while (true) {
   }
 }
 
+dispatchClosed = true // a wedged writer that returns from here on must not start its next stage
+// Writers still running past their hard limit — not "never ran", and not failed: wait for them.
+const stillRunning = wedged.map((w) => ({ id: w.task || w.label, repo: w.repo, status: 'STILL_RUNNING', label: w.label }))
+const stillRunningIds = new Set(stillRunning.map((w) => w.id))
 // Whatever is still pending when we stop never ran — report it, never drop it silently.
-const blocked = [...pendingById.values()].map((i) => ({ id: i.id, repo: i.repo, slice: i.slice ?? 0, dependsOn: i.dependsOn || [], status: 'BLOCKED_NOT_RUN' }))
+const blocked = [...pendingById.values()].filter((i) => !stillRunningIds.has(i.id)).map((i) => ({ id: i.id, repo: i.repo, slice: i.slice ?? 0, dependsOn: i.dependsOn || [], status: 'BLOCKED_NOT_RUN' }))
 if (blocked.length) log(`⚠ ${blocked.length} issue(s) never ran — blocked behind failures or a halt`)
 if (halt) emit('halt', { reason: halt.reason })
 
@@ -3440,7 +3895,7 @@ if (halt) emit('halt', { reason: halt.reason })
 let claimsReleased = null
 if (claim && claimedByRun.size) {
   const toRelease = [...claimedByRun.entries()]
-    .filter(([id]) => !landedIds.has(id))
+    .filter(([id]) => !landedIds.has(id) && !stillRunningIds.has(id)) // a still-running task is still being worked on
     .map(([id, repo]) => ({ id, repo, status: (allResults.find((r) => r.id === id) || {}).status || 'NOT_RUN' }))
   if (toRelease.length) {
     const rel = await step(`release ${toRelease.length} claimed issue(s)`, () =>
@@ -3491,7 +3946,7 @@ const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo
 const landedTaskIds = new Set(allResults.filter((r) => !r.gateStep && landed(r)).map((r) => r.id))
 const recoveredLater = (r) => (r.gateStep ? gateDone.has(r.repo) : landedTaskIds.has(r.id))
 const latestById = (list) => [...new Map(list.map((r) => [r.id, r])).values()]
-const openResults = latestById(allResults.filter((r) => !landed(r) && !recoveredLater(r)))
+const openResults = latestById(allResults.filter((r) => !landed(r) && !recoveredLater(r) && !stillRunningIds.has(r.id)))
 const recovered = latestById(allResults.filter((r) => !landed(r) && recoveredLater(r))).map((r) => ({ id: r.id, repo: r.repo, failedAs: r.status }))
 const noteOf = (r, f) => ({ task: r.id, repo: r.repo, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue, ...(f.harness ? { harness: true } : {}) })
 
@@ -3500,6 +3955,7 @@ const noteOf = (r, f) => ({ task: r.id, repo: r.repo, severity: f.severity, pers
   const endSummary = {
     done: allResults.filter((r) => !r.gateStep && landed(r)).length,
     failed: openResults.length,
+    stillRunning: stillRunning.length,
     recovered: recovered.length,
     blocked: blocked.length,
     prs: prsOpened.length,
@@ -3525,10 +3981,12 @@ if (execute) {
     inputs: { specPath, planPath },
     repos: [...new Set(doneTasks.map((t) => t.repo))],
     done: doneTasks.map((t) => ({ id: t.id, repo: t.repo, status: t.status })),
-    needsAttention: openResults.map((r) => ({ id: r.id, repo: r.repo, status: r.status })),
+    needsAttention: openResults.map((r) => ({ id: r.id, repo: r.repo, status: r.status })).concat(stillRunning),
     recovered,
     toolLatencySec,
     timedOut,
+    late: lateLog.map(({ label, kind, softMin, outcome }) => ({ label, kind, softMin, outcome })),
+    wedged: wedgedLog,
     blocked: blocked.map((b) => b.id),
     prs: prsOpened,
     learnings, // [{text, repos}] — the next run's loader filters them by repo
@@ -3571,7 +4029,7 @@ if (execute) {
         model: 'opus',
         isolation: 'worktree', // checks out the ledger branch in its own worktree
         schema: CRYSTALLIZE_SCHEMA,
-        timeoutMin: CRYSTALLIZE_TIMEOUT_MIN,
+        kind: 'crystallize',
       }),
     )
     const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [])
@@ -3607,7 +4065,7 @@ const advisoryNotes = allResults.flatMap((r) => (r.advisory || []).map((f) => no
 const ungatedRepos = Object.keys(repoRef).filter((r) => !gateDone.has(r))
 if (ungatedRepos.length) log(`⚠ ${ungatedRepos.length} repo(s) landed work but never gated (no PR yet): ${ungatedRepos.map((r) => (ungatedReasons[r] ? `${r} (${ungatedReasons[r]} — push it by hand)` : r)).join(', ')} — re-invoke the project to drain and gate`)
 log(
-  `■ done: ${allResults.filter((r) => !r.gateStep && ok(r)).length} · needs-attention: ${openResults.length}${recovered.length ? ` (+${recovered.length} recovered after a replan)` : ''} · blocked (never ran): ${blocked.length} · absorbed: ${alreadyDone.length} · ` +
+  `■ done: ${allResults.filter((r) => !r.gateStep && ok(r)).length} · needs-attention: ${openResults.length}${recovered.length ? ` (+${recovered.length} recovered after a replan)` : ''}${stillRunning.length ? ` · still running: ${stillRunning.length}` : ''} · blocked (never ran): ${blocked.length} · absorbed: ${alreadyDone.length} · ` +
     `waves: ${waves} · advisory (not reworked): ${advisoryNotes.length} · ` +
     `context-Qs: ${contextResolves.asked} (${contextResolves.answered} answered by a scout, ${contextResolves.escalated} escalated) · ` +
     `guard: ${guardChecks.passed}/${guardChecks.checked} fix(es) passed without a panel re-run · ` +
@@ -3619,8 +4077,9 @@ log(
 return {
   inputs: { specPath, planPath, project }, // the design artifacts this run was built from
   done: allResults.filter((r) => !r.gateStep && ok(r)),
-  // still open: the latest attempt of each task or slot that never landed
-  needsAttention: openResults,
+  // still open: the latest attempt of each task or slot that never landed, plus writers still
+  // running past their hard limit (STILL_RUNNING — wait for them, they may still commit)
+  needsAttention: openResults.concat(stillRunning),
   // failed once, then landed after a replan (or the repo gated green): history, not work
   recovered,
   // issues the scheduler never reached — blocked behind a failure or a halt. Re-invoking the
@@ -3678,8 +4137,14 @@ return {
     steps: telemetry,
     // the session probe: seconds a trivial Bash call waited before it ran (null = not measured)
     toolLatencySec,
-    // dispatches the wall-clock backstop gave up on — each agent may have kept running after it
+    // dispatches given up on at their HARD limit (readers) — each agent may have kept running after it
     timedOut,
+    // every dispatch that passed its SOFT limit, and what became of it: accepted (a late valid
+    // result, used), died (late, then nothing), abandoned (a reader given up on), wedged (a writer
+    // still out at the end), pending
+    late: lateLog.map(({ label, kind, softMin, outcome }) => ({ label, kind, softMin, outcome })),
+    // writers that passed their hard limit (their repo was fenced while they ran)
+    wedged: wedgedLog,
     journal: journal.enabled ? { runDir: journal.runDir, events: journal.seq, written: journal.written, chunks: journal.flushes, mismatches: journal.mismatches, lost: journal.dead } : null,
   },
   note:

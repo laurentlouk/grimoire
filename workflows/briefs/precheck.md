@@ -9,6 +9,12 @@ The header gives the task's declared files, the files the implementer reported c
 the exact diff range (or, when the implementer reported no usable SHAs, how to find it).
 
 ## Checks — run them, in order, with git in the repo checkout
+When the header has a **fact sheet**, run it once, in one Bash call, and judge every check
+from its output; run another command only when a check cannot be decided from it. Each tool call
+costs seconds to minutes of latency, the git work itself is cheap. Its marker lines are
+candidates: judge each one (a `placeholder` attribute in markup is not a stub). No fact sheet
+means the implementer reported no usable range: establish it as the header says.
+
 1. **There is a change** (`change`). The range resolves, it holds at least one commit, and the diff is
    not empty. (No SHAs reported: establish the range yourself as the header says; a branch
    with no commit past the base branch is a FAIL.)
