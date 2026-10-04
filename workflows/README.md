@@ -124,7 +124,7 @@ ignored, with a warning.)
 | `draftPr` | `true` | open the repo's PR as a draft after its first landing; `false` pushes without opening a PR before the terminal slot |
 | `environmentChecks` | `[]` | `[{name, run, timeoutSec: 30, when: ['start', 'stall'], fix}]`: the project's own prerequisites (a browser the tests drive, a local service), checked like the built-ins. `run` is shell from config, trusted like `gate.run` |
 | `builtinEnvChecks` | `true` | per repo, `commit:<repo>` (a signed empty commit in a scratch worktree, hooks skipped, thrown away) and `remote:<repo>` (`git ls-remote origin HEAD`), each under a portable time limit (`perl -e 'alarm …'`; stock macOS has no `timeout`). See "Environment checks" |
-| `reviewParallel` | `'stages'` | `'stages'`: the precheck first, then spec and quality round 0 together on the same head; a spec fix that moves the head re-runs quality on the new head. `'all'`: precheck, spec and quality together (reviews are wasted when the precheck fails). `'off'`: one after the other, as in 0.8.x |
+| `reviewParallel` | `'stages'` | `'stages' \| 'all' \| 'off'`. `'stages'`: the precheck first, then spec and quality round 0 together on the same head; when a spec fix moves the head, the stale quality verdict is discarded and quality re-runs as `<persona>:<id>~h1`. `'all'`: the precheck runs alongside the reviewers too; a precheck FAIL discards both rounds and the stages then run in order. `'off'`: one after the other, as in 0.8.x. An unknown value warns and falls back to `'stages'`. Discarded rounds are journaled with `discarded: true` and a `reason`, and never count as a verdict |
 | `hydrateAhead` | `2` | how many ready-next tasks are hydrated while their blockers are still in flight (`0`: just in time only) |
 | `estimatePerTaskMin` | `{low: 40, high: 110}` | preview only: the minutes per task the wall-clock `estimate` assumes; a number sets both bounds |
 | `maxToolLatencySec` | `15` | execute runs: the session probe refuses to start when a trivial Bash call waits this long before it runs (a PreToolUse hook hanging until its timeout, paid on every command of the run); from 8 s it warns. `0` never refuses |
@@ -327,10 +327,12 @@ before.
 round 0 run together on the same head once the precheck passes, so a task waits for the
 slower stage instead of both: the common case is that every round-0 review passes (the 0.8.0
 run's journal had 32 review events and no FAIL). A spec fix that moves the head discards the
-quality verdict and re-runs it on the new head. A reviewer that runs a build or a test does it
-in its own detached worktree at the reviewed head (`git worktree add --detach`, the repo's
-`laneSetup`), never in the shared checkout: two reviewers building there once emptied each
-other's build output.
+quality verdict and re-runs it on the new head (`<persona>:<id>~h1`). Every reviewer, verifier,
+guard and sweep reviewer that runs a build or a test does it in its own detached worktree at the
+reviewed head, `<worktreeDir>/review-<task>-<persona>…` (`git worktree add --detach`, with the
+repo's `laneSetup` applied), never in the shared checkout: two reviewers building there once
+emptied each other's build output. The precheck reads git only and gets none; the gate removes
+any `review-*` worktree a dead reviewer left behind before it runs.
 
 **Hydration ahead.** In a blocked-by chain the next task used to be hydrated only after its
 blocker landed, on the critical path (6–43 minutes each in the 0.8.0 run). With `hydrateAhead`
