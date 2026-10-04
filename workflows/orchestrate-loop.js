@@ -4637,7 +4637,12 @@ if (halt) emit('halt', { reason: halt.reason })
 // PR if it has none (draftPr), the halt banner and the status comment. So does a repo the run
 // left ungated without a halt (a terminal slot that failed with no replan left).
 if (execute && SHIP_ON_HALT) {
-  const ending = Object.keys(repoRef).filter((repo) => !gateDone.has(repo) && shipStateOf(repo).landedHead)
+  // A repo whose terminal slot is still running (a gate past its hard limit) is left to it: the
+  // gate pushes, retitles and marks the PR ready itself, and a halt banner written meanwhile
+  // would contradict it.
+  const slotStillOpen = Object.keys(repoRef).filter((repo) => openSlots.has(repo) && !gateDone.has(repo))
+  if (slotStillOpen.length) log(`⚠ ship on halt skips ${slotStillOpen.join(', ')}: its terminal slot is still running and owns the PR`)
+  const ending = Object.keys(repoRef).filter((repo) => !gateDone.has(repo) && !openSlots.has(repo) && shipStateOf(repo).landedHead)
   if (ending.length) {
     if (envState.inflight) await envState.inflight // its failure and fix belong in the comment
     const stopFor = (repo) => {

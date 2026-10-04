@@ -175,6 +175,8 @@ function journalEvents(calls) {
   ok(journalEvents(calls).some((e) => e.type === 'gate' && e.repo === 'api' && e.prUrl === 'https://github.com/x/y/pull/9'), 'the journal records its gate event')
   ok(logs.some((l) => /◎ api: its terminal slot returned after its final wave — DONE · .*\(recorded; the run had stopped dispatching\)/.test(l)), 'logged as recorded after the run stopped dispatching')
   eq(((result && result.telemetry.late) || []).filter((l) => l.label === 'gate:api').map((l) => l.outcome), ['accepted'], 'telemetry.late: the gate result was accepted (nothing is dispatched after a gate)')
+  ok(!calls.some((c) => /^ship:api#halt/.test(c.label)), 'no halt ship for api while its gate still owns the PR (no halt banner over a PR the gate marks ready)')
+  ok(logs.some((l) => /ship on halt skips api: its terminal slot is still running/.test(l)), 'the skip is logged')
 }
 
 // ══════════════ K-3 · a late prefetch never overwrites what a replan revised ══════════════
