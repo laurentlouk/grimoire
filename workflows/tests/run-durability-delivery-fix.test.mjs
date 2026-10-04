@@ -350,6 +350,10 @@ for (const SHELL of SHELLS) {
     ok(/^LOCK ok \//m.test(r.out) && / gate$/.test(readFileSync(join(LK, 'owner'), 'utf8').trim()), 'then LOCK ok: held as `gate`')
     r = X.exec(SHELL, release)
     ok(/LOCK released/.test(r.out) && !existsSync(LK), 'the release removes it')
+    mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `1 ${Math.floor(Date.now() / 1000)} gate\n`)
+    r = X.exec(SHELL, take.replace(/^ {2}/gm, ''), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
+    ok(/^LOCK stale: gate /m.test(r.out) && /^LOCK ok \//m.test(r.out), 'a gate lock an earlier gate left (one repo never runs two gates at once) is taken over')
+    X.exec(SHELL, release)
   }
   X.done()
 }

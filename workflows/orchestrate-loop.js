@@ -1650,10 +1650,12 @@ ${L.join('\n')}
 // The gate's side of the ship lock: one script that waits (GATE_LOCK_WAIT_SEC) and takes it as `gate`,
 // and the command that releases it. Its Bash calls are short-lived shells, so a gate's lock is held by
 // age (GATE_LOCK_STALE_SEC), not by pid; ships honour it, and a halt (no gate left running) does not.
+// Nor does the next gate (GS=1): one repo never runs two gates at once, so a gate lock it finds was
+// left by an earlier gate that did not release it.
 function gateLockScripts(repo) {
   const P = `P=${shq(repoPath(repo))}`
   return {
-    take: ['set -u', `LW=\${GRIMOIRE_SHIP_LOCK_WAIT:-${GATE_LOCK_WAIT_SEC}}; case "$LW" in ''|*[!0-9]*) LW=${GATE_LOCK_WAIT_SEC} ;; esac; GS=0`, SHIP_HELPERS.split('\n')[0], SHIP_LOCK_FN, P, shipLockPath(repo), 'if shiplock gate; then echo "LOCK ok $LKP"; else echo "LOCK busy"; fi'].join('\n'),
+    take: ['set -u', `LW=\${GRIMOIRE_SHIP_LOCK_WAIT:-${GATE_LOCK_WAIT_SEC}}; case "$LW" in ''|*[!0-9]*) LW=${GATE_LOCK_WAIT_SEC} ;; esac; GS=1`, SHIP_HELPERS.split('\n')[0], SHIP_LOCK_FN, P, shipLockPath(repo), 'if shiplock gate; then echo "LOCK ok $LKP"; else echo "LOCK busy"; fi'].join('\n'),
     release: `${P}; ${shipLockPath(repo)}; rm -rf "$LKP"; echo "LOCK released"`,
   }
 }
