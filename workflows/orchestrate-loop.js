@@ -3182,7 +3182,7 @@ async function runTask(task) {
       let head = done.headSha
       if (task.lane === 'worktree') {
         const integrate = await integrateLane(task) // nothing new to merge; it still retires the lane
-        if (!integrate || integrate.status !== 'MERGED') return { id: task.id, repo: task.repo, status: 'MERGE_CONFLICT', impl, integrate }
+        if (!integrate || integrate.status !== 'MERGED') return { id: task.id, repo: task.repo, status: integrate && integrate.status === 'FENCED' ? 'FENCED' : 'MERGE_CONFLICT', impl, integrate }
         head = asSha(integrate.headSha) || head
       }
       return { id: task.id, repo: task.repo, status: impl.status, impl, advisory: [], runBranch: task.runBranch || task.branch, headSha: head, range: done, absorbed: 'reviewed-earlier' }
