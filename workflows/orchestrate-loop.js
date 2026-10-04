@@ -3236,9 +3236,11 @@ async function runTask(task) {
   // as they stand (verify-only), never "fixed" for being empty. An empty claim with nothing to show
   // goes through the precheck as before: that IS a defect.
   const prior = (Array.isArray(impl.landedBefore) ? impl.landedBefore : []).map(asSha).filter(Boolean)
+  let verifiedPrior = null // the landedBefore SHAs the panel is about to judge as they stand
   if (landed(impl) && prior.length && !range.firstSha && (!range.headSha || !range.startSha || range.headSha === range.startSha)) {
     const done = { baseSha: range.baseSha, startSha: null, firstSha: prior[0], headSha: prior[prior.length - 1] }
-    if (prior.every(isReviewedSha)) {
+    const branch = task.runBranch || runBranchFor(task.repo)
+    if (prior.every((s) => isReviewedSha(task.id, branch, s))) {
       emit('absorb', { task: task.id, repo: task.repo, source: 'reviewed-earlier', head: done.headSha })
       log(`   · ${task.id}: already on the branch and reviewed earlier (${prior.map((s) => s.slice(0, 7)).join(', ')}) — absorbed, no precheck, no panel`)
       let head = done.headSha
@@ -3250,8 +3252,9 @@ async function runTask(task) {
       return { id: task.id, repo: task.repo, status: impl.status, impl, advisory: [], runBranch: task.runBranch || task.branch, headSha: head, range: done, absorbed: 'reviewed-earlier' }
     }
     Object.assign(range, done)
+    verifiedPrior = prior
     emit('absorb', { task: task.id, repo: task.repo, source: 'verify-only', head: done.headSha })
-    log(`   · ${task.id}: already on the branch but not reviewed (${prior.map((s) => s.slice(0, 7)).join(', ')}) — reviewing ${done.firstSha}^..${done.headSha} as it stands`)
+    log(`   · ${task.id}: already on the branch but not reviewed for ${task.id} (${prior.map((s) => s.slice(0, 7)).join(', ')}) — reviewing ${done.firstSha}^..${done.headSha} as it stands`)
   }
 
   // ── the PRECHECK rung: is there something reviewable at all? ──
@@ -3380,7 +3383,7 @@ async function runTask(task) {
     landedHead = asSha(integrate.headSha) || landedHead
   }
 
-  return { id: task.id, repo: task.repo, status: impl.status, impl, prUrl: impl.prUrl, review: quality, advisory, runBranch: task.runBranch || task.branch, headSha: landedHead, range: { ...range } }
+  return { id: task.id, repo: task.repo, status: impl.status, impl, prUrl: impl.prUrl, review: quality, advisory, runBranch: task.runBranch || task.branch, headSha: landedHead, range: { ...range }, ...(verifiedPrior ? { verifiedPrior } : {}) }
 }
 
 // ═══════════ 2 · DAG execution: continuous dispatch + final terminal wave + REPLAN ═══════════
@@ -3519,23 +3522,27 @@ const gateDone = new Set() // repos whose terminal slot (sweep → gate where co
 const ungatedReasons = {} // repo → why its certified tree could not be shipped (push / PR step failed)
 const gateHold = new Set() // repos whose terminal slot FAILED — held until a replan lands new repo work, else the drained project re-dispatches the same failing slot forever
 const repoRef = {} // repo → {ticket, branch} from its most recent landed task (briefs the terminal slot)
-// Every SHA a review panel passed — in this session, or in an earlier one per the checkpoint and the
-// verified PR state. An implementer that finds its task already on the branch names the SHAs that
-// implement it (`landedBefore`); reviewed ones are absorbed as they are, never reviewed twice.
+// The SHAs a review panel passed, PER TASK and per run branch — in this session (the commits and the
+// range the panel judged), or in an earlier one (an absorbed record's head and first commit, once
+// the reconcile verified them on the run branch and outside the base). An implementer that finds
+// its task already on the branch names the SHAs that implement it (`landedBefore`): only when every
+// one was reviewed for THAT task on its run branch is it absorbed as it is; anything else is reviewed
+// as it stands. A global set let PROJ-2 cite PROJ-1's reviewed head and land with no review at all.
 // Prefix match, so a short SHA meets its full form.
-const reviewedShas = new Set()
-const markReviewed = (...shas) => {
-  for (const s of shas.flat()) if (asSha(s)) reviewedShas.add(asSha(s))
+const reviewedShas = new Map() // task id → Map(sha → run branch)
+const markReviewed = (id, runBranch, ...shas) => {
+  if (!id || !runBranch) return
+  if (!reviewedShas.has(id)) reviewedShas.set(id, new Map())
+  for (const s of shas.flat()) if (asSha(s)) reviewedShas.get(id).set(asSha(s), runBranch)
 }
-const isReviewedSha = (s) => {
+const isReviewedSha = (id, runBranch, s) => {
   const x = asSha(s)
-  return !!x && [...reviewedShas].some((r) => r.startsWith(x) || x.startsWith(r))
+  return !!x && [...(reviewedShas.get(id) || [])].some(([r, b]) => b === runBranch && (r.startsWith(x) || x.startsWith(r)))
 }
-for (const t of checkpointLanded) markReviewed(t.commits, t.firstSha, t.headSha)
 // The absorbed tasks join the run state as if they had landed in this session: dependencies met,
 // listed for the replanner, the terminal sweep and the PR body, the repo briefed for its slot.
 for (const t of absorbedRecords) {
-  markReviewed(t.commits, t.firstSha, t.headSha)
+  markReviewed(t.id, t.runBranch, t.firstSha, t.headSha) // verified on the run branch; its commits list is not
   landedIds.add(t.id)
   doneTasks.push({ id: t.id, repo: t.repo, status: t.status, summary: t.summary, ticket: t.ticket, runBranch: t.runBranch, headSha: t.headSha, commits: t.commits, files: t.files, range: { baseSha: null, startSha: t.startSha, firstSha: t.firstSha, headSha: t.headSha } })
   repoRef[t.repo] = { ticket: t.ticket, branch: t.runBranch }
@@ -4106,9 +4113,12 @@ function settle(r) {
     gateHold.delete(r.repo) // new work landed on this repo's tree — its gate may retry
     gateDone.delete(r.repo) // and a gate that already shipped must re-run on the new tree (replan-landed work after a green gate)
     const t = hydratedById.get(r.id)
-    // what the panel passed: the task's commits (and the earlier ones it verified), up to its head
+    // the task's commits (and the earlier ones it verified), up to its head
     const commits = [...new Set([...(r.impl?.commits || []), ...(r.impl?.landedBefore || []), r.range && r.range.firstSha, r.range && r.range.headSha].map(asSha).filter(Boolean))]
-    markReviewed(commits, r.headSha)
+    // what the panel JUDGED, for this task only: its commits and its reviewed range — `landedBefore`
+    // only when that was the range it judged (verify-only), or SHAs already reviewed for this task
+    const judged = [...(r.impl?.commits || []), ...(r.verifiedPrior || []), r.range && r.range.firstSha, r.range && r.range.headSha, r.headSha]
+    markReviewed(r.id, r.runBranch || runBranchFor(r.repo), judged)
     const files = [...new Set([...((t && t.files) || []).map((f) => String(f).split(' — ')[0].trim()), ...(r.impl?.filesChanged || []).map(String)].filter(Boolean))]
     doneTasks.push({ id: r.id, repo: r.repo, status: r.status, summary: r.impl?.summary, ticket: (t && t.ticket) || r.id, runBranch: r.runBranch, headSha: asSha(r.headSha), commits, files, range: r.range || null })
     // the gate is briefed on the RUN branch — a lane branch no longer exists after integration
