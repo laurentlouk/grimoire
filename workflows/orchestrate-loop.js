@@ -58,6 +58,8 @@ const JOURNAL_DEAD_AFTER = 2 // consecutive lost journal chunks before the write
 const DEFAULT_DELIVER = 'incremental' // after each landing: push the landed SHA (fast-forward, from a ship worktree) and keep ONE draft PR per repo up to date — the PR is the proof of what landed and the run's saved state. A 0.8.0 run built seven slices over 29 h and three halts and left nothing on the remote. 'end': nothing is pushed before the terminal slot. {deliver}, per repo {repos:[{deliver}]}.
 const SHIP_PUSH_FAILURES = 2 // consecutive failed pushes before a repo's incremental pushes stop (a pre-push hook that demands the gate stops them at once)
 const DEFAULT_ENV_CHECK_SEC = 30 // per environment check: a signed commit or an ls-remote behind a locked agent hangs; past this it is reported timed out (exit 142)
+const ENV_DEADLINE_SEC = 90 // the whole environment report: the checks run in parallel under one deadline, so the script returns inside the Bash tool's 120-s default whatever hangs
+const ENV_CHECK_MAX_SEC = 85 // one check's own limit never reaches the deadline: it ends (and cleans up) before the watchdog would kill it
 const POWER_WARN_PCT = 20 // macOS: on battery, the start check warns; a stall check warns again below this charge
 
 // Paths. All overridable through args — a skill installed with `npx skills add` lands under
@@ -764,25 +766,53 @@ function builtinChecksFor(repos) {
     { type: 'power', name: 'power', when: ENV_WHEN, warnOnly: true },
   ]
 }
+// The checks run IN PARALLEL, one background job each, under one deadline (ENV_DEADLINE_SEC,
+// GRIMOIRE_ENV_DEADLINE in the environment overrides it — the tests use it): run one after the
+// other, two repos' signed commit and ls-remote behind a locked agent took 4 × 30 s, past the Bash
+// tool's 120-s default, and the report was lost. Each check keeps its own limit (at most
+// ENV_CHECK_MAX_SEC); a job still running at the deadline is stopped and reported 142. The commit
+// probe's scratch worktree is added WITHOUT a checkout: it only proves the signer answers, and
+// checking out a large tree took longer than the commit it guards.
 function envScript(checks) {
-  const L = ['set -u', `${TO_FN}   # exit 142 = timed out`, `say() { echo "CHECK $1 EXIT $2"; tail -n 5 "$O" | sed 's/^/  | /'; }`, 'O=$(mktemp)']
-  for (const c of checks) {
+  const L = [
+    'set -u',
+    `${TO_FN}   # exit 142 = timed out`,
+    `DL=\${GRIMOIRE_ENV_DEADLINE:-${ENV_DEADLINE_SEC}}; case "$DL" in ''|*[!0-9]*) DL=${ENV_DEADLINE_SEC} ;; esac`,
+    'E=$(mktemp -d 2>/dev/null || mktemp -d -t grimoire)',
+    `say() { RC=$(cat "$E/$2.rc" 2>/dev/null); [ -n "$RC" ] || { RC=142; echo "still running at the \${DL}-s deadline: stopped" >>"$E/$2"; }; echo "CHECK $1 EXIT $RC"; tail -n 5 "$E/$2" 2>/dev/null | sed 's/^/  | /'; }`,
+  ]
+  const jobs = []
+  const says = []
+  checks.forEach((c, i) => {
+    const j = i + 1
     const g = c.repo ? `git -C ${shq(repoPath(c.repo))}` : ''
+    const lim = Math.min(c.timeoutSec || DEFAULT_ENV_CHECK_SEC, ENV_CHECK_MAX_SEC)
     if (c.type === 'commit')
       L.push(
-        `# ${c.name}: a signed commit in a scratch worktree (hooks skipped; thrown away, never pushed)`,
-        'D=$(mktemp -d); T="$D/wt"',
-        `if ${g} worktree add --detach -q "$T" HEAD >"$O" 2>&1; then GIT_TERMINAL_PROMPT=0 to ${c.timeoutSec} git -C "$T" -c core.hooksPath=/dev/null commit --allow-empty -q -m grimoire-env-probe >>"$O" 2>&1; RC=$?; else RC=$?; fi`,
-        `${g} worktree remove --force "$T" >/dev/null 2>&1; rm -rf "$D"; ${g} worktree prune >/dev/null 2>&1`,
-        `echo "signing: commit.gpgsign=$(${g} config --get commit.gpgsign) gpg.format=$(${g} config --get gpg.format) gpg.ssh.program=$(${g} config --get gpg.ssh.program)" >>"$O"`,
-        `say ${shq(c.name)} "$RC"`,
+        `# ${c.name}: a signed commit in a scratch worktree (no checkout, hooks skipped; thrown away, never pushed)`,
+        `( O="$E/${j}"; D=$(mktemp -d); T="$D/wt"`,
+        `  if ${g} worktree add --detach --no-checkout -q "$T" HEAD >"$O" 2>&1; then GIT_TERMINAL_PROMPT=0 to ${lim} git -C "$T" -c core.hooksPath=/dev/null commit --allow-empty -q -m grimoire-env-probe >>"$O" 2>&1; RC=$?; else RC=$?; fi`,
+        `  ${g} worktree remove --force "$T" >/dev/null 2>&1; rm -rf "$D"; ${g} worktree prune >/dev/null 2>&1`,
+        `  echo "signing: commit.gpgsign=$(${g} config --get commit.gpgsign) gpg.format=$(${g} config --get gpg.format) gpg.ssh.program=$(${g} config --get gpg.ssh.program)" >>"$O"`,
+        `  echo "$RC" >"$E/${j}.rc" ) >/dev/null 2>&1 & J${j}=$!`,
       )
     else if (c.type === 'remote')
-      L.push(`# ${c.name}: the remote answers (the network, the credential helper or the SSH agent)`, `GIT_TERMINAL_PROMPT=0 to ${c.timeoutSec} ${g} ls-remote origin HEAD >"$O" 2>&1; say ${shq(c.name)} $?`)
-    else if (c.type === 'power') L.push('# power: on battery a laptop may sleep mid-run (macOS; reported, never a failure)', 'if command -v pmset >/dev/null 2>&1; then pmset -g batt >"$O" 2>&1; say power 0; fi')
-    else L.push(`# ${c.name} (environmentChecks)`, `to ${c.timeoutSec} sh -c ${shq(c.run)} >"$O" 2>&1; say ${shq(c.name)} $?`)
+      L.push(`# ${c.name}: the remote answers (the network, the credential helper or the SSH agent)`, `( GIT_TERMINAL_PROMPT=0 to ${lim} ${g} ls-remote origin HEAD >"$E/${j}" 2>&1; echo $? >"$E/${j}.rc" ) >/dev/null 2>&1 & J${j}=$!`)
+    else if (c.type === 'power') L.push('# power: on battery a laptop may sleep mid-run (macOS; reported, never a failure)', `( if command -v pmset >/dev/null 2>&1; then pmset -g batt >"$E/${j}" 2>&1; echo 0 >"$E/${j}.rc"; fi ) >/dev/null 2>&1 & J${j}=$!`)
+    else L.push(`# ${c.name} (environmentChecks)`, `( to ${lim} sh -c ${shq(c.run)} >"$E/${j}" 2>&1; echo $? >"$E/${j}.rc" ) >/dev/null 2>&1 & J${j}=$!`)
+    jobs.push(`"$J${j}"`)
+    says.push(c.type === 'power' ? `command -v pmset >/dev/null 2>&1 && say power ${j}` : `say ${shq(c.name)} ${j}`)
+  })
+  if (jobs.length) {
+    L.push(
+      '# the deadline: a job still running then is stopped (its CHECK line says 142)',
+      `( Z=; trap 'kill "$Z" 2>/dev/null; exit 0' TERM; sleep "$DL" & Z=$!; wait "$Z"; kill ${jobs.join(' ')} ) >/dev/null 2>&1 & WD=$!`,
+      `wait ${jobs.join(' ')}`,
+      '{ kill "$WD"; wait "$WD"; } 2>/dev/null',
+      ...says,
+    )
   }
-  L.push('rm -f "$O"')
+  L.push('rm -rf "$E"')
   return L.join('\n')
 }
 function envBlock(checks, afterProbe) {
@@ -2207,12 +2237,23 @@ for (const [n, c] of (Array.isArray(opts.environmentChecks) ? opts.environmentCh
     log(`⚠ environmentChecks[${n}] ignored — a second check named ${name}`)
     continue
   }
+  // the built-in checks' names: a user check called `commit:api` would be judged as the built-in
+  // one (the signing fix, the signing config) and printed twice under one name
+  if (/^(commit|remote):/.test(name) || name === 'power') {
+    log(`⚠ environmentChecks[${n}] ignored — ${name} is a built-in check's name (commit:<repo>, remote:<repo>, power); rename it`)
+    continue
+  }
   const when = (typeof c.when === 'string' ? [c.when] : Array.isArray(c.when) ? c.when : ENV_WHEN).filter((w) => ENV_WHEN.includes(w))
-  userEnvChecks.push({ type: 'user', name, run: c.run.trim(), timeoutSec: Number.isFinite(c.timeoutSec) && c.timeoutSec > 0 ? c.timeoutSec : DEFAULT_ENV_CHECK_SEC, when: when.length ? when : ENV_WHEN, fix: str(c.fix) || '' })
+  let timeoutSec = Number.isFinite(c.timeoutSec) && c.timeoutSec > 0 ? c.timeoutSec : DEFAULT_ENV_CHECK_SEC
+  if (timeoutSec > ENV_CHECK_MAX_SEC) {
+    log(`⚠ environmentChecks[${n}].timeoutSec ${timeoutSec} capped at ${ENV_CHECK_MAX_SEC} s — the checks share one ${ENV_DEADLINE_SEC}-s deadline, so a report fits in the Bash tool's 120-s default`)
+    timeoutSec = ENV_CHECK_MAX_SEC
+  }
+  userEnvChecks.push({ type: 'user', name, run: c.run.trim(), timeoutSec, when: when.length ? when : ENV_WHEN, fix: str(c.fix) || '' })
 }
 // The checks' run state. A stall check runs one at a time; `requested`/`covered` count the requests
 // so a request made while one runs is honoured at the next quiescence, not by a second dispatch.
-const envState = { requested: 0, covered: 0, inflight: null, runs: 0, halt: null, failures: [], warnings: [], ran: new Set(), start: null }
+const envState = { requested: 0, covered: 0, inflight: null, runs: 0, rechecks: 0, suspect: null, halt: null, failures: [], transient: [], warnings: [], ran: new Set(), start: null }
 // `timeoutMin` can only LENGTHEN a repo's writer limits (see limitsFor). A value at or under the
 // global one silently did nothing — and a replan once "fixed" a timeout by proposing a higher
 // value for a key that was never in effect.
@@ -2371,10 +2412,11 @@ function onLate(info) {
 
 // ── environment checks at a stall: before a replan, before the final wave, and in flight ──
 // `settle` requests one after a BLOCKED, DIED, ERROR or FENCED task, `onLate` after a late writer,
-// a ship after a failed push. One runs at a time, without blocking the loop; a failure stops new
-// dispatches at once (envState.halt → halt at the top of the loop), and the run halts with
-// `kind: 'environment'` once in-flight work settles. No replan is spent and no code is marked
-// failed: requeuing work into a machine that cannot commit fails the same way.
+// a ship after a failed push. One runs at a time, without blocking the loop. A failure pauses new
+// dispatches at once and is re-checked once (env:recheck#n): a re-check that passes was a blip and
+// the run goes on; one that fails too latches envState.halt (→ halt at the top of the loop), and the
+// run halts with `kind: 'environment'` once in-flight work settles. No replan is spent and no code is
+// marked failed: requeuing work into a machine that cannot commit fails the same way.
 // Repos this run is building in: pending, in flight, or with landed work.
 const playRepos = () => [...new Set([...pendingById.values(), ...inFlight.values()].map((x) => x.repo).concat(Object.keys(repoRef)).filter((r) => repoConfig.has(r)))]
 const stallChecks = () => [...builtinChecksFor(playRepos()), ...userEnvChecks].filter((c) => c.when.includes('stall'))
@@ -2419,11 +2461,15 @@ function envReason(failed) {
     .map((f) => `${f.name} ${f.exit === 142 ? `timed out after ${f.timeoutSec} s` : `exited ${f.exit}`} (${about[f.type] || 'check'}${f.signing ? `; ${f.signing}` : ''})${f.fix ? ` — ${f.fix}` : ''}`)
     .join(' · ')}`
 }
-async function runEnvChecks(why) {
-  const checks = stallChecks()
-  const n = ++envState.runs
-  const r = await agentT(envPrompt(why, checks), {
-    label: `env:stall#${n}`,
+// `only`: a RE-CHECK of the checks that just failed (env:recheck#n) — one timed-out ls-remote is
+// often a blip, and a single failure used to halt a run whose next check passed.
+async function runEnvChecks(why, only) {
+  const recheck = Array.isArray(only)
+  const checks = recheck ? only : stallChecks()
+  const n = recheck ? ++envState.rechecks : ++envState.runs
+  const label = recheck ? `env:recheck#${n}` : `env:stall#${n}`
+  const r = await agentT(envPrompt(recheck ? `${why} (re-checking ${checks.map((c) => c.name).join(', ')} once before halting)` : why, checks), {
+    label,
     phase: 'Implement',
     model: 'haiku',
     effort: 'low', // runs one fixed script
@@ -2431,20 +2477,21 @@ async function runEnvChecks(why) {
     kind: 'env', // 2/4 min
   })
   if (!r || !Array.isArray(r.results)) {
-    emit('env', { when: 'stall', why, ok: null, failed: [] })
-    log(`⚠ environment check env:stall#${n} (after ${why}) returned nothing usable — not counted as a failure`)
-    return { failed: [] }
+    emit('env', { when: 'stall', why, ok: null, failed: [], ...(recheck ? { recheck: true } : {}) })
+    log(`⚠ environment check ${label} (after ${why}) returned nothing usable — not counted as a failure`)
+    return { failed: [], checks: [] }
   }
   const { failed } = judgeEnv(checks, r.results, 'stall')
   for (const c of checks) if (c.type !== 'power') envState.ran.add(c.name)
-  emit('env', { when: 'stall', why, ok: !failed.length, failed: failed.map((f) => f.name) })
-  if (failed.length) {
-    envState.failures = failed
-    log(`⛔ ${envReason(failed)}`)
-  } else log(`✓ environment check after ${why}: ${checks.filter((c) => c.type !== 'power').map((c) => c.name).join(', ')} answered`)
-  return { failed }
+  emit('env', { when: 'stall', why, ok: !failed.length, failed: failed.map((f) => f.name), ...(recheck ? { recheck: true } : {}) })
+  if (failed.length) log(`${recheck ? '⛔' : '⚠'} ${envReason(failed)}${recheck ? ' — failed again on the re-check' : ' — re-checking once before halting (no new dispatch meanwhile)'}`)
+  else log(`✓ environment ${recheck ? 're-check' : 'check'} after ${why}: ${checks.filter((c) => c.type !== 'power').map((c) => c.name).join(', ')} answered`)
+  return { failed, checks: checks.filter((c) => c.type !== 'power') }
 }
-// Non-blocking: starts a stall check unless one is running (then returns that one).
+// Non-blocking: starts a stall check unless one is running (then returns that one). A failure is
+// RE-CHECKED once before it counts: new dispatches pause meanwhile (envState.suspect), and only a
+// re-check that fails too latches the halt. A later green check of the same checks, before the run
+// has stopped, clears a latched halt: the failure did not hold.
 function requestEnvCheck(why) {
   envState.requested++
   if (envState.inflight) return envState.inflight
@@ -2455,17 +2502,38 @@ function requestEnvCheck(why) {
   }
   const done = (res) => {
     envState.inflight = null
+    envState.suspect = null
     envState.covered = Math.max(envState.covered, covers)
-    if (res && res.failed.length && !envState.halt) {
-      envState.halt = { reason: envReason(res.failed), kind: 'environment' }
-      wake() // the loop stops dispatching now, not after the next settle
+    if (res && res.failed.length) {
+      envState.failures = res.failed
+      if (!envState.halt) envState.halt = { reason: envReason(res.failed), kind: 'environment' }
+    } else if (res && envState.halt && envState.failures.every((f) => res.checks.some((c) => c.name === f.name))) {
+      log(`◎ environment: ${envState.failures.map((f) => f.name).join(', ')} answered on a later check — the environment halt is lifted${dispatchClosed ? ' (too late: the run has stopped)' : ''}`)
+      emit('env', { when: 'stall', why, ok: true, failed: [], cleared: envState.failures.map((f) => f.name) })
+      if (!dispatchClosed && halt === envState.halt) halt = null
+      envState.halt = null
+      envState.failures = []
     }
+    wake() // a halt stops dispatching now, not after the next settle; a cleared one resumes it
     return res
   }
-  envState.inflight = runEnvChecks(why).then(done, (e) => {
-    log(`⚠ environment check failed internally: ${String(e)}`)
-    return done(null)
-  })
+  envState.inflight = runEnvChecks(why)
+    .then(async (first) => {
+      if (!first || !first.failed.length || dispatchClosed) return first
+      envState.suspect = first.failed
+      const names = new Set(first.failed.map((f) => f.name))
+      const again = await runEnvChecks(why, first.checks.filter((c) => names.has(c.name)))
+      if (again.failed.length) return again // it held: the halt latches
+      if (again.checks.length) {
+        envState.transient.push(...first.failed.map((f) => ({ name: f.name, exit: f.exit })))
+        log(`◎ environment: ${[...names].join(', ')} answered on the re-check — a transient failure, the run goes on`)
+      }
+      return { failed: [], checks: again.checks } // a re-check that returned nothing is not a failure either
+    })
+    .then(done, (e) => {
+      log(`⚠ environment check failed internally: ${String(e)}`)
+      return done(null)
+    })
   return envState.inflight
 }
 // At quiescence: wait for the running check, run a requested one, and turn a failure into the halt.
@@ -4293,6 +4361,7 @@ const inFlight = new Map() // id → {id, repo, files, exclusive, direct, promis
 const repoBusy = (repo) => [...inFlight.values()].filter((x) => x.repo === repo)
 const directDone = {} // repo → the in-flight DIRECT task's promise; lane integrations queue behind it
 let consecutiveDied = 0 // task settles in a row where the agent died without a result — see the circuit breaker
+let envPaused = false // a dispatch step was skipped while a failed environment check awaited its re-check
 
 // ── hydration PREFETCH: hydrate the next ready issues while their blockers are in flight ──
 // In a strict blocked-by chain each hydration (6–43 min in a real run) used to start only once the
@@ -4707,7 +4776,9 @@ while (true) {
   // stopping (halt set, or budget floor hit): in-flight work still settles below,
   // nothing new starts, and the run ends cleanly at quiescence.
   const stopping = budgetLow()
-  if (!halt && !stopping) {
+  // a failed environment check awaiting its re-check pauses new dispatches (in-flight work goes on)
+  if (!halt && !stopping && envState.suspect) envPaused = true
+  if (!halt && !stopping && !envState.suspect) {
     const eligible = [...pendingById.values()].filter((i) => depsMet(i) && !inFlight.has(i.id)).sort(readyOrder)
     const picks = []
     const picked = {}
@@ -4868,6 +4939,12 @@ while (true) {
   // ── 3 · QUIESCENT (nothing in flight, or only wedged writers) — the ONLY place we stop,
   // gate, or replan, which is exactly the coherence the old wave barrier existed to provide.
   // Wedged writers keep their repos FENCED: nothing there is gated, replanned into or dispatched. ──
+  // An environment halt is acted on only once the checks still running or asked for have answered: a
+  // later green check of the same checks lifts it (requestEnvCheck), and the held work dispatches.
+  if (halt && halt === envState.halt && (envState.inflight || envState.requested > envState.covered)) {
+    await envStall('the run went quiescent')
+    if (!halt) continue
+  }
   if (halt) break
   if (stopping) {
     halt = {
@@ -4890,6 +4967,12 @@ while (true) {
   // after a stall (a BLOCKED, DIED, ERROR or FENCED task, a late writer, a failed push): is the
   // machine fit for the final wave, or a replan? A failure halts here — no replan spent.
   if (await envStall('the run went quiescent')) break
+  // the environment re-check that paused dispatching passed: dispatch what was held, before any
+  // final wave or replan is decided on a state that still has ready work
+  if (envPaused) {
+    envPaused = false
+    continue
+  }
   const held = fenceHeld()
   // A repo with a failed task still awaiting its replan (or the halt that ends the run) is not
   // final, even with no pending dependents: its gate would mark the PR ready over the failure. Its
@@ -5185,7 +5268,7 @@ const noteOf = (r, f) => ({ task: r.id, repo: r.repo, severity: f.severity, pers
 
 // Draft PRs still open as drafts at the end (repo → url), and the environment checks' account.
 const draftPrsOf = () => Object.fromEntries(Object.entries(shipState).filter(([repo, s]) => s.prUrl && s.draft !== false && !gateDone.has(repo)).map(([repo, s]) => [repo, s.prUrl]))
-const environmentOf = () => ({ checks: [...envState.ran], failures: envState.failures.map(({ name, exit, output, fix }) => ({ name, exit, output, fix })), warnings: envState.warnings })
+const environmentOf = () => ({ checks: [...envState.ran], failures: envState.failures.map(({ name, exit, output, fix }) => ({ name, exit, output, fix })), warnings: envState.warnings, transient: envState.transient })
 
 // ── the journal's last chunk, BEFORE the ledger: crystallize reads it ──
 {

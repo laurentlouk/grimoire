@@ -248,8 +248,8 @@ let D1 = null
 }
 const CHAIN = [T('#4'), T('#5', { dependsOn: ['#4'] }), T('#6', { dependsOn: ['#5'] })]
 {
-  const { result, labels, prompt } = await run('E3 · BLOCKED, then the stall check finds the signer locked → environment halt, no replan, the fix in the PR comment', CHAIN,
-    by({ 'impl:#4': impl('aaaaaaa'), 'impl:#5': BLOCKED, 'env:stall#1': (p) => envReport(p, { 'commit:api': 142 }) }), { args: QUIET })
+  const { result, labels, prompt } = await run('E3 · BLOCKED, then the stall check finds the signer locked, and its re-check too → environment halt, no replan, the fix in the PR comment', CHAIN,
+    by({ 'impl:#4': impl('aaaaaaa'), 'impl:#5': BLOCKED, 'env:stall#1': (p) => envReport(p, { 'commit:api': 142 }), 'env:recheck#1': (p) => envReport(p, { 'commit:api': 142 }) }), { args: QUIET })
   ok(/^environment: commit:api timed out after 30 s/.test(result.halt.reason) && result.halt.kind === 'environment', `halt: ${result.halt.reason.slice(0, 60)}… (kind environment)`)
   ok(!labels.some((l) => l.startsWith('replan')), 'no replan spent')
   const comment = heredocs(prompt('ship:api#halt'))[1]
@@ -272,18 +272,19 @@ const CHAIN = [T('#4'), T('#5', { dependsOn: ['#4'] }), T('#6', { dependsOn: ['#
   ok(logs.some((l) => /environmentChecks\[2\] ignored/.test(l)), 'a check without a name or command is ignored, with a warning')
 }
 {
-  const { result, labels, prompt } = await run('E6a · a LATE writer triggers the in-flight check; it fails → nothing new is dispatched, halt once in-flight work settles', [A, B],
-    by({ 'impl:PROJ-1': () => later(impl('aaaaaaa'), 250), 'env:stall#1': (p) => envReport(p, { 'commit:api': 142 }) }), { args: { ...QUIET, agentTimeoutMin: 0.001 } })
+  const { result, labels, prompt } = await run('E6a · a LATE writer triggers the in-flight check; it fails, and again on the re-check → nothing new is dispatched, halt once in-flight work settles', [A, B],
+    by({ 'impl:PROJ-1': () => later(impl('aaaaaaa'), 250), 'env:stall#1': (p) => envReport(p, { 'commit:api': 142 }), 'env:recheck#1': (p) => envReport(p, { 'commit:api': 142 }) }), { args: { ...QUIET, agentTimeoutMin: 0.001 } })
   ok(prompt('env:stall#1').includes('late writer: impl:PROJ-1'), 'onLate (writer) requested the check')
   ok(!labels.includes('impl:PROJ-2'), 'PROJ-2 is never dispatched')
   ok(result.done.map((d) => d.id).join() === 'PROJ-1' && /^environment: commit:api/.test(result.halt.reason) && result.halt.kind === 'environment', 'the in-flight PROJ-1 lands; then the environment halt')
 }
 {
   const envDone = deferred()
-  const { result, labels } = await run('E6b · a failed push triggers the in-flight check; it fails → the next task is not dispatched', [A, B, C],
+  const { result, labels } = await run('E6b · a failed push triggers the in-flight check; it fails, and again on the re-check → the next task is not dispatched', [A, B, C],
     by({
       'ship:api#1': { pushed: false, failedStep: 'push', detail: 'hung' },
-      'env:stall#1': (p) => { setTimeout(envDone.resolve, 0); return envReport(p, { 'remote:api': 142 }) },
+      'env:stall#1': (p) => envReport(p, { 'remote:api': 142 }),
+      'env:recheck#1': (p) => { setTimeout(envDone.resolve, 0); return envReport(p, { 'remote:api': 142 }) }, // it holds on the re-check
       'impl:PROJ-2': () => envDone.promise.then(() => later(impl('bbbbbbb', 'aaaaaaa'), 5)),
     }), { args: QUIET })
   ok(labels.includes('impl:PROJ-2') && !labels.includes('impl:PROJ-3'), 'PROJ-2 was already running and lands; PROJ-3 is never dispatched')
