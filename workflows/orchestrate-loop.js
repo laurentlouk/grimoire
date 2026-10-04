@@ -2201,7 +2201,10 @@ const runMeta = {
   personasHash: str(runMetaOpt.personasHash),
   configHash: str(runMetaOpt.configHash),
 }
-const runId = str(opts.runId) && /^[A-Za-z0-9._-]+$/.test(opts.runId.trim()) ? opts.runId.trim() : null
+// A runId names the run's directory under the telemetry dir: letters, digits, `.`, `_` and `-` only, and
+// never only dots (`.` or `..` would put the journal in the telemetry dir itself or above it).
+const runId = str(opts.runId) && /^[A-Za-z0-9._-]+$/.test(opts.runId.trim()) && !/^\.+$/.test(opts.runId.trim()) ? opts.runId.trim() : null
+if (opts.runId !== undefined && opts.runId !== null && opts.runId !== '' && !runId) log(`⚠ runId ${trim(JSON.stringify(opts.runId), 80)} ignored — letters, digits, ".", "_" and "-" only, and not only dots; the journal starts a new run directory`)
 // Cross-session resume: the checkpoint the journal last wrote (run.json → checkpoint), passed
 // back by the orchestrate skill, so a new session keeps the budgets the earlier one used.
 // {freshStart:true} starts over ON PURPOSE: the resumeState and every PR state marker are ignored,
