@@ -272,6 +272,8 @@ try {
     { type: 'review', task: '#5', stage: 'quality', persona: 'break-it', verdict: 'PASS', gating: 0, advisory: 0, round: 0 },
     { type: 'settle', task: '#5', repo: 'site', status: 'DONE' },
     { type: 'ship', repo: 'site', mode: 'land', pushed: true, head: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true },
+    { type: 'ship', repo: 'site', mode: 'halt', pushed: null, head: 'bbbbbbb2222', failedStep: 'comment', detail: 'gh: rate limited', prUrl: 'https://example.invalid/pr/7', draft: true },
+    { type: 'env', when: 'stall', why: 'a failed push of site', ok: null, failed: [] },
     { type: 'wedged', label: 'impl:#6', task: '#6', repo: 'site', hardMin: 180 },
     { type: 'fence', repo: 'site', action: 'hold' },
     { type: 'env', when: 'stall', why: 'late writer', ok: false, failed: ['commit:site'] },
@@ -303,6 +305,8 @@ try {
   has(/site → held: no dispatch into it/, 'fence: held')
   has(/site · land → pushed bbbbbbb2222 · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship: the pushed head and the draft PR')
   has(/stall \(late writer\) → FAILED: commit:site/, 'env: the failed check')
+  has(/site · halt → bbbbbbb2222 already on the remote · comment step failed: gh: rate limited · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship: nothing to push, a failed step after it')
+  has(/stall \(a failed push of site\) → no usable report \(not counted as a failure\)/, 'env: a check that returned nothing usable')
   has(/start \(startup\) → ok/, 'env: a passing check')
   has(/landed earlier, from checkpoint @ aaaaaaa1111/, 'absorb: the source and the head')
   has(/\[environment\] environment: commit:site timed out/, 'halt: its kind')

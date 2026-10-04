@@ -39,9 +39,10 @@ already settled there.
   repo in one run lands on its ONE run branch, so when the header says RUN BRANCH, check that
   branch out and commit there — never start a branch of your own (it would never be
   integrated).
-- **Never push, never open or update a PR.** Each repo's run branch is pushed and its ONE PR
-  opened (or updated) once, at PROJECT END, by the repo's terminal slot — for every repo,
-  gated or not. You commit; the loop ships.
+- **Never push, never open or update a PR.** The loop ships what you commit: once a task has
+  passed its review it pushes the landed head and keeps the repo's one draft PR up to date (or,
+  for a repo set to deliver at the end, pushes once, at PROJECT END), and the repo's terminal
+  slot marks the PR ready at PROJECT END. You commit; the loop ships.
 - **Explore before asking; don't guess.** If a fact is discoverable in the design artifacts,
   the docs, the code, schemas, contracts, config or git history, find it yourself before
   asking, and never state a discoverable fact as a guess. Only decisions the owner holds

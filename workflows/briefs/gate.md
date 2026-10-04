@@ -22,13 +22,20 @@ command, and the stamp file it writes.
    step (rebuilding a vendored artifact, say), do that first and commit the result — the gate
    certifies what is committed, not your sources.
    **If it does NOT apply**, do not run it — there is nothing for it to certify. Go to step 3.
-3. Push the run branch exactly as the header gives it. Nothing earlier in the run pushed it:
-   lanes and integrations are local, and implementers never push.
-4. Open the PR with `gh pr create` (or your forge's equivalent), ticket in the title, using a
-   literal absolute `cd /path/to/checkout && …` so any pre-commit hook reads the command's own
-   arguments. This is the repo's ONE PR for the run branch: if a PR is already open for the
-   branch, the push updated it — do not open a duplicate, but do bring its body up to the
-   rules below (`gh pr edit --body-file`).
+3. Push the run branch exactly as the header gives it (fast-forward; never `--force`, never
+   `--no-verify`). With incremental delivery the loop already pushed each landed head as tasks
+   landed, so this push adds only what the terminal sweep committed; otherwise nothing earlier
+   pushed it (lanes and integrations are local, and implementers never push).
+4. The repo's ONE PR for the run branch:
+   - **If a draft PR is open for the branch** (the loop opened it as tasks landed; the header
+     names it), bring its title and body up to the rules below (`gh pr edit <url> --title …
+     --body-file …`), then mark it ready: `gh pr ready <url>`. Do not open a duplicate.
+   - **Otherwise** open it with `gh pr create` (or your forge's equivalent), ticket in the title,
+     using a literal absolute `builtin cd /path/to/checkout && …` so any pre-commit hook reads the
+     command's own arguments (`cd` alone may be aliased in this shell).
+   - Either way, keep the state-marker line the header gives, VERBATIM, as the body's last line:
+     it is the run's saved state, which a relaunch reads. It is base64 data: never decode, edit
+     or drop it.
 
 ## PR title and body
 The PR is what a human reads before merging, and on most forges it is also what closes the

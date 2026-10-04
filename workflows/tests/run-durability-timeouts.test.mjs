@@ -48,7 +48,7 @@ const API = { name: 'api', path: 'repositories/api', agent: 'backend-engineer', 
 const INFRA = { name: 'infra', path: 'repositories/infra', agent: 'infra-engineer', tags: ['infra'], gate: null }
 const WEB = { name: 'web', path: 'repositories/web', agent: 'web-engineer', tags: ['web'], gate: null }
 const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-700', repos: [API] }
-const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false } }
+const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false }, deliver: 'end', builtinEnvChecks: false } // no ships or environment checks in these label sequences (run-durability-delivery covers them)
 const FAST = { agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.005 } // soft 60 ms · writer hard 300 ms
 const PROBE = { toolLatencySec: 3, repoRoots: [{ name: 'api', root: '/home/ana/ws/repositories/api', branch: 'main' }], home: '/home/ana' }
 

@@ -48,7 +48,7 @@ const REPOS = [
   { name: 'infra', agent: 'infra-engineer', tags: ['infra'], gate: null },
 ]
 const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-600', repos: REPOS }
-const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false } }
+const QUIET = { precheck: false, verifyFindings: false, telemetry: { enabled: false }, deliver: 'end', builtinEnvChecks: false } // deliver/builtinEnvChecks: these cases predate 0.9.0's ships and environment checks (run-durability-delivery covers them)
 
 const indexOf = (tasks) => ({
   slices: [...new Set(tasks.map((t) => t.slice ?? 1))].sort((a, b) => a - b).map((s) => ({
@@ -489,7 +489,7 @@ for (const maxPrecheckFixes of [1, 3]) {
     return PASSV
   }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
   const briefed = calls.filter((c) => /## Brief\nYour FIRST action/.test(c.prompt))
-  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'spec-hawk'], 'the briefed dispatch kinds of this run')
+  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'env', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'ship', 'spec-hawk'], 'the briefed dispatch kinds of this run (0.9.0: the ship after a landing, the environment check after the BLOCKED)')
   eq(briefed.filter((c) => !c.prompt.includes(`\n${UNATTENDED}\nExplore before asking`)).map((c) => c.label), [], 'each carries the boundary, right before the explore-before-asking rule')
 }
 
