@@ -489,7 +489,7 @@ for (const maxPrecheckFixes of [1, 3]) {
     return PASSV
   }, { extraArgs: { verifyFindings: false, telemetry: { enabled: false } } })
   const briefed = calls.filter((c) => /## Brief\nYour FIRST action/.test(c.prompt))
-  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'env', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'ship', 'spec-hawk'], 'the briefed dispatch kinds of this run (0.9.0: the ship after a landing, the environment check after the BLOCKED)')
+  eq([...new Set(briefed.map((c) => c.label.replace(/[:#].*$/, '')))].sort(), ['break-it', 'data-integrity', 'env', 'gate', 'hydrate', 'impl', 'ledger', 'parse-index', 'precheck', 'privacy', 'reliability-sre', 'replan', 'seal', 'ship', 'spec-hawk'], 'the briefed dispatch kinds of this run (0.9.0: the ship after a landing, the environment check after the BLOCKED, the seal after the gate)')
   eq(briefed.filter((c) => !c.prompt.includes(`\n${UNATTENDED}\nExplore before asking`)).map((c) => c.label), [], 'each carries the boundary, right before the explore-before-asking rule')
 }
 

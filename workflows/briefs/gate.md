@@ -13,8 +13,9 @@ command, and the stamp file it writes.
    --porcelain` must be empty. A gate stamp is a TREE HASH, so any uncommitted edit or later
    commit invalidates it. If something is uncommitted, commit it first.
    Before that, remove the scratch worktrees reviewers left behind (detached, nothing to keep):
-   `git worktree remove --force` each `review-*` path `git worktree list` shows, then
-   `git worktree prune`. Never remove any other worktree.
+   `git worktree remove --force` each `review-<repo>--…` path `git worktree list` shows (the
+   reviewers name theirs after the repo and the task), then `git worktree prune`. Never remove
+   any other worktree: a lane of another repo can also start with `review-`.
 2. **If the gate command APPLIES**: run it ONCE, in the FOREGROUND, exactly as the header
    gives it, including any flags (a lock wait, a timeout, an environment variable) — those
    flags are not optional, they are what makes the command safe to run unattended. Do NOT
@@ -22,20 +23,28 @@ command, and the stamp file it writes.
    step (rebuilding a vendored artifact, say), do that first and commit the result — the gate
    certifies what is committed, not your sources.
    **If it does NOT apply**, do not run it — there is nothing for it to certify. Go to step 3.
-3. Push the run branch exactly as the header gives it (fast-forward; never `--force`, never
-   `--no-verify`). With incremental delivery the loop already pushed each landed head as tasks
-   landed, so this push adds only what the terminal sweep committed; otherwise nothing earlier
-   pushed it (lanes and integrations are local, and implementers never push).
+3. Take the repo's ship lock with the script the header gives, before you push: a ship of this run
+   that started late must not push to the branch or rewrite the PR while you do. `LOCK busy` →
+   run it again, up to five times in all; still busy → return BLOCKED with `failedStep: push`.
+   Release it with the header's command once step 4 is done, or the moment you stop, pass or
+   fail. Then push the run branch exactly as the header gives it (fast-forward; never `--force`,
+   never `--no-verify`). With incremental delivery the loop already pushed each landed head as
+   tasks landed, so this push adds only what the terminal sweep committed; otherwise nothing
+   earlier pushed it (lanes and integrations are local, and implementers never push).
 4. The repo's ONE PR for the run branch:
    - **If a draft PR is open for the branch** (the loop opened it as tasks landed; the header
      names it), bring its title and body up to the rules below (`gh pr edit <url> --title …
      --body-file …`), then mark it ready: `gh pr ready <url>`. Do not open a duplicate.
+   - **If the header says the PR is already READY** (an earlier terminal slot of this run marked
+     it, and work landed since), the push above adds that work: rewrite its title and body over
+     EVERY task the header lists. It stays ready.
    - **Otherwise** open it with `gh pr create` (or your forge's equivalent), ticket in the title,
      using a literal absolute `builtin cd /path/to/checkout && …` so any pre-commit hook reads the
      command's own arguments (`cd` alone may be aliased in this shell).
    - Either way, keep the state-marker line the header gives, VERBATIM, as the body's last line:
      it is the run's saved state, which a relaunch reads. It is base64 data: never decode, edit
-     or drop it.
+     or drop it. Once you return, the loop checks that line on the PR and puts it back if your
+     copy differs; it changes nothing else in the body.
 
 ## PR title and body
 The PR is what a human reads before merging, and on most forges it is also what closes the

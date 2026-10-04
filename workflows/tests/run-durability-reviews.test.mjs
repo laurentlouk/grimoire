@@ -298,7 +298,7 @@ async function run(scenario, tasks, responder, { args = {}, repos = [APP] } = {}
 {
   const GATED = { ...API, gate: { run: 'make e2e' } }
   const { labels } = await run('P-7c · default, gated repo: the terminal sweep after the per-task quality core, the gate last', [API_TASK], base, { repos: [GATED] })
-  const order = labels.filter((l) => !/^(parse-index|hydrate:|harness-context|ledger|crystallize|journal#|preflight:)/.test(l)).map((l) => l.replace(/:.*/, ''))
+  const order = labels.filter((l) => !/^(parse-index|hydrate:|harness-context|ledger|crystallize|journal#|preflight:|seal:)/.test(l)).map((l) => l.replace(/:.*/, ''))
   ok(order.indexOf('reliability-sre') > order.lastIndexOf('break-it') && order.indexOf('reliability-sre') > order.lastIndexOf('spec-hawk'), 'the sweep ran after every per-task review')
   eq(order[order.length - 1], 'gate', 'the gate ran last')
 }

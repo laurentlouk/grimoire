@@ -61,8 +61,9 @@ const body = load('orchestrate-loop.js')
 let PASS = 0, FAIL = 0
 // Post-gate LEARNING dispatches: the harness-context loader runs right after the index, the
 // ledger writer + crystallize run after every gate/PR. They are not build steps — order
-// assertions about "the gate ran last" mean last among BUILD dispatches.
-const LEARNING = new Set(['harness-context', 'ledger', 'crystallize'])
+// assertions about "the gate ran last" mean last among BUILD dispatches. Nor is the seal, which
+// checks the state marker on the PR the gate marked ready (and touches nothing else).
+const LEARNING = new Set(['harness-context', 'ledger', 'crystallize', 'seal'])
 const buildOnly = (order) => order.filter((l) => !LEARNING.has(l))
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
 const unb64 = (s) => Buffer.from(String(s).replace(/\s+/g, ''), 'base64').toString('utf8') // journal and ledger payloads travel base64
