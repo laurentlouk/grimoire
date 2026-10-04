@@ -228,6 +228,14 @@ function journalEvents(calls) {
   ok(!!end && j.lostEvents >= end.seq, `every event up to run.end (and any after it) is counted lost (${j.lostEvents} ≥ ${end && end.seq})`)
   eq(logs.filter((l) => /telemetry writer lost 2 chunks in a row — marked dead/.test(l)).length, 1, 'logged once')
 }
+{
+  // flushEvery 1: run.end itself fills a chunk. That chunk is the final one, and still gets its attempt.
+  const { calls, labels } = await run('K-5b · … also when run.end itself triggers the flush', [T('PROJ-1')], (label, p) => (label.startsWith('journal#') ? HANG() : happy(label, p)), {
+    args: { ...QUIET, telemetry: { enabled: true, flushEvery: 1 }, timeouts: { journal: { soft: 0.001, hard: 0.002 } } },
+  })
+  const writes = labels.filter((l) => l.startsWith('journal#'))
+  ok(writes.length === 3 && journalEvents(calls.filter((c) => c.label === writes[2])).some((e) => e.type === 'run.end'), `the third and last dispatch carries run.end (${writes.join(', ')})`)
+}
 
 // ══════════════ K-6 · a replan whose tasks are all still running halts as still running ══════════════
 {

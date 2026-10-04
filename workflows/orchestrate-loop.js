@@ -4732,8 +4732,9 @@ const environmentOf = () => ({ checks: [...envState.ran], failures: envState.fai
     prs: prsOpened.length,
     tokens: runSpent(),
   }
-  emit('run.end', { status: halt ? 'halted' : 'drained', ...endSummary })
+  // final first: a flush that run.end itself triggers (flushEvery) is then the final chunk, which a dead writer still attempts
   journal.final = { status: halt ? 'halted' : 'drained', summary: { ...endSummary, replans, halt: halt ? halt.reason : null, prUrls: prsOpened.map((p) => p.pr) } }
+  emit('run.end', { status: halt ? 'halted' : 'drained', ...endSummary })
   flushJournal()
   await journal.chain
   if (journal.enabled)
