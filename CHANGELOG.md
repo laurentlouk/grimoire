@@ -108,6 +108,15 @@ brief- and skill-level and stack-agnostic.
   and relaunches with the same `runId` and a fresh `resumeState`; starting from scratch takes an
   explicit request. `resumeFromRunId` is kept for a byte-identical relaunch, the tracker alone
   never resumes a run, and after a halt the skill reads the PR's status comment first.
+- **Late results land where they belong.** An adversarial review raced the engine's
+  asynchronous paths against each other. A final wave no longer hangs when one slot wedges and
+  another then returns. A wedged terminal slot is booked when it returns, even after the run
+  has ended, and its gate is never run twice (a second push, a second PR). A prefetch that lands
+  after a replan never replaces the task the replan revised. A writer that returns after the run
+  stopped dispatching flows no further. A repo with a failed task is not gated, and its PR not
+  marked ready, before that failure is replanned. A dead journal writer stops being queued
+  instead of holding the end of the run for 8 minutes per chunk. A prefetch's claims are handed
+  back when the run halts before it returns.
 - **Logs and eval cases.** `/grimoire:logs` summarizes the new events in words and shows a
   v2 checkpoint's landed tasks and heads. `orchestrate` evals: resume by state after a halt, a
   knob change on resume, the preview's estimate, an environment halt, and a new-session
