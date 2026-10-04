@@ -15,6 +15,9 @@
 //      run had already stopped as "hydration died". It is now accepted, and a null hydration is
 //      retried once (L5, L6)
 //    • SLOW AGENTS READ AS AN OUTAGE — the circuit breaker counted timeouts as deaths (L7)
+//    • A ONE-WORD PREFLIGHT TOOK 12 MINUTES — preflight and precheck get short limits and a
+//      hedged duplicate; the precheck runs one fact script instead of eight git calls; a hung
+//      journal writer no longer holds the end of the run (T-1 to T-3)
 //
 //  Same stubbed runtime as the other loop tests (agent / parallel / log / phase / args / budget).
 //  Timers are real: limits are fractional minutes (0.001 min = 60 ms).
@@ -235,6 +238,66 @@ function journalEvents(calls) {
   ok(!/booked as DIED, but nothing stops it/.test(replan), 'replan: the "DIED task may still be running" section is gone')
   const impl = readFileSync(`${DIR}/briefs/implement.md`, 'utf8')
   ok(/not cut off at its time limit; it is waited for/.test(impl) && /so a later\s+session can absorb it/.test(impl), 'implement: waited for, not cut off; commit so a later session can absorb it')
+}
+
+// ══════════════ T · short limits and a hedge for mechanical dispatches ══════════════
+{
+  const { result, labels, logs, calls } = await run('T-1 · a silent preflight is hedged; the duplicate answers and the run starts', [T('PROJ-1')], (label) => {
+    if (label === 'preflight:grimoire:reviewer') return HANG()
+    return happy(label)
+  }, { args: { ...QUIET, timeouts: { preflight: { soft: 0.001, hard: 0.01, hedgeAfter: 0.001 } } } })
+  ok(labels.includes('preflight:grimoire:reviewer~h1'), 'the hedge preflight:grimoire:reviewer~h1 was dispatched')
+  ok(!labels.includes('preflight:grimoire:reviewer~r1') && !result.error, 'no re-probe round, no refusal: the hedge answered')
+  ok(logs.some((l) => /⏳ \[hedge\] preflight:grimoire:reviewer has not answered after 0\.001m/.test(l)), 'a hedge log line')
+  const impl = calls.find((c) => c.label === 'impl:PROJ-1')
+  ok(impl && impl.at < 450 && result.done.length === 1, `the run started well under the 600 ms hard limit (impl at ${impl && impl.at} ms) and landed`)
+  ok(/Your first and only action is the structured reply/.test((calls.find((c) => c.label.startsWith('preflight:')) || {}).prompt || ''), 'the preflight prompt says: reply only, read nothing, run nothing')
+}
+{
+  const { result, labels } = await run('T-2 · every journal writer hangs: the run ends anyway, chunks counted lost', [T('PROJ-1')], (label) => {
+    if (label.startsWith('journal#')) return HANG()
+    return happy(label)
+  }, { args: { ...QUIET, telemetry: {}, timeouts: { journal: { soft: 0.001, hard: 0.005 } } } })
+  ok(labels.includes('ledger'), 'the ledger is still dispatched')
+  ok(result.telemetry.journal && result.telemetry.journal.lost >= 1, `telemetry.journal.lost ≥ 1 (got ${result.telemetry.journal && result.telemetry.journal.lost})`)
+  ok(result.telemetry.timedOut.some((l) => l.startsWith('journal#')), 'the hung writer is listed as given up on')
+}
+{
+  const { result, labels, prompt } = await run('T-3 · the precheck runs one fact script; a silent precheck is hedged', [T('PROJ-1')], (label) => {
+    if (label === 'precheck:PROJ-1') return HANG()
+    return happy(label)
+  }, { args: { verifyFindings: false, telemetry: { enabled: false }, timeouts: { precheck: { soft: 0.001, hard: 0.01, hedgeAfter: 0.001 } } } })
+  const p = prompt('precheck:PROJ-1')
+  ok(/## The fact sheet — run this ONCE, in one Bash call/.test(p), 'the precheck prompt carries the fact sheet')
+  ok(p.includes('git -C repositories/api rev-list --count 0000000..aaaaaaa') && p.includes('git -C repositories/api diff --name-status 0000000..aaaaaaa'), 'it counts the commits and lists the files of the exact range')
+  ok(/merge-base --is-ancestor 0000000 aaaaaaa; echo "exit \$\?"/.test(p) && /merge-base --is-ancestor aaaaaaa feat\/proj-700-api; echo "exit \$\?"/.test(p), 'and prints the range-start and run-branch ancestry exits')
+  ok(labels.includes('precheck:PROJ-1~h1') && !labels.includes('precheck:PROJ-1#1'), 'precheck:PROJ-1~h1 answered for the silent one — no fix round')
+  ok(result.done.some((d) => d.id === 'PROJ-1'), 'the task landed')
+}
+{
+  // The fact sheet, RUN in bash against a real repo: the marker scan must report file:line of ADDED lines only.
+  const repo = mkdtempSync(join(tmpdir(), 'grimoire-facts-'))
+  const git = (...a) => spawnSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { encoding: 'utf8' })
+  git('init', '-q')
+  mkdirSync(join(repo, 'src'))
+  writeFileSync(join(repo, 'src/old.ts'), '// TODO pre-existing\nexport const old = 1\n')
+  git('add', '.'); git('commit', '-q', '-m', 'base')
+  const base = git('rev-parse', 'HEAD').stdout.trim()
+  writeFileSync(join(repo, 'src/a.ts'), 'export const a = 1\n// TODO finish this\n=======\nconst ok = true\n')
+  writeFileSync(join(repo, 'src/old.ts'), '// TODO pre-existing\nexport const old = 2\n')
+  git('add', '.'); git('commit', '-q', '-m', 'change')
+  const head = git('rev-parse', 'HEAD').stdout.trim()
+  const { prompt } = await run('T-3b · the fact sheet, run in bash, reports what each check needs', [T('PROJ-1')], (label) => {
+    if (label === 'impl:PROJ-1') return { ...IMPL_OK, commits: [head], baseSha: base, startSha: base, headSha: head }
+    return happy(label)
+  }, { args: { verifyFindings: false, telemetry: { enabled: false }, repos: [{ ...API, path: repo }] } })
+  const script = (/## The fact sheet[^\n]*\n```bash\n([\s\S]*?)\n```/.exec(prompt('precheck:PROJ-1')) || [])[1] || ''
+  const out = spawnSync('bash', ['-c', script], { encoding: 'utf8' }).stdout
+  ok(/== commits\n1\n/.test(out), 'one commit in the range')
+  ok(/A\tsrc\/a\.ts/.test(out) && /M\tsrc\/old\.ts/.test(out), 'the files, with their change type')
+  ok(out.includes('src/a.ts:2: // TODO finish this') && out.includes('src/a.ts:3: ======='), 'added stub and conflict markers, as file:line')
+  ok(!out.includes('pre-existing'), 'a marker the diff did not add is not listed')
+  ok(/== range start \(check 8\)\nexit 0/.test(out) && /== on the run branch \(check 7\)\nexit (1|128)/.test(out), 'the ancestry exits are printed (the run branch does not exist in this scratch repo)')
 }
 
 console.log(`\n${PASS} passed · ${FAIL} failed`)

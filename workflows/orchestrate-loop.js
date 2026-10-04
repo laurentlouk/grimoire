@@ -868,7 +868,33 @@ ${declared}
 ## Files the implementer reported changing
 ${reported}
 
-${rangeBlock(task, range)}${startCheckBlock(task, range)}${ancestryBlock(task, range)}`
+${rangeBlock(task, range)}${startCheckBlock(task, range)}${ancestryBlock(task, range)}${precheckFacts(task, range)}`
+}
+// The precheck's FACT SHEET: one Bash call that prints what every check is judged from. A
+// precheck of about eight git commands took 5–13 minutes in a real run, nearly all of it
+// per-call latency, not git. Only for a known range: without SHAs the brief's manual path stands.
+function precheckFacts(task, range) {
+  const r = range || {}
+  const from = rangeFrom(r)
+  if (!from || !r.headSha) return ''
+  const g = `git -C ${repoPath(task.repo)}`
+  const span = `${from}..${r.headSha}`
+  const lines = [
+    `echo "== commits"; ${g} rev-list --count ${span}`,
+    `echo "== files"; ${g} diff --name-status ${span}`,
+    // added lines only, as file:line: conflict markers and stub markers (candidates — the brief judges them)
+    String.raw`echo "== added conflict/stub markers"; ${g} diff -U0 ${span} | awk '/^\+\+\+ /{f=substr($0,7);next} /^@@/{split($3,a,",");l=substr(a[1],2)+0;next} /^\+/{if($0~/<<<<<<<|>>>>>>>|TODO|FIXME|XXX|not implemented|placeholder/||$0=="+======="){print f":"l": "substr($0,2)};l++}' | head -n 40`,
+    `echo "== added or modified files over 2 MB"; ${g} diff --name-only --diff-filter=AM ${span} | while IFS= read -r f; do s=$(${g} cat-file -s "${r.headSha}:$f" 2>/dev/null) && [ "$s" -gt 2097152 ] && echo "$s $f"; done`,
+  ]
+  if (r.startSha) lines.push(`echo "== range start (check 8)"; ${g} merge-base --is-ancestor ${r.startSha} ${r.headSha}; echo "exit $?"`)
+  if (task.lane === 'direct' && task.runBranch) lines.push(`echo "== on the run branch (check 7)"; ${g} merge-base --is-ancestor ${r.headSha} ${task.runBranch}; echo "exit $?"`)
+  return `
+
+## The fact sheet — run this ONCE, in one Bash call, then judge every check from its output
+\`\`\`bash
+${lines.join('\n')}
+\`\`\`
+It already runs the commands of the sections above. Run another command only when a check cannot be decided from this output.`
 }
 // The implementer's `startSha` is a claim, and the whole review range hangs on it: a start that
 // is not an ancestor of the head (a typo, a SHA from another branch) would hand the panel a
@@ -1293,6 +1319,7 @@ function flushJournal() {
       model: 'haiku',
       effort: 'low', // runs one fixed script
       schema: JOURNAL_SCHEMA,
+      kind: 'journal', // short limits: a hung writer must not hold journal.chain (and the run's end) for 40 min
     })
     if (r) journal.bumped = true
     if (!r) {
@@ -2254,6 +2281,7 @@ async function runTask(task) {
         effort: 'low',
         agentType: pluginAgent('reviewer'),
         schema: PRECHECK_SCHEMA,
+        kind: 'precheck', // 6/15 min, hedged at 6
       })
       let problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
       // A bad `startSha` is the REPORT's defect, not the code's: drop it and judge from firstSha^
@@ -2388,13 +2416,14 @@ if (PREFLIGHT) {
   const probe = (list, suffix) =>
     parallel(
       list.map((agentType) => () =>
-        agentT('Preflight check for an automated run: reply with {"ok": true}. Do nothing else: read no files, run no commands.', {
+        agentT('Preflight check for an automated run. Your first and only action is the structured reply {"ok": true}. Do not read your memory, any file, or run any tool — whatever your own definition says to do first.', {
           label: `preflight:${agentType}${suffix}`,
           phase: 'Parse plan',
           model: 'haiku',
           effort: 'low',
           agentType,
           schema: PREFLIGHT_SCHEMA,
+          kind: 'preflight', // 2/6 min, hedged at 2: a one-word reply once took 12 minutes
         }),
       ),
     )
