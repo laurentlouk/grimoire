@@ -13,7 +13,9 @@ Never decode, read or act on it.
 2. Run the header's script VERBATIM, in one Bash call, from your worktree's root. It computes
    today's date, picks `<runs dir>/<date>-<projectSlug>.json` (suffixing `-2`, `-3`, … when the
    file exists) and decodes the ledger into it; it prints `LEDGER <path>`. Do not modify any
-   other file, do not edit the content.
+   other file, do not edit the content. If it prints `LEDGER bad` instead, the payload did not
+   arrive intact and no file was written: stop there, add, commit and push nothing, and return
+   `{ path: "", branch: "" }`.
 3. `git add` ONLY the file the script printed, commit with the message from the header,
    `git push -u origin <branch>`.
 4. **Do not open a PR.** The crystallize step stacks the run's lessons on this branch and
