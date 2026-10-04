@@ -100,6 +100,7 @@ try {
   expectDeny(bash(`rm -rf ${homedir()}/Documents`), 'rm -rf of an absolute path outside the project')
   expectDeny(bash('rm -rf ../../../../../../../../../../etc'), 'rm -rf of a relative path escaping the project')
   expectDeny(bash(`cd ${SANDBOX} && rm -rf proj`), 'cd to the parent, then rm -rf the project')
+  expectDeny(bash(`builtin cd ${SANDBOX} && rm -rf proj`), 'builtin cd to the parent, then rm -rf the project')
   expectDeny(bash('sudo rm -Rf -- /usr'), 'sudo rm -Rf -- /usr')
   expectAllow(bash('rm -rf node_modules'), 'rm -rf node_modules')
   expectAllow(bash('rm -rf .worktrees/api--proj-1'), 'rm -rf .worktrees/api--proj-1')
