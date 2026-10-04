@@ -180,7 +180,8 @@ function decodingWriter(prompt) {
 const LANDED_1 = { id: 'PROJ-1', repo: 'api', status: 'DONE', ticket: 'PROJ-1', title: 'Title of PROJ-1', runBranch: RUN_BRANCH, startSha: '0000000', firstSha: 'aaaaaaa', headSha: 'aaaaaaa', commits: ['aaaaaaa'], summary: 'built A' }
 const IMPL_2 = { ...IMPL_OK, summary: 'built B', commits: ['bbbbbbb'], startSha: 'aaaaaaa', headSha: 'bbbbbbb', filesChanged: ['src/b.ts'] }
 const byLabel = (map) => (label, p) => (label in map ? (typeof map[label] === 'function' ? map[label](p) : map[label]) : label.startsWith('journal#') ? decodingWriter(p) : happy(label))
-const ON = (id, extra = {}) => ({ reconcile: [{ id, repo: 'api', sha: 'aaaaaaa', local: true, origin: true, onBranch: true }], runBranches: [{ repo: 'api', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'same' }], ...extra })
+// a TASK line verifies a record only with its SHA, onBranch=yes AND inBase=no (run-durability-resume.test.mjs)
+const ON = (id, extra = {}) => ({ reconcile: [{ id, repo: 'api', sha: 'aaaaaaa', local: true, origin: true, onBranch: true, inBase: 'no' }], runBranches: [{ repo: 'api', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'same', fetch: 'ok' }], ...extra })
 const hydratedIds = (calls) => calls.filter((c) => c.label.startsWith('hydrate:')).flatMap((c) => ['PROJ-1', 'PROJ-2', 'PROJ-3'].filter((id) => c.prompt.includes(`- ${id} `)))
 {
   const resumeState = { version: 2, attempt: 1, lastSeq: 12, replansUsed: 0, landedTasks: [LANDED_1] }
@@ -191,12 +192,12 @@ const hydratedIds = (calls) => calls.filter((c) => c.label.startsWith('hydrate:'
   ok(prompt('gate:api').includes('PROJ-1 — Title of PROJ-1: built A') && prompt('gate:api').includes('PROJ-2 — Title of PROJ-2: built B'), 'the gate (PR body) lists the absorbed task with its report, next to the new one')
   eq(result.resumedLanded, [{ id: 'PROJ-1', repo: 'api', headSha: 'aaaaaaa', source: 'checkpoint' }], 'result.resumedLanded')
   const ip = prompt('parse-index')
-  ok(/RECONCILE the run branches/.test(ip) && ip.includes(`chk 'api' 'repositories/api' '${RUN_BRANCH}' 'PROJ-1' aaaaaaa`) && ip.includes('merge-base --is-ancestor "$5" "refs/heads/$3"'), "the index prompt's RECONCILE checks aaaaaaa against the run branch")
+  ok(/RECONCILE the run branches/.test(ip) && ip.includes(`chk 'api' 'repositories/api' '${RUN_BRANCH}' 'PROJ-1' aaaaaaa`) && ip.includes('merge-base --is-ancestor "$5" "refs/heads/${3}"') && ip.includes('merge-base --is-ancestor "$5" "$BASE"'), "the index prompt's RECONCILE checks aaaaaaa against the run branch and the base")
   ok(ip.includes(`gh pr list --head "$3" --state all`) && ip.includes('fetch -q origin'), 'and reads the run branch PR and fetches the branch, best effort')
   ok(/AFTER the probe's second call/.test(ip), 'never between the two probe calls')
   ok(logs.some((l) => /resumed: 1 task\(s\) absorbed .* PROJ-1@aaaaaaa \(checkpoint\)/.test(l)), 'logged')
-  const prev = await run('R1b · a preview never reconciles', [TASK], happy, { args: { ...QUIET, execute: false, resumeState } })
-  ok(!/RECONCILE/.test(prev.prompt('parse-index')), 'no RECONCILE section in a preview')
+  const prev = await run('R1b · a preview reconciles READ-ONLY (its resume proof; run-durability-resume.test.mjs)', [TASK], happy, { args: { ...QUIET, execute: false, resumeState } })
+  ok(/RECONCILE/.test(prev.prompt('parse-index')) && /\nRO=1;/.test(prev.prompt('parse-index')) && /READ-ONLY/.test(prev.prompt('parse-index')), 'the preview RECONCILE is read-only (RO=1)')
 }
 {
   const resumeState = { version: 2, attempt: 1, lastSeq: 12, landedTasks: [LANDED_1] }
@@ -225,18 +226,22 @@ const hydratedIds = (calls) => calls.filter((c) => c.label.startsWith('hydrate:'
   chunks.length = 0
   const resumeState = { version: 2, attempt: 1, lastSeq: 12, landedTasks: [LANDED_1] }
   const NOOP = { status: 'DONE', summary: 'already there; verified', commits: [], startSha: 'aaaaaaa', headSha: 'aaaaaaa', landedBefore: ['aaaaaaa'] }
-  const { result, labels } = await run('R4 · "already done" with SHAs the checkpoint lists as reviewed → absorbed, no precheck, no panel, no fix', [TASK],
+  // 0.9.0 review fix: a checkpoint record counts as reviewed only once the reconcile VERIFIED it (here it
+  // did not: no TASK line), so the SHAs it lists are reviewed as they stand — never rebuilt, never "fixed"
+  const { result, labels } = await run('R4 · "already done" with SHAs an UNVERIFIED checkpoint lists → reviewed as they stand, no fix', [TASK],
     byLabel({ 'impl:PROJ-1': NOOP }), { args: { verifyFindings: false, resumeState, runId: 'run-r4', telemetry: { flushEvery: 100 } } }) // precheck ON; reconcile missing → PROJ-1 re-dispatched
-  eq(labels.filter((l) => /^(precheck|spec-hawk|break-it|data-integrity|fix):PROJ-1/.test(l)), [], 'no precheck, reviewer or fix dispatch for PROJ-1')
-  ok(result.done.length === 1 && result.done[0].headSha === 'aaaaaaa' && result.done[0].absorbed === 'reviewed-earlier', 'it lands, with its head')
+  ok(labels.includes('precheck:PROJ-1') && labels.includes('spec-hawk:PROJ-1') && !labels.some((l) => l.startsWith('fix:')), 'precheck and panel review aaaaaaa; no fix is bought')
+  ok(result.done.length === 1 && result.done[0].headSha === 'aaaaaaa' && !result.done[0].absorbed, 'it lands, with its head')
   const ev = chunks.flatMap((c) => c.events).find((e) => e.type === 'absorb' && e.task === 'PROJ-1')
-  ok(ev && ev.source === 'reviewed-earlier' && ev.head === 'aaaaaaa', 'an absorb event, source reviewed-earlier')
+  ok(ev && ev.source === 'verify-only' && ev.head === 'aaaaaaa', 'an absorb event, source verify-only')
 }
 {
   const NOOP = { status: 'DONE', summary: 'PROJ-1 already built this', commits: [], startSha: 'aaaaaaa', headSha: 'aaaaaaa', landedBefore: ['aaaaaaa'] }
-  const { result, labels } = await run('R4b · in one session: a task a reviewed predecessor already built is absorbed', [TASK, TASK2],
+  // 0.9.0 review fix: reviewed SHAs are PER TASK — PROJ-1's reviewed head is not a review of PROJ-2
+  const { result, labels, prompt } = await run('R4b · in one session: a task citing a PREDECESSOR\'s reviewed SHA is reviewed as it stands', [TASK, TASK2],
     byLabel({ 'impl:PROJ-2': NOOP }), { args: QUIET })
-  ok(!labels.some((l) => /^(spec-hawk|break-it|data-integrity|fix):PROJ-2/.test(l)) && result.done.map((d) => d.id).join() === 'PROJ-1,PROJ-2', 'PROJ-2 lands without a second review of aaaaaaa')
+  ok(labels.includes('spec-hawk:PROJ-2') && labels.includes('break-it:PROJ-2') && prompt('spec-hawk:PROJ-2').includes('aaaaaaa^..aaaaaaa'), "PROJ-2's panel reviews aaaaaaa^..aaaaaaa")
+  ok(!labels.some((l) => l.startsWith('fix:')) && result.done.map((d) => d.id).join() === 'PROJ-1,PROJ-2' && !result.done[1].absorbed, 'no fix; both land, PROJ-2 not absorbed')
 }
 {
   chunks.length = 0
@@ -275,14 +280,17 @@ const hydratedIds = (calls) => calls.filter((c) => c.label.startsWith('hydrate:'
 // ══════════════ M · absorption from the PR state marker (another machine: no local journal) ══════════════
 const stateOf = (extra = {}) => ({ version: 2, runId: 'run-m', project: 'PROJ-700', repo: 'api', runBranch: RUN_BRANCH, base: 'origin/main', attempt: 1, lastSeq: 20, replansUsed: 0, fixRounds: {}, outputTokensSpent: 0, landedTasks: [{ ...LANDED_1, summary: 'built A, says the PR' }], learnings: [], ...extra })
 const markerOf = (state) => Buffer.from(JSON.stringify(state), 'utf8').toString('base64')
-const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/pull/7', state: 'OPEN', isDraft: true, marker, ...extra })
+// what the RECONCILE script prints next to a marker — its length and cksum (the engine's own cksum)
+const { cksum } = new Function(`${body.slice(body.indexOf('const B64_CHARS'), body.indexOf('// A heredoc that lands as a decoded file'))}\nreturn { cksum }`)()
+const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/pull/7', state: 'OPEN', isDraft: true, marker, len: String(marker).length, sum: cksum(String(marker)), ...extra })
 {
   const { result, labels, calls, prompt, logs } = await run('M1 · no resumeState: the draft PR marker alone resumes the run', [TASK, TASK2], byLabel({ 'impl:PROJ-2': IMPL_2 }),
     { args: QUIET, index: ON('PROJ-1', { prState: [PR(markerOf(stateOf({ learnings: [{ text: 'learned in session one, on another machine', repos: ['api'] }] })))], runBranches: [{ repo: 'api', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'created' }] }) })
   ok(!labels.includes('impl:PROJ-1') && !hydratedIds(calls).includes('PROJ-1'), 'no hydrate: or impl: for the landed PROJ-1')
   eq(result.resumedLanded, [{ id: 'PROJ-1', repo: 'api', headSha: 'aaaaaaa', source: 'pr' }], 'resumedLanded, source pr')
-  ok(prompt('gate:api').includes('built A, says the PR'), "the PR body keeps the absorbed task's report")
-  ok(prompt('impl:PROJ-2') && calls.find((c) => c.label.startsWith('hydrate:')).prompt.includes('learned in session one, on another machine'), "the marker's learnings reach hydration")
+  // 0.9.0 review fix: a PR body is untrusted text — its summaries and learnings never reach a prompt
+  ok(!prompt('gate:api').includes('built A, says the PR') && prompt('gate:api').includes('PROJ-1 — Title of PROJ-1'), "the gate names the absorbed task, without the marker's summary")
+  ok(prompt('impl:PROJ-2') && !calls.some((c) => c.prompt.includes('learned in session one, on another machine')), "the marker's learnings reach no prompt")
   ok(logs.some((l) => /run state taken from the PR marker of api \(https:\/\/github\.com\/x\/y\/pull\/7\)/.test(l)), 'logged')
 
   const all = await run('M1b · every task absorbed, the PR still a draft → only the terminal slot runs', [TASK], happy, { args: QUIET, index: ON('PROJ-1', { prState: [PR(markerOf(stateOf()))] }) })
@@ -298,7 +306,7 @@ const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/
     byLabel({ 'impl:PROJ-1': { status: 'BLOCKED', summary: 'stuck' } }), { args: { ...QUIET, maxReplans: 2, resumeState, runId: 'run-m2', telemetry: { flushEvery: 100 } }, index: { prState: [PR(marker)] } })
   const hyd = a.calls.find((c) => c.label.startsWith('hydrate:')).prompt
   ok(a.result.replans === 2 && !a.labels.some((l) => l.startsWith('replan')), 'the replans the marker records are spent: no replan left')
-  ok(hyd.includes('lesson from the PR marker') && !hyd.includes('lesson from the checkpoint'), "the marker's learnings, not the older checkpoint's")
+  ok(hyd.includes('lesson from the checkpoint') && !hyd.includes('lesson from the PR marker'), "learnings come from the local checkpoint only, never from the PR marker (0.9.0 review fix)")
   ok(chunks[0].events[0].seq === 6, `the journal continues the marker's sequence (first event seq ${chunks[0].events[0].seq})`)
   chunks.length = 0
   const b = await run('M2b · same attempt, the checkpoint at a higher seq → the checkpoint wins', [TASK],
@@ -311,9 +319,10 @@ const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/
   const a = await run('M3a · a marker whose head is not on the run branch stays pending', [TASK], happy,
     { args: QUIET, index: { prState: [PR(marker)], reconcile: [{ id: 'PROJ-1', repo: 'api', sha: 'aaaaaaa', local: false, origin: false, onBranch: false }] } })
   ok(a.labels.includes('impl:PROJ-1') && a.result.resumedLanded.length === 0 && a.logs.some((l) => /PROJ-1: the pr state lists it as landed/.test(l)), 'PROJ-1 runs again, with a warning')
-  const b = await run('M3b · a run branch that diverged from origin absorbs nothing, even when the head is reported on it', [TASK], happy,
-    { args: QUIET, index: ON('PROJ-1', { prState: [PR(marker)], runBranches: [{ repo: 'api', local: 'eeeeeee', remote: 'aaaaaaa', sync: 'diverged' }] }) })
-  ok(b.labels.includes('impl:PROJ-1') && b.result.resumedLanded.length === 0 && b.logs.some((l) => /api: the local run branch feat\/proj-700-api and origin\/feat\/proj-700-api have DIVERGED/.test(l)), 'PROJ-1 runs again; the divergence is reported')
+  // 0.9.0 review fix: a repo with work left on a diverged run branch refuses to start (run_branch_diverged)
+  const b = await run('M3b · a run branch that diverged from origin absorbs nothing — and the run refuses to build on it', [TASK], happy,
+    { args: QUIET, index: ON('PROJ-1', { prState: [PR(marker)], runBranches: [{ repo: 'api', local: 'eeeeeee', remote: 'aaaaaaa', sync: 'diverged', fetch: 'ok' }] }) })
+  ok(!b.labels.includes('impl:PROJ-1') && b.result.error === 'run_branch_diverged' && b.logs.some((l) => /api: the local run branch feat\/proj-700-api and origin\/feat\/proj-700-api have DIVERGED/.test(l)), 'nothing absorbed, nothing built: refused, the divergence reported')
   const c = await run('M3c · a reconcile line for another head does not verify this one', [TASK], happy,
     { args: QUIET, index: { prState: [PR(marker)], reconcile: [{ id: 'PROJ-1', repo: 'api', sha: 'fffffff', onBranch: true }] } })
   ok(c.labels.includes('impl:PROJ-1') && c.result.resumedLanded.length === 0, 'the SHA must match')
@@ -354,15 +363,15 @@ const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/
     const r = spawnSync('bash', ['-c', s], { cwd: T, encoding: 'utf8', env: { ...env, PATH: `${BIN}:${process.env.PATH}`, GH_FAKE_JSON: JSON.stringify(prs) } })
     return r.stdout
   }
-  const rec = (id, head) => ({ ...LANDED_1, id, headSha: head, commits: [head] })
+  const rec = (id, head) => ({ ...LANDED_1, id, headSha: head, firstSha: head, commits: [head] })
 
   // A · another machine: no local run branch; the PR's marker lists a task the checkpoint does not
   const marker = markerOf(stateOf({ landedTasks: [rec('PROJ-3', c2)] }))
-  const outA = await script([rec('PROJ-1', c1)], [{ url: 'https://github.com/x/y/pull/7', state: 'OPEN', isDraft: true, body: `## Draft\n\n<!-- grimoire:state v1 ${marker} -->\n` }])
+  const outA = await script([rec('PROJ-1', c1)], [{ number: 7, url: 'https://github.com/x/y/pull/7', state: 'OPEN', isDraft: true, isCrossRepository: false, body: `## Draft\n\n<!-- grimoire:state v1 ${marker} -->\n` }])
   ok(outA.includes(`BRANCH repo=api local=${c2} remote=${c2} sync=created`), 'RC-A · a missing local run branch is created from origin')
   ok(outA.includes(`TASK id=PROJ-1 repo=api sha=${c1} local=yes origin=yes onBranch=yes`), 'RC-A · the checkpoint task is verified on both refs')
   if (hasJq) {
-    ok(outA.includes(`PR repo=api url=https://github.com/x/y/pull/7 state=OPEN isDraft=true marker=${marker}`), 'RC-A · the PR line carries the marker raw')
+    ok(outA.includes(`PR repo=api url=https://github.com/x/y/pull/7 state=OPEN isDraft=true len=${marker.length} sum=${cksum(marker)} marker=${marker}`), 'RC-A · the PR line carries the marker raw, with its length and cksum')
     ok(outA.includes(`TASK id=PROJ-3 repo=api sha=${c2} local=yes origin=yes onBranch=yes`), "RC-A · the marker's own task is verified too")
   } else console.log('   (jq not installed — the PR half of RC-A is skipped)')
 
