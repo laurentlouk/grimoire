@@ -30,12 +30,16 @@ brief- and skill-level and stack-agnostic.
   (`briefs/ship.md`), in its own worktree, pushes the exact landed SHA to the run branch
   (fast-forward, hooks run, never forced) and opens or updates the repo's draft PR. Its body
   lists the landed tasks and carries a hidden state marker, `<!-- grimoire:state v1 <base64
-  JSON> -->`, with the run's checkpoint, rewritten on every landing: the PR is the run's proof
-  and its saved state. The terminal slot marks it ready after the gate. On a halt every repo
-  pushes what landed and gets a status comment: the reason, what landed, what is open, what to
-  fix, how to resume. A ship failure never halts or replans; a repo whose pre-push hook wants
-  the gate stops incremental pushes (`shipped.<repo>.disabled`). New result fields `draftPrs`
-  and `shipped`; `prs` still lists ready PRs only.
+  JSON> -->`, with the run's state, rewritten on every landing: the PR is the run's proof (each
+  landed task with its title, head SHA and "passed spec and quality review", and the exact
+  resume instruction) and its saved state. The terminal slot waits for the repo's pending
+  ship, then the gate marks the PR ready and keeps the marker. On a halt (also a wedged one:
+  only the last reviewed head is pushed) every repo pushes what landed, gets its draft PR if it
+  has none, and gets a status comment: the reason, what to fix first, what landed, what is open,
+  any agent still running, how to resume. A ship failure never halts or replans: two failed
+  pushes in a row, or a pre-push hook that wants the gate, stop that repo's incremental pushes
+  (`shipped.<repo>.disabled`), and a failed push asks for an environment check. New result
+  fields `draftPrs` and `shipped`, event `ship`; `prs` still lists ready PRs only.
 - **Landed work survives the session and is absorbed on resume.** The checkpoint recorded
   landed ids that nothing read back, and the tracker keeps issues open until the PR merges, so
   each new session re-dispatched landed work. Checkpoint v2 records every landed task's run
@@ -54,9 +58,24 @@ brief- and skill-level and stack-agnostic.
   portable time limit (`perl -e 'alarm …'`: stock macOS has no `timeout`, which the implement
   brief recommended for hang-prone commands such as the first attempt's Playwright WebKit
   runs). At start a failure refuses the run (`environment_unavailable`); after a BLOCKED, DIED,
-  late or failed push, before the next replan and the final wave, it halts with
-  `kind: 'environment'` and the fix, and no replan is spent. One haiku dispatch
-  (`briefs/env.md`); event `env`; result `environment`.
+  ERROR, late or fenced task, or a failed push, a check runs in flight (a failure stops new
+  dispatches at once) and before the next replan and the final wave; a failure halts with
+  `kind: 'environment'` and the fix, and no replan is spent. On macOS a `power` check warns when
+  the machine runs on battery (the run lost 49 minutes to a laptop hibernating on battery at 1%);
+  it never refuses. One haiku dispatch (`briefs/env.md`); event `env`; result `environment`.
+- **A run branch named after the project's key** (`runBranch` overrides it, also per repo). The
+  run's project text was a sentence ("acme/site#3 — GitHub parent issue #3; its slices are
+  …"), so its branch was that sentence slugged and cut at 60 characters, and a relaunch worded
+  differently would have built on another branch and missed its PR and saved state. The branch
+  now takes the first ticket reference in the project text (`owner/repo#N`, `#N`, a key like
+  `PROJ-123`, or a tracker URL's id), so that sentence and `acme/site#3` share
+  `feat/acme-site-3-<repo>`; a project text with no reference is slugged as before.
+- **Shell guidance for implementers and reviewers.** `cd` replaced by a shell plugin's function
+  made 147 commands of the run fail: the briefs now say never `cd` (use `git -C` and absolute
+  paths, or `builtin cd`), read files with the Read and Grep tools, and bound hang-prone
+  commands with `timeout`, `gtimeout` or, where neither exists, `perl -e 'alarm …'`. The engine's
+  own scripts use `builtin cd`, and the guard hook follows `builtin cd` and `command cd` like
+  `cd`.
 - **The journal agent can only run its script.** In the first attempt the haiku journal
   agent, running from the product checkout with the project's instructions loaded, acted on its payload.
   Event lines and `run.json` now travel base64 and are decoded by the script; the brief says
@@ -102,6 +121,9 @@ Nothing to change in `grimoire.config.json`.
 - A run can now refuse to start with `environment_unavailable` when a signed commit or the
   remote does not answer: unlock the signing agent or fix the remote, or pass
   `builtinEnvChecks: false`.
+- The run branch is now named after the project's first ticket reference. A run started on
+  0.8.x whose project text held more than its key (a sentence) used another branch name: to
+  continue it, pass `runBranch` with that name.
 - `agentTimeoutMin` is now a soft limit: a late agent is awaited and its result accepted.
   `agentHardTimeoutMin` (180) is where the run stops waiting; `repos[].timeoutMin` still raises
   its repo's writers' limits.
