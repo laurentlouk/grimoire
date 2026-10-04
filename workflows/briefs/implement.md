@@ -58,8 +58,15 @@ already settled there.
   oldest first — SHAs, not messages), and `headSha` (`git rev-parse HEAD`). The review panel
   is handed exactly `startSha..headSha`, so a merge brings in only what it adds to the branch.
 - **Never poll-loop or babysit a long command.** No watch loops, and never background a job
-  then poll for it — run it in the FOREGROUND and wait. Wrap anything that could hang in
-  `timeout <seconds> …`.
+  then poll for it — run it in the FOREGROUND and wait. Wrap anything that could hang (a browser
+  engine, a device, a network call) in a time limit: `timeout <s> …`, or `gtimeout <s> …`, and
+  where neither exists (stock macOS has no `timeout`) `perl -e 'alarm shift; exec @ARGV' <s> …`
+  (exit 142 = timed out). Check which one exists before relying on it: a wrapper that is "command
+  not found" guards nothing.
+- **Shell: never `cd`.** It may be aliased or replaced by a shell plugin's function (one such
+  replacement once made 147 commands of a run fail). Use `git -C <path>` and absolute paths, or `builtin cd` when
+  a tool must run from a directory. Read and search files with the Read and Grep tools rather than
+  `cat`, `head` or `grep` in Bash.
 - You have no interactive channel — a question can only travel as your return value. If,
   after exploring, the requirement or the right approach is still unclear, return status
   NEEDS_CONTEXT with ONE specific `question` — do NOT guess or ship a half-solution. A

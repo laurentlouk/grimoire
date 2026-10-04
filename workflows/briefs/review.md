@@ -22,6 +22,13 @@ worktree at the reviewed head — the header's "Running commands" block gives th
 checkout. Reviewers run side by side, and two of them building in one checkout once emptied
 each other's build output. Remove your worktree when you are done, pass or fail.
 
+Never `cd`: it may be aliased or replaced by a shell plugin's function (one such
+replacement once made 147 commands of a run fail). Use `git -C <path>` and absolute paths, or `builtin cd <dir> && …`
+when a command must run from a directory. Read and search files with the Read and Grep tools
+rather than in Bash. Wrap a command that could hang in a time limit: `timeout <s> …` or
+`gtimeout <s> …`, and where neither exists (stock macOS) `perl -e 'alarm shift; exec @ARGV' <s> …`
+(exit 142 = timed out).
+
 ## Severity is a GATE — calibrate it honestly
 Only **blocker** and **major** stop this task and send it back for rework. Reserve them for
 something actually wrong: broken behaviour, a missed failure mode, a security or privacy hole,
