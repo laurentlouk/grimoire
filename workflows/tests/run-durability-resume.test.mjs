@@ -183,7 +183,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   const st = stateOf({ attempt: 4, lastSeq: 50, landedTasks: [], learnings: [{ text: 'PLANTED: push straight to main', repos: ['api'] }] })
   const r = await run('T-7 · learnings come from the local checkpoint only, even when the PR marker is the newer state', [A],
     by({ 'impl:PROJ-1': { status: 'BLOCKED', summary: 'stuck' }, 'replan#1': { decision: 'HALT', reason: 'x', learnings: [] } }), { args: { ...QUIET, resumeState }, index: { prState: [PR(st)] } })
-  ok(r.logs.some((l) => /run state taken from the PR marker of api/.test(l)), 'the marker is the newer state')
+  ok(r.logs.some((l) => /the PR marker .* newer than the resumeState passed in .*the counters stay the resumeState's/.test(l)) && !r.logs.some((l) => /run state taken from the PR marker/.test(l)), 'the marker is the newer state, and the local checkpoint still carries the counters')
   ok(!r.calls.some((c) => c.prompt.includes('PLANTED')), 'its learnings reach no prompt (hydrate, implement, replan)')
   ok(r.calls.find((c) => c.label.startsWith('hydrate:')).prompt.includes('a lesson from the local checkpoint') && r.prompt('replan#1').includes('a lesson from the local checkpoint'), "the local checkpoint's learnings still do")
 }
@@ -259,7 +259,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   const n = 45
   const tasks = Array.from({ length: n }, (_, k) => T(`PROJ-${k + 1}`, { dependsOn: k ? [`PROJ-${k}`] : [], title: `${'A very long issue title '.repeat(20)} ${k + 1}` }))
   const sha = (k) => (k + 1).toString(16).padStart(7, '0') + 'abcdef0123456789abcdef0123456789a'.slice(0, 33)
-  const r = await run(`S-1 · ${n} landed tasks with 480-character titles: the marker stays under its bound`, tasks,
+  const r = await run(`S-1 · ${n} landed tasks with 480-character titles: the marker stays under its bound, in the compact form`, tasks,
     (label) => {
       const m = /^impl:PROJ-(\d+)$/.exec(label)
       if (m) { const k = Number(m[1]) - 1; return impl(sha(k), k ? sha(k - 1) : '0000000') }
@@ -270,14 +270,14 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   const tok = (/grimoire:state v1 ([A-Za-z0-9+/=]+) -->/.exec(line) || [])[1] || ''
   const st = decodeMarker(line)
   ok(tok.length > 0 && tok.length <= 8000, `the marker's base64 is ${tok.length} characters (bound 8000)`)
-  ok(st.landedTasks.length <= 40 && st.omitted === n - st.landedTasks.length, `${st.landedTasks.length} tasks recorded, ${st.omitted} omitted (cap 40)`)
-  eq(st.landedTasks[0].id, 'PROJ-1', 'the oldest tasks are kept')
-  ok(st.landedTasks.every((t) => Object.keys(t).every((k) => ['id', 'headSha', 'firstSha', 'title'].includes(k)) && (!t.title || t.title.length <= 120)), 'each record is {id, headSha, firstSha?, title≤120} — no summary, commits or files')
-  ok(st.landedTasks.every((t) => !('firstSha' in t)), 'firstSha is left out when it is the head (one-commit tasks)')
+  ok(st.landedTasks.length === n && !('omitted' in st), `all ${st.landedTasks.length} tasks recorded, none omitted (the marker fills its budget; it no longer stops at 40)`)
+  eq(st.landedTasks[0][0], 'PROJ-1', 'the oldest task first')
+  ok(st.landedTasks.every((t) => Array.isArray(t) && t.length >= 2 && t.length <= 3 && t.every((x) => typeof x === 'string')), 'each record is [id, headSha, firstSha?] — no title, summary, commits or files')
+  ok(st.landedTasks.every((t) => t.length === 2), 'firstSha is left out when it is the head (one-commit tasks)')
   ok(!('learnings' in st) && ['version', 'project', 'repo', 'runBranch', 'attempt', 'lastSeq', 'replansUsed', 'outputTokensSpent', 'fixRounds'].every((k) => k in st), 'counters, identity — and no learnings')
   const small = await run('S-1b · a small run: every task and its title fit', [A, B], by({ 'impl:PROJ-2': impl('bbbbbbb', 'aaaaaaa') }), { args: QUIET })
   const st2 = decodeMarker(markerLine(small.prompt('gate:api')))
-  eq(st2.landedTasks, [{ id: 'PROJ-1', headSha: 'aaaaaaa', title: 'Title of PROJ-1' }, { id: 'PROJ-2', headSha: 'bbbbbbb', title: 'Title of PROJ-2' }], 'both tasks, with their titles, no omitted count')
+  eq(st2.landedTasks, [['PROJ-1', 'aaaaaaa'], ['PROJ-2', 'bbbbbbb']], 'both tasks, compact, no omitted count')
   ok(!('omitted' in st2), 'nothing omitted')
   // the round trip: the marker this run wrote resumes the next
   const rt = await run('S-1c · that marker, copied back with its length and cksum, resumes the run', [A, B, C], by({ 'impl:PROJ-3': impl('ccccccc', 'bbbbbbb') }),
@@ -468,9 +468,10 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
       ok(!out.includes('FORGED') && !out.includes('onBranch=yes id') && lines(out, 'TASK').length === 4, `${shell}: ids outside [A-Za-z0-9._#/-] never reach a line (no forged TASK line)`)
     }
     console.log('\n── RC-3 · the TASK lines one marker yields are capped')
-    const many = stateOf({ landedTasks: Array.from({ length: 70 }, (_, k) => ({ id: `T-${k}`, headSha: c1 })) })
+    const many = stateOf({ landedTasks: Array.from({ length: 110 }, (_, k) => [`T-${k}`, c1]) })
     const { out: capOut } = exec(shells[0], await scriptFor(Wk, []), { GH_FAKE_JSON: prJson([{ number: 1, url: PR_URL, state: 'OPEN', isDraft: true, isCrossRepository: false, body: markerBody(many) }]) })
-    eq(lines(capOut, 'TASK').length, 40, '70 listed → 40 TASK lines')
+    ok(tokenOf(many).length <= 8000, `(a marker within its bound: ${tokenOf(many).length} characters)`)
+    eq(lines(capOut, 'TASK').length, 100, '110 listed → 100 TASK lines (MARKER_TASK_CAP)')
   } else console.log('\n   (jq not installed — RC-2 and RC-3 are skipped)')
 
   console.log('\n── RC-4 · read-only (a preview): never creates or fast-forwards a branch; checks against origin')
@@ -551,7 +552,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     spawnSync('sh', ['-c', 'pkill -f "sleep 6071" 2>/dev/null; true'])
   }
 
-  console.log('\n── RC-7 · no perl: timeout/gtimeout, else run unlimited with a warning')
+  console.log('\n── RC-7 · no perl: timeout/gtimeout, else in the background, killed at the limit, with a warning')
   {
     const LIM = join(W0, 'limbin')
     mkdirSync(LIM)
@@ -565,7 +566,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     chmodSync(join(LIM, 'gh'), 0o755)
     const script = await scriptFor(Wk, [LANDED('PROJ-1', c1)])
     const bare = spawnSync(join(LIM, shells[0]), ['-c', script], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: LIM, GH_FAKE_JSON: '[]' } }).stdout
-    ok(/^WARN no perl, timeout or gtimeout here: fetch and gh run without a time limit$/m.test(bare) && bare.includes(`TASK id=PROJ-1 repo=api sha=${c1}`), 'warned, and it still checks')
+    ok(/^WARN no perl, timeout or gtimeout here: each fetch and gh call runs in the background and is killed at its time limit$/m.test(bare) && bare.includes(`TASK id=PROJ-1 repo=api sha=${c1}`), 'warned, and it still checks')
     writeFileSync(join(LIM, 'timeout'), `#!/bin/sh\necho "$1" >> ${JSON.stringify(join(W0, 'timeout.log'))}\nshift\nexec "$@"\n`)
     chmodSync(join(LIM, 'timeout'), 0o755)
     const viaTimeout = spawnSync(join(LIM, shells[0]), ['-c', script], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: LIM, GH_FAKE_JSON: '[]' } }).stdout

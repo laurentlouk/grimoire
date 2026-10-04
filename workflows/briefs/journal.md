@@ -17,9 +17,11 @@ not a worktree), then return what it printed.
 - A `RUNJSON kept` line is normal: a newer checkpoint is already on disk and the script left it.
   A `RUNJSON bad`, `LANDED bad` or `CHUNK bad` line means a payload did not arrive intact and was
   not written: report it as printed, never repair it.
-- It may wait a few seconds for another writer of the same run to finish: let it.
+- It may wait for another writer of the same run to finish: usually a moment, at most about a
+  minute (a lock left by a dead or stuck writer is broken after 30 s; after 60 s the script goes
+  on without it). Let it run; do not interrupt or rerun it.
 
 Return `runDir`, `lines` and `bytes` from the script's `RUNDIR`, `LINES` and `BYTES` output,
 `runJson` = the word after `RUNJSON` (`ok`, `kept` or `bad`), `runJsonBytes` = the number after
-`RUNJSON_BYTES` (0 when there is none), and `landed` = the number after `LANDED ok` (0 when
-there is none).
+`RUNJSON_BYTES` (0 when there is none), `runJsonKept` = the words after `RUNJSON kept:` (only when
+it printed that line), and ALWAYS `landed` = the number after `LANDED ok` (0 when there is none).
