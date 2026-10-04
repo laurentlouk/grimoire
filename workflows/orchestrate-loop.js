@@ -4538,6 +4538,7 @@ while (true) {
       const revisedDeferred = revised.filter((t) => t.deferred)
       deferred.push(...revisedDeferred)
       let requeued = 0
+      let stillInFlight = 0 // revised tasks skipped because their writer is still running
       const replannedFailures = [...failures] // snapshot: the loop below retires the ones it retries
       for (const t of revised.filter((x) => !x.deferred)) {
         // a replanned task re-enters the DAG fully specified — no hydration round-trip.
@@ -4546,6 +4547,7 @@ while (true) {
         if (t.ticket && t.ticket !== 'NO_TICKET' && inProject.has(t.ticket)) t.id = t.ticket
         if (inFlight.has(t.id)) {
           log(`   · replan #${replanNo}: ${t.id} is still running past its hard limit — not requeued`)
+          stillInFlight++
           continue
         }
         pendingById.set(t.id, { id: t.id, title: '', repo: t.repo, state: 'todo', slice: t.slice ?? 0, sliceLabel: t.sliceLabel || '', dependsOn: t.dependsOn || [] })
@@ -4587,7 +4589,8 @@ while (true) {
       }
       log(`↻ replan #${replanNo}: REVISE${cause === 'code' ? '' : ` (${cause} cause${charged ? ', charged: its free replans are used up' : ' — no replan spent'})`} — ${revision.reason} · ${requeued} task(s) requeued${newLearnings.length ? ` · learned: ${newLearnings.map(learningText).join('; ')}` : ''}`)
       if (!requeued) {
-        halt = { reason: `replan #${replanNo} requeued nothing while work is still open` }
+        // every task it revised is still running: say that, not "requeued nothing"
+        halt = stillInFlight ? { reason: stillRunningReason(), kind: 'wedged' } : { reason: `replan #${replanNo} requeued nothing while work is still open` }
         log(`⛔ ${halt.reason}`)
         break
       }

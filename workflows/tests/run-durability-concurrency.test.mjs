@@ -229,6 +229,22 @@ function journalEvents(calls) {
   eq(logs.filter((l) => /telemetry writer lost 2 chunks in a row — marked dead/.test(l)).length, 1, 'logged once')
 }
 
+// ══════════════ K-6 · a replan whose tasks are all still running halts as still running ══════════════
+{
+  // impl:PROJ-1 (api) never returns and wedges at 300 ms; PROJ-2 (infra) is BLOCKED. The replan for
+  // infra REVISES only PROJ-1, which is still in flight: nothing can be requeued.
+  const { result, labels, logs } = await run('K-6 · every revised task is still in flight: the halt says still running, not "requeued nothing"', [T('PROJ-1'), IN('PROJ-2')], (label, p) => {
+    if (label === 'impl:PROJ-1') return HANG()
+    if (label === 'impl:PROJ-2') return { status: 'BLOCKED', summary: 'nope' }
+    if (label.startsWith('replan#')) return { decision: 'REVISE', cause: 'code', reason: 'redo PROJ-1', learnings: [], tasks: [T('PROJ-1')] }
+    return happy(label, p)
+  }, { args: { ...QUIET, ...FAST, repos: [API, INFRA] } })
+  ok(logs.some((l) => /replan #1: PROJ-1 is still running past its hard limit — not requeued/.test(l)), 'PROJ-1 is not requeued')
+  eq((result && result.halt && result.halt.kind) || null, 'wedged', 'halt kind: wedged')
+  ok(/^still running: impl:PROJ-1 in api passed the 0\.005-min hard limit and has not returned; it may still commit — let it finish/.test((result && result.halt && result.halt.reason) || ''), `the halt names the writer still running (got ${JSON.stringify(result && result.halt && result.halt.reason)})`)
+  eq(labels.filter((l) => l === 'impl:PROJ-1').length, 1, 'impl:PROJ-1 dispatched once')
+}
+
 // ══════════════ K-8 · a repo with a failed task is not gated before that failure is decided ══════════════
 {
   // One repo, the 0.9.0 defaults (incremental delivery, environment checks). PROJ-1 lands, PROJ-2 fails
