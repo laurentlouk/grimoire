@@ -169,7 +169,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   const r = await run('T-6 · the counters a marker carries are clamped: tokens, replans, fix rounds, sequence', [A, B], by({ 'impl:PROJ-2': NOPE }),
     { args: { ...QUIET, maxOutputTokens: 1e6, maxReplans: 2, runId: 'run-t6', telemetry: { flushEvery: 1000 } }, index: { prState: [PR(st)], reconcile: [TASKLINE('PROJ-1', 'aaaaaaa')], runBranches: [BRANCH()] } })
   ok(r.logs.some((l) => /the state marker says 5000(\.0)?M output tokens were spent — more than the 1(\.0)?M cap; ignored \(counted as 0\)/.test(l)) || r.logs.some((l) => /output tokens were spent — more than the .* cap; ignored/.test(l)), 'the planted 5e9 tokens are ignored, with a warning')
-  ok(!(r.result.halt && /budget/.test(r.result.halt.reason || '')) && r.labels.includes('impl:PROJ-2'), 'the run is not halted for budget: PROJ-2 is dispatched')
+  ok(!(r.result.halt && /^budget_exhausted/.test(r.result.halt.reason || '')) && r.labels.includes('impl:PROJ-2'), 'the run is not halted for budget: PROJ-2 is dispatched')
   ok(r.result.replans === 2 && !r.labels.some((l) => l.startsWith('replan')), 'replansUsed 50 counts as maxReplans (2): no replan left, never more')
   ok(r.logs.some((l) => /escalating .* → opus/.test(l)) || r.calls.find((c) => c.label === 'impl:PROJ-2').opts.model === 'opus', 'PROJ-2\'s carried fix rounds escalate it (clamped, still an escalation)')
   const t = r.result.telemetry
