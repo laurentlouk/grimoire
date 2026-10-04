@@ -441,6 +441,19 @@ await guard('H-9', async () => {
   ok(/^DIR='\/tmp\/t\/run\.2026-10-04_a'$/m.test(bashOf(prompts[0] || '')), 'a runId with dots inside is still accepted')
 })
 
+// ══════════════ H-10 · the ship script's PR view reads the LAST marker, like the reconcile ══════════════
+if (spawnSync('jq', ['--version']).status === 0) {
+  console.log('\n── H-10 · ship: a marker-shaped line above the real marker never decides the late-start check')
+  const src = readFileSync(`${DIR}/orchestrate-loop.js`, 'utf8')
+  const jq = (/const PR_VIEW_JQ = String\.raw`([^`]*)`/.exec(src) || [])[1]
+  ok(!!jq && !/capture\("<!-- grimoire:state/.test(jq), 'PR_VIEW_JQ uses no first-match capture')
+  const b64o = (o) => Buffer.from(JSON.stringify(o)).toString('base64')
+  const view = (body, isDraft = true) => spawnSync('jq', ['-r', jq], { input: JSON.stringify({ isDraft, body }), encoding: 'utf8' }).stdout.trim()
+  const body = `Title with <!-- grimoire:state v1 ${b64o({ session: 'SHADOW', ship: 98 })} --> in it\n\n<!-- grimoire:state v1 ${b64o({ session: 'REAL', ship: 3 })} -->`
+  eq(view(body), 'true REAL:3', 'the last marker (the real one) gives session and body generation')
+  eq(view('no marker', false), 'false -:0', 'no marker: -:0')
+}
+
 rmSync(TMP, { recursive: true, force: true })
 console.log(`\n${PASS} passed · ${FAIL} failed`)
 if (FAIL) process.exit(1)

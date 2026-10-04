@@ -1565,7 +1565,7 @@ if [ "$CK" = ${crc}/${n} ] || [ "$CK" = -/${n} ]; then OK=1; else OK=0; rm -f "$
 //   · NEVER OVER A NEWER ONE — the marker on the PR names the session and the ship that wrote it; a
 //     ship that started late (a later ship, or the gate, already wrote one) keeps its hands off.
 // plan = {mode, head, push, pr, edit, ready, create, prUrl, title, body, comments: {ok, failed, ready, note}, gen, reviewPrefixes}
-const PR_VIEW_JQ = String.raw`"\(.isDraft) " + ((((.body // "") | capture("<!-- grimoire:state v1 (?<m>[A-Za-z0-9+/=]+) -->") | .m) // "") | if . == "" then "-:0" else (try (@base64d | fromjson | "\(.session // "-"):\(.ship // 0)") catch "-:0") end)`
+const PR_VIEW_JQ = String.raw`"\(.isDraft) " + ((([(.body // "") | match("<!-- grimoire:state v1 ([A-Za-z0-9+/=]+) -->"; "g") | .captures[0].string] | last) // "") | if . == "" then "-:0" else (try (@base64d | fromjson | "\(.session // "-"):\(.ship // 0)") catch "-:0") end)`
 // The repo's ship lock: its path (in the git dir: never a file the gate would see as uncommitted) and
 // the function that takes it. GS=1: a gate's lock is stale (a halt: no gate runs any more).
 const shipLockPath = (repo) => `G=$(git -C "$P" rev-parse --git-common-dir 2>/dev/null); case "$G" in '') G="$P/.git" ;; /*) ;; *) G="$P/$G" ;; esac; LKP="$G/grimoire-ship-${refToken(repo)}.lock"; HELD=0`
