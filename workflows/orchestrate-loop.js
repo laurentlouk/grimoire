@@ -42,7 +42,7 @@ const DEFAULT_MAX_FIX_ATTEMPTS = 3 // fix rung: fixes per review stage before it
 const DEFAULT_MAX_REPLANS = 3 // replan rung: how many times a failed slice may re-plan from the current state before we HALT
 const DEFAULT_MAX_CONTEXT_RESOLVES = 2 // resolve rung (cheapest): NEEDS_CONTEXT answers fetched from a read-only scout before the question is allowed to escalate to a replan. Override with {maxContextResolves:N}; 0 disables.
 const DEFAULT_AGENT_TIMEOUT_MIN = 40 // per-agent SOFT limit (minutes): past it a dispatch is logged LATE and still awaited — the runtime cannot cancel an agent, so a late valid result is accepted. Override with {agentTimeoutMin:N}; 0 disables every limit. A repo may raise it for ITS writers with {repos:[{timeoutMin:N}]} — e.g. a repo whose gate queues for a machine-global lock.
-const DEFAULT_AGENT_HARD_TIMEOUT_MIN = 180 // per-agent HARD limit (minutes): a reader is given up on (null) at min(2 × soft, this); a WRITER is never given up on — it is WEDGED: still awaited, its repo FENCED so nothing is re-dispatched into its checkout. Implementers booked "died" at a 40-min backstop once ran 78 and 115 more minutes and committed while retries were dispatched into the same checkout. {agentHardTimeoutMin:0}: writers never wedge. Per kind: {timeouts:{<kind>:{soft, hard, hedgeAfter}}}.
+const DEFAULT_AGENT_HARD_TIMEOUT_MIN = 180 // per-agent HARD limit (minutes): a reader is given up on (null) at min(2 × soft, this); a WRITER is never given up on — it is WEDGED: still awaited, its repo FENCED so nothing is re-dispatched into its checkout. Implementers booked "died" at a 40-min backstop once ran 78 and 115 minutes in all and committed while retries were dispatched into the same checkout. {agentHardTimeoutMin:0}: writers never wedge. Per kind: {timeouts:{<kind>:{soft, hard, hedgeAfter}}}.
 const DEFAULT_HYDRATE_AHEAD = 2 // hydration PREFETCH: issues hydrated while the blockers they wait on are still in flight, so a strict blocked-by chain never waits for a hydration on its critical path. {hydrateAhead:0} hydrates only at dispatch.
 const DEFAULT_MAX_PER_REPO = 3 // within-repo parallelism: how many of a repo's tasks may be IN FLIGHT at once. Whether a ready task actually joins is decided at dispatch by declared-file overlap against the repo's running tasks — disjoint files → parallel worktree lanes, any overlap or an undeclared footprint → held until the conflict clears. {maxPerRepo:1} restores strict serialization.
 const DEFAULT_MAX_PRECHECK_FIXES = 1 // precheck rung: cheap structural check between the implementer and the panel. A FAIL buys this many fix dispatches before the task fails as PRECHECK_FAILED. {precheck:false} disables the rung.
@@ -2247,8 +2247,8 @@ if (repoList.length) {
 
 // ── time limits: a timeout makes a dispatch LATE, never dead ──
 // The runtime cannot cancel an agent: agent() returns a bare promise, and a timer can only stop
-// WAITING. A real run booked two implementers DIED at a 40-min backstop; they kept running for 78
-// and 115 more minutes and committed while replans dispatched retries into the same checkout. So
+// WAITING. A real run booked two implementers DIED at a 40-min backstop; they kept running, 78
+// and 115 minutes in all, and committed while replans dispatched retries into the same checkout. So
 // every dispatch has a KIND, and each kind two limits (minutes):
 //   soft — logged `late`, still awaited: a result that arrives later is accepted as if on time
 //   hard — onHard 'null' (readers, mechanical kinds): given up on and resolved null (timedOut);

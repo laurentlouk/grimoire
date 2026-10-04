@@ -41,10 +41,21 @@ tell the script where they are with `{briefsDir, personasDir}`. Run it as `/orch
 
 **Previews by default.** Without `{execute:true}` the run stops after the index and returns
 the dependency DAG, which issues are startable, the review panel each repo would draw, the
-resolved repo config, and a wall-clock `estimate`. Nothing else is dispatched. A forgotten or
-malformed flag therefore fails safe.
+resolved repo config, the resume proof and a wall-clock `estimate`. Nothing else is dispatched,
+and no branch is touched: the index's reconcile runs read-only. A forgotten or malformed flag
+therefore fails safe.
 
-The `estimate` is `{tasks, criticalPath, repoSerial, largestRepo, perTaskMin, terminalMin,
+The resume proof is what an execute run would take from the run's saved state ("Resume"
+below), checked the same way: `resumedLanded` (each task verified on its run branch, with its
+`headSha` and `source`, `checkpoint` or `pr`), `unverifiedLanded` (listed as landed but not
+verified: built again), `stillToBuild`, and `branches`, per repo `{runBranch, sync, fetch,
+local, remote, ahead, verified, prs}`, each PR with its marker's verdict (`verified`, `ignored:
+<why>`, `none`, or `unread (freshStart)`). It is also one log line, `◎ resume: 2/3 landed,
+verified on feat/proj-700-api @ bbbbbbb (checkpoint+pr) — still to build: PROJ-3`, and
+`freshStart: true` when that is set.
+
+The `estimate` covers only what is still to build (verified landed tasks are not counted, and
+`basis` says so): `{tasks, criticalPath, repoSerial, largestRepo, perTaskMin, terminalMin,
 startupMin, hours: {low, high}, basis}`. The critical path is the longest `dependsOn` chain
 inside the project: a strict blocked-by chain runs one task at a time whatever `maxPerRepo`
 is. `low` = (startup + max(critical path, ⌈largest repo ÷ maxPerRepo⌉) × per-task low +
@@ -53,7 +64,9 @@ terminal high) ÷ 60, because declared files are unknown at index level. The def
 min per task, 30–90 min for the terminal review and gate, 10 min startup) come from measured
 0.8.x runs; `estimatePerTaskMin` overrides the per-task bounds. A 10-issue chain in one repo
 comes out at about 7–20 h; the real 0.8.0 run of that shape took about 29 h of run time over
-three attempts, 9–10 h of it lost to the failures 0.9.0 removes ("Run durability").
+three attempts. About 16.6 h of that went to a PreToolUse hook that timed out on every Bash
+call, which the session probe (`maxToolLatencySec`, 0.8.1) now refuses, and 9–10 h to the
+failures 0.9.0 removes ("Run durability"); the two overlap.
 
 ## Inputs
 
@@ -115,11 +128,11 @@ ignored, with a warning.)
 | ----- | ------- | ------- |
 | `maxPerRepo` | `3` | tasks in flight per repo (`1` restores strict serialization) |
 | `maxFixAttempts` | `3` | fix rounds per review stage before it returns FAIL |
-| `maxReplans` | `3` | replans before the run halts |
+| `maxReplans` | `3` | replans charged to the run before it halts. The replanner names a `cause`: `code` (or none) spends one; `harness` (a late or wedged agent, silent reviewers) is free up to `maxReplans` times, then spends one; `environment` halts the run with `kind: 'environment'` and spends none. `0` turns replanning off |
 | `maxContextResolves` | `2` | scout-answered `NEEDS_CONTEXT` questions per dispatch (`0` escalates immediately) |
 | `agentTimeoutMin` | `40` | the SOFT limit per dispatch, in minutes (`0` disables every limit). Past it the dispatch is logged as late (event `late`, `telemetry.late`) and still awaited; a result that arrives later is accepted. An agent cannot be stopped, so a limit only decides how long the run waits. Mechanical kinds have shorter limits of their own (`timeouts`); `crystallize` has 90 minutes |
 | `agentHardTimeoutMin` | `180` | where waiting ends. A reader (reviewer, verifier, guard, replanner, …) is given up on at twice its soft limit, capped by this value (`telemetry.timedOut`). A writer (implementer, fix, integrate, gate) is never settled while it may still be running: it is marked wedged, its repo is fenced (nothing else is dispatched into that checkout, no replan requeues into it) and its result is still taken when it arrives. When only wedged work is left, the run halts with `kind: 'wedged'`. `0`: writers never wedge |
-| `timeouts` | — | per dispatch kind, `{<kind>: {soft, hard, hedgeAfter}}` in minutes. Defaults: `writer` (soft `agentTimeoutMin`, hard `agentHardTimeoutMin`), `reader` (hard 2 × soft, capped by the hard limit), `hydrate` (hard 90), `preflight` 2/6 (hedge at 2), `precheck` 6/15 (hedge at 6), `journal` 4/8, `ship` 5/12, `env` 2/4, `crystallize` 90/180. `hedgeAfter` starts one duplicate of a side-effect-free dispatch and takes the first non-empty reply. Unknown kinds are ignored with a warning |
+| `timeouts` | — | per dispatch kind, `{<kind>: {soft, hard, hedgeAfter}}` in minutes. Defaults: `writer` (soft `agentTimeoutMin`, hard `agentHardTimeoutMin`), `reader` (hard 2 × soft, capped by the hard limit), `hydrate` (hard 90), `preflight` 2/6 (hedge at 2), `precheck` 6/15 (hedge at 6), `journal` 4/8, `ship` 5/12, `env` 2/4, `crystallize` 90/180. `hedgeAfter` starts one duplicate of a side-effect-free dispatch and takes the first non-empty reply: it applies to `preflight`, `precheck`, and `hydrate` when `claim` is off (no default for hydrate), and is ignored with a warning for any other kind. Unknown kinds are ignored with a warning |
 | `deliver` | `'incremental'` | `'incremental'`: after each landing, push the landed SHA to the repo's run branch (fast-forward only, from a ship worktree, hooks never bypassed) and open or update its draft PR. `'end'`: nothing reaches the remote before the terminal slot. Per repo: `repos[].deliver` |
 | `shipOnHalt` | `true` | on a halt, push what landed, open the draft PR if it is missing, and post a status comment on it (the reason, what landed, what is open, what to fix, how to resume), even under `deliver: 'end'` |
 | `draftPr` | `true` | open the repo's PR as a draft after its first landing; `false` pushes without opening a PR before the terminal slot |
@@ -151,10 +164,10 @@ ignored, with a warning.)
 | `claim` | — | `{identity}` — claim issues at hydration, never build one someone else started, release what did not land |
 | `telemetry` | `{enabled: true}` | the decision journal: `{enabled, dir: '.grimoire/runs', flushEvery: 40}` (`retentionDays` is read by `/grimoire:logs`) |
 | `runId` · `runMeta` | set by `/orchestrate` | the journal directory name, and `{grimoireVersion, briefsHash, personasHash, configHash}` every event of the run is tagged with |
-| `resumeState` | — | the `checkpoint` from an earlier session's `run.json` (or from the draft PR's state marker, when newer). The run absorbs every task it lists as landed once it has verified the SHA on the run branch, and keeps the replans, fix rounds, learnings, sequence and spend already used. See "Resume" |
+| `resumeState` | — | the `checkpoint` of the run's newest local `run.json`. The engine also reads each run branch's PR state marker itself: the run-level counters (replans, fix rounds, sequence, spend) come from the newer of the two, the landed tasks from both, each absorbed only once its SHA is verified on the run branch; learnings come from `resumeState` only. See "Resume" |
+| `freshStart` | `false` | `true` starts over on purpose: `resumeState` and every PR state marker are ignored, nothing is absorbed (landed work is built and reviewed again), the budgets start at zero, and no branch is created, moved or reset. An execute run refuses as `run_branch_exists` when origin already holds a run branch with commits not in the base: pass a `runBranch` origin does not have. A value that is not a boolean is ignored with a warning |
 | `guard` | — | not read by the loop: the `PreToolUse` guard hook's config (`hooks/README.md`) |
 | `graph` | `{enabled: true}` | not read by the loop: the code graph's config, `{enabled, repos?, dir: '.grimoire/graph', exclude?, maxFileKB: 512}` (`tools/graph/README.md`); scouts use it for research, never for what code does |
-
 | `finalCheck` | `null` | `{repos:[…], prompt, agentType?}` — one read-only cross-repo check when every named repo landed work (e.g. API-contract drift between a client and its server) |
 
 The canonical `requireHook` is [rtk](https://github.com/rtk-ai/rtk), which condenses every Bash result before it reaches an agent: `{ name: 'rtk hook claude', check: 'command -v rtk && rtk hook check "git status" | grep -q "^rtk "', fix: 'brew install rtk-ai/tap/rtk && rtk init -g', raw: 'rtk proxy' }`. A run that would dispatch dozens of agents without it reads raw output everywhere, so refusing is cheaper than running.
@@ -178,23 +191,24 @@ flowchart TB
     repos["repos — name · path · agent · tags · gate"] --> gate
     gate{{"INPUT GATE (in-script)\nall four set?"}}
     gate -- "any missing" --> ref1["REFUSED — missing_pipeline_inputs\nnothing dispatched"]
-    gate -- "all present" --> idx["PHASE A: SLICE INDEX — one agent\nverify spec &amp; plan exist · project has slice-tagged issues\nlist EVERY issue: id · repo · state · dependsOn — NO bodies\ndone/canceled issues ABSORBED (count as landed deps)\nRECONCILE: tasks an earlier session landed (resumeState, or the draft PR's\nstate marker) verified on the run branch → absorbed, never rebuilt"]
+    gate -- "all present" --> idx["PHASE A: SLICE INDEX — one agent\nverify spec &amp; plan exist · project has slice-tagged issues\nlist EVERY issue: id · repo · state · dependsOn — NO bodies\ndone/canceled issues ABSORBED (count as landed deps)\nRECONCILE: tasks an earlier session landed (resumeState and the draft PR's\nstate marker) verified on the run branch, not in the base → absorbed, never rebuilt"]
     idx -- "inputProblems" --> ref2["REFUSED — invalid_pipeline_inputs\neach problem named · nothing dispatched"]
     idx -- "requireHook configured &amp; failing" --> ref3["REFUSED — required_hook_missing\n{skipHookCheck:true} overrides, loudly"]
+    idx -- "a run branch it cannot build on\ndiverged · behind · freshStart on a taken branch" --> ref6["REFUSED — run_branch_diverged ·\nrun_branch_behind · run_branch_exists\neach problem and its fix"]
     idx -- "an environment check fails\nsigned commit · remote · environmentChecks" --> ref5["REFUSED — environment_unavailable\neach failed check and its fix"]
     idx --> ctx["HARNESS CONTEXT — cheap, read-only (execute only)\nmemory stores verbatim + prior run-ledger learnings\n→ pasted into every brief"]
     ctx --> exec{"execute:true?\n(preview is the default)"}
     exec -- "yes · an agent type does not answer the preflight" --> ref4["REFUSED — agents_unavailable\nthe unresolvable types named · {preflight:false} overrides"]
-    exec -- "no" --> prev["PREVIEW — dependency DAG, startable issues,\nper-repo review panels, resolved repo config,\nwall-clock estimate (critical path × minutes per task)"]
+    exec -- "no" --> prev["PREVIEW — dependency DAG, startable issues,\nper-repo review panels, resolved repo config,\nthe resume proof (reconciled read-only),\nwall-clock estimate of what is left"]
     exec -- "yes" --> disp["CONTINUOUS DISPATCH — no wave barrier\nstart EVERY issue whose own dependsOn landed\nslice → downstream-unlocked → id · ≤ maxPerRepo in flight\nhydrate just-in-time, or hydrateAhead while blockers run\ndisjoint files → worktree lanes · nothing into a FENCED repo"]
     disp --> race["RACE — first settle wins\nper task: lifecycle below\nlanded → dependents unblock · failed → blocks only its dependents\nlate ≠ dead: past its soft limit a dispatch is still awaited\na writer past its hard limit is WEDGED and fences its repo\n3 consecutive quick agent deaths → stop dispatching, drain"]
     race -- "rescan IMMEDIATELY" --> disp
     race -- "landed · deliver: incremental" --> ship["SHIP — haiku, own worktree, never blocks the loop\npush the landed SHA to the run branch (fast-forward, hooks run)\nopen or update the repo's DRAFT PR + its state marker\njournal flushed: the landing is durable"]
     disp -- "QUIESCENT: work stuck behind failures" --> envq{{"ENVIRONMENT CHECK\nafter BLOCKED · DIED · late · a failed push"}}
-    envq -- "ok" --> replan["REPLANNER — A* from CURRENT state\nrevised tasks re-enter the DAG fully specified\nnever requeues into a fenced repo"]
+    envq -- "ok" --> replan["REPLANNER — A* from CURRENT state\nrevised tasks re-enter the DAG fully specified\nnever requeues into a fenced repo\ncause: code spends a replan · harness free up to maxReplans"]
     envq -- "fails · no replan spent" --> halt
     replan -- "REVISE" --> disp
-    replan -- "HALT (reason)" --> halt["HALT — kind: environment · wedged · or the reason given\npush what landed · open the draft PR if missing (shipOnHalt)\nSTATUS COMMENT: reason · landed / open · what to fix · how to resume"]
+    replan -- "HALT (reason) · cause: environment" --> halt["HALT — kind: environment · wedged · harness · or none\npush what landed · open the draft PR if missing (shipOnHalt)\nSTATUS COMMENT: reason · landed / open · what to fix · how to resume"]
     disp -- "QUIESCENT: only WEDGED writers left" --> halt
     halt --> ledger
     disp -- "QUIESCENT: project DRAINED" --> final["ONE FINAL WAVE — environment check, then terminal slots,\nrepos in PARALLEL: sweep → gate → the draft PR marked READY\ndiagram below"]
@@ -209,12 +223,14 @@ flowchart TB
 Replans, terminal slots and halts happen **only at quiescence** (nothing in flight, or nothing
 in flight but wedged writers) — the coherence a wave barrier used to provide, without its idle
 time. A token-budget floor stops dispatching, lets in-flight work settle, then halts cleanly.
-A repo with a failed task still awaiting its replan is not drained, even when nothing depends
-on that task: the environment check and the replan come first, and the repo gates (its PR
+A repo with a failed task is never gated while that failure stands, even when nothing depends
+on the task: the environment check and the replan come first, and the repo gates (its PR
 marked ready) only once the failure has been replanned and landed, while repos without a
-failure gate as usual. If the replan halts or the budget is spent, the repo stays a draft and
-the halt's status comment says why. A halt pushes what landed and comments on the repo's draft PR; any repo it left without its
-gate and ready PR is listed in `ungatedRepos`. Re-invoking `/grimoire:orchestrate` on the same
+failure gate as usual. If the replan halts or the budget is spent, the repo stays a draft: with
+nothing else left, the halt names each task that did not land and its repo (`exhausted replan
+budget (3) — PROJ-4 (api) QUALITY_FAILED did not land; api not gated`), and the status comment
+says why. A halt pushes what landed and comments on the repo's draft PR; any repo it left
+without its gate and ready PR is listed in `ungatedRepos`. Re-invoking `/grimoire:orchestrate` on the same
 project resumes from the saved state ("Resume" below); the tracker alone cannot, because its
 issues close only when the PR merges.
 
@@ -280,11 +296,17 @@ panel's job.
 **Failures are information.** A failed issue blocks only its dependents. When the scheduler is
 stuck, the replanner searches from the current state rather than restarting the original plan,
 and returns `learnings` that are folded into every later hydration and into the run ledger the
-next run reads. See the `adaptive-replanning` skill. A harness failure is not code
-information: when a reviewer of a stage returns nothing, that persona alone is retried once;
-if any lens is still missing, the stage fails closed and the run halts as `reviewers
-unavailable`, naming the lens — no replan is spent and the task is reported
-`REVIEWERS_UNAVAILABLE`, never as failed review and never passed on the surviving reviewers.
+next run reads. See the `adaptive-replanning` skill. The replanner also names the failures'
+`cause`, and only a code cause spends the replan budget: an environment cause (a hung tool or
+hook, a locked commit signer, a machine asleep) halts the run with `kind: 'environment'`,
+because requeuing the same work into the same machine fails the same way, and a harness cause
+(a late or wedged agent, silent reviewers) is free up to `maxReplans` times, then charged, so a
+harness loop still ends; a HALT it decides on a harness cause carries `kind: 'harness'`.
+Silent reviewers never reach the replanner at all: when a reviewer of a stage returns nothing,
+that persona alone is retried once; if any lens is still missing, the stage fails closed and the
+run halts as `reviewers unavailable`, naming the lens — no replan is spent and the task is
+reported `REVIEWERS_UNAVAILABLE`, never as failed review and never passed on the surviving
+reviewers.
 
 **Parallelism comes from declared files.** `dependsOn` decides what is *ready*; declared
 `files` decide what may run *together* in one repo. Disjoint footprints get their own worktree
@@ -397,19 +419,22 @@ sees output tokens (`budget.spent()`); input and cache tokens are not visible to
 A long unattended run has to survive agents that run late, a machine that stops cooperating
 and a session that ends, without losing or redoing work. A 0.8.0 run of ten issues in a
 strict chain took about 29 hours of run time over three attempts, built seven slices and
-opened no PR; about 9–10 of those hours were wasted on the failures below.
+opened no PR; about 9–10 of those hours were wasted on the failures below (and much of every
+hour on a hanging hook: "Runtime constraints").
 
 **Late is not dead.** An agent cannot be cancelled ("Runtime constraints"): a time limit only
 decides how long the run waits. In 0.8.x a dispatch past the 40-minute backstop was booked
-DIED while it kept working: two implementers booked dead kept going, for 78 and 115 minutes
-in all, and committed their slices, and a replan re-dispatched one task into the checkout its predecessor
-was still writing. Every dispatch now has a soft and a hard limit for its kind
+DIED while it kept working: two implementers booked dead kept going, for 78 and 115 minutes in
+all, and committed their slices, and a replan re-dispatched one task into the checkout its
+predecessor was still writing. Every dispatch now has a soft and a hard limit for its kind
 (`agentTimeoutMin`, `agentHardTimeoutMin`, `timeouts`):
 
 - at the soft limit the dispatch is logged as late (`late`) and still awaited, and its result
   is accepted when it comes (`late-result`, `accepted: true`). For a writer, a non-blocking
   environment check runs: a `git commit` hung on a locked signing agent looks exactly like a
-  late writer;
+  late writer. `telemetry.late` keeps each late dispatch's outcome: `accepted`, `died` (it
+  returned nothing after all), `abandoned` (a reader given up on at its hard limit), `wedged`
+  or `pending`;
 - at the hard limit a reader is given up on (`telemetry.timedOut`). A writer is not: it is
   marked wedged (`wedged`) and its repo is fenced (`fence`), so nothing is dispatched or
   requeued into that checkout. The task keeps its slot until the agent returns, then carries
@@ -420,8 +445,13 @@ was still writing. Every dispatch now has a soft and a hard limit for its kind
   the final wave: the other slots are booked, its repo stays out of the next wave and of
   dispatch, and its result is booked when it returns (still in the result if the run has
   ended by then), so its gate never runs twice;
-- side-effect-free kinds (preflight, precheck) start one duplicate at `hedgeAfter` (`hedge`)
-  and take the first reply;
+- a lane that passed its review while its repo's primary checkout is fenced is not merged: it
+  settles `FENCED`, a harness failure, with its worktree and lane branch left in place. The
+  replanner never requeues it while the fence holds; once it is released, a retry of the same
+  id resumes in that worktree;
+- the side-effect-free kinds start one duplicate at their `hedgeAfter` (`hedge`) and take the
+  first non-empty reply: preflight at 2 minutes, precheck at 6, and hydration when claims are
+  off and `timeouts.hydrate.hedgeAfter` is set;
 - a hydration that returns nothing is retried once (`hydrate:w<N>~r1`) before the run halts;
   a late one is accepted (one took 43 minutes and halted a 0.8.0 run);
 - only quick deaths count toward the three-deaths circuit breaker; late, wedged and hedged
@@ -435,8 +465,8 @@ exactly the pushed tree, away from the next implementer), and
 - pushes that exact SHA to the run branch, fast-forward only
   (`git push origin <sha>:refs/heads/<runBranch>`): never `--force`, never `--no-verify`, and
   the next task's unreviewed commits are never published;
-- opens the repo's draft PR after its first landing (`gh pr create --draft`, or the forge's
-  equivalent) and rewrites its body as tasks land: a banner (built unattended, each task
+- opens the repo's draft PR after its first landing (`gh pr create --draft`) and rewrites its
+  body as tasks land: a banner (built unattended, each task
   reviewed, not ready to merge), the exact resume instruction (re-run `/grimoire:orchestrate`
   on the same spec, plan and project; it finds this PR's saved state), the landed tasks — each
   with its closing keyword (`Closes #N` on GitHub or GitLab issues, the bare key for Jira or
@@ -444,6 +474,11 @@ exactly the pushed tree, away from the next implementer), and
   as its last line, a hidden state marker, `<!-- grimoire:state v1 <base64 JSON> -->`, holding
   the run's state ("Resume" below). The body is built by the engine and passed base64, so
   implementer text never reads as an instruction.
+
+The ship script and the reconcile (below) reach the PR through `gh` and nothing else: without
+it, or on a forge `gh` does not serve, pushes still go on, but no draft PR is opened
+(`failedStep: 'pr'`, then PR updates stop) and no marker is read back, so a resume relies on
+the local `run.json` alone. The gate is an agent and may use the forge's own CLI.
 
 Ships for one repo are chained and coalesce (a queued ship pushes the latest landed head);
 they never block the loop. A ship failure never halts, replans or marks code failed. A push
@@ -458,10 +493,13 @@ only what was reviewed), gets its draft PR if it has none (`draftPr`), the halt 
 status comment: the reason, what to fix first (the environment failure and its fix, or "let the
 agent still running finish"), the landed tasks with their SHAs, what is still open, any wedged
 agent, and how to resume. A repo the run leaves ungated without a halt (a terminal slot that
-failed with no replan left) gets the same. The halt's script also removes the reviewers'
-leftover `review-*` worktrees; mid-run, a ship only prunes the records of deleted ones, because a
-live `review-*` worktree belongs to a reviewer working in it. Each push triggers the remote's CI
-and previews: visible progress, or a cost; `deliver: 'end'` opts a repo out.
+failed with no replan left) gets the same. A repo whose terminal slot is still running (a gate
+past its hard limit) is skipped and logged: that gate pushes, retitles and marks the PR ready
+itself, and a halt banner written meanwhile would contradict it. The halt's script also
+removes the reviewers' leftover `review-*` worktrees; mid-run, a ship only prunes the records of
+deleted ones, because a live `review-*` worktree belongs to a reviewer working in it. Each push
+triggers the remote's CI and previews: visible progress, or a cost; `deliver: 'end'` opts a
+repo out.
 
 **Environment checks.** The machine can stop cooperating mid-run: a commit-signing agent that
 locks, an SSH agent that hangs. In the 0.8.0 run an implementer found the locked signing
@@ -475,7 +513,8 @@ check under `perl -e 'alarm <s>; exec @ARGV'` (exit 142 = timed out; stock macOS
 
 - **at start**, inside the index: any failure refuses the run as `environment_unavailable`,
   naming each check and its fix, before anything is hydrated;
-- **after a stall** (a BLOCKED, DIED, ERROR, late or fenced task, or a failed push), before the
+- **after a stall** (a BLOCKED, DIED, ERROR or FENCED task, a writer past its soft limit, or a
+  failed push), before the
   next replan and before the final wave: a failure halts with `kind: 'environment'` and a reason
   that says what to fix, e.g. "environment: commit:api timed out after 30 s (signed commit in a
   scratch worktree; gpg.format=ssh, gpg.ssh.program=…) — unlock or approve the commit-signing
@@ -495,17 +534,60 @@ real run lost 49 minutes on battery at 1%) — and never refuses or halts.
 draft PR (on the remote, so another machine can continue). The tracker is not one of them: its
 issues close only when the PR merges, so landed-but-unmerged work still looks open there.
 
-- `/grimoire:orchestrate` finds a project's earlier run before launching (the newest matching
-  `run.json`, else the draft PR's marker), reuses its `runId` and passes `resumeState`. The
-  engine also reads the PR marker itself at startup.
-- The index reconciles every landed task against git: the run branch exists locally or on
-  the remote, and the task's head is an ancestor of it (`merge-base --is-ancestor`). A verified
-  task is absorbed (`absorb` event; `resumedLanded`, with `source: 'checkpoint'` or `'pr'`): it
-  seeds the landed set, the summaries the gate's PR body and the terminal sweep list, and the
-  reviewed SHAs. A task whose SHA is no longer on the branch (it was reset) is logged and built
-  again.
-- The checkpoint also carries the replans and fix rounds used, the learnings, the journal's
-  sequence and the output tokens spent, so the budgets continue rather than reset.
+- **Where the state comes from.** `/grimoire:orchestrate` finds the project's newest local
+  `run.json` (by `updatedAt`), reuses its `runId` and passes its `checkpoint` as `resumeState`,
+  to the preview first and then to the execute run; on a machine without one it passes none.
+  The engine reads every run branch's PR marker itself, in the index. The run-level counters
+  (attempt, replans and fix rounds used, the journal's sequence, output tokens spent) come from
+  the newer of `resumeState` and the verified markers, by attempt, then `lastSeq` (a tie goes to
+  `resumeState`), so the budgets continue rather than reset; the landed tasks come from both;
+  learnings come from `resumeState` only.
+- **The reconcile.** One fixed script inside the index (`briefs/index.md`), POSIX sh that runs as
+  it is under bash, zsh and dash. Per repo, in parallel, it fetches the run branch, lists the
+  branch's PRs and checks every listed task against the branch and the base. Each fetch and `gh`
+  call has a 30-second limit and the whole script a 90-second deadline (the Bash tool allows
+  120 s); a repo still running then is stopped and named in a `WARN` line. It prints a `BRANCH`
+  line per repo (`local`, `remote`, `sync`: `same`, `ahead`, `created`, `fast-forwarded`,
+  `behind`, `diverged`, `local-only`, `remote-only` or `missing`; `fetch=ok|failed`; and
+  `ahead=<n>`, the commits origin's run branch holds that the base does not), a `PR` line per
+  PR of the branch from this same repository (a fork's PR is never read; open first, then
+  newest, at most three, and only the first carrying a marker prints it, raw, with its length
+  and `cksum`), and a `TASK` line per listed task (`local`, `origin`, `onBranch`,
+  `inBase=yes|no|unknown`, `first`, `firstOk`). In an execute run it creates a missing local run
+  branch from origin and fast-forwards one strictly behind, in a clean checkout only; it never
+  resets, rebases or discards a commit. In a preview and under `freshStart` it is read-only.
+- **What is absorbed.** A task whose head is on the run branch (the local one; origin's when
+  only origin has it, or in a preview when the local one is behind) and not in the base
+  (`inBase=no`), and whose first commit, when recorded, passes the same test. A diverged branch
+  absorbs nothing, nor does a base that does not resolve in the checkout (set `baseBranch`), nor
+  a head that is gone (a reset branch): each is logged and built again (`unverifiedLanded` in a
+  preview). An absorbed task (`absorb` event; `resumedLanded`, with `source: 'checkpoint'` or
+  `'pr'`) seeds the landed set, the replanner's DONE list, the gate's PR body and the terminal
+  sweep, and its head and first commit count as reviewed for that task, on that run branch,
+  only: reviewed SHAs are per task, so one task can never cite another's.
+- **A PR marker is trusted only as far as it is verified**, because anyone who can edit a PR
+  body can write one. The copy the index agent returns must match the length and `cksum` the
+  script printed; the marker must name its project (by key, unless the run branch is set
+  explicitly), its repo and its run branch, all equal to this run's; only ids of this project's
+  index are absorbed; its counters are clamped (output tokens above `maxOutputTokens`, or above
+  10⁹ without a cap, count as 0; replans at most `maxReplans`; fix rounds at most 3 ×
+  `maxFixAttempts` + `maxPrecheckFixes`, for this project's issues only); and no text of it
+  reaches a prompt (it carries no learnings, summaries, commits or files, and its titles never
+  name a task). A repo whose verified marker says its PR is out of draft (open or merged) was
+  shipped by its terminal slot: unless new work lands there, the slot is not paid again.
+- **A run branch the run cannot build on refuses the launch**, before anything is hydrated. For
+  a repo with work left, a branch that diverged from origin is `run_branch_diverged`; one behind
+  origin that could not be fast-forwarded (uncommitted changes, or the branch checked out in
+  another worktree), or only on origin and not created locally, is `run_branch_behind`.
+  `problems` says how to fix each, and nothing landed is lost: it is verified again on the next
+  launch. A failed fetch (offline) is a warning, and every other sync state is logged. A remote
+  run branch that lacks the last absorbed head gets it shipped at start.
+- **`freshStart: true`** starts over on purpose: no `resumeState`, no marker read, nothing
+  absorbed, the budgets at zero, and every branch left exactly as it is. Its first push has to
+  fast-forward origin's run branch, so for a repo with work it refuses as `run_branch_exists`
+  when origin holds the run branch and the reconcile cannot show it holds nothing past the base
+  (`ahead=0`): pass a `runBranch` origin does not have, or close the earlier run's PR and delete
+  its branch first. A preview logs that it would refuse.
 - `resumeFromRunId` is not a resume: it replays cached results for the longest unchanged
   prefix of agent calls ("Runtime constraints"). Use it only for a byte-identical relaunch.
 
@@ -516,9 +598,14 @@ reviewer), `verify`, `fix`, `escalate`, `guard`, `resolve`, `integrate`, `settle
 `terminal`, `gate`, `claim`, `budget`, `halt`, `run.end`, and, from 0.9.0, `late`, `hedge`,
 `wedged`, `late-result`, `fence` (a repo held or released), `ship` (`{repo, mode, pushed, head,
 prUrl, draft, failedStep, detail, disabled}`; `pushed: null` = nothing to push), `env` (`{when,
-why, ok, failed}`; `ok: null` = no usable report) and `absorb`. Each
-carries a gap-free `seq`, the cumulative output tokens `tok`, and its fields (reasons
-included). The script has no clock and no filesystem, so events are buffered and one haiku
+why, ok, failed}`; `ok: null` = no usable report) and `absorb` (`{task, repo, source, head}`;
+`source` is `checkpoint` or `pr` for a task absorbed at start, `reviewed-earlier` for one an
+implementer found already on the branch and reviewed, `verify-only` for one found there
+unreviewed and sent to the panel as it stands). `harness-routed` (from 0.8.1) records a
+terminal-sweep finding on a harness file routed to crystallize; `replan` carries the `cause`
+and `halt` its `kind`. Each carries a `seq` (a resumed session continues the checkpoint's;
+one without a checkpoint starts at 1), the cumulative output tokens `tok`, and its fields
+(reasons included). The script has no clock and no filesystem, so events are buffered and one haiku
 writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
 
 - decodes its payload: the chunk's lines, `run.json` and the landed-task detail travel
@@ -533,7 +620,8 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   a mistyped character, a payload cut off or a missing decoder leaves the file on disk as it
   was. The ledger script does the same and prints `LEDGER bad` instead of a path;
 - runs under a lock in the run directory (a `.lock` directory holding the writer's pid), so
-  two writers never interleave;
+  two writers do not interleave: a lock whose writer is gone is broken at once, any lock after
+  about 30 s, and a writer still without it after about a minute goes on without it;
 - writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
   replayed flush overwrites the same file, never appends duplicates;
 - stamps the flush time into each line (`at`) in the shell — every event of one chunk shares
@@ -553,9 +641,9 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   `mv`, only when this flush is not older than the one on disk: ordered by `gen` (the attempt
   the engine knows from the checkpoint it resumed, else the attempt), then by `lastSeq`. A late
   flush never rolls back a newer checkpoint, whatever order the writers run in;
-- appends the detail of each task that landed since the last confirmed flush (`summary` up to
-  400 characters, `commits`, `files` up to 50, with `attempt` and `at`) to
-  `<runId>/landed.jsonl`, once;
+- appends the detail of each task that landed since the last confirmed flush (its full record:
+  `id`, `repo`, `status`, `ticket`, `title`, `runBranch`, the SHAs, `commits`, `summary` up to
+  400 characters, `files` up to 50, with `attempt` and `at`) to `<runId>/landed.jsonl`, once;
 - prints the line and byte counts of the decoded chunk, `RUNJSON ok|kept|bad` with
   `RUNJSON_BYTES`, and `LANDED ok <n>`, which the engine compares with what it sent: a mismatch
   is logged and counted (a refused `run.json` as a lost write, `telemetry.journal.runJsonLost`),
@@ -566,17 +654,30 @@ After two lost in a row the writer is marked dead: later chunks are counted lost
 dispatched, since each would otherwise wait out its 8-minute limit at the end of the run, and
 only the final chunk (`run.end` and the final `run.json`) gets one more attempt.
 
-The checkpoint is version 2: `{version: 2, replansUsed, learnings, fixRounds,
-outputTokensSpent, lastSeq, landed, pending, landedTasks, shipped, wedged}`. It travels in
-every flush and the writer retypes it, so it keeps only what a resume needs: each of
-`landedTasks` is `{id, repo, runBranch, headSha, firstSha, title}` (`status` when not `DONE`,
-`title` up to 120 characters; tracker-absorbed issues are not in it), `learnings` are the last
-30, each up to 300 characters, and `shipped` is `{<repo>: {pushedHead, prUrl, draft}}`. A
-resume absorbs from `run.json` alone; summaries and paths are enrichment (an absorbed task
-without paths makes a conditional gate apply). A version-1 checkpoint still resumes its
-budgets; it has no SHAs, so nothing is absorbed from it. The draft PR's state marker carries a
-smaller, bounded share of it per repo (the counters, and each task's id and SHAs).
-`summary.halt` is `{reason, kind}` (`kind` null when the halt has none), like the `halt` event.
+The checkpoint is version 2: `{version: 2, attempt, replansUsed, learnings, fixRounds,
+outputTokensSpent, lastSeq, landed, pending, landedTasks, shipped}`. It travels in every flush
+and the writer retypes it, so it keeps only what a resume needs: each of `landedTasks` is `{id,
+repo, runBranch, headSha, firstSha, title}` (`status` when not `DONE`, `title` up to 120
+characters; tracker-absorbed issues are not in it), `learnings` are the last 30, each
+`{text, repos}` up to 300 characters, and `shipped` is `{<repo>: {pushedHead, prUrl, draft}}`.
+`landed` and `pending` are id lists. A resume absorbs from `run.json` alone; summaries and paths
+are enrichment (an absorbed task without paths makes a conditional gate apply). A 0.8.x
+checkpoint (no `version`) still resumes its budgets; it has no SHAs, so nothing is absorbed from
+it. `summary` is written at the end: `{done, failed, stillRunning, recovered, blocked, prs,
+tokens, replans, halt, prUrls}`, where `halt` is `{reason, kind}` (`kind` null when the halt has
+none), like the `halt` event.
+
+The draft PR's state marker is not the checkpoint. It is one line,
+`<!-- grimoire:state v1 <base64 JSON> -->`, per repo: `{version: 2, runId, project, repo,
+runBranch, base, attempt, lastSeq, replansUsed, fixRounds, outputTokensSpent, landedTasks}`,
+with `fixRounds` for that repo's tasks and each landed task as `{id, headSha, firstSha?,
+title?}` (`firstSha` only when it differs from the head, `title` up to 120 characters). It
+holds at most 40 tasks and 8,000 characters of base64, because the index agent copies it back
+verbatim: titles are shortened to 40 characters, then dropped, before the newest tasks are left
+out (`omitted` counts them); a task left out is not absorbed from the PR, so on another machine
+it runs again, finds its work on the branch (`landedBefore`) and is reviewed as it stands. It
+carries no learnings, summaries, commits or files: detail stays in the local `run.json` and
+`landed.jsonl`.
 
 Chunks flush every `flushEvery` events, on every landing and after each ship, at every
 replan, before the final wave and at the end (before the ledger, so `crystallize` can read the
@@ -588,7 +689,8 @@ local and gitignored; `/grimoire:logs` renders it, and its `summary` is the cros
 ## What it returns
 
 `done` · `needsAttention` (the latest attempt of each task or slot that never landed; a writer
-still running at its hard limit is listed as `STILL_RUNNING`) ·
+still running at its hard limit is listed as `STILL_RUNNING`, a lane held behind a fenced
+checkout as `FENCED`) ·
 `recovered` (attempts that failed before the same task landed after a replan, or before its
 repo gated green: history, not work) · `blocked` (never ran) · `alreadyDone` (absorbed) · `deferred` ·
 `advisoryNotes` (the minor/nit findings not reworked, plus any repeated footprint-only
@@ -600,22 +702,28 @@ runs over these) · `draftPrs` (repo → the draft PR the loop opened as tasks l
 (repo → `{pushedHead, prUrl, draft, disabled}`: what reached the remote, and whether incremental
 pushes or PR updates were turned off) · `resumedLanded` (tasks absorbed from an earlier session,
 verified on the run branch, each with `source: 'checkpoint' | 'pr'`) · `environment` (`{checks,
-failures, warnings}`: the checks that ran, each failure with its fix, the power warnings) · `replans` + `learnings` + `halt`
-(`{reason, kind}`; `kind: 'environment'` or `'wedged'` is a machine state, not failed code) · `contextResolves`
+failures, warnings}`: the checks that ran, each failure with its fix, the power warnings) ·
+`replans` (the ones charged to `maxReplans`) + `learnings` + `halt` (`{reason, kind}`; `kind:
+'environment'` is the machine and `'wedged'` a writer still running, neither failed code;
+`'harness'` is a replanner that halted on a harness cause; most halts have none) · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·
 `precheckStats` · `overturnedFindings` · `routing` (picks by agent and model, fallbacks,
 escalations) · `claimedElsewhere` · `claimsReleased` · `meta` · `telemetry` (output tokens,
 this run's spend against `maxOutputTokens`, the session probe's `toolLatencySec`, `late` (each
-dispatch past its soft limit, `{label, kind, softMin, outcome: 'accepted' | 'abandoned' |
-'wedged' | 'pending'}`), `wedged` (the writers past their hard limit), `timedOut` (the readers
-given up on at their hard limit), and the journal's receipt) · `harness` (the ledger written and what
-crystallize produced; when PRs shipped but crystallize did not finish, the `note` says to run
-it by hand over them).
+dispatch past its soft limit, `{label, kind, softMin, outcome: 'accepted' | 'died' |
+'abandoned' | 'wedged' | 'pending'}`), `wedged` (the writers past their hard limit), `timedOut`
+(the readers given up on at their hard limit), and `journal`, the writer's receipt: `{runDir,
+events, written, chunks, mismatches, lost, lostEvents, runJsonLost}`) · `harness` (the ledger
+written and what crystallize produced; when PRs shipped but crystallize did not finish, the
+`note` says to run it by hand over them).
 
-A start-up refusal returns `{error, …}` instead: `missing_pipeline_inputs`,
-`invalid_pipeline_inputs`, `required_hook_missing`, `slow_tool_calls`, `agents_unavailable`, or
-`environment_unavailable` (`problems: [{name, exit, output, fix}]`).
+A preview returns the plan instead (see "Previews by default"). A start-up refusal returns
+`{error, …}`: `missing_pipeline_inputs`, `parse_failed` (the index returned nothing),
+`invalid_pipeline_inputs`, `required_hook_missing`, `slow_tool_calls`, `run_branch_diverged`,
+`run_branch_behind` or `run_branch_exists` (each with `problems` and `branches`, the per-repo
+branch view), `environment_unavailable` (`problems: [{name, exit, output, fix}]`), or
+`agents_unavailable`.
 
 The run stops at PRs. Merging and deploying stay yours.
 
@@ -647,18 +755,31 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
   why a writer past its hard limit fences its repo instead of being retried into it.
 - **`agent()` options are a closed set**: `{label, phase, schema, model, effort,
   isolation: 'worktree', agentType}`. There is no timeout, abort signal, tool list or working
-  directory option; the engine strips its own keys (the limit kind and its minutes) before
-  each call, because an unknown key is a validation error. Tools can be narrowed only through
-  `agentType` (an agent definition's `tools:`), and Bash allows anything, so "read-only" is a
-  convention. Custom agent types still receive the project's instruction file and the session's
-  PreToolUse hooks.
+  directory option; the engine passes its own dispatch options (`kind`, `task`, `repo`, `lane`,
+  `last`) to its time-limit wrapper and strips them before each call, because an unknown key is
+  a validation error. Tools can be narrowed only through `agentType` (an agent definition's
+  `tools:`), and Bash allows anything, so "read-only" is a convention. Custom agent types still
+  receive the project's instruction file and the session's PreToolUse hooks.
+- **Every agent pays the session's PreToolUse hooks.** A hook that hangs until its own timeout
+  is paid on every Bash call of every agent, and looks like slow work. About 16.6 of the 29
+  hours of the real 0.8.0 run were a third-party PreToolUse Bash hook timing out at 30 s on
+  every call. The session probe (`maxToolLatencySec`, from 0.8.1) refuses such a session at
+  start; that run had 0.8.0 installed. Keep the installed plugin up to date.
+- **A message sent to the session while a workflow runs reaches its agents.** The runtime
+  relays it into the prompts of the agents the workflow dispatches. In the same run a haiku
+  probe took a user's message as its instruction and ran the build and the gate. Every brief
+  now tells an agent to report such a message, never obey it, but the reliable way is not to
+  send one: give instructions after the run, or stop it first.
 - **`isolation: 'worktree'` is a worktree of the orchestrating repository**, not of
   `repos[].path` (unless that path is `.`). Reviewer and ship worktrees for target repos are
   made by the agent itself with `git -C <repo> worktree add --detach`.
 - **Queue time counts toward every limit**: the timer starts when the engine dispatches, and
-  the runtime caps concurrency (`min(16, CPUs − 2)` per workflow, 1000 agents per run). More
-  concurrency (parallel reviews, prefetch, ship, hedges) can make a queued agent look late,
-  which is one reason a late agent is awaited rather than written off.
+  the runtime caps how many agents run at once. More concurrency (parallel reviews, prefetch,
+  ship, hedges) can make a queued agent look late, which is one reason a late agent is awaited
+  rather than written off.
+- **A sleeping machine makes every agent late.** The same run's Mac hibernated on battery
+  mid-run; the `power` check warns about it ("Environment checks"), and only a plugged-in,
+  awake machine (`caffeinate -is` on macOS) prevents it.
 - **Replay is best-effort.** `resumeFromRunId` returns cached results for the longest
   unchanged prefix of `agent()` calls; the first changed prompt or option, and everything after
   it, runs live. Results of dispatches the original run had abandoned are recorded and come
@@ -678,4 +799,4 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
 - The first review of a stage is the full panel; after a fix a sonnet guard decides whether the panel re-runs.
 - Briefs and memory are pasted as a stable prefix so prompt caching hits across dispatches; volatile values (task, SHAs) come last.
 - `requireHook` (rtk) refuses to execute without output compression.
-- After a halt, a kill or in a new session, resume by state: the same `runId` and `resumeState` from a fresh `run.json` (or the draft PR's state marker). Landed tasks are absorbed once verified on the run branch and the budgets carry over; nothing landed is built again. `resumeFromRunId` replays cached results only for a byte-identical relaunch.
+- After a halt, a kill or in a new session, resume by state: the same `runId` and `resumeState` from a fresh `run.json` (the engine reads the draft PR's state marker itself). Landed tasks are absorbed once verified on the run branch and the budgets carry over; nothing landed is built again. `resumeFromRunId` replays cached results only for a byte-identical relaunch.
