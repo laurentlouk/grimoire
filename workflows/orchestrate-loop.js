@@ -390,6 +390,7 @@ const IMPL_SCHEMA = {
     baseSha: { type: 'string', description: 'git merge-base <base branch> HEAD — where this branch left the integration branch (the brief names it)' },
     startSha: { type: 'string', description: 'git rev-parse HEAD BEFORE your first change in this dispatch — the commit you started from (for a merge or integration task: the branch head before the merge). The review range begins here' },
     headSha: { type: 'string', description: 'git rev-parse HEAD after your last commit' },
+    landedBefore: { type: 'array', items: { type: 'string' }, description: 'ONLY when the task was already done when you started (an earlier attempt committed it): the SHAs on the branch that implement it, oldest first; then commits is empty and startSha = headSha' },
     filesChanged: { type: 'array', items: { type: 'string' } },
     concerns: { type: 'string' },
     question: { type: 'string', description: 'set only when status is NEEDS_CONTEXT' },
@@ -867,7 +868,7 @@ ${resolved.map((r) => `- **Q:** ${r.question}\n  **A:** ${r.answer}`).join('\n')
     out += `
 
 ## ↻ The review panel rejected the previous attempt — fix every item, then re-confirm:
-${fixFindings.map((f) => `- [${f.severity}${f.persona ? ` · ${f.persona}` : ''}] ${f.file || '?'}:${f.line || '?'} — ${f.issue}`).join('\n')}`
+${fixFindings.map((f) => `- [${f.severity}${f.persona ? ` · ${f.persona}` : ''}] ${f.file || '?'}:${f.line || '?'} — ${f.issue}${f.check === 'change' ? ' (if the work is already on the branch, return `landedBefore` instead of redoing it)' : ''}`).join('\n')}`
   return out
 }
 
@@ -2336,6 +2337,33 @@ async function runTask(task) {
   // panel judges this task's change instead of re-deriving it once per reviewer.
   const range = reviewRange(impl, null)
 
+  // ── ALREADY DONE when it started: an earlier attempt (or a predecessor that outlived its time
+  // limit) committed this task, and the implementer verified it instead of redoing it ──
+  // An empty range used to FAIL the precheck as "nothing to review", buy a fix that had nothing to
+  // fix, and re-review the result (3.5 h for two tiny commits, once). Now the implementer names the
+  // SHAs that implement the task (`landedBefore`): reviewed ones (this session, the checkpoint, the
+  // verified PR state) are absorbed as they are; unreviewed ones become the range and are reviewed
+  // as they stand (verify-only), never "fixed" for being empty. An empty claim with nothing to show
+  // goes through the precheck as before: that IS a defect.
+  const prior = (Array.isArray(impl.landedBefore) ? impl.landedBefore : []).map(asSha).filter(Boolean)
+  if (landed(impl) && prior.length && !range.firstSha && (!range.headSha || !range.startSha || range.headSha === range.startSha)) {
+    const done = { baseSha: range.baseSha, startSha: null, firstSha: prior[0], headSha: prior[prior.length - 1] }
+    if (prior.every(isReviewedSha)) {
+      emit('absorb', { task: task.id, repo: task.repo, source: 'reviewed-earlier', head: done.headSha })
+      log(`   · ${task.id}: already on the branch and reviewed earlier (${prior.map((s) => s.slice(0, 7)).join(', ')}) — absorbed, no precheck, no panel`)
+      let head = done.headSha
+      if (task.lane === 'worktree') {
+        const integrate = await integrateLane(task) // nothing new to merge; it still retires the lane
+        if (!integrate || integrate.status !== 'MERGED') return { id: task.id, repo: task.repo, status: 'MERGE_CONFLICT', impl, integrate }
+        head = asSha(integrate.headSha) || head
+      }
+      return { id: task.id, repo: task.repo, status: impl.status, impl, advisory: [], runBranch: task.runBranch || task.branch, headSha: head, range: done, absorbed: 'reviewed-earlier' }
+    }
+    Object.assign(range, done)
+    emit('absorb', { task: task.id, repo: task.repo, source: 'verify-only', head: done.headSha })
+    log(`   · ${task.id}: already on the branch but not reviewed (${prior.map((s) => s.slice(0, 7)).join(', ')}) — reviewing ${done.firstSha}^..${done.headSha} as it stands`)
+  }
+
   // ── the PRECHECK rung: is there something reviewable at all? ──
   // One cheap structural dispatch before the first panel round — the panel is never paid to
   // discover an empty diff, a missing commit range, conflict markers or a stub. A FAIL goes
@@ -2564,9 +2592,23 @@ const gateDone = new Set() // repos whose terminal slot (sweep → gate where co
 const ungatedReasons = {} // repo → why its certified tree could not be shipped (push / PR step failed)
 const gateHold = new Set() // repos whose terminal slot FAILED — held until a replan lands new repo work, else the drained project re-dispatches the same failing slot forever
 const repoRef = {} // repo → {ticket, branch} from its most recent landed task (briefs the terminal slot)
+// Every SHA a review panel passed — in this session, or in an earlier one per the checkpoint and the
+// verified PR state. An implementer that finds its task already on the branch names the SHAs that
+// implement it (`landedBefore`); reviewed ones are absorbed as they are, never reviewed twice.
+// Prefix match, so a short SHA meets its full form.
+const reviewedShas = new Set()
+const markReviewed = (...shas) => {
+  for (const s of shas.flat()) if (asSha(s)) reviewedShas.add(asSha(s))
+}
+const isReviewedSha = (s) => {
+  const x = asSha(s)
+  return !!x && [...reviewedShas].some((r) => r.startsWith(x) || x.startsWith(r))
+}
+for (const t of checkpointLanded) markReviewed(t.commits, t.firstSha, t.headSha)
 // The absorbed tasks join the run state as if they had landed in this session: dependencies met,
 // listed for the replanner, the terminal sweep and the PR body, the repo briefed for its slot.
 for (const t of absorbedRecords) {
+  markReviewed(t.commits, t.firstSha, t.headSha)
   landedIds.add(t.id)
   doneTasks.push({ id: t.id, repo: t.repo, status: t.status, summary: t.summary, ticket: t.ticket, runBranch: t.runBranch, headSha: t.headSha, commits: t.commits, files: t.files, range: { baseSha: null, startSha: t.startSha, firstSha: t.firstSha, headSha: t.headSha } })
   repoRef[t.repo] = { ticket: t.ticket, branch: t.runBranch }
@@ -2865,8 +2907,9 @@ function settle(r) {
     gateHold.delete(r.repo) // new work landed on this repo's tree — its gate may retry
     gateDone.delete(r.repo) // and a gate that already shipped must re-run on the new tree (replan-landed work after a green gate)
     const t = hydratedById.get(r.id)
-    // the task's commits, up to its head
-    const commits = [...new Set([...(r.impl?.commits || []), r.range && r.range.firstSha, r.range && r.range.headSha].map(asSha).filter(Boolean))]
+    // what the panel passed: the task's commits (and the earlier ones it verified), up to its head
+    const commits = [...new Set([...(r.impl?.commits || []), ...(r.impl?.landedBefore || []), r.range && r.range.firstSha, r.range && r.range.headSha].map(asSha).filter(Boolean))]
+    markReviewed(commits, r.headSha)
     const files = [...new Set([...((t && t.files) || []).map((f) => String(f).split(' — ')[0].trim()), ...(r.impl?.filesChanged || []).map(String)].filter(Boolean))]
     doneTasks.push({ id: r.id, repo: r.repo, status: r.status, summary: r.impl?.summary, ticket: (t && t.ticket) || r.id, runBranch: r.runBranch, headSha: asSha(r.headSha), commits, files, range: r.range || null })
     // the gate is briefed on the RUN branch — a lane branch no longer exists after integration

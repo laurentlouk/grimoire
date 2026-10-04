@@ -222,6 +222,45 @@ const hydratedIds = (calls) => calls.filter((c) => c.label.startsWith('hydrate:'
   ok(firstFlush.landedTasks.length === 1 && firstFlush.landedTasks[0].id === 'PROJ-1', 'the first flush already holds PROJ-1: it was written when PROJ-1 landed')
 }
 {
+  chunks.length = 0
+  const resumeState = { version: 2, attempt: 1, lastSeq: 12, landedTasks: [LANDED_1] }
+  const NOOP = { status: 'DONE', summary: 'already there; verified', commits: [], startSha: 'aaaaaaa', headSha: 'aaaaaaa', landedBefore: ['aaaaaaa'] }
+  const { result, labels } = await run('R4 · "already done" with SHAs the checkpoint lists as reviewed → absorbed, no precheck, no panel, no fix', [TASK],
+    byLabel({ 'impl:PROJ-1': NOOP }), { args: { verifyFindings: false, resumeState, runId: 'run-r4', telemetry: { flushEvery: 100 } } }) // precheck ON; reconcile missing → PROJ-1 re-dispatched
+  eq(labels.filter((l) => /^(precheck|spec-hawk|break-it|data-integrity|fix):PROJ-1/.test(l)), [], 'no precheck, reviewer or fix dispatch for PROJ-1')
+  ok(result.done.length === 1 && result.done[0].headSha === 'aaaaaaa' && result.done[0].absorbed === 'reviewed-earlier', 'it lands, with its head')
+  const ev = chunks.flatMap((c) => c.events).find((e) => e.type === 'absorb' && e.task === 'PROJ-1')
+  ok(ev && ev.source === 'reviewed-earlier' && ev.head === 'aaaaaaa', 'an absorb event, source reviewed-earlier')
+}
+{
+  const NOOP = { status: 'DONE', summary: 'PROJ-1 already built this', commits: [], startSha: 'aaaaaaa', headSha: 'aaaaaaa', landedBefore: ['aaaaaaa'] }
+  const { result, labels } = await run('R4b · in one session: a task a reviewed predecessor already built is absorbed', [TASK, TASK2],
+    byLabel({ 'impl:PROJ-2': NOOP }), { args: QUIET })
+  ok(!labels.some((l) => /^(spec-hawk|break-it|data-integrity|fix):PROJ-2/.test(l)) && result.done.map((d) => d.id).join() === 'PROJ-1,PROJ-2', 'PROJ-2 lands without a second review of aaaaaaa')
+}
+{
+  chunks.length = 0
+  const NOOP = { status: 'DONE', summary: 'a predecessor committed it before it was booked dead', commits: [], startSha: 'ddddddd', headSha: 'ddddddd', landedBefore: ['ccccccc', 'ddddddd'] }
+  const { result, labels, prompt } = await run('R5 · "already done" with SHAs nobody reviewed → reviewed as they stand, no fix', [TASK],
+    byLabel({ 'impl:PROJ-1': NOOP }), { args: { verifyFindings: false, runId: 'run-r5', telemetry: { flushEvery: 100 } } })
+  ok(prompt('precheck:PROJ-1').includes('diff ccccccc^..ddddddd') && !/is empty|startSha/.test(prompt('precheck:PROJ-1').split('## The exact diff')[1] || ''), 'the precheck judges ccccccc^..ddddddd, not an empty range')
+  ok(labels.includes('spec-hawk:PROJ-1') && labels.includes('break-it:PROJ-1') && prompt('spec-hawk:PROJ-1').includes('diff ccccccc^..ddddddd'), 'the panel reviews that range')
+  ok(!labels.some((l) => l.startsWith('fix:')), 'no fix is bought')
+  ok(result.done[0].headSha === 'ddddddd' && result.done[0].range.firstSha === 'ccccccc', 'it lands with that head and range')
+  ok(chunks.flatMap((c) => c.events).some((e) => e.type === 'absorb' && e.source === 'verify-only'), 'an absorb event, source verify-only')
+}
+{
+  let pc = 0
+  const EMPTY = { status: 'DONE', summary: 'nothing to do?', commits: [], startSha: 'aaaaaaa', headSha: 'aaaaaaa' }
+  const { labels, prompt } = await run('R6 · an empty range with no evidence still fails the precheck; the fix is told about landedBefore', [TASK],
+    byLabel({ 'impl:PROJ-1': EMPTY, 'precheck:PROJ-1': () => (pc++ ? { verdict: 'PASS', problems: [] } : { verdict: 'FAIL', problems: [{ check: 'change', issue: 'the range aaaaaaa..aaaaaaa is empty' }] }) }), { args: { verifyFindings: false } })
+  ok(labels.includes('fix:PROJ-1:precheck#1'), "today's precheck FAIL → fix path")
+  ok(prompt('fix:PROJ-1:precheck#1').includes('is empty (if the work is already on the branch, return `landedBefore` instead of redoing it)'), 'the change finding carries the landedBefore hint')
+  const ib = readFileSync(`${DIR}/briefs/implement.md`, 'utf8')
+  ok(/## Already done when you start/.test(ib) && /landedBefore/.test(ib) && /do not redo, regenerate or re-commit it/.test(ib), 'implement.md has the "Already done when you start" section')
+}
+
+{
   const GATED = [{ ...REPOS[0], gate: { run: 'make gate', when: { pathsMatching: ['infra/'] } } }]
   const absorbed = (files) => run(`R7 · conditional gate after a resume — absorbed task files ${JSON.stringify(files)}`, [TASK, TASK2], byLabel({ 'impl:PROJ-2': IMPL_2 }),
     { args: { ...QUIET, repos: GATED, resumeState: { version: 2, attempt: 1, lastSeq: 1, landedTasks: [{ ...LANDED_1, ...(files ? { files } : {}) }] } }, index: ON('PROJ-1') })

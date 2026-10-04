@@ -66,6 +66,17 @@ already settled there.
   answer; only genuine product/UX/cost decisions go to a human. Returning NEEDS_CONTEXT early
   is CHEAP and correct; burying the question and guessing is the expensive failure.
 
+## Already done when you start
+If HEAD already holds this task's work — an earlier attempt, or a predecessor that ran past its
+time limit, committed it — do not redo, regenerate or re-commit it. Verify it against the
+success criteria with the focused checks, then return DONE (DONE_PENDING_GATE in a gated repo)
+with `commits: []`, `startSha = headSha = HEAD`, and `landedBefore` = the SHAs that implement it,
+oldest first (`git log --reverse --format=%H <baseSha>..HEAD -- <declared files>`, keeping only
+this task's commits). The loop absorbs those SHAs if a panel already passed them, and otherwise
+reviews them as they stand: an empty diff is never a defect when you name them. If only part of
+the task is there, finish the rest as a normal change (its commits in `commits`) and leave
+`landedBefore` out.
+
 ## Parallel lane (only when the header says PARALLEL LANE)
 Other implementers are working in the shared checkout RIGHT NOW: do not touch that checkout,
 its branch, or its index. Work ONLY in your worktree; if it already exists (an earlier attempt
