@@ -54,6 +54,7 @@ const DEFAULT_MAX_TOOL_LATENCY_SEC = 15 // startup probe (execute runs): when a 
 const TOOL_LATENCY_WARN_SEC = 8 // from here on the probe's number is logged as a warning: two back-to-back calls normally sit 2–6 s apart
 const CRYSTALLIZE_TIMEOUT_MIN = 90 // crystallize reads every review thread, patches skills and runs their evals: the longest single dispatch of a run, and the 40-min backstop killed it before it wrote anything
 const DEFAULT_JOURNAL_FLUSH_EVERY = 40 // telemetry: decision events buffered before one cheap writer puts them on disk (also flushed at every replan, the final wave and the end)
+const JOURNAL_DEAD_AFTER = 2 // consecutive lost journal chunks before the writer is marked dead: later chunks are counted lost, never queued (each would wait out its limit at the run's end); the final chunk still gets one attempt
 const DEFAULT_DELIVER = 'incremental' // after each landing: push the landed SHA (fast-forward, from a ship worktree) and keep ONE draft PR per repo up to date — the PR is the proof of what landed and the run's saved state. A 0.8.0 run built seven slices over 29 h and three halts and left nothing on the remote. 'end': nothing is pushed before the terminal slot. {deliver}, per repo {repos:[{deliver}]}.
 const SHIP_PUSH_FAILURES = 2 // consecutive failed pushes before a repo's incremental pushes stop (a pre-push hook that demands the gate stops them at once)
 const DEFAULT_ENV_CHECK_SEC = 30 // per environment check: a signed commit or an ls-remote behind a locked agent hangs; past this it is reported timed out (exit 142)
@@ -1536,7 +1537,7 @@ function integratePrompt(task) {
 
 // The re-planner — A* from the CURRENT state when the scheduler is stuck.
 function replanPrompt({ goal, done, failures, blocked, learnings, replanNo, maxReplans }) {
-  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans} (only a \`cause: code\` replan spends one).
+  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans} (a \`cause: code\` replan spends one; a \`cause: harness\` one is free up to ${maxReplans} time(s), then spends one like code; \`cause: environment\` halts the run and spends none).
 
 ## Goal
 ${goal}
@@ -1828,7 +1829,11 @@ const journal = {
   flushes: 0,
   written: 0,
   mismatches: 0,
-  dead: 0,
+  dead: 0, // chunks lost: their writer returned nothing, or it was marked dead before they ran
+  lostEvents: 0, // the events of those chunks
+  lostInARow: 0,
+  writerDead: false, // JOURNAL_DEAD_AFTER chunks lost in a row: no more chunks are queued but the final one
+  finalSent: false, // the chunk carrying journal.final has been queued
   final: null, // {status, summary} once the run is over — the last flush writes it into run.json
   bumped: false, // a flush of THIS session has landed, so the attempt number is already bumped
 }
@@ -1845,7 +1850,18 @@ function flushJournal() {
   if (!journal.enabled || !journal.pending.length) return journal.chain
   const batch = journal.pending.splice(0)
   const n = ++journal.flushes
+  const final = !!journal.final && !journal.finalSent // the run's last chunk: one attempt, even once the writer is marked dead
+  if (journal.final) journal.finalSent = true
+  const lose = () => {
+    journal.dead++
+    journal.lostEvents += batch.length
+  }
+  if (journal.writerDead && !final) {
+    lose()
+    return journal.chain
+  }
   journal.chain = journal.chain.then(async () => {
+    if (journal.writerDead && !final) return lose() // queued before the writer was marked dead
     const lines = batch.map((e) => JSON.stringify(e))
     const firstSeq = batch[0].seq
     // The bump rides on the first flush that LANDS, not on flush #1: a lost first chunk would
@@ -1858,10 +1874,17 @@ function flushJournal() {
       schema: JOURNAL_SCHEMA,
       kind: 'journal', // short limits: a hung writer must not hold journal.chain (and the run's end) for 40 min
     })
-    if (r) journal.bumped = true
+    if (r) {
+      journal.bumped = true
+      journal.lostInARow = 0
+    }
     if (!r) {
-      journal.dead++
+      lose()
       if (journal.dead === 1) log('⚠ telemetry writer died — events of this chunk are lost; the run itself is unaffected')
+      if (++journal.lostInARow >= JOURNAL_DEAD_AFTER && !journal.writerDead) {
+        journal.writerDead = true
+        log(`⚠ telemetry writer lost ${journal.lostInARow} chunks in a row — marked dead: later chunks are counted lost instead of queued; the final chunk still gets one attempt`)
+      }
       return
     }
     if (typeof r.runDir === 'string' && r.runDir.trim()) {
@@ -2374,7 +2397,6 @@ function withLimits(start, lim, label, meta) {
     let live = 1 // copies still out (the dispatch, plus its hedge)
     let late = null // its lateLog entry, once past soft
     let wedge = null // its wedged entry, once a writer passed hard
-    let holder = null // the fence an abandoned reader holds on its repo
     const timers = []
     const at = (min, fn) => {
       if (min > 0) timers.push(setTimeout(fn, min * 60 * 1000))
@@ -2389,18 +2411,20 @@ function withLimits(start, lim, label, meta) {
       const val = v == null ? null : v
       if (gaveUp) {
         emit('late-result', { label: which, task: m.task || null, accepted: false, status: statusOf(val) })
-        if (holder && !live) releaseFence(m.repo, holder)
         return
       }
       if (settled || (val === null && live > 0)) return // a copy already answered, or the other copy still may
+      // Once the loop has stopped dispatching, a wedged writer's result is not used: its task would
+      // flow on into stages that cannot run (reviews, fixes). A `last` dispatch — nothing is
+      // dispatched after it (the gate) — is still delivered, so its slot is recorded.
+      const accepted = val !== null && !(wedge && dispatchClosed && !m.last)
       if (late) {
-        const accepted = val !== null && !(wedge && dispatchClosed)
         late.outcome = accepted ? 'accepted' : val === null ? 'died' : 'abandoned'
         emit('late-result', { label: which, task: m.task || null, accepted, status: statusOf(val) })
-        if (wedge) log(`◎ [late] ${which} returned past its hard limit — ${accepted ? 'result accepted, the task continues' : val === null ? 'with nothing' : 'after the run had stopped dispatching'}`)
+        if (wedge) log(`◎ [late] ${which} returned past its hard limit — ${accepted ? (dispatchClosed ? 'result recorded (nothing is dispatched after it)' : 'result accepted, the task continues') : val === null ? 'with nothing' : 'after the run had stopped dispatching — not used, the task goes no further'}`)
       }
       if (wedge) unwedge(wedge)
-      finish(val)
+      finish(accepted ? val : null)
     }
     first.then(arrive(label), () => arrive(label)(null))
     at(lim.soft, () => {
@@ -2437,7 +2461,7 @@ function withLimits(start, lim, label, meta) {
       if (late) late.outcome = 'abandoned'
       // No fence for an abandoned reader: reviewers, verifiers and guards run commands only in
       // their own detached worktree (runBlock), never in the shared checkout.
-      log(`⏳ [timeout] ${label} passed its ${fmtMin(lim.hard)}m hard limit — no longer awaited (treated as no reply); the agent itself is NOT stopped and may still be running${holder ? `; ${m.repo} is fenced until it returns` : ''}`)
+      log(`⏳ [timeout] ${label} passed its ${fmtMin(lim.hard)}m hard limit — no longer awaited (treated as no reply); the agent itself is NOT stopped and may still be running`)
       finish(null)
     })
   })
@@ -2456,12 +2480,14 @@ function metaFor(label, o) {
   return { task, repo: o.repo || (task && taskRepo.get(task)) || null, lane: !!o.lane }
 }
 // Every agent dispatch goes through this. `kind` picks its limits (default 'reader'); `task`,
-// `repo` and `lane` say what it works on. All four are stripped before agent() sees the opts —
-// the runtime's opts schema is closed, so an unknown key would be a validation error.
+// `repo` and `lane` say what it works on; `last`: nothing is dispatched after it (see withLimits).
+// All five are stripped before agent() sees the opts — the runtime's opts schema is closed, so an
+// unknown key would be a validation error.
 const agentT = (prompt, o) => {
-  const { kind, task, repo, lane, ...rest } = o || {}
+  const { kind, task, repo, lane, last, ...rest } = o || {}
   const label = rest.label || 'agent'
   const meta = metaFor(label, { task, repo, lane })
+  if (last) meta.last = true
   if (dispatchClosed && meta.task) return Promise.resolve(null)
   return withLimits((l) => agent(prompt, l === label ? rest : { ...rest, label: l }), limitsFor(kind, meta.repo), label, meta)
 }
@@ -3107,11 +3133,19 @@ async function reviewRound(task, mode, personas, phaseName, range, attempt, tag 
 // A round whose verdicts no longer count (the head it judged moved, or the precheck failed under
 // 'all'): journaled with `discarded: true` once it settles, never awaited, never gating.
 function discardRound(task, mode, round, why) {
-  Promise.resolve(round).then((r) => {
-    for (const x of (r && r.reviews) || [])
-      emit('review', { task: task.id, stage: mode, persona: x.persona, verdict: x.v.verdict, gating: (x.v.findings || []).filter(isGating).length, advisory: (x.v.findings || []).filter((f) => !isGating(f)).length, round: 0, discarded: true, reason: why })
-    for (const p of (r && r.unavailable) || []) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: 0, discarded: true, reason: why })
-  })
+  Promise.resolve(round)
+    .then((r) => {
+      for (const x of (r && r.reviews) || [])
+        emit('review', { task: task.id, stage: mode, persona: x.persona, verdict: x.v.verdict, gating: (x.v.findings || []).filter(isGating).length, advisory: (x.v.findings || []).filter((f) => !isGating(f)).length, round: 0, discarded: true, reason: why })
+      for (const p of (r && r.unavailable) || []) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: 0, discarded: true, reason: why })
+    })
+    .catch(() => {}) // nobody awaits a discarded round: its rejection must not go unhandled
+}
+// A round started ahead of the stage that awaits it may end up awaited by nobody (the task returns
+// early, or throws): a rejection must not go unhandled. A stage that awaits it still sees it.
+const ahead = (round) => {
+  round.catch(() => {})
+  return round
 }
 // reviewParallel 'all': round 0 of both stages starts NEXT TO the precheck, on the implementer's
 // head. It counts only if the precheck passes on its first look: the first precheck FAIL discards
@@ -3121,8 +3155,8 @@ function earlyReviews(task, range) {
   const e = {
     head: r.headSha,
     discarded: false,
-    spec: reviewRound(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', r, 0),
-    quality: reviewRound(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', r, 0),
+    spec: ahead(reviewRound(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', r, 0)),
+    quality: ahead(reviewRound(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', r, 0)),
     discard(why) {
       if (e.discarded) return
       e.discarded = true
@@ -3428,7 +3462,7 @@ async function runTask(task) {
       let head = done.headSha
       if (task.lane === 'worktree') {
         const integrate = await integrateLane(task) // nothing new to merge; it still retires the lane
-        if (!integrate || integrate.status !== 'MERGED') return { id: task.id, repo: task.repo, status: 'MERGE_CONFLICT', impl, integrate }
+        if (!integrate || integrate.status !== 'MERGED') return { id: task.id, repo: task.repo, status: integrate && integrate.status === 'FENCED' ? 'FENCED' : 'MERGE_CONFLICT', impl, integrate }
         head = asSha(integrate.headSha) || head
       }
       return { id: task.id, repo: task.repo, status: impl.status, impl, advisory: [], runBranch: task.runBranch || task.branch, headSha: head, range: done, absorbed: 'reviewed-earlier' }
@@ -3531,7 +3565,7 @@ async function runTask(task) {
   else if (REVIEW_PARALLEL !== 'off') {
     log(`   · ${task.id}: spec ∥ quality review on ${h0 || 'the reported head'}…`)
     spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', { ...range }, 0)
-    quality0 = reviewRound(task, 'quality', qualityPanel, 'Quality review', { ...range }, 0)
+    quality0 = ahead(reviewRound(task, 'quality', qualityPanel, 'Quality review', { ...range }, 0))
   }
   const fixesBefore = task.fixRounds || 0
   const spec = await runReviewStage(task, 'spec', specPanel, 'Spec review', resolved, range, { first: spec0 })
@@ -3766,7 +3800,7 @@ Fix dispatches: address ONLY the findings listed, commit to \`${ref.branch}\`. T
   }
 }
 let replans = resumeBase && Number.isInteger(resumeBase.replansUsed) && resumeBase.replansUsed > 0 ? Math.min(resumeBase.replansUsed, MAX_REPLANS) : 0
-let replanNo = replans // every replan dispatched (its label number); only a code-cause replan spends one of MAX_REPLANS
+let replanNo = replans // every replan dispatched (its label number); a code-cause replan spends one of MAX_REPLANS, and so does a harness-cause one once its free ones are used
 let freeReplans = 0 // harness-cause replans not charged to MAX_REPLANS (at most MAX_REPLANS of them, then they are charged)
 let halt = null // {reason} once we stop early
 const claimedByRun = new Map() // id → repo: issues this run claimed at hydration (released at the end if they did not land)
@@ -4147,20 +4181,24 @@ function prefetchHydration(cands) {
       log(`⚠ prefetch hydrate:p${n} ${hyd ? 'reported input problems' : 'returned nothing'} — ${issues.map((i) => i.id).join(', ')} will hydrate at dispatch`)
       return
     }
-    // as the just-in-time path does: under both id and ticket
+    // as the just-in-time path does: under both id and ticket — never over a task already there (a
+    // replan revised it while this ran: its version stands), and only for an issue still pending
+    const wrote = new Set()
     for (const t of hyd.tasks || []) {
       if ((invalidatedAt[t.repo] || 0) > epoch) continue // a replan since: re-hydrated later, with its learnings
+      const keys = [t.id, t.ticket && t.ticket !== 'NO_TICKET' ? t.ticket : null].filter(Boolean)
+      const issue = keys.find((k) => pendingById.has(k))
+      if (!issue || keys.some((k) => hydratedById.has(k))) continue
       t.prefetchedBefore = before.get(t.id) || before.get(t.ticket) || []
-      hydratedById.set(t.id, t)
-      if (t.ticket && t.ticket !== 'NO_TICKET') hydratedById.set(t.ticket, t)
+      for (const k of keys) hydratedById.set(k, t)
+      wrote.add(issue)
     }
-    for (const i of issues) if (hydratedById.has(i.id)) prefetched.add(i.id)
-    if (claim)
-      for (const i of issues) {
-        claimedByRun.set(i.id, i.repo)
-        emit('claim', { task: i.id, action: 'claim', by: claim.identity })
-      }
+    for (const i of issues) if (wrote.has(i.id)) prefetched.add(i.id)
+    if (claim) for (const i of issues) emit('claim', { task: i.id, action: 'claim', by: claim.identity })
   }
+  // The hydration claims its issues as it runs: they are recorded now, so a run that ends before it
+  // returns (or after it was given up on) still hands them back with the release.
+  if (claim) for (const i of issues) claimedByRun.set(i.id, i.repo)
   const p = agentT(hydratePrompt(project, issues, relevantLearnings([...learnings, ...priorLearnings], [...new Set(issues.map((i) => i.repo))]), claim), {
     label: `hydrate:p${n}`,
     phase: 'Parse plan',
@@ -4382,6 +4420,7 @@ async function terminalSlot(repo) {
     kind: 'writer',
     task: pseudo.id,
     repo,
+    last: true, // a result returning after the loop ended is still the slot's (bookLateSlot)
   })
   // A gate that reports its gate still PENDING certified nothing — it is the gate.
   const failed = !gate || gate.status === 'BLOCKED' || gate.status === 'NEEDS_CONTEXT' || gate.status === 'DONE_PENDING_GATE'
@@ -4421,31 +4460,59 @@ function fenceHeld() {
 // The final wave, raced against "every slot still open is wedged": a gate (or a terminal fix)
 // past its hard limit must not hold the other repos' results, nor the run, forever.
 const STILL_RUNNING = { stillRunning: true }
+// repo → its terminal slot while it runs. A slot its wave booked as STILL_RUNNING keeps running:
+// its repo stays out of the next wave and out of dispatch until it returns (the gate pushes and
+// opens a PR — it must never run twice), and its result is booked when it arrives.
+const openSlots = new Map()
+const slotFailed = (f) => f.status === 'GATE_FAILED' || f.status === 'TERMINAL_REVIEW_FAILED' // a failure of a terminal slot, not of a task
 async function finalWave(finals) {
   const out = finals.map(() => STILL_RUNNING)
   const done = new Set()
+  let returned = false // the wave has handed back its results: a slot ending later books its own
+  // Every slot that ends wakes the wave: once another slot has wedged, nothing else would.
+  const end = (repo, i) => (r) => {
+    out[i] = r
+    done.add(repo)
+    openSlots.delete(repo)
+    if (returned) bookLateSlot(repo, r)
+    wake()
+    return r
+  }
   const all = parallel(
-    finals.map((repo, i) => () =>
-      terminalSlot(repo).then((r) => {
-        out[i] = r
-        done.add(repo)
-        return r
-      }),
-    ),
+    finals.map((repo, i) => () => {
+      const p = terminalSlot(repo).then(end(repo, i), () => end(repo, i)(null))
+      openSlots.set(repo, p)
+      return p
+    }),
   )
   for (;;) {
     const r = await Promise.race([all, waker()])
     if (r !== WAKE) return r
-    const open = finals.filter((repo) => !done.has(repo))
-    if (open.length && open.every((repo) => wedged.some((w) => w.repo === repo))) {
-      log(`⛔ final wave: ${open.join(', ')} still running past the hard limit — booking the other slot(s) now`)
-      return out
+    if (finals.every((repo) => done.has(repo) || wedged.some((w) => w.repo === repo))) {
+      const open = finals.filter((repo) => !done.has(repo))
+      if (open.length) log(`⛔ final wave: ${open.join(', ')} still running past the hard limit — booking the other slot(s) now`)
+      returned = true
+      return out.slice() // a snapshot: a slot that ends later is booked once, by bookLateSlot
     }
   }
 }
+// A slot its final wave left STILL_RUNNING has returned: book it as any slot result (gateDone, its
+// PR, ungatedRepos) and wake the loop. Once the loop is over nothing acts on it, but it is still
+// this run's result: it leaves stillRunning, lands in the result and is flushed to the journal.
+function bookLateSlot(repo, r) {
+  if (!r) emit('terminal', { repo, verdict: 'DIED' })
+  const res = r || { id: `${repo}:gate`, repo, gateStep: true, status: 'GATE_FAILED', gate: null }
+  log(`◎ ${repo}: its terminal slot returned after its final wave — ${res.status}${res.prUrl ? ` · ${res.prUrl}` : ''}${dispatchClosed ? ' (recorded; the run had stopped dispatching)' : ''}`)
+  settle(res)
+  if (dispatchClosed) {
+    // stillRunning exists by now: it is built right after dispatchClosed is set, with no await between
+    for (let i; (i = stillRunning.findIndex((s) => s.id === `${repo}:final` || s.id === `${repo}:gate`)) >= 0; ) stillRunningIds.delete(stillRunning.splice(i, 1)[0].id)
+    flushJournal()
+  }
+  wake()
+}
 function stillRunningReason() {
   const parts = wedged.map((w) => `${w.label}${w.repo ? ` in ${w.repo}` : ''} passed the ${fmtMin(w.hardMin)}-min hard limit and has not returned; it may still commit`)
-  for (const [repo, hs] of fencedRepos) for (const h of hs) if (h.kind !== 'writer') parts.push(`${h.label} in ${repo} was given up on at its ${fmtMin(h.hardMin)}-min hard limit and may still be running in that checkout`)
   return `still running: ${parts.join('; ') || 'a fenced repo'} — let it finish (git log, ps) before resuming`
 }
 
@@ -4489,7 +4556,7 @@ while (true) {
     const picks = []
     const picked = {}
     for (const i of eligible) {
-      if (fencedRepos.has(i.repo)) continue // a writer past its hard limit (or an abandoned reader) may still be working in it
+      if (fencedRepos.has(i.repo) || openSlots.has(i.repo)) continue // a writer past its hard limit, or a terminal slot, may still be working in it
       if (repoBusy(i.repo).length + (picked[i.repo] || 0) >= MAX_PER_REPO) continue
       if (repoBusy(i.repo).some((x) => x.exclusive)) continue // an undeclared footprint holds its whole repo
       picked[i.repo] = (picked[i.repo] || 0) + 1
@@ -4620,8 +4687,11 @@ while (true) {
   // ── 2 · anything running → wait for the FIRST settle, book it, rescan immediately ──
   // A wedge or a fence release wakes the loop too. When every task still in flight is a wedged
   // writer, nothing will settle on its own: fall through to the quiescent step for the rest.
+  // A terminal slot that outlived its wave and is no longer wedged is running work too: its end
+  // wakes the loop (bookLateSlot).
   const stuck = inFlight.size > 0 && [...inFlight.keys()].every((id) => wedged.some((w) => w.task === id))
-  if (inFlight.size && !stuck) {
+  const slotRunning = [...openSlots.keys()].some((repo) => !wedged.some((w) => w.repo === repo))
+  if ((inFlight.size && !stuck) || slotRunning) {
     const r = await Promise.race([...inFlight.values()].map((x) => x.promise).concat(waker()))
     if (r === WAKE) continue
     const ended = inFlight.get(r.id)
@@ -4665,7 +4735,12 @@ while (true) {
   // machine fit for the final wave, or a replan? A failure halts here — no replan spent.
   if (await envStall('the run went quiescent')) break
   const held = fenceHeld()
-  const finals = [...pendingById.keys()].every(held) ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r) && !fencedRepos.has(r) && ![...pendingById.values()].some((i) => i.repo === r)) : []
+  // A repo with a failed task still awaiting its replan (or the halt that ends the run) is not
+  // final, even with no pending dependents: its gate would mark the PR ready over the failure. Its
+  // failure is handled first (the environment check above, the replan below); a repo without one
+  // still gates now. A failed gate or sweep holds its repo through gateHold instead.
+  const failedRepos = new Set(failures.filter((f) => !slotFailed(f)).map((f) => f.repo))
+  const finals = [...pendingById.keys()].every(held) ? Object.keys(repoRef).filter((r) => !gateDone.has(r) && !gateHold.has(r) && !fencedRepos.has(r) && !openSlots.has(r) && !failedRepos.has(r) && ![...pendingById.values()].some((i) => i.repo === r)) : []
   if (finals.length) {
     log(`▶ final wave: terminal sweep → ${finals.some(hasGateCommand) ? 'gate + ' : ''}push + PR: ${finals.join(', ')}`)
     flushJournal()
@@ -4749,9 +4824,10 @@ while (true) {
         break
       }
       // Prefetched hydrations of not-yet-dispatched tasks in the failing repos lack this replan's
-      // learnings: drop them, they hydrate again (an in-flight prefetch's result is discarded).
+      // learnings: drop them, they hydrate again (an in-flight prefetch's result is discarded — in
+      // the repo of every revised task too: a REVISE can rewrite a cross-repo dependent).
       prefetchEpoch++
-      for (const r of failingRepos) invalidatedAt[r] = prefetchEpoch
+      for (const r of new Set([...failingRepos, ...(revision.tasks || []).map((t) => t && t.repo).filter(Boolean)])) invalidatedAt[r] = prefetchEpoch
       for (const id of [...prefetched]) {
         const t = hydratedById.get(id)
         if (!t || !failingRepos.includes(t.repo) || inFlight.has(id)) continue
@@ -4763,6 +4839,7 @@ while (true) {
       const revisedDeferred = revised.filter((t) => t.deferred)
       deferred.push(...revisedDeferred)
       let requeued = 0
+      let stillInFlight = 0 // revised tasks skipped because their writer is still running
       const replannedFailures = [...failures] // snapshot: the loop below retires the ones it retries
       for (const t of revised.filter((x) => !x.deferred)) {
         // a replanned task re-enters the DAG fully specified — no hydration round-trip.
@@ -4771,6 +4848,7 @@ while (true) {
         if (t.ticket && t.ticket !== 'NO_TICKET' && inProject.has(t.ticket)) t.id = t.ticket
         if (inFlight.has(t.id)) {
           log(`   · replan #${replanNo}: ${t.id} is still running past its hard limit — not requeued`)
+          stillInFlight++
           continue
         }
         pendingById.set(t.id, { id: t.id, title: '', repo: t.repo, state: 'todo', slice: t.slice ?? 0, sliceLabel: t.sliceLabel || '', dependsOn: t.dependsOn || [] })
@@ -4812,13 +4890,14 @@ while (true) {
       }
       log(`↻ replan #${replanNo}: REVISE${cause === 'code' ? '' : ` (${cause} cause${charged ? ', charged: its free replans are used up' : ' — no replan spent'})`} — ${revision.reason} · ${requeued} task(s) requeued${newLearnings.length ? ` · learned: ${newLearnings.map(learningText).join('; ')}` : ''}`)
       if (!requeued) {
-        halt = { reason: `replan #${replanNo} requeued nothing while work is still open` }
+        // every task it revised is still running: say that, not "requeued nothing"
+        halt = stillInFlight ? { reason: stillRunningReason(), kind: 'wedged' } : { reason: `replan #${replanNo} requeued nothing while work is still open` }
         log(`⛔ ${halt.reason}`)
         break
       }
       continue
     }
-    // A wedged writer, or an abandoned reader, still holds a repo with open work: say so precisely
+    // A wedged writer still holds a repo with open work: say so precisely
     // — it may still commit, and a resume must not start before it has finished.
     if (inFlight.size || [...fencedRepos.keys()].some((repo) => [...pendingById.values()].some((i) => i.repo === repo) || (repoRef[repo] && !gateDone.has(repo)))) {
       halt = { reason: stillRunningReason(), kind: 'wedged' }
@@ -4835,6 +4914,12 @@ while (true) {
               ? `${pendingById.size} issue(s) blocked behind work someone else has started (${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}) — re-invoke once it lands`
               : `${pendingById.size} issue(s) unschedulable — dependency cycle or dangling dependsOn in the tickets`,
       }
+      log(`⛔ ${halt.reason}`)
+    } else if (replans >= MAX_REPLANS && failures.some((f) => !slotFailed(f))) {
+      // nothing waits on them, but failed tasks are left that no replan can take: their repos were
+      // never gated (their PR stays a draft) — a halt, as with dependents waiting
+      const left = failures.filter((f) => !slotFailed(f))
+      halt = { reason: `exhausted replan budget (${MAX_REPLANS}) — ${left.map((f) => `${f.id} (${f.repo}) ${f.status}`).join(', ')} did not land; ${[...new Set(left.map((f) => f.repo))].join(', ')} not gated` }
       log(`⛔ ${halt.reason}`)
     }
     break // everything landed (possibly with reported failures and no replan budget left)
@@ -4857,7 +4942,12 @@ if (halt) emit('halt', { reason: halt.reason })
 // PR if it has none (draftPr), the halt banner and the status comment. So does a repo the run
 // left ungated without a halt (a terminal slot that failed with no replan left).
 if (execute && SHIP_ON_HALT) {
-  const ending = Object.keys(repoRef).filter((repo) => !gateDone.has(repo) && shipStateOf(repo).landedHead)
+  // A repo whose terminal slot is still running (a gate past its hard limit) is left to it: the
+  // gate pushes, retitles and marks the PR ready itself, and a halt banner written meanwhile
+  // would contradict it.
+  const slotStillOpen = Object.keys(repoRef).filter((repo) => openSlots.has(repo) && !gateDone.has(repo))
+  if (slotStillOpen.length) log(`⚠ ship on halt skips ${slotStillOpen.join(', ')}: its terminal slot is still running and owns the PR`)
+  const ending = Object.keys(repoRef).filter((repo) => !gateDone.has(repo) && !openSlots.has(repo) && shipStateOf(repo).landedHead)
   if (ending.length) {
     if (envState.inflight) await envState.inflight // its failure and fix belong in the comment
     const stopFor = (repo) => {
@@ -4922,7 +5012,9 @@ if (finalCheck && finalCheck.repos.every((r) => touched.has(r))) {
 // threads on those PRs are its primary signal. Everything lands on one branch + PR —
 // nothing this phase writes is live before that PR merges.
 phase('Crystallize')
-const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo: r.repo, pr: r.prUrl }))
+// prsNow/openNow are read again for the result: a slot that outlived its wave may return meanwhile (bookLateSlot)
+const prsNow = () => allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo: r.repo, pr: r.prUrl }))
+const prsOpened = prsNow()
 // What still needs a human. A task that failed and was later requeued by a replan and LANDED is
 // recovered, not open work (a run once reported a task "DIED" in needsAttention after the same
 // task had landed and shipped in its PR); a terminal-slot failure is recovered once its repo
@@ -4930,7 +5022,8 @@ const prsOpened = allResults.filter((r) => r.prUrl).map((r) => ({ id: r.id, repo
 const landedTaskIds = new Set(allResults.filter((r) => !r.gateStep && landed(r)).map((r) => r.id))
 const recoveredLater = (r) => (r.gateStep ? gateDone.has(r.repo) : landedTaskIds.has(r.id))
 const latestById = (list) => [...new Map(list.map((r) => [r.id, r])).values()]
-const openResults = latestById(allResults.filter((r) => !landed(r) && !recoveredLater(r) && !stillRunningIds.has(r.id)))
+const openNow = () => latestById(allResults.filter((r) => !landed(r) && !recoveredLater(r) && !stillRunningIds.has(r.id)))
+const openResults = openNow()
 const recovered = latestById(allResults.filter((r) => !landed(r) && recoveredLater(r))).map((r) => ({ id: r.id, repo: r.repo, failedAs: r.status }))
 const noteOf = (r, f) => ({ task: r.id, repo: r.repo, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue, ...(f.harness ? { harness: true } : {}) })
 
@@ -4949,12 +5042,13 @@ const environmentOf = () => ({ checks: [...envState.ran], failures: envState.fai
     prs: prsOpened.length,
     tokens: runSpent(),
   }
-  emit('run.end', { status: halt ? 'halted' : 'drained', ...endSummary })
+  // final first: a flush that run.end itself triggers (flushEvery) is then the final chunk, which a dead writer still attempts
   journal.final = { status: halt ? 'halted' : 'drained', summary: { ...endSummary, replans, halt: halt ? halt.reason : null, prUrls: prsOpened.map((p) => p.pr) } }
+  emit('run.end', { status: halt ? 'halted' : 'drained', ...endSummary })
   flushJournal()
   await journal.chain
   if (journal.enabled)
-    log(`◎ decision journal: ${journal.written} event(s) written in ${journal.flushes} chunk(s) → ${journal.runDir || TELEMETRY_DIR}${journal.mismatches ? ` · ${journal.mismatches} chunk(s) failed the line/byte check` : ''}${journal.dead ? ` · ${journal.dead} chunk(s) lost (writer died)` : ''}`)
+    log(`◎ decision journal: ${journal.written} event(s) written in ${journal.flushes} chunk(s) → ${journal.runDir || TELEMETRY_DIR}${journal.mismatches ? ` · ${journal.mismatches} chunk(s) failed the line/byte check` : ''}${journal.dead ? ` · ${journal.dead} chunk(s) lost (writer died), ${journal.lostEvents} event(s)${journal.writerDead ? '; the writer was marked dead' : ''}` : ''}`)
 }
 const contextQuestionsForLedger = (contextResolves.questions || []).map((q) => ({ task: q.task, question: q.question, resolvedBy: q.resolvedBy }))
 const advisoryForLedger = allResults.flatMap((r) => (r.advisory || []).map((f) => noteOf(r, f)))
@@ -5071,7 +5165,7 @@ return {
   done: allResults.filter((r) => !r.gateStep && ok(r)),
   // still open: the latest attempt of each task or slot that never landed, plus writers still
   // running past their hard limit (STILL_RUNNING — wait for them, they may still commit)
-  needsAttention: openResults.concat(stillRunning),
+  needsAttention: openNow().concat(stillRunning),
   // failed once, then landed after a replan (or the repo gated green): history, not work
   recovered,
   // issues the scheduler never reached — blocked behind a failure or a halt. Re-invoking the
@@ -5095,7 +5189,7 @@ return {
   // created/patched and the ONE PR carrying it.
   harness: harnessLearning,
   // READY PRs only (the terminal slot's): crystallize runs over these
-  prs: prsOpened,
+  prs: prsNow(),
   // repo → the draft PR the loop opened as tasks landed, still a draft (reviewed, ungated work)
   draftPrs,
   // repo → {pushedHead, prUrl, draft, disabled}: what reached the remote while the run went;
@@ -5145,7 +5239,7 @@ return {
     late: lateLog.map(({ label, kind, softMin, outcome }) => ({ label, kind, softMin, outcome })),
     // writers that passed their hard limit (their repo was fenced while they ran)
     wedged: wedgedLog,
-    journal: journal.enabled ? { runDir: journal.runDir, events: journal.seq, written: journal.written, chunks: journal.flushes, mismatches: journal.mismatches, lost: journal.dead } : null,
+    journal: journal.enabled ? { runDir: journal.runDir, events: journal.seq, written: journal.written, chunks: journal.flushes, mismatches: journal.mismatches, lost: journal.dead, lostEvents: journal.lostEvents } : null,
   },
   note:
     'Absorbed the WHOLE tracker project: a lightweight slice index up front, each dispatch cycle hydrated just-in-time, already-done issues skipped. Scheduling was CONTINUOUS and dependsOn-driven straight from the tickets — each issue dispatched the moment its dependencies landed (no wave barrier), parallel across repos AND within a repo where declared files were disjoint (worktree lanes, integrations serialized into one run branch per repo); ready order was slice, then downstream-unlocked (critical path). A failed issue blocked only its dependents, and when failures left work stuck the loop re-planned from the current state. Reviews were SCOPED: per task, spec review + the build-safety quality core gated whether dependents could build on the change; once per repo, AT PROJECT END (one final wave, repos in parallel), the TERMINAL quality sweep reviewed the whole integrated run branch before the PR — implementation never paid a gate. Gated on blocker/major only, so any minor/nit finding is in advisoryNotes and was NOT reworked; a cheap guard decided whether a multi-reviewer panel re-reviewed each fix (guardChecks). Every repo had its run branch pushed and its ONE PR opened by its terminal slot after the sweep passed (a configured gate command run exactly ONCE, on the final tree, first; ungatedRepos lists any repo a halt left without its gate/PR). ' +

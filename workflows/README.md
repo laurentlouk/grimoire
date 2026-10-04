@@ -209,7 +209,11 @@ flowchart TB
 Replans, terminal slots and halts happen **only at quiescence** (nothing in flight, or nothing
 in flight but wedged writers) — the coherence a wave barrier used to provide, without its idle
 time. A token-budget floor stops dispatching, lets in-flight work settle, then halts cleanly.
-A halt pushes what landed and comments on the repo's draft PR; any repo it left without its
+A repo with a failed task still awaiting its replan is not drained, even when nothing depends
+on that task: the environment check and the replan come first, and the repo gates (its PR
+marked ready) only once the failure has been replanned and landed, while repos without a
+failure gate as usual. If the replan halts or the budget is spent, the repo stays a draft and
+the halt's status comment says why. A halt pushes what landed and comments on the repo's draft PR; any repo it left without its
 gate and ready PR is listed in `ungatedRepos`. Re-invoking `/grimoire:orchestrate` on the same
 project resumes from the saved state ("Resume" below); the tracker alone cannot, because its
 issues close only when the PR merges.
@@ -410,7 +414,12 @@ was still writing. Every dispatch now has a soft and a hard limit for its kind
   marked wedged (`wedged`) and its repo is fenced (`fence`), so nothing is dispatched or
   requeued into that checkout. The task keeps its slot until the agent returns, then carries
   on with that result (precheck, review). When nothing but wedged writers is left, the run
-  halts with `kind: 'wedged'`, and the reason says the agent may still commit;
+  halts with `kind: 'wedged'`, and the reason says the agent may still commit. A writer that
+  returns after the run stopped dispatching is recorded (`late-result`, `accepted: false`) and
+  not used: its task goes no further. A terminal slot whose gate or fix wedges does not hold
+  the final wave: the other slots are booked, its repo stays out of the next wave and of
+  dispatch, and its result is booked when it returns (still in the result if the run has
+  ended by then), so its gate never runs twice;
 - side-effect-free kinds (preflight, precheck) start one duplicate at `hedgeAfter` (`hedge`)
   and take the first reply;
 - a hydration that returns nothing is retried once (`hydrate:w<N>~r1`) before the run halts;
@@ -533,6 +542,11 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   rolls back a newer checkpoint;
 - prints the line and byte counts of the decoded chunk, which the engine compares with what
   it sent — a mismatch is logged and counted, never trusted.
+
+A writer that returns nothing loses its chunk (`telemetry.journal.lost`, and `lostEvents`).
+After two lost in a row the writer is marked dead: later chunks are counted lost without being
+dispatched, since each would otherwise wait out its 8-minute limit at the end of the run, and
+only the final chunk (`run.end` and the final `run.json`) gets one more attempt.
 
 The checkpoint is version 2: `{version: 2, replansUsed, learnings, fixRounds,
 outputTokensSpent, lastSeq, landed, pending, landedTasks, shipped, wedged}`, where each of
