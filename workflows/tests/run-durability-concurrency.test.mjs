@@ -245,6 +245,21 @@ function journalEvents(calls) {
   eq(labels.filter((l) => l === 'impl:PROJ-1').length, 1, 'impl:PROJ-1 dispatched once')
 }
 
+// ══════════════ K-7 · issues a prefetch claims are handed back when the run halts before it returns ══════════════
+{
+  // Claims on. PROJ-2 waits on PROJ-1 and is prefetched (and claimed by that hydration) while PROJ-1
+  // runs; the prefetch never returns. PROJ-1 is BLOCKED with no replan budget: the run halts.
+  const { result, labels, prompt } = await run('K-7 · a prefetch still running at the halt: its issues are in the claim release', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })], (label, p) => {
+    if (label === 'impl:PROJ-1') return later(50, { status: 'BLOCKED', summary: 'no' })
+    if (label === 'release-claims') return { released: ['PROJ-1', 'PROJ-2'] }
+    return happy(label, p)
+  }, { args: { ...QUIET, maxReplans: 0, claim: { identity: 'grimoire-bot' } }, hydrate: (label) => (label === 'hydrate:p1' ? HANG() : undefined) })
+  ok(/- PROJ-2 /.test(prompt('hydrate:p1')) && /CLAIM these issues/.test(prompt('hydrate:p1')), 'PROJ-2 was prefetched by a claiming hydration')
+  ok(/^exhausted replan budget/.test((result && result.halt && result.halt.reason) || ''), 'the run halted')
+  ok(labels.includes('release-claims') && /- PROJ-2 \(api\)/.test(prompt('release-claims')), 'PROJ-2 is handed back with the release')
+  ok(/- PROJ-1 \(api\)/.test(prompt('release-claims')), 'so is PROJ-1')
+}
+
 // ══════════════ K-8 · a repo with a failed task is not gated before that failure is decided ══════════════
 {
   // One repo, the 0.9.0 defaults (incremental delivery, environment checks). PROJ-1 lands, PROJ-2 fails

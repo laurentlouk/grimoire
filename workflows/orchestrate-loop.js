@@ -3894,12 +3894,11 @@ function prefetchHydration(cands) {
       wrote.add(issue)
     }
     for (const i of issues) if (wrote.has(i.id)) prefetched.add(i.id)
-    if (claim)
-      for (const i of issues) {
-        claimedByRun.set(i.id, i.repo)
-        emit('claim', { task: i.id, action: 'claim', by: claim.identity })
-      }
+    if (claim) for (const i of issues) emit('claim', { task: i.id, action: 'claim', by: claim.identity })
   }
+  // The hydration claims its issues as it runs: they are recorded now, so a run that ends before it
+  // returns (or after it was given up on) still hands them back with the release.
+  if (claim) for (const i of issues) claimedByRun.set(i.id, i.repo)
   const p = agentT(hydratePrompt(project, issues, relevantLearnings([...learnings, ...priorLearnings], [...new Set(issues.map((i) => i.repo))]), claim), {
     label: `hydrate:p${n}`,
     phase: 'Parse plan',
