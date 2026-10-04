@@ -174,6 +174,7 @@ function journalEvents(calls) {
   eq((result && result.ungatedRepos) || null, [], 'api is not reported ungated')
   ok(journalEvents(calls).some((e) => e.type === 'gate' && e.repo === 'api' && e.prUrl === 'https://github.com/x/y/pull/9'), 'the journal records its gate event')
   ok(logs.some((l) => /◎ api: its terminal slot returned after its final wave — DONE · .*\(recorded; the run had stopped dispatching\)/.test(l)), 'logged as recorded after the run stopped dispatching')
+  eq(((result && result.telemetry.late) || []).filter((l) => l.label === 'gate:api').map((l) => l.outcome), ['accepted'], 'telemetry.late: the gate result was accepted (nothing is dispatched after a gate)')
 }
 
 // ══════════════ K-3 · a late prefetch never overwrites what a replan revised ══════════════
@@ -192,6 +193,22 @@ function journalEvents(calls) {
   ok(/REVISED approach for PROJ-3/.test(prompt('impl:PROJ-3')), "impl:PROJ-3 is built from the replan's revision")
   ok(!/Build PROJ-3/.test(prompt('impl:PROJ-3')), 'not from the stale prefetch')
   ok(result && result.done.length === 2 && !result.halt, 'both landed')
+}
+
+// ══════════════ K-4 · a wedged writer that returns after the loop ended flows no further ══════════════
+{
+  // impl:PROJ-1 wedges at 300 ms and the run halts as still running; the final journal flush takes
+  // 600 ms, and the implementer returns a valid result at 500 ms, while the run is ending.
+  const { result, logs } = await run('K-4 · a wedged implementer returning after the run stopped dispatching: no review, no stats', [T('PROJ-1')], (label, p) => {
+    if (label === 'impl:PROJ-1') return later(500, IMPL_OK)
+    if (label.startsWith('journal#')) return later(600, { runDir: '/tmp/x', lines: 0, bytes: 0 })
+    return happy(label, p)
+  }, { args: { ...QUIET, ...FAST, telemetry: { enabled: true, flushEvery: 1000 } } })
+  ok(logs.some((l) => /◎ \[late\] impl:PROJ-1 returned past its hard limit — after the run had stopped dispatching/.test(l)), 'its late result is logged as arriving after the run stopped dispatching')
+  ok(!logs.some((l) => /PROJ-1: spec ∥ quality review|PROJ-1 \(api\): (spec|quality) review|reviewer\(s\) returned nothing/.test(l)), 'the task does not flow into reviews')
+  eq(result && result.reviewStats.stages, 0, 'reviewStats untouched')
+  eq(((result && result.telemetry.late) || []).filter((l) => l.label === 'impl:PROJ-1').map((l) => l.outcome), ['abandoned'], 'telemetry.late: abandoned')
+  eq(attention(result), ['PROJ-1:STILL_RUNNING'], 'PROJ-1 reported STILL_RUNNING, as when the run stopped')
 }
 
 // ══════════════ K-8 · a repo with a failed task is not gated before that failure is decided ══════════════

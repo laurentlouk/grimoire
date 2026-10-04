@@ -2289,14 +2289,17 @@ function withLimits(start, lim, label, meta) {
         return
       }
       if (settled || (val === null && live > 0)) return // a copy already answered, or the other copy still may
+      // Once the loop has stopped dispatching, a wedged writer's result is not used: its task would
+      // flow on into stages that cannot run (reviews, fixes). A `last` dispatch — nothing is
+      // dispatched after it (the gate) — is still delivered, so its slot is recorded.
+      const accepted = val !== null && !(wedge && dispatchClosed && !m.last)
       if (late) {
-        const accepted = val !== null && !(wedge && dispatchClosed)
         late.outcome = accepted ? 'accepted' : val === null ? 'died' : 'abandoned'
         emit('late-result', { label: which, task: m.task || null, accepted, status: statusOf(val) })
-        if (wedge) log(`◎ [late] ${which} returned past its hard limit — ${accepted ? 'result accepted, the task continues' : val === null ? 'with nothing' : 'after the run had stopped dispatching'}`)
+        if (wedge) log(`◎ [late] ${which} returned past its hard limit — ${accepted ? (dispatchClosed ? 'result recorded (nothing is dispatched after it)' : 'result accepted, the task continues') : val === null ? 'with nothing' : 'after the run had stopped dispatching — not used, the task goes no further'}`)
       }
       if (wedge) unwedge(wedge)
-      finish(val)
+      finish(accepted ? val : null)
     }
     first.then(arrive(label), () => arrive(label)(null))
     at(lim.soft, () => {
@@ -2352,12 +2355,14 @@ function metaFor(label, o) {
   return { task, repo: o.repo || (task && taskRepo.get(task)) || null, lane: !!o.lane }
 }
 // Every agent dispatch goes through this. `kind` picks its limits (default 'reader'); `task`,
-// `repo` and `lane` say what it works on. All four are stripped before agent() sees the opts —
-// the runtime's opts schema is closed, so an unknown key would be a validation error.
+// `repo` and `lane` say what it works on; `last`: nothing is dispatched after it (see withLimits).
+// All five are stripped before agent() sees the opts — the runtime's opts schema is closed, so an
+// unknown key would be a validation error.
 const agentT = (prompt, o) => {
-  const { kind, task, repo, lane, ...rest } = o || {}
+  const { kind, task, repo, lane, last, ...rest } = o || {}
   const label = rest.label || 'agent'
   const meta = metaFor(label, { task, repo, lane })
+  if (last) meta.last = true
   if (dispatchClosed && meta.task) return Promise.resolve(null)
   return withLimits((l) => agent(prompt, l === label ? rest : { ...rest, label: l }), limitsFor(kind, meta.repo), label, meta)
 }
@@ -4082,6 +4087,7 @@ async function terminalSlot(repo) {
     kind: 'writer',
     task: pseudo.id,
     repo,
+    last: true, // a result returning after the loop ended is still the slot's (bookLateSlot)
   })
   // A gate that reports its gate still PENDING certified nothing — it is the gate.
   const failed = !gate || gate.status === 'BLOCKED' || gate.status === 'NEEDS_CONTEXT' || gate.status === 'DONE_PENDING_GATE'
