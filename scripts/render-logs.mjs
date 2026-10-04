@@ -447,7 +447,7 @@ function client() {
         stat('done', s(done ?? '—')), stat('failed / attention', s(failed ?? '—')), stat('blocked', s(blocked ?? '—')),
         stat('PRs', s(end.prs ?? prUrls.length)), stat('replans', s(count('replan'))), stat('events', s(ev.length))),
       prUrls.length || drafts.length ? h('div', { class: 'tags' }, prUrls.map((u) => h('span', { class: 'tag' }, u)), drafts.map((u) => h('span', { class: 'tag' }, `${u} (draft)`))) : null,
-      halt || sm.halt ? h('p', { class: 'FAIL' }, `halt: ${s(halt ? halt.reason : sm.halt.reason ?? sm.halt)}`) : null,
+      halt || sm.halt ? h('p', { class: 'FAIL' }, `halt: ${haltText(halt || sm.halt)}`) : null,
       r.checkpoint ? checkpoint(r.checkpoint) : null,
       isObj(sm.telemetry) ? kvBlock('Telemetry (run summary)', sm.telemetry) : null,
       r.badLines ? h('p', { class: 'muted' }, `${r.badLines} malformed event line(s) skipped`) : null,
@@ -455,6 +455,8 @@ function client() {
   }
 
   const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  // a halt event or run.json's summary.halt: {reason, kind} (kind null when the halt has none), or a bare reason (before 0.9.0)
+  const haltText = (x) => (isObj(x) ? `${x.kind ? `[${s(x.kind)}] ` : ''}${s(x.reason)}` : s(x))
   function kvBlock(title, o) {
     return h('div', { class: 'card', style: 'margin-top:8px' }, h('h3', null, title),
       h('div', { class: 'scroll' }, h('table', null, h('tbody', null, Object.entries(o).map(([k, v]) =>

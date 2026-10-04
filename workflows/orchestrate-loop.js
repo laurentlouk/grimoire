@@ -4543,7 +4543,7 @@ const stillRunningIds = new Set(stillRunning.map((w) => w.id))
 // Whatever is still pending when we stop never ran — report it, never drop it silently.
 const blocked = [...pendingById.values()].filter((i) => !stillRunningIds.has(i.id)).map((i) => ({ id: i.id, repo: i.repo, slice: i.slice ?? 0, dependsOn: i.dependsOn || [], status: 'BLOCKED_NOT_RUN' }))
 if (blocked.length) log(`⚠ ${blocked.length} issue(s) never ran — blocked behind failures or a halt`)
-if (halt) emit('halt', { reason: halt.reason })
+if (halt) emit('halt', { reason: halt.reason, kind: halt.kind || null })
 
 // ── ship on halt: what landed reaches the remote, with the reason and how to resume ──
 // Every halt of a real 0.8.0 run left nothing on the remote. On a halt (shipOnHalt, even under
@@ -4645,7 +4645,7 @@ const environmentOf = () => ({ checks: [...envState.ran], failures: envState.fai
     tokens: runSpent(),
   }
   emit('run.end', { status: halt ? 'halted' : 'drained', ...endSummary })
-  journal.final = { status: halt ? 'halted' : 'drained', summary: { ...endSummary, replans, halt: halt ? halt.reason : null, prUrls: prsOpened.map((p) => p.pr) } }
+  journal.final = { status: halt ? 'halted' : 'drained', summary: { ...endSummary, replans, halt: halt ? { reason: halt.reason, kind: halt.kind || null } : null, prUrls: prsOpened.map((p) => p.pr) } }
   flushJournal()
   await journal.chain
   if (journal.enabled)
