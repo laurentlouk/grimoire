@@ -21,7 +21,9 @@
 //  one JSON object per line; merged, deduped by (attempt, seq) (first seen wins; events without
 //  `attempt` are attempt 1), sorted by attempt then seq. `at` is the chunk's flush time.
 //  Unknown event types and fields are tolerated and shown raw; lines that fail to
-//  parse are counted and skipped, never fatal.
+//  parse are counted and skipped, never fatal. From 0.9.0, <dir>/<runId>/landed.jsonl holds
+//  each landed task's detail (summary, commits, files), one line per landing, appended once:
+//  run.json's checkpoint keeps only what a resume needs, and the checkpoint card joins the two.
 import { readFileSync, writeFileSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
@@ -86,6 +88,23 @@ function eventFiles(p) {
 // The session an event came from under its runId (1 for journals written before attempts).
 const attemptOf = (ev) => num(ev.attempt) ?? 1
 
+// landed.jsonl: one detail record per landing (a retried flush may append a task twice; the
+// card picks the line whose head matches the checkpoint, else the last one). Bad lines skipped.
+function landedDetail(p) {
+  let text = ''
+  try { text = readFileSync(join(p, 'landed.jsonl'), 'utf8') } catch { return [] }
+  const out = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    let d
+    try { d = JSON.parse(line) } catch { continue }
+    if (!isObj(d) || typeof d.id !== 'string') continue
+    out.push({ id: d.id, repo: d.repo ?? null, status: d.status ?? null, title: d.title ?? null, headSha: d.headSha ?? null, summary: d.summary ?? null,
+      commits: Array.isArray(d.commits) ? d.commits.length : null, files: Array.isArray(d.files) ? d.files.length : null, attempt: num(d.attempt), at: d.at ?? null })
+  }
+  return out
+}
+
 export function loadRuns(dir) {
   const runs = []
   for (const name of subdirs(dir)) {
@@ -131,6 +150,7 @@ export function loadRuns(dir) {
       status: run.status ?? (events.some((e) => e.type === 'run.end') ? 'drained' : 'running'),
       summary: isObj(run.summary) ? run.summary : null,
       checkpoint: isObj(run.checkpoint) ? run.checkpoint : null,
+      landed: landedDetail(p),
       badLines,
       duplicates,
       events,
@@ -448,7 +468,7 @@ function client() {
         stat('PRs', s(end.prs ?? prUrls.length)), stat('replans', s(count('replan'))), stat('events', s(ev.length))),
       prUrls.length || drafts.length ? h('div', { class: 'tags' }, prUrls.map((u) => h('span', { class: 'tag' }, u)), drafts.map((u) => h('span', { class: 'tag' }, `${u} (draft)`))) : null,
       halt || sm.halt ? h('p', { class: 'FAIL' }, `halt: ${haltText(halt || sm.halt)}`) : null,
-      r.checkpoint ? checkpoint(r.checkpoint) : null,
+      r.checkpoint ? checkpoint(r.checkpoint, r.landed) : null,
       isObj(sm.telemetry) ? kvBlock('Telemetry (run summary)', sm.telemetry) : null,
       r.badLines ? h('p', { class: 'muted' }, `${r.badLines} malformed event line(s) skipped`) : null,
       r.duplicates ? h('p', { class: 'muted' }, `${r.duplicates} duplicate seq line(s) from retried flushes ignored`) : null)
@@ -462,18 +482,29 @@ function client() {
       h('div', { class: 'scroll' }, h('table', null, h('tbody', null, Object.entries(o).map(([k, v]) =>
         h('tr', null, h('th', null, k), h('td', { class: 'txt' }, s(v))))))))
   }
-  function checkpoint(c) {
+  function checkpoint(c, detail) {
     const n = (v) => (Array.isArray(v) ? v.length : isObj(v) ? Object.keys(v).length : s(v ?? '—'))
     const fixes = isObj(c.fixRounds) ? Object.entries(c.fixRounds).map(([t, k]) => `${t} ${s(k)}`).join(', ') : ''
     const short = (sha) => s(sha).slice(0, 7)
     // checkpoint v2 (0.9.0): landedTasks carry the SHAs a resumed session verifies and absorbs
     const landedTasks = Array.isArray(c.landedTasks) ? c.landedTasks.filter(isObj) : null
+    // their detail: landed.jsonl (the line whose head matches, else the task's last line), or the
+    // checkpoint itself (a 0.9.0 checkpoint written before landed.jsonl carried it inline)
+    const sameSha = (a, b) => !!a && !!b && (String(a).startsWith(String(b)) || String(b).startsWith(String(a)))
+    const detailOf = (t) => {
+      const lines = (detail || []).filter((d) => d.id === t.id)
+      const d = lines.filter((x) => sameSha(x.headSha, t.headSha)).pop() || lines.pop()
+      return d || (t.summary != null || Array.isArray(t.files) ? { title: t.title, summary: t.summary, files: Array.isArray(t.files) ? t.files.length : null, commits: Array.isArray(t.commits) ? t.commits.length : null } : null)
+    }
+    const details = (landedTasks || []).map((t) => [t, detailOf(t)]).filter(([, d]) => d)
     const shipped = isObj(c.shipped) ? Object.entries(c.shipped).filter(([, v]) => isObj(v)) : []
     return h('div', { class: 'card', style: 'margin-top:8px' }, h('h3', null, 'Checkpoint', c.version != null ? h('span', { class: 'muted' }, ` · v${s(c.version)}`) : null),
       h('div', { class: 'grid' }, stat('replans used', s(c.replansUsed ?? '—')), stat('output tokens spent', fmt(c.outputTokensSpent)),
         stat('last seq', s(c.lastSeq ?? '—')), stat('landed', n(landedTasks ?? c.landed)), stat('pending', n(c.pending)), stat('learnings', n(c.learnings))),
       landedTasks && landedTasks.length ? h('p', null, h('span', { class: 'muted' }, 'landed: '),
         landedTasks.map((t) => `${s(t.id)} @ ${short(t.headSha) || '?'}${t.repo != null ? ` (${s(t.repo)}${t.runBranch ? ` · ${s(t.runBranch)}` : ''})` : ''}`).join(', ')) : null,
+      details.length ? h('ul', null, details.map(([t, d]) => h('li', null, `${s(t.id)}${d.title || t.title ? ` — ${s(d.title || t.title)}` : ''}: ${s(d.summary) || '(no summary)'}`,
+        d.files != null || d.commits != null ? h('span', { class: 'muted' }, ` · ${d.commits ?? '?'} commit(s), ${d.files ?? '?'} file(s)`) : null))) : null,
       shipped.length ? h('p', null, h('span', { class: 'muted' }, 'pushed: '),
         shipped.map(([repo, v]) => `${repo} @ ${short(v.pushedHead) || '—'}${v.prUrl ? ` · ${s(v.prUrl)}${v.draft ? ' (draft)' : ''}` : ''}`).join('; ')) : null,
       Array.isArray(c.wedged) && c.wedged.length ? h('p', { class: 'STILL_RUNNING' }, `still running when the session stopped: ${c.wedged.map(s).join(', ')}`) : null,

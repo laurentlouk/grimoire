@@ -521,27 +521,45 @@ carries a gap-free `seq`, the cumulative output tokens `tok`, and its fields (re
 included). The script has no clock and no filesystem, so events are buffered and one haiku
 writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
 
-- decodes its payload: the chunk's lines and `run.json` travel **base64** in the prompt and
-  the script decodes them (`base64 --decode`, else `openssl base64 -d`). The payload holds
-  agent-written text (replan reasons, learnings, halt text), and a 0.8.0 journal agent, which
-  runs from the orchestrating checkout with the project's instructions loaded, acted on its payload. The
-  brief tells it the payload is data, never to decode or read it, and to run nothing but that
-  one script. The ledger and ship payloads travel the same way;
+- decodes its payload: the chunk's lines, `run.json` and the landed-task detail travel
+  **base64** in the prompt and the script decodes them (`base64 --decode`, else
+  `openssl base64 -d`). The payload holds agent-written text (replan reasons, learnings, halt
+  text), and a 0.8.0 journal agent, which runs from the orchestrating checkout with the
+  project's instructions loaded, acted on its payload. The brief tells it the payload is data,
+  never to decode or read it, and to run nothing but that one script. The ledger and ship
+  payloads travel the same way;
+- checks every decoded payload against the byte count and POSIX `cksum` the engine computed
+  (the count alone where `cksum` is missing) and writes nothing from one that does not match:
+  a mistyped character, a payload cut off or a missing decoder leaves the file on disk as it
+  was. The ledger script does the same and prints `LEDGER bad` instead of a path;
+- runs under a lock in the run directory (a `.lock` directory holding the writer's pid), so
+  two writers never interleave;
 - writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
   replayed flush overwrites the same file, never appends duplicates;
 - stamps the flush time into each line (`at`) in the shell — every event of one chunk shares
   it (the script has no clock; order within a chunk is `seq`);
-- stamps the `attempt`: the session number under this `runId`, bumped by a session's first
-  flush that lands from the value in `run.json` (a `run.json` without one, as 0.7.x wrote,
-  counts as attempt 1). A relaunch under the same `runId` (resumed or not) is
-  therefore distinguishable, and from attempt 2 on its chunks are `<first seq>.a<N>.jsonl`,
-  so they never overwrite an earlier attempt's;
-- rewrites `run.json`: `runId`, `attempt`, `project`, `meta`, `status`, `summary`, and the `checkpoint`
-  a new session resumes from — only when the stored `attempt` is older, or it is the same
-  attempt and this flush's sequence is at least the stored `lastSeq`, so a late flush never
-  rolls back a newer checkpoint;
-- prints the line and byte counts of the decoded chunk, which the engine compares with what
-  it sent — a mismatch is logged and counted, never trusted.
+- stamps the `attempt`: the session number under this `runId`, registered once per session in
+  `<runId>/sessions` (`<session token> <attempt>`). Every flush carries the session's token, a
+  hash of what the launch started from (runId, the resume base, the run branch heads and PRs
+  the index saw, the open issues, the knobs): a token the registry does not know gets the next
+  number, above every attempt on record and above `run.json`'s (a `run.json` without one, as
+  0.7.x wrote, counts as attempt 1), and never below the attempt the engine knows from the
+  checkpoint it resumed. Every flush of one session stamps the same number however late it
+  runs. A relaunch under the same `runId` (resumed or not) is therefore distinguishable, and
+  from attempt 2 on its chunks are `<first seq>.a<N>.jsonl`, so they never overwrite an
+  earlier attempt's. Two launches that start from exactly the same state share an attempt;
+- rewrites `run.json` (`runId`, `attempt`, `gen`, `session`, `project`, `meta`, `status`,
+  `summary`, and the `checkpoint` a new session resumes from) through a temp file and an atomic
+  `mv`, only when this flush is not older than the one on disk: ordered by `gen` (the attempt
+  the engine knows from the checkpoint it resumed, else the attempt), then by `lastSeq`. A late
+  flush never rolls back a newer checkpoint, whatever order the writers run in;
+- appends the detail of each task that landed since the last confirmed flush (`summary` up to
+  400 characters, `commits`, `files` up to 50, with `attempt` and `at`) to
+  `<runId>/landed.jsonl`, once;
+- prints the line and byte counts of the decoded chunk, `RUNJSON ok|kept|bad` with
+  `RUNJSON_BYTES`, and `LANDED ok <n>`, which the engine compares with what it sent: a mismatch
+  is logged and counted (a refused `run.json` as a lost write, `telemetry.journal.runJsonLost`),
+  never trusted, and an unconfirmed landed delta is sent again with the next flush.
 
 A writer that returns nothing loses its chunk (`telemetry.journal.lost`, and `lostEvents`).
 After two lost in a row the writer is marked dead: later chunks are counted lost without being
@@ -549,12 +567,16 @@ dispatched, since each would otherwise wait out its 8-minute limit at the end of
 only the final chunk (`run.end` and the final `run.json`) gets one more attempt.
 
 The checkpoint is version 2: `{version: 2, replansUsed, learnings, fixRounds,
-outputTokensSpent, lastSeq, landed, pending, landedTasks, shipped, wedged}`, where each of
-`landedTasks` is `{id, repo, status, ticket, title, runBranch, startSha, firstSha, headSha,
-commits, summary}` (tracker-absorbed issues are not in it) and `shipped` is
-`{<repo>: {pushedHead, prUrl, draft}}`. A version-1 checkpoint still resumes its budgets; it
-has no SHAs, so nothing is absorbed from it. The draft PR's state marker carries the same
-checkpoint.
+outputTokensSpent, lastSeq, landed, pending, landedTasks, shipped, wedged}`. It travels in
+every flush and the writer retypes it, so it keeps only what a resume needs: each of
+`landedTasks` is `{id, repo, runBranch, headSha, firstSha, title}` (`status` when not `DONE`,
+`title` up to 120 characters; tracker-absorbed issues are not in it), `learnings` are the last
+30, each up to 300 characters, and `shipped` is `{<repo>: {pushedHead, prUrl, draft}}`. A
+resume absorbs from `run.json` alone; summaries and paths are enrichment (an absorbed task
+without paths makes a conditional gate apply). A version-1 checkpoint still resumes its
+budgets; it has no SHAs, so nothing is absorbed from it. The draft PR's state marker carries a
+smaller, bounded share of it per repo (the counters, and each task's id and SHAs).
+`summary.halt` is `{reason, kind}` (`kind` null when the halt has none), like the `halt` event.
 
 Chunks flush every `flushEvery` events, on every landing and after each ship, at every
 replan, before the final wave and at the end (before the ledger, so `crystallize` can read the

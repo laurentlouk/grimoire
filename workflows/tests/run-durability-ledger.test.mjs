@@ -90,13 +90,15 @@ async function run(scenario, tasks, responder, { args = {}, index = {} } = {}) {
 }
 
 // A faithful journal writer that does not touch disk: decodes the payloads the way the script
-// does and returns the receipt the script would print.
+// does and returns the receipt the script would print. The third payload, when there is one, is
+// the landed-task delta for landed.jsonl.
 const chunks = []
 function decodingWriter(prompt) {
-  const [lines, runJson] = heredocs(prompt).map(unb64)
+  const [lines, runJson, landed] = heredocs(prompt).map(unb64)
   const dir = (/^DIR='([^']+)'$/m.exec(prompt) || [])[1] || '.grimoire/runs/x'
-  chunks.push({ prompt, lines, run: JSON.parse(runJson), events: lines.trim().split('\n').map((l) => JSON.parse(l)) })
-  return { runDir: dir, lines: lines.trim().split('\n').length, bytes: Buffer.byteLength(lines, 'utf8') }
+  const delta = landed ? landed.trim().split('\n').map((l) => JSON.parse(l)) : []
+  chunks.push({ prompt, lines, run: JSON.parse(runJson), events: lines.trim().split('\n').map((l) => JSON.parse(l)), landed: delta })
+  return { runDir: dir, lines: lines.trim().split('\n').length, bytes: Buffer.byteLength(lines, 'utf8'), runJson: 'ok', runJsonBytes: Buffer.byteLength(runJson, 'utf8'), landed: delta.length }
 }
 
 // ══════════════ J-0 · b64 / unb64 / parseStateMarker, pure JS ══════════════
@@ -217,12 +219,14 @@ const hydratedIds = (calls) => calls.filter((c) => c.label.startsWith('hydrate:'
   ok(beforeGate.length >= 2, `${beforeGate.length} flushes before the final wave (one per landing; flushEvery is 100)`)
   const cp = chunks[chunks.length - 1].run.checkpoint
   ok(cp.version === 2 && cp.attempt === '__ATTEMPT__', 'checkpoint version 2, its attempt left for the writer to stamp')
-  eq(cp.landedTasks.map((t) => [t.id, t.headSha, t.commits, t.firstSha, t.runBranch, t.summary, t.title]),
-    [['PROJ-1', 'aaaaaaa', ['aaaaaaa'], 'aaaaaaa', RUN_BRANCH, 'built it', 'Title of PROJ-1'], ['PROJ-2', 'bbbbbbb', ['bbbbbbb'], 'bbbbbbb', RUN_BRANCH, 'built B', 'Title of PROJ-2']], 'landedTasks: id, head, commits, first commit, run branch, summary, title')
-  eq(cp.landedTasks.map((t) => t.files), [['src/a.ts'], ['src/b.ts']], "each task's paths ride along (the gate condition needs them after a resume)")
+  // run.json keeps what a resume needs; each task's detail travels once, in landed.jsonl (see run-durability-statewrite)
+  eq(cp.landedTasks, [{ id: 'PROJ-1', repo: 'api', runBranch: RUN_BRANCH, headSha: 'aaaaaaa', firstSha: 'aaaaaaa', title: 'Title of PROJ-1' }, { id: 'PROJ-2', repo: 'api', runBranch: RUN_BRANCH, headSha: 'bbbbbbb', firstSha: 'bbbbbbb', title: 'Title of PROJ-2' }], 'landedTasks: id, repo, run branch, head, first commit, title')
+  const detail = chunks.flatMap((c) => c.landed)
+  eq(detail.map((t) => [t.id, t.headSha, t.commits, t.summary, t.files]), [['PROJ-1', 'aaaaaaa', ['aaaaaaa'], 'built it', ['src/a.ts']], ['PROJ-2', 'bbbbbbb', ['bbbbbbb'], 'built B', ['src/b.ts']]],
+    "each task's commits, summary and paths go to landed.jsonl once (the gate condition reads the paths after a resume, when the record has them)")
   ok(cp.landed.includes('PROJ-1') && Array.isArray(cp.pending), '`landed` and `pending` are still there for older readers')
   const firstFlush = chunks[0].run.checkpoint
-  ok(firstFlush.landedTasks.length === 1 && firstFlush.landedTasks[0].id === 'PROJ-1', 'the first flush already holds PROJ-1: it was written when PROJ-1 landed')
+  ok(firstFlush.landedTasks.length === 1 && firstFlush.landedTasks[0].id === 'PROJ-1' && chunks[0].landed.map((t) => t.id).join() === 'PROJ-1', 'the first flush already holds PROJ-1, and its detail: both were written when PROJ-1 landed')
 }
 {
   chunks.length = 0
