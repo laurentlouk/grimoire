@@ -2832,11 +2832,19 @@ async function reviewRound(task, mode, personas, phaseName, range, attempt, tag 
 // A round whose verdicts no longer count (the head it judged moved, or the precheck failed under
 // 'all'): journaled with `discarded: true` once it settles, never awaited, never gating.
 function discardRound(task, mode, round, why) {
-  Promise.resolve(round).then((r) => {
-    for (const x of (r && r.reviews) || [])
-      emit('review', { task: task.id, stage: mode, persona: x.persona, verdict: x.v.verdict, gating: (x.v.findings || []).filter(isGating).length, advisory: (x.v.findings || []).filter((f) => !isGating(f)).length, round: 0, discarded: true, reason: why })
-    for (const p of (r && r.unavailable) || []) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: 0, discarded: true, reason: why })
-  })
+  Promise.resolve(round)
+    .then((r) => {
+      for (const x of (r && r.reviews) || [])
+        emit('review', { task: task.id, stage: mode, persona: x.persona, verdict: x.v.verdict, gating: (x.v.findings || []).filter(isGating).length, advisory: (x.v.findings || []).filter((f) => !isGating(f)).length, round: 0, discarded: true, reason: why })
+      for (const p of (r && r.unavailable) || []) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: 0, discarded: true, reason: why })
+    })
+    .catch(() => {}) // nobody awaits a discarded round: its rejection must not go unhandled
+}
+// A round started ahead of the stage that awaits it may end up awaited by nobody (the task returns
+// early, or throws): a rejection must not go unhandled. A stage that awaits it still sees it.
+const ahead = (round) => {
+  round.catch(() => {})
+  return round
 }
 // reviewParallel 'all': round 0 of both stages starts NEXT TO the precheck, on the implementer's
 // head. It counts only if the precheck passes on its first look: the first precheck FAIL discards
@@ -2846,8 +2854,8 @@ function earlyReviews(task, range) {
   const e = {
     head: r.headSha,
     discarded: false,
-    spec: reviewRound(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', r, 0),
-    quality: reviewRound(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', r, 0),
+    spec: ahead(reviewRound(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', r, 0)),
+    quality: ahead(reviewRound(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', r, 0)),
     discard(why) {
       if (e.discarded) return
       e.discarded = true
@@ -3253,7 +3261,7 @@ async function runTask(task) {
   else if (REVIEW_PARALLEL !== 'off') {
     log(`   · ${task.id}: spec ∥ quality review on ${h0 || 'the reported head'}…`)
     spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', { ...range }, 0)
-    quality0 = reviewRound(task, 'quality', qualityPanel, 'Quality review', { ...range }, 0)
+    quality0 = ahead(reviewRound(task, 'quality', qualityPanel, 'Quality review', { ...range }, 0))
   }
   const fixesBefore = task.fixRounds || 0
   const spec = await runReviewStage(task, 'spec', specPanel, 'Spec review', resolved, range, { first: spec0 })
