@@ -1439,7 +1439,7 @@ function integratePrompt(task) {
 
 // The re-planner — A* from the CURRENT state when the scheduler is stuck.
 function replanPrompt({ goal, done, failures, blocked, learnings, replanNo, maxReplans }) {
-  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans} (only a \`cause: code\` replan spends one).
+  return `${harnessBlock()}${brief('replan')}Replan ${replanNo}/${maxReplans} (a \`cause: code\` replan spends one; a \`cause: harness\` one is free up to ${maxReplans} time(s), then spends one like code; \`cause: environment\` halts the run and spends none).
 
 ## Goal
 ${goal}
@@ -3511,7 +3511,7 @@ Fix dispatches: address ONLY the findings listed, commit to \`${ref.branch}\`. T
   }
 }
 let replans = resumeBase && Number.isInteger(resumeBase.replansUsed) && resumeBase.replansUsed > 0 ? Math.min(resumeBase.replansUsed, MAX_REPLANS) : 0
-let replanNo = replans // every replan dispatched (its label number); only a code-cause replan spends one of MAX_REPLANS
+let replanNo = replans // every replan dispatched (its label number); a code-cause replan spends one of MAX_REPLANS, and so does a harness-cause one once its free ones are used
 let freeReplans = 0 // harness-cause replans not charged to MAX_REPLANS (at most MAX_REPLANS of them, then they are charged)
 let halt = null // {reason} once we stop early
 const claimedByRun = new Map() // id → repo: issues this run claimed at hydration (released at the end if they did not land)
