@@ -54,6 +54,7 @@ const DEFAULT_MAX_TOOL_LATENCY_SEC = 15 // startup probe (execute runs): when a 
 const TOOL_LATENCY_WARN_SEC = 8 // from here on the probe's number is logged as a warning: two back-to-back calls normally sit 2–6 s apart
 const CRYSTALLIZE_TIMEOUT_MIN = 90 // crystallize reads every review thread, patches skills and runs their evals: the longest single dispatch of a run, and the 40-min backstop killed it before it wrote anything
 const DEFAULT_JOURNAL_FLUSH_EVERY = 40 // telemetry: decision events buffered before one cheap writer puts them on disk (also flushed at every replan, the final wave and the end)
+const JOURNAL_DEAD_AFTER = 2 // consecutive lost journal chunks before the writer is marked dead: later chunks are counted lost, never queued (each would wait out its limit at the run's end); the final chunk still gets one attempt
 const DEFAULT_DELIVER = 'incremental' // after each landing: push the landed SHA (fast-forward, from a ship worktree) and keep ONE draft PR per repo up to date — the PR is the proof of what landed and the run's saved state. A 0.8.0 run built seven slices over 29 h and three halts and left nothing on the remote. 'end': nothing is pushed before the terminal slot. {deliver}, per repo {repos:[{deliver}]}.
 const SHIP_PUSH_FAILURES = 2 // consecutive failed pushes before a repo's incremental pushes stop (a pre-push hook that demands the gate stops them at once)
 const DEFAULT_ENV_CHECK_SEC = 30 // per environment check: a signed commit or an ls-remote behind a locked agent hangs; past this it is reported timed out (exit 142)
@@ -1730,7 +1731,11 @@ const journal = {
   flushes: 0,
   written: 0,
   mismatches: 0,
-  dead: 0,
+  dead: 0, // chunks lost: their writer returned nothing, or it was marked dead before they ran
+  lostEvents: 0, // the events of those chunks
+  lostInARow: 0,
+  writerDead: false, // JOURNAL_DEAD_AFTER chunks lost in a row: no more chunks are queued but the final one
+  finalSent: false, // the chunk carrying journal.final has been queued
   final: null, // {status, summary} once the run is over — the last flush writes it into run.json
   bumped: false, // a flush of THIS session has landed, so the attempt number is already bumped
 }
@@ -1747,7 +1752,18 @@ function flushJournal() {
   if (!journal.enabled || !journal.pending.length) return journal.chain
   const batch = journal.pending.splice(0)
   const n = ++journal.flushes
+  const final = !!journal.final && !journal.finalSent // the run's last chunk: one attempt, even once the writer is marked dead
+  if (journal.final) journal.finalSent = true
+  const lose = () => {
+    journal.dead++
+    journal.lostEvents += batch.length
+  }
+  if (journal.writerDead && !final) {
+    lose()
+    return journal.chain
+  }
   journal.chain = journal.chain.then(async () => {
+    if (journal.writerDead && !final) return lose() // queued before the writer was marked dead
     const lines = batch.map((e) => JSON.stringify(e))
     const firstSeq = batch[0].seq
     // The bump rides on the first flush that LANDS, not on flush #1: a lost first chunk would
@@ -1760,10 +1776,17 @@ function flushJournal() {
       schema: JOURNAL_SCHEMA,
       kind: 'journal', // short limits: a hung writer must not hold journal.chain (and the run's end) for 40 min
     })
-    if (r) journal.bumped = true
+    if (r) {
+      journal.bumped = true
+      journal.lostInARow = 0
+    }
     if (!r) {
-      journal.dead++
+      lose()
       if (journal.dead === 1) log('⚠ telemetry writer died — events of this chunk are lost; the run itself is unaffected')
+      if (++journal.lostInARow >= JOURNAL_DEAD_AFTER && !journal.writerDead) {
+        journal.writerDead = true
+        log(`⚠ telemetry writer lost ${journal.lostInARow} chunks in a row — marked dead: later chunks are counted lost instead of queued; the final chunk still gets one attempt`)
+      }
       return
     }
     if (typeof r.runDir === 'string' && r.runDir.trim()) {
@@ -4715,7 +4738,7 @@ const environmentOf = () => ({ checks: [...envState.ran], failures: envState.fai
   flushJournal()
   await journal.chain
   if (journal.enabled)
-    log(`◎ decision journal: ${journal.written} event(s) written in ${journal.flushes} chunk(s) → ${journal.runDir || TELEMETRY_DIR}${journal.mismatches ? ` · ${journal.mismatches} chunk(s) failed the line/byte check` : ''}${journal.dead ? ` · ${journal.dead} chunk(s) lost (writer died)` : ''}`)
+    log(`◎ decision journal: ${journal.written} event(s) written in ${journal.flushes} chunk(s) → ${journal.runDir || TELEMETRY_DIR}${journal.mismatches ? ` · ${journal.mismatches} chunk(s) failed the line/byte check` : ''}${journal.dead ? ` · ${journal.dead} chunk(s) lost (writer died), ${journal.lostEvents} event(s)${journal.writerDead ? '; the writer was marked dead' : ''}` : ''}`)
 }
 const contextQuestionsForLedger = (contextResolves.questions || []).map((q) => ({ task: q.task, question: q.question, resolvedBy: q.resolvedBy }))
 const advisoryForLedger = allResults.flatMap((r) => (r.advisory || []).map((f) => noteOf(r, f)))
@@ -4906,7 +4929,7 @@ return {
     late: lateLog.map(({ label, kind, softMin, outcome }) => ({ label, kind, softMin, outcome })),
     // writers that passed their hard limit (their repo was fenced while they ran)
     wedged: wedgedLog,
-    journal: journal.enabled ? { runDir: journal.runDir, events: journal.seq, written: journal.written, chunks: journal.flushes, mismatches: journal.mismatches, lost: journal.dead } : null,
+    journal: journal.enabled ? { runDir: journal.runDir, events: journal.seq, written: journal.written, chunks: journal.flushes, mismatches: journal.mismatches, lost: journal.dead, lostEvents: journal.lostEvents } : null,
   },
   note:
     'Absorbed the WHOLE tracker project: a lightweight slice index up front, each dispatch cycle hydrated just-in-time, already-done issues skipped. Scheduling was CONTINUOUS and dependsOn-driven straight from the tickets — each issue dispatched the moment its dependencies landed (no wave barrier), parallel across repos AND within a repo where declared files were disjoint (worktree lanes, integrations serialized into one run branch per repo); ready order was slice, then downstream-unlocked (critical path). A failed issue blocked only its dependents, and when failures left work stuck the loop re-planned from the current state. Reviews were SCOPED: per task, spec review + the build-safety quality core gated whether dependents could build on the change; once per repo, AT PROJECT END (one final wave, repos in parallel), the TERMINAL quality sweep reviewed the whole integrated run branch before the PR — implementation never paid a gate. Gated on blocker/major only, so any minor/nit finding is in advisoryNotes and was NOT reworked; a cheap guard decided whether a multi-reviewer panel re-reviewed each fix (guardChecks). Every repo had its run branch pushed and its ONE PR opened by its terminal slot after the sweep passed (a configured gate command run exactly ONCE, on the final tree, first; ungatedRepos lists any repo a halt left without its gate/PR). ' +

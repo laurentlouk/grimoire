@@ -538,6 +538,11 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
 - prints the line and byte counts of the decoded chunk, which the engine compares with what
   it sent — a mismatch is logged and counted, never trusted.
 
+A writer that returns nothing loses its chunk (`telemetry.journal.lost`, and `lostEvents`).
+After two lost in a row the writer is marked dead: later chunks are counted lost without being
+dispatched, since each would otherwise wait out its 8-minute limit at the end of the run, and
+only the final chunk (`run.end` and the final `run.json`) gets one more attempt.
+
 The checkpoint is version 2: `{version: 2, replansUsed, learnings, fixRounds,
 outputTokensSpent, lastSeq, landed, pending, landedTasks, shipped, wedged}`, where each of
 `landedTasks` is `{id, repo, status, ticket, title, runBranch, startSha, firstSha, headSha,

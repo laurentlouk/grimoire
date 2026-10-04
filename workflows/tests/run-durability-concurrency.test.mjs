@@ -211,6 +211,24 @@ function journalEvents(calls) {
   eq(attention(result), ['PROJ-1:STILL_RUNNING'], 'PROJ-1 reported STILL_RUNNING, as when the run stopped')
 }
 
+// ══════════════ K-5 · a dead journal writer stops being queued; the final chunk gets one attempt ══════════════
+{
+  // Every journal writer hangs and is given up on at 120 ms. With a chunk every 2 events, the run queues
+  // many chunks: each used to wait out its limit in turn, all of them at the end of the run.
+  const { result, calls, labels, logs } = await run('K-5 · two lost chunks in a row mark the writer dead: no more chunks are dispatched but the last', [T('PROJ-1'), T('PROJ-2'), T('PROJ-3')], (label, p) => {
+    if (label.startsWith('journal#')) return HANG()
+    return happy(label, p)
+  }, { args: { ...QUIET, telemetry: { enabled: true, flushEvery: 2 }, timeouts: { journal: { soft: 0.001, hard: 0.002 } } } })
+  const writes = labels.filter((l) => l.startsWith('journal#'))
+  const j = (result && result.telemetry.journal) || {}
+  eq(writes.length, 3, `three writer dispatches: two lost, then the final chunk (got ${writes.join(', ')})`)
+  const end = journalEvents(calls.filter((c) => c.label === writes[writes.length - 1])).find((e) => e.type === 'run.end')
+  ok(!!end, 'the last dispatch carries the final chunk (run.end)')
+  ok(j.chunks > 3 && j.lost === j.chunks && j.written === 0, `every chunk is counted lost, dispatched or not (${j.lost}/${j.chunks})`)
+  ok(!!end && j.lostEvents >= end.seq, `every event up to run.end (and any after it) is counted lost (${j.lostEvents} ≥ ${end && end.seq})`)
+  eq(logs.filter((l) => /telemetry writer lost 2 chunks in a row — marked dead/.test(l)).length, 1, 'logged once')
+}
+
 // ══════════════ K-8 · a repo with a failed task is not gated before that failure is decided ══════════════
 {
   // One repo, the 0.9.0 defaults (incremental delivery, environment checks). PROJ-1 lands, PROJ-2 fails
