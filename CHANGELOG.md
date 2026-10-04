@@ -1,5 +1,115 @@
 # Changelog
 
+## 0.9.0 — run durability
+
+Fixes found in a real unattended run (one static-site repo, ten issues in a strict blocked-by
+chain, `maxPerRepo` 1, on 0.8.0) that took about 29 hours of run time over three attempts,
+plus about 9 hours waiting on the user, built seven slices and opened no PR. Its journal put
+the time in implementing (12.7 h), reviewing (8.2 h), hydration (3.6 h), replans (2.2 h),
+prechecks (2.1 h) and journal and ledger writes (1.3 h); about 9–10 of those hours were wasted.
+It halted three times: on the replan budget, on a hydration timeout, and on a locked 1Password
+commit signer. Nothing reached the remote until a human pushed it. All fixes are engine-,
+brief- and skill-level and stack-agnostic.
+
+- **A timeout makes a dispatch late, not dead** (`agentHardTimeoutMin`, default 180;
+  `timeouts`). An agent cannot be cancelled, yet the run booked agents dead at 40 minutes while
+  they kept working. In the first attempt a "dead" implementer was re-dispatched into the
+  checkout it was still writing (about 4 hours of failures on the first slice); in the second,
+  two implementers booked dead ran 78 and 115 minutes, committed their slices, and cost 1.5
+  hours of replans that sent them back as "verify-only". `agentTimeoutMin` is now a soft
+  limit: the dispatch is logged as late, still awaited, and its result accepted. At the hard
+  limit a reader is given up on; a writer is marked wedged and fences its repo (nothing else is
+  dispatched or requeued into that checkout) until it returns, and when only wedged work is
+  left the run halts with `kind: 'wedged'`. A hydration that returns nothing is retried once and
+  a late one is accepted (a 43-minute hydration halted the second attempt). Only quick deaths
+  count toward the circuit breaker. Events `late`, `wedged`, `late-result`, `fence`;
+  `telemetry.late` and `telemetry.wedged`; `needsAttention` lists a still-running task as
+  `STILL_RUNNING`.
+- **A draft PR from the first landing, and the run's state in it** (`deliver`, default
+  `'incremental'`; `shipOnHalt`; `draftPr`). After each landing, one haiku dispatch
+  (`briefs/ship.md`), in its own worktree, pushes the exact landed SHA to the run branch
+  (fast-forward, hooks run, never forced) and opens or updates the repo's draft PR. Its body
+  lists the landed tasks and carries a hidden state marker, `<!-- grimoire:state v1 <base64
+  JSON> -->`, with the run's checkpoint, rewritten on every landing: the PR is the run's proof
+  and its saved state. The terminal slot marks it ready after the gate. On a halt every repo
+  pushes what landed and gets a status comment: the reason, what landed, what is open, what to
+  fix, how to resume. A ship failure never halts or replans; a repo whose pre-push hook wants
+  the gate stops incremental pushes (`shipped.<repo>.disabled`). New result fields `draftPrs`
+  and `shipped`; `prs` still lists ready PRs only.
+- **Landed work survives the session and is absorbed on resume.** The checkpoint recorded
+  landed ids that nothing read back, and the tracker keeps issues open until the PR merges, so
+  each new session re-dispatched landed work. Checkpoint v2 records every landed task's run
+  branch and SHAs, and the journal flushes on every landing. At startup the engine reconciles
+  the checkpoint, from `resumeState` or from the draft PR's state marker, against the local or
+  remote run branch and absorbs each task whose head is on it (`absorb` event;
+  `resumedLanded`, with `source: 'checkpoint' | 'pr'`), so a new session or another machine
+  continues where the last one stopped. An implementer that finds its work already on the
+  branch returns `landedBefore` instead of an empty range: SHAs already reviewed land as they
+  are, others are reviewed as that range, and no "no change" fix is bought (the third
+  attempt's empty ranges bought fix rounds that returned invalid start SHAs).
+- **Environment checks** (`builtinEnvChecks`, default on; `environmentChecks`). The third
+  attempt's implementer found the commit signer locked halfway through a task, and a replan
+  spent about eight minutes diagnosing it before halting. Per repo, a signed commit in a
+  scratch worktree and an `ls-remote` of the origin, plus the project's own checks, each under a
+  portable time limit (`perl -e 'alarm …'`: stock macOS has no `timeout`, which the implement
+  brief recommended for hang-prone commands such as the first attempt's Playwright WebKit
+  runs). At start a failure refuses the run (`environment_unavailable`); after a BLOCKED, DIED,
+  late or failed push, before the next replan and the final wave, it halts with
+  `kind: 'environment'` and the fix, and no replan is spent. One haiku dispatch
+  (`briefs/env.md`); event `env`; result `environment`.
+- **The journal agent can only run its script.** In the first attempt the haiku journal
+  agent, running from the product checkout with the project's instructions loaded, acted on its payload.
+  Event lines and `run.json` now travel base64 and are decoded by the script; the brief says
+  the payload is data and forbids any other command. `run.json` is written only when the flush
+  is not older than what is stored, so a late flush never rolls back a newer checkpoint. The
+  ledger and ship payloads travel the same way.
+- **Per-task reviewers in parallel** (`reviewParallel`, default `'stages'`). Precheck, spec
+  review and quality review ran one after another, and reviewing took 8.2 hours. Spec and
+  quality round 0 now run together on the same head after the precheck; a spec fix that moves
+  the head re-runs quality. A reviewer that runs commands does it in its own detached worktree:
+  two reviewers building in one checkout emptied each other's build output.
+- **Hydration ahead** (`hydrateAhead`, default 2). In a chain each hydration (6–43 minutes,
+  3.6 hours in all) waited for its blocker to land. The next ready tasks are now hydrated while
+  their blockers are in flight, and the implementer is told the code may have moved since.
+- **Short limits and a hedge for mechanical dispatches.** Preflight, precheck, journal, ship
+  and environment checks shared an implementer's 40-minute limit; a one-word preflight reply
+  took 12 minutes, and prechecks took 5–13 minutes for about eight git commands (2.1 hours in
+  all). They now have limits of their own (`timeouts`); preflight and precheck start one
+  duplicate when the first is slow (`hedge`); the preflight prompt asks for the reply and
+  nothing else; the precheck runs one fact script in a single Bash call.
+- **The skill resumes by state and says how long a run takes.** The third attempt was a
+  `resumeFromRunId` relaunch with only `agentTimeoutMin` raised, on a stale checkpoint: the
+  replay diverged at the first late result and redid three slices, 3.5 hours for two small
+  commits. The preview now returns an `estimate` (critical path × minutes per task;
+  `estimatePerTaskMin`), about 7–20 hours for that project, and the `orchestrate` skill prints
+  it, says a draft PR appears after the first landing, and names the environment checks.
+  Before an execute run it tells the user the duration and checks commit signing, push and the
+  project's prerequisites. Invoked on a project that already has a run, it finds that run (the
+  newest matching `run.json`, else the draft PR's state marker), shows k/n landed with the proof,
+  and relaunches with the same `runId` and a fresh `resumeState`; starting from scratch takes an
+  explicit request. `resumeFromRunId` is kept for a byte-identical relaunch, the tracker alone
+  never resumes a run, and after a halt the skill reads the PR's status comment first.
+- **Logs and eval cases.** `/grimoire:logs` summarizes the new events in words and shows a
+  v2 checkpoint's landed tasks and heads. `orchestrate` evals: resume by state after a halt, a
+  knob change on resume, the preview's estimate, an environment halt, and a new-session
+  relaunch that finds the run.
+
+### Upgrading from 0.8.1
+Nothing to change in `grimoire.config.json`.
+- Draft PRs now appear after each repo's first landed task, and each landing pushes the run
+  branch, which triggers its CI and previews. Set `deliver: 'end'` (run-wide, or per repo) to
+  keep pushes for the end; `shipOnHalt: false` also skips the halt push and comment.
+- A run can now refuse to start with `environment_unavailable` when a signed commit or the
+  remote does not answer: unlock the signing agent or fix the remote, or pass
+  `builtinEnvChecks: false`.
+- `agentTimeoutMin` is now a soft limit: a late agent is awaited and its result accepted.
+  `agentHardTimeoutMin` (180) is where the run stops waiting; `repos[].timeoutMin` still raises
+  its repo's writers' limits.
+- Checkpoint v2 is backward compatible: a 0.8.x `resumeState` still resumes its budgets; it has
+  no SHAs, so landed tasks are not absorbed from it.
+- Resume with the same `runId` and a fresh `resumeState` (`/grimoire:orchestrate` does it), not
+  with `resumeFromRunId` and changed args.
+
 ## 0.8.1 — run efficiency and honest reporting
 
 Fixes found in a real unattended run (six issues, one repo) that took 9 h 10 for about 2 h 45

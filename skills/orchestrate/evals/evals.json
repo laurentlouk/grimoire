@@ -100,15 +100,20 @@
     "id": 5,
     "query": "The execute run on EXPORT halted halfway through overnight. Kick it off again.",
     "should_trigger": true,
-    "expected_output": "Resumes rather than re-running: relaunches with resumeFromRunId and the same scriptPath and args so completed agent calls return cached results; then waits for the completion notification instead of polling.",
+    "expected_output": "Resumes by state rather than re-running: reads the run's <telemetry.dir>/<runId>/run.json fresh (or the draft PR's state marker when newer) and relaunches without resumeFromRunId, with the same runId and resumeState set to that checkpoint, so landed tasks are absorbed and the budgets kept; uses resumeFromRunId only for a byte-identical relaunch in the same session; reads the halt reason (the draft PR's status comment) before relaunching; then waits for the completion notification instead of polling.",
     "expectations": [
       {
-        "text": "Relaunches with `resumeFromRunId` and the same scriptPath and args",
+        "text": "Relaunches with the same `runId` and `resumeState` set to the checkpoint read from the run's `run.json` (or the draft PR's state marker), not with changed args under `resumeFromRunId`",
         "passed": null,
         "evidence": ""
       },
       {
-        "text": "Does not re-run the project from scratch",
+        "text": "Mentions `resumeFromRunId` only as an option for a byte-identical relaunch (same scriptPath and exactly the same args), if at all",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not re-run the project from scratch with a new runId and no resumeState",
         "passed": null,
         "evidence": ""
       },
@@ -141,5 +146,112 @@
       }
     ],
     "id": 6
+  },
+  {
+    "id": 7,
+    "query": "Run 20261003-115400-export stopped because agents kept timing out. Raise agentTimeoutMin to 90 and resume it.",
+    "should_trigger": true,
+    "expected_output": "Does not use resumeFromRunId, because the args change: the replay would diverge at the first changed prompt or late result and redo landed work. Reads .grimoire/runs/20261003-115400-export/run.json fresh, right before launching, and relaunches with the same runId, resumeState set to its checkpoint, and agentTimeoutMin: 90 (explaining that it is now a soft limit: late agents are awaited, not booked dead).",
+    "expectations": [
+      {
+        "text": "Does not relaunch with `resumeFromRunId` while changing an arg",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Reads the run's `run.json` fresh, right before launching, and passes its `checkpoint` as `resumeState` with the same `runId`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Passes the new `agentTimeoutMin` value in the relaunch args",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 8,
+    "query": "Preview what the loop would do on the EXPORT project before we commit to anything. Spec and plan are in docs/, grimoire.config.json is at the root.",
+    "should_trigger": true,
+    "expected_output": "Launches a preview (no execute: true) and prints, besides the dependency graph and review panels, the duration estimate from the result's estimate (hours low–high, number of tasks, critical path, and that a strict blocked-by chain runs one task at a time whatever maxPerRepo is); says a draft PR appears after the first landed task; names the environment checks the run will make (commit:<repo>, remote:<repo>, and any environmentChecks).",
+    "expectations": [
+      {
+        "text": "Runs a preview, not an execute run",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Prints the estimated wall clock as a range of hours with the task count and the critical path",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Says a draft PR per repo appears after the first landed task",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Names the environment checks the run will make (signed commit and remote per repo, plus any configured ones)",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 9,
+    "query": "The EXPORT run halted overnight with \"environment: commit:api timed out after 30 s\". What now?",
+    "should_trigger": true,
+    "expected_output": "Treats the halt as a machine state, not failed code: points at the status comment on the repo's draft PR (the halt reason, what landed, the fix) and the environment fix first (unlock or approve the commit-signing agent and confirm a signed commit works), then relaunches by state with the same runId and resumeState from a fresh run.json, without resumeFromRunId and without starting from scratch.",
+    "expectations": [
+      {
+        "text": "Points at the draft PR's status comment (or the run's halt reason and fix) before relaunching",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Says the commit-signing agent must be unlocked or approved, and that a signed commit is checked to work, before relaunching",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not describe the halt as failed code or a failed review",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Relaunches (or proposes to) with the same `runId` and `resumeState`, not from scratch",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 10,
+    "query": "New session. Re-run the orchestrator on the EXPORT spec and plan, same as before; it halted yesterday partway through.",
+    "should_trigger": true,
+    "expected_output": "Before launching, finds the existing run: the matching <telemetry.dir>/*/run.json (newest by attempt, then lastSeq) or, failing that, the state marker in the draft PR on the run branch. Shows the proof (k/n landed, verified on the run branch at its head SHA, the draft PR) and what is still to build, and relaunches without resumeFromRunId, with the same runId and resumeState set to that checkpoint. Does not start a fresh run.",
+    "expectations": [
+      {
+        "text": "Looks for the earlier run in the local `run.json` files or the draft PR's state marker before launching",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Shows how many tasks already landed, with their proof (run branch and SHA, or the draft PR), and what is still to build",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Relaunches with the same `runId` and `resumeState`, without `resumeFromRunId`",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not start a new run from scratch that would redo the landed work",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
   }
 ]

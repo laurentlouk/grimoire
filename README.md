@@ -71,7 +71,7 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 /grimoire:graph      # the code graph as a local HTML page: dependency map, files, symbols, hotspots
 ```
 
-`/orchestrate` needs a fourth input besides the three design artifacts: `repos`, the list of repositories with their owning agent, tags (for review-lens selection) and gate command. `workflows/README.md` has the full reference.
+`/orchestrate` needs a fourth input besides the three design artifacts: `repos`, the list of repositories with their owning agent, tags (for review-lens selection) and gate command. It previews first, with a wall-clock estimate (a strict blocked-by chain runs one task at a time). Once it runs, every landed task is pushed to one draft PR per repo, and a halted or killed run picks up where it stopped when you invoke `/orchestrate` on the same project again. `workflows/README.md` has the full reference.
 
 **🧠 How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
 
@@ -95,6 +95,10 @@ Every execute run writes a **decision journal**: which agent and model each task
 - **Guard hook**: a `PreToolUse` hook denies pushes to protected branches, recursive deletes outside the project, and agent edits to the project's Claude settings and hooks (`hooks/README.md`). A seatbelt, not a sandbox.
 - **Claims**: with `claim.identity` set, the loop assigns each issue to itself as it starts it, never builds an issue someone else has started, and hands back what it did not land.
 - **Cheap checks before expensive ones**: a haiku precheck rejects an empty or stubbed diff before any reviewer is paid, and each blocking finding is verified against the code before it buys a fix.
+- **Late is not dead**: an agent cannot be cancelled, so one past its time limit is waited for and its result accepted, never booked dead and retried into the checkout it is still writing. A writer that passes the hard limit fences its repo, and the run halts saying the agent may still commit.
+- **Progress on the remote**: each landed task is pushed (fast-forward, hooks run, never forced) to a draft PR per repo that is updated as tasks land and marked ready after the gate. A halt adds a status comment with the reason, what to fix and how to resume. `deliver: 'end'` keeps a repo's pushes for the end.
+- **Environment checks**: a signed commit and the remote are probed for every repo, with any `environmentChecks` of your own, at start (the run refuses) and whenever something stalls (it halts at once, no replan spent). A locked commit-signing agent costs minutes, not a night.
+- **Resume from saved state**: the saved state is the run's `run.json` checkpoint and a state marker in its draft PR. Invoking `/orchestrate` on a project that already has a run finds it, shows what landed with the SHAs that prove it, and builds only the rest. The tracker alone cannot resume a run: its issues close only when the PR merges.
 
 ## 💸 Token economy: rtk
 

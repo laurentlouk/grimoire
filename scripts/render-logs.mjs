@@ -168,10 +168,12 @@ function runFacts(run) {
     if (e.task != null && e.repo != null && ['route', 'dispatch', 'settle'].includes(e.type)) taskRepo[e.task] = e.repo
     if (e.task != null && ['dispatch', 'settle'].includes(e.type)) tasks.add(String(e.task))
   }
-  // first-round pass: per (task, per-task stage), the reviews at the lowest round all PASS
+  // first-round pass: per (task, per-task stage), the reviews at the lowest round all PASS.
+  // A discarded round (reviewParallel: a quality verdict made stale by a spec fix that moved the
+  // head, or rounds started next to a precheck that failed) never counted, so it is skipped.
   const firstRound = {}
   for (const e of ev) {
-    if (e.type !== 'review' || e.task == null || e.stage === 'terminal') continue
+    if (e.type !== 'review' || e.task == null || e.stage === 'terminal' || e.discarded === true) continue
     const k = `${e.task}|${e.stage}`
     const r = num(e.round) ?? 0
     const f = firstRound[k]
@@ -194,7 +196,7 @@ function runFacts(run) {
     if (e.type !== 'verify') continue
     let who = e.persona
     if (who == null) {
-      const ps = [...new Set(ev.filter((r) => r.type === 'review' && r.task === e.task && r.stage === e.stage
+      const ps = [...new Set(ev.filter((r) => r.type === 'review' && r.discarded !== true && r.task === e.task && r.stage === e.stage
         && (num(r.round) ?? 0) === (num(e.round) ?? 0) && (num(r.gating) ?? 0) > 0).map((r) => r.persona))]
       who = ps.length === 1 ? ps[0] : ps.length ? `${e.stage} panel (${ps.join('+')})` : `${e.stage} (persona unknown)`
     }
@@ -335,7 +337,7 @@ main{padding:16px;max-width:1200px;margin:0 auto}section{margin:0 0 22px}h2{font
 .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:600;font-size:12px}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}td.txt{overflow-wrap:anywhere;min-width:220px}td.mono{font-family:var(--mono);font-size:12px;white-space:nowrap}
-.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.SHIP_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY{color:var(--warn)}
+.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.SHIP_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY,.STILL_RUNNING,.FENCED{color:var(--warn)}
 .lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.lane .task{border-top:1px solid var(--line);padding:6px 0;cursor:pointer}.lane .task:hover{color:var(--acc)}
 details{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--card)}summary{cursor:pointer;padding:8px 10px;font-weight:600;overflow-wrap:anywhere}
 details ol{margin:0;padding:0 10px 10px 30px}details li{margin:3px 0;overflow-wrap:anywhere}.k{font-family:var(--mono);font-size:12px;color:var(--mut)}
@@ -356,7 +358,7 @@ function client() {
     for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c))
     return el
   }
-  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'SHIP_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'answered']
+  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'SHIP_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'STILL_RUNNING', 'FENCED', 'answered']
   const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
   const cls = (v) => (STATUS.includes(String(v)) ? String(v) : null)
   const s = (v) => (v == null ? '' : typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(v))
@@ -368,7 +370,7 @@ function client() {
     route: (e) => `${s(e.agent)} × ${s(e.model)}${e.fallback ? ' (fallback)' : ''} — ${s(e.reason)}`,
     dispatch: (e) => `${s(e.agent)} × ${s(e.model)} · ${s(e.lane)} · cycle ${s(e.cycle)}`,
     precheck: (e) => `${s(e.verdict)}${Array.isArray(e.problems) && e.problems.length ? ': ' + list(e.problems) : ''}`,
-    review: (e) => `${s(e.stage)} · ${s(e.persona)} → ${s(e.verdict)} (gating ${s(e.gating)}, advisory ${s(e.advisory)}, round ${s(e.round)})`,
+    review: (e) => `${s(e.stage)} · ${s(e.persona)} → ${s(e.verdict)} (gating ${s(e.gating)}, advisory ${s(e.advisory)}, round ${s(e.round)})${e.discarded ? ` · discarded${e.reason ? `: ${s(e.reason)}` : ''}, not counted` : ''}`,
     verify: (e) => `${s(e.stage)} r${s(e.round)}: ${s(e.confirmed)} confirmed, ${s(e.overturned)} overturned${Array.isArray(e.reasons) && e.reasons.length ? ' — ' + list(e.reasons) : ''}`,
     fix: (e) => `${s(e.stage)} r${s(e.round)} · ${s(e.model)} · ${s(e.findings)} finding(s)`,
     escalate: (e) => `${s(e.from)} → ${s(e.to)}: ${s(e.reason)}`,
@@ -381,7 +383,16 @@ function client() {
     gate: (e) => `${s(e.repo)} → ${s(e.status)}${e.applies === false ? ' (not applicable)' : ''}${e.prUrl ? ' · ' + s(e.prUrl) : ''}`,
     claim: (e) => `${s(e.action)} by ${s(e.by)}`,
     budget: (e) => `${s(e.spent)} / ${s(e.cap)} → ${s(e.action)}`,
-    halt: (e) => s(e.reason),
+    halt: (e) => `${e.kind ? `[${s(e.kind)}] ` : ''}${s(e.reason)}`,
+    // 0.9.0 · run durability: late and wedged dispatches, incremental delivery, environment checks, resume
+    late: (e) => `${s(e.label)} past its ${s(e.softMin)}-min soft limit${e.kind ? ` (${s(e.kind)})` : ''}: still awaited, not stopped`,
+    hedge: (e) => `${s(e.label)}: a duplicate dispatch started; the first non-empty reply wins`,
+    wedged: (e) => `${s(e.label)} past its ${s(e.hardMin)}-min hard limit and still running${e.repo != null ? `: ${s(e.repo)} fenced` : ''}`,
+    'late-result': (e) => `${s(e.label)} returned late${e.status ? ` (${s(e.status)})` : ''} → ${e.accepted ? 'accepted' : 'discarded'}`,
+    fence: (e) => `${s(e.repo)} → ${e.action === 'release' ? 'released' : e.action === 'hold' ? 'held: no dispatch into it until the late writer returns' : s(e.action)}`,
+    ship: (e) => `${s(e.repo)}${e.mode ? ` · ${s(e.mode)}` : ''} → ${e.pushed === false ? `failed at ${s(e.failedStep || 'push')}${e.detail ? `: ${s(e.detail)}` : ''}` : `pushed ${s(e.head ?? e.remoteHead ?? e.pushedHead ?? '?')}`}${e.prUrl ? ` · ${s(e.prUrl)}${e.draft ? ' (draft)' : ''}` : ''}${e.disabled ? ` · incremental ${s(e.disabled)} disabled` : ''}`,
+    env: (e) => `${s(e.when)}${e.why ? ` (${s(e.why)})` : ''} → ${e.ok ? 'ok' : `FAILED: ${list(e.failed)}`}`,
+    absorb: (e) => `landed earlier, from ${s(e.source)}${e.head ? ` @ ${s(e.head)}` : ''}`,
     'run.end': (e) => `${s(e.status)} · done ${s(e.done)} · failed ${s(e.failed)} · blocked ${s(e.blocked)} · PRs ${s(e.prs)} · tokens ${s(e.tokens)}`,
   }
   const summarize = (e) => { try { return SUM[e.type] ? SUM[e.type](e) : rest(e) } catch { return rest(e) } }
@@ -422,6 +433,8 @@ function client() {
     const blocked = end.blocked ?? (Array.isArray(sm.blocked) ? sm.blocked.length : sm.blocked)
     const prUrls = uniq([...(Array.isArray(sm.prs) ? sm.prs.map((p) => (typeof p === 'string' ? p : p && (p.url || p.prUrl))) : []),
       ...ev.filter((e) => e.type === 'gate' && e.prUrl).map((e) => e.prUrl)].filter(Boolean).map(String))
+    const drafts = uniq([...(isObj(sm.draftPrs) ? Object.values(sm.draftPrs) : []),
+      ...ev.filter((e) => e.type === 'ship' && e.prUrl && e.draft !== false).map((e) => e.prUrl)].filter(Boolean).map(String)).filter((u) => !prUrls.includes(u))
     const halt = ev.find((e) => e.type === 'halt')
     return h('section', null,
       h('h2', null, 'Overview'),
@@ -432,7 +445,7 @@ function client() {
         stat('status', s(r.status), r.status), stat('output tokens', fmt(D.tokens[r.runId])),
         stat('done', s(done ?? '—')), stat('failed / attention', s(failed ?? '—')), stat('blocked', s(blocked ?? '—')),
         stat('PRs', s(end.prs ?? prUrls.length)), stat('replans', s(count('replan'))), stat('events', s(ev.length))),
-      prUrls.length ? h('div', { class: 'tags' }, prUrls.map((u) => h('span', { class: 'tag' }, u))) : null,
+      prUrls.length || drafts.length ? h('div', { class: 'tags' }, prUrls.map((u) => h('span', { class: 'tag' }, u)), drafts.map((u) => h('span', { class: 'tag' }, `${u} (draft)`))) : null,
       halt || sm.halt ? h('p', { class: 'FAIL' }, `halt: ${s(halt ? halt.reason : sm.halt.reason ?? sm.halt)}`) : null,
       r.checkpoint ? checkpoint(r.checkpoint) : null,
       isObj(sm.telemetry) ? kvBlock('Telemetry (run summary)', sm.telemetry) : null,
@@ -449,12 +462,21 @@ function client() {
   function checkpoint(c) {
     const n = (v) => (Array.isArray(v) ? v.length : isObj(v) ? Object.keys(v).length : s(v ?? '—'))
     const fixes = isObj(c.fixRounds) ? Object.entries(c.fixRounds).map(([t, k]) => `${t} ${s(k)}`).join(', ') : ''
-    return h('div', { class: 'card', style: 'margin-top:8px' }, h('h3', null, 'Checkpoint'),
+    const short = (sha) => s(sha).slice(0, 7)
+    // checkpoint v2 (0.9.0): landedTasks carry the SHAs a resumed session verifies and absorbs
+    const landedTasks = Array.isArray(c.landedTasks) ? c.landedTasks.filter(isObj) : null
+    const shipped = isObj(c.shipped) ? Object.entries(c.shipped).filter(([, v]) => isObj(v)) : []
+    return h('div', { class: 'card', style: 'margin-top:8px' }, h('h3', null, 'Checkpoint', c.version != null ? h('span', { class: 'muted' }, ` · v${s(c.version)}`) : null),
       h('div', { class: 'grid' }, stat('replans used', s(c.replansUsed ?? '—')), stat('output tokens spent', fmt(c.outputTokensSpent)),
-        stat('last seq', s(c.lastSeq ?? '—')), stat('landed', n(c.landed)), stat('pending', n(c.pending)), stat('learnings', n(c.learnings))),
+        stat('last seq', s(c.lastSeq ?? '—')), stat('landed', n(landedTasks ?? c.landed)), stat('pending', n(c.pending)), stat('learnings', n(c.learnings))),
+      landedTasks && landedTasks.length ? h('p', null, h('span', { class: 'muted' }, 'landed: '),
+        landedTasks.map((t) => `${s(t.id)} @ ${short(t.headSha) || '?'}${t.repo != null ? ` (${s(t.repo)}${t.runBranch ? ` · ${s(t.runBranch)}` : ''})` : ''}`).join(', ')) : null,
+      shipped.length ? h('p', null, h('span', { class: 'muted' }, 'pushed: '),
+        shipped.map(([repo, v]) => `${repo} @ ${short(v.pushedHead) || '—'}${v.prUrl ? ` · ${s(v.prUrl)}${v.draft ? ' (draft)' : ''}` : ''}`).join('; ')) : null,
+      Array.isArray(c.wedged) && c.wedged.length ? h('p', { class: 'STILL_RUNNING' }, `still running when the session stopped: ${c.wedged.map(s).join(', ')}`) : null,
       fixes ? h('p', null, h('span', { class: 'muted' }, 'fix rounds: '), fixes) : null,
       Array.isArray(c.pending) && c.pending.length ? h('p', null, h('span', { class: 'muted' }, 'pending: '), c.pending.map(s).join(', ')) : null,
-      Array.isArray(c.learnings) && c.learnings.length ? h('ul', null, c.learnings.map((l) => h('li', null, s(l)))) : null)
+      Array.isArray(c.learnings) && c.learnings.length ? h('ul', null, c.learnings.map((l) => h('li', null, s(isObj(l) && l.text != null ? l.text : l)))) : null)
   }
 
   function timeline(r) {
