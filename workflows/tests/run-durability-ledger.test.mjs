@@ -169,7 +169,9 @@ function decodingWriter(prompt) {
   ok(files.includes(`${String(JSON.parse(unb64(heredocs(two)[0]).trim().split('\n')[0]).seq).padStart(8, '0')}.jsonl`), "the late writer's event chunk is still written (chunks are idempotent by name)")
   ok(readFileSync(join(TEL, 'run-s', 'events', files.sort()[0]), 'utf8').split('\n')[0].startsWith('{"seq":1,'), 'the decoded chunk is plain JSON lines')
 
-  await session('J-4b · a NEW attempt under the same runId restarts at a lower seq — and still writes')
+  // a relaunch's index sees the run branch J-4a moved: its session token differs (it hashes what a launch started from)
+  await run('J-4b · a NEW attempt under the same runId restarts at a lower seq — and still writes', [TASK, TASK2], (label, p) => (label.startsWith('journal#') ? capture(p) : happy(label)),
+    { args: { ...QUIET, runId: 'run-s', telemetry: { dir: TEL, flushEvery: 3 } }, index: { runBranches: [{ repo: 'api', local: 'aaaaaaa', remote: '', sync: 'local-only' }] } })
   const second = captured.splice(0)
   bash(second[0])
   ok(runJson().attempt === 2 && runJson().checkpoint.lastSeq === seqOf(second[0]) && seqOf(second[0]) < seqOf(last), 'run.json is attempt 2, at its own lower seq')
