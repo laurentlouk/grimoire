@@ -9,7 +9,10 @@ commands and names.
   `detail`. Do NOT resolve conflicts yourself and do NOT edit any file — this diff passed
   review as-is, and rewriting it here would ship unreviewed code. Leave the lane worktree and
   branch in place for the replanner.
-- On success: remove the lane worktree and branch, return status MERGED with `headSha`.
+- On success: remove the lane worktree and branch, return status MERGED with `headSha` (the run
+  branch head after the merge). It is required: a landing without it is never pushed. If the
+  header says you already merged and only asks for the head, merge nothing again: run the two
+  read-only commands it gives and return what they say.
 
 Mechanical step only: no code edits, no rebase, no push, no PR, no test runs (the repo gate
 runs once on the final integrated tree).

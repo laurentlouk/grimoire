@@ -413,11 +413,13 @@ function client() {
     fence: (e) => `${s(e.repo)} → ${e.action === 'release' ? 'released' : e.action === 'hold' ? 'held: no dispatch into it until the late writer returns' : s(e.action)}`,
     // pushed: true · false (the push failed) · null (nothing to push: the head was already there).
     // skipped: 'ready' (the PR is out of draft, so it is the gate's: nothing pushed or rewritten) · 'lock'
-    // (another ship or the gate held the repo's ship lock: nothing moved). Neither is a failed push,
+    // (another ship or the gate held the repo's ship lock: nothing moved) · 'unknown' (the PR could not
+    // be read, so it may be ready: nothing moved). None is a failed push,
     // whatever `pushed` says.
     ship: (e) => `${s(e.repo)}${e.mode ? ` · ${s(e.mode)}` : ''} → ${e.skipped === 'ready'
       ? `skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone${e.mode === 'halt' ? ` · ${e.failedStep === 'comment' ? 'the status comment failed' : 'status comment only'}` : ' · the new work waits for the next terminal slot'}`
       : e.skipped === 'lock' ? `skipped: another ship or the gate held the ship lock — nothing pushed or rewritten, not a failed push${e.detail ? `: ${s(e.detail)}` : ''}`
+        : e.skipped === 'unknown' ? `skipped: its PR could not be read (gh failed), so it may be out of draft — nothing pushed or rewritten, not a failed push${e.detail ? `: ${s(e.detail)}` : ''}`
         : e.skipped ? `skipped (${s(e.skipped)})`
           : e.pushed === false ? `failed at ${s(e.failedStep || 'push')}${e.detail ? `: ${s(e.detail)}` : ''}` : `${e.pushed === null ? `${s(e.head ?? '?')} already on the remote` : `pushed ${s(e.head ?? e.remoteHead ?? e.pushedHead ?? '?')}`}${e.failedStep ? ` · ${s(e.failedStep)} step failed${e.detail ? `: ${s(e.detail)}` : ''}` : ''}`}${e.prUrl ? ` · ${s(e.prUrl)}${e.draft ? ' (draft)' : e.draft === false ? ' (ready)' : ''}` : ''}${e.disabled ? ` · incremental ${s(e.disabled)} disabled` : ''}`,
     // recheck: the one re-check of the checks a stall check found failing · cleared: the checks a later
@@ -436,6 +438,8 @@ function client() {
         : e.source === 'checkpoint' || e.source === 'pr' ? `landed in an earlier attempt, verified on the run branch (from the ${e.source === 'pr' ? 'PR state marker' : 'checkpoint'})`
           : `landed earlier, from ${s(e.source)}`}${e.head ? ` @ ${s(e.head)}` : ''}`,
     'harness-routed': (e) => `${s(e.stage)} · ${s(e.persona)} · ${s(e.severity)} at ${s(e.where)}: a harness file, routed to crystallize, not fixed on the product branch`,
+    // after run.end: the details of tasks that landed since the last confirmed flush, LANDED_DELTA_MAX per chunk
+    'landed.flush': (e) => `${s(e.left)} landed task detail(s) still to write to landed.jsonl: one more chunk`,
     'run.end': (e) => `${s(e.status)} · done ${s(e.done)} · failed ${s(e.failed)} · blocked ${s(e.blocked)} · PRs ${s(e.prs)} · tokens ${s(e.tokens)}`,
   }
   const summarize = (e) => { try { return SUM[e.type] ? SUM[e.type](e) : rest(e) } catch { return rest(e) } }
