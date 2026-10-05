@@ -416,7 +416,7 @@ case "$op" in
   "pr list") [ -f "$S/url" ] && cat "$S/url"; exit 0 ;;
   "pr create") K=body keep "$@"; echo "https://github.com/x/y/pull/9" > "$S/url"; cat "$S/url" ;;
   "pr edit") shift; K=body keep "$@" ;;
-  "pr view") [ -f "$S/draft" ] && echo true || echo false ;;
+  "pr view") v=false; [ -f "$S/draft" ] && v=true; case "$*" in *isDraft,body*) echo "$v -:0" ;; *) echo "$v" ;; esac ;; # what --jq prints: the state, then the marker's session:ship
   "pr comment") shift; K=comment keep "$@" ;;
 esac
 `)

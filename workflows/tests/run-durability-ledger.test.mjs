@@ -196,7 +196,7 @@ const hydratedIds = (calls) => calls.filter((c) => c.label.startsWith('hydrate:'
   ok(prompt('gate:api').includes('PROJ-1 — Title of PROJ-1: built A') && prompt('gate:api').includes('PROJ-2 — Title of PROJ-2: built B'), 'the gate (PR body) lists the absorbed task with its report, next to the new one')
   eq(result.resumedLanded, [{ id: 'PROJ-1', repo: 'api', headSha: 'aaaaaaa', source: 'checkpoint' }], 'result.resumedLanded')
   const ip = prompt('parse-index')
-  ok(/RECONCILE the run branches/.test(ip) && ip.includes(`chk 'api' 'repositories/api' '${RUN_BRANCH}' 'PROJ-1' aaaaaaa`) && ip.includes('merge-base --is-ancestor "$5" "refs/heads/${3}"') && ip.includes('merge-base --is-ancestor "$5" "$BASE"'), "the index prompt's RECONCILE checks aaaaaaa against the run branch and the base")
+  ok(/RECONCILE the run branches/.test(ip) && ip.includes(`{ JR='api'; JP='repositories/api'; JB='${RUN_BRANCH}'; rb "$JR" "$JP" "$JB"`) && ip.includes(`  c 'PROJ-1' aaaaaaa\n`) && ip.includes('merge-base --is-ancestor "$5" "refs/heads/${3}"') && ip.includes('merge-base --is-ancestor "$5" "$BASE"'), "the index prompt's RECONCILE checks aaaaaaa against the run branch and the base")
   ok(ip.includes(`gh pr list --head "$3" --state all`) && ip.includes('fetch -q origin'), 'and reads the run branch PR and fetches the branch, best effort')
   ok(/AFTER the probe's second call/.test(ip), 'never between the two probe calls')
   ok(logs.some((l) => /resumed: 1 task\(s\) absorbed .* PROJ-1@aaaaaaa \(checkpoint\)/.test(l)), 'logged')
@@ -375,7 +375,7 @@ const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/
   const marker = markerOf(stateOf({ landedTasks: [rec('PROJ-3', c2)] }))
   const outA = await script([rec('PROJ-1', c1)], [{ number: 7, url: 'https://github.com/x/y/pull/7', state: 'OPEN', isDraft: true, isCrossRepository: false, body: `## Draft\n\n<!-- grimoire:state v1 ${marker} -->\n` }])
   ok(outA.includes(`BRANCH repo=api local=${c2} remote=${c2} sync=created`), 'RC-A · a missing local run branch is created from origin')
-  ok(outA.includes(`TASK id=PROJ-1 repo=api sha=${c1} local=yes origin=yes onBranch=yes`), 'RC-A · the checkpoint task is verified on both refs')
+  ok(outA.includes(`TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)} local=yes origin=yes onBranch=yes`), 'RC-A · the checkpoint task is verified on both refs (its SHA as the script names it: 12 characters)')
   if (hasJq) {
     ok(outA.includes(`PR repo=api url=https://github.com/x/y/pull/7 state=OPEN isDraft=true len=${marker.length} sum=${cksum(marker)} marker=${marker}`), 'RC-A · the PR line carries the marker raw, with its length and cksum')
     ok(outA.includes(`TASK id=PROJ-3 repo=api sha=${c2} local=yes origin=yes onBranch=yes`), "RC-A · the marker's own task is verified too")
@@ -385,7 +385,7 @@ const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/
   sh(`git checkout -q ${RUN_BRANCH} && git reset -q --hard ${c1}`, W)
   const outB = await script([rec('PROJ-2', c2)])
   ok(outB.includes(`sync=fast-forwarded`) && sh('git rev-parse HEAD', W) === c2, 'RC-B · a clean, checked-out branch strictly behind origin is fast-forwarded')
-  ok(outB.includes(`TASK id=PROJ-2 repo=api sha=${c2} local=yes origin=yes onBranch=yes`), 'RC-B · then the remote-only head verifies')
+  ok(outB.includes(`TASK id=PROJ-2 repo=api sha=${c2.slice(0, 12)} local=yes origin=yes onBranch=yes`), 'RC-B · then the remote-only head verifies')
 
   // C · a local commit origin does not have, and origin moved on → diverged: reported, nothing touched
   const c3 = commit(P, 'c3')
@@ -393,7 +393,7 @@ const PR = (marker, extra = {}) => ({ repo: 'api', url: 'https://github.com/x/y/
   const d1 = commit(W, 'd1')
   const outC = await script([rec('PROJ-1', c1)])
   ok(outC.includes(`local=${d1} remote=${c3} sync=diverged`) && sh('git rev-parse HEAD', W) === d1, 'RC-C · diverged: reported, the local branch left exactly as it was')
-  ok(outC.includes(`TASK id=PROJ-1 repo=api sha=${c1} local=yes origin=yes onBranch=no`), 'RC-C · and no task is on the branch for absorption')
+  ok(outC.includes(`TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)} local=yes origin=yes onBranch=no`), 'RC-C · and no task is on the branch for absorption')
   ok(!/PR repo=/.test(outC), 'RC-C · no PR → no PR line')
   rmSync(T, { recursive: true, force: true })
 }

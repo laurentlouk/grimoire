@@ -124,6 +124,7 @@ async function reconcileScript(repos, landedTasks, extra = {}) {
   return (/## Also RECONCILE[\s\S]*?```bash\n([\s\S]*?)\n```/.exec(prompt('parse-index')) || [])[1] || ''
 }
 const execRc = (shell, script, extra = {}, cwd = TMP) => spawnSync(shell, ['-c', script], { cwd, encoding: 'utf8', env: { ...env, PATH: `${BIN}:${process.env.PATH}`, GH_FAKE_JSON: '[]', ...extra }, timeout: 120000 }).stdout || ''
+const original = ['original-awk', 'nawk', 'bwk-awk'].map((a) => spawnSync('sh', ['-c', `command -v ${a}`], { encoding: 'utf8' }).stdout.trim()).find((p) => p && !/mawk|gawk/.test(spawnSync('sh', ['-c', `readlink -f ${p}`], { encoding: 'utf8' }).stdout)) || null
 const linesOf = (out, kind) => out.split('\n').filter((l) => l.startsWith(`${kind} `))
 const prJson = (bodyText) => JSON.stringify([{ number: 7, url: PR_URL, state: 'OPEN', isDraft: true, isCrossRepository: false, body: bodyText }])
 
@@ -179,21 +180,44 @@ await guard('H-2', async () => {
     { args: QUIET, index: { prState: [PR(tok)], reconcile: [TASKLINE('PROJ-1', 'aaaaaaa')], runBranches: [BRANCH()] } })
   ok(long.logs.some((l) => /is too long to read back/.test(l)) && long.result.resumedLanded.length === 0, 'refused, nothing absorbed')
 
-  section('H-2d · many landed tasks in three repos: the reconcile output stays inside its budget, every repo keeps its lines')
+  section('H-2d · many landed tasks in one repo of three: the output stays inside its budget, every repo keeps its lines, and what the small repos leave goes to the big one')
   const names = ['api', 'web', 'ios']
   const repos = names.map((name) => {
     sh(`git clone -q origin.git many-${name} 2>/dev/null && git -C many-${name} checkout -q ${RUN_BRANCH}`)
     return { ...REPOS[0], name, path: join(TMP, `many-${name}`), runBranch: RUN_BRANCH }
   })
-  const known = names.flatMap((name) => Array.from({ length: 70 }, (_, k) => ({ ...CK(`${name.toUpperCase()}-${k + 1}`, c2, { firstSha: c1 }), repo: name, runBranch: RUN_BRANCH })))
+  const count = { api: 250, web: 5, ios: 5 }
+  const known = names.flatMap((name) => Array.from({ length: count[name] }, (_, k) => ({ ...CK(`${name.toUpperCase()}-${k + 1}`, c2, { firstSha: c1 }), repo: name, runBranch: RUN_BRANCH })))
   const script = await reconcileScript(repos, known)
   const out = execRc('bash', script, { GH_FAKE_JSON: prJson('a PR without a marker') })
-  ok(out.length <= 28000, `the whole output is ${out.length} characters (budget 28,000; 210 TASK lines would take ~40,000)`)
+  ok(out.length <= 28000, `the whole output is ${out.length} characters (budget 28,000; 260 TASK lines would take ~27,000 plus the rest)`)
+  const shown = {}
   for (const name of names) {
     const tasks = linesOf(out, 'TASK').filter((l) => l.includes(` repo=${name} `))
-    ok(linesOf(out, 'BRANCH').some((l) => l.startsWith(`BRANCH repo=${name} `)) && linesOf(out, 'PR').some((l) => l.startsWith(`PR repo=${name} `)) && tasks.length >= 30,
-      `${name}: its BRANCH and PR lines, and ${tasks.length} TASK lines (its newest first)`)
-    ok(new RegExp(`^WARN repo=${name}: ${70 - tasks.length} landed task\\(s\\) not checked: this repo's share of the reconcile output is spent`, 'm').test(out), `${name}: a WARN line counts the ${70 - tasks.length} left unchecked`)
+    shown[name] = tasks.length
+    ok(linesOf(out, 'BRANCH').some((l) => l.startsWith(`BRANCH repo=${name} `)) && linesOf(out, 'PR').some((l) => l.startsWith(`PR repo=${name} `)), `${name}: its BRANCH and PR lines`)
+  }
+  eq([shown.web, shown.ios], [5, 5], 'the small repos: every task checked')
+  const even = Math.floor((28000 - 900) / 3 / 110)
+  ok(shown.api > even + 30 && shown.api < 250, `api: ${shown.api} TASK lines — more than an even third (~${even}): the small repos' unused share went to it`)
+  ok(new RegExp(`^WARN repo=api: ${250 - shown.api} landed task\\(s\\) not checked: the reconcile output budget is spent`, 'm').test(out) && !/^WARN repo=(web|ios):/m.test(out), `api: a WARN line counts the ${250 - shown.api} left unchecked; none for web or ios`)
+  ok(linesOf(out, 'TASK').filter((l) => l.includes(' repo=api ')).every((l, k) => l.startsWith(`TASK id=API-${250 - k} `)), 'api: its newest tasks first')
+  if (original) {
+    const oa = execRc('bash', script.replace('| awk -v B=', `| ${original} -v B=`), { GH_FAKE_JSON: prJson('a PR without a marker') })
+    eq(oa, out, `the allotment reads the same under ${original} (the one-true-awk macOS ships)`)
+  }
+
+  section('H-2e · a task both the checkpoint and the marker list is checked once, the checkpoint\'s line first')
+  if (HAS_JQ) {
+    // one single-commit task (marker [id, head]; checkpoint first = head), one two-commit task (both carry its first commit)
+    const marker = tokenOf(stateOf({ landedTasks: [['PROJ-1', c1], ['PROJ-2', c2, c1.slice(0, 12)], ['PROJ-3', c2]] }))
+    const script2 = await reconcileScript(repoAt(WK), [CK('PROJ-1', c1), CK('PROJ-2', c2, { firstSha: c1 })])
+    for (const shell of SHELLS) {
+      const o = execRc(shell, script2, { GH_FAKE_JSON: prJson(`x\n<!-- grimoire:state v1 ${marker} -->\n`) })
+      const ids = linesOf(o, 'TASK').map((l) => /^TASK id=(\S+)/.exec(l)[1])
+      eq(ids, ['PROJ-2', 'PROJ-1', 'PROJ-3'], `${shell}: one line each — the checkpoint's (newest first), then the marker's own PROJ-3`)
+      ok(linesOf(o, 'TASK')[1] === `TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)} local=yes origin=yes onBranch=yes inBase=no first=none firstOk=none`, `${shell}: a first commit that is the head is dropped (first=none)`)
+    }
   }
   ok(linesOf(out, 'TASK').every((l) => l.length <= 260), 'every TASK line is short (ids ≤ 64, SHAs ≤ 40)')
 })
@@ -394,7 +418,7 @@ await guard('H-8', async () => {
   await new Promise((r) => srv.listen(0, '127.0.0.1', r))
   const port = srv.address().port
   const LIM = fresh('lim')
-  for (const c of ['git', 'date', 'mktemp', 'grep', 'wc', 'tr', 'cksum', 'cut', 'sleep', 'rm', 'cat', 'jq', 'kill', 'printf', 'env', 'sed', 'dirname', 'basename', 'uname', 'ls', 'expr', 'head', 'tail', 'pgrep', 'pkill', 'ps', ...SHELLS]) {
+  for (const c of ['git', 'date', 'mktemp', 'grep', 'wc', 'tr', 'cksum', 'cut', 'sleep', 'rm', 'cat', 'jq', 'kill', 'printf', 'env', 'sed', 'awk', 'dirname', 'basename', 'uname', 'ls', 'expr', 'head', 'tail', 'pgrep', 'pkill', 'ps', ...SHELLS]) {
     const p = which(c)
     if (p && p.startsWith('/') && !existsSync(join(LIM, c))) symlinkSync(p, join(LIM, c))
   }
