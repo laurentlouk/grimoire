@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.9.1 — the 0.9.0 follow-ups
+
+The minor findings recorded from the last review rounds of 0.9.0 (issue #14). None blocked a run
+in the common case; each is fixed and tested for real in bash, zsh and dash
+(`workflows/tests/run-durability-followups.test.mjs`), and the whole suite now passes on Linux
+too, where only the journal script had run before.
+
+**Delivery and ship**
+- **An unreadable PR is UNKNOWN, never a draft.** When `gh pr view` (or `gh pr list`) failed
+  (a 502, a timeout), the ship script treated the PR as a draft and pushed to it and rewrote its
+  description, though it may have been ready. It now prints `UNKNOWN`: nothing is pushed,
+  rewritten or claimed (a halt posts no status comment there), the next ship retries, and the
+  `ship` event says `skipped: 'unknown'`.
+- **The integrate step's `headSha` is required with MERGED**, and one that leaves it out is asked
+  once more, read-only, inside the repo's merge queue: the run branch's head, accepted only when
+  it holds the reviewed lane tip. A landing without it was never shipped.
+- **Nothing is dispatched once the workflow has returned.** A wedged gate's seal or a late halt
+  ship could be dispatched after the body returned, and the runtime does not say what becomes of
+  such a call: it is now skipped and logged, and a relaunch resumes from the PR and `run.json`.
+- **Bounded steps under the lock.** The repo's `laneSetup` in the ship worktree runs under the
+  script's time limits (at most 180 s), and the gate pushes through a script that renews its
+  lock's age every 60 s while the push runs: a pre-push hook longer than 20 minutes no longer
+  loses the lock to a ship.
+- **Free text never closes an issue.** A closing keyword before an issue reference in a title,
+  an implementer's summary or a halt reason ("… Closes #99") gets a zero-width space: the PR
+  body closes only the issues the engine names.
+- **The run branch key.** `SOC-2 …`, `GPT-4 …`, `COVID-19 …`, `AES-256 …`, `Q3-2026 …` (standards,
+  models, periods, versions) no longer key a project; "Auth rewrite — PROJ-700" keys as
+  `PROJ-700`; a GitHub project URL keys with its owner (`acme/projects/7`). A verified marker
+  written for another wording of the same key is logged with that text. A run started before
+  0.9.1 whose key changes (one of those texts, or a project URL) builds on a new run branch: pass
+  `runBranch` with the old name to keep resuming it.
+
+**Resume and state**
+- **The reconcile** checks the checkpoint's tasks first (up to 250 per repo, named by
+  12-character SHAs), then the marker's, once per task (a single-commit task's two lines never
+  deduped), and shares what a repo's even share leaves to the repos that need more: one repo of
+  three with 250 landed tasks gets about 215 checked, not 70.
+- **The journal mutex** holds its holder's pid and is broken only when that pid is gone (a 5-s
+  timer alone broke live ones: 4 of ~100 trials overlapped at 16 writers); the lock's pid is read
+  again right before it is broken; `GRIMOIRE_LOCK_STALE` is at least 1; without `date +%s` the
+  journal and ship locks count their sleeps (their waits had no end); a clock jump (the machine
+  slept) ages no lock; `landed.jsonl`'s path reaches `awk` through the environment.
+- **A replan's tasks** are listed in the PR marker (`replan`) and absorbed from it under the
+  checkpoint's rules, so another machine no longer redoes them.
+- **`trustNewerMarker: true`** takes the higher of each counter from a verified marker newer than
+  `resumeState` (this machine's `run.json` behind another machine's run). Off by default: a PR body
+  never sets the budgets on its own.
+- **Every landed detail reaches `landed.jsonl`:** after the final chunk (8 details at most), one
+  more per 8 follows (`landed.flush`) while each is confirmed.
+
+**Not covered here**: a run against real GitHub and the real Claude Code Bash-tool output limit
+(both need a real session; see issue #14).
+
 ## 0.9.0 — run durability
 
 Fixes found in a real unattended run on 0.8.0: one static-site repo, ten issues in a strict

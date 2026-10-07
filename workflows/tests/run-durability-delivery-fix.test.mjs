@@ -80,7 +80,7 @@ const indexOf = (tasks, extra) => ({
   hookProblems: [],
   ...extra,
 })
-async function run(scenario, tasks, responder, { args = {}, index = {}, linger = 0 } = {}) {
+async function run(scenario, tasks, responder, { args = {}, index = {}, linger = 0, ledgerMs = 0 } = {}) {
   const calls = []
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || '?'
@@ -88,7 +88,7 @@ async function run(scenario, tasks, responder, { args = {}, index = {}, linger =
     if (label === 'parse-index') return typeof index === 'function' ? index(prompt) : indexOf(tasks, index)
     if (label.startsWith('hydrate:')) return { tasks: tasks.filter((t) => prompt.includes(`- ${t.id} `)).map((t) => ({ ...t })) }
     if (label === 'harness-context') return { harnessMemory: '', agentMemory: {}, priorLearnings: [], priorLedgers: [] }
-    if (label === 'ledger') return { path: 'runs/x.json', branch: 'harness/run-x' }
+    if (label === 'ledger') return later({ path: 'runs/x.json', branch: 'harness/run-x' }, ledgerMs) // ledgerMs: the body is still alive that long after the main loop
     if (label === 'crystallize') return { reports: [], skillsCreated: [], skillsPatched: [], memoryEntriesAdded: 0, docsSynced: [], prUrl: '', summary: '' }
     return responder(label, prompt, opts, calls)
   }
@@ -97,10 +97,11 @@ async function run(scenario, tasks, responder, { args = {}, index = {}, linger =
   const logs = []
   const result = await fn(agent, parallel, async () => {}, (m) => logs.push(m), () => {}, { ...INPUTS, execute: true, ...args },
     { total: null, spent: () => 0, remaining: () => Infinity }, async () => {})
+  const returnedAt = calls.length // what was dispatched by the time the body returned
   if (linger) await tick(linger)
   console.log(`\n── ${scenario}`)
   const labels = calls.map((c) => c.label)
-  return { result, calls, logs, labels, prompt: (l) => (calls.find((c) => c.label === l) || {}).prompt || '' }
+  return { result, calls, logs, labels, returnedAt, prompt: (l) => (calls.find((c) => c.label === l) || {}).prompt || '' }
 }
 const ships = (labels) => labels.filter((l) => l.startsWith('ship:'))
 
@@ -284,11 +285,20 @@ for (const SHELL of SHELLS) {
   ok(hb.includes('- Closes #4 — Title of #4 · `aaaaaaa`') && hb.includes('- #5 — Title of #5 · head SHA not reported · passed spec and quality review · **landed locally, not yet pushed**') && !hb.includes('Closes #5'), 'the body: #4 closes, #5 is local only and does not close')
 }
 {
-  const { calls, logs } = await run('P3 · an integrate that says MERGED without the run branch head: no ship ever pushes a lane tip', [T('PROJ-1'), T('PROJ-2')],
-    by({ 'impl:PROJ-1': impl('1a1a1a1'), 'impl:PROJ-2': () => later(impl('2b2b2b2'), 30), 'integrate:PROJ-1': { status: 'MERGED' }, 'integrate:PROJ-2': { status: 'MERGED', headSha: '2222222' } }), { args: { ...QUIET, builtinEnvChecks: false, maxPerRepo: 2 } })
+  const { calls, logs, prompt } = await run('P3 · an integrate that says MERGED without the run branch head, and gives none when asked again: no ship ever pushes a lane tip', [T('PROJ-1'), T('PROJ-2')],
+    by({ 'impl:PROJ-1': impl('1a1a1a1'), 'impl:PROJ-2': () => later(impl('2b2b2b2'), 30), 'integrate:PROJ-1': { status: 'MERGED' }, 'integrate:PROJ-1~head': { status: 'ERROR', headSha: '', detail: 'MISSING' }, 'integrate:PROJ-2': { status: 'MERGED', headSha: '2222222' } }), { args: { ...QUIET, builtinEnvChecks: false, maxPerRepo: 2 } })
   const pushed = calls.filter((c) => c.label.startsWith('ship:')).map((c) => headOf(c.prompt))
   ok(pushed.length >= 1 && pushed.every((h) => h === '2222222'), `only the run branch head an integrate reported is pushed (${pushed.join(', ')})`)
-  ok(logs.some((l) => /integrate:PROJ-1 reported MERGED without the run branch head — the lane tip 1a1a1a1 is never pushed/.test(l)), 'logged')
+  const again = prompt('integrate:PROJ-1~head')
+  ok(/Merge NOTHING again/.test(again) && again.includes('merge-base --is-ancestor 1a1a1a1 refs/heads/feat/proj-700-api'), 'asked once, read-only: the run branch head, and whether it holds the lane tip 1a1a1a1')
+  ok(logs.some((l) => /integrate:PROJ-1 reported MERGED without the run branch head, and asked once more it gave none \(MISSING\)/.test(l)) && logs.some((l) => /PROJ-1: no run branch head for this landing — the lane tip 1a1a1a1 is never pushed/.test(l)), 'logged')
+}
+{
+  const { calls, logs } = await run('P3b · asked once more, the integrate gives the run branch head: that landing ships', [T('PROJ-1'), T('PROJ-2')],
+    by({ 'impl:PROJ-1': impl('1a1a1a1'), 'impl:PROJ-2': () => later(impl('2b2b2b2'), 30), 'integrate:PROJ-1': { status: 'MERGED', headSha: '' }, 'integrate:PROJ-1~head': { status: 'MERGED', headSha: 'abcdef1' }, 'integrate:PROJ-2': () => later({ status: 'MERGED', headSha: '2222222' }, 30) }), { args: { ...QUIET, builtinEnvChecks: false, maxPerRepo: 2 } })
+  const pushed = calls.filter((c) => c.label.startsWith('ship:')).map((c) => headOf(c.prompt))
+  ok(pushed.includes('abcdef1') && !pushed.includes('1a1a1a1') && calls.filter((c) => c.label.startsWith('integrate:PROJ-1')).length === 2, `the head it gave is pushed (${pushed.join(', ')}), after one re-ask`)
+  ok(logs.some((l) => /asked once more: abcdef1, holding the lane tip/.test(l)), 'logged')
 }
 
 // ══════════════ L · one ship at a time, bounded, never over a newer description ══════════════
@@ -344,8 +354,9 @@ for (const SHELL of SHELLS) {
     mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `${holder.pid} ${Math.floor(Date.now() / 1000)} ship\n`)
     let r = X.exec(SHELL, take.replace(/^ {2}/gm, ''), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
     ok(/^LOCK busy/m.test(r.out), 'a live ship holds it: LOCK busy')
+    const gone = new Promise((res) => holder.once('exit', res))
     holder.kill()
-    await tick(100)
+    await gone // reaped: a killed child not yet waited for is a zombie, and `kill -0` still finds it
     r = X.exec(SHELL, take.replace(/^ {2}/gm, ''), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
     ok(/^LOCK ok \//m.test(r.out) && / gate$/.test(readFileSync(join(LK, 'owner'), 'utf8').trim()), 'then LOCK ok: held as `gate`')
     r = X.exec(SHELL, release)
@@ -484,12 +495,20 @@ for (const SHELL of SHELLS) {
 
 // ══════════════ G · a terminal slot that ends badly after the halt ship skipped it ══════════════
 {
-  const r = await run('G1 · the gate wedges, the run halts (wedged), the gate then returns BLOCKED → its halt ship runs then', [T('PROJ-1')],
-    by({ 'gate:api': () => later({ status: 'BLOCKED', summary: 'tests failed', failedStep: 'gate' }, 500) }), { args: { ...QUIET, builtinEnvChecks: false, agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.004 }, linger: 900 })
+  const r = await run('G1 · the gate wedges, the run halts (wedged), the gate then returns BLOCKED while the run is still writing its ledger → its halt ship runs then', [T('PROJ-1')],
+    by({ 'gate:api': () => later({ status: 'BLOCKED', summary: 'tests failed', failedStep: 'gate' }, 500) }), { args: { ...QUIET, builtinEnvChecks: false, agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.004, timeouts: { reader: { soft: 0.5, hard: 1 } } }, linger: 900, ledgerMs: 1200 })
   eq(r.result.halt && r.result.halt.kind, 'wedged', 'the run halted: the gate is still running')
-  ok(r.labels.includes('ship:api#halt') && r.labels.indexOf('ship:api#halt') > r.labels.indexOf('gate:api'), 'after the gate returned, the halt ship ran')
+  ok(r.labels.includes('ship:api#halt') && r.labels.indexOf('ship:api#halt') > r.labels.indexOf('gate:api') && r.labels.indexOf('ship:api#halt') < r.returnedAt, 'after the gate returned, the halt ship ran — before the run returned')
   const [hb = '', hc = ''] = heredocs(r.prompt('ship:api#halt'))
   ok(hb.includes("⏸ **Halted:** api's terminal slot, still running when the run stopped, ended GATE_FAILED: tests failed") && hc.includes('## ⏸ The grimoire run halted'), 'the draft gets the banner and the status comment, with what the gate said')
+
+  const g = await run('G1b · the same gate returns only after the run has returned → nothing is dispatched then (no one would await it), and it says so', [T('PROJ-1')],
+    by({ 'gate:api': () => later({ status: 'BLOCKED', summary: 'tests failed', failedStep: 'gate' }, 500) }), { args: { ...QUIET, builtinEnvChecks: false, agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.004 }, linger: 900 })
+  ok(!g.labels.includes('ship:api#halt') && g.calls.length === g.returnedAt, 'no halt ship, no dispatch of any kind after the return')
+  ok(g.logs.some((l) => /api: its terminal slot ended GATE_FAILED after the run returned — its halt ship is not dispatched; relaunching resumes and ships what landed/.test(l)), 'logged')
+  const s = await run('G1c · a wedged gate that returns green after the run returned: its seal is not dispatched', [T('PROJ-1')],
+    by({ 'gate:api': () => later({ status: 'DONE', summary: 'green', prUrl: PR_URL }, 500) }), { args: { ...QUIET, builtinEnvChecks: false, agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.004 }, linger: 900 })
+  ok(!s.labels.some((l) => l.startsWith('seal:')) && s.calls.length === s.returnedAt && s.logs.some((l) => /api: its gate returned after the run did — the PR's state marker is left unchecked/.test(l)), 'no seal after the return, and said so')
 }
 
 // ══════════════ N · the halt's worktree cleanup, one PR per repo, reserved check names ══════════════

@@ -165,6 +165,7 @@ ignored, with a warning.)
 | `telemetry` | `{enabled: true}` | the decision journal: `{enabled, dir: '.grimoire/runs', flushEvery: 40}` (`retentionDays` is read by `/grimoire:logs`) |
 | `runId` · `runMeta` | set by `/orchestrate` | the journal directory name (letters, digits, `.`, `_` and `-` only, and never only dots: an invalid one is ignored with a warning, and the journal starts a new dated run directory), and `{grimoireVersion, briefsHash, personasHash, configHash}` every event of the run is tagged with |
 | `resumeState` | — | the `checkpoint` of the run's newest local `run.json`. The engine also reads each run branch's PR state marker itself. The run-level counters (attempt, replans, fix rounds, sequence, spend) come from `resumeState` when there is one, whatever the markers say, else from the newest verified marker, bounded either way; the landed tasks come from both, each absorbed only when it is an issue of the project (or this run's replan task) and its SHA is verified on the run branch; learnings come from `resumeState` only. See "Resume" |
+| `trustNewerMarker` | `false` | `true` takes the higher of each run-level counter (attempt, sequence, replans and fix rounds spent, output tokens) from a verified PR marker NEWER than `resumeState`: this machine's `run.json` is behind a run that went on elsewhere. Each stays bounded as a marker's. Off by default: a PR body anyone with write access can edit never sets the budgets on its own. See "Resume" |
 | `freshStart` | `false` | `true` starts over on purpose: `resumeState` and every PR state marker are ignored, nothing is absorbed (landed work is built and reviewed again), the budgets start at zero, and no branch is created, moved or reset. An execute run refuses as `run_branch_exists` when origin already holds a run branch with commits not in the base: pass a `runBranch` origin does not have. A value that is not a boolean is ignored with a warning |
 | `guard` | — | not read by the loop: the `PreToolUse` guard hook's config (`hooks/README.md`) |
 | `graph` | `{enabled: true}` | not read by the loop: the code graph's config, `{enabled, repos?, dir: '.grimoire/graph', exclude?, maxFileKB: 512}` (`tools/graph/README.md`); scouts use it for research, never for what code does |
@@ -331,14 +332,22 @@ run branch is named `feat/<key>-<repo-slug>`, deterministically, so every sessio
 resume included) builds on the same one. The key is the ticket reference `project` names, the
 first rule that matches winning: `owner/repo#N`; else `#N` (as `issue-N`); else a tracker URL —
 an issue or pull/merge request URL counts as `owner/repo#N`, a Jira or Linear URL gives its key,
-any other URL its trailing number; else a bare `ABC-123`, but only as the whole text, at its
-start, or inside `[ ]` or `( )`, and never with a standard's prefix (`UTF`, `UTF8`, `ISO`, `SHA`,
-`HTTP`, `HTTPS`, `RFC`, `ES`, `TLS`, `SSL`, `IPV`, `CVE`), so "Migrate to UTF-8 and ISO-8601
-dates (PROJ-12)" keys on `PROJ-12`, never `UTF-8`. Anything else falls back to the whole project
+a GitHub project URL (`/orgs/<org>/projects/7`, `/users/<user>/projects/7`) or a GitLab group's
+epic or milestone counts with its owner (`acme/projects/7`: two owners' project 7 once shared
+`7`), any other URL its trailing number; else a bare `ABC-123`, but only as the whole text, at
+its start, inside `[ ]` or `( )`, or at its end after a separator (`—`, `–`, `:`, `|`, ` - `:
+"Auth rewrite — PROJ-700"), and never with a prefix that names a standard, a model, a period or
+a version (`UTF`, `UTF8`, `ISO`, `SHA`, `HTTP`, `HTTPS`, `RFC`, `ES`, `TLS`, `SSL`, `IPV`, `CVE`,
+`SOC`, `GPT`, `COVID`, `AES`, `RSA`, `WCAG`, `IEC`, `IEEE`, `ECMA`, `ANSI`, `NIST`, `FIPS`,
+`OWASP`, `Q1`–`Q4`, `H1`, `H2`, `S1`, `S2`, `FY…`, `CY…`, `V<n>`), so "Migrate to UTF-8 and
+ISO-8601 dates (PROJ-12)" keys on `PROJ-12`, never `UTF-8`, and "SOC-2 audit" and "SOC-2
+logging" are two projects. Anything else falls back to the whole project
 text (accents folded, other characters collapsed to dashes; nothing sluggable left becomes
 `x<hash>`). A 0.8.0 run's project was a sentence, so its branch was too, and a relaunch worded
 differently would have built on another branch and missed its PR: now `acme/site#3`
-and a sentence that starts with it share `feat/acme-site-3-<repo>`. `runBranch` names
+and a sentence that starts with it share `feat/acme-site-3-<repo>`. A verified PR marker
+written for another wording of the same key is used and logged with that text, before
+anything lands: if it is another project, relaunch with `runBranch` set. `runBranch` names
 it outright. Lane merges into
 the repo's single run branch are serialized, and a merge conflict is a first-class
 `MERGE_CONFLICT` failure routed to the replanner — a reviewed diff is never silently
@@ -463,7 +472,10 @@ predecessor was still writing. Every dispatch now has a soft and a hard limit fo
   not used: its task goes no further. A terminal slot whose gate or fix wedges does not hold
   the final wave: the other slots are booked, its repo stays out of the next wave and of
   dispatch, and its result is booked when it returns (still in the result if the run has
-  ended by then), so its gate never runs twice;
+  ended by then), so its gate never runs twice. Once the workflow has RETURNED, nothing more is
+  dispatched: the runtime does not say what becomes of an agent call made after the script
+  returned (nothing awaits or reports it), so a late gate's seal and a late halt ship are
+  skipped, logged once, and a relaunch resumes from the PR and `run.json` as they stand;
 - a lane that passed its review while its repo's primary checkout is fenced is not merged: it
   settles `FENCED`, a harness failure, with its worktree and lane branch left in place. The
   replanner never requeues it while the fence holds; once it is released, a retry of the same
@@ -483,7 +495,10 @@ worktree, `<path>/<worktreeDir>/ship-<repo>`, checked out at the landed SHA and 
 hook checks exactly the pushed tree, away from the next implementer. The script
 
 - takes the repo's ship lock, then reads the PR (`gh pr view --json isDraft,body`) before
-  anything moves: a PR out of draft is the gate's, and nothing is pushed to it (below);
+  anything moves: a PR out of draft is the gate's, and nothing is pushed to it (below). A PR
+  that cannot be read (`gh pr list` or `gh pr view` failed: a 502, a timeout) may be out of
+  draft, so it is `UNKNOWN`: nothing is pushed, rewritten or claimed (a halt posts no status
+  comment there), and the next ship tries again. It once counted as a draft;
 - pushes that exact SHA to the run branch, fast-forward only
   (`git push origin <sha>:refs/heads/<runBranch>`): never `--force`, never `--no-verify`, and
   the next task's unreviewed commits are never published;
@@ -497,6 +512,10 @@ hook checks exactly the pushed tree, away from the next implementer. The script
   the run's state ("Resume" below). The body is built by the engine and passed base64, so
   implementer text never reads as an instruction. A landed task the remote does not hold yet
   reads "landed locally, not yet pushed" and gets no closing keyword: the PR does not hold it.
+  Those closing keywords are the only ones: free text in a body (a title, an implementer's
+  summary, a halt reason), and the titles and summaries the gate is handed, gets a zero-width
+  space after the first letter of any GitHub or GitLab closing keyword before an issue reference
+  (`F​ixes #99`): it reads the same, and merging the PR closes only the issues the run landed.
 
 The ship script and the reconcile (below) reach the PR through `gh` and nothing else: without
 it, or on a forge `gh` does not serve, pushes still go on, but no draft PR is opened
@@ -508,19 +527,23 @@ they never block the loop. A ship failure never halts, replans or marks code fai
 that fails twice in a row, or a pre-push hook that demands the gate, stops incremental pushes
 for that repo (`shipped.<repo>.disabled: 'push'`; set `repos[].deliver: 'end'` to skip the
 attempt), and a failed push asks for an environment check; a failed PR step stops only the PR
-updates. A ship that found the PR out of draft (`READY`) or the lock busy (`LOCK busy`) moved
-nothing, and neither counts as a failed push (`ship` event `skipped: 'ready' | 'lock'`). The
+updates. A ship that found the PR out of draft (`READY`), could not read it (`UNKNOWN`) or found
+the lock busy (`LOCK busy`) moved nothing, and none counts as a failed push (`ship` event
+`skipped: 'ready' | 'unknown' | 'lock'`; an unreadable PR asks for an environment check). The
 terminal slot waits for the repo's pending ship; then the gate takes the ship lock, pushes the
 final head and marks the PR ready.
 
 **A PR claims only what reached the remote.** A failed push leaves the description as it was,
 still describing what the remote holds, and a land ship posts a short note on the draft PR
 instead: the SHA it could not push, where origin's run branch is, and the tasks landed on this
-machine only until a push succeeds (the next landing, the terminal slot or a halt). An integrate
-step that reports MERGED without the run branch's head leaves its landing with no head: the
-ships keep pushing the last landed head they know, the lane's commits reach the remote with a
-later landing that reports one, or with the terminal slot, and no lane tip is ever pushed in
-its place.
+machine only until a push succeeds (the next landing, the terminal slot or a halt). The
+integrate step must report the run branch's head with MERGED (`headSha` is required: a landing
+without it is never pushed, and a run whose every integrate left it out pushed nothing, not even
+on a halt). One that leaves it out is asked once more, inside the repo's merge queue, with two
+read-only commands: the run branch's head, accepted only when it holds the reviewed lane tip.
+Still none: the ships keep pushing the last landed head they know, the lane's commits reach the
+remote with a later landing that reports one, or with the terminal slot, and no lane tip is
+ever pushed in its place.
 
 **A ready PR is the gate's.** A PR out of draft, whether the repo's terminal slot or a person
 marked it ready, is never pushed to or rewritten by a ship: not when a replan lands more work in
@@ -549,10 +572,17 @@ worktree and one PR. So:
   wave"). Its Bash calls are short-lived shells, so its lock is held by age, not by pid: ships
   honour a gate lock younger than 20 minutes, while the next gate of the repo, the seal and the
   halt ship take one over at once (one repo never runs two gates at a time, and once the run has
-  stopped no gate is left running). The gate releases it when the PR is done, pass or fail;
+  stopped no gate is left running). The gate pushes through one script that renews the lock's
+  age every 60 s while the push runs (`GRIMOIRE_GATE_LOCK_BEAT` overrides that) and stops with
+  it, so a pre-push hook longer than 20 minutes no longer loses the lock to a ship; a push the
+  Bash tool kills leaves the lock to age out. The gate releases it when the PR is done, pass or
+  fail;
 - the script stops itself by 540 s (`GRIMOIRE_SHIP_DEADLINE` overrides that), inside the ship's
   hard limit and the Bash tool's 600-s maximum, and the push by 480 s; each network call runs in
-  its own process group, killed whole at its limit, so a hung pre-push hook dies with its push;
+  its own process group, killed whole at its limit, so a hung pre-push hook dies with its push.
+  The repo's `laneSetup`, run when the ship worktree is created, is bounded the same way (at
+  most 180 s, under `sh`): unbounded, it could hold the lock past its stale age. Without
+  `date +%s`, the wait for the lock counts its 1-s sleeps (it had no end there);
 - a ship that starts late never overwrites a newer description: the marker names the `session`
   and the generation of the body it closes (`ship`, one more for every ship and gate of the
   session), and a ship that finds a later generation of its own session on the PR leaves the
@@ -642,14 +672,18 @@ issues close only when the PR merges, so landed-but-unmerged work still looks op
   (attempt, replans and fix rounds used, the journal's sequence, output tokens spent) come from
   `resumeState` when one is passed: it is the run's own journal, and a PR body anyone with write
   access can edit never outranks it (a marker newer than it is logged, and the tasks it lists are
-  still verified and absorbed). Without one, the newest verified marker carries them, by attempt,
-  then `lastSeq`. Either way the budgets continue rather than reset. The landed tasks come from
-  both; learnings come from `resumeState` only.
+  still verified and absorbed). When this machine's `run.json` is behind another machine's run
+  (its marker is newer), `trustNewerMarker: true` takes the higher of each counter, each still
+  bounded as a marker's: only you know the other run is yours. Without a `resumeState`, the
+  newest verified marker carries them, by attempt, then `lastSeq`. Either way the budgets
+  continue rather than reset. The landed tasks come from both; learnings come from
+  `resumeState` only.
 - **The `resumeState` is checked too**, by the marker's rules. Only issues of this project's
   index are absorbed from it, each once verified on the run branch; a task a replan invented (no
   issue of its own) only when its record says `replan: true`, the checkpoint's `runId` is this
   launch's, and its id cannot read as an issue reference (`#12`, `owner/repo#12`: the PR body would
-  close that issue). A record's ticket is its id, so it cannot name another issue. Its counters
+  close that issue). A PR marker lists such tasks too (`replan`, their ids), under the same rules
+  (its `runId` is this launch's), so another machine with no checkpoint no longer redoes them. A record's ticket is its id, so it cannot name another issue. Its counters
   are clamped like a marker's (below), except that its output tokens are kept up to 10⁹: they
   are the run's own, and a run already past its cap must stop rather than start over. Its
   learnings reach prompts as the checkpoint writes them: the last 30, each up to 300 characters.
@@ -671,12 +705,16 @@ issues close only when the PR merges, so landed-but-unmerged work still looks op
   with its length and `cksum`; the LAST marker of its body, the one the run writes as the last
   line, so marker-shaped text above it never shadows it; one over 8,000 characters prints as
   `marker=toolong` with its length and is not read), and a `TASK` line per listed task
-  (`local`, `origin`, `onBranch`, `inBase=yes|no|unknown`, `first`, `firstOk`): at most 100 from
-  the marker and 100 from the checkpoint (its newest) per repo, one per task. The whole output is
-  capped at 28,000 characters (the Bash tool keeps about 30,000, and a cut output once lost the
-  lines of the repos after it), split evenly per repo: `BRANCH` and `PR` lines always print,
-  `TASK` lines stop at the repo's share, and a `WARN` line counts the tasks left unchecked (they
-  run again, find their work on the branch and are reviewed as it stands). In an execute run it
+  (`local`, `origin`, `onBranch`, `inBase=yes|no|unknown`, `first`, `firstOk`): per repo, the
+  checkpoint's first (at most 250, its newest, each named by 12-character SHAs: the engine matches
+  SHAs by prefix), then the marker's (at most 100), one per task: the same id and head (and
+  first commit, dropped when it is the head) is checked once — a single-commit task's marker and
+  checkpoint lines once never deduped. The whole output is capped at 28,000 characters (the Bash
+  tool keeps about 30,000, and a cut output once lost the lines of the repos after it): `BRANCH`
+  and `PR` lines always print; `TASK` lines get an even share per repo of what is left, then
+  what a repo did not use goes to the repos that need more, and a `WARN` line counts the tasks
+  left unchecked (they run again, find their work on the branch and are reviewed as it stands).
+  One repo of three with 250 landed tasks gets about 215 checked. In an execute run it
   creates a missing local run branch from origin and fast-forwards one strictly behind, in a
   clean checkout only; it never resets, rebases or discards a commit. In a preview and under
   `freshStart` it is read-only.
@@ -724,8 +762,9 @@ reviewer), `verify`, `fix`, `escalate`, `guard`, `resolve`, `integrate`, `settle
 `terminal`, `gate`, `claim`, `budget`, `halt`, `run.end`, and, from 0.9.0, `late`, `hedge`,
 `wedged`, `late-result`, `fence` (a repo held or released), `ship` (`{repo, mode, pushed, head,
 prUrl, draft, failedStep, detail, disabled, skipped?}`; `pushed: null` = nothing to push;
-`skipped: 'ready'` = the PR was out of draft and `skipped: 'lock'` = the ship lock stayed busy,
-both moving nothing and neither a failed push), `seal` (`{repo, ok, already, step, round}`: the
+`skipped: 'ready'` = the PR was out of draft, `skipped: 'unknown'` = the PR could not be read
+and `skipped: 'lock'` = the ship lock stayed busy, each moving nothing and none a failed push),
+`landed.flush` (`{left}`, after `run.end`: landed details still to write), `seal` (`{repo, ok, already, step, round}`: the
 ready PR's state marker was exact (`already`), put back, or not checked, with the failing
 `step`), `env` (`{when, why, ok, failed, recheck?, cleared?}`; `ok: null` = no usable report;
 `recheck: true` on the one re-check of a failed stall check; `cleared` names the checks a later
@@ -754,11 +793,16 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
 - runs under a lock in the run directory (a `.lock` directory holding the writer's pid), so
   two writers do not interleave. The lock changes hands (taken, released, broken) only under a
   second `mkdir` mutex, `.lock.brk`, so the pid read under it is the holder's: two waiters that
-  both saw a dead holder once both broke the lock, one of them the other's fresh one. A lock
-  whose pid is gone is broken at once; one held by the same pid, or by none, for 30 s is broken
-  then (`GRIMOIRE_LOCK_STALE` overrides the 30 s); a writer still without it after 60 s goes on
-  without it; a mutex left by a writer killed inside it is removed after 5 s. Time is read from
-  `date +%s`, never counted in sleeps, so a journal agent may wait about a minute at most;
+  both saw a dead holder once both broke the lock, one of them the other's fresh one. The mutex
+  holds its holder's pid too, and is broken at once when that pid is gone (read again right
+  before); only a mutex with no pid (its writer killed between creating it and writing the pid)
+  waits 5 s — a 5-s timer alone broke live mutexes (4 of ~100 trials overlapped at 16 writers).
+  A lock whose pid is gone is broken at once (its pid read again right before); one held by the
+  same pid, or by none, for 30 s is broken then (`GRIMOIRE_LOCK_STALE` overrides the 30 s, at
+  least 1); a writer still without it after 60 s goes on without it. Time is read from
+  `date +%s`, never counted in sleeps, so a journal agent may wait about a minute at most; only
+  where `date +%s` does not work are the naps counted (the wait had no end there), and a clock
+  that jumps (the machine slept) ages no lock;
 - writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
   replayed flush overwrites the same file, never appends duplicates;
 - stamps the flush time into each line (`at`) in the shell — every event of one chunk shares
@@ -783,7 +827,10 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   400 characters, `files` up to 50, with `attempt`, `at` and `k`, a key of its id and head) to
   `<runId>/landed.jsonl`, once: a line whose `k` the file already holds is skipped, so a resent
   detail is never written twice. A flush sends at most 8 details, oldest first; the rest ride the
-  next flushes;
+  next flushes, and at the end of the run one more chunk per 8 follows the final one (a
+  `landed.flush` event) while each confirms some: the final chunk once carried 8 and nothing came
+  after it. The file's path reaches `awk` through the environment, never `-v` (which reads
+  backslashes in a path as escapes);
 - prints the line and byte counts of the decoded chunk, `RUNJSON ok|kept|bad` with
   `RUNJSON_BYTES` (`RUNJSON kept: <why>` when a newer checkpoint is on disk), and
   `LANDED ok <n>`, which the engine compares with what it sent: a mismatch is logged and counted
@@ -815,9 +862,12 @@ tokens, replans, halt, prUrls}`, where `halt` is `{reason, kind}` (`kind` null w
 none), like the `halt` event.
 
 The draft PR's state marker is not the checkpoint. It is one line,
-`<!-- grimoire:state v1 <base64 JSON> -->`, per repo: `{version: 2, runId, project, repo,
-runBranch, base, attempt, lastSeq, replansUsed, fixRounds, outputTokensSpent, session, ship,
-landedTasks, omitted?}`, with `fixRounds` for that repo's tasks and each landed task in a compact
+`<!-- grimoire:state v1 <base64 JSON> -->`, per repo: `{version: 2, runId, project, text?,
+repo, runBranch, base, attempt, lastSeq, replansUsed, fixRounds, outputTokensSpent, session,
+ship, landedTasks, replan?, omitted?}`, with `project` the project's key, `text` its wording
+when that is not the key (up to 120 characters: a resume says when a marker was written for
+another wording), `replan` the ids of the landed tasks a replan invented (from 0.9.1),
+`fixRounds` for that repo's tasks and each landed task in a compact
 form, `[id, headSha]`, or `[id, headSha, firstSha]` when its first commit is not its head
 (`firstSha` possibly abbreviated to 12 hex characters); the 0.9.0 object form `{id, headSha,
 firstSha?, title?}` is still read. `session` and `ship` (the generation of the body it closes)
@@ -829,7 +879,8 @@ then the fix rounds of tasks that already landed dropped (those of tasks still t
 their budget); only then the newest tasks left out (`omitted` counts them). A task left out is
 not absorbed from the PR, so on another machine it runs again, finds its work on the branch
 (`landedBefore`) and is reviewed as it stands. It carries no titles, learnings, summaries,
-commits or files: detail stays in the local `run.json` and `landed.jsonl`. The reconcile and the
+commits or files: detail stays in the local `run.json` and `landed.jsonl`; its `text` is only
+ever logged, never put in a prompt. The reconcile and the
 ship's PR view read the last marker of a body; one over 8,000 characters is not read.
 
 Chunks flush every `flushEvery` events, on every landing and after each ship, at every

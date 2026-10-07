@@ -67,6 +67,8 @@ const SHIP_LOCK_WAIT_SEC = 150 // how long a ship waits for its repo's ship lock
 const SHIP_LOCK_STALE_SEC = 900 // a ship's lock whose pid is still alive is taken over past this age (a reused pid): above any ship script's deadline
 const GATE_LOCK_STALE_SEC = 1200 // the gate's lock is taken over past this age: its Bash calls are short-lived shells, so there is no pid to check
 const GATE_LOCK_WAIT_SEC = 90 // one attempt of the gate at the ship lock, inside the Bash tool's 120-s default
+const GATE_LOCK_BEAT_SEC = 60 // while the gate's push runs, its lock's age is renewed this often: a pre-push hook longer than GATE_LOCK_STALE_SEC no longer loses the lock to a ship
+const SHIP_SETUP_SEC = 180 // the repo's laneSetup in the ship worktree, at most (never past the script's deadline): an unbounded one held the lock past its stale age
 const DEFAULT_ENV_CHECK_SEC = 30 // per environment check: a signed commit or an ls-remote behind a locked agent hangs; past this it is reported timed out (exit 142)
 const ENV_DEADLINE_SEC = 90 // the whole environment report: the checks run in parallel under one deadline, so the script returns inside the Bash tool's 120-s default whatever hangs
 const ENV_CHECK_MAX_SEC = 85 // one check's own limit never reaches the deadline: it ends (and cleans up) before the watchdog would kill it
@@ -588,6 +590,7 @@ const SHIP_SCHEMA = {
     hookBlocked: { type: 'boolean', description: 'PUSH ok=0 hook=1: a pre-push hook refused the push' },
     ready: { type: 'boolean', description: 'a READY line was printed: the PR is out of draft, so nothing was pushed and its description was left alone' },
     lockBusy: { type: 'boolean', description: 'a LOCK busy line was printed: another ship (or the gate) held the repo, so nothing was pushed or rewritten' },
+    unknown: { type: 'boolean', description: 'an UNKNOWN line was printed: the PR could not be read (gh failed), so nothing was pushed or rewritten' },
     detail: { type: 'string', description: 'the output lines printed under the failing line, verbatim' },
   },
 }
@@ -613,11 +616,11 @@ const RELEASE_SCHEMA = {
 // scheduler routes it to the replanner (a reviewed diff is never silently rewritten).
 const INTEGRATE_SCHEMA = {
   type: 'object',
-  required: ['status'],
+  required: ['status', 'headSha'],
   properties: {
     status: { type: 'string', enum: ['MERGED', 'CONFLICT', 'ERROR'] },
     detail: { type: 'string', description: 'CONFLICT: the conflicting paths. ERROR: what failed.' },
-    headSha: { type: 'string', description: 'MERGED: git rev-parse HEAD of the run branch after the merge' },
+    headSha: { type: 'string', description: 'MERGED: git rev-parse HEAD of the run branch after the merge — required: without it nothing of this landing is pushed. CONFLICT / ERROR: ""' },
   },
 }
 
@@ -882,32 +885,35 @@ const MARKER_MAX_CHARS = 8000 // a marker's base64 length: the index agent copie
 const MARKER_FIRST_LEN = 12 // an abbreviated firstSha: git resolves it, the engine matches SHAs by prefix, an ambiguous one fails the check (the task runs again)
 const MARKER_TITLE_MAX = 120
 // The reconcile's whole output is budgeted: the Bash tool keeps ~30k characters, and a cut output lost
-// the lines of the repos after it. Each repo gets an even share; its BRANCH and PR lines (one marker of
-// at most MARKER_MAX_CHARS) always print, its TASK lines (each at most ~250 characters: an id of at most
-// 64, SHAs of at most 40) stop at the share, and a WARN line counts the tasks left unchecked (they run
-// again, find their work on the branch and are reviewed as it stands). Per repo, at most
-// MARKER_TASK_CAP TASK lines come from the marker and at most MARKER_TASK_CAP from the checkpoint
-// (newest first: the marker keeps the oldest), one per task: the same id, head and first commit
-// (compared on MARKER_FIRST_LEN characters) is checked once.
+// the lines of the repos after it. Every BRANCH and PR line (one marker of at most MARKER_MAX_CHARS)
+// always prints; what is left goes to TASK lines (each at most ~250 characters: an id of at most 64,
+// SHAs of at most 40), first an even share per repo, then what a repo did not use to the repos that
+// need more (an even split once left 11 of 120 tasks unchecked in a 4-repo run while the other repos'
+// shares sat unused). A WARN line counts the tasks left unchecked: they run again, find their work on
+// the branch and are reviewed as it stands. Per repo, the checkpoint's tasks are checked FIRST (at
+// most CHECKPOINT_TASK_CAP, newest first: the run's own record), then the marker's (at most
+// MARKER_TASK_CAP: it keeps the oldest), one line per task: the same id and head (and first commit,
+// dropped when it is the head) on MARKER_FIRST_LEN characters is checked once — a single-commit
+// task's marker line `[id, head]` and its checkpoint line (first = head) once never deduped.
 const RECONCILE_OUTPUT_BUDGET = 28000
+const CHECKPOINT_TASK_CAP = 250 // checkpoint tasks the reconcile checks per repo, newest first; each one's line in the script is short (id and 12-character SHAs), the output budget is what binds
 const TASK_ID_RE = /^[A-Za-z0-9._#/-]{1,64}$/ // a landed task id the run will check and absorb (the script refuses any other)
 function reconcileBlock(known, afterProbe, readOnly) {
   const repos = [...repoConfig.values()]
   // The LAST marker of a body is the run's (draftBody writes it as the body's last line): text above it,
   // a title or a summary quoting a marker, never shadows it.
   const jq = `[.[] | select(.isCrossRepository == false)] | sort_by([(if .state == "OPEN" then 0 elif .state == "MERGED" then 1 else 2 end), -(.number // 0)]) | .[:3] | map(. + {m: (([(.body // "") | match("<!-- grimoire:state v1 ([A-Za-z0-9+/=]+) -->"; "g") | .captures[0].string] | last) // "none")}) | ([to_entries[] | select(.value.m != "none") | .key][0] // -1) as $k | to_entries[] | .key as $i | .value | (if $i == $k then .m else "none" end) as $m | ($m != "none" and ($m | length) > ${MARKER_MAX_CHARS}) as $big | (if $big then "toolong:" + ($m | length | tostring) else $m end) as $p | "P\\t\\(.url)\\t\\(.state)\\t\\(.isDraft)\\t\\($p)", (if $m == "none" or $big then empty else ($m | try (@base64d | fromjson | .landedTasks | if type == "array" then .[:${MARKER_TASK_CAP}][] else empty end | (if type == "array" then {id: .[0], headSha: .[1], firstSha: .[2]} else . end) | select(type == "object" and (.id | type) == "string" and (.headSha | type) == "string") | select((.id | test("^[A-Za-z0-9._#/-]{1,64}$")) and (.headSha | test("^[0-9a-f]{7,40}$"))) | "T\\t\\(.id)\\t\\(.headSha)\\t\\(if (.firstSha | type) == "string" and (.firstSha | test("^[0-9a-f]{7,40}$")) then .firstSha else "-" end)") catch empty) end)`
-  const lim = Math.floor(RECONCILE_OUTPUT_BUDGET / Math.max(1, repos.length)) - 300 // room for the WARN lines
+  const short = (sha) => String(sha).slice(0, MARKER_FIRST_LEN) // git resolves it; the engine matches SHAs by prefix
   const jobs = repos.map((r, i) => {
-    const a = `${shq(r.name)} ${shq(r.path)} ${shq(runBranchFor(r.name))}`
     const chks = known
       .filter((t) => t.repo === r.name)
       .reverse()
-      .slice(0, MARKER_TASK_CAP)
-      .map((t) => `  chk ${a} ${shq(t.id)} ${t.headSha}${t.firstSha ? ` ${t.firstSha}` : ''}`)
-    return [`{ OUTN=0; SKIP=0; LIM=${lim}; rb ${a}`, `  prs ${a} ${i + 1}`, ...chks, `  skipped ${shq(r.name)}`, `  echo END; } >"$W/${i + 1}" 2>/dev/null & P${i + 1}=$!`].join('\n')
+      .slice(0, CHECKPOINT_TASK_CAP)
+      .map((t) => `  c ${shq(t.id)} ${short(t.headSha)}${t.firstSha && !shaEq(t.firstSha, t.headSha) ? ` ${short(t.firstSha)}` : ''}`)
+    return [`{ JR=${shq(r.name)}; JP=${shq(r.path)}; JB=${shq(runBranchFor(r.name))}; rb "$JR" "$JP" "$JB"`, `  prs "$JR" "$JP" "$JB" ${i + 1}`, ...chks, `  mt "$JR" "$JP" "$JB" ${i + 1}`, `  echo END; } >"$W/${i + 1}" 2>/dev/null & P${i + 1}=$!`].join('\n')
   })
   const pids = repos.map((_, i) => `"$P${i + 1}"`).join(' ')
-  const shows = repos.map((r, i) => `show ${i + 1} ${shq(r.name)}`).join('\n')
+  const shows = repos.map((r, i) => `{ printf '%s\\t#NAME %s\\n' ${i + 1} ${shq(r.name)}; [ -f "$W/${i + 1}" ] && sed 's/^/${i + 1}\t/' "$W/${i + 1}"; }`).join('\n')
   return `
 
 ## Also RECONCILE the run branches — what earlier attempts of this run already landed
@@ -940,8 +946,7 @@ bgto() { # <seconds> <command…>, with no perl or timeout: in the background, i
   wait "$_p"
 }
 cdir() { if command -v builtin >/dev/null 2>&1; then builtin cd "$1"; else cd "$1"; fi; }
-put() { OUTN=$((OUTN + \${#1} + 1)); printf '%s\\n' "$1"; }
-skipped() { [ "$SKIP" -gt 0 ] && put "WARN repo=\${1}: \${SKIP} landed task(s) not checked: this repo's share of the reconcile output is spent; they run again, find their work on the branch and are reviewed as it stands"; }
+put() { printf '%s\\n' "$1"; }
 rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it from origin when missing, fast-forward it when strictly behind
   F=failed
   late || { to git -C "$2" fetch -q origin "+refs/heads/\${3}:refs/remotes/origin/\${3}" >/dev/null 2>&1 && F=ok; }
@@ -964,12 +969,13 @@ rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it 
   A=none; [ -n "$R" ] && { A=$(git -C "$2" rev-list --count "\${BASE}..\${R}" 2>/dev/null); case "$A" in ''|*[!0-9]*) A=unknown ;; esac; }
   put "BRANCH repo=\${1} local=\${L:-none} remote=\${R:-none} sync=\${S} fetch=\${F} ahead=\${A}"
 }
-chk() { # <repo> <path> <run branch> <task id> <head sha> [<first sha>]: is that landed task on the run branch, and NOT in the base? One TASK line per task, within this repo's share of the output
+chk() { # <repo> <path> <run branch> <task id> <head sha> [<first sha>]: is that landed task on the run branch, and NOT in the base? One TASK line per task (the output budget is applied when the lines are shown)
   case "$4" in ''|*[!A-Za-z0-9._#/-]*) return ;; esac
   case "$5" in ''|*[!0-9a-f]*) return ;; esac
   X=\${6:-}; case "$X" in *[!0-9a-f]*) return ;; esac
   [ "\${#4}" -le 64 ] && [ "\${#5}" -le 40 ] && [ "\${#X}" -le 40 ] || return
-  K="\${4}=\${5}=$(printf '%.${MARKER_FIRST_LEN}s' "$X")"
+  case "$5" in "$X"*) X= ;; esac; [ -n "$X" ] && case "$X" in "$5"*) X= ;; esac # a first commit that is the head is no first commit: [id, head] and (id, head, head) are one task
+  K="\${4}=$(printf '%.${MARKER_FIRST_LEN}s' "$5")=$(printf '%.${MARKER_FIRST_LEN}s' "$X")"
   case "$SEEN" in *" \${K} "*) return ;; esac
   SEEN="$SEEN\${K} "
   LO=no; OR=no; IB=unknown; FO=none; ON=no
@@ -985,8 +991,12 @@ chk() { # <repo> <path> <run branch> <task id> <head sha> [<first sha>]: is that
   HR=$LO
   case "$S" in diverged) HR=no ;; remote-only) HR=$OR ;; behind) [ "$RO" = 1 ] && HR=$OR ;; esac
   [ "$HR" = yes ] && [ "$IB" = no ] && [ "$FO" != no ] && ON=yes
-  _l="TASK id=\${4} repo=\${1} sha=\${5} local=\${LO} origin=\${OR} onBranch=\${ON} inBase=\${IB} first=\${X:-none} firstOk=\${FO}"
-  if [ $((OUTN + \${#_l} + 1)) -gt "$LIM" ]; then SKIP=$((SKIP + 1)); else put "$_l"; fi
+  put "TASK id=\${4} repo=\${1} sha=\${5} local=\${LO} origin=\${OR} onBranch=\${ON} inBase=\${IB} first=\${X:-none} firstOk=\${FO}"
+}
+c() { chk "$JR" "$JP" "$JB" "$@"; } # a checkpoint task of this job's repo (JR, JP, JB: its name, checkout and run branch): <task id> <head sha> [<first sha>]
+mt() { # <repo> <path> <run branch> <job>: the marker's tasks, after the checkpoint's (a task both list is checked once)
+  [ -f "$W/gh.\${4}.t" ] || return 0
+  while IFS="$TAB" read -r a b c; do [ "$c" = - ] && c=; chk "$1" "$2" "$3" "$a" "$b" "$c"; done <"$W/gh.\${4}.t"
 }
 prs() { # <repo> <path> <run branch> <job>: the branch's PRs from THIS repository (a fork's PR never counts), open first, newest first; the first one carrying a state marker prints it raw with its length and cksum (one over ${MARKER_MAX_CHARS} characters: toolong and its length), then the tasks it lists
   command -v gh >/dev/null 2>&1 || { put "PR repo=\${1} none (gh not installed)"; return; }
@@ -1004,18 +1014,44 @@ prs() { # <repo> <path> <run branch> <job>: the branch's PRs from THIS repositor
            *) N=$(printf '%s' "$d" | wc -c | tr -d ' '); C=$(printf '%s' "$d" | cksum | cut -d ' ' -f 1) ;;
          esac
          put "PR repo=\${1} url=\${a} state=\${b} isDraft=\${c} len=\${N} sum=\${C} marker=\${d}" ;;
-      T) [ "$NT" -lt "$CAP" ] || continue; NT=$((NT + 1)); [ "$c" = - ] && c=; chk "$1" "$2" "$3" "$a" "$b" "$c" ;;
+      T) [ "$NT" -lt "$CAP" ] || continue; NT=$((NT + 1)); printf '%s\\t%s\\t%s\\n' "$a" "$b" "$c" >>"$G.t" ;; # checked by mt, after the checkpoint's tasks
     esac
   done <"$G"
 }
-show() { [ -f "$W/$1" ] && grep -v '^END$' "$W/$1"; grep -qx END "$W/$1" 2>/dev/null || printf 'WARN repo=%s: the reconcile did not finish within %s s, its lines may be incomplete\\n' "$2" "$DL"; }
+# every repo's BRANCH, PR and WARN lines; then TASK lines within what the budget leaves: an even share
+# per repo first, then what is left to the repos that need more, in order; a WARN for what is not shown
+ALLOT='{ i = $0; sub(/\t.*/, "", i); l = substr($0, length(i) + 2) }
+l ~ /^#NAME / { nm[i] = substr(l, 7); if (i + 0 > n) n = i + 0; next }
+l == "END" { fin[i] = 1; next }
+l ~ /^TASK / { t[i, ++nt[i]] = l; next }
+{ o[i, ++no[i]] = l; fixed += length(l) + 1 }
+END {
+  left = B - fixed - 300 * n
+  if (left < 0) left = 0
+  share = int(left / (n ? n : 1))
+  for (i = 1; i <= n; i++) {
+    k = 0; u = 0
+    while (k < nt[i] && u + length(t[i, k + 1]) + 1 <= share) { k++; u += length(t[i, k]) + 1 }
+    tk[i] = k; left -= u
+  }
+  for (i = 1; i <= n; i++)
+    while (tk[i] < nt[i] && length(t[i, tk[i] + 1]) + 1 <= left) { tk[i]++; left -= length(t[i, tk[i]]) + 1 }
+  for (i = 1; i <= n; i++) {
+    for (j = 1; j <= no[i]; j++) print o[i, j]
+    for (j = 1; j <= tk[i]; j++) print t[i, j]
+    if (nt[i] > tk[i]) print "WARN repo=" nm[i] ": " (nt[i] - tk[i]) " landed task(s) not checked: the reconcile output budget is spent; they run again, find their work on the branch and are reviewed as it stands"
+    if (!fin[i]) print "WARN repo=" nm[i] ": the reconcile did not finish within " D " s, its lines may be incomplete"
+  }
+}'
 W=$(mktemp -d 2>/dev/null || mktemp -d -t grimoire 2>/dev/null)
 if [ -z "$W" ] || [ ! -d "$W" ]; then echo "WARN cannot create a temporary directory: nothing was checked"; exit 0; fi
 ${jobs.join('\n')}
 ( trap 'kill "$Z" 2>/dev/null; exit 0' TERM; sleep $((DL + 5)) & Z=$!; wait "$Z"; kill ${pids} ) >/dev/null 2>&1 & WD=$!
 wait ${pids}
 { kill "$WD"; wait "$WD"; } 2>/dev/null
+{
 ${shows}
+} | awk -v B=${RECONCILE_OUTPUT_BUDGET} -v D="$DL" "$ALLOT"
 rm -rf "$W"
 )
 \`\`\``
@@ -1207,11 +1243,18 @@ ${ship.lock.take.split('\n').map((l) => `  ${l}`).join('\n')}
   \`LOCK ok\` → go on. \`LOCK busy\` → run it again, up to five times in all; still busy → return BLOCKED with failedStep \`push\`, naming the holder it printed. Release it once the PR is done — or the moment you stop, pass or fail: \`${ship.lock.release}\``
       : ''
   }
-- ${
-    deliverOf(task.repo) === 'incremental'
-      ? `Push the final head (fast-forward): the loop already pushed each landed head to this branch as tasks landed, so this adds what the terminal sweep committed: \`git -C ${repoPath(task.repo)} push -u origin ${task.branch}\`.`
-      : `Push the run branch — nothing earlier in the run pushed it (lanes and integrations are local): \`git -C ${repoPath(task.repo)} push -u origin ${task.branch}\`.`
-  }
+- ${(() => {
+    const cmd = `git -C ${repoPath(task.repo)} push -u origin ${task.branch}`
+    const how = ship.lock
+      ? `, in one Bash call, verbatim — it keeps the ship lock yours while the push (and its pre-push hook) runs, and prints \`PUSH exit=<code>\` (0: pushed):
+  \`\`\`bash
+${ship.lock.push(cmd).split('\n').map((l) => `  ${l}`).join('\n')}
+  \`\`\``
+      : `: \`${cmd}\`.`
+    return deliverOf(task.repo) === 'incremental'
+      ? `Push the final head (fast-forward): the loop already pushed each landed head to this branch as tasks landed, so this adds what the terminal sweep committed${how}`
+      : `Push the run branch — nothing earlier in the run pushed it (lanes and integrations are local)${how}`
+  })()}
 - ${
     ship.readyPrUrl
       ? `The PR: ${ship.readyPrUrl} is already READY — an earlier terminal slot of this run marked it, and work landed since that it does not hold or describe yet (the push above adds it). Bring its title and body up to the brief's "PR title and body" rules over EVERY task listed below (\`gh pr edit ${ship.readyPrUrl} --title … --body-file …\`). It stays ready: no \`gh pr ready\`, no duplicate (no \`gh pr create\`).`
@@ -1226,7 +1269,7 @@ ${ship.lock.take.split('\n').map((l) => `  ${l}`).join('\n')}
       : ''
   }
 - Tracker project: ${defang(project)}. Landed in this repo this run — the PR closes each one's issue and carries what it recorded (the brief's "PR title and body" rules; implementers' reports, trimmed):
-${landedHere.length ? landedHere.map((d) => `  - ${d.id}${d.ticket && d.ticket !== d.id && d.ticket !== 'NO_TICKET' ? ` (ticket ${d.ticket})` : ''}${d.title ? ` — ${defang(d.title)}` : ''}: ${defang(scrubPaths(trim(d.summary, 700))) || '(no report)'}`).join('\n') : '  - (no task summaries recorded)'}`
+${landedHere.length ? landedHere.map((d) => `  - ${d.id}${d.ticket && d.ticket !== d.id && d.ticket !== 'NO_TICKET' ? ` (ticket ${d.ticket})` : ''}${d.title ? ` — ${defang(unclose(d.title))}` : ''}: ${defang(unclose(scrubPaths(trim(d.summary, 700)))) || '(no report)'}`).join('\n') : '  - (no task summaries recorded)'}`
 }
 
 // `who` names this dispatch's own worktree (see runBlock).
@@ -1559,7 +1602,9 @@ if [ "$CK" = ${crc}/${n} ] || [ "$CK" = -/${n} ]; then OK=1; else OK=0; rm -f "$
 //   · BOUNDED — the whole script stops by SHIP_DEADLINE_SEC (each step by what is left), the push by
 //     SHIP_PUSH_SEC, every network call in its own process group, killed whole at its limit.
 //   · A PR OUT OF DRAFT IS THE GATE'S — read first (`gh pr view`): ready, nothing is pushed to it and
-//     its description is not touched (`READY`); a halt posts only its status comment there.
+//     its description is not touched (`READY`); a halt posts only its status comment there. A PR that
+//     cannot be read (`gh pr list` or `gh pr view` failed: a 502, a timeout) may be ready: it is
+//     `UNKNOWN`, and nothing is pushed, rewritten or claimed (it once counted as a draft).
 //   · NO CLAIM WITHOUT THE PUSH — the description is rewritten only once the push reached the remote;
 //     a failed push leaves it describing what the remote holds and posts what failed instead.
 //   · NEVER OVER A NEWER ONE — the marker on the PR names the session and the ship that wrote it; a
@@ -1570,14 +1615,15 @@ const PR_VIEW_JQ = String.raw`"\(.isDraft) " + ((([(.body // "") | match("<!-- g
 // the function that takes it. GS=1: a gate's lock is stale (a halt: no gate runs any more).
 const shipLockPath = (repo) => `G=$(git -C "$P" rev-parse --git-common-dir 2>/dev/null); case "$G" in '') G="$P/.git" ;; /*) ;; *) G="$P/$G" ;; esac; LKP="$G/grimoire-ship-${refToken(repo)}.lock"; HELD=0`
 const SHIP_LOCK_FN = `shiplock() { # <ship|gate>: take the repo's ship lock — one ship, or the gate, moves the run branch and the PR at a time
-  _t0=$(now); _n=0; _p=; _k=; _a=0
+  _t0=$(now); _n=0; _p=; _k=; _a=0; _i=0
   while :; do
+    if [ "$_t0" = 0 ]; then _e=$_i; else _e=$(( $(now) - _t0 )); fi # waited: by the clock, or the 1-s sleeps where date +%s does not work (the wait had no end there)
     if mkdir "$LKP" 2>/dev/null; then echo "$$ $(now) $1" >"$LKP/owner"; HELD=1; return 0; fi
     [ -d "$LKP" ] || { echo "LOCK error: cannot create $LKP (not writable?) — nothing moves"; return 1; }
     _p=; _t=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null
     case "$_t" in ''|*[!0-9]*) _t=0 ;; esac
     _a=$(( $(now) - _t )); _x=0
-    if [ -z "$_p" ]; then [ $(( $(now) - _t0 )) -ge 10 ] && _x=1
+    if [ -z "$_p" ]; then [ "$_e" -ge 10 ] && _x=1
     elif [ "$_k" = gate ]; then { [ "$GS" = 1 ] || [ "$_a" -ge ${GATE_LOCK_STALE_SEC} ]; } && _x=1
     elif ! kill -0 "$_p" 2>/dev/null || [ "$_a" -ge ${SHIP_LOCK_STALE_SEC} ]; then _x=1
     fi
@@ -1596,8 +1642,8 @@ const SHIP_LOCK_FN = `shiplock() { # <ship|gate>: take the repo's ship lock — 
       _n=$((_n + 1))
       if [ "$_n" -ge 5 ]; then echo "LOCK error: could not take over $LKP after 5 tries — nothing moves"; return 1; fi
     fi
-    if [ $(( $(now) - _t0 )) -ge "$LW" ]; then echo "LOCK busy: held by \${_k:-?} \${_p:-?} for \${_a} s"; return 1; fi
-    [ "$_x" = 1 ] || sleep 1
+    if [ "$_e" -ge "$LW" ]; then echo "LOCK busy: held by \${_k:-?} \${_p:-?} for \${_a} s"; return 1; fi
+    [ "$_x" = 1 ] || { sleep 1; _i=$((_i + 1)); }
   done
 }
 shipunlock() { _p=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null; [ "$HELD" = 1 ] && [ "$_p" = "$$" ] && rm -rf "$LKP"; HELD=0; }`
@@ -1625,7 +1671,7 @@ function shipPrompt(repo, plan) {
     SHIP_LOCK_FN,
     "trap 'shipunlock; exit 143' TERM HUP INT",
     `T0=$(now); P=${shq(path)}; W=${shq(wt)}; O=$(mktemp); F=$(mktemp); C=$(mktemp); U=${shq(known)}; GS=${halting ? 1 : 0}`,
-    `SES=${shq(journal.session || '-')}; GEN=${Number.isInteger(plan.gen) ? plan.gen : 0}; RD=0; NEWER=0; PUSHOK=1; DR=`,
+    `SES=${shq(journal.session || '-')}; GEN=${Number.isInteger(plan.gen) ? plan.gen : 0}; RD=0; UNK=0; NEWER=0; PUSHOK=1; DR=`,
     `# 0 · the repo's ship lock: a ship given up on at its hard limit may still be running`,
     shipLockPath(repo),
     'if shiplock ship; then LK=1; echo "LOCK ok"; else LK=0; fi',
@@ -1636,15 +1682,17 @@ function shipPrompt(repo, plan) {
   L.push('git -C "$P" worktree prune >/dev/null 2>&1')
   if (plan.pr)
     L.push(
-      '# 2 · the PR, read before anything moves: out of draft it belongs to the gate (nothing is pushed to it, nothing rewritten); a newer description is never overwritten',
+      '# 2 · the PR, read before anything moves: out of draft it belongs to the gate (nothing is pushed to it, nothing rewritten); a newer description is never overwritten.',
+      '#     A PR that cannot be read (gh failed: a 502, a timeout) is UNKNOWN, never a draft: it may be ready, so nothing is pushed or rewritten',
       'if command -v gh >/dev/null 2>&1; then',
-      ...(known ? [] : [`  [ -n "$U" ] || U=$( (cdir "$P" && to 30 gh pr list --head ${branch} --state open --json url --jq '.[0].url // empty') 2>/dev/null)`]),
+      ...(known ? [] : [`  [ -n "$U" ] || U=$( (cdir "$P" && to 30 gh pr list --head ${branch} --state open --json url --jq '.[0].url // empty') 2>/dev/null) || { U=; UNK=1; }`]),
       '  if [ -n "$U" ]; then',
-      `    V=$( (cdir "$P" && to 30 gh pr view "$U" --json isDraft,body --jq '${PR_VIEW_JQ}') 2>/dev/null)`,
-      '    case "$V" in true\\ *) DR=true ;; false\\ *) DR=false; RD=1; echo "READY url=$U" ;; esac',
+      `    V=$( (cdir "$P" && to 30 gh pr view "$U" --json isDraft,body --jq '${PR_VIEW_JQ}') 2>/dev/null) || V=`,
+      '    case "$V" in true\\ *) DR=true ;; false\\ *) DR=false; RD=1; echo "READY url=$U" ;; *) UNK=1 ;; esac',
       '    PG=${V#* }; PS=${PG%%:*}; PN=${PG##*:}; case "$PN" in \'\'|*[!0-9]*) PN=0 ;; esac',
       '    [ "$PS" = "$SES" ] && [ "$PN" -gt "$GEN" ] && NEWER=1',
       '  fi',
+      '  [ "$UNK" = 1 ] && echo "UNKNOWN url=$U: the PR could not be read — nothing is pushed or rewritten"',
       'fi',
     )
   if (plan.push) {
@@ -1652,11 +1700,13 @@ function shipPrompt(repo, plan) {
       '# 3 · the ship worktree, detached at the landed SHA — reset and cleaned: a hook that edited it never blocks the next ship',
       'if [ "$LK" != 1 ]; then echo "PUSH ok=0 hook=0 step=lock"; PUSHOK=0',
       'elif [ "$RD" = 1 ]; then echo "PUSH skipped ready=1"',
+      'elif [ "$UNK" = 1 ]; then echo "PUSH skipped unknown=1"',
       'else',
       '  WT=0',
       `  if [ -f "$W/.git" ]; then git -C "$W" checkout -f --detach -q ${h} >"$O" 2>&1 && git -C "$W" clean -fdq >>"$O" 2>&1 && WT=1`,
       `  elif [ -e "$W" ]; then echo "$W exists but is not a worktree" >"$O"`,
-      `  elif git -C "$P" worktree add --detach -q ${shq(rel)} ${h} >"$O" 2>&1; then WT=1${setup ? `; { ${setup.replace(/<lane>/g, wt)} ; } >/dev/null 2>&1 || true` : ''}`,
+      // the lane setup is bounded like every other step: an unbounded one held the lock past its stale age
+      `  elif git -C "$P" worktree add --detach -q ${shq(rel)} ${h} >"$O" 2>&1; then WT=1${setup ? `; to ${SHIP_SETUP_SEC} sh -c ${shq(setup.replace(/<lane>/g, wt))} </dev/null >/dev/null 2>&1 || true` : ''}`,
       '  fi',
       `  # 4 · push exactly that SHA to the run branch, fast-forward only (the pre-push hook runs), at most ${SHIP_PUSH_SEC} s`,
       `  if [ "$WT" = 1 ]; then GIT_TERMINAL_PROMPT=0 to 30 git -C "$P" ls-remote origin refs/heads/${branch} >"$O" 2>&1; RC=$?; else RC=1; fi`,
@@ -1674,6 +1724,7 @@ function shipPrompt(repo, plan) {
       `# 5 · the description — ${known ? 'update it' : plan.create ? 'find the PR, else open it as a DRAFT' : 'find the PR and update it (draftPr: false: never open one)'}: only once the push reached the remote, only on a draft, never over a newer one`,
       'if ! command -v gh >/dev/null 2>&1; then echo "PR ok=0 step=gh"; echo "gh is not installed"',
       'elif [ "$RD" = 1 ]; then echo "PR ok=1 url=$U action=ready"',
+      'elif [ "$UNK" = 1 ]; then echo "PR ok=1 url=$U action=unknown"',
       'elif [ "$LK" != 1 ] || [ "$PUSHOK" != 1 ]; then echo "PR ok=1 url=$U action=kept"',
       'elif [ "$NEWER" = 1 ]; then echo "PR ok=1 url=$U action=newer"',
       'else',
@@ -1696,11 +1747,11 @@ function shipPrompt(repo, plan) {
     const branches = []
     if (plan.ready) branches.push(['true', cm.ready]) // the engine knows it is out of draft: that variant, whatever gh says now
     else {
-      if (cm.ok) branches.push(['[ "$RD" != 1 ] && [ "$PUSHOK" = 1 ]', cm.ok])
+      if (cm.ok) branches.push(['[ "$RD" != 1 ] && [ "$UNK" != 1 ] && [ "$PUSHOK" = 1 ]', cm.ok]) // an unreadable PR: nothing was pushed, so no "pushed" claim
       if (cm.ready) branches.push(['[ "$RD" = 1 ]', cm.ready])
       if (cm.failed) branches.push(['[ "$PUSHOK" != 1 ] && [ "$LK" = 1 ]', cm.failed]) // lock busy: no push was tried, so no "FAILED" claim
     }
-    L.push(`# 6 · the status comment: ${[cm.ok && 'pushed (or already there) → the proof', cm.ready && 'out of draft → why the PR was left alone', cm.failed && 'push failed → what the remote holds'].filter(Boolean).join('; ')}`, 'if [ -n "$U" ] && command -v gh >/dev/null 2>&1; then')
+    L.push(`# 6 · the status comment: ${[cm.ok && 'pushed (or already there) → the proof', cm.ready && 'out of draft → why the PR was left alone', cm.failed && 'push failed → what the remote holds'].filter(Boolean).join('; ')}; an unreadable PR gets none (each one claims something)`, `if [ -n "$U" ]${plan.ready ? '' : ' && [ "$UNK" != 1 ]'} && command -v gh >/dev/null 2>&1; then`)
     branches.forEach(([cond, text], i) => L.push(`${i ? 'elif' : 'if'} ${cond}; then`, ...comment(text)))
     L.push('else OK=0; fi', post, 'fi')
   } else if (plan.pr && cm.note) {
@@ -1713,7 +1764,7 @@ function shipPrompt(repo, plan) {
     )
   }
   L.push('shipunlock; rm -f "$O" "$F" "$C"')
-  const lines = ['LOCK', 'READY', 'PUSH', 'PR', 'DRAFT', ...(halting || cm.note ? ['COMMENT'] : [])]
+  const lines = ['LOCK', 'READY', 'UNKNOWN', 'PUSH', 'PR', 'DRAFT', ...(halting || cm.note ? ['COMMENT'] : [])]
   return `${brief('ship')}- Repo \`${repo}\` · checkout \`${path}\` · run branch \`${branch}\` · base \`${base}\`
 - Mode: **${plan.mode}** · landed head \`${h}\`${plan.ready ? ' (its PR is out of draft: no push, no new description — the status comment only)' : plan.push ? '' : ' (already on the remote: no push)'}${plan.pr ? '' : ' · no PR step'}
 
@@ -1729,11 +1780,22 @@ ${L.join('\n')}
 // age (GATE_LOCK_STALE_SEC), not by pid; ships honour it, and a halt (no gate left running) does not.
 // Nor does the next gate (GS=1): one repo never runs two gates at once, so a gate lock it finds was
 // left by an earlier gate that did not release it.
+// The PUSH runs under a heartbeat: every GATE_LOCK_BEAT_SEC, while the shell that runs the push is alive,
+// the lock's age is renewed (only while the gate still holds it), so a pre-push hook that runs longer than
+// GATE_LOCK_STALE_SEC no longer loses the lock to a ship. The heartbeat stops with that shell: a push the
+// Bash tool kills leaves the lock to age out as before.
 function gateLockScripts(repo) {
   const P = `P=${shq(repoPath(repo))}`
   return {
     take: ['set -u', `LW=\${GRIMOIRE_SHIP_LOCK_WAIT:-${GATE_LOCK_WAIT_SEC}}; case "$LW" in ''|*[!0-9]*) LW=${GATE_LOCK_WAIT_SEC} ;; esac; GS=1`, SHIP_HELPERS.split('\n')[0], SHIP_LOCK_FN, P, shipLockPath(repo), 'if shiplock gate; then echo "LOCK ok $LKP"; else echo "LOCK busy"; fi'].join('\n'),
     release: `${P}; ${shipLockPath(repo)}; rm -rf "$LKP"; echo "LOCK released"`,
+    push: (cmd) =>
+      [
+        `${P}; ${shipLockPath(repo)}; M=$$; BEAT=\${GRIMOIRE_GATE_LOCK_BEAT:-${GATE_LOCK_BEAT_SEC}}; case "$BEAT" in ''|*[!0-9]*|0) BEAT=${GATE_LOCK_BEAT_SEC} ;; esac`,
+        `( while sleep "$BEAT"; kill -0 "$M" 2>/dev/null; do _p=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null; [ "$_k" = gate ] && echo "$_p $(date +%s) gate" >"$LKP/owner"; done ) >/dev/null 2>&1 </dev/null & HB=$!`,
+        `${cmd}; RC=$?`,
+        'kill "$HB" 2>/dev/null; echo "PUSH exit=$RC"',
+      ].join('\n'),
   }
 }
 // The SEAL, after a green gate: the gate retyped the state marker (up to MARKER_MAX_CHARS of base64)
@@ -1820,10 +1882,16 @@ ${L.join('\n')}
 // that both saw a dead holder once both broke the lock, one of them the other's fresh one (10 of 25
 // trials with 8 waiters). A lock whose pid is gone is broken at once; one held by the same pid, or by
 // none, for LOCK_STALE_SEC (the section it guards takes well under a second) is broken then; a writer
-// still without it after twice that goes on without it. Time is counted with `date +%s`, never in
-// sleeps: a counter of 0.05-s naps took ~44 s to reach "30 s", and never reached it where `sleep`
-// takes whole seconds. A mutex left by a writer killed inside it is removed after 5 s.
-// GRIMOIRE_LOCK_STALE (seconds) in the environment overrides LOCK_STALE_SEC — the tests use it.
+// still without it after twice that goes on without it. Its pid is read again right before it is
+// broken. Time is counted with `date +%s`, never in sleeps: a counter of 0.05-s naps took ~44 s to
+// reach "30 s", and never reached it where `sleep` takes whole seconds. Only where `date +%s` does
+// not work are naps counted instead (the wait had no end there), with a cap of three times the wait
+// on naps whatever the clock says. A clock that jumps (the machine slept) ages no lock: a live writer's
+// lock was broken on wake. The MUTEX holds its holder's pid too: it is broken at once when that pid
+// is gone (read again right before), and only a mutex with no pid (its writer killed between `mkdir`
+// and writing it) waits 5 s — a 5-s timer alone broke live mutexes (4 of ~100 trials at 16 writers
+// with a planted stale one overlapped). GRIMOIRE_LOCK_STALE (seconds) in the environment overrides
+// LOCK_STALE_SEC, at least 1 — the tests use it.
 //
 // `landed.jsonl` is appended once per task head: a resent delta (its receipt was lost) skips the
 // lines whose key (`k`, a hash of id and head) the file already holds.
@@ -1840,7 +1908,7 @@ function journalPrompt({ lines, runJson, landed = [], firstSeq, runDir, slug, se
   const landedBlock = landed.length
     ? `T="$DIR/landed.jsonl.$$"
 ${decodeVia('$T', landed.map((d) => JSON.stringify({ attempt: '__ATTEMPT__', at: '__AT__', k: landedKey(d), ...d })).join('\n') + '\n')}
-if [ "$OK" = 1 ] && sed ${landedStamp} "$T" > "$T.s" && awk -v F="$DIR/landed.jsonl" 'BEGIN { while ((getline l < F) > 0) if (match(l, /"k":"[0-9a-f]+"/)) s[substr(l, RSTART, RLENGTH)] = 1 } { if (match($0, /"k":"[0-9a-f]+"/)) { k = substr($0, RSTART, RLENGTH); if (k in s) next; s[k] = 1 } print }' "$T.s" > "$T.d" && cat "$T.d" >> "$DIR/landed.jsonl"; then echo "LANDED ok $(wc -l < "$T" | tr -d ' ')"; else echo "LANDED bad"; fi
+if [ "$OK" = 1 ] && sed ${landedStamp} "$T" > "$T.s" && LJ="$DIR/landed.jsonl" awk 'BEGIN { F = ENVIRON["LJ"]; while ((getline l < F) > 0) if (match(l, /"k":"[0-9a-f]+"/)) s[substr(l, RSTART, RLENGTH)] = 1 } { if (match($0, /"k":"[0-9a-f]+"/)) { k = substr($0, RSTART, RLENGTH); if (k in s) next; s[k] = 1 } print }' "$T.s" > "$T.d" && cat "$T.d" >> "$DIR/landed.jsonl"; then echo "LANDED ok $(wc -l < "$T" | tr -d ' ')"; else echo "LANDED bad"; fi
 rm -f "$T" "$T.s" "$T.d"
 `
     : ''
@@ -1853,29 +1921,36 @@ case "$DIR" in /*) ;; *) C=$(git rev-parse --path-format=absolute --git-common-d
 mkdir -p "$DIR/events"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ); SESSION=${tok}; SEED=${Number.isInteger(seed) && seed > 0 ? seed : 0}; NEWSEQ=${newSeq}
 ${DECODE_FN}
-L="$DIR/.lock"; B="$DIR/.lock.brk"; HELD=0; LS=\${GRIMOIRE_LOCK_STALE:-${LOCK_STALE_SEC}}; case "$LS" in ''|*[!0-9]*) LS=${LOCK_STALE_SEC} ;; esac
+L="$DIR/.lock"; B="$DIR/.lock.brk"; HELD=0; LS=\${GRIMOIRE_LOCK_STALE:-${LOCK_STALE_SEC}}; case "$LS" in ''|*[!0-9]*) LS=${LOCK_STALE_SEC} ;; esac; [ "$LS" -ge 1 ] || LS=1
 now() { _n=$(date +%s 2>/dev/null); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac; echo "$_n"; }
-nap() { sleep 0.05 2>/dev/null || sleep 1; }
-unlock() { [ "$HELD" = 1 ] || return 0; HELD=0; _g=0; _u=
-  while :; do if mkdir "$B" 2>/dev/null; then _g=1; break; fi; [ -n "$_u" ] || _u=$(now); [ $(($(now) - _u)) -ge 5 ] && break; nap; done
+NAPS=1; sleep 0.01 2>/dev/null && NAPS=20; I=0; CLK=1; [ "$(now)" = 0 ] && CLK=0
+nap() { I=$((I + 1)); sleep 0.05 2>/dev/null || sleep 1; }
+tick() { if [ "$CLK" = 1 ]; then now; else echo $((I / NAPS)); fi; } # seconds: the clock, or the naps taken where date +%s does not work
+brk() { mkdir "$B" 2>/dev/null || return 1; echo $$ > "$B/pid"; }
+staleb() { _q=$(cat "$B/pid" 2>/dev/null)
+  if [ -n "$_q" ]; then BT=; kill -0 "$_q" 2>/dev/null || { [ "$(cat "$B/pid" 2>/dev/null)" = "$_q" ] && rm -rf "$B"; }
+  else _n=$(tick); if [ -z "$BT" ]; then BT=$_n; elif [ $((_n - BT)) -ge 5 ]; then nap; [ -z "$(cat "$B/pid" 2>/dev/null)" ] && rm -rf "$B"; BT=; fi; fi; }
+unlock() { [ "$HELD" = 1 ] || return 0; HELD=0; _g=0; _u=$(tick)
+  while :; do if brk; then _g=1; break; fi; staleb; [ $(($(tick) - _u)) -ge 5 ] && break; nap; done
   [ "$(cat "$L/pid" 2>/dev/null)" = "$$" ] && rm -rf "$L"; [ "$_g" = 1 ] && rm -rf "$B"; return 0; }
 trap unlock EXIT
-T0=$(now); TS=$T0; SEEN=-; BT=
+T0=$(tick); TS=$T0; LN=$T0; SEEN=-; BT=
 while :; do
-  if mkdir "$B" 2>/dev/null; then
+  N=$(tick); [ $((N - LN)) -gt 5 ] && { TS=$((TS + N - LN)); T0=$((T0 + N - LN)); }; LN=$N
+  if brk; then
     BT=
     if [ -d "$L" ]; then
-      N=$(now); P=$(cat "$L/pid" 2>/dev/null)
+      P=$(cat "$L/pid" 2>/dev/null)
       [ "$P" = "$SEEN" ] || { SEEN=$P; TS=$N; }
-      if { [ -n "$P" ] && ! kill -0 "$P" 2>/dev/null; } || [ $((N - TS)) -ge "$LS" ]; then rm -rf "$L"; fi
+      if { [ -n "$P" ] && ! kill -0 "$P" 2>/dev/null; } || [ $((N - TS)) -ge "$LS" ]; then [ "$(cat "$L/pid" 2>/dev/null)" = "$P" ] && rm -rf "$L"; fi
     fi
     mkdir "$L" 2>/dev/null && { echo $$ > "$L/pid"; HELD=1; }
     rm -rf "$B"
     [ "$HELD" = 1 ] && break
-  else
-    N=$(now); if [ -z "$BT" ]; then BT=$N; elif [ $((N - BT)) -ge 5 ]; then rm -rf "$B"; BT=; fi
+  else staleb
   fi
-  N=$(now); [ $((N - T0)) -ge $((LS * 2)) ] && break
+  N=$(tick); [ $((N - T0)) -ge $((LS * 2)) ] && break
+  [ "$I" -ge $((LS * 6 * NAPS)) ] && break
   nap
 done
 PREV=$(sed -n 's/^{"runId":[^,]*,"attempt":\\([0-9][0-9]*\\).*/\\1/p' "$DIR/run.json" 2>/dev/null | head -n 1)
@@ -1931,8 +2006,15 @@ Why the run stopped short of them: ${reason}`
 }
 
 // The INTEGRATION step for a parallel lane — mechanical merge, serialized per repo.
-function integratePrompt(task) {
+// `tip`, on the re-ask: the merge was reported MERGED with no run branch head. Nothing is merged again
+// (the lane branch is gone): the run branch's head is read, and accepted only when it holds the lane tip.
+function integratePrompt(task, tip) {
   const path = repoPath(task.repo)
+  if (tip)
+    return `${brief('integrate')}Task ${task.id} in \`${path}\`: you merged lane \`${task.laneBranch}\` into run branch \`${task.runBranch}\` and reported MERGED without \`headSha\`. Merge NOTHING again — run only:
+1. \`git -C ${path} rev-parse --verify -q 'refs/heads/${task.runBranch}^{commit}'\` → the run branch head.
+2. \`git -C ${path} merge-base --is-ancestor ${tip} refs/heads/${task.runBranch} && echo HOLDS || echo MISSING\`.
+HOLDS → return MERGED with headSha = the SHA of step 1. MISSING, or step 1 printed nothing → return ERROR, headSha "", with what it printed.`
   return `${brief('integrate')}Task ${task.id} in \`${path}\`: lane \`${task.laneBranch}\` → run branch \`${task.runBranch}\`.
 1. \`git -C ${path} rev-parse --verify --quiet ${task.runBranch}\` — if missing: \`git -C ${path} branch ${task.runBranch} ${BASE_BRANCH}\`.
 2. \`git -C ${path} checkout ${task.runBranch}\` then \`git -C ${path} merge --no-ff ${task.laneBranch}\`.
@@ -2259,7 +2341,7 @@ function emit(type, data) {
 let runJsonFor = () => ({}) // assigned once run state exists (see below)
 let landedDelta = () => [] // the landed tasks whose detail landed.jsonl does not hold yet (see below)
 function flushJournal() {
-  if (!journal.enabled || !journal.pending.length) return journal.chain
+  if (!journal.enabled || !journal.pending.length || bodyReturned) return journal.chain
   const batch = journal.pending.splice(0)
   const n = ++journal.flushes
   const final = !!journal.final && !journal.finalSent // the run's last chunk: one attempt, even once the writer is marked dead
@@ -2405,6 +2487,12 @@ const MAX_PER_REPO = Number.isInteger(opts.maxPerRepo) && opts.maxPerRepo >= 1 ?
 // Startup agent preflight (execute runs): every agent type the run can dispatch answers one
 // trivial prompt before any work starts. ON unless {preflight:false}.
 const PREFLIGHT = opts.preflight !== false
+// A verified PR marker NEWER than the resumeState passed in (the run went on on another machine, and
+// this machine's run.json is behind it) gives its counters only when asked: {trustNewerMarker: true}
+// takes the higher of each (attempt, sequence, replans and fix rounds spent, output tokens), each still
+// bounded as a marker's. Off by default: a PR body anyone with write access can edit never sets the
+// run's budgets on its own (a planted marker once spent every replan).
+const TRUST_NEWER_MARKER = opts.trustNewerMarker === true
 // Precheck rung (cheap structural check before the panel). ON unless {precheck:false}.
 const PRECHECK = opts.precheck !== false
 const MAX_PRECHECK_FIXES =
@@ -2660,6 +2748,13 @@ const fencedRepos = new Map()
 const fenceWaiters = new Map() // repo → Set of callbacks fired when its primary checkout is fenced
 const taskRepo = new Map() // task id → repo, registered at dispatch: names the task of a dispatch whose call site passes only a label
 let dispatchClosed = false // the main loop is over: a late writer's task must not dispatch its next stage
+// The workflow body has RETURNED. A wedged gate can still come back after that (its seal), and so can a
+// slot that ended without a green gate (its late halt ship); the runtime does not say what becomes of an
+// agent() call made once the script has returned — no one awaits it, nothing reports it — so from here
+// on nothing is dispatched: what was skipped is logged once, and a relaunch resumes from the PR and
+// run.json as they stand.
+let bodyReturned = false
+let refusedAfterReturn = 0
 
 // The main loop sleeps on its in-flight tasks AND on this, so a wedge or a fence release
 // re-evaluates the schedule at once.
@@ -2981,6 +3076,10 @@ const agentT = (prompt, o) => {
   const meta = metaFor(label, { task, repo, lane })
   if (last) meta.last = true
   if (dispatchClosed && meta.task) return Promise.resolve(null)
+  if (bodyReturned) {
+    if (!refusedAfterReturn++) log(`◎ ${label}: not dispatched — the run had already returned (nothing would await it); a relaunch resumes from the PR and run.json`)
+    return Promise.resolve(null)
+  }
   return withLimits((l) => agent(prompt, l === label ? rest : { ...rest, label: l }), limitsFor(kind, meta.repo), label, meta)
 }
 
@@ -3042,16 +3141,23 @@ const refToken = (v) =>
 // A bare `ABC-123` counts only as the whole text, at its start, or in brackets or parentheses, and
 // never with a standard's prefix: "Migrate to UTF-8 and ISO-8601 dates (PROJ-12)" once keyed on
 // `UTF-8`, so every project that mentions UTF-8 (or SHA-256, HTTP-2) shared one run branch, and the
-// state marker of one was accepted as the other's.
-const STANDARD_PREFIXES = new Set(['UTF', 'UTF8', 'ISO', 'SHA', 'HTTP', 'HTTPS', 'RFC', 'ES', 'TLS', 'SSL', 'IPV', 'CVE'])
+// state marker of one was accepted as the other's. Nor a name, a version or a period that reads like a
+// key: `SOC-2 …`, `GPT-4 …`, `COVID-19 …`, `AES-256 …`, `Q3-2026 …` each keyed every project that
+// starts with it on one branch. A key at the END of the text, after a separator, counts too:
+// "Auth rewrite — PROJ-700" is PROJ-700 (it was the whole sentence).
+const STANDARD_PREFIXES = new Set([
+  'UTF', 'UTF8', 'ISO', 'SHA', 'HTTP', 'HTTPS', 'RFC', 'ES', 'TLS', 'SSL', 'IPV', 'CVE',
+  'SOC', 'GPT', 'COVID', 'AES', 'RSA', 'WCAG', 'IEC', 'IEEE', 'ECMA', 'ANSI', 'NIST', 'FIPS', 'OWASP', // standards and names, never a team's key (WEB-12 or MD-3 may well be one: kept)
+])
+const NOT_A_KEY = (prefix) => STANDARD_PREFIXES.has(prefix) || /^(Q[1-4]|H[12]|S[12]|FY\d{0,4}|CY\d{0,4}|V\d+)$/.test(prefix) // quarters, halves, fiscal years, versions
 const BARE_KEY = '([A-Z][A-Z0-9_]{1,9})-(\\d+)'
 function bareKey(text) {
   const t = String(text).trim()
-  const pick = (m) => (m && !STANDARD_PREFIXES.has(m[1]) ? `${m[1]}-${m[2]}` : null)
+  const pick = (m) => (m && !NOT_A_KEY(m[1]) ? `${m[1]}-${m[2]}` : null)
   const lead = pick(new RegExp(`^${BARE_KEY}(?![\\w-])`).exec(t)) // the whole text, or its start
   if (lead) return lead
   for (const m of t.matchAll(new RegExp(`[[(]\\s*${BARE_KEY}\\s*[\\])]`, 'g'))) if (pick(m)) return pick(m) // [ABC-123] or (ABC-123)
-  return null
+  return pick(new RegExp(`(?:\\s[-—–|]|[:—–|])\\s*${BARE_KEY}$`).exec(t)) // "… — ABC-123", "…: ABC-123", "… - ABC-123"
 }
 function projectKey(text) {
   const s = String(text)
@@ -3060,6 +3166,10 @@ function projectKey(text) {
   if ((m = /(?<![\w&/#])#(\d+)\b/.exec(s))) return `#${m[1]}`
   if ((m = /https?:\/\/[^/\s]+\/([\w.-]+)\/([\w.-]+)(?:\/-)?\/(?:issues|pull|merge_requests)\/(\d+)/.exec(s))) return `${m[1]}/${m[2]}#${m[3]}`
   if ((m = /https?:\/\/\S*?\/(?:issue|issues|browse|ticket|tickets)\/([A-Z][A-Z0-9_]{1,9}-\d+)(?![\w-])/.exec(s)) && !STANDARD_PREFIXES.has(m[1].split('-')[0])) return m[1]
+  // a GitHub project (`/orgs/<org>/projects/7`, `/users/<user>/projects/7`) or a GitLab group's epic or
+  // milestone is numbered per owner: two owners' project 7 once shared one key, `7`
+  if ((m = /https?:\/\/[^/\s]+\/(?:orgs|users)\/([\w.-]+)\/projects\/(\d+)(?![\w.-])/.exec(s))) return `${m[1]}/projects/${m[2]}`
+  if ((m = /https?:\/\/[^/\s]+\/groups\/([\w./-]+?)\/-\/(epics|milestones)\/(\d+)(?![\w.-])/.exec(s))) return `${m[1]}/${m[2]}/${m[3]}`
   if ((m = /https?:\/\/\S*\/(\d+)(?=[/?#\s]|$)/.exec(s))) return m[1]
   return bareKey(s) || s
 }
@@ -3266,6 +3376,8 @@ function markerCounters(s, p) {
     runBranch: s.runBranch,
     ...stateCounters(s, `${p.repo}: the state marker`),
     landedTasks: Array.isArray(s.landedTasks) ? s.landedTasks.slice(0, MARKER_TASK_CAP) : [],
+    runId: str(s.runId) || null,
+    replan: Array.isArray(s.replan) ? s.replan.filter((x) => typeof x === 'string').slice(0, MARKER_TASK_CAP) : [],
     url: str(p.url) || '',
     state: str(p.state) || '',
     isDraft: p.isDraft,
@@ -3313,6 +3425,14 @@ for (const p of FRESH_START ? [] : prStates) {
     ignore('for another project, repo or run branch')
     continue
   }
+  // the same key from another wording is a relaunch phrased differently — or another project the key
+  // heuristic could not tell apart: said, so a wrong resume is seen before anything is absorbed
+  // (a marker names the project by its key, and by its wording in `text` when that differs; a 0.9.0
+  // marker has no `text`, and its key alone says nothing about the wording)
+  const said = (t) => String(t).trim().replace(/\s+/g, ' ')
+  const theirs = str(s.text) || str(s.project)
+  if (![said(project), ...(str(s.text) ? [] : [said(String(PROJECT_KEY))])].includes(said(theirs)))
+    log(`⚠ ${p.repo}: the state marker in ${str(p.url) || 'its PR'} was written for "${trim(said(theirs), 120)}" — not this project's text, but the same key (${PROJECT_KEY}) and run branch, so its state is used. If that is another project, relaunch with {runBranch} set (or {freshStart: true}) before anything lands`)
   markerVerdict.set(p, 'verified')
   markerStates.push(markerCounters(s, p))
 }
@@ -3333,9 +3453,15 @@ const resumeSafe = resumeOpt ? { ...stateCounters(resumeOpt, 'the resumeState pa
 let resumeBase = resumeSafe
 if (!resumeBase) for (const m of markerStates) if (!resumeBase || newerState(m, resumeBase)) resumeBase = m
 if (resumeBase && resumeBase !== resumeSafe) log(`◎ run state taken from the PR marker of ${resumeBase.repo}${resumeBase.url ? ` (${resumeBase.url})` : ''}: attempt ${stateRank(resumeBase)[0]}, seq ${stateRank(resumeBase)[1]}`)
-for (const m of resumeSafe ? markerStates : [])
-  if (newerState(m, resumeSafe))
-    log(`◎ ${m.repo}: the PR marker${m.url ? ` (${m.url})` : ''} says attempt ${stateRank(m)[0]}, seq ${stateRank(m)[1]} — newer than the resumeState passed in (attempt ${stateRank(resumeSafe)[0]}, seq ${stateRank(resumeSafe)[1]}); the counters stay the resumeState's, the tasks it lists are still verified and absorbed`)
+const newerMarkers = resumeSafe ? markerStates.filter((m) => newerState(m, resumeSafe)) : []
+for (const m of newerMarkers)
+  log(`◎ ${m.repo}: the PR marker${m.url ? ` (${m.url})` : ''} says attempt ${stateRank(m)[0]}, seq ${stateRank(m)[1]} — newer than the resumeState passed in (attempt ${stateRank(resumeSafe)[0]}, seq ${stateRank(resumeSafe)[1]}); ${TRUST_NEWER_MARKER ? 'trustNewerMarker: the higher of each counter is taken' : "the counters stay the resumeState's (this machine's run.json may be behind another machine's: if that run is yours, relaunch with {trustNewerMarker: true} to take the higher of each)"}, the tasks it lists are still verified and absorbed`)
+if (TRUST_NEWER_MARKER && newerMarkers.length) {
+  const hi = (k) => Math.max(resumeSafe[k] || 0, ...newerMarkers.map((m) => m[k] || 0))
+  const fixRounds = { ...resumeSafe.fixRounds }
+  for (const m of newerMarkers) for (const [id, n] of Object.entries(m.fixRounds || {})) fixRounds[id] = Math.max(fixRounds[id] || 0, n)
+  resumeBase = { ...resumeSafe, attempt: hi('attempt'), lastSeq: hi('lastSeq'), replansUsed: hi('replansUsed'), outputTokensSpent: hi('outputTokensSpent'), fixRounds }
+}
 const candidates = new Map() // id → its landed records, checkpoint first
 const addCandidate = (rec, source) => {
   if (rec && !alreadyDoneIds.has(rec.id)) candidates.set(rec.id, [...(candidates.get(rec.id) || []), { ...rec, source }])
@@ -3356,15 +3482,21 @@ for (const t of checkpointLanded) {
 }
 if (foreignLanded.length)
   log(`⚠ the resumeState lists ${foreignLanded.length} landed task(s) that are not issues of ${project}${sameRun ? '' : ' (nor a replan task of this runId)'} — ignored: ${foreignLanded.slice(0, 8).join(', ')}${foreignLanded.length > 8 ? ', …' : ''}`)
+// A marker carries the ids of the tasks a replan invented (`replan`): they are absorbed from it under the
+// checkpoint's rules — the marker is this launch's run (its runId), the id cannot read as an issue
+// reference, and the head is verified on the run branch. Another machine has no checkpoint, so they
+// once always ran again there.
 for (const m of markerStates) {
   const foreign = []
+  const replanIds = new Set(!!runId && m.runId === runId ? m.replan : [])
   for (const t of m.landedTasks) {
     // a marker record names no repo: it is its marker's. The compact form is [id, headSha, firstSha?]
     const o = Array.isArray(t) ? { id: t[0], headSha: t[1], firstSha: t[2] } : t
     const rec = landedRecord(o && typeof o === 'object' && o.repo === undefined ? { ...o, repo: m.repo } : o, true)
     if (!rec || rec.repo !== m.repo) continue
-    if (!inProject.has(rec.id)) foreign.push(rec.id)
-    else addCandidate(rec, 'pr')
+    if (inProject.has(rec.id)) addCandidate(rec, 'pr')
+    else if (replanIds.has(rec.id) && !ISSUE_REF_RE.test(rec.id)) addCandidate({ ...rec, ticket: 'NO_TICKET', replan: true }, 'pr')
+    else foreign.push(rec.id)
   }
   if (foreign.length) log(`⚠ ${m.repo}: the state marker in ${m.url || 'its PR'} lists ${foreign.length} task(s) that are not issues of ${project} — ignored: ${foreign.slice(0, 8).join(', ')}${foreign.length > 8 ? ', …' : ''}`)
 }
@@ -3982,10 +4114,13 @@ async function dispatchImpl(task, fixFindings, resolved, label, stage) {
 // primary checkout (the direct task, an integration) would hold the chain forever, so a lane
 // waiting behind a FENCED primary checkout settles FENCED instead, its worktree left in place.
 const mergeQueues = {} // repo → tail of that repo's integration chain
-function integrateLane(task) {
-  const dispatch = () =>
-    agentT(integratePrompt(task), {
-      label: `integrate:${task.id}`,
+// `tip`: the reviewed lane head. A MERGED without the run branch head is asked for it ONCE, inside the
+// repo's merge queue (no other integrate moves the run branch meanwhile): a landing with no head was
+// never shipped, and when every integrate of a run omitted it nothing was pushed, even on a halt.
+function integrateLane(task, tip) {
+  const dispatch = (again) =>
+    agentT(integratePrompt(task, again), {
+      label: `integrate:${task.id}${again ? '~head' : ''}`,
       phase: 'Implement',
       model: 'sonnet',
       effort: 'low', // mechanical merge; a conflict is reported, never resolved
@@ -4005,7 +4140,14 @@ function integrateLane(task) {
     }
     after.then(go, go)
   })
-  const p = turn.then((t) => (t === 'go' ? dispatch() : fenced())).then((r) => {
+  const p = turn.then((t) => (t === 'go' ? dispatch() : fenced())).then(async (r) => {
+    if (r && r.status === 'MERGED' && !asSha(r.headSha) && asSha(tip)) {
+      const h = await dispatch(asSha(tip))
+      if (h && h.status === 'MERGED' && asSha(h.headSha)) {
+        log(`   · ${task.id}: integrate:${task.id} reported MERGED without the run branch head — asked once more: ${String(asSha(h.headSha)).slice(0, 7)}, holding the lane tip`)
+        r = { ...r, headSha: asSha(h.headSha) }
+      } else log(`⚠ ${task.id}: integrate:${task.id} reported MERGED without the run branch head, and asked once more it gave none${h && str(h.detail) ? ` (${trim(h.detail, 200)})` : ''}`)
+    }
     emit('integrate', { task: task.id, status: r ? r.status : 'DIED' })
     return r
   })
@@ -4047,7 +4189,7 @@ async function runTask(task) {
       log(`   · ${task.id}: already on the branch and reviewed earlier (${prior.map((s) => s.slice(0, 7)).join(', ')}) — absorbed, no precheck, no panel`)
       let head = done.headSha
       if (task.lane === 'worktree') {
-        const integrate = await integrateLane(task) // nothing new to merge; it still retires the lane
+        const integrate = await integrateLane(task, done.headSha) // nothing new to merge; it still retires the lane
         if (!integrate || integrate.status !== 'MERGED') return { id: task.id, repo: task.repo, status: integrate && integrate.status === 'FENCED' ? 'FENCED' : 'MERGE_CONFLICT', impl, integrate }
         head = asSha(integrate.headSha) || head
       }
@@ -4178,14 +4320,14 @@ async function runTask(task) {
   let landedHead = range.headSha // what the run branch holds once this task has landed
   if (task.lane === 'worktree') {
     log(`   · ${task.id}: reviews passed — integrating lane ${task.laneBranch} into ${task.runBranch}…`)
-    const integrate = await integrateLane(task)
+    const integrate = await integrateLane(task, range.headSha)
     if (!integrate || integrate.status !== 'MERGED') {
       return { id: task.id, repo: task.repo, status: integrate && integrate.status === 'FENCED' ? 'FENCED' : 'MERGE_CONFLICT', impl, review: quality, integrate }
     }
     // the run branch head after the merge, or none: the lane tip is NOT what the run branch holds
     // (a ship pushing it would put a lane commit on the run branch, or be refused as no fast-forward)
     landedHead = asSha(integrate.headSha)
-    if (!landedHead) log(`⚠ ${task.id}: integrate:${task.id} reported MERGED without the run branch head — the lane tip ${range.headSha || ''} is never pushed in its place`)
+    if (!landedHead) log(`⚠ ${task.id}: no run branch head for this landing — the lane tip ${range.headSha || ''} is never pushed in its place; the next landing's ship (or the terminal slot) pushes it`)
   }
 
   return { id: task.id, repo: task.repo, status: impl.status, impl, prUrl: impl.prUrl, review: quality, advisory, runBranch: task.runBranch || task.branch, headSha: landedHead, range: { ...range }, ...(verifiedPrior ? { verifiedPrior } : {}) }
@@ -4479,11 +4621,8 @@ const checkpointTaskRecord = (d) => {
 // The detail records landed.jsonl lacks: tasks that landed in THIS session and were not confirmed
 // yet, at most LANDED_DELTA_MAX per flush, oldest first (the rest ride the next flushes). A task
 // absorbed from an earlier session was written by that session's flush.
-landedDelta = () =>
-  doneTasks
-    .map(landedTaskRecord)
-    .filter((t) => !journal.landedSent.has(`${t.id}@${t.headSha}`))
-    .slice(0, LANDED_DELTA_MAX)
+const landedUnsent = () => doneTasks.map(landedTaskRecord).filter((t) => !journal.landedSent.has(`${t.id}@${t.headSha}`))
+landedDelta = () => landedUnsent().slice(0, LANDED_DELTA_MAX)
 for (const t of absorbedRecords) journal.landedSent.add(`${t.id}@${t.headSha}`)
 runJsonFor = (final) => ({
   runId: runId || null,
@@ -4542,7 +4681,9 @@ function stateFor(repo, gen = 0) {
   }
   const build = (kept, firstLen, fr) => {
     const omitted = mine.length - kept.length
-    return { version: 2, runId: runId || null, project: PROJECT_KEY === project ? trim(project, 200) : String(PROJECT_KEY), repo, runBranch: runBranchFor(repo), base: BASE_BRANCH, attempt: sessionAttempt, lastSeq: journal.seq, replansUsed: replans, fixRounds: Object.fromEntries(fr.slice(0, MARKER_TASK_CAP)), outputTokensSpent: runSpent(), session: journal.session || null, ship: gen, landedTasks: kept.map((d) => rec(d, firstLen)), ...(omitted ? { omitted } : {}) }
+    const replanIds = kept.filter((d) => !indexIds.has(d.id)).map((d) => d.id) // tasks a replan invented: a resume of this runId absorbs them from the marker too
+    // `text`: the project's wording when it is not the key itself, so a resume can say a marker was written for another wording of the same key
+    return { version: 2, runId: runId || null, project: PROJECT_KEY === project ? trim(project, 200) : String(PROJECT_KEY), ...(PROJECT_KEY === project ? {} : { text: trim(project, 120) }), repo, runBranch: runBranchFor(repo), base: BASE_BRANCH, attempt: sessionAttempt, lastSeq: journal.seq, replansUsed: replans, fixRounds: Object.fromEntries(fr.slice(0, MARKER_TASK_CAP)), outputTokensSpent: runSpent(), session: journal.session || null, ship: gen, landedTasks: kept.map((d) => rec(d, firstLen)), ...(replanIds.length ? { replan: replanIds } : {}), ...(omitted ? { omitted } : {}) }
   }
   const size = (st) => Math.ceil(utf8Encode(scrubPaths(JSON.stringify(st))).length / 3) * 4
   let kept = mine.slice(0, MARKER_TASK_CAP)
@@ -4584,6 +4725,13 @@ const closingRef = (ref) => (/^([\w.-]+\/[\w.-]+)?#\d+$/.test(ref) ? `Closes ${r
 // A zero-width space breaks the token and leaves the text reading the same. Applied to the whole
 // engine-built text; the marker line is appended after it.
 const defang = (s) => String(s).replace(/<!--/g, '<​!--').replace(/-->/g, '--​>')
+// Nor a CLOSING KEYWORD: the PR body closes exactly the issues the engine names (closingRef, one per
+// landed task it pushed), and free text — a title, an implementer's summary, a halt reason — must not
+// close another one: a summary flattened into the body as "… Closes #99" closed #99 on merge. GitHub's
+// and GitLab's keywords (close/fix/resolve/implement and their forms) before an issue reference get a
+// zero-width space after their first letter: the text reads the same, no tracker parses it.
+const CLOSING_RE = /\b(clos(?:e|es|ed|ing)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|implement(?:s|ed|ing)?)(\s*:?\s*)(?=(?:[\w.-]+\/[\w.-]+)?#\d|https?:\/\/\S+\/(?:issues|-\/issues|work_items)\/\d)/gi
+const unclose = (s) => String(s).replace(CLOSING_RE, (m, k, sep) => `${k[0]}​${k.slice(1)}${sep}`)
 const resumeLine = () => `re-run \`/grimoire:orchestrate\` on the same spec (\`${specPath}\`), plan (\`${planPath}\`) and project (\`${trim(project, 120)}\`); it finds this PR's saved state.`
 function prTitle() {
   const key = String(PROJECT_KEY)
@@ -4620,10 +4768,10 @@ function landedLines(repo, withSummary, pushed = null) {
     .map((d) => {
       const title = titleById.get(d.id) || ''
       const local = !!pushed && !pushed.has(d.id)
-      return `- ${local ? trackerRefOf(d) : closingRef(trackerRefOf(d))}${title ? ` — ${trim(title, 100)}` : ''} · ${d.headSha ? `\`${shortSha(d.headSha)}\`` : 'head SHA not reported'} · passed spec and quality review${local ? ' · **landed locally, not yet pushed**' : ''}${withSummary && d.summary ? `\n  ${trim(d.summary, 240)}` : ''}`
+      return `- ${local ? trackerRefOf(d) : closingRef(trackerRefOf(d))}${title ? ` — ${unclose(trim(title, 100))}` : ''} · ${d.headSha ? `\`${shortSha(d.headSha)}\`` : 'head SHA not reported'} · passed spec and quality review${local ? ' · **landed locally, not yet pushed**' : ''}${withSummary && d.summary ? `\n  ${unclose(trim(d.summary, 240))}` : ''}`
     })
 }
-const openLine = (o) => `- ${o.id}${titleById.get(o.id) ? ` — ${trim(titleById.get(o.id), 80)}` : ''} (${o.status})`
+const openLine = (o) => `- ${o.id}${titleById.get(o.id) ? ` — ${unclose(trim(titleById.get(o.id), 80))}` : ''} (${o.status})`
 const remoteAt = (repo) => {
   const st = shipStateOf(repo)
   return st.pushedHead ? `origin/\`${runBranchFor(repo)}\` is at \`${shortSha(st.pushedHead)}\`` : `origin/\`${runBranchFor(repo)}\` holds none of this run's work yet`
@@ -4637,7 +4785,7 @@ function draftBody(repo, stop, pushed = null, gen = 0) {
   const text = [
     `> 🚧 **Draft — built unattended by the grimoire loop**${runId ? ` (run \`${runId}\`)` : ''}. Each task below passed its own spec and quality review.`,
     `> Still to come before it is marked ready: the repo-wide terminal review${gate && gate.run ? `, the gate \`${gate.run}\`` : ''} and the final description. **Do not merge yet.**`,
-    ...(stop ? ['>', `> ⏸ **Halted:** ${trim(stop.reason, 500)}`] : []),
+    ...(stop ? ['>', `> ⏸ **Halted:** ${unclose(trim(stop.reason, 500))}`] : []),
     '>',
     `> **To resume** (after a halt, a closed session, or on another machine): ${resumeLine()}`,
     '',
@@ -4765,14 +4913,17 @@ function bookShip(repo, plan, r, label) {
   const foundReady = !!r && (r.ready === true || (str(r.prUrl) && r.draft === false && r.pushed !== true && !r.failedStep))
   if (foundReady || (r && str(r.prUrl) && r.draft === false)) st.draft = false
   else if (r && str(r.prUrl) && st.draft !== false) st.draft = true
-  const skipped = foundReady ? 'ready' : r && r.lockBusy === true ? 'lock' : null
+  const skipped = foundReady ? 'ready' : r && r.lockBusy === true ? 'lock' : r && r.unknown === true ? 'unknown' : null
   if (skipped) {
     ev.skipped = skipped
     if (r.failedStep === 'comment') ev.failedStep = 'comment'
     Object.assign(ev, { prUrl: st.prUrl, draft: st.draft, detail, disabled: st.disabled })
     emit('ship', ev)
     if (skipped === 'ready') log(`◎ ${label}: its PR ${st.prUrl} is out of draft — nothing pushed, its description left alone${halting ? (ev.failedStep ? ' · the status comment failed' : ' · the status comment posted') : `; the new work waits for ${repo}'s next terminal slot`}`)
-    else log(`⚠ ${label}: ${repo}'s ship lock was held by another ship or the gate${detail ? ` (${detail})` : ''} — nothing pushed or rewritten${halting ? '' : '; the next ship retries'}`)
+    else if (skipped === 'unknown') {
+      log(`⚠ ${label}: ${repo}'s PR${st.prUrl ? ` ${st.prUrl}` : ''} could not be read (gh failed) — it may be out of draft, so nothing was pushed or rewritten${halting ? `; relaunching resumes and ships what landed` : '; the next ship retries'}`)
+      if (!halting) requestEnvCheck(`an unreadable PR of ${repo}`)
+    } else log(`⚠ ${label}: ${repo}'s ship lock was held by another ship or the gate${detail ? ` (${detail})` : ''} — nothing pushed or rewritten${halting ? '' : '; the next ship retries'}`)
     flushJournal()
     return
   }
@@ -5139,6 +5290,10 @@ function settle(r) {
 // differs (sealPrompt). Tried twice; a seal that never succeeds only costs a resume on ANOTHER machine
 // (the local run.json still holds the state), so it is logged, never a failure of the slot.
 async function sealMarker(repo, marker) {
+  if (bodyReturned) {
+    log(`⚠ ${repo}: its gate returned after the run did — the PR's state marker is left unchecked (this machine's run.json holds the state)`)
+    return false
+  }
   for (let n = 0; n < 2; n++) {
     const label = `seal:${repo}${n ? `~r${n}` : ''}`
     const r = await agentT(sealPrompt(repo, shipStateOf(repo).prUrl, marker), {
@@ -5297,7 +5452,10 @@ function bookLateSlot(repo, r) {
   }
   // The halt ship skipped this repo while its slot owned the PR; the slot ended without a green gate,
   // so the draft would keep no banner and no status comment: ship them now.
-  if (haltShipsSkipped.has(repo) && !gateDone.has(repo) && shipStateOf(repo).landedHead) {
+  if (haltShipsSkipped.has(repo) && !gateDone.has(repo) && shipStateOf(repo).landedHead && bodyReturned) {
+    haltShipsSkipped.delete(repo)
+    log(`⚠ ${repo}: its terminal slot ended ${res.status} after the run returned — its halt ship is not dispatched; relaunching resumes and ships what landed`)
+  } else if (haltShipsSkipped.has(repo) && !gateDone.has(repo) && shipStateOf(repo).landedHead) {
     haltShipsSkipped.delete(repo)
     const said = res.gate && (str(res.gate.summary) || str(res.gate.concerns))
     const why = `${repo}'s terminal slot, still running when the run stopped, ended ${res.status}${said ? `: ${trim(said, 300)}` : ''}`
@@ -5886,6 +6044,20 @@ const environmentOf = () => ({ checks: [...envState.ran], failures: envState.fai
   emit('run.end', { status: halt ? 'halted' : 'drained', ...endSummary })
   flushJournal()
   await journal.chain
+  // The final chunk carries at most LANDED_DELTA_MAX details, and nothing came after it: a run that
+  // landed more than that since its last confirmed flush never wrote the rest to landed.jsonl. One more
+  // chunk per LANDED_DELTA_MAX, while each one confirms some (a writer that confirms none is not asked again).
+  for (let left = landedUnsent().length; journal.enabled && !journal.writerDead && left > 0; ) {
+    emit('landed.flush', { left })
+    flushJournal()
+    await journal.chain
+    const now = landedUnsent().length
+    if (now >= left) {
+      log(`⚠ landed.jsonl: ${now} landed task detail(s) not written — the writer confirmed none of the last chunk (the run itself is unaffected)`)
+      break
+    }
+    left = now
+  }
   if (journal.enabled)
     log(`◎ decision journal: ${journal.written} event(s) written in ${journal.flushes} chunk(s) → ${journal.runDir || TELEMETRY_DIR}${journal.mismatches ? ` · ${journal.mismatches} chunk(s) failed the line/byte check` : ''}${journal.dead ? ` · ${journal.dead} chunk(s) lost (writer died), ${journal.lostEvents} event(s)${journal.writerDead ? '; the writer was marked dead' : ''}` : ''}${journal.runJsonLost ? ` · ${journal.runJsonLost} run.json write(s) lost` : ''}`)
 }
@@ -5999,6 +6171,7 @@ log(
     `routing: ${Object.entries(routingStats.byModel).map(([m, n]) => `${m}×${n}`).join(' ') || '—'}, ${routingStats.escalations} escalation(s), ${routingStats.fallbacks} fallback(s) · ` +
     `replans: ${replans} · ${fmtTok(runSpent())} output tok this run`
 )
+bodyReturned = true // a result is built from here on; nothing more is dispatched (see bodyReturned)
 return {
   inputs: { specPath, planPath, project }, // the design artifacts this run was built from
   done: allResults.filter((r) => !r.gateStep && ok(r)),

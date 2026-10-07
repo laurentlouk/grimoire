@@ -72,6 +72,7 @@ const log = (x) => fs.appendFileSync(path.join(S, 'log'), x + '\\n')
 const a = process.argv.slice(2), op = a[0] + ' ' + a[1]
 const opt = (k) => { const i = a.indexOf(k); return i >= 0 ? a[i + 1] : undefined }
 if (rd('failview') && op === 'pr view') { log('view-failed'); process.stderr.write('HTTP 502\\n'); process.exit(1) }
+if (rd('faillist') && op === 'pr list') { log('list-failed'); process.stderr.write('HTTP 502\\n'); process.exit(1) }
 const url = rd('url').trim()
 const delay = Number(rd('delay', '0'))
 if (delay && (op === 'pr edit' || op === 'pr ready')) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay) }
@@ -118,7 +119,7 @@ export const receipt = (out) => {
   const pr = /^PR ok=(\d)(?: url=(\S*))?/m.exec(out) || []
   const draft = /^DRAFT (\w+)/m.exec(out)
   const failedStep = push[1] === '0' ? 'push' : pr[1] === '0' ? 'pr' : /^COMMENT ok=0/m.test(out) ? 'comment' : undefined
-  return { pushed: push[1] === '1', remoteHead: (/^PUSH ok=1 remote=(\S+)/m.exec(out) || [])[1] || '', prUrl: pr[2] || (/^READY url=(\S+)/m.exec(out) || [])[1] || '', draft: draft ? draft[1] === 'true' : undefined, hookBlocked: push[2] === '1', ready: /^READY /m.test(out), lockBusy: /^LOCK busy/m.test(out), failedStep, detail: out.slice(-300) }
+  return { pushed: push[1] === '1', remoteHead: (/^PUSH ok=1 remote=(\S+)/m.exec(out) || [])[1] || '', prUrl: pr[2] || (/^READY url=(\S+)/m.exec(out) || [])[1] || '', draft: draft ? draft[1] === 'true' : undefined, hookBlocked: push[2] === '1', ready: /^READY /m.test(out), lockBusy: /^LOCK busy/m.test(out), unknown: /^UNKNOWN /m.test(out), failedStep, detail: out.slice(-300) }
 }
 // the ship script of a landing, pointed at a sandbox
 export async function getScripts(X, c1, extra = {}) {

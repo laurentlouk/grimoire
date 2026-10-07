@@ -27,14 +27,18 @@ const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL
   const gateTake = ((/Before you push, take this repo's SHIP LOCK[\s\S]*?```bash\n([\s\S]*?)\n {2}```/.exec(got.gate) || [])[1] || '').replace(/^ {2}/gm, '')
   console.log('\n── F-1 · the ship lock cannot be created (.git not writable): fail fast, never spin')
   ok(!!land && !!gateTake, 'captured the land ship script and the gate lock script')
-  chmodSync(join(X.W, '.git'), 0o555)
+  // root writes through a 0555 directory: there, a regular file at the lock path makes `mkdir` fail the same way
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0
+  if (asRoot) { console.log('   (as root: .git cannot be made unwritable — a file at the lock path takes the same branch)'); writeFileSync(join(X.W, '.git', 'grimoire-ship-api.lock'), '') }
+  else chmodSync(join(X.W, '.git'), 0o555)
   for (const SHELL of SHELLS) {
     const r = X.exec(SHELL, land, { GRIMOIRE_SHIP_DEADLINE: '20' }, { timeout: 15000, killSignal: 'SIGKILL' })
     ok(r.signal === null && r.ms < 8000 && /^LOCK error: cannot create /m.test(r.out) && r.out.split('\n').length < 20, `${SHELL}: ship returns in ${r.ms} ms with LOCK error, nothing moves`)
     const g = X.exec(SHELL, gateTake, {}, { timeout: 15000, killSignal: 'SIGKILL' })
     ok(g.signal === null && g.ms < 8000 && /LOCK error: cannot create /.test(g.out) && /^LOCK busy/m.test(g.out), `${SHELL}: the gate's lock script returns in ${g.ms} ms (LOCK error, then LOCK busy for the gate's retry rule)`)
   }
-  chmodSync(join(X.W, '.git'), 0o755)
+  if (asRoot) rmSync(join(X.W, '.git', 'grimoire-ship-api.lock'), { force: true })
+  else chmodSync(join(X.W, '.git'), 0o755)
   X.done()
 }
 

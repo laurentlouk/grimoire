@@ -19,8 +19,9 @@ what it printed. The script stops itself before that limit.
   unreviewed commits), never change the PR's draft or ready state, never close or merge it.
 - The script decides on its own, and each of these is a result, not a problem: it waits for the
   repo's ship lock (another ship, or the gate, may hold it) and moves nothing when it stays busy;
-  it pushes nothing and leaves the description alone when the PR is out of draft (`READY`); it
-  leaves the description alone when the push failed, or when a newer one is already there.
+  it pushes nothing and leaves the description alone when the PR is out of draft (`READY`), or
+  when the PR could not be read at all (`UNKNOWN`: it may be out of draft); it leaves the
+  description alone when the push failed, or when a newer one is already there.
 - Run no other command: no git, no gh, no build, no test. Fix nothing, and never remove the lock
   yourself.
 - The script tidies worktrees: `git worktree prune` drops the records of worktrees whose
@@ -35,6 +36,7 @@ what it printed. The script stops itself before that limit.
 - `hookBlocked`: `PUSH ok=0 hook=1` → true.
 - `ready`: a `READY` line → true (the PR is out of draft: nothing was pushed to it).
 - `lockBusy`: a `LOCK busy` line → true.
+- `unknown`: an `UNKNOWN` line → true (the PR could not be read: nothing was pushed or rewritten).
 - `prUrl`: the `url=` value of the PR line ("" when it is empty or there is no PR line).
 - `draft`: the `DRAFT` line, `true` or `false`.
 - `failedStep`: the first of `push`, `pr`, `comment` whose line says `ok=0`; omit it when none did.
