@@ -135,7 +135,9 @@ function run(todo) {
         say(`${skill}: passed`)
       } else {
         failed++
-        const why = r.status === 2 ? 'the cost ceiling was reached before every case ran' : r.status === 1 ? `a case scored below ${THRESHOLD}` : 'the eval did not complete'
+        // exit 2 is a partial run: the CLI stopped before every case ran (its cost ceiling, or a
+        // login that failed; an expired one needs `/login` in an interactive `claude`)
+        const why = r.status === 2 ? 'the eval stopped before every case ran (the cost ceiling, or a failed login: see its output above)' : r.status === 1 ? `a case scored below ${THRESHOLD}` : 'the eval did not complete'
         say(`${skill}: ${why} (exit ${r.status ?? r.signal}); the report is under ${path.relative(ROOT, results)}/`)
       }
     }
