@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.10.0 — trust the learning
+
+Three changes that turn promises the harness already made into checks, drawn from a comparison
+with Anthropic's [AI-native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook):
+every gate trusts the tests, so a fix may not weaken them; a loop that learns by rewriting its
+skills needs those rewrites tested; and the agent that wrote a lesson may not approve it.
+
+**A fix must not weaken a test**
+- Loosening the test that exposed a finding is the cheapest way to make the finding go away, and
+  nothing caught it: the precheck only checks that tests moved with behaviour, and the
+  whole-task diff a re-review reads shows a test the task added and a fix then weakened as one
+  weak test, added. Every fix a review sends back (spec, quality and the terminal sweep) now gets
+  a fact sheet built from the fix's own diff by one fixed command (no model, no per-repo
+  configuration): the test files that existed before the fix and that it deleted, the assertions
+  it removed from them, the skips or focus markers it added. The terminal sweep has no task
+  range, so its fix range comes from the fix's own report, and its guard now reads the fix diff
+  too instead of having to find the commits.
+- The guard reads it and sends an unjustified weakening to the panel with a reason starting
+  `test weakened:`. In a re-review round exactly one reviewer gets it (break-it, else the spec
+  hawk, else the first lens), with the findings the fix answered, and raises it as a blocker
+  unless one of them asked for that test change (`briefs/guard.md`, `briefs/review.md`). The
+  verifier of that round is handed the fix diff too, since the whole range cannot show a removed
+  line (`briefs/verify.md`). The interactive `review` skill applies the same rule.
+- A removed assertion is cited by its line before the fix. Deletions of empty or binary test
+  files are listed, renames are followed (a test moved and loosened shows under its new path),
+  docs are never tests, and the sheet stops at 60 lines of 240 characters with a count of the rest.
+- Tested for real against a temp git repo in bash, zsh and dash: a removed `expect()`, an added
+  `it.skip`, an emptied Go `t.Errorf`, a deleted `test_*.py`, a Rust `#[ignore]`, a JUnit
+  `@Disabled`, an NUnit `[Ignore]`, a Cypress `should()`, a `tests.py`, a path with a space, a
+  renamed and loosened test; not code outside test paths, not docs, not tests the fix added;
+  `(none)` for a clean fix and a plain failure line when git cannot read the range. The engine
+  side covers the guard, one judge per re-review round (also on its retry), the verifier, and a
+  second fix round reading the second fix (`workflows/tests/fix-test-integrity.test.mjs`).
+
+**Skill evals run before a push**
+- `npm run evals:changed` (`scripts/skill-evals.mjs`) runs `claude plugin eval` for every skill
+  the branch changes (its directory or its generated cases), on your machine and your Claude
+  login: no API key, no CI bill. It evaluates the commit in a temporary detached worktree, so
+  what passes is exactly what is pushed. Each pass is remembered by the skill's content and the
+  threshold it met, in the repository's git dir, shared by its worktrees: a re-push, an amend or
+  a rebase that leaves a skill as it was runs nothing. By hand it refuses uncommitted skill
+  edits; it refuses a stale `evals/`. A skill fails when a case scores below
+  `GRIMOIRE_EVALS_THRESHOLD` (default 0.85); runs, concurrency and a cost ceiling are settings.
+- `.githooks/pre-push` (`npm run hooks` once per clone) checks every pushed ref and blocks the
+  push until each changed skill has passed. From a terminal it runs the evals; inside Claude
+  Code, a GUI client or another agent it prints the command instead (`GRIMOIRE_EVALS_RUN_IN_HOOK`
+  overrides it outside Claude Code). Once one ref is blocked, later refs are only checked. It
+  lets the push through, with a warning, without node or without a base branch to compare
+  with; `git push --no-verify` skips it. Until now nothing ran the evals unless someone
+  remembered to (`scripts/skill-evals.test.mjs`, with a fake `claude`).
+- New cases: `review` #5 (a fix that loosens an assertion and skips a test is not passed) and
+  `crystallize` #5 (a clean crystallize PR is still not merged by its author).
+
+**A human merges every crystallize PR**
+- The `crystallize` skill let the orchestrator merge a "clean" crystallize PR once a few had
+  come back clean; its loop brief said never merge, and the engine never did. They now agree: a
+  human merges, because the agent that wrote a lesson must not approve it. The clean checklist
+  stays, as what the PR body reports so the merge is quick, and "evals green" says how they
+  were run.
+
 ## 0.9.1 — the 0.9.0 follow-ups
 
 The minor findings recorded from the last review rounds of 0.9.0 (issue #14). None blocked a run

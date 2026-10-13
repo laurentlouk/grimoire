@@ -17,6 +17,9 @@ The header numbers the findings, gives the task verbatim and the exact diff to r
   proof in `evidence`. A REJECTED without evidence is counted as CONFIRMED.
 - A finding only a command can settle (a test, a build): run it in your own worktree, as the
   header's "Running commands" block says — never in the shared checkout.
+- A finding that a fix weakened a test is about the fix's own diff ("This round re-reviewed a
+  fix" in the header), where a removed line keeps its line number from before the fix: judge it
+  there. The whole range cannot show it, so its absence there is not proof.
 
 ## Do not
 - Re-grade severity, argue taste, or weigh whether a real defect "matters" — a real defect

@@ -256,7 +256,7 @@ flowchart TB
     qr -- "PASS" --> both
     both --> done
     qr -- "blocking findings" --> fix["FIX — same implementer\nfix brief = the gating findings only"]
-    fix --> guard{{"GUARD — cheap · read-only · multi-reviewer stages only\nreads the fix's OWN diff (pre-fix HEAD‥new HEAD)\nverifies every finding truly fixed &amp; fix contained\nbinary — NEW defects stay the panel's job"}}
+    fix --> guard{{"GUARD — cheap · read-only · multi-reviewer stages only\nreads the fix's OWN diff (pre-fix HEAD‥new HEAD)\nverifies every finding truly fixed &amp; fix contained\n&amp; no test weakened (fact sheet of the fix diff)\nbinary — NEW defects stay the panel's job"}}
     guard -- "PASS — panel NOT re-run" --> both
     guard -- "RE_REVIEW · guard died → full panel again" --> qr
     done["DONE / DONE_WITH_CONCERNS / DONE_PENDING_GATE\nlane? → serialized integrate into the run branch\nunblocks dependents · ship + journal flush (non-blocking)\nadvisory notes ride into the summary"]
@@ -307,6 +307,18 @@ all is unverifiable, so it gates anyway, carrying its summary as a synthesized m
 the full panel; after a fix, one cheap agent reads the fix's own diff and either passes the
 stage or sends it back to the panel. It is binary on purpose — finding *new* defects stays the
 panel's job.
+
+**A fix must not weaken a test.** Loosening the test that exposed a finding is the cheapest
+way to make the finding go away, and the whole-task diff a re-review reads cannot show it: a
+test the task added and a fix then weakened reads as one weak test, added. So every fix a
+review sends back (spec, quality, terminal sweep) gets a fact sheet built from the fix's own diff by one fixed command (no model): the test files
+that existed before the fix and that it deleted, the assertions it removed from them, and the
+skips or focus markers it added. The guard reads it and sends an unjustified weakening to the
+panel (`test weakened:`); in a re-review round exactly one reviewer gets it (break-it, else the
+spec hawk, else the first lens), with the findings the fix answered, and raises it as a
+blocker unless one of them asked for that test change; that round's verifier is handed the fix
+diff too, since the whole range cannot show a removed line. The lines are path and keyword
+candidates, so the agent judges them (`briefs/guard.md`, `briefs/review.md`, `briefs/verify.md`).
 
 **Failures are information.** A failed issue blocks only its dependents. When the scheduler is
 stuck, the replanner searches from the current state rather than restarting the original plan,

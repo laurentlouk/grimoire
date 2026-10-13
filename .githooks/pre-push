@@ -1,0 +1,16 @@
+#!/bin/sh
+# grimoire · pre-push: every skill this push changes must have passed its evals on exactly the pushed
+# content (scripts/skill-evals.mjs). From a terminal it evaluates what is left, with your Claude login;
+# inside Claude Code, a GUI client or another agent it prints the command instead. Once one ref is
+# blocked the push is, so later refs are only checked, never evaluated. Install once per clone:
+# `npm run hooks`. Skip once: `git push --no-verify`. Without node it warns and lets the push through.
+command -v node >/dev/null 2>&1 || { echo "grimoire evals: node is not on PATH, skill evals not checked" >&2; exit 0; }
+root=$(git rev-parse --show-toplevel) || exit 0
+[ -f "$root/scripts/skill-evals.mjs" ] || exit 0
+status=0
+mode=--hook
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case $local_sha in *[!0]*) ;; *) continue ;; esac # a branch deletion pushes nothing
+  node "$root/scripts/skill-evals.mjs" $mode --head "$local_sha" </dev/null || { status=1; mode=--check; }
+done
+exit $status
