@@ -8,7 +8,7 @@
 // checkout's first (freshness.mjs), so it only re-parses what its branch changed.
 import { existsSync } from 'node:fs'
 import { loadProject, scanRepo } from './project.mjs'
-import { openStore } from './store.mjs'
+import { openStore, SCHEMA_VERSION } from './store.mjs'
 import { runIndex } from './run.mjs'
 import { seed } from './freshness.mjs'
 import { Graph, sql, FOOTER } from './query.mjs'
@@ -92,16 +92,19 @@ export const TOOLS = [
   },
   {
     name: 'graph_sql',
-    description: 'A read-only SELECT over the graph for questions the other tools do not answer. Tables: files(id, repo, path, lang, is_test, node_id), nodes(id, file_id, kind, name, qualname, parent_id, line, end_line, signature, is_test), edges(src, dst, kind CALLS|IMPORTS|EXTENDS|IMPLEMENTS, confidence, line), imports(file_id, source, names, resolved), cochange(repo, a, b, n), repos(name, root, head, indexed_at).',
+    description: 'A read-only SELECT over the graph for questions the other tools do not answer. Tables: files(id, repo, path, lang, is_test, node_id), nodes(id, file_id, kind, name, qualname, parent_id, line, end_line, signature, is_test), edges(src, dst, kind CALLS|IMPORTS|EXTENDS|IMPLEMENTS, confidence, line), imports(file_id, source, names, resolved), cochange(repo, a, b, n), churn(repo, path, n: recent commits touching the file), repos(name, root, head, indexed_at).',
     params: { sql: { type: 'string', description: 'One SELECT or WITH … SELECT statement.' } },
     required: ['sql'],
     raw: true,
   },
 ]
 
-// Files that moved since the last index, per repo (cheap: stat only, no parsing).
+// Files that moved since the last index, per repo (cheap: stat only, no parsing). An index built by
+// another grimoire version is stale as a whole: the next refresh rebuilds it with the current rules.
 function staleness(project, db) {
   const out = {}
+  const schema = (() => { try { return db.prepare("SELECT value FROM meta WHERE key = 'schema'").get()?.value } catch { return null } })()
+  if (schema && schema !== SCHEMA_VERSION) { for (const repo of project.repos) out[repo.name] = 'built by another grimoire version: rebuilt on the next query'; return out }
   for (const repo of project.repos) {
     const known = new Map(db.prepare('SELECT path, size, mtime FROM files WHERE repo = ?').all(repo.name).map((f) => [f.path, f]))
     let changed = 0

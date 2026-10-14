@@ -38,8 +38,8 @@ export function loadProject(rootArg) {
 }
 
 // Directories never worth indexing: dependencies, build output, caches, generated trees.
-const SKIP_DIRS = new Set(['node_modules', '.git', '.grimoire', '.worktrees', 'vendor', 'dist', 'build', 'out', 'target', '.next', '.nuxt', '.svelte-kit', '.turbo', 'coverage', '__pycache__', '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache', 'Pods', 'DerivedData', '.gradle', '.idea', 'bower_components', 'third_party'])
-const SKIP_FILE = /\.(min|bundle|generated|pb)\.[^/]+$|\.d\.ts$|(^|\/)(package-lock|yarn\.lock|pnpm-lock)/
+const SKIP_DIRS = new Set(['node_modules', '.git', '.grimoire', '.worktrees', 'vendor', 'dist', 'build', 'out', 'target', '.next', '.nuxt', '.svelte-kit', '.turbo', 'coverage', '__pycache__', '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache', 'Pods', 'DerivedData', '.gradle', '.idea', 'bower_components', 'third_party', '.terraform', '.terragrunt-cache'])
+const SKIP_FILE = /\.(min|bundle|generated|pb)\.[^/]+$|\.d\.ts$|(^|\/)(package-lock|yarn\.lock|pnpm-lock)|\.terraform\.lock\.hcl$/
 
 // Minimal globs: `*` within a segment, `**` across segments, a bare name matches any segment.
 function compileGlobs(globs) {

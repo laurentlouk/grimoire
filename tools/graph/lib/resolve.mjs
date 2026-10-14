@@ -13,11 +13,12 @@
 //   unique-name   the only definition of that name in the repository
 //   ambiguous     one of ≤ MAX_AMBIGUOUS definitions of that name (each gets an edge)
 //   path          an import resolved to a file by its path
-// A name with more candidates than that, or on a receiver whose type the repository does not
-// define, stays unresolved: most such calls go to the standard library or a dependency.
+// A name with more candidates than that, on a receiver whose type the repository does not define,
+// or a standard-library method name (COMMON_METHODS) on a receiver whose type the syntax does not
+// state, stays unresolved: most such calls go to the standard library or a dependency.
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { familyOf } from './langs.mjs'
+import { familyOf, COMMON_METHODS } from './langs.mjs'
 
 const MAX_AMBIGUOUS = 3
 const CALLABLE = new Set(['function', 'method', 'constructor'])
@@ -181,6 +182,66 @@ export function resolveRepo(db, repo, repoAbs) {
   const seen = new Set()
   const emit = (src, dst, kind, conf, line) => { const k = `${src}|${dst}|${kind}`; if (seen.has(k) || src === dst && kind !== 'CALLS') return; seen.add(k); edgeIns.run(src, dst, kind, conf, line) }
   const inFiles = (cands, files) => cands.filter((c) => files.some((f) => f.id === c.file_id))
+  // A receiver that starts at a type the repository does not define (`Utc::now().timestamp()`,
+  // `UpdateItemOutput::builder().build()`, `new Intl.NumberFormat(..).format()`) or, in Rust, at a
+  // crate the repository does not have (`chrono::Utc::now()`, `std::env::var`) yields a dependency's
+  // value: its methods are the dependency's, whatever the repository names the same. Only the path
+  // before the first call counts, segment by segment: a call heading it to the repository's own
+  // constructor or factory, or a repository type, namespace or module among its scopes, keeps the
+  // chain in the repository, except that a Rust path is decided by its root alone (crate/self/super,
+  // a repository module, or the crate's own Cargo.toml names). SCREAMING_CASE heads are constants, and a
+  // property path with no call (`Api.users`, `App\Models\User`) is left to the rules below.
+  const moduleNames = new Set([...fileById.values()].flatMap((f) => [path.posix.basename(noExt(f.path)), ...f.dir.split('/')]).flatMap((m) => [m, m.replace(/-/g, '_')]))
+  for (const n of nodes) if (n.kind === 'module') moduleNames.add(n.name)
+  if (files.some((f) => f.lang === 'rust')) { // a crate is named by its Cargo.toml, not its folder (`lib/` → `my_lib`)
+    const dirs = new Set([...fileById.values()].filter((f) => f.family === 'rust').flatMap((f) => { const up = []; for (let x = f.dir; ; x = path.posix.dirname(x)) { up.push(x); if (x === '.' || x === '/') break } return up }))
+    for (const d of dirs) {
+      let toml = ''
+      try { toml = readFileSync(path.join(repoAbs, d, 'Cargo.toml'), 'utf8') } catch { continue }
+      const tables = toml.split(/^[ \t]*\[/m) // each table up to the next header
+      for (const t of tables.filter((sec) => /^(package|lib)\]/.test(sec))) { const m = /^\s*name\s*=\s*"([^"]+)"/m.exec(t); if (m) moduleNames.add(m[1].replace(/-/g, '_')) }
+      for (const t of tables.filter((sec) => /^(dev-|build-)?dependencies\]/.test(sec))) for (const m of t.matchAll(/^\s*([\w-]+)\s*=\s*\{[^}\n]*\bpath\s*=/gm)) moduleNames.add(m[1].replace(/-/g, '_')) // a local path crate
+    }
+  }
+  const IDENT = /^[\p{L}_$][\p{L}\p{N}_$]*/u
+  const isRepoScope = (family, name) => moduleNames.has(name) || (byName.get(`${family}|${name}`) || []).some((c) => CLASSY.has(c.kind) || c.kind === 'namespace')
+  const startsInDependency = (qual, family) => {
+    const constructed = /^new\s/.test(qual), lead = qual.replace(/^(new|await)\s+/, '')
+    const cut = lead.indexOf('(')
+    const segs = (cut < 0 ? lead : lead.slice(0, cut)).split(/::|\.|->|\\/).map((x) => (IDENT.exec(x.replace(/^[\s?!]+/, '')) || [''])[0]).filter(Boolean)
+    // the segment called first (`builder` in `Output::builder()`) is a function, not a scope; after
+    // `new`, the whole path names a type
+    const scopes = cut >= 0 && !constructed ? segs.slice(0, -1) : segs
+    if (!segs.length || SELF.test(segs[0])) return false
+    const head = segs[0]
+    // `Order().total()`, `NewServer(80).Start()`, `Meters(5.0).double_it()`: the call heading the
+    // chain is the repository's own constructor or factory
+    if (segs.length === 1 && cut >= 0 && (byName.get(`${family}|${head}`) || []).length) return false
+    // a Rust path is decided by its root: `aws_sdk::types::error::X` is the crate's even where the
+    // repository has an `error` module (a turbofish `make::<T>()` is not a path)
+    if (family === 'rust' && /^[\p{Ll}_]/u.test(head) && lead.startsWith(head + '::') && lead[head.length + 2] !== '<') return !/^(crate|self|super)$/.test(head) && !moduleNames.has(head)
+    if (scopes.some((x) => isRepoScope(family, x))) return false
+    return cut >= 0 && /^\p{Lu}/u.test(head) && /\p{Ll}/u.test(head)
+  }
+  // The type a receiver constructs, when the syntax says so: `new Store()`, `Store()`, `Store::new()`,
+  // `crate::geo::Store::new()`, `Reg.getInstance()`, `Store.shared`, `(new Util())`. One call at
+  // most, ending the receiver; the type is the last segment the repository defines as a type.
+  const constructedType = (qual, family) => {
+    let q = qual.trim()
+    while (/^\(.*\)$/s.test(q) && balanced(q.slice(1, -1))) q = q.slice(1, -1).trim()
+    const isNew = /^new\s/.test(q)
+    q = q.replace(/^new\s+/, '')
+    for (let prev; prev !== q;) { prev = q; q = q.replace(/<[^<>]*>/g, '') } // generics
+    const open = q.indexOf('(')
+    if (open >= 0 && (!q.endsWith(')') || !balanced(q.slice(open + 1, -1)))) return null
+    const segs = (open >= 0 ? q.slice(0, open) : q).split(/::|\.|->|\\/).map((x) => (IDENT.exec(x.trim()) || [''])[0])
+    if (!segs.length || segs.some((x) => !x)) return null
+    for (const x of isNew ? [segs[segs.length - 1]] : segs.slice().reverse()) if (classesNamed(family, x).length) return x
+    return null
+  }
+  const balanced = (t) => { let d = 0; for (const ch of t) { if (ch === '(') d++; else if (ch === ')' && --d < 0) return false } return d === 0 }
+  const SELF_CLASS = /^(self\.class|self\.__class__|type\(self\)|this\.constructor)$/ // the class of `self`
+  const superCall = (qual, family) => /^super\([^()]*\)$/.test(qual) || (family === 'php' && qual === 'parent')
   const stats = { calls: 0, resolved: 0 }
 
   for (const r of refs) {
@@ -236,11 +297,25 @@ export function resolveRepo(db, repo, repoAbs) {
         if (members.length) pick = { nodes: members, conf: 'qualified' }
         else if (hit.length) pick = { nodes: hit.slice(0, MAX_AMBIGUOUS), conf: 'import' }
       }
+      else if (startsInDependency(qual, from.family)) continue
       if (!pick) {
         const types = classesNamed(from.family, qLast)
         const members = cands.filter((c) => types.some((t) => t.id === c.parent_id))
         if (members.length) pick = { nodes: members.slice(0, MAX_AMBIGUOUS), conf: members.length === 1 || types.length === 1 ? 'qualified' : 'ambiguous' }
         else if (/^[A-Z]/.test(qLast) && !types.length && !/[.(]/.test(qual)) continue // a type the repo does not define: a dependency
+      }
+      if (!pick) {
+        // `x.len()`, `seen.has(k)`: an untyped receiver calling a standard-library name is that library's
+        // method far more often than the repository's one definition of the name. A receiver the syntax
+        // constructs from a repository type (`Store::new().len()`) is that type's; `super().update()`
+        // is the parent's.
+        if (COMMON_METHODS[from.family]?.has(name) && !superCall(qual, from.family)) {
+          const own = SELF_CLASS.test(qual) && selfType ? membersUp([selfType], cands) : []
+          const t = own.length ? null : constructedType(qual, from.family)
+          const members = own.length ? own : t ? membersUp(classesNamed(from.family, t), cands) : []
+          if (!members.length) continue
+          pick = { nodes: members.slice(0, MAX_AMBIGUOUS), conf: own.length ? 'same-class' : 'typed' }
+        }
       }
       if (!pick) {
         const methods = cands.filter((c) => c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
