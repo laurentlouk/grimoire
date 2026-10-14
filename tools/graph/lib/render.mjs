@@ -30,8 +30,10 @@ export async function renderGraph(project) {
     const files = db.prepare('SELECT id, repo, path, lang, size, is_test, node_id FROM files ORDER BY repo, path').all()
     const nodes = db.prepare("SELECT id, file_id, kind, COALESCE(qualname, name) AS name, line, is_test FROM nodes WHERE kind != 'file'").all()
     const edges = db.prepare('SELECT src, dst, kind, confidence FROM edges').all()
-    // each repository's 25 strongest pairs, each once (cochange.mjs stores both directions)
-    const cochange = db.prepare('SELECT repo, a, b, n FROM (SELECT repo, a, b, n, ROW_NUMBER() OVER (PARTITION BY repo ORDER BY n DESC, a, b) AS rk FROM cochange WHERE a < b) WHERE rk <= 25 ORDER BY n DESC, repo, a, b').all()
+    // each repository's 25 strongest pairs, each once: cochange.mjs stores a pair both ways unless one
+    // side's partner cap cut it, so keep a < b, or the one way it was stored
+    const cochange = db.prepare(`SELECT repo, a, b, n FROM (SELECT c.repo, c.a, c.b, c.n, ROW_NUMBER() OVER (PARTITION BY c.repo ORDER BY c.n DESC, c.a, c.b) AS rk FROM cochange c
+      WHERE c.a < c.b OR NOT EXISTS (SELECT 1 FROM cochange m WHERE m.repo = c.repo AND m.a = c.b AND m.b = c.a)) WHERE rk <= 25 ORDER BY n DESC, repo, a, b`).all()
     const hasChurn = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'churn'").get() // an index built before schema 3 has none
     const churn = new Map(hasChurn ? db.prepare('SELECT repo, path, n FROM churn').all().map((c) => [`${c.repo}\0${c.path}`, c.n]) : [])
     const system = systemMap(files, nodes, edges)
@@ -202,7 +204,7 @@ h2{font-size:15px;margin:22px 0 10px}.muted{color:var(--muted)}.grid2{display:gr
 .pill{display:inline-block;padding:1px 7px;border-radius:999px;border:1px solid var(--line);font-size:11px;color:var(--muted);margin-left:6px}
 .detail{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:20px}.detail h3{margin:0 0 6px;font-size:15px;overflow-wrap:anywhere}
 ul.links{list-style:none;padding:0;margin:6px 0 0}ul.links li{padding:3px 0;overflow-wrap:anywhere}a.jump{color:var(--accent);cursor:pointer;text-decoration:none}a.jump:hover{text-decoration:underline}
-.note{color:var(--muted);font-size:12px;margin:8px 0}details{margin-top:12px}summary{cursor:pointer;color:var(--muted);font-size:13px}
+.note{color:var(--muted);font-size:12px;margin:8px 0}.linkbtn{font:inherit;color:var(--accent);background:none;border:0;padding:0;cursor:pointer}.linkbtn:hover{text-decoration:underline}details{margin-top:12px}summary{cursor:pointer;color:var(--muted);font-size:13px}
 .toolbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;margin-bottom:12px}
 .svgbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;overflow-x:auto}.svgbox svg{display:block;width:100%;height:auto;min-width:720px}
 .detail .svgbox{border:0;padding:0;margin-top:10px}.detail .svgbox svg{min-width:600px;max-width:1000px}
@@ -401,13 +403,13 @@ function client() {
       h('p', { class: 'note' }, 'Solid: at least one link resolved by syntax · dashed: unique-name matches only · dotted: ambiguous matches only. Arrows point from the file that uses to the file it uses.'),
       h('details', null, h('summary', null, `Every file it uses (${f.out.size}), every file using it (${f.in.size}), its ${plural(f.defs.length, 'definition')}`),
         h('div', { class: 'grid2' },
-          h('div', null, h('h2', null, 'Uses'), h('ul', { class: 'links' }, byCount(f.out).slice(0, 200).map(([g, v]) => h('li', null, jumpFile(g), h('span', { class: 'pill' }, v[0]))))),
-          h('div', null, h('h2', null, 'Used by'), h('ul', { class: 'links' }, byCount(f.in).slice(0, 200).map(([g, v]) => h('li', null, jumpFile(g), h('span', { class: 'pill' }, v[0])))))),
+          h('div', null, h('h2', null, `Uses${f.out.size > 200 ? ' (the first 200 listed)' : ''}`), h('ul', { class: 'links' }, byCount(f.out).slice(0, 200).map(([g, v]) => h('li', null, jumpFile(g), h('span', { class: 'pill' }, v[0]))))),
+          h('div', null, h('h2', null, `Used by${f.in.size > 200 ? ' (the first 200 listed)' : ''}`), h('ul', { class: 'links' }, byCount(f.in).slice(0, 200).map(([g, v]) => h('li', null, jumpFile(g), h('span', { class: 'pill' }, v[0])))))),
         h('h2', null, 'Definitions'),
         h('ul', { class: 'links' }, f.defs.slice().sort((a, b) => a.line - b.line).map((n) => h('li', null, jumpSym(n), h('span', { class: 'pill' }, n.kind))))))
   }
   // real links: the keyboard reaches them, and the anchor they set is the navigation (readHash)
-  const jumpFile = (f, text) => h('a', { class: 'jump mono', href: `#file-${f.id}` }, text || f.shown)
+  const jumpFile = (f) => h('a', { class: 'jump mono', href: `#file-${f.id}` }, f.shown)
   const jumpSym = (n) => h('span', null, h('a', { class: 'jump', href: `#sym-${n.id}` }, n.name), h('span', { class: 'muted mono' }, `  ${loc(n)}`))
   function select(sel) {
     if (!sel || (!sel.sym && !sel.file)) return
@@ -589,7 +591,7 @@ function client() {
     wrap.append(canvas, tip)
     const legend = h('div', { class: 'legend' }, D.repos.filter((r) => !st.repo || r.name === st.repo).map((r) => h('span', null, h('i', { style: `background:${repoColor.get(r.name)}` }), r.name)))
     const head = h('div', { class: 'toolbar' }, seg, mod
-      ? h('span', null, 'Files of ', h('b', { class: 'mono' }, mod.key), ` (${mod.repo}, ${onMap < mod.files ? `${onMap} of its ${plural(mod.files, 'file')} on the map, the most connected; the map holds ${D.mapMax.toLocaleString()} at most` : plural(mod.files, 'file')}) and the files they link to by syntax · `, h('a', { class: 'jump', onclick: () => { st.module = null; render() } }, 'all files'))
+      ? h('span', null, 'Files of ', h('b', { class: 'mono' }, mod.key), ` (${mod.repo}, ${onMap === 0 ? `none of its ${plural(mod.files, 'file')} is among the ${D.mapMax.toLocaleString()} most connected the map holds` : onMap < mod.files ? `${onMap} of its ${plural(mod.files, 'file')} on the map, the most connected; the map holds ${D.mapMax.toLocaleString()} at most` : plural(mod.files, 'file')}) and the files they link to by syntax · `, h('button', { class: 'linkbtn', 'data-ctl': 'all-files', onclick: () => { st.module = null; render() } }, 'all files'))
       : h('span', { class: 'muted' }, `${prod.toLocaleString()} of ${plural(st.repo ? M.totals[st.repo] || 0 : M.total, 'production file')}${tests ? `, and ${plural(tests, 'test file')} where room was left` : ''} · the ${D.mapMax.toLocaleString()} most connected at most`))
     const note = h('p', { class: 'note' }, `Grouped by directory · the biggest are named, hover for the rest · lines are imports and calls between files${st.guesses ? '' : ', ambiguous-only links hidden'} · drag to pan, scroll to zoom, click to open, double-click to reset`)
     requestAnimationFrame(() => drawMap(canvas, tip, vis, core ? (m) => core.has(m.f.id) : vis))
@@ -726,8 +728,11 @@ function client() {
     document.documentElement.style.setProperty('--hdr', `${hd.offsetHeight + 12}px`)
     writeHash()
     if (keepFocus) { search.focus(); if (caret && caret[0] !== null) search.setSelectionRange(caret[0], caret[1]) }
-    else if (st.focusMain) { const t = document.querySelector('main .detail h3') || document.querySelector('main .toolbar'); if (t) { t.tabIndex = -1; t.focus({ preventScroll: true }) } }
-    else if (ctl) { const el = document.querySelector(`[data-ctl="${ctl}"]`); if (el) el.focus() }
+    else {
+      const t = st.focusMain && (document.querySelector('main .detail h3') || document.querySelector('main .toolbar'))
+      if (t) { t.tabIndex = -1; t.focus({ preventScroll: true }) }
+      else if (ctl) { const el = document.querySelector(`[data-ctl="${ctl}"]`); if (el) el.focus() }
+    }
     st.focusMain = false
   }
   readHash()

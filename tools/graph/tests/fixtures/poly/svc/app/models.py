@@ -33,12 +33,3 @@ class AuditLedger(Ledger):
 class Order:
     def total_order(self):
         return 0
-
-
-class Café:
-    @staticmethod
-    def fabrique():
-        return Café()
-
-    def servir(self):
-        return 1

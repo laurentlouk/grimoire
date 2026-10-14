@@ -384,7 +384,7 @@ r = await q('callers', { symbol: 'main', repo: 'web' })
 has(r, 'report  function  web/src/report.ts:3  [import]', 'a new file is picked up')
 has(await q('search', { query: 'slug' }), 'Nothing named like', 'a deleted file leaves the graph')
 has(await q('status'), 'files: python 4', 'status counts follow')
-{ // an index built by an older grimoire rebuilds on the next query, not only on the next write
+{ // an index built by another grimoire version rebuilds on the next query, not only on the next write
   const { openStore } = await import('../lib/store.mjs')
   const old = await openStore(path.join(PROJ, '.grimoire/graph/graph.db'))
   old.prepare("UPDATE meta SET value = '2' WHERE key = 'schema'").run(); old.close()
@@ -522,10 +522,16 @@ const { layoutMap } = await import('../lib/layout.mjs')
   const ins = db.prepare('INSERT INTO cochange(repo, a, b, n) VALUES(?, ?, ?, ?)')
   for (let i = 0; i < 150; i++) { ins.run('busy', `a${i}.ts`, `b${i}.ts`, 9 + (i % 5)); ins.run('busy', `b${i}.ts`, `a${i}.ts`, 9 + (i % 5)) } // stored both ways, as cochange.mjs does
   ins.run('quiet', 'x.ts', 'y.ts', 3); ins.run('quiet', 'y.ts', 'x.ts', 3)
+  // a hub: cochange.mjs keeps each file's 12 strongest partners, so a hub's later pairs are stored one way only
+  for (let i = 0; i < 20; i++) { ins.run('hub', 'aaa.ts', `p${String(i).padStart(2, '0')}.ts`, 2); if (i < 12) ins.run('hub', `p${String(i).padStart(2, '0')}.ts`, 'aaa.ts', 2) }
+  for (let i = 0; i < 20; i++) ins.run('hub', `zz${i}.ts`, 'aab.ts', 2) // stored one way, with the later name first
   db.close()
   const pageCo = await renderGraph({ dbPath: path.join(CO, '.grimoire/graph/graph.db') })
   const Dco = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageCo)[1].replace(/\\u003c/g, '<'))
   const quiet = Dco.cochange.filter(([r]) => r === 'quiet'), busy = Dco.cochange.filter(([r]) => r === 'busy')
+  const hub = Dco.cochange.filter(([r]) => r === 'hub')
+  ok(hub.length === 25 && new Set(hub.map(([, a, b]) => [a, b].sort().join(' '))).size === 25 && hub.some(([, a, b]) => a.startsWith('zz') || b.startsWith('zz')),
+    `change together: a pair stored one way only still counts, once (${hub.length} hub pairs)`)
   ok(JSON.stringify(quiet) === '[["quiet","x.ts","y.ts",3]]' && busy.length === 25 && busy.every(([, a, b]) => a < b),
     `change together: a quiet repository keeps its pair beside a busy one, 25 per repository, each pair once (${quiet.length} quiet, ${busy.length} busy)`)
 }

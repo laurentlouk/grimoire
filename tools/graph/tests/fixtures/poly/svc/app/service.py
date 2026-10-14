@@ -1,4 +1,4 @@
-from .models import User, Ledger, Order, Café
+from .models import User, Ledger, Order
 from app import util
 
 
@@ -25,6 +25,15 @@ def order_total():
 
 def touch():
     return Ledger().update()
+
+
+class Café:
+    @staticmethod
+    def fabrique():
+        return Café()
+
+    def servir(self):
+        return 1
 
 
 def commande():

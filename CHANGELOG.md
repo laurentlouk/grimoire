@@ -56,15 +56,16 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
 - File labels carry their folder; tables wrap paths and keep their counts visible; views have
   plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`). They hold for the index the page was
   rendered from: a re-parsed file gets new ids, and module numbers shift as modules change.
-- Keyboard: modules, neighbourhood items and treemap tiles are buttons (Enter or Space), and the
-  header keeps focus across re-renders.
+- Keyboard: every list row and link is a real link (`#sym-`, `#file-`, `#mod-`), drawn modules,
+  neighbourhood items and treemap tiles are buttons (Enter or Space), focus moves to what opened,
+  the header keeps focus across re-renders and the search keeps its caret.
 - The CSP admits only the page's own script, by its SHA-256, instead of any inline script: a name
   that slipped past escaping could no longer run code. One did during this work (an `esc()` whose
   last two replacements a trailing comment had swallowed); a test now pins `esc()` itself.
 - A generated 10,000-file index renders in about a second into a 3.3 MB page.
 
 **Checks**
-- `tools/graph/tests/graph.test.mjs`: 163 checks (84 before): false links and their legitimate
+- `tools/graph/tests/graph.test.mjs`: 164 checks (84 before): false links and their legitimate
   look-alikes in Rust, TypeScript and Python; file classes; churn (and a sweep that counts for
   none); schema migration on a query; modules, ranks and cross-repository links; the fixture's
   exact system map; the page helpers (escaping, anchors, link sureness, churn bands, treemap,
