@@ -44,5 +44,18 @@
       { "text": "Only run directories inside the telemetry dir are removed; committed ledgers and other directories are untouched", "passed": null, "evidence": "" },
       { "text": "Mentions telemetry.retentionDays in grimoire.config.json as the way to make the retention permanent", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 5,
+    "query": "How are the loop runs doing lately? What's our success rate, and why do runs halt?",
+    "should_trigger": true,
+    "expected_output": "Runs node <root>/scripts/render-logs.mjs summary (or summary --json) from the project root and answers from its outcomes block: runs by outcome (drained, halted, running, stale), run success as drained over finished runs and task landing as landed over settled tasks, each quoted with its counts, and the halts grouped by kind with the latest reason, noting the pre-0.9.0 ones are unclassified. Flags runs whose journal is incomplete (events missing, unfinished writes) as undercounted, and does not draw a trend from a handful of runs. Offers to render the page, whose scorecard shows the same numbers, without publishing it.",
+    "expectations": [
+      { "text": "Runs render-logs.mjs summary (text or --json) rather than counting events by hand", "passed": null, "evidence": "" },
+      { "text": "Reports run success (drained over finished) and task landing (landed over settled), each with its counts", "passed": null, "evidence": "" },
+      { "text": "Groups halts by kind with a reason, and says pre-0.9.0 halts are unclassified", "passed": null, "evidence": "" },
+      { "text": "Mentions runs with an incomplete journal or a stale running status instead of silently counting them", "passed": null, "evidence": "" },
+      { "text": "Does not publish, upload or share the page", "passed": null, "evidence": "" }
+    ]
   }
 ]

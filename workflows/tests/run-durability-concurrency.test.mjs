@@ -217,18 +217,18 @@ function journalEvents(calls) {
 {
   // Every journal writer hangs and is given up on at 120 ms. With a chunk every 2 events, the run queues
   // many chunks: each used to wait out its limit in turn, all of them at the end of the run.
-  const { result, calls, labels, logs } = await run('K-5 · two lost chunks in a row mark the writer dead: no more chunks are dispatched but the last', [T('PROJ-1'), T('PROJ-2'), T('PROJ-3')], (label, p) => {
+  const { result, calls, labels, logs } = await run('K-5 · two writers in a row that return nothing (a chunk, then its resend) mark the writer dead: no more chunks are dispatched but the last', [T('PROJ-1'), T('PROJ-2'), T('PROJ-3')], (label, p) => {
     if (label.startsWith('journal#')) return HANG()
     return happy(label, p)
   }, { args: { ...QUIET, telemetry: { enabled: true, flushEvery: 2 }, timeouts: { journal: { soft: 0.001, hard: 0.002 } } } })
   const writes = labels.filter((l) => l.startsWith('journal#'))
   const j = (result && result.telemetry.journal) || {}
-  eq(writes.length, 3, `three writer dispatches: two lost, then the final chunk (got ${writes.join(', ')})`)
+  eq(writes.length, 3, `three writer dispatches: the first chunk, one piece of its resend, then the final chunk (got ${writes.join(', ')})`)
   const end = journalEvents(calls.filter((c) => c.label === writes[writes.length - 1])).find((e) => e.type === 'run.end')
   ok(!!end, 'the last dispatch carries the final chunk (run.end)')
   ok(j.chunks > 3 && j.lost === j.chunks && j.written === 0, `every chunk is counted lost, dispatched or not (${j.lost}/${j.chunks})`)
   ok(!!end && j.lostEvents >= end.seq, `every event up to run.end (and any after it) is counted lost (${j.lostEvents} ≥ ${end && end.seq})`)
-  eq(logs.filter((l) => /telemetry writer lost 2 chunks in a row — marked dead/.test(l)).length, 1, 'logged once')
+  eq(logs.filter((l) => /telemetry writer returned nothing 2 times in a row — marked dead/.test(l)).length, 1, 'logged once')
 }
 {
   // flushEvery 1: run.end itself fills a chunk. That chunk is the final one, and still gets its attempt.

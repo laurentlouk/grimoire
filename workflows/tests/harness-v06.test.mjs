@@ -314,7 +314,7 @@ function journalWriter(prompt, { lie = false } = {}) {
   const heredocs = [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/g)].map((m) => Buffer.from(m[1].replace(/\s+/g, ''), 'base64').toString('utf8').replace(/\n$/, ''))
   const lines = heredocs[0]
   const run = JSON.parse(heredocs[1])
-  const file = (/F="\$DIR\/events\/(\d{8})\.jsonl"/.exec(prompt) || [])[1]
+  const file = (/; CHUNK=(\d{8}); /.exec(prompt) || [])[1]
   const dir = (/^DIR='([^']+)'$/m.exec(prompt) || [])[1] || '.grimoire/runs/20260923-120000-PROJ-600'
   writes.push({ file, dir, events: lines.split('\n').map((l) => JSON.parse(l)), run })
   const n = lines.split('\n').length
@@ -330,7 +330,8 @@ function journalWriter(prompt, { lie = false } = {}) {
   }, { extraArgs: { precheck: false, verifyFindings: false, runId: 'run-7', runMeta: { grimoireVersion: '0.6.0', briefsHash: 'abc123' }, telemetry: { flushEvery: 3 } } })
   const events = writes.flatMap((w) => w.events)
   const types = events.map((e) => e.type)
-  ok(labels.filter((l) => l.startsWith('journal#')).length === writes.length && writes.length >= 2, `flushed in ${writes.length} chunk(s) of ≤ 3`)
+  // `journal#N.rjK`: this writer never confirms run.json (it predates the receipt), so the final one is resent alone
+  ok(labels.filter((l) => /^journal#\d+$/.test(l)).length === writes.length && writes.length >= 2, `flushed in ${writes.length} chunk(s) of ≤ 3`)
   ok(writes.every((w) => w.dir === '.grimoire/runs/run-7'), 'every chunk goes to <telemetryDir>/<runId>')
   ok(writes.every((w) => w.file === String(w.events[0].seq).padStart(8, '0')), 'each chunk file is named by its first seq (a retried flush overwrites, never duplicates)')
   ok(events.every((e, i) => e.seq === i + 1), 'sequence numbers are gap-free and ordered')

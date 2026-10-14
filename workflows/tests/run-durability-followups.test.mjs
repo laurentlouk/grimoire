@@ -213,7 +213,9 @@ const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
 })
 {
   ok(!!script, 'U-6 · captured a journal script')
-  const instr = (D, LOG) => retarget(script, D).replace('PREV=$(sed', `echo "in $$" >> '${LOG}'; sleep 0.05; echo "out $$" >> '${LOG}'\nPREV=$(sed`)
+  // the lock lives in the writer's file: inline it (the file's own text) so the critical section can be marked
+  const WRITER = readFileSync(new URL('../scripts/journal-writer.sh', import.meta.url), 'utf8')
+  const instr = (D, LOG) => retarget(script, D).replace('\n. "$W"\n', () => `\n${WRITER}`).replace('PREV=$(sed', `echo "in $$" >> '${LOG}'; sleep 0.05; echo "out $$" >> '${LOG}'\nPREV=$(sed`)
   const depth = (LOG) => { let d = 0, max = 0; for (const l of (existsSync(LOG) ? readFileSync(LOG, 'utf8') : '').trim().split('\n').filter(Boolean)) { d += l.startsWith('in') ? 1 : -1; max = Math.max(max, d) } return max }
   for (const [what, plant, trials] of [['a dead pid', '99999\n', 6], ['no pid (its writer killed between mkdir and writing it)', null, 2]]) {
     section(`U-6a · 16 writers at once, a stale .lock.brk with ${what} planted, ${trials} trials: never two inside, nothing left`)

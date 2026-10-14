@@ -94,10 +94,14 @@ const receiptOf = (out) => {
   return { runDir: (/^RUNDIR (.+)$/m.exec(out) || [])[1] || '', lines: num(/^LINES (\d+)$/m), bytes: num(/^BYTES (\d+)$/m), runJson: (/^RUNJSON (ok|kept|bad)\b/m.exec(out) || [])[1], runJsonBytes: num(/^RUNJSON_BYTES (\d+)$/m), landed: num(/^LANDED ok (\d+)$/m) }
 }
 // A writer that confirms without touching disk (for capturing prompts): it reports what the script would.
+// A resend carries one payload only: its chunk, or run.json alone (see journalPrompt).
 const confirming = (p) => {
-  const [lines, rj, landed] = heredocs(p).map(unb64)
-  return { runDir: (/^DIR='([^']+)'$/m.exec(p) || [])[1], lines: lines.trim().split('\n').length, bytes: Buffer.byteLength(lines), runJson: 'ok', runJsonBytes: Buffer.byteLength(rj), landed: landed ? landed.trim().split('\n').length : 0 }
+  const hs = heredocs(p).map(unb64)
+  const has = { chunk: /"\$DIR\/\.chunk\.\$\$\.b64"/.test(p), rj: /"\$DIR\/\.runjson\.\$\$\.b64"/.test(p), landed: /"\$DIR\/\.landed\.\$\$\.b64"/.test(p) }
+  const lines = has.chunk ? hs.shift() : '', rj = has.rj ? hs.shift() : '', landed = has.landed ? hs.shift() : ''
+  return { runDir: (/^DIR='([^']+)'$/m.exec(p) || [])[1], lines: has.chunk ? lines.trim().split('\n').length : 0, bytes: Buffer.byteLength(lines), runJson: has.rj ? 'ok' : 'kept', runJsonBytes: Buffer.byteLength(rj), landed: landed ? landed.trim().split('\n').length : 0 }
 }
+const flushOnly = (x) => /^journal#\d+$/.test(x.label) // the flushes, not the resends of a chunk or of the final run.json
 const sh = (shell, script, env) => spawnSync(shell.path, ['-c', script], { encoding: 'utf8', env: env || process.env })
 const shAsync = (shell, script) => new Promise((res) => { const c = spawn(shell.path, ['-c', script]); let out = ''; c.stdout.on('data', (d) => (out += d)); c.on('close', (code) => res({ code, out })) })
 const retarget = (p, from, to) => bashOf(p).replaceAll(`DIR='${from}'`, `DIR='${to}'`)
@@ -226,7 +230,7 @@ const S2 = await capture('W-3 · (capture) session 2: flush #1 abandoned at its 
 const LEGACY = '{"runId":"run-s","attempt":1,"project":"PROJ-700","status":"halted","startedAt":"2026-09-01T00:00:00Z","checkpoint":{"lastSeq":5}}'
 {
   const zombie = S2.prompts.find((x) => x.label === 'journal#1').p
-  const rest = S2.prompts.filter((x) => x.label !== 'journal#1').map((x) => x.p)
+  const rest = S2.prompts.filter((x) => x.label !== 'journal#1' && flushOnly(x)).map((x) => x.p)
   const two = rest[0], last = rest[rest.length - 1]
   ok(seqOf(zombie) < seqOf(two) && seqOf(two) < seqOf(last), `seqs: zombie #1 ${seqOf(zombie)} < #2 ${seqOf(two)} < last ${seqOf(last)}`)
   ok(!/firstOfSession|PREV:-0\} \+ 1/.test(zombie) && (/SESSION=([0-9a-f]+)/.exec(zombie) || [])[1] === (/SESSION=([0-9a-f]+)/.exec(last) || [])[1], 'every flush carries the same session token, none a "first of session" bump')
@@ -271,7 +275,7 @@ const LEGACY = '{"runId":"run-s","attempt":1,"project":"PROJ-700","status":"halt
   mkdirSync(join(D, 'events'), { recursive: true })
   writeFileSync(join(D, 'run.json'), LEGACY)
   const zombie = S2.prompts.find((x) => x.label === 'journal#1').p
-  const rest = S2.prompts.filter((x) => x.label !== 'journal#1').map((x) => x.p)
+  const rest = S2.prompts.filter((x) => x.label !== 'journal#1' && flushOnly(x)).map((x) => x.p)
   for (const p of rest) sh(shell, retarget(p, S2.dir, D))
   const S3 = await capture('W-3b · (capture) session 3 resumes session 2\'s checkpoint', [T(1), T(2), T(3)], { runId: 'run-s', tel: TEL3, args: { resumeState: readRun(D).checkpoint }, index: { runBranches: [{ repo: 'api', local: 'a2aaaaa', remote: 'a2aaaaa', sync: 'same' }] } })
   ok(S3.prompts.every((x) => /SEED=3;/.test(x.p)), 'session 3 passes the attempt it knows from the checkpoint: SEED=3')

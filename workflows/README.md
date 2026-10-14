@@ -147,6 +147,7 @@ ignored, with a warning.)
 | `runsDir` | `runs` | where run ledgers are written |
 | `briefsDir` | `workflows/briefs` | where the dispatch briefs live |
 | `personasDir` | `workflows/personas` | where the review lenses live |
+| `scriptsDir` | next to `briefsDir` (`…/scripts`) | where the journal writer's file lives (`journal-writer.sh`); a missing or altered file makes the run carry the writer inline |
 | `worktreeDir` | `.worktrees` | where parallel lanes are checked out |
 | `baseBranch` | `origin/main` | the integration branch lanes branch from and reviews/sweeps diff against (`origin/master`, `origin/trunk`, …) |
 | `requireHook` | `null` | `{name, check, fix?, raw?}` — refuse to execute unless a tool hook is installed and registered in this session. `raw` (e.g. `'rtk proxy'`) is the prefix that runs a command with its output uncompressed: implement and gate prompts tell the agent to re-run a command as `<raw> <cmd>` when its output is empty, garbled or contradicts its exit code (without `raw`, the same rule without a command) |
@@ -162,7 +163,7 @@ ignored, with a warning.)
 | `maxOutputTokens` | — | cost fuse: this run's output tokens, counted across resumed sessions; reaching it halts as `budget_exhausted` |
 | `budgetFloor` | `80000` | stop dispatching when the turn's remaining token budget drops below this |
 | `claim` | — | `{identity}` — claim issues at hydration, never build one someone else started, release what did not land |
-| `telemetry` | `{enabled: true}` | the decision journal: `{enabled, dir: '.grimoire/runs', flushEvery: 40}` (`retentionDays` is read by `/grimoire:logs`) |
+| `telemetry` | `{enabled: true}` | the decision journal: `{enabled, dir: '.grimoire/runs', flushEvery: 40, flushBytes: 3000}` (a chunk goes at whichever comes first; `retentionDays` is read by `/grimoire:logs`) |
 | `runId` · `runMeta` | set by `/orchestrate` | the journal directory name (letters, digits, `.`, `_` and `-` only, and never only dots: an invalid one is ignored with a warning, and the journal starts a new dated run directory), and `{grimoireVersion, briefsHash, personasHash, configHash}` every event of the run is tagged with |
 | `resumeState` | — | the `checkpoint` of the run's newest local `run.json`. The engine also reads each run branch's PR state marker itself. The run-level counters (attempt, replans, fix rounds, sequence, spend) come from `resumeState` when there is one, whatever the markers say, else from the newest verified marker, bounded either way; the landed tasks come from both, each absorbed only when it is an issue of the project (or this run's replan task) and its SHA is verified on the run branch; learnings come from `resumeState` only. See "Resume" |
 | `trustNewerMarker` | `false` | `true` takes the higher of each run-level counter (attempt, sequence, replans and fix rounds spent, output tokens) from a verified PR marker NEWER than `resumeState`: this machine's `run.json` is behind a run that went on elsewhere. Each stays bounded as a marker's. Off by default: a PR body anyone with write access can edit never sets the budgets on its own. See "Resume" |
@@ -789,7 +790,16 @@ terminal-sweep finding on a harness file routed to crystallize; `replan` carries
 and `halt` its `kind`. Each carries a `seq` (a resumed session continues the checkpoint's;
 one without a checkpoint starts at 1), the cumulative output tokens `tok`, and its fields
 (reasons included). The script has no clock and no filesystem, so events are buffered and one haiku
-writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
+writer per chunk (`briefs/journal.md`) runs a short script: it sets the run directory, the session,
+the chunk's name and each payload's cksum, writes the payloads, checks that
+`<scriptsDir>/journal-writer.sh` is this engine's writer (its cksum) and sources it. The writer is
+`JOURNAL_WRITER` in the engine, byte for byte (`node scripts/build-journal-writer.mjs` writes the
+file, and a test checks it); it ships with the engine copy `/orchestrate` makes, next to the
+briefs. The haiku once retyped all of it, about 5 kB of shell, on every flush, with the payloads;
+it now retypes under 1 kB and the payloads. A flush that finds the file missing or different
+prints `WRITER missing` and writes nothing (`writer: 'missing'` in its receipt): the engine sends
+it again with the writer inline, and every later script too (`telemetry.journal.inlineWriter`).
+The writer:
 
 - decodes its payload: the chunk's lines, `run.json` and the landed-task detail travel
   **base64** in the prompt and the script decodes them (`base64 --decode`, else
@@ -816,7 +826,8 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   where `date +%s` does not work are the naps counted (the wait had no end there), and a clock
   that jumps (the machine slept) ages no lock;
 - writes the chunk to `<telemetry.dir>/<runId>/events/<first seq>.jsonl` — a retried or
-  replayed flush overwrites the same file, never appends duplicates;
+  replayed flush overwrites the same file, never appends duplicates. A chunk sent again after a
+  failed write goes to `<first seq>.r1.jsonl` (see below);
 - stamps the flush time into each line (`at`) in the shell — every event of one chunk shares
   it (the script has no clock; order within a chunk is `seq`);
 - stamps the `attempt`: the session number under this `runId`, registered once per session in
@@ -838,10 +849,10 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   `id`, `repo`, `status`, `ticket`, `title`, `runBranch`, the SHAs, `commits`, `summary` up to
   400 characters, `files` up to 50, with `attempt`, `at` and `k`, a key of its id and head) to
   `<runId>/landed.jsonl`, once: a line whose `k` the file already holds is skipped, so a resent
-  detail is never written twice. A flush sends at most 8 details, oldest first; the rest ride the
-  next flushes, and at the end of the run one more chunk per 8 follows the final one (a
-  `landed.flush` event) while each confirms some: the final chunk once carried 8 and nothing came
-  after it. The file's path reaches `awk` through the environment, never `-v` (which reads
+  detail is never written twice. A flush sends at most 8 details and at most 4,000 bytes of them
+  (one always goes), oldest first; the rest ride the next flushes, and at the end of the run one
+  more chunk per delta follows the final one (a `landed.flush` event) while each confirms some:
+  the final chunk once carried 8 and nothing came after it. The file's path reaches `awk` through the environment, never `-v` (which reads
   backslashes in a path as escapes);
 - prints the line and byte counts of the decoded chunk, `RUNJSON ok|kept|bad` with
   `RUNJSON_BYTES` (`RUNJSON kept: <why>` when a newer checkpoint is on disk), and
@@ -854,9 +865,26 @@ writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
   receipt), and all are counted in `telemetry.journal.runJsonKept`, because a session whose
   generation is behind the one on disk keeps every write and its checkpoint never persists.
 
-A writer that returns nothing loses its chunk (`telemetry.journal.lost`, and `lostEvents`).
-After two lost in a row the writer is marked dead: later chunks are counted lost without being
-dispatched, since each would otherwise wait out its 8-minute limit at the end of the run, and
+A chunk the writer did not confirm (it returned nothing, or its counts are not the chunk's) is
+sent again once, in two pieces that carry its events only: no `run.json`, no landed delta, so each
+script is small. Each piece goes to `<first seq>.r1.jsonl`, never over a chunk on disk (a writer
+that misreported a chunk it did write must not see it replaced by half of it); a seq written twice
+is harmless, as the reader keeps the first one seen. A piece still unconfirmed is lost
+(`telemetry.journal.lost` counts the chunks with events lost, `lostEvents` the events,
+`resent` the chunks sent again). A resend where no piece was written either turns resends off for
+the rest of the run: that writer cannot write a chunk at all (no decoder, say), and resending
+every chunk would only double the dispatches. Three of seven real runs had lost a chunk of 12 to
+24 events with no second try: the first chunk of two of them (`run.start` included), a middle
+one of the third.
+
+The final `run.json` (the run's `status` and `summary`) is sent again alone, at most twice, when
+the writer did not confirm it: no later flush rewrites it, and two drained runs stayed `running`
+on disk while their last chunk held `run.end` (`telemetry.journal.runJsonResent`). A `kept` one is
+no loss and is not resent.
+
+A writer that returns nothing counts toward the writer's death, whatever it carried. After two in
+a row the writer is marked dead: later chunks are counted lost without being dispatched, since
+each would otherwise wait out its 8-minute limit at the end of the run, nothing is resent, and
 only the final chunk (`run.end` and the final `run.json`) gets one more attempt.
 
 The checkpoint is version 2: `{version: 2, runId, attempt, replansUsed, learnings, fixRounds,
@@ -895,10 +923,14 @@ commits or files: detail stays in the local `run.json` and `landed.jsonl`; its `
 ever logged, never put in a prompt. The reconcile and the
 ship's PR view read the last marker of a body; one over 8,000 characters is not read.
 
-Chunks flush every `flushEvery` events, on every landing and after each ship, at every
-replan, before the final wave and at the end (before the ledger, so `crystallize` can read the
-finished journal). A landing is on disk minutes after it happens, not at the next flush
-forty events later. The directory is
+Chunks flush before the first dispatch (`run.start`, the startup checks and what was absorbed:
+the run is on disk from its start, and its first chunk is small), every `flushEvery` events or
+once the buffered events hold `flushBytes` bytes of JSON, on every landing and after each ship,
+at every replan, before the final wave and at the end (before the ledger, so `crystallize` can
+read the finished journal). A landing is on disk minutes after it happens, not at the next flush
+forty events later. The size limits are there because the writer retypes every byte as base64,
+and the chunks that did not arrive were among the biggest: two of them a first chunk held until
+the first landing, hours in. The directory is
 local and gitignored; `/grimoire:logs` renders it, and its `summary` is the cross-run evidence
 `crystallize` reads, grouped by grimoire version and briefs hash.
 
@@ -935,7 +967,7 @@ this run's spend against `maxOutputTokens`, the session probe's `toolLatencySec`
 dispatch past its soft limit, `{label, kind, softMin, outcome: 'accepted' | 'died' |
 'abandoned' | 'wedged' | 'pending'}`), `wedged` (the writers past their hard limit), `timedOut`
 (the readers given up on at their hard limit), and `journal`, the writer's receipt: `{runDir,
-events, written, chunks, mismatches, lost, lostEvents, runJsonLost, runJsonKept}`) · `harness` (the ledger
+events, written, chunks, mismatches, resent, lost, lostEvents, runJsonLost, runJsonResent, runJsonKept, inlineWriter}`) · `harness` (the ledger
 written and what crystallize produced; when PRs shipped but crystallize did not finish, the
 `note` says to run it by hand over them).
 

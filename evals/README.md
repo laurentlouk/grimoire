@@ -24,7 +24,7 @@ and no key. Running the cases is manual and paid, and needs the command-line `cl
 | graph | 5 | 1 | 2 | 2 |
 | implement | 5 | 1 | 1 | 3 |
 | launch-agent | 5 | 1 | 1 | 3 |
-| logs | 4 | 1 | 1 | 2 |
+| logs | 5 | 1 | 1 | 3 |
 | orchestrate | 12 | 1 | 1 | 10 |
 | review | 5 | 1 | 1 | 3 |
 | roast | 5 | 1 | 1 | 3 |
