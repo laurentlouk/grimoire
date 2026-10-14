@@ -102,13 +102,17 @@ function leftovers(p) {
 
 // run.json's status, unless the newest session's run.end says the run is over: the final run.json
 // write is the one a dying writer loses (seen in the field: drained runs left at "running"), and
-// run.end travels in an events chunk of its own. A later session without a run.end is still running.
+// run.end travels in an events chunk of its own. It also wins over a run.json an EARLIER session
+// wrote (its `attempt` below the newest session's): a session whose generation is behind the one on
+// disk keeps every run.json write, so session 1's "halted" can outlive session 2's drain. A later
+// session without a run.end is still running.
 function statusOf(run, events) {
   const declared = typeof run.status === 'string' ? run.status : null
   const last = events.length ? Math.max(...events.map(attemptOf)) : null
   const end = [...events].reverse().find((e) => e.type === 'run.end' && attemptOf(e) === last && typeof e.status === 'string')
-  if (end && (!declared || declared === 'running'))
-    return { status: end.status, statusNote: declared ? `run.json still says running (its last write lost); run.end #${s(end.seq)} of session ${last} says ${end.status}` : null }
+  const older = num(run.attempt) !== null && last !== null && num(run.attempt) < last
+  if (end && (!declared || declared === 'running' || (older && declared !== end.status)))
+    return { status: end.status, statusNote: declared ? `run.json still says ${declared} (${older ? `written by session ${run.attempt}` : 'its last write lost'}); run.end #${s(end.seq)} of session ${last} says ${end.status}` : null }
   return { status: declared ?? 'running', statusNote: null }
 }
 const s = (v) => (v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v))
@@ -368,12 +372,16 @@ export function runOutcome(run, now = Date.now()) {
   }
   const activeMin = Object.keys(spans).length ? Math.round(Object.values(spans).reduce((m, a) => m + a.to - a.from, 0) / 60000) : null
   // events the journal lost: gaps in seq within a session, and before the first session's first event
+  // when that event is not its run.start (a session opens with run.start; one resumed under a new
+  // runId, from a PR's state marker, starts it past 1 and has lost nothing)
   const seqs = {}
   for (const e of ev) if (num(e.seq) !== null) (seqs[attemptOf(e)] ||= []).push(e.seq)
+  const firstAttempt = Math.min(...Object.keys(seqs).map(Number))
+  const opensWithStart = ev.some((e) => e.type === 'run.start' && attemptOf(e) === firstAttempt && e.seq === Math.min(...(seqs[firstAttempt] || [])))
   let missingEvents = 0
   for (const [a, list] of Object.entries(seqs)) {
     list.sort((x, y) => x - y)
-    if (Number(a) === Math.min(...Object.keys(seqs).map(Number))) missingEvents += list[0] - 1
+    if (Number(a) === firstAttempt && !opensWithStart) missingEvents += list[0] - 1
     for (let i = 1; i < list.length; i++) missingEvents += Math.max(0, list[i] - list[i - 1] - 1)
   }
   const personas = {}

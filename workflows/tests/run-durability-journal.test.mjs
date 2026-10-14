@@ -20,7 +20,7 @@
 //  Same stubbed runtime as the other loop tests. The writer scripts of JR-1 are RUN, in bash,
 //  zsh and dash (whichever exist), with a payload mistyped the way a writer copies one wrong;
 //  the journal they leave is read back with scripts/render-logs.mjs.
-import { readFileSync, readdirSync, mkdtempSync, rmSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, mkdtempSync, rmSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -141,6 +141,22 @@ try {
     ok(!!loaded && loaded.status === 'drained' && !loaded.statusNote && readFileSync(join(D, 'run.json'), 'utf8').includes('"status":"drained"'), 'run.json says drained, written by the resend (no status repaired from run.end)')
     ok(!!out && out.journal.missingEvents === 0 && seqs.length === j.events && seqs.every((s, i) => s === i + 1), `render-logs reads every event, seq 1 to ${j.events}, none missing`)
     ok(j.resent === 1 && j.lost === 0 && j.lostEvents === 0 && j.written === j.events && j.runJsonResent === 1, `telemetry.journal: resent 1, lost 0, written ${j.written}/${j.events}, final run.json resent 1`)
+  }
+
+  // ══════════════ JR-1b · the same from session 2: pieces are `<firstSeq>.r1.a2.jsonl` ══════════════
+  if (SHELLS.length) {
+    const shell = SHELLS[0]
+    const TEL = fresh('tel')
+    mkdirSync(join(TEL, 'run-a2', 'events'), { recursive: true })
+    writeFileSync(join(TEL, 'run-a2', 'sessions'), 'deadbeef 1\n') // an earlier launch registered attempt 1
+    const r = await run(`JR-1b · ${shell.name}: a second session's mistyped first chunk`, [T(1)], (label, p) => {
+      if (!label.startsWith('journal#')) return happy(label)
+      return receiptOf(sh(shell, label === 'journal#1' ? mistype(bashOf(p), 0) : bashOf(p)).stdout)
+    }, { args: { ...QUIET, runId: 'run-a2', telemetry: { dir: TEL } } })
+    const files = readdirSync(join(TEL, 'run-a2', 'events')).sort()
+    ok(files.length > 0 && files.every((f) => /\.a2\.jsonl$/.test(f)) && files.filter((f) => /^\d{8}\.r1\.a2\.jsonl$/.test(f)).length === 2, `the pieces carry the session: ${files.join(' ')}`)
+    const [loaded] = loadRuns(TEL)
+    ok(!!loaded && loaded.events.every((e) => e.attempt === 2) && runOutcome(loaded).journal.missingEvents === 0 && r.result.telemetry.journal.lost === 0, 'every event read back as attempt 2, none missing')
   }
 
   // ══════════════ JR-2 · the first flush goes before the first dispatch ══════════════

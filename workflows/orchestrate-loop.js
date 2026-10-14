@@ -2428,7 +2428,7 @@ function emit(type, data) {
   journal.pendingBytes += utf8Bytes(JSON.stringify(ev))
   if (journal.pending.length >= JOURNAL_FLUSH_EVERY || journal.pendingBytes >= JOURNAL_FLUSH_BYTES) flushJournal()
 }
-let runJsonFor = () => ({}) // assigned once run state exists (see below)
+let runJsonFor = null // assigned once run state exists (see below): no flush goes before it, so none writes an empty run.json
 let landedDelta = () => [] // the landed tasks whose detail landed.jsonl does not hold yet (see below)
 // One writer dispatch. Its chunk (`lines`), `runJson` and `landed` delta are each optional: a resend
 // carries one of them only, so its payload is small. A writer that returns nothing counts toward
@@ -2497,7 +2497,7 @@ async function resendChunk(n, batch) {
   if (lost.length) loseEvents(lost)
 }
 function flushJournal() {
-  if (!journal.enabled || !journal.pending.length || bodyReturned) return journal.chain
+  if (!journal.enabled || !journal.pending.length || bodyReturned || !runJsonFor) return journal.chain // before runJsonFor: the events wait for the start flush
   const batch = journal.pending.splice(0)
   journal.pendingBytes = 0
   const n = ++journal.flushes

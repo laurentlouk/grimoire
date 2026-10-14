@@ -61,7 +61,7 @@ The page opens on it, and `summary` prints it first (`scorecard` and one `outcom
 - **Reviewer lenses** (reviews, FAIL rate and verify overturns per persona) and **Repositories** (tasks landed, gates passed, failed or not applicable).
 - **journal completeness**: events missing (gaps in `seq` within a session, and before the first session's first event), unfinished writes (the writer's `<file>.<pid>`, `.b64`, `.s` or `.d` temp files left in the run dir), malformed lines, and statuses taken from `run.end`.
 
-Two readings to know. A run whose run.json still says `running` while its newest session wrote a `run.end` is reported with the `run.end` status, and the overview says so: the final run.json write is the one a dying writer loses. A run with events missing has numbers that undercount: say so when you quote them. Quote rates with their counts (`3/6`), and do not draw a conclusion from a handful of runs.
+Two readings to know. A run whose run.json still says `running`, or was written by an earlier session, while its newest session wrote a `run.end` is reported with the `run.end` status, and the overview says so: the final run.json write is the one a dying writer loses, and a session whose generation is behind the one on disk keeps every write. A run with events missing has numbers that undercount: say so when you quote them. Quote rates with their counts (`3/6`), and do not draw a conclusion from a handful of runs.
 
 ## Prune old runs
 

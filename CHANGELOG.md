@@ -23,8 +23,8 @@ scripts run for real in bash, zsh and dash).
   adds `scorecard` and one `outcomes` row per run. Both use one function, so the CLI and the page
   never disagree.
 - **A run whose final run.json write was lost no longer reads as `running`.** When the newest
-  session wrote a `run.end`, its status wins over a `running` run.json, and the overview says where
-  the status came from. A run still `running` with no journal write for 12 h is marked stale.
+  session wrote a `run.end`, its status wins over a `running` run.json, or one an earlier session
+  wrote, and the overview says where the status came from. A run still `running` with no journal write for 12 h is marked stale.
 - **A lost chunk is counted.** These are shown as an incomplete journal, so numbers that undercount
   say so:
   - gaps in `seq` within a session, and before the first session's first event

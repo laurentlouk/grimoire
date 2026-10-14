@@ -513,6 +513,33 @@ try {
   ok(/running · stale/.test(text7) && /⚠ 4 event\(s\) missing, 1 unfinished write\(s\), status from run\.end/.test(text7), 'the runs table marks the stale run and the incomplete journal')
   ok(/status: run\.json still says running/.test(text7) && /halted in session 1, then resumed: \[environment\]/.test(text7),
     "the overview says where its status came from, and shows session 1's halt as resumed, not as the run's verdict")
+
+  // ══════ 8 · outcomes: a resume under a new runId, and a run.json an earlier session wrote ══════
+  section('8 · outcomes: a session that opens with run.start lost nothing before it; an older session\'s run.json loses to the newest run.end')
+  const RUNS8 = join(ROOT, 'resumes', '.grimoire', 'runs')
+  const meta8 = { grimoireVersion: '0.9.1', briefsHash: 'ffff666', personasHash: 'p6', configHash: 'c6' }
+  const write8 = (runId, run, events) => {
+    mkdirSync(join(RUNS8, runId, 'events'), { recursive: true })
+    writeFileSync(join(RUNS8, runId, 'run.json'), JSON.stringify({ runId, project: 'P8', meta: meta8, startedAt: iso(1), updatedAt: iso(0), ...run }))
+    writeFileSync(join(RUNS8, runId, 'events', `${pad(events[0].seq)}${events[0].attempt > 1 ? `.a${events[0].attempt}` : ''}.jsonl`), events.map((e) => JSON.stringify({ at: iso(0), tok: 1, ...e })).join('\n') + '\n')
+  }
+  // resumed on another machine from a PR's state marker: a new run dir, attempt 1 continues at seq 61
+  write8('run-moved', { status: 'drained', attempt: 1 }, [
+    { seq: 61, attempt: 1, type: 'run.start', project: 'P8', mode: 'execute', meta: meta8, resumed: true, repos: ['api'] },
+    { seq: 62, attempt: 1, type: 'run.end', status: 'drained', done: 2, failed: 0, blocked: 0, prs: 1, tokens: 10 },
+  ])
+  // session 1 halted and wrote run.json; session 2 drained, its run.json writes all kept (its generation behind)
+  write8('run-kept', { status: 'halted', attempt: 1 }, [
+    { seq: 9, attempt: 2, type: 'run.start', project: 'P8', mode: 'execute', meta: meta8, resumed: true, repos: ['api'] },
+    { seq: 10, attempt: 2, type: 'run.end', status: 'drained', done: 3, failed: 0, blocked: 0, prs: 1, tokens: 10 },
+  ])
+  const s8 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json'], { cwd: join(ROOT, 'resumes'), encoding: 'utf8' })
+  let S8 = null
+  try { S8 = JSON.parse(s8.stdout) } catch {}
+  const o8 = (id) => S8 && S8.outcomes.find((o) => o.runId === id)
+  ok(o8('run-moved') && o8('run-moved').journal.missingEvents === 0, 'a session that opens with run.start past seq 1 (a resume under a new runId) lost nothing before it')
+  ok(o8('run-kept') && o8('run-kept').status === 'drained' && /run\.json still says halted \(written by session 1\); run\.end #10 of session 2 says drained/.test(o8('run-kept').journal.statusNote),
+    "session 1's halted run.json loses to session 2's run.end, and says so")
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }
