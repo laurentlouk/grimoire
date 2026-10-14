@@ -356,6 +356,108 @@ try {
   const g9 = S5 && S5.groups.find((g) => g.version === '0.9.0')
   ok(g9 && g9.firstRound.total === 2 && g9.firstRound.passed === 1,
     `first-round pass skips the discarded quality round: spec failed round 0, quality passed its re-run → 1/2 (got ${g9 ? `${g9.firstRound.passed}/${g9.firstRound.total}` : 'none'})`)
+
+  // ══════ 6 · outcomes and the scorecard ══════
+  section('6 · outcomes: a lost final run.json write, stale runs, lost events, and the scorecard over them')
+  const ROOT6 = join(ROOT, 'outcomes')
+  const RUNS6 = join(ROOT6, '.grimoire', 'runs')
+  const meta6 = { grimoireVersion: '0.9.1', briefsHash: 'eeee555', personasHash: 'p5', configHash: 'c5' }
+  // events as one chunk per attempt, from a given first seq; `at` steps by an hour within an attempt
+  const writeEvents = (runId, attempt, firstSeq, startHoursAgo, events) => {
+    const d = join(RUNS6, runId, 'events')
+    mkdirSync(d, { recursive: true })
+    const at0 = Date.now() - startHoursAgo * 3600000
+    const lines = events.map((e, i) => JSON.stringify({ seq: firstSeq + i, at: new Date(at0 + i * 3600000).toISOString(), tok: (i + 1) * 1000, attempt, ...e }))
+    writeFileSync(join(d, `${pad(firstSeq)}${attempt > 1 ? `.a${attempt}` : ''}.jsonl`), lines.join('\n') + '\n')
+  }
+  const runJson6 = (runId, extra) => { mkdirSync(join(RUNS6, runId), { recursive: true }); writeFileSync(join(RUNS6, runId, 'run.json'), JSON.stringify({ runId, project: 'P6', meta: meta6, ...extra })) }
+  // E · session 1 halted on the environment; session 2 resumed and drained, but run.json's last write was lost
+  // (it still says running), the first chunk of session 1 never landed (seq 1–4) and left its .b64 behind.
+  runJson6('run-epsilon', { startedAt: new Date(Date.now() - 30 * 3600000).toISOString(), updatedAt: new Date(Date.now() - 20 * 3600000).toISOString(), status: 'running', summary: null })
+  writeEvents('run-epsilon', 1, 5, 30, [
+    { type: 'settle', task: 'E-1', repo: 'web', status: 'DONE' },
+    { type: 'halt', reason: 'environment: commit:web exited 128', kind: 'environment' },
+    { type: 'run.end', status: 'halted', done: 1, failed: 0, blocked: 2, prs: 0, tokens: 1000 },
+  ])
+  writeEvents('run-epsilon', 2, 8, 20, [
+    { type: 'run.start', project: 'P6', mode: 'execute', meta: meta6, resumed: true, repos: ['web'] },
+    { type: 'route', task: 'E-2', repo: 'web', agent: 'web-engineer', model: 'sonnet', reason: 'default', fallback: false },
+    { type: 'dispatch', task: 'E-2', repo: 'web', agent: 'web-engineer', model: 'sonnet', lane: 'direct', cycle: 1 },
+    { type: 'late', label: 'impl:E-2', task: 'E-2', kind: 'writer', softMin: 40 },
+    { type: 'late', label: 'guard:E-2', task: 'E-2', kind: 'reader', softMin: 40 },
+    { type: 'review', task: 'E-2', stage: 'spec', persona: 'Spec Hawk', verdict: 'PASS', gating: 0, advisory: 0, round: 0 },
+    { type: 'settle', task: 'E-2', repo: 'web', status: 'DONE_WITH_CONCERNS' },
+    { type: 'gate', repo: 'web', status: 'DONE_WITH_CONCERNS', applies: true, prUrl: 'https://example.invalid/pr/60' },
+    { type: 'run.end', status: 'drained', done: 3, failed: 0, blocked: 0, prs: 1, tokens: 6000 },
+  ])
+  writeFileSync(join(RUNS6, 'run-epsilon', 'events', '00000001.jsonl.4242.b64'), 'eyJzZXEiOjF9')
+  // Z · resumed after a halt and still running, written to 1 h ago: running, not stale, not repaired
+  runJson6('run-zeta', { startedAt: new Date(Date.now() - 5 * 3600000).toISOString(), updatedAt: new Date(Date.now() - 3600000).toISOString(), status: 'running', summary: null })
+  writeEvents('run-zeta', 1, 1, 5, [
+    { type: 'run.start', project: 'P6', mode: 'execute', meta: meta6, repos: ['api'] },
+    { type: 'halt', reason: 'environment: docker is not running', kind: 'environment' },
+    { type: 'run.end', status: 'halted', done: 0, failed: 0, blocked: 1, prs: 0, tokens: 500 },
+  ])
+  writeEvents('run-zeta', 2, 4, 1, [
+    { type: 'run.start', project: 'P6', mode: 'execute', meta: meta6, resumed: true, repos: ['api'] },
+    { type: 'dispatch', task: 'Z-1', repo: 'api', agent: 'api-engineer', model: 'sonnet', lane: 'direct', cycle: 1 },
+  ])
+  // H · halted for good on a gate failure; T · "running" with no write for two days: stale
+  runJson6('run-eta', { startedAt: new Date(Date.now() - 50 * 3600000).toISOString(), updatedAt: new Date(Date.now() - 48 * 3600000).toISOString(), status: 'halted',
+    summary: { done: 1, failed: 1, blocked: 0, prs: 0, halt: { reason: 'gate failed twice', kind: null } } })
+  writeEvents('run-eta', 1, 1, 50, [
+    { type: 'run.start', project: 'P6', mode: 'execute', meta: meta6, repos: ['api'] },
+    { type: 'review', task: 'H-1', stage: 'spec', persona: 'Spec Hawk', verdict: 'FAIL', gating: 1, advisory: 0, round: 0 },
+    { type: 'settle', task: 'H-1', repo: 'api', status: 'DONE' },
+    { type: 'settle', task: 'H-2', repo: 'api', status: 'SPEC_FAILED' },
+    { type: 'gate', repo: 'api', status: 'GATE_FAILED', applies: true, prUrl: '' },
+    { type: 'halt', reason: 'gate failed twice' },
+  ])
+  runJson6('run-theta', { startedAt: new Date(Date.now() - 60 * 3600000).toISOString(), updatedAt: new Date(Date.now() - 50 * 3600000).toISOString(), status: 'running', summary: null })
+  writeEvents('run-theta', 1, 1, 60, [
+    { type: 'run.start', project: 'P6', mode: 'execute', meta: meta6, repos: ['api'] },
+    { type: 'dispatch', task: 'T-9', repo: 'api', agent: 'api-engineer', model: 'sonnet', lane: 'direct', cycle: 1 },
+  ])
+  const s6 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json'], { cwd: ROOT6, encoding: 'utf8' })
+  let S6 = null
+  try { S6 = JSON.parse(s6.stdout) } catch {}
+  const out6 = (id) => S6 && S6.outcomes.find((o) => o.runId === id)
+  const eps = out6('run-epsilon'), zeta = out6('run-zeta'), eta = out6('run-eta'), theta = out6('run-theta')
+  ok(eps && eps.status === 'drained' && /run\.json still says running.*run\.end #16 of session 2 says drained/.test(eps.journal.statusNote),
+    'a drained run whose final run.json write was lost reads as drained, from the newest session\'s run.end, and says so')
+  ok(eps && eps.tasks.landed === 3 && eps.tasks.blocked === 0 && eps.prs === 1 && eps.attempts === 2, "its tasks and PRs come from that run.end, not session 1's")
+  ok(eps && eps.journal.missingEvents === 4 && eps.journal.leftovers === 1, 'a first chunk that never landed: 4 events missing, its .b64 counted as an unfinished write')
+  ok(eps && eps.activeMin === 2 * 60 + 8 * 60, "active time sums each session's first-to-last write, not the gap between sessions (2 h + 8 h)")
+  ok(eps && eps.late === 2 && eps.lateImpl === 1 && eps.dispatches === 1, 'late: 2 agents in all, 1 of them the implementer')
+  ok(eps && eps.halts.length === 1 && eps.halts[0].kind === 'environment', 'the halt of session 1 is kept on a run that later drained')
+  ok(zeta && zeta.status === 'running' && !zeta.stale && !zeta.journal.statusNote, "session 1's run.end does not end a run whose session 2 is still running")
+  ok(theta && theta.status === 'running' && theta.stale && theta.tasks.inFlight === 1, `"running" with no write for ${50} h is stale, its dispatched task in flight`)
+  ok(eta && eta.status === 'halted' && eta.tasks.landed === 1 && eta.tasks.failed === 1 && eta.halts[0].kind === null, 'a halted run without run.end: tasks from run.json\'s summary, a halt with no kind')
+  const sc6 = S6 && S6.scorecard
+  ok(sc6 && sc6.runs === 4 && sc6.drained === 1 && sc6.halted === 1 && sc6.running === 1 && sc6.stale === 1, 'scorecard: 4 runs · 1 drained · 1 halted · 1 running · 1 stale')
+  ok(sc6 && sc6.runSuccess === 0.5 && sc6.cleanDrains === 1, 'scorecard: run success 1/2 finished runs, 1 clean drain')
+  ok(sc6 && sc6.tasks.landed === 4 && sc6.tasks.failed === 1 && sc6.tasks.blocked === 0 && sc6.tasks.inFlight === 2 && sc6.landingRate === 0.8,
+    "scorecard: landing rate 4 landed of 5 settled; the resumed run's task is in flight, not blocked as its session 1 left it")
+  ok(sc6 && sc6.haltKinds.environment.count === 2 && sc6.haltKinds.environment.resumedToDrain === 1 && sc6.haltKinds.unclassified.count === 1,
+    'scorecard: halts by kind, with the environment halt a resume carried to a drain')
+  ok(sc6 && sc6.personas['Spec Hawk'].reviews === 2 && sc6.personas['Spec Hawk'].fails === 1, 'scorecard: Spec Hawk 1 FAIL of 2 reviews')
+  ok(sc6 && sc6.repos.api.gatesFailed === 1 && sc6.repos.web.gatesPassed === 1, 'scorecard: gates passed and failed per repository')
+  ok(sc6 && sc6.journal.runsIncomplete === 1 && sc6.journal.statusRepaired === 1, 'scorecard: one run with an incomplete journal, one status taken from run.end')
+  const t6 = spawnSync(process.execPath, [SCRIPT, 'summary'], { cwd: ROOT6, encoding: 'utf8' })
+  ok(t6.status === 0 && /outcomes: 4 runs · drained 1 · halted 1 · running 1 · stale 1/.test(t6.stdout) && /landing rate 80%/.test(t6.stdout)
+    && t6.stdout.indexOf('outcomes:') < t6.stdout.indexOf('version 0.9.1'), 'text summary leads with the outcomes, then the per-version detail')
+  const r6 = spawnSync(process.execPath, [SCRIPT, '--out', 'logs.html', '--run', 'run-epsilon'], { cwd: ROOT6, encoding: 'utf8' })
+  const html6 = r6.status === 0 ? readFileSync(join(ROOT6, 'logs.html'), 'utf8') : ''
+  const blob6 = (html6.match(/<script type="application\/json" id="grimoire-data">([\s\S]*?)<\/script>/) || [])[1] || '{}'
+  const js6 = (html6.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || ''
+  const doc6 = { body: new El('body'), createElement: (t) => new El(t), getElementById: (id) => (id === 'grimoire-data' ? { textContent: blob6 } : null) }
+  let text6 = ''
+  try { new Function('document', 'Node', js6)(doc6, El); text6 = doc6.body.textContent } catch (e) { ok(false, `the renderer ran (${e.message})`) }
+  ok(/Scorecard \(4 runs\)/.test(text6) && /50%\s+run success/.test(text6) && /80%\s+task landing/.test(text6), 'the page leads with the scorecard: runs, run success, task landing')
+  ok(/Why runs stopped/.test(text6) && /environment\s+2\s+2\s+1/.test(text6), 'the page lists why runs stopped, by kind (halts, runs, resumed to a drain)')
+  ok(/running · stale/.test(text6) && /⚠ 4 event\(s\) missing, 1 unfinished write\(s\), status from run\.end/.test(text6), 'the runs table marks the stale run and the incomplete journal')
+  ok(/status: run\.json still says running/.test(text6) && /halted in session 1, then resumed: \[environment\]/.test(text6),
+    "the overview says where its status came from, and shows session 1's halt as resumed, not as the run's verdict")
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

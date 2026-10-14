@@ -88,6 +88,32 @@ function eventFiles(p) {
 // The session an event came from under its runId (1 for journals written before attempts).
 const attemptOf = (ev) => num(ev.attempt) ?? 1
 
+// The writer's temp files left behind (`<file>.<pid>`, `.b64`, `.s`, `.d`): a chunk, landed.jsonl or
+// run.json whose write never finished. A leftover chunk is events the journal lost.
+function leftovers(p) {
+  const out = []
+  for (const d of [p, join(p, 'events')]) {
+    let names = []
+    try { names = readdirSync(d) } catch { continue }
+    for (const n of names) if (/\.jsonl?\.\d+(\.b64|\.s|\.d)?$/.test(n)) out.push(relative(p, join(d, n)))
+  }
+  return out.sort()
+}
+
+// run.json's status, unless the newest session's run.end says the run is over: the final run.json
+// write is the one a dying writer loses (seen in the field: drained runs left at "running"), and
+// run.end travels in an events chunk of its own. A later session without a run.end is still running.
+function statusOf(run, events) {
+  const declared = typeof run.status === 'string' ? run.status : null
+  const last = events.length ? Math.max(...events.map(attemptOf)) : null
+  const end = [...events].reverse().find((e) => e.type === 'run.end' && attemptOf(e) === last && typeof e.status === 'string')
+  if (end && (!declared || declared === 'running'))
+    return { status: end.status, statusNote: declared ? `run.json still says running (its last write lost); run.end #${s(end.seq)} of session ${last} says ${end.status}` : null }
+  return { status: declared ?? 'running', statusNote: null }
+}
+const s = (v) => (v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v))
+const later = (a, b) => (Date.parse(b ?? '') > Date.parse(a ?? '') ? b : a ?? b)
+
 // landed.jsonl: one detail record per landing (a retried flush may append a task twice; the
 // card picks the line whose head matches the checkpoint, else the last one). Bad lines skipped.
 function landedDetail(p) {
@@ -141,19 +167,21 @@ export function loadRuns(dir) {
     const meta = { ...(isObj(start.meta) ? start.meta : {}), ...(isObj(run.meta) ? run.meta : {}) }
     let mtime = null
     try { mtime = lstatSync(p).mtime.toISOString() } catch {}
+    const lastAt = events.reduce((a, e) => later(a, e.at), null)
     runs.push({
       runId: String(run.runId ?? name),
       dirName: name,
       project: run.project ?? start.project ?? null,
       meta,
       startedAt: run.startedAt ?? events[0]?.at ?? mtime,
-      updatedAt: run.updatedAt ?? events[events.length - 1]?.at ?? mtime,
-      status: run.status ?? (events.some((e) => e.type === 'run.end') ? 'drained' : 'running'),
+      updatedAt: later(run.updatedAt, lastAt) ?? mtime, // a chunk can land after run.json's last write
+      ...statusOf(run, events),
       summary: isObj(run.summary) ? run.summary : null,
       checkpoint: isObj(run.checkpoint) ? run.checkpoint : null,
       landed: landedDetail(p),
       badLines,
       duplicates,
+      leftovers: leftovers(p),
       events,
     })
   }
@@ -292,6 +320,146 @@ export function aggregate(runs) {
   return out
 }
 
+// ── outcomes: did the runs deliver? ──
+// One row per run: how it ended, what it landed, what it cost, why it stopped, and whether its own
+// journal is complete. scorecard() sums the rows; the page runs the same function over the rows its
+// filters keep, so the CLI and the page never disagree.
+const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
+export const STALE_HOURS = 12 // a "running" run with no journal write for this long: its session most likely died
+
+export function runOutcome(run, now = Date.now()) {
+  const ev = run.events
+  const f = runFacts(run)
+  const sm = run.summary || {}
+  const lastAttempt = ev.length ? Math.max(...ev.map(attemptOf)) : 1
+  const end = [...ev].reverse().find((e) => e.type === 'run.end' && attemptOf(e) === lastAttempt)
+  const count = (t) => ev.filter((e) => e.type === t).length
+  // tasks: the newest session's run.end, else run.json's summary, else each task's last settle
+  const lastSettle = new Map()
+  for (const e of ev) if (e.type === 'settle' && e.task != null) lastSettle.set(String(e.task), String(e.status))
+  const settled = [...lastSettle.values()]
+  const n = (v) => num(v) ?? (Array.isArray(v) ? v.length : null)
+  const src = end || (run.summary ? { done: sm.done, failed: sm.failed ?? sm.needsAttention, blocked: sm.blocked, stillRunning: sm.stillRunning } : null)
+  const tasks = src
+    ? { landed: n(src.done) ?? 0, failed: n(src.failed) ?? 0, blocked: n(src.blocked) ?? 0, inFlight: n(src.stillRunning) ?? 0 }
+    : { landed: settled.filter((x) => LANDED.includes(x)).length, failed: settled.filter((x) => !LANDED.includes(x) && x !== 'BLOCKED').length,
+      blocked: settled.filter((x) => x === 'BLOCKED').length, inFlight: Math.max(0, f.tasks - lastSettle.size) }
+  const gatePrs = new Set(ev.filter((e) => e.type === 'gate' && e.prUrl).map((e) => String(e.prUrl)))
+  const prs = num(end?.prs) ?? num(sm.prs) ?? (Array.isArray(sm.prUrls) ? sm.prUrls.length : gatePrs.size)
+  // every halt, in any session; a pre-0.9.0 run.json holds a bare reason and its halt event no kind
+  const halts = ev.filter((e) => e.type === 'halt').map((e) => ({ kind: e.kind || null, reason: s(e.reason), attempt: attemptOf(e) }))
+  if (!halts.length && sm.halt) halts.push({ kind: (isObj(sm.halt) && sm.halt.kind) || null, reason: s(isObj(sm.halt) ? sm.halt.reason : sm.halt), attempt: lastAttempt })
+  // active time: each session's first to last journal write, summed (the gaps between sessions are not work)
+  const spans = {}
+  for (const e of ev) {
+    const t = Date.parse(e.at ?? '')
+    if (!Number.isFinite(t)) continue
+    const a = (spans[attemptOf(e)] ||= { from: t, to: t })
+    a.from = Math.min(a.from, t)
+    a.to = Math.max(a.to, t)
+  }
+  const activeMin = Object.keys(spans).length ? Math.round(Object.values(spans).reduce((m, a) => m + a.to - a.from, 0) / 60000) : null
+  // events the journal lost: gaps in seq within a session, and before the first session's first event
+  const seqs = {}
+  for (const e of ev) if (num(e.seq) !== null) (seqs[attemptOf(e)] ||= []).push(e.seq)
+  let missingEvents = 0
+  for (const [a, list] of Object.entries(seqs)) {
+    list.sort((x, y) => x - y)
+    if (Number(a) === Math.min(...Object.keys(seqs).map(Number))) missingEvents += list[0] - 1
+    for (let i = 1; i < list.length; i++) missingEvents += Math.max(0, list[i] - list[i - 1] - 1)
+  }
+  const personas = {}
+  for (const e of ev) {
+    if (e.type !== 'review' || e.discarded === true || e.persona == null) continue
+    const p = (personas[s(e.persona)] ||= { reviews: 0, fails: 0, overturned: 0, checked: 0 })
+    p.reviews++
+    if (e.verdict === 'FAIL') p.fails++
+  }
+  for (const [p, o] of Object.entries(f.overturned)) Object.assign((personas[p] ||= { reviews: 0, fails: 0, overturned: 0, checked: 0 }), { overturned: o.overturned, checked: o.checked })
+  const repos = {}
+  const repoOf = (r) => (repos[s(r)] ||= { landed: 0, notLanded: 0, gatesPassed: 0, gatesFailed: 0, gatesNA: 0, terminal: null })
+  const taskRepo = {}
+  for (const e of ev) if (e.task != null && e.repo != null) taskRepo[s(e.task)] = e.repo
+  for (const [t, st] of lastSettle) if (taskRepo[t] != null) repoOf(taskRepo[t])[LANDED.includes(st) ? 'landed' : 'notLanded']++
+  for (const e of ev) {
+    if (e.type === 'gate' && e.repo != null) repoOf(e.repo)[e.applies === false ? 'gatesNA' : LANDED.includes(e.status) ? 'gatesPassed' : 'gatesFailed']++
+    if (e.type === 'terminal' && e.repo != null) repoOf(e.repo).terminal = s(e.verdict)
+  }
+  const updated = Date.parse(run.updatedAt ?? '')
+  return {
+    runId: run.runId, project: run.project ?? null, version: run.meta.grimoireVersion ?? 'unknown', briefs: run.meta.briefsHash ?? 'unknown',
+    startedAt: run.startedAt ?? null, updatedAt: run.updatedAt ?? null,
+    status: run.status, stale: run.status === 'running' && Number.isFinite(updated) && now - updated > STALE_HOURS * 3600000,
+    attempts: Object.keys(seqs).length || 1, activeMin,
+    tasks, prs, firstRound: f.firstRound, fixes: count('fix'), escalations: count('escalate'), replans: f.replans,
+    // late: every agent past its soft limit (readers, fixes and ships too); lateImpl: implementer dispatches only
+    dispatches: count('dispatch'), late: count('late'), lateImpl: ev.filter((e) => e.type === 'late' && /^impl:/.test(s(e.label))).length, wedged: count('wedged'),
+    tokens: f.tokens, tokensPerLanded: f.tokens !== null && tasks.landed ? Math.round(f.tokens / tasks.landed) : null,
+    halts, personas, repos,
+    journal: { missingEvents, leftovers: run.leftovers?.length ?? 0, badLines: run.badLines ?? 0, statusNote: run.statusNote ?? null },
+  }
+}
+
+// Sums outcome rows. Self-contained on purpose: the page embeds its source and runs it over the rows
+// its filters keep. Rates are null when nothing counts toward them, never 0.
+export function scorecard(rows) {
+  const sum = (f) => rows.reduce((a, r) => a + (f(r) || 0), 0)
+  const rate = (a, b) => (b ? a / b : null)
+  const median = (xs) => {
+    const v = xs.filter((x) => typeof x === 'number').sort((a, b) => a - b)
+    return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : Math.round((v[v.length / 2 - 1] + v[v.length / 2]) / 2)) : null
+  }
+  const by = (st) => rows.filter((r) => r.status === st).length
+  const drained = by('drained'), halted = by('halted')
+  const tasks = { landed: sum((r) => r.tasks.landed), failed: sum((r) => r.tasks.failed), blocked: sum((r) => r.tasks.blocked), inFlight: sum((r) => r.tasks.inFlight) }
+  const firstRound = { passed: sum((r) => r.firstRound.passed), total: sum((r) => r.firstRound.total) }
+  const haltKinds = {}
+  for (const r of rows) for (const h of [...r.halts].reverse()) {
+    const k = (haltKinds[h.kind || 'unclassified'] ||= { count: 0, resumedToDrain: 0, runs: [], lastReason: null })
+    k.count++
+    if (r.status === 'drained') k.resumedToDrain++
+    if (!k.runs.includes(r.runId)) k.runs.push(r.runId)
+    k.lastReason ||= h.reason // rows come newest first, each run's halts newest first
+  }
+  const merge = (key) => {
+    const out = {}
+    for (const r of rows) for (const [name, o] of Object.entries(r[key])) {
+      const d = (out[name] ||= {})
+      for (const [k, v] of Object.entries(o)) if (typeof v === 'number') d[k] = (d[k] || 0) + v
+    }
+    return out
+  }
+  const dispatches = sum((r) => r.dispatches)
+  return {
+    runs: rows.length, drained, halted, running: rows.filter((r) => r.status === 'running' && !r.stale).length, stale: rows.filter((r) => r.stale).length,
+    runSuccess: rate(drained, drained + halted),
+    cleanDrains: rows.filter((r) => r.status === 'drained' && !r.tasks.failed && !r.tasks.blocked).length,
+    tasks, landingRate: rate(tasks.landed, tasks.landed + tasks.failed + tasks.blocked),
+    firstRound, firstRoundRate: rate(firstRound.passed, firstRound.total),
+    prs: sum((r) => r.prs), fixes: sum((r) => r.fixes), escalations: sum((r) => r.escalations), replans: sum((r) => r.replans),
+    dispatches, late: sum((r) => r.late), lateImpl: sum((r) => r.lateImpl), lateShare: rate(sum((r) => r.lateImpl), dispatches), wedged: sum((r) => r.wedged),
+    halts: sum((r) => r.halts.length), haltKinds,
+    medianActiveMin: median(rows.map((r) => r.activeMin)), medianTokensPerLanded: median(rows.map((r) => r.tokensPerLanded)),
+    tokens: sum((r) => r.tokens),
+    personas: merge('personas'), repos: merge('repos'),
+    journal: { runsIncomplete: rows.filter((r) => r.journal.missingEvents || r.journal.leftovers || r.journal.badLines).length,
+      missingEvents: sum((r) => r.journal.missingEvents), leftovers: sum((r) => r.journal.leftovers), statusRepaired: rows.filter((r) => r.journal.statusNote).length },
+  }
+}
+
+function scorecardText(sc) {
+  const pct = (x) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`)
+  const kinds = Object.entries(sc.haltKinds).map(([k, v]) => `${k} ${v.count}${v.resumedToDrain ? ` (${v.resumedToDrain} resumed to a drain)` : ''}`).join(', ') || 'none'
+  return [
+    `outcomes: ${sc.runs} run${sc.runs === 1 ? '' : 's'} · drained ${sc.drained} · halted ${sc.halted} · running ${sc.running} · stale ${sc.stale} (no write for ${STALE_HOURS} h)`,
+    `  run success ${pct(sc.runSuccess)} of finished runs · clean drains ${sc.cleanDrains} · PRs ${sc.prs}`,
+    `  tasks landed ${sc.tasks.landed} · failed ${sc.tasks.failed} · blocked ${sc.tasks.blocked} → landing rate ${pct(sc.landingRate)}`,
+    `  halts ${sc.halts}: ${kinds}`,
+    `  median active time/run ${sc.medianActiveMin ?? 'n/a'} min · median output tokens/landed task ${sc.medianTokensPerLanded ?? 'n/a'} · implementers past the soft limit ${sc.lateImpl}/${sc.dispatches} (${sc.late} agents in all)`,
+    `  journal: ${sc.journal.runsIncomplete} run(s) incomplete (${sc.journal.missingEvents} event(s) missing, ${sc.journal.leftovers} unfinished write(s)) · ${sc.journal.statusRepaired} status(es) taken from run.end`,
+  ].join('\n')
+}
+
 function summaryText(groups, runs, dir) {
   const skipped = runs.reduce((a, r) => a + r.badLines, 0)
   const pct = (x) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`)
@@ -362,11 +530,17 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:now
 .lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.lane .task{border-top:1px solid var(--line);padding:6px 0;cursor:pointer}.lane .task:hover{color:var(--acc)}
 details{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--card)}summary{cursor:pointer;padding:8px 10px;font-weight:600;overflow-wrap:anywhere}
 details ol{margin:0;padding:0 10px 10px 30px}details li{margin:3px 0;overflow-wrap:anywhere}.k{font-family:var(--mono);font-size:12px;color:var(--mut)}
+.stat small{display:block;color:var(--mut);font-size:11px;margin-top:2px;overflow-wrap:anywhere}.warnc{color:var(--warn)}
+.bar{display:flex;align-items:center;gap:6px;white-space:nowrap}.track{display:flex;gap:2px;width:90px;height:8px}.track i{display:block;height:8px;border-radius:2px}
+.track .ok{background:var(--ok)}.track .bad{background:var(--bad)}.track .warn{background:var(--warn)}.track .mut{background:var(--line)}
+button.link{font:inherit;font-family:var(--mono);font-size:12px;color:var(--acc);background:none;border:0;padding:0;cursor:pointer;text-align:left;white-space:nowrap}.nowrap{white-space:nowrap}
+header label{min-width:0;max-width:100%}
 .muted{color:var(--mut)}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12px;margin:0}.empty{color:var(--mut);padding:8px 0}
 `
 
 // Runs in the browser. Builds every node with textContent/append: data never reaches innerHTML.
-function client() {
+// `score` is scorecard() itself, embedded, so the page sums its filtered rows as `summary` does.
+function client(score) {
   const D = JSON.parse(document.getElementById('grimoire-data').textContent)
   const h = (tag, attrs, ...kids) => {
     const el = document.createElement(tag)
@@ -445,9 +619,11 @@ function client() {
   const summarize = (e) => { try { return SUM[e.type] ? SUM[e.type](e) : rest(e) } catch { return rest(e) } }
   const verdictOf = (e) => e.verdict ?? e.decision ?? e.status ?? null
 
-  const st = { run: D.initialRun, version: D.initialVersion || '', briefs: '', types: new Set(), q: '', task: null }
+  const st = { run: D.initialRun, version: D.initialVersion || '', briefs: '', project: '', types: new Set(), q: '', task: null }
   const fmt = (n) => (typeof n === 'number' ? n.toLocaleString() : '—')
-  const byVersion = (r) => (!st.version || (r.meta.grimoireVersion ?? 'unknown') === st.version) && (!st.briefs || (r.meta.briefsHash ?? 'unknown') === st.briefs)
+  const outOf = Object.fromEntries((D.outcomes || []).map((o) => [o.runId, o]))
+  const keep = (o) => (!st.version || o.version === st.version) && (!st.briefs || o.briefs === st.briefs) && (!st.project || s(o.project) === st.project)
+  const byVersion = (r) => keep({ version: r.meta.grimoireVersion ?? 'unknown', briefs: r.meta.briefsHash ?? 'unknown', project: r.project })
   const runs = () => D.runs.filter(byVersion)
   const current = () => runs().find((r) => r.runId === st.run) || runs()[0] || null
 
@@ -456,6 +632,7 @@ function client() {
   function header() {
     const vs = uniq(D.runs.map((r) => r.meta.grimoireVersion ?? 'unknown'))
     const bs = uniq(D.runs.map((r) => r.meta.briefsHash ?? 'unknown'))
+    const ps = uniq(D.runs.map((r) => s(r.project)).filter(Boolean))
     const cur = current()
     return h('header', null,
       h('h1', null, 'grimoire run log'),
@@ -465,10 +642,90 @@ function client() {
         opt('', 'all', !st.version), vs.map((v) => opt(v, v, v === st.version)))),
       h('label', null, 'briefs', h('select', { onchange: (ev) => { st.briefs = ev.target.value; render() } },
         opt('', 'all', !st.briefs), bs.map((v) => opt(v, v, v === st.briefs)))),
+      ps.length > 1 ? h('label', null, 'project', h('select', { onchange: (ev) => { st.project = ev.target.value; render() } },
+        opt('', 'all', !st.project), ps.map((v) => opt(v, v, v === st.project)))) : null,
       h('span', { class: 'muted' }, `generated ${D.generatedAt}`))
   }
 
   const stat = (label, value, c) => h('div', { class: 'card stat' }, h('b', { class: cls(c) }, value), h('span', null, label))
+
+  // ── scorecard: did the runs deliver? The rows the filters keep, summed by the same function as `summary`. ──
+  const pct = (x) => (x == null ? '—' : `${Math.round(x * 100)}%`)
+  const mins = (m) => (m == null ? '—' : m >= 90 ? `${(m / 60).toFixed(1)} h` : `${m} min`)
+  const ago = (iso) => { const ms = Date.parse(D.generatedAt) - Date.parse(iso || ''); return Number.isFinite(ms) ? mins(Math.round(ms / 60000)) : '?' }
+  const clipT = (v, n) => { const t = s(v); return t.length > n ? t.slice(0, n - 1) + '…' : t }
+  const tile = (label, value, sub, c) => h('div', { class: 'card stat' }, h('b', { class: c || null }, value), h('span', null, label), sub ? h('small', null, sub) : null)
+  // landed · failed · blocked (· in flight) as one bar, each segment titled and the counts written beside it: never color alone
+  function outcomeBar(t) {
+    const total = t.landed + t.failed + t.blocked + t.inFlight
+    if (!total) return h('span', { class: 'muted' }, '—')
+    const seg = (n, c, label) => (n ? h('i', { class: c, style: `flex:${n}`, title: `${n} ${label}` }) : null)
+    return h('span', { class: 'bar', role: 'img', 'aria-label': `${t.landed} landed, ${t.failed} failed, ${t.blocked} blocked${t.inFlight ? `, ${t.inFlight} in flight` : ''}` },
+      h('span', { class: 'track' }, seg(t.landed, 'ok', 'landed'), seg(t.failed, 'bad', 'failed'), seg(t.blocked, 'warn', 'blocked'), seg(t.inFlight, 'mut', 'in flight')),
+      h('span', { class: 'k' }, `${t.landed} / ${t.failed} / ${t.blocked}${t.inFlight ? ` / ${t.inFlight}` : ''}`))
+  }
+  // cols: [heading, cell, class] — class 'num' (right-aligned) or 'txt' (wraps, never narrower than 220px)
+  const table = (cols, rows, empty) => h('div', { class: 'scroll card', style: 'padding:0;margin-top:8px' }, h('table', null,
+    h('thead', null, h('tr', null, cols.map(([c, , k]) => h('th', { class: k || null }, c)))),
+    h('tbody', null, rows.length ? rows.map((x) => h('tr', null, cols.map(([, f, k]) => h('td', { class: k || null }, f(x)))))
+      : h('tr', null, h('td', { colspan: cols.length, class: 'empty' }, empty)))))
+  function scorecardPanel() {
+    const rows = (D.outcomes || []).filter(keep)
+    const sc = score(rows)
+    const kinds = Object.entries(sc.haltKinds).sort((a, b) => b[1].count - a[1].count)
+    const journalNotes = (o) => [o.journal.missingEvents ? `${o.journal.missingEvents} event(s) missing` : null, o.journal.leftovers ? `${o.journal.leftovers} unfinished write(s)` : null,
+      o.journal.badLines ? `${o.journal.badLines} malformed line(s)` : null, o.journal.statusNote ? 'status from run.end' : null].filter(Boolean)
+    const open = (id) => { st.run = id; st.task = null; render(); const d = document.getElementById('overview'); if (d) d.scrollIntoView() }
+    const haltCell = (o) => {
+      const last = o.halts[o.halts.length - 1]
+      if (o.status === 'halted' && last) return h('span', { class: 'FAIL', title: last.reason }, `${last.kind ? `[${last.kind}] ` : ''}${clipT(last.reason, 110)}`)
+      return o.halts.length ? h('span', { class: 'muted' }, `resumed after ${o.halts.length} halt(s)`) : '—'
+    }
+    return h('section', null,
+      h('h2', null, `Scorecard (${sc.runs} run${sc.runs === 1 ? '' : 's'}${st.version || st.briefs || st.project ? ', filtered' : ''})`),
+      h('div', { class: 'grid' },
+        tile('runs', String(sc.runs), `${sc.drained} drained · ${sc.halted} halted · ${sc.running} running${sc.stale ? ` · ${sc.stale} stale` : ''}`),
+        tile('run success', pct(sc.runSuccess), `drained, of ${sc.drained + sc.halted} finished · ${sc.cleanDrains} with nothing left open`),
+        tile('task landing', pct(sc.landingRate), `${sc.tasks.landed} landed · ${sc.tasks.failed} failed · ${sc.tasks.blocked} blocked`),
+        tile('1st-round review pass', pct(sc.firstRoundRate), `${sc.firstRound.passed}/${sc.firstRound.total} task stages`),
+        tile('PRs opened', String(sc.prs), `${sc.fixes} fix rounds · ${sc.escalations} escalations · ${sc.replans} replans`),
+        tile('halts', String(sc.halts), kinds.map(([k, v]) => `${k} ${v.count}`).join(' · ') || 'none'),
+        tile('active time / run', mins(sc.medianActiveMin), 'median, first to last write of each session'),
+        tile('output tokens / landed task', fmt(sc.medianTokensPerLanded), `median · ${fmt(sc.tokens)} in all`),
+        tile('implementers past the soft limit', `${sc.lateImpl}/${sc.dispatches}`, `${pct(sc.lateShare)} of dispatches · ${sc.late} agents late in all · ${sc.wedged} wedged`),
+        tile('runs with an incomplete journal', sc.journal.runsIncomplete ? `⚠ ${sc.journal.runsIncomplete} of ${sc.runs}` : '0',
+          `${sc.journal.missingEvents} event(s) missing · ${sc.journal.leftovers} unfinished write(s) · ${sc.journal.statusRepaired} status(es) from run.end`, sc.journal.runsIncomplete ? 'warnc' : null)),
+      h('h3', { style: 'margin-top:14px' }, 'Runs'),
+      table([
+        ['started', (o) => h('span', { class: 'k nowrap' }, s(o.startedAt).slice(0, 16).replace('T', ' '))],
+        ['run', (o) => h('button', { class: 'link', type: 'button', onclick: () => open(o.runId) }, o.runId)],
+        ['project', (o) => h('span', { title: s(o.project) }, clipT(o.project, 40))], ['version', (o) => o.version],
+        ['outcome', (o) => h('span', { class: o.stale ? 'warnc' : cls(o.status) }, o.stale ? `running · stale (${ago(o.updatedAt)})` : s(o.status))],
+        ['sessions', (o) => String(o.attempts), 'num'], ['active', (o) => mins(o.activeMin), 'num'],
+        ['landed / failed / blocked', (o) => outcomeBar(o.tasks)], ['PRs', (o) => String(o.prs ?? '—'), 'num'],
+        ['1st-round', (o) => (o.firstRound.total ? `${o.firstRound.passed}/${o.firstRound.total}` : '—'), 'num'],
+        ['fix · esc · replan', (o) => `${o.fixes} · ${o.escalations} · ${o.replans}`, 'num'], ['late impl.', (o) => h('span', { title: `${o.late} agent(s) past their soft limit in all` }, `${o.lateImpl}/${o.dispatches}`), 'num'],
+        ['halt', haltCell, 'txt'], ['tokens · per landed', (o) => `${fmt(o.tokens)} · ${fmt(o.tokensPerLanded)}`, 'num'],
+        ['journal', (o) => { const n = journalNotes(o); return n.length ? h('span', { class: 'warnc', title: o.journal.statusNote || null }, '⚠ ' + n.join(', ')) : h('span', { class: 'muted' }, 'complete') }, 'txt'],
+      ], rows, 'no runs match the filters'),
+      h('h3', { style: 'margin-top:14px' }, 'Why runs stopped'),
+      table([
+        ['kind', (x) => h('span', { class: 'mono' }, x[0] === 'unclassified' ? 'unclassified (before 0.9.0)' : x[0])], ['halts', (x) => String(x[1].count), 'num'],
+        ['runs', (x) => String(x[1].runs.length), 'num'], ['resumed to a drain', (x) => String(x[1].resumedToDrain), 'num'],
+        ['latest reason', (x) => h('span', { title: x[1].lastReason }, clipT(x[1].lastReason, 220)), 'txt'],
+      ], kinds, 'no halts'),
+      h('h3', { style: 'margin-top:14px' }, 'Reviewer lenses'),
+      table([
+        ['persona', (x) => x[0]], ['reviews', (x) => String(x[1].reviews || 0), 'num'], ['FAIL', (x) => String(x[1].fails || 0), 'num'],
+        ['FAIL rate', (x) => pct(x[1].reviews ? (x[1].fails || 0) / x[1].reviews : null), 'num'],
+        ['verify overturned', (x) => (x[1].checked ? `${x[1].overturned || 0}/${x[1].checked}` : '—'), 'num'],
+      ], Object.entries(sc.personas).sort((a, b) => (b[1].reviews || 0) - (a[1].reviews || 0)), 'no reviews'),
+      h('h3', { style: 'margin-top:14px' }, 'Repositories'),
+      table([
+        ['repo', (x) => x[0]], ['tasks landed', (x) => String(x[1].landed || 0), 'num'], ['not landed', (x) => String(x[1].notLanded || 0), 'num'],
+        ['gates passed', (x) => String(x[1].gatesPassed || 0), 'num'], ['gates failed', (x) => String(x[1].gatesFailed || 0), 'num'], ['no gate', (x) => String(x[1].gatesNA || 0), 'num'],
+      ], Object.entries(sc.repos).sort((a, b) => a[0].localeCompare(b[0])), 'no repositories'))
+  }
   function overview(r) {
     const ev = r.events
     const end = [...ev].reverse().find((e) => e.type === 'run.end') || {}
@@ -482,18 +739,22 @@ function client() {
       ...ev.filter((e) => e.type === 'gate' && e.prUrl).map((e) => e.prUrl)].filter(Boolean).map(String))
     const drafts = uniq([...(isObj(sm.draftPrs) ? Object.values(sm.draftPrs) : []),
       ...ev.filter((e) => e.type === 'ship' && e.prUrl && e.draft !== false).map((e) => e.prUrl)].filter(Boolean).map(String)).filter((u) => !prUrls.includes(u))
-    const halt = ev.find((e) => e.type === 'halt')
-    return h('section', null,
+    const lastHalt = [...ev].reverse().find((e) => e.type === 'halt')
+    const o = outOf[r.runId]
+    return h('section', { id: 'overview' },
       h('h2', null, 'Overview'),
       h('div', { class: 'tags' }, h('span', { class: 'tag' }, `run ${r.runId}`), r.project ? h('span', { class: 'tag' }, `project ${s(r.project)}`) : null,
         Object.entries(r.meta).map(([k, v]) => h('span', { class: 'tag' }, `${k} ${s(v)}`)),
         h('span', { class: 'tag' }, `started ${s(r.startedAt)}`), h('span', { class: 'tag' }, `updated ${s(r.updatedAt)}`)),
       h('div', { class: 'grid' },
-        stat('status', s(r.status), r.status), stat('output tokens', fmt(D.tokens[r.runId])),
+        stat('status', o && o.stale ? `${s(r.status)} · stale` : s(r.status), r.status), stat('output tokens', fmt(D.tokens[r.runId])),
         stat('done', s(done ?? '—')), stat('failed / attention', s(failed ?? '—')), stat('blocked', s(blocked ?? '—')),
         stat('PRs', s(end.prs ?? prUrls.length)), stat('replans', s(count('replan'))), stat('events', s(ev.length))),
       prUrls.length || drafts.length ? h('div', { class: 'tags' }, prUrls.map((u) => h('span', { class: 'tag' }, u)), drafts.map((u) => h('span', { class: 'tag' }, `${u} (draft)`))) : null,
-      halt || sm.halt ? h('p', { class: 'FAIL' }, `halt: ${haltText(halt || sm.halt)}`) : null,
+      r.statusNote ? h('p', { class: 'muted' }, `status: ${r.statusNote}`) : null,
+      o && o.stale ? h('p', { class: 'warnc' }, `⚠ still "running" but nothing written for ${ago(r.updatedAt)} (over ${D.staleHours} h): its session most likely died — resume it with /orchestrate`) : null,
+      r.status === 'halted' && (lastHalt || sm.halt) ? h('p', { class: 'FAIL' }, `halt: ${haltText(lastHalt || sm.halt)}`)
+        : lastHalt ? h('p', { class: 'muted' }, `halted in session ${s(lastHalt.attempt ?? 1)}, then resumed: ${haltText(lastHalt)}`) : null,
       r.checkpoint ? checkpoint(r.checkpoint, r.landed) : null,
       isObj(sm.telemetry) ? kvBlock('Telemetry (run summary)', sm.telemetry) : null,
       r.badLines ? h('p', { class: 'muted' }, `${r.badLines} malformed event line(s) skipped`) : null,
@@ -626,7 +887,7 @@ function client() {
       ['tokens/run avg · max', (g) => `${fmt(g.tokensPerRun.avg)} · ${fmt(g.tokensPerRun.max)}`],
     ]
     return h('section', null,
-      h('h2', null, 'Across runs, by version'),
+      h('h2', null, `Across runs, by version${st.project ? ' (all projects)' : ''}`),
       h('div', { class: 'scroll card', style: 'padding:0' }, h('table', null,
         h('thead', null, h('tr', null, cols.map(([c]) => h('th', null, c)))),
         h('tbody', null, groups.length ? groups.map((g) => h('tr', null, cols.map(([, f]) => h('td', { class: 'txt', style: 'min-width:0' }, s(f(g))))))
@@ -649,7 +910,7 @@ function client() {
 
   function render() {
     const r = current()
-    const main = h('main', null)
+    const main = h('main', null, scorecardPanel())
     if (r) {
       st.run = r.runId
       const tasks = taskIndex(r)
@@ -663,13 +924,13 @@ function client() {
   render()
 }
 
-function renderHtml({ runs, ledgers, groups, initialRun, initialVersion }) {
+function renderHtml({ runs, ledgers, groups, outcomes = runs.map((r) => runOutcome(r)), initialRun, initialVersion }) {
   const tokens = {}
   for (const r of runs) tokens[r.runId] = finalTokens(r)
-  const data = { generatedAt: new Date().toISOString(), initialRun, initialVersion, runs, ledgers, aggregate: groups, tokens }
+  const data = { generatedAt: new Date().toISOString(), initialRun, initialVersion, runs, ledgers, aggregate: groups, tokens, outcomes, staleHours: STALE_HOURS }
   // Every "<" becomes <, so no data string can close the <script> element.
   const blob = JSON.stringify(data).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
-  const js = `(${client.toString()})()`.replace(/<\//g, '<\\/')
+  const js = `(${client.toString()})(${scorecard.toString()})`.replace(/<\//g, '<\\/')
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'none'">
@@ -710,10 +971,15 @@ function main() {
   let runs = loadRuns(resolve(dir))
   if (version) runs = runs.filter((r) => (r.meta.grimoireVersion ?? 'unknown') === version)
   const groups = aggregate(runs)
+  const outcomes = runs.map((r) => runOutcome(r))
 
   if (cmd === 'summary') {
-    if (args.json) console.log(JSON.stringify({ dir, runs: runs.length, skippedLines: runs.reduce((a, r) => a + r.badLines, 0), groups }, null, 2))
-    else console.log(summaryText(groups, runs, dir))
+    const sc = scorecard(outcomes)
+    if (args.json) console.log(JSON.stringify({ dir, runs: runs.length, skippedLines: runs.reduce((a, r) => a + r.badLines, 0), scorecard: sc, outcomes, groups }, null, 2))
+    else {
+      const [head, ...rest] = summaryText(groups, runs, dir).split('\n') // outcomes first, then the per-version detail
+      console.log([head, ...(runs.length ? [scorecardText(sc)] : []), ...rest].join('\n'))
+    }
     return
   }
   if (cmd !== 'render') { console.error(`unknown command: ${cmd} (expected render, summary or prune)`); process.exit(2) }
@@ -723,7 +989,7 @@ function main() {
   const initialRun = typeof args.run === 'string' ? args.run : runs[0]?.runId ?? null
   if (typeof args.run === 'string' && !runs.some((r) => r.runId === args.run)) console.error(`warning: run ${args.run} not found in ${dir}; opening the newest`)
   mkdirSync(dirname(out), { recursive: true })
-  writeFileSync(out, renderHtml({ runs, ledgers, groups, initialRun, initialVersion: version }))
+  writeFileSync(out, renderHtml({ runs, ledgers, groups, outcomes, initialRun, initialVersion: version }))
   console.log(out)
 }
 
