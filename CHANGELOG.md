@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased — the run scorecard, and a journal that arrives whole
+
+The log page could replay one run's decisions, but not say whether the runs deliver. Reading the
+journals of seven real runs also showed that two drained runs were displayed as `running`, and that
+three had lost a whole chunk of events (the first one, in two of them) without the page noticing. The page now reports both, and the
+loop's writer no longer loses them (`workflows/tests/run-durability-journal.test.mjs`, the writer's
+scripts run for real in bash, zsh and dash).
+
+**Logs (`scripts/render-logs.mjs`)**
+- **A scorecard opens the page**, over the runs the version, briefs and new project filters keep.
+  It shows:
+  - runs by outcome (drained, halted, running, stale) and the run success rate (drained over finished)
+  - the task landing rate (landed over settled), first-round review pass, PRs opened
+  - halts by kind, with how many a resume carried to a drain
+  - median active time per run and median output tokens per landed task
+  - implementers past their soft limit
+  - per-persona FAIL and overturn rates, gates per repository
+  - the journal's own completeness
+
+  One row per run links to its overview. `summary` prints the same numbers first; `summary --json`
+  adds `scorecard` and one `outcomes` row per run. Both use one function, so the CLI and the page
+  never disagree.
+- **A run whose final run.json write was lost no longer reads as `running`.** When the newest
+  session wrote a `run.end`, its status wins over a `running` run.json, and the overview says where
+  the status came from. A run still `running` with no journal write for 12 h is marked stale.
+- **A lost chunk is counted.** These are shown as an incomplete journal, so numbers that undercount
+  say so:
+  - gaps in `seq` within a session, and before the first session's first event
+  - the writer's unfinished temp files (`<file>.<pid>`, `.b64`, `.s`, `.d`)
+- **A halt the run resumed from is not its verdict.** The overview shows it as "halted in session N,
+  then resumed" instead of in red on a drained run.
+
+**Journal (`workflows/orchestrate-loop.js`)**
+
+The haiku writer retypes every payload as base64, and the chunks that did not arrive were among
+the biggest (12 to 24 events). One writer's leftover temp file decoded to a first chunk copied
+wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
+- **The first flush goes before the first dispatch.** It carries `run.start`, the startup checks and
+  what was absorbed. The run is on disk from its start, and its first chunk is small. It used to wait
+  for the first landing, hours in, with as many as 24 events by then.
+- **A chunk also goes once the buffered events hold `flushBytes` bytes of JSON.** The default is
+  3000; set it in `telemetry.flushBytes`. `flushEvery` still applies.
+- **A chunk the writer did not confirm is sent again once,** in two pieces that carry its events
+  only, with no run.json and no landed delta:
+  - Each piece goes to `<firstSeq>.r1.jsonl`, never over a chunk on disk.
+  - A piece still unconfirmed is lost, and counted.
+  - A resend that writes nothing turns resends off for the run.
+  - `telemetry.journal.resent` counts the chunks sent again.
+- **The final run.json is sent again alone, up to twice, when it was not confirmed.** Nothing after
+  the run's end rewrites it. `telemetry.journal.runJsonResent` counts these resends.
+- **A flush's landed delta is capped at 4,000 bytes as well as 8 tasks;** one task always goes.
+- A writer returning nothing still marks the writer dead after two in a row, resends included, and
+  nothing is resent once it is dead.
+
 ## 0.9.1 — the 0.9.0 follow-ups
 
 The minor findings recorded from the last review rounds of 0.9.0 (issue #14). None blocked a run
