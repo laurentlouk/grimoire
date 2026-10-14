@@ -2,7 +2,7 @@
   "name": "grimoire",
   "private": true,
   "type": "module",
-  "description": "Repo tooling for the grimoire plugin: tests, the drift check, the eval generator, the log renderer, the harness manifest, the code graph CLI, and the pre-push skill-eval runner and hook. No dependencies (the graph's parser runtime lives in tools/graph/package.json).",
+  "description": "Repo tooling for the grimoire plugin: tests, the drift check, the eval generator, the log renderer, the harness manifest, the code graph CLI, and the pre-push check. No dependencies (the graph's parser runtime lives in tools/graph/package.json).",
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "check": "node scripts/check-drift.mjs",
@@ -11,7 +11,6 @@
     "harness:manifest": "node scripts/harness-manifest.mjs",
     "logs": "node scripts/render-logs.mjs",
     "graph": "node --no-warnings tools/graph/graph.mjs",
-    "evals:changed": "node scripts/skill-evals.mjs",
     "hooks": "git config core.hooksPath .githooks"
   },
   "engines": {

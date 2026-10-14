@@ -4,8 +4,8 @@
 
 Three changes that turn promises the harness already made into checks, drawn from a comparison
 with Anthropic's [AI-native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook):
-every gate trusts the tests, so a fix may not weaken them; a loop that learns by rewriting its
-skills needs those rewrites tested; and the agent that wrote a lesson may not approve it.
+every gate trusts the tests, so a fix may not weaken them; what CI checks should fail before a
+push, not after it, without any key; and the agent that wrote a lesson may not approve it.
 
 **A fix must not weaken a test**
 - Loosening the test that exposed a finding is the cheapest way to make the finding go away, and
@@ -34,22 +34,16 @@ skills needs those rewrites tested; and the agent that wrote a lesson may not ap
   side covers the guard, one judge per re-review round (also on its retry), the verifier, and a
   second fix round reading the second fix (`workflows/tests/fix-test-integrity.test.mjs`).
 
-**Skill evals run before a push**
-- `npm run evals:changed` (`scripts/skill-evals.mjs`) runs `claude plugin eval` for every skill
-  the branch changes (its directory or its generated cases), on your machine and your Claude
-  login: no API key, no CI bill. It evaluates the commit in a temporary detached worktree, so
-  what passes is exactly what is pushed. Each pass is remembered by the skill's content and the
-  threshold it met, in the repository's git dir, shared by its worktrees: a re-push, an amend or
-  a rebase that leaves a skill as it was runs nothing. By hand it refuses uncommitted skill
-  edits; it refuses a stale `evals/`. A skill fails when a case scores below
-  `GRIMOIRE_EVALS_THRESHOLD` (default 0.85); runs, concurrency and a cost ceiling are settings.
-- `.githooks/pre-push` (`npm run hooks` once per clone) checks every pushed ref and blocks the
-  push until each changed skill has passed. From a terminal it runs the evals; inside Claude
-  Code, a GUI client or another agent it prints the command instead (`GRIMOIRE_EVALS_RUN_IN_HOOK`
-  overrides it outside Claude Code). Once one ref is blocked, later refs are only checked. It
-  lets the push through, with a warning, without node or without a base branch to compare
-  with; `git push --no-verify` skips it. Until now nothing ran the evals unless someone
-  remembered to (`scripts/skill-evals.test.mjs`, with a fake `claude`).
+**A pre-push check, no key**
+- `.githooks/pre-push` (`npm run hooks` once per clone) runs the fast checks CI runs, the drift
+  check and the generated `evals/` in sync with `skills/*/evals/evals.json`, on exactly the
+  commit being pushed (a temporary worktree, so uncommitted edits never skew it), and blocks the
+  push when one fails. No model, no API key, no sign-in; about a second per pushed commit. The
+  full test suite (minutes) stays in CI. It never wedges a push on its own problems (no node, a
+  commit it cannot check out), and `git push --no-verify` skips it (`scripts/pre-push.test.mjs`,
+  through a real `git push`).
+- Running the eval cases stays manual and paid: `claude plugin eval .`, which needs the
+  command-line `claude` signed in. Nothing in grimoire needs an API key.
 - New cases: `review` #5 (a fix that loosens an assertion and skips a test is not passed) and
   `crystallize` #5 (a clean crystallize PR is still not merged by its author).
 

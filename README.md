@@ -158,11 +158,10 @@ npm test               # engine, guard, renderer and code-graph tests (the graph
 npm run check          # drift: roster ↔ agents, briefs ↔ engine, evals present, config documented
 npm run evals:check    # evals/ is up to date with skills/*/evals/evals.json
 claude plugin eval .   # run the skill evals (paid; see evals/README.md)
-npm run hooks          # once per clone: the pre-push hook below
-npm run evals:changed  # the evals of the skills this branch changed, each content evaluated once
+npm run hooks          # once per clone: the pre-push check below
 ```
 
-The pre-push hook evaluates every skill a push changes, on exactly the pushed content, with your machine and your Claude login (no API key, no CI bill), and blocks the push until they pass: a skill edit, by hand or by `crystallize`, is evaluated before it leaves the machine, and an unchanged skill is never evaluated twice. From a terminal it runs the evals; inside Claude Code, a GUI client or another agent it prints the command instead. It is opt-in per clone, `git push --no-verify` skips it, it covers `skills/` (not agents, briefs or hooks), and once `core.hooksPath` points at `.githooks`, hooks in `.git/hooks` stop running. Settings: `scripts/skill-evals.mjs`.
+The pre-push check runs CI's fast checks (`npm run check`, `npm run evals:check`) on exactly the commit being pushed, in about a second, and blocks the push when one fails: no model, no API key, no sign-in. The full test suite stays in CI. It is opt-in per clone, `git push --no-verify` skips it, and once `core.hooksPath` points at `.githooks`, hooks in `.git/hooks` stop running.
 
 What changed in each release: [CHANGELOG.md](CHANGELOG.md).
 

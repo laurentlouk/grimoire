@@ -1,16 +1,39 @@
 #!/bin/sh
-# grimoire · pre-push: every skill this push changes must have passed its evals on exactly the pushed
-# content (scripts/skill-evals.mjs). From a terminal it evaluates what is left, with your Claude login;
-# inside Claude Code, a GUI client or another agent it prints the command instead. Once one ref is
-# blocked the push is, so later refs are only checked, never evaluated. Install once per clone:
-# `npm run hooks`. Skip once: `git push --no-verify`. Without node it warns and lets the push through.
-command -v node >/dev/null 2>&1 || { echo "grimoire evals: node is not on PATH, skill evals not checked" >&2; exit 0; }
-root=$(git rev-parse --show-toplevel) || exit 0
-[ -f "$root/scripts/skill-evals.mjs" ] || exit 0
+# grimoire · pre-push: the fast checks CI runs, on exactly the commit being pushed, before it leaves
+# the machine: the drift check (roster, memory, evals present, briefs, personas, versions, config,
+# harness manifest) and the generated evals/ in sync with skills/*/evals/evals.json. No model, no
+# key, no sign-in; a second or two per pushed commit. The full test suite (minutes) stays in CI.
+# Each pushed commit is checked out in a temporary worktree, so uncommitted edits never skew it.
+# Install once per clone: `npm run hooks`. Skip once: `git push --no-verify`.
+# It never wedges a push on its own problems: without node, or when a commit cannot be checked
+# out, it warns and lets the push through.
+say() { echo "grimoire pre-push: $*" >&2; }
+command -v node >/dev/null 2>&1 || { say "node is not on PATH, checks skipped"; exit 0; }
 status=0
-mode=--hook
+seen=" "
 while read -r local_ref local_sha remote_ref remote_sha; do
   case $local_sha in *[!0]*) ;; *) continue ;; esac # a branch deletion pushes nothing
-  node "$root/scripts/skill-evals.mjs" $mode --head "$local_sha" </dev/null || { status=1; mode=--check; }
+  case $seen in *" $local_sha "*) continue ;; esac  # the same commit under two refs: check it once
+  seen="$seen$local_sha "
+  [ "$status" -eq 0 ] || continue                  # one failure already blocks the push
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/grimoire-prepush.XXXXXX") || { say "no temporary directory, checks skipped"; exit 0; }
+  if ! git worktree add -q --detach "$dir/tree" "$local_sha" >/dev/null 2>&1; then
+    say "cannot check out $local_ref, checks skipped for it"
+    rm -rf "$dir"
+    continue
+  fi
+  for check in check-drift.mjs "build-evals.mjs --check"; do
+    script=${check%% *}
+    [ -f "$dir/tree/scripts/$script" ] || continue
+    # shellcheck disable=SC2086 # the check's flag is meant to split off
+    if ! node "$dir/tree/scripts/"$check >"$dir/out" 2>&1; then
+      say "$local_ref: scripts/$check failed:"
+      grep -v '^✓' "$dir/out" >&2
+      status=1
+    fi
+  done
+  git worktree remove --force "$dir/tree" >/dev/null 2>&1
+  rm -rf "$dir"
 done
+[ "$status" -eq 0 ] || say "fix it and push again (\`git push --no-verify\` skips this check)"
 exit $status
