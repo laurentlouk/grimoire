@@ -356,6 +356,57 @@ try {
   const g9 = S5 && S5.groups.find((g) => g.version === '0.9.0')
   ok(g9 && g9.firstRound.total === 2 && g9.firstRound.passed === 1,
     `first-round pass skips the discarded quality round: spec failed round 0, quality passed its re-run → 1/2 (got ${g9 ? `${g9.firstRound.passed}/${g9.firstRound.total}` : 'none'})`)
+
+  // ══════ 6 · guard PASSes the terminal sweep re-flagged ══════
+  // The count crystallize reads to decide whether to tighten the guard brief. Read the old way
+  // (any guard PASS in a repo whose terminal verdict was not PASS) this run gave 3 of 5: the
+  // sweep's own guard counted as a guard PASS, a sweep that died or whose reviewers were
+  // unavailable counted as a re-flag, a repair landed after the re-flag counted, and the one real
+  // re-flag (api: blocking terminal review, fixed, verdict PASS) was missed because a `<repo>:final`
+  // task maps to no repo. Right: 1 of 4.
+  section('6 · guard PASSes the terminal sweep re-flagged: per-task guards, real re-flags, in order')
+  const ROOT6 = join(ROOT, 'reflag')
+  const RUN6 = join(ROOT6, '.grimoire', 'runs', 'run-epsilon')
+  mkdirSync(RUN6, { recursive: true })
+  const metaE = { grimoireVersion: '0.10.0', briefsHash: 'eeee555', personasHash: 'p5', configHash: 'c5' }
+  writeFileSync(join(RUN6, 'run.json'), JSON.stringify({ runId: 'run-epsilon', project: 'PROJ-10', meta: metaE, startedAt: iso(0), updatedAt: iso(0), status: 'drained' }))
+  const task = (id, repo) => [
+    { type: 'route', task: id, repo, agent: `${repo}-engineer`, model: 'sonnet', reason: 'default tier', fallback: false },
+    { type: 'dispatch', task: id, repo, agent: `${repo}-engineer`, model: 'sonnet', lane: 'direct', cycle: 1 },
+    { type: 'review', task: id, stage: 'quality', persona: 'break-it', verdict: 'FAIL', gating: 1, advisory: 0, round: 0 },
+    { type: 'fix', task: id, stage: 'quality', round: 1, model: 'sonnet', findings: 1 },
+    { type: 'guard', task: id, stage: 'quality', round: 1, decision: 'PASS', reason: 'addressed, contained' },
+    { type: 'settle', task: id, repo, status: 'DONE' },
+  ]
+  const ev6 = [
+    { type: 'run.start', project: 'PROJ-10', mode: 'execute', meta: metaE, knobs: {}, repos: ['api', 'web', 'app', 'ops'] },
+    // api: its guard passed T-9, then the sweep raised a blocker, fixed it under its own guard, and passed → re-flagged
+    ...task('T-9', 'api'),
+    { type: 'review', task: 'api:final', stage: 'terminal', persona: 'Reliability & Release SRE', verdict: 'FAIL', gating: 1, advisory: 0, round: 0 },
+    { type: 'fix', task: 'api:final', stage: 'terminal', round: 1, model: 'sonnet', findings: 1 },
+    { type: 'guard', task: 'api:final', stage: 'terminal', round: 1, decision: 'PASS', reason: 'addressed, contained' },
+    { type: 'terminal', repo: 'api', verdict: 'PASS' },
+    // web: the sweep died → not a re-flag; app: its reviewers were unavailable → not a re-flag
+    ...task('T-10', 'web'),
+    { type: 'terminal', repo: 'web', verdict: 'DIED' },
+    ...task('T-11', 'app'),
+    { type: 'terminal', repo: 'app', verdict: 'UNAVAILABLE' },
+    // ops: the sweep failed first, then a repair task's guard passed and the retried sweep passed → the repair was not re-flagged
+    { type: 'review', task: 'ops:final', stage: 'terminal', persona: 'Privacy Engineer', verdict: 'FAIL', gating: 1, advisory: 0, round: 0 },
+    { type: 'terminal', repo: 'ops', verdict: 'FAIL' },
+    ...task('T-12', 'ops'),
+    { type: 'terminal', repo: 'ops', verdict: 'PASS' },
+    { type: 'run.end', status: 'drained', done: 4, failed: 0, blocked: 0, prs: 4, tokens: 8000 },
+  ]
+  writeFileSync(join(RUN6, 'events.jsonl'), ev6.map((e, i) => JSON.stringify({ seq: i + 1, at: iso(0), tok: (i + 1) * 100, ...e })).join('\n') + '\n')
+  const s6 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json'], { cwd: ROOT6, encoding: 'utf8' })
+  let S6 = null
+  try { S6 = JSON.parse(s6.stdout) } catch {}
+  const g10 = S6 && S6.groups.find((g) => g.version === '0.10.0')
+  ok(g10 && g10.guardPass === 4, `guard PASS counts the 4 per-task guards, not the sweep's own (got ${g10 && g10.guardPass})`)
+  ok(g10 && g10.guardPassReflagged === 1, `re-flagged: only api's T-9 — a blocking terminal review counts even when a fix cleared it; a died or unavailable sweep does not; a repair after the re-flag does not (got ${g10 && g10.guardPassReflagged})`)
+  const t6 = spawnSync(process.execPath, [SCRIPT, 'summary'], { cwd: ROOT6, encoding: 'utf8' })
+  ok(/guard PASS 4 · later re-flagged by terminal 1/.test(t6.stdout), 'the text summary carries the same numbers')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

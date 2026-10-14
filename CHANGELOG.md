@@ -47,6 +47,19 @@ push, not after it, without any key; and the agent that wrote a lesson may not a
 - New cases: `review` #5 (a fix that loosens an assertion and skips a test is not passed) and
   `crystallize` #5 (a clean crystallize PR is still not merged by its author).
 
+**The re-flag count crystallize reads**
+- `render-logs.mjs summary` counted any guard PASS in a repo whose terminal slot did not end
+  PASS as "re-flagged by the terminal sweep". So a sweep that died, or whose reviewers were
+  unavailable, counted as a re-flag, and a repair task that landed after the re-flag counted
+  too. Meanwhile the real case was missed: a sweep that raised a blocker, fixed it and passed.
+  Its reviews belong to `<repo>:final`, which mapped to no repo.
+- It now counts per-task guard PASSes (the sweep's own guard can't re-flag itself) whose repo
+  the sweep re-flagged after the pass. A re-flag is a blocking terminal review, even one a fix
+  then cleared, or a FAIL verdict. The match is still per repo, not per finding, so read the
+  number as an upper bound. On the new test's run it reads 1 of 4, where the old count read
+  3 of 5 (`scripts/render-logs.test.mjs` §6). The figure `crystallize` uses to decide whether
+  to tighten the guard brief no longer rests on harness failures.
+
 **A human merges every crystallize PR**
 - The `crystallize` skill let the orchestrator merge a "clean" crystallize PR once a few had
   come back clean; its loop brief said never merge, and the engine never did. They now agree: a
