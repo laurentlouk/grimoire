@@ -108,6 +108,41 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   rmSync(TF, { recursive: true, force: true })
 }
 
+// ── 1c · modules: the system map's units ──
+{
+  const { moduleKeys, systemMap } = await import('../lib/modules.mjs')
+  const F = (id, repo, path, test = 0) => ({ id, repo, path, is_test: test })
+  const fs = [
+    F(1, 'api', 'lib/src/cqrs/a.rs'), F(2, 'api', 'lib/src/cqrs/b.rs'), F(3, 'api', 'lib/src/db/c.rs'), F(4, 'api', 'lib/src/db/d.rs'),
+    F(5, 'api', 'lib/src/infra/e.rs'), F(6, 'api', 'lib/build.rs'), F(7, 'api', 'gql/src/schema.rs'), F(8, 'api', 'main.rs'),
+    F(9, 'app', 'components/Button.tsx'), F(10, 'app', 'hooks/useX.ts'), F(11, 'app', 'app/(tabs)/index.tsx'), F(12, 'app', 'app/_layout.tsx'),
+    F(13, 'app', 'components/Button.test.tsx', 1),
+  ]
+  const keys = moduleKeys(fs)
+  const got = fs.map((f) => `${f.id}:${keys.get(f.id) ?? '-'}`).join(' ')
+  ok(got === '1:lib/src/cqrs 2:lib/src/cqrs 3:lib/src/db 4:lib/src/db 5:lib/src/infra 6:lib 7:gql 8:(root) 9:components 10:hooks 11:app 12:app 13:-',
+    `modules: a folder holding most of its repo splits into its subfolders, files right in it stay at its level, test code belongs to none (${got})`)
+  const nodes = fs.map((f) => ({ id: 100 + f.id, file_id: f.id }))
+  const E = (a, b, kind, conf) => ({ src: 100 + a, dst: 100 + b, kind, confidence: conf })
+  const edges = [
+    E(1, 3, 'CALLS', 'import'), E(2, 3, 'CALLS', 'typed'), E(2, 4, 'CALLS', 'qualified'), E(1, 3, 'IMPORTS', 'path'), // cqrs → db: 3 file pairs
+    E(1, 5, 'CALLS', 'ambiguous'), E(2, 5, 'CALLS', 'unique-name'), // name guesses: no link
+    E(13, 9, 'CALLS', 'import'), // from test code: no link
+    E(7, 1, 'CALLS', 'import'), E(9, 10, 'IMPORTS', 'path'), E(11, 9, 'IMPORTS', 'path'), E(12, 9, 'IMPORTS', 'path'), E(1, 2, 'CALLS', 'same-file'),
+  ]
+  const S = systemMap(fs, nodes, edges)
+  const mods = S.modules.map((m) => `${m.repo}:${m.key}:${m.files}`).join(' ')
+  const links = S.links.map(([a, b, n]) => `${S.modules[a].key}>${S.modules[b].key}:${n}`).sort().join(' ')
+  ok(links === 'app>components:2 components>hooks:1 gql>lib/src/cqrs:1 lib/src/cqrs>lib/src/db:3',
+    `system map: links count file pairs between modules, from links resolved by syntax only, never from test code (${links})`)
+  ok(S.modules.filter((m) => m.repo === 'app').map((m) => m.key).join(' ') === 'app components hooks',
+    `system map: a lane lists its modules in the order code flows, users above what they use (${mods})`)
+  ok(JSON.stringify(systemMap(fs, nodes, edges)) === JSON.stringify(S), 'system map: deterministic')
+  const C = systemMap(fs, nodes, [...edges, E(10, 9, 'IMPORTS', 'path')]) // hooks → components closes a cycle
+  const ranks = C.modules.filter((m) => m.repo === 'app').map((m) => `${m.key}:${m.rank}`).join(' ')
+  ok(ranks === 'app:0 components:1 hooks:1', `system map: modules in a cycle share one rank, below their users (${ranks})`)
+}
+
 // ── 2 · a polyglot project ──
 console.log('\n2 · polyglot project (TypeScript · Rust · Python · Go)')
 const SANDBOX = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-graph-')))
