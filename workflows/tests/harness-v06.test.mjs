@@ -314,7 +314,7 @@ function journalWriter(prompt, { lie = false } = {}) {
   const heredocs = [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/g)].map((m) => Buffer.from(m[1].replace(/\s+/g, ''), 'base64').toString('utf8').replace(/\n$/, ''))
   const lines = heredocs[0]
   const run = JSON.parse(heredocs[1])
-  const file = (/F="\$DIR\/events\/(\d{8})\.jsonl"/.exec(prompt) || [])[1]
+  const file = (/; CHUNK=(\d{8}); /.exec(prompt) || [])[1]
   const dir = (/^DIR='([^']+)'$/m.exec(prompt) || [])[1] || '.grimoire/runs/20260923-120000-PROJ-600'
   writes.push({ file, dir, events: lines.split('\n').map((l) => JSON.parse(l)), run })
   const n = lines.split('\n').length

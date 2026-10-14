@@ -88,14 +88,15 @@ function eventFiles(p) {
 // The session an event came from under its runId (1 for journals written before attempts).
 const attemptOf = (ev) => num(ev.attempt) ?? 1
 
-// The writer's temp files left behind (`<file>.<pid>`, `.b64`, `.s`, `.d`): a chunk, landed.jsonl or
-// run.json whose write never finished. A leftover chunk is events the journal lost.
+// The writer's temp files left behind (`<file>.<pid>`, `.b64`, `.s`, `.d`; from the writer file on,
+// `.chunk.<pid>`, `.runjson.<pid>` and `.landed.<pid>`): a chunk, landed.jsonl or run.json whose write
+// never finished. A leftover chunk is events the journal lost.
 function leftovers(p) {
   const out = []
   for (const d of [p, join(p, 'events')]) {
     let names = []
     try { names = readdirSync(d) } catch { continue }
-    for (const n of names) if (/\.jsonl?\.\d+(\.b64|\.s|\.d)?$/.test(n)) out.push(relative(p, join(d, n)))
+    for (const n of names) if (/(\.jsonl?|^\.(chunk|runjson|landed))\.\d+(\.b64|\.s|\.d)?$/.test(n)) out.push(relative(p, join(d, n)))
   }
   return out.sort()
 }

@@ -25,6 +25,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadRuns, runOutcome } from '../../scripts/render-logs.mjs'
+import { writerText, WRITER_FILE } from '../../scripts/build-journal-writer.mjs'
 
 const DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -82,13 +83,13 @@ async function run(scenario, tasks, responder, { args = {} } = {}) {
 // What each journal script carries: its chunk, run.json and the landed delta are each optional (a resend carries one).
 const payloads = (p) => {
   const hs = heredocs(p).map(unb64)
-  const has = { chunk: /F="\$DIR\/events\//.test(p), runJson: /T="\$DIR\/run\.json\.\$\$"/.test(p), landed: /T="\$DIR\/landed\.jsonl\.\$\$"/.test(p) }
+  const has = { chunk: /"\$DIR\/\.chunk\.\$\$\.b64"/.test(p), runJson: /"\$DIR\/\.runjson\.\$\$\.b64"/.test(p), landed: /"\$DIR\/\.landed\.\$\$\.b64"/.test(p) }
   return { has, chunk: has.chunk ? hs.shift() : null, runJson: has.runJson ? JSON.parse(hs.shift()) : null, landed: has.landed ? hs.shift() : null }
 }
 // What a faithful haiku returns: the script's lines mapped onto JOURNAL_SCHEMA.
 const receiptOf = (out) => {
   const num = (re) => Number((re.exec(out) || [])[1] || 0)
-  return { runDir: (/^RUNDIR (.+)$/m.exec(out) || [])[1] || '', lines: num(/^LINES (\d+)$/m), bytes: num(/^BYTES (\d+)$/m), runJson: (/^RUNJSON (ok|kept|bad)\b/m.exec(out) || [])[1], runJsonBytes: num(/^RUNJSON_BYTES (\d+)$/m), runJsonKept: (/^RUNJSON kept: (.*)$/m.exec(out) || [])[1], landed: num(/^LANDED ok (\d+)$/m) }
+  return { writer: /^WRITER missing/m.test(out) ? 'missing' : 'ok', runDir: (/^RUNDIR (.+)$/m.exec(out) || [])[1] || '', lines: num(/^LINES (\d+)$/m), bytes: num(/^BYTES (\d+)$/m), runJson: (/^RUNJSON (ok|kept|bad)\b/m.exec(out) || [])[1], runJsonBytes: num(/^RUNJSON_BYTES (\d+)$/m), runJsonKept: (/^RUNJSON kept: (.*)$/m.exec(out) || [])[1], landed: num(/^LANDED ok (\d+)$/m) }
 }
 // A writer that confirms without touching disk: it reports what the script would.
 const confirming = (p) => {
@@ -126,12 +127,12 @@ try {
     ok(labels.includes('journal#1.r1') && labels.includes('journal#1.r2') && !labels.some((l) => /^journal#[2-9]\d*\.r\d$/.test(l)), 'the mistyped first chunk is resent in two pieces, and only it')
     const piece = r.journals.find((c) => c.label === 'journal#1.r1').prompt
     const pp = payloads(piece)
-    ok(pp.has.chunk && !pp.has.runJson && !pp.has.landed && heredocs(piece).length === 1 && /F="\$DIR\/events\/\d{8}\.r1\.jsonl"/.test(bashOf(piece)) && /RUNJSON kept: not sent with this script/.test(piece),
+    ok(pp.has.chunk && !pp.has.runJson && !pp.has.landed && heredocs(piece).length === 1 && /; CHUNK=\d{8}\.r1; /.test(bashOf(piece)) && /; CK_R=; N_R=; /.test(piece),
       'a piece carries its events only: one payload, a .r1 file, no run.json, no landed delta')
     ok(!!finalLabel && labels.includes(`${finalLabel}.rj1`) && !labels.includes(`${finalLabel}.rj2`), `the final run.json (${finalLabel}), mistyped, is resent alone once, and that is enough`)
     const rj = r.journals.find((c) => c.label === `${finalLabel}.rj1`).prompt
     const rp = payloads(rj)
-    ok(rp.has.runJson && !rp.has.chunk && !rp.has.landed && heredocs(rj).length === 1 && /echo "LINES 0"; echo "BYTES 0"/.test(rj) && rp.runJson.status === 'drained', 'the run.json resend carries run.json only, with the final status')
+    ok(rp.has.runJson && !rp.has.chunk && !rp.has.landed && heredocs(rj).length === 1 && /; CHUNK=; CK_C=; N_C=; /.test(rj) && rp.runJson.status === 'drained', 'the run.json resend carries run.json only, with the final status')
     const files = readdirSync(join(D, 'events')).sort()
     ok(!files.includes('00000001.jsonl') && files.includes('00000001.r1.jsonl') && files.filter((f) => f.endsWith('.r1.jsonl')).length === 2, `the mistyped chunk wrote nothing; its pieces did (${files.join(' ')})`)
     eq(leftovers(D), [], 'no temp file left behind')
@@ -157,6 +158,36 @@ try {
     ok(files.length > 0 && files.every((f) => /\.a2\.jsonl$/.test(f)) && files.filter((f) => /^\d{8}\.r1\.a2\.jsonl$/.test(f)).length === 2, `the pieces carry the session: ${files.join(' ')}`)
     const [loaded] = loadRuns(TEL)
     ok(!!loaded && loaded.events.every((e) => e.attempt === 2) && runOutcome(loaded).journal.missingEvents === 0 && r.result.telemetry.journal.lost === 0, 'every event read back as attempt 2, none missing')
+  }
+
+  // ══════════════ JR-9 · the writer is a file: a flush carries its own lines and payloads only ══════════════
+  {
+    section('JR-9 · workflows/scripts/journal-writer.sh is the engine\'s writer, and no flush retypes it')
+    const text = writerText()
+    ok(readFileSync(WRITER_FILE, 'utf8') === text, 'the file is the engine\'s JOURNAL_WRITER byte for byte (else: node scripts/build-journal-writer.mjs)')
+    const r = await run('JR-9 · (capture) two tasks', [T(1), T(2)], (label, p) => (label.startsWith('journal#') ? confirming(p) : happy(label)), { args: { ...QUIET, runId: 'run-w', telemetry: { dir: fresh('tel') } } })
+    const own = r.journals.map((c) => bashOf(c.prompt).replace(/<<'GRIMOIRE_EOF'\n[\s\S]*?\nGRIMOIRE_EOF/g, ''))
+    ok(own.every((s) => !s.includes('L="$DIR/.lock"') && !s.includes('dec() {') && /\n\. "\$W"\n/.test(s)), 'no flush carries the lock, the decoder or the checks: each sources the file')
+    const longest = Math.max(...own.map((s) => s.length))
+    ok(longest < 1200 && Buffer.byteLength(text) > 4 * longest, `what a flush retypes besides its payloads: at most ${longest} characters, against ${Buffer.byteLength(text)} for the writer it no longer carries`)
+  }
+
+  // ══════════════ JR-10 · the file missing, or not the engine's: the writer goes inline ══════════════
+  for (const [name, setup] of [['missing', (d) => d], ['altered', (d) => { writeFileSync(join(d, 'journal-writer.sh'), readFileSync(WRITER_FILE, 'utf8').replace('LINES 0', 'LINES 1')); return d }]]) {
+    const shell = SHELLS[0]
+    if (!shell) break
+    const TEL = fresh('tel')
+    const scriptsDir = setup(fresh('scripts'))
+    const r = await run(`JR-10 · ${shell.name}: the writer file ${name}`, [T(1), T(2)], (label, p) => (label.startsWith('journal#') ? receiptOf(sh(shell, bashOf(p)).stdout) : happy(label)),
+      { args: { ...QUIET, runId: 'run-i', scriptsDir, telemetry: { dir: TEL } } })
+    const labels = r.journals.map((c) => c.label)
+    const first = r.journals[0].prompt, inline = r.journals.find((c) => c.label === 'journal#1.inline')
+    ok(/WRITER missing/.test(sh(shell, bashOf(first)).stdout) && !!inline && labels.filter((l) => l.endsWith('.inline')).length === 1, 'journal#1 finds it and writes nothing; it is sent again inline, once')
+    ok(r.journals.filter((c) => c.label !== 'journal#1').every((c) => c.prompt.includes('L="$DIR/.lock"') && !/\n\. "\$W"\n/.test(c.prompt)), 'every script after it carries the writer inline')
+    const [loaded] = loadRuns(TEL)
+    const j = r.result.telemetry.journal
+    ok(!!loaded && loaded.status === 'drained' && runOutcome(loaded).journal.missingEvents === 0 && j.inlineWriter === true && j.lost === 0 && j.resent === 0, 'the journal is whole: drained, no event missing, nothing resent')
+    ok(r.logs.filter((l) => /journal writer .*journal-writer\.sh is missing or differs/.test(l)).length === 1, 'logged once')
   }
 
   // ══════════════ JR-2 · the first flush goes before the first dispatch ══════════════

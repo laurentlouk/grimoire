@@ -28,7 +28,8 @@ scripts run for real in bash, zsh and dash).
 - **A lost chunk is counted.** These are shown as an incomplete journal, so numbers that undercount
   say so:
   - gaps in `seq` within a session, and before the first session's first event
-  - the writer's unfinished temp files (`<file>.<pid>`, `.b64`, `.s`, `.d`)
+  - the writer's unfinished temp files (`<file>.<pid>`, `.chunk.<pid>`, `.runjson.<pid>`,
+    `.landed.<pid>`, with `.b64`, `.s` or `.d`)
 - **A halt the run resumed from is not its verdict.** The overview shows it as "halted in session N,
   then resumed" instead of in red on a drained run.
 
@@ -53,6 +54,16 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
 - **A flush's landed delta is capped at 4,000 bytes as well as 8 tasks;** one task always goes.
 - A writer returning nothing still marks the writer dead after two in a row, resends included, and
   nothing is resent once it is dead.
+- **The writer is a file now, not text the haiku retypes.** `workflows/scripts/journal-writer.sh`
+  holds the lock, the attempt registry, the decoding and the checks, and ships with the engine
+  copy, next to the briefs. It is the engine's `JOURNAL_WRITER` byte for byte:
+  `npm run journal:writer` writes it, and a test checks it.
+  - A flush now retypes under 1 kB of shell besides its payloads, against about 5 kB before.
+  - Each flush checks the file's cksum before it sources it. A missing or altered file prints
+    `WRITER missing` and writes nothing; that flush and every later one then carry the writer
+    inline. `telemetry.journal.inlineWriter` says so.
+  - `scriptsDir` overrides where the file is; the default is next to `briefsDir`.
+- Each event is serialized once: the byte count and the chunk share its line.
 
 ## 0.11.0 — trust and see
 

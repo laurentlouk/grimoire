@@ -147,6 +147,7 @@ ignored, with a warning.)
 | `runsDir` | `runs` | where run ledgers are written |
 | `briefsDir` | `workflows/briefs` | where the dispatch briefs live |
 | `personasDir` | `workflows/personas` | where the review lenses live |
+| `scriptsDir` | next to `briefsDir` (`…/scripts`) | where the journal writer's file lives (`journal-writer.sh`); a missing or altered file makes the run carry the writer inline |
 | `worktreeDir` | `.worktrees` | where parallel lanes are checked out |
 | `baseBranch` | `origin/main` | the integration branch lanes branch from and reviews/sweeps diff against (`origin/master`, `origin/trunk`, …) |
 | `requireHook` | `null` | `{name, check, fix?, raw?}` — refuse to execute unless a tool hook is installed and registered in this session. `raw` (e.g. `'rtk proxy'`) is the prefix that runs a command with its output uncompressed: implement and gate prompts tell the agent to re-run a command as `<raw> <cmd>` when its output is empty, garbled or contradicts its exit code (without `raw`, the same rule without a command) |
@@ -789,7 +790,16 @@ terminal-sweep finding on a harness file routed to crystallize; `replan` carries
 and `halt` its `kind`. Each carries a `seq` (a resumed session continues the checkpoint's;
 one without a checkpoint starts at 1), the cumulative output tokens `tok`, and its fields
 (reasons included). The script has no clock and no filesystem, so events are buffered and one haiku
-writer per chunk (`briefs/journal.md`) runs a fixed shell script that:
+writer per chunk (`briefs/journal.md`) runs a short script: it sets the run directory, the session,
+the chunk's name and each payload's cksum, writes the payloads, checks that
+`<scriptsDir>/journal-writer.sh` is this engine's writer (its cksum) and sources it. The writer is
+`JOURNAL_WRITER` in the engine, byte for byte (`node scripts/build-journal-writer.mjs` writes the
+file, and a test checks it); it ships with the engine copy `/orchestrate` makes, next to the
+briefs. The haiku once retyped all of it, about 5 kB of shell, on every flush, with the payloads;
+it now retypes under 1 kB and the payloads. A flush that finds the file missing or different
+prints `WRITER missing` and writes nothing (`writer: 'missing'` in its receipt): the engine sends
+it again with the writer inline, and every later script too (`telemetry.journal.inlineWriter`).
+The writer:
 
 - decodes its payload: the chunk's lines, `run.json` and the landed-task detail travel
   **base64** in the prompt and the script decodes them (`base64 --decode`, else
@@ -957,7 +967,7 @@ this run's spend against `maxOutputTokens`, the session probe's `toolLatencySec`
 dispatch past its soft limit, `{label, kind, softMin, outcome: 'accepted' | 'died' |
 'abandoned' | 'wedged' | 'pending'}`), `wedged` (the writers past their hard limit), `timedOut`
 (the readers given up on at their hard limit), and `journal`, the writer's receipt: `{runDir,
-events, written, chunks, mismatches, resent, lost, lostEvents, runJsonLost, runJsonResent, runJsonKept}`) · `harness` (the ledger
+events, written, chunks, mismatches, resent, lost, lostEvents, runJsonLost, runJsonResent, runJsonKept, inlineWriter}`) · `harness` (the ledger
 written and what crystallize produced; when PRs shipped but crystallize did not finish, the
 `note` says to run it by hand over them).
 

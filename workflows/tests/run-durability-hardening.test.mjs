@@ -333,7 +333,9 @@ await guard('H-6', async () => {
   const { prompts, dir } = await journalPrompts()
   const script = prompts[0]
   // instrument the critical section: in/out marks around a 0.25-s hold, right after the lock is taken
-  const instr = (D, LOG) => retarget(script, dir, D).replace('PREV=$(sed', `echo "in $$" >> '${LOG}'; sleep 0.25; echo "out $$" >> '${LOG}'\nPREV=$(sed`)
+  // the lock lives in the writer's file: inline it (the file's own text) so the critical section can be marked
+  const WRITER = readFileSync(new URL('../scripts/journal-writer.sh', import.meta.url), 'utf8')
+  const instr = (D, LOG) => retarget(script, dir, D).replace('\n. "$W"\n', () => `\n${WRITER}`).replace('PREV=$(sed', `echo "in $$" >> '${LOG}'; sleep 0.25; echo "out $$" >> '${LOG}'\nPREV=$(sed`)
   const depth = (LOG) => { let d = 0, max = 0; for (const l of readFileSync(LOG, 'utf8').trim().split('\n')) { d += l.startsWith('in') ? 1 : -1; max = Math.max(max, d) } return max }
   // a slow `rm -rf`, slower for some writers than others, widens the window between reading the
   // holder's pid and breaking its lock: without the mutex, two waiters that both saw the dead holder
@@ -376,7 +378,7 @@ await guard('H-6', async () => {
     const { out, s } = results[i]
     ok(/^RUNJSON ok$/m.test(out) && s >= 0.9 && s < 5 && !existsSync(join(D, '.lock')) && !existsSync(join(D, '.lock.brk')), `${shell} · ${what}: broken after ${s.toFixed(1)} s (expected 1–3: whole seconds), written, nothing left`)
   })
-  ok(/LS=\$\{GRIMOIRE_LOCK_STALE:-30\}/.test(script) && /\[ \$\(\(N - T0\)\) -ge \$\(\(LS \* 2\)\) \] && break/.test(script), 'the defaults: broken after 30 s, given up after 60 s')
+  ok(/LS=\$\{GRIMOIRE_LOCK_STALE:-30\}/.test(WRITER) && /\[ \$\(\(N - T0\)\) -ge \$\(\(LS \* 2\)\) \] && break/.test(WRITER), 'the defaults (in the writer\'s file): broken after 30 s, given up after 60 s')
 })
 
 // ══════════════ H-7 · the landed receipt, the delta, `kept`, and landed.jsonl ══════════════

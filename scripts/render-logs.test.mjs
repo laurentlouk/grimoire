@@ -533,11 +533,13 @@ try {
     { seq: 9, attempt: 2, type: 'run.start', project: 'P8', mode: 'execute', meta: meta8, resumed: true, repos: ['api'] },
     { seq: 10, attempt: 2, type: 'run.end', status: 'drained', done: 3, failed: 0, blocked: 0, prs: 1, tokens: 10 },
   ])
+  writeFileSync(join(RUNS8, 'run-kept', '.runjson.5150.b64'), 'eyJ9') // a writer-file flush that stopped before decoding its run.json
   const s8 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json'], { cwd: join(ROOT, 'resumes'), encoding: 'utf8' })
   let S8 = null
   try { S8 = JSON.parse(s8.stdout) } catch {}
   const o8 = (id) => S8 && S8.outcomes.find((o) => o.runId === id)
-  ok(o8('run-moved') && o8('run-moved').journal.missingEvents === 0, 'a session that opens with run.start past seq 1 (a resume under a new runId) lost nothing before it')
+  ok(o8('run-moved') && o8('run-moved').journal.missingEvents === 0 && o8('run-moved').journal.leftovers === 0, 'a session that opens with run.start past seq 1 (a resume under a new runId) lost nothing before it')
+  ok(o8('run-kept') && o8('run-kept').journal.leftovers === 1, "the writer file's temp names (.runjson.<pid>.b64) count as an unfinished write")
   ok(o8('run-kept') && o8('run-kept').status === 'drained' && /run\.json still says halted \(written by session 1\); run\.end #10 of session 2 says drained/.test(o8('run-kept').journal.statusNote),
     "session 1's halted run.json loses to session 2's run.end, and says so")
 } finally {

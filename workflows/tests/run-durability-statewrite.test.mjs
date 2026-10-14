@@ -97,7 +97,7 @@ const receiptOf = (out) => {
 // A resend carries one payload only: its chunk, or run.json alone (see journalPrompt).
 const confirming = (p) => {
   const hs = heredocs(p).map(unb64)
-  const has = { chunk: /F="\$DIR\/events\//.test(p), rj: /T="\$DIR\/run\.json\.\$\$"/.test(p), landed: /T="\$DIR\/landed\.jsonl\.\$\$"/.test(p) }
+  const has = { chunk: /"\$DIR\/\.chunk\.\$\$\.b64"/.test(p), rj: /"\$DIR\/\.runjson\.\$\$\.b64"/.test(p), landed: /"\$DIR\/\.landed\.\$\$\.b64"/.test(p) }
   const lines = has.chunk ? hs.shift() : '', rj = has.rj ? hs.shift() : '', landed = has.landed ? hs.shift() : ''
   return { runDir: (/^DIR='([^']+)'$/m.exec(p) || [])[1], lines: has.chunk ? lines.trim().split('\n').length : 0, bytes: Buffer.byteLength(lines), runJson: has.rj ? 'ok' : 'kept', runJsonBytes: Buffer.byteLength(rj), landed: landed ? landed.trim().split('\n').length : 0 }
 }
