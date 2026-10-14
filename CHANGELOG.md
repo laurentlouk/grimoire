@@ -1,5 +1,82 @@
 # Changelog
 
+## 0.10.0 — trust the learning
+
+Three changes that turn promises the harness already made into checks, drawn from a comparison
+with Anthropic's [AI-native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook):
+every gate trusts the tests, so a fix may not weaken them; what CI checks should fail before a
+push, not after it, without any key; and the agent that wrote a lesson may not approve it.
+
+**A fix must not weaken a test**
+- Loosening the test that exposed a finding is the cheapest way to make the finding go away, and
+  nothing caught it: the precheck only checks that tests moved with behaviour, and the
+  whole-task diff a re-review reads shows a test the task added and a fix then weakened as one
+  weak test, added. Every fix a review sends back (spec, quality and the terminal sweep) now gets
+  a fact sheet built from the fix's own diff by one fixed command (no model, no per-repo
+  configuration): the test files that existed before the fix and that it deleted, the assertions
+  it removed from them, the skips or focus markers it added. The terminal sweep has no task
+  range, so its fix range comes from the fix's own report, and its guard now reads the fix diff
+  too instead of having to find the commits.
+- The guard reads it and sends an unjustified weakening to the panel with a reason starting
+  `test weakened:`. In a re-review round exactly one reviewer gets it (break-it, else the spec
+  hawk, else the first lens), with the findings the fix answered, and raises it as a blocker
+  unless one of them asked for that test change (`briefs/guard.md`, `briefs/review.md`). The
+  verifier of that round is handed the fix diff too, since the whole range cannot show a removed
+  line (`briefs/verify.md`). The interactive `review` skill applies the same rule.
+- A removed assertion is cited by its line before the fix. Deletions of empty or binary test
+  files are listed, renames are followed (a test moved and loosened shows under its new path),
+  docs are never tests, and the sheet stops at 60 lines of 240 characters with a count of the rest.
+- Tested for real against a temp git repo in bash, zsh and dash: a removed `expect()`, an added
+  `it.skip`, an emptied Go `t.Errorf`, a deleted `test_*.py`, a Rust `#[ignore]`, a JUnit
+  `@Disabled`, an NUnit `[Ignore]`, a Cypress `should()`, a `tests.py`, a path with a space, a
+  renamed and loosened test; not code outside test paths, not docs, not tests the fix added;
+  `(none)` for a clean fix and a plain failure line when git cannot read the range. The engine
+  side covers the guard, one judge per re-review round (also on its retry), the verifier, and a
+  second fix round reading the second fix (`workflows/tests/fix-test-integrity.test.mjs`).
+
+**A pre-push check, no key**
+- `.githooks/pre-push` (`npm run hooks` once per clone) runs the fast checks CI runs, the drift
+  check and the generated `evals/` in sync with `skills/*/evals/evals.json`, on exactly the
+  commit being pushed (a temporary worktree, so uncommitted edits never skew it), and blocks the
+  push when one fails. No model, no API key, no sign-in; about a second per pushed commit. The
+  full test suite (minutes) stays in CI. It never wedges a push on its own problems (no node, a
+  commit it cannot check out), and `git push --no-verify` skips it (`scripts/pre-push.test.mjs`,
+  through a real `git push`).
+- Running the eval cases stays manual and paid: `claude plugin eval .`, which needs the
+  command-line `claude` signed in. Nothing in grimoire needs an API key.
+- New cases: `review` #5 (a fix that loosens an assertion and skips a test is not passed) and
+  `crystallize` #5 (a clean crystallize PR is still not merged by its author).
+
+**The re-flag count crystallize reads**
+- `render-logs.mjs summary` counted any guard PASS in a repo whose terminal slot did not end
+  PASS as "re-flagged by the terminal sweep". So a sweep that died, or whose reviewers were
+  unavailable, counted as a re-flag, and a repair task that landed after the re-flag counted
+  too. Meanwhile the real case was missed: a sweep that raised a blocker, fixed it and passed.
+  Its reviews belong to `<repo>:final`, which mapped to no repo.
+- It now counts per-task guard PASSes (the sweep's own guard can't re-flag itself) whose repo
+  the sweep re-flagged after the pass. A re-flag is a blocking terminal review, even one a fix
+  then cleared, or a FAIL verdict. The match is still per repo, not per finding, so read the
+  number as an upper bound. On the new test's run it reads 1 of 4, where the old count read
+  3 of 5 (`scripts/render-logs.test.mjs` §6). The figure `crystallize` uses to decide whether
+  to tighten the guard brief no longer rests on harness failures.
+
+**`crystallize` is not loaded before the PR exists**
+- A pre-PR request ("capture the learnings now, before the PR") loaded the skill just to
+  decline. Its description said "Never mid-implementation", but that wasn't enough for the
+  model to skip loading it, so eval case `crystallize-2`, which expects the skill not to fire,
+  failed. The description now says such a request is answered without the skill, by saying
+  the PR and its review threads come first.
+- In-session runs, judged by whether each transcript opened the skill: the negative case
+  loaded it in 0 of 3 runs with the new description, against 2 of 3 with the old; the four
+  positive cases still loaded it, 4 of 4. Every run still declined correctly and wrote nothing.
+
+**A human merges every crystallize PR**
+- The `crystallize` skill let the orchestrator merge a "clean" crystallize PR once a few had
+  come back clean; its loop brief said never merge, and the engine never did. They now agree: a
+  human merges, because the agent that wrote a lesson must not approve it. The clean checklist
+  stays, as what the PR body reports so the merge is quick, and "evals green" says how they
+  were run.
+
 ## 0.9.1 — the 0.9.0 follow-ups
 
 The minor findings recorded from the last review rounds of 0.9.0 (issue #14). None blocked a run

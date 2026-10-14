@@ -73,7 +73,7 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 
 `/orchestrate` needs a fourth input besides the three design artifacts: `repos`, the list of repositories with their owning agent, tags (for review-lens selection) and gate command. It previews first, with a wall-clock estimate (a strict blocked-by chain runs one task at a time). Once it runs, every landed task is pushed to one draft PR per repo, and a halted or killed run picks up where it stopped when you invoke `/orchestrate` on the same project again. Leave the session alone while it runs: a message sent to it reaches the prompts of the agents the run dispatches, so give instructions after the run, or stop it first. `workflows/README.md` has the full reference.
 
-**🧠 How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
+**🧠 How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews and merges. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
 
 **🔍 Explore before asking; don't guess: built in.** If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, an agent finds it before asking and never states a discoverable fact as a guess; only decisions the owner holds (product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase) come back as questions, and an inconclusive search says what was checked and what is still unknown. Nothing to paste into `CLAUDE.md`: the rule is carried by the skills that ask (`roast`, `to-plan`, `to-issues`, `implement`, `launch-agent`, `setup`), the team-agent template, every scout and the reviewer, and the loop's briefs and dispatch header, so no project can miss it.
 
@@ -158,7 +158,10 @@ npm test               # engine, guard, renderer and code-graph tests (the graph
 npm run check          # drift: roster ↔ agents, briefs ↔ engine, evals present, config documented
 npm run evals:check    # evals/ is up to date with skills/*/evals/evals.json
 claude plugin eval .   # run the skill evals (paid; see evals/README.md)
+npm run hooks          # once per clone: the pre-push check below
 ```
+
+The pre-push check runs CI's fast checks (`npm run check`, `npm run evals:check`) on exactly the commit being pushed, in about a second, and blocks the push when one fails: no model, no API key, no sign-in. The full test suite stays in CI. It is opt-in per clone, `git push --no-verify` skips it, and once `core.hooksPath` points at `.githooks`, hooks in `.git/hooks` stop running.
 
 What changed in each release: [CHANGELOG.md](CHANGELOG.md).
 

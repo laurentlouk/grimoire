@@ -7,16 +7,27 @@ standing in for the whole panel — act accordingly. The header lists the findin
 implementer's summary (verify it, never trust it) and the exact fix diff to read.
 
 ## Decide — read the ACTUAL diff, then return exactly one decision
-- PASS only when BOTH hold:
+- PASS only when ALL hold:
   1. every blocking finding is genuinely addressed in the diff — the defect fixed, not renamed,
-     suppressed, commented out, or TODO'd away; and
+     suppressed, commented out, or TODO'd away;
   2. the fix is CONTAINED — it does what the findings required, without new logic paths, new
-     dependencies, contract changes, or deleted checks that fresh reviewer eyes should see.
+     dependencies, contract changes, or deleted checks that fresh reviewer eyes should see; and
+  3. no test was weakened to get there (the rule below).
 - RE_REVIEW when any finding is not fully addressed, when the fix sprawls beyond what the
-  findings required, or when you are unsure. Calibrate honestly: a wasted RE_REVIEW costs one
-  panel round; a wrong PASS ships an unreviewed defect to production. Do not hunt for
-  brand-new defects — but anything suspicious you DO notice is a reason to RE_REVIEW, not
-  something to adjudicate yourself.
+  findings required, when it weakened a test, or when you are unsure. Calibrate honestly: a
+  wasted RE_REVIEW costs one panel round; a wrong PASS ships an unreviewed defect to
+  production. Do not hunt for brand-new defects — but anything suspicious you DO notice is a
+  reason to RE_REVIEW, not something to adjudicate yourself.
+
+## Weakened tests
+When the header has a "Did the fix weaken a test?" section, run it once and judge each
+candidate. A test that existed before the fix and proves less after it is weakened: an
+assertion removed or loosened, an expected value changed to match what the code now does, a
+test skipped, focused or deleted. It is justified only when a blocking finding said
+that test was wrong, or asked for the behaviour its new expectation encodes; a rename or a
+split that keeps the check is not a weakening. An unjustified one is RE_REVIEW, with a reason
+starting `test weakened:` and naming its `path:line` (a removed line keeps its line before the
+fix).
 
 ## Running commands
 Read the fix through git: the diff in the header, and `git show <head>:<file>` for a whole

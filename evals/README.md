@@ -14,16 +14,19 @@ Layout (the `claude plugin eval` format): one case per `<skill>-<id>/`, with `pr
 Run: `claude plugin eval .` from the plugin root (filter with `--tag <skill>` or `--case '<skill>-*'`).
 Each run writes `evals/results/<timestamp>/`, which is git-ignored.
 
+The pre-push check (`npm run hooks` once per clone) runs the same `--check` on every pushed commit, with no model
+and no key. Running the cases is manual and paid, and needs the command-line `claude` signed in.
+
 | Skill | Cases | Positive | Negative | Edge |
 | --- | --- | --- | --- | --- |
 | adaptive-replanning | 4 | 1 | 1 | 2 |
-| crystallize | 4 | 1 | 1 | 2 |
+| crystallize | 5 | 1 | 1 | 3 |
 | graph | 4 | 1 | 2 | 1 |
 | implement | 5 | 1 | 1 | 3 |
 | launch-agent | 5 | 1 | 1 | 3 |
 | logs | 4 | 1 | 1 | 2 |
 | orchestrate | 12 | 1 | 1 | 10 |
-| review | 4 | 1 | 1 | 2 |
+| review | 5 | 1 | 1 | 3 |
 | roast | 5 | 1 | 1 | 3 |
 | setup | 5 | 1 | 1 | 3 |
 | tdd | 4 | 1 | 1 | 2 |
