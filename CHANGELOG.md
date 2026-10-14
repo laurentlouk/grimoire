@@ -60,6 +60,16 @@ push, not after it, without any key; and the agent that wrote a lesson may not a
   3 of 5 (`scripts/render-logs.test.mjs` §6). The figure `crystallize` uses to decide whether
   to tighten the guard brief no longer rests on harness failures.
 
+**`crystallize` is not loaded before the PR exists**
+- A pre-PR request ("capture the learnings now, before the PR") loaded the skill just to
+  decline. Its description said "Never mid-implementation", but that wasn't enough for the
+  model to skip loading it, so eval case `crystallize-2`, which expects the skill not to fire,
+  failed. The description now says such a request is answered without the skill, by saying
+  the PR and its review threads come first.
+- In-session runs, judged by whether each transcript opened the skill: the negative case
+  loaded it in 0 of 3 runs with the new description, against 2 of 3 with the old; the four
+  positive cases still loaded it, 4 of 4. Every run still declined correctly and wrote nothing.
+
 **A human merges every crystallize PR**
 - The `crystallize` skill let the orchestrator merge a "clean" crystallize PR once a few had
   come back clean; its loop brief said never merge, and the engine never did. They now agree: a

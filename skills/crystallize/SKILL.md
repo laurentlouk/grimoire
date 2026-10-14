@@ -1,6 +1,6 @@
 ---
 name: crystallize
-description: After a pull request is opened and its review threads are settled (or after it merges), turn what the work taught into durable knowledge: patch existing skills or create new ones, add curated facts to the harness memory, fix documentation that drifted from the code, and report exactly what changed so a human can review it before it takes effect. Use at the end of build, review, PR. Never mid-implementation.
+description: After a pull request is opened and its review threads are settled (or after it merges), turn what the work taught into durable knowledge: patch existing skills or create new ones, add curated facts to the harness memory, fix documentation that drifted from the code, and report exactly what changed so a human can review it before it takes effect. Use at the end of build, review, PR. Not before the PR exists: a request to capture learnings mid-implementation or right after an implementer reports DONE is answered without this skill, by saying the PR and its review threads come first.
 ---
 
 # Crystallize: learn from the pull request
