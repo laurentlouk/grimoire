@@ -49,3 +49,55 @@ pub fn crate_version() -> u32 {
 pub fn local_version() -> u32 {
     util::lookup().version()
 }
+
+// Call arguments and a turbofish are not crate paths; an inline module and the crate's own package
+// name start in the repository.
+pub fn arg_chain() -> u32 {
+    let found = util::lookup();
+    found.with_mode(Mode::Fast).version()
+}
+
+pub fn make<T>() -> Registry {
+    Registry::new()
+}
+
+pub fn turbo_version() -> u32 {
+    make::<u8>().version()
+}
+
+mod inline {
+    pub fn make_one() -> crate::geo::Registry {
+        crate::geo::Registry::new()
+    }
+}
+
+pub fn inline_version() -> u32 {
+    inline::make_one().version()
+}
+
+pub fn package_version() -> u32 {
+    geo_core::util::lookup().version()
+}
+
+pub enum Mode {
+    Fast,
+}
+
+// The repository has a `builder` module, but `Output::builder()` is the dependency type's function.
+pub fn output_version() -> u32 {
+    Output::builder().version()
+}
+
+// A crate path is decided by its root: `util` further down is the dependency's module, not ours.
+pub fn sdk_version() -> u32 {
+    aws_sdk::util::Output::builder().version()
+}
+
+// A standard-library name still resolves on a qualified path and through a repository type.
+pub fn path_len(r: &Registry) -> usize {
+    Registry::len(r)
+}
+
+pub fn new_version() -> u32 {
+    Registry::new().version()
+}

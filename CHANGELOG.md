@@ -8,42 +8,64 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
 
 **Links worth trusting**
 - On a receiver whose type the syntax does not state, a standard-library method name (`len`,
-  `get`, `has`, `map`…, listed per language in `COMMON_METHODS`) is no longer linked by name to
+  `get`, `has`, `update`…, listed per language in `COMMON_METHODS`) is no longer linked by name to
   the one method the repository happens to define with that name. One `len` had collected 305
-  false callers that way; it now has 2.
-- A method on a chain that starts at a type or crate the repository does not define
-  (`UpdateItemOutput::builder().build()`, `chrono::Utc::now().timestamp()`) is a dependency's,
-  and is not linked either (157 false callers on one `build`).
-- Result on that project: call links 21,710 → 19,232, name guesses 30.6% → 22.6%.
+  false callers that way; it now has 2. `self.len()`, `Type::len(x)`, a typed receiver and
+  `super().update()` still resolve.
+- A method on a chain that starts in a dependency is the dependency's: a call chain whose path
+  before its first call starts at a type the repository does not define
+  (`UpdateItemOutput::builder().build()`, `new Intl.NumberFormat(..).format()`), or a Rust path
+  rooted at a crate the repository does not have (`chrono::Utc::now()`, `std::env::var`). A
+  repository type, namespace or module anywhere on that path keeps the chain in the repository;
+  SCREAMING_CASE heads are constants; a Rust crate counts as the repository's by its folder, an
+  inline `mod` or its Cargo.toml package name; a turbofish or a call argument is not a path.
+- Result on that project: call links 21,710 → 19,282, name guesses 30.6% → 22.7%. Some 170
+  `import` and `same-file` links went too: the same `len`/`get` calls, matched within a file.
 - Storybook stories, `mocks/`, `__mocks__/`, `fixtures/` and `__fixtures__/` count as test code
   (172 files there), so they no longer rank as the most connected production code.
 - `.tf`, `.tfvars` and `.hcl` files are indexed by name (an infrastructure repository showed 0 of
-  193 files); the infrastructure tools' cache folders never are.
-- `graph_status` reports per repository how many call links are name guesses.
-- Schema 3: an existing index rebuilds once, so it takes the new rules at once instead of file by
-  file. It adds `churn`: how many recent commits touched each file.
+  193 files); the infrastructure tools' cache folders and lock files never are.
+- `graph_status` reports per repository how many call links are name guesses (`unique-name` and
+  `ambiguous`; the README defines the term).
+- Schema 3: an index built by an older version rebuilds once, on the next query or write, so it
+  takes the new rules at once. It adds `churn`: how many of the last 400 non-merge commits touched
+  each file, sweeps of more than 25 files left out. A repository dropped from the configuration
+  drops its churn too.
 
 **A page that groups before it draws**
-- Map opens on a system map: one lane per repository, its modules (folders of production code,
-  a dominant folder split into its subfolders, `lib/modules.mjs`) in the order code flows, each
-  line a module using another, its width the file pairs linked by syntax. Modules in a cycle share
-  a rank. Hover for links and counts; click a module for its files on the file map, fitted to it.
-  That project reads as 83 modules instead of 1,500 dots.
+- Map opens on a system map: one lane per repository drawing its 14 largest modules (folders of
+  production code; a folder holding more than a third of its repository splits into its
+  subfolders, `lib/modules.mjs`), in the order code flows, each line a module using another, its
+  width the file pairs linked by syntax. Modules in a cycle share a rank; links across repositories
+  are drawn but rank nothing. It never shows test code or name guesses. Hover for links and
+  counts; click a module for its files on the file map, fitted to it. That project reads as 52
+  drawn modules of 83 instead of 1,500 dots.
 - A symbol or a file opens beside the list as a neighbourhood: what uses it on the left, what it
   uses on the right; resolved links solid and first, unique-name dashed, ambiguous hidden; every
-  hidden count said; the full lists one click away.
-- Test code and ambiguous links stay hidden until their toggle is on, in every view. The file
-  map's cap goes to production code first.
-- Hotspots rank by links resolved by syntax, name guesses counted apart, and open on a
-  size × churn treemap (log-scale colour).
+  hidden count said; the full lists one click away. A file link is as sure as its surest edge.
+- Test code and ambiguous links stay hidden until their toggle is on, in the lists, the
+  neighbourhoods and the file map, whose cap goes to production code first and whose ranking no
+  name guess decides.
+- Hotspots rank by links resolved by syntax, name guesses counted apart, and open on a treemap
+  of the 400 largest files by size and churn, its legend giving each colour's real range.
 - File labels carry their folder; tables wrap paths and keep their counts visible; views have
-  plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`).
-- A generated 10,000-file index renders in under half a second into a 3.3 MB page.
+  plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`), valid until the next full rebuild.
+- Keyboard: modules, neighbourhood items and treemap tiles are buttons (Enter or Space), and the
+  header keeps focus across re-renders.
+- The CSP admits only the page's own script, by its SHA-256, instead of any inline script: a name
+  that slipped past escaping could no longer run code. One did during this work (an `esc()` whose
+  last two replacements a trailing comment had swallowed); a test now pins `esc()` itself.
+- A generated 10,000-file index renders in about a second into a 3.3 MB page.
 
 **Checks**
-- `tools/graph/tests/graph.test.mjs`: 106 checks (84 before), including the false-link fixtures in
-  Rust and TypeScript, file classes, churn, modules and their ranks, the production-first cap, and
-  a check that the page script compiles (it caught `html()`'s `</` rewrite breaking a regex).
+- `tools/graph/tests/graph.test.mjs`: 140 checks (84 before): false links and their legitimate
+  look-alikes in Rust, TypeScript and Python; file classes; churn (and a sweep that counts for
+  none); schema migration on a query; modules, ranks and cross-repository links; the fixture's
+  exact system map; the page helpers (escaping, anchors, link sureness, churn bands, treemap,
+  lane cap, defaults); the file map's ambiguous-only flag; the CSP hash; a page script that
+  compiles.
+- Three independent reviews (engine, page, tests and docs) found one blocker, six majors and a
+  dozen minors; all are fixed in this release.
 - New eval case `graph` #5.
 
 ## 0.10.0 — trust the learning

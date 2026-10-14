@@ -40,4 +40,12 @@ impl Registry {
     pub fn version(&self) -> u32 {
         1
     }
+
+    pub fn with_mode(&self, _m: crate::Mode) -> &Self {
+        self
+    }
+
+    pub fn count(&self) -> usize {
+        self.len()
+    }
 }

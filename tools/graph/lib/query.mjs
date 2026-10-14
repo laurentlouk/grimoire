@@ -114,13 +114,14 @@ export class Graph {
       const counts = this.one("SELECT count(*) c FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND n.kind != 'file'", r.name).c
       const edges = this.q('SELECT e.kind, count(*) c FROM edges e JOIN nodes n ON n.id = e.src JOIN files f ON f.id = n.file_id WHERE f.repo = ? GROUP BY e.kind', r.name).map((e) => `${e.kind} ${e.c}`).join(', ')
       const calls = JSON.parse(this.one('SELECT value FROM meta WHERE key = ?', `calls:${r.name}`)?.value || '{"calls":0,"resolved":0}')
-      const conf = this.q("SELECT e.confidence, count(*) c FROM edges e JOIN nodes n ON n.id = e.src JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND e.kind = 'CALLS' GROUP BY e.confidence ORDER BY c DESC", r.name).map((e) => `${e.confidence} ${e.c}`).join(', ')
+      const byConf = this.q("SELECT e.confidence, count(*) c FROM edges e JOIN nodes n ON n.id = e.src JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND e.kind = 'CALLS' GROUP BY e.confidence ORDER BY c DESC", r.name)
+      const conf = byConf.map((e) => `${e.confidence} ${e.c}`).join(', ')
       lines.push(`${r.name}  (${r.root})  indexed ${r.indexed_at}${r.head ? ` at ${r.head.slice(0, 10)}` : ''}${fresh && fresh[r.name] ? `  ${fresh[r.name]}` : ''}`)
       lines.push(`  files: ${langs}`)
       lines.push(`  symbols: ${counts}   edges: ${edges || 'none'}`)
       lines.push(`  call sites resolved: ${calls.resolved}/${calls.calls}${conf ? ` (${conf})` : ''}`)
-      const g = this.one("SELECT sum(e.confidence IN ('ambiguous','unique-name')) g, count(*) n FROM edges e JOIN nodes x ON x.id = e.src JOIN files f ON f.id = x.file_id WHERE f.repo = ? AND e.kind = 'CALLS'", r.name)
-      if (g.n) lines.push(`  name guesses: ${Math.round((100 * g.g) / g.n)}% of ${g.n} call links (ambiguous + unique-name)`)
+      const n = byConf.reduce((a, e) => a + e.c, 0), guessed = byConf.filter((e) => e.confidence === 'ambiguous' || e.confidence === 'unique-name').reduce((a, e) => a + e.c, 0)
+      if (n) lines.push(`  name guesses: ${Math.round((100 * guessed) / n)}% of ${n} call links (ambiguous + unique-name)`)
     }
     return lines.join('\n')
   }

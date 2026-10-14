@@ -11,3 +11,7 @@ function total(shapes: Circle[]): number {
   const seen = shapes.map((x) => x.area())
   return shapes.reduce((s, x) => s + x.area(), 0) + (seen.has(2) ? 1 : 0)
 }
+
+export function formatAll(): string {
+  return new Intl.NumberFormat('en').describe()
+}

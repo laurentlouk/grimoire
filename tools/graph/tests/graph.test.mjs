@@ -101,10 +101,10 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   ok(!wrong.length, `stories, mocks and fixtures are test code; look-alike production paths are not${wrong.length ? ': ' + wrong.join(' · ') : ''}`)
   ok(['infra/prod/eks/terragrunt.hcl', 'modules/vpc/main.tf', 'env/prod.tfvars'].every((p) => langOf(p) === 'other'), 'Terraform and Terragrunt files are indexed by name')
   const TF = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-tf-')))
-  for (const rel of ['main.tf', 'infra/prod/eks/terragrunt.hcl', 'env/prod.tfvars', '.terraform/modules/vpc/main.tf', 'infra/prod/eks/.terragrunt-cache/abc/main.tf']) { mkdirSync(path.dirname(path.join(TF, rel)), { recursive: true }); writeFileSync(path.join(TF, rel), 'locals {}\n') }
+  for (const rel of ['main.tf', 'infra/prod/eks/terragrunt.hcl', 'env/prod.tfvars', '.terraform/modules/vpc/main.tf', 'infra/prod/eks/.terragrunt-cache/abc/main.tf', '.terraform.lock.hcl', 'infra/prod/eks/.terraform.lock.hcl']) { mkdirSync(path.dirname(path.join(TF, rel)), { recursive: true }); writeFileSync(path.join(TF, rel), 'locals {}\n') }
   spawnSync('git', ['-C', TF, 'init', '-q'])
   const scanned = scanRepo({ abs: TF }, { exclude: [], maxBytes: 1 << 20 }).map((f) => f.path).sort()
-  ok(JSON.stringify(scanned) === JSON.stringify(['env/prod.tfvars', 'infra/prod/eks/terragrunt.hcl', 'main.tf']), `Terraform's and Terragrunt's caches are never indexed (${scanned.join(', ')})`)
+  ok(JSON.stringify(scanned) === JSON.stringify(['env/prod.tfvars', 'infra/prod/eks/terragrunt.hcl', 'main.tf']), `Terraform's and Terragrunt's caches and lock files are never indexed (${scanned.join(', ')})`)
   rmSync(TF, { recursive: true, force: true })
 }
 
@@ -141,6 +141,40 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   const C = systemMap(fs, nodes, [...edges, E(10, 9, 'IMPORTS', 'path')]) // hooks → components closes a cycle
   const ranks = C.modules.filter((m) => m.repo === 'app').map((m) => `${m.key}:${m.rank}`).join(' ')
   ok(ranks === 'app:0 components:1 hooks:1', `system map: modules in a cycle share one rank, below their users (${ranks})`)
+  const apiRanks = S.modules.filter((m) => m.repo === 'api').map((m) => `${m.key}:${m.rank}`).join(' ')
+  ok(apiRanks === '(root):0 gql:0 lib:0 lib/src/infra:0 lib/src/cqrs:1 lib/src/db:2', `system map: gql uses cqrs uses db; a module reached only by name guesses stays on top (${apiRanks})`)
+  const X = systemMap(fs, nodes, [...edges, E(10, 3, 'CALLS', 'import')]) // app's hooks → api's lib/src/db
+  const xl = X.links.map(([a, b, n]) => `${X.modules[a].repo}:${X.modules[a].key}>${X.modules[b].repo}:${X.modules[b].key}:${n}`).filter((t) => t.includes('hooks>')).join(' ')
+  const dbRank = X.modules.find((m) => m.key === 'lib/src/db').rank
+  ok(xl === 'app:hooks>api:lib/src/db:1' && dbRank === 2, `system map: a link across repositories is drawn but never ranks a module (${xl}, db rank ${dbRank})`)
+}
+
+// ── 1d · the page's pure helpers (injected into the page as they are) ──
+{
+  const R = await import('../lib/render.mjs')
+  ok(R.esc('a"b>c<d&e') === 'a&quot;b&gt;c&lt;d&amp;e', `esc: quotes, angle brackets and ampersands (${R.esc('a"b>c<d&e')})`)
+  ok(R.cut('abcdefgh', 5) === 'abcd…' && R.cutL('src/geo/circle.ts', 9) === '…ircle.ts' && R.cut('ab', 5) === 'ab', 'cut keeps the start of a name, cutL the end of a path')
+  ok(R.plural(1, 'file') === '1 file' && R.plural(0, 'file') === '0 files' && R.plural(1500, 'link') === '1,500 links', 'plural')
+  const tabs = ['overview', 'map', 'files', 'symbols', 'hotspots']
+  ok(JSON.stringify([R.parseHash('#sym-12', tabs), R.parseHash('#file-3', tabs), R.parseHash('#mod-0', tabs), R.parseHash('#map', tabs), R.parseHash('#nope', tabs), R.parseHash('#sym-x', tabs), R.parseHash('', tabs)])
+    === '[{"kind":"sym","id":12},{"kind":"file","id":3},{"kind":"mod","id":0},{"kind":"tab","tab":"map"},null,null,null]', 'parseHash: plain anchors only, anything else ignored')
+  ok([R.pairConf([3, 1, 2, 0]), R.pairConf([2, 0, 1, 1]), R.pairConf([2, 0, 0, 2])].join(' ') === 'resolved unique-name ambiguous', 'a file link is as sure as its surest edge')
+  ok([0, 1, 2, 3, 7, 20, 400].map((c) => R.heatOf(c, 400)).join(' ') === '0 1 1 1 2 2 4' && R.heatOf(1, 1) === 4, 'heatOf: log-scale churn bands')
+  ok(JSON.stringify(R.heatBands(400)) === '[[1,1,4],[2,5,20],[3,21,89],[4,90,400]]' && JSON.stringify(R.heatBands(1)) === '[[4,1,1]]' && JSON.stringify(R.heatBands(0)) === '[]', `heatBands: the legend's real ranges (${JSON.stringify(R.heatBands(400))})`)
+  const sq = R.squarify([6, 6, 4, 3, 2, 2, 1], 0, 0, 6, 4)
+  const area = sq.reduce((a, [, , w, h]) => a + w * h, 0)
+  ok(sq.length === 7 && Math.abs(area - 24) < 1e-9 && sq.every(([x, y, w, h]) => x >= -1e-9 && y >= -1e-9 && x + w <= 6 + 1e-9 && y + h <= 4 + 1e-9) && Math.abs(sq[0][2] * sq[0][3] - 6) < 1e-9, 'squarify: every value gets an area in proportion, inside the rectangle')
+  ok(JSON.stringify(R.squarify([], 0, 0, 10, 10)) === '[]' && JSON.stringify(R.squarify([0, 0], 0, 0, 10, 10)) === '[[0,0,0,0],[0,0,0,0]]', 'squarify: nothing to draw draws nothing')
+  const mods = [{ i: 0, files: 2 }, { i: 1, files: 9 }, { i: 2, files: 5 }, { i: 3, files: 1 }]
+  const lp = R.lanePick(mods, 2)
+  ok(lp.shown.map((m) => m.i).join(' ') === '1 2' && lp.rest === 2 && R.lanePick(mods, 14).rest === 0, 'lanePick: a lane keeps its largest modules, in flow order, and counts the rest')
+  ok(R.INITIAL.tests === false && R.INITIAL.guesses === false && R.INITIAL.tab === 'overview' && R.INITIAL.mapMode === 'modules' && R.LANE_MAX === 14 && R.MAXCOL === 12, 'the page opens on the overview, modules first, with test code and ambiguous links hidden')
+  // the file map: a link whose every edge is ambiguous is flagged, and ranks no file
+  const md = R.mapData([{ id: 1, repo: 'r', path: 'a.ts', is_test: 0, node_id: 11 }, { id: 2, repo: 'r', path: 'b.ts', is_test: 0, node_id: 12 }, { id: 3, repo: 'r', path: 'c.ts', is_test: 0, node_id: 13 }],
+    [], [{ src: 11, dst: 12, kind: 'CALLS', confidence: 'ambiguous' }, { src: 11, dst: 13, kind: 'CALLS', confidence: 'import' }, { src: 11, dst: 13, kind: 'CALLS', confidence: 'ambiguous' }])
+  const byId = (id) => md.files.indexOf(id)
+  const flags = md.links.map(([a, b, w, amb]) => `${md.files[a]}-${md.files[b]}:${w}:${amb}`).sort().join(' ')
+  ok(flags === '1-2:1:1 1-3:2:0' && md.deg[byId(2)] === 0 && md.deg[byId(3)] === 1, `file map: ambiguous-only links are flagged and rank no file (${flags}; deg ${md.deg})`)
 }
 
 // ── 2 · a polyglot project ──
@@ -158,10 +192,10 @@ has(idx, 'shop: 3 files, 3 parsed', 'index: the Go repo too')
 const st = await q('status')
 has(st, 'files: typescript 5', 'status: languages per repo')
 has(st, 'EXTENDS 1, IMPLEMENTS 1', 'status: edge counts per kind')
-{ // status: how many call links are name guesses, from the index itself
-  const tally = (await q('sql', { sql: "SELECT sum(confidence IN ('ambiguous','unique-name')) AS g, count(*) AS n FROM edges e JOIN nodes x ON x.id = e.src JOIN files f ON f.id = x.file_id WHERE e.kind = 'CALLS' AND f.repo = 'core'" })).split('\n')[1].split('\t').map(Number)
-  has(st, `name guesses: ${Math.round((100 * tally[0]) / tally[1])}% of ${tally[1]} call links (ambiguous + unique-name)`, 'status: the share of call links that are name guesses, per repo')
-}
+// shop (Go): New → Cart (`&Cart{}`) [same-file], Cart.Total → pricing.Sum [import], TestTotal → New
+// [same-package], and `c.Total()` on `c := New()`, whose type the syntax does not state: the one name
+// guess of its 4 call links.
+has(st, 'name guesses: 25% of 4 call links (ambiguous + unique-name)', 'status: the share of call links that are name guesses, per repo')
 
 let r = await q('callers', { symbol: 'square', repo: 'web', depth: 3 })
 has(r, 'Circle.area  method  web/src/geo/circle.ts:8  [import]', 'TS: a named import resolves the call to the imported file')
@@ -189,14 +223,27 @@ r = await q('callers', { symbol: 'Registry.len' })
 has(r, 'registry_size  function  core/src/lib.rs:24  [typed]', 'Rust: `r.len()` on a typed receiver still links to Registry::len')
 lacks(r, 'name_count', 'Rust: `names.len()` on an untyped receiver is the standard library\'s len, not the only len the repo defines')
 lacks(r, 'core/src/geo.rs:32  [', 'Rust: `self.items.len()` inside Registry::len is not a call to itself')
+has(r, 'Registry.count  method  core/src/geo.rs', 'Rust: `self.len()` resolves a standard-library name within its own type')
+has(r, 'path_len  function  core/src/lib.rs', 'Rust: `Registry::len(r)` resolves a standard-library name on a qualified path')
 r = await q('callers', { symbol: 'Registry.refresh_all' })
 has(r, 'refresh  function  core/src/lib.rs:35', 'Rust: a name the standard library does not use still resolves on an untyped receiver')
 r = await q('callers', { symbol: 'Registry.version' })
 has(r, 'local_version  function  core/src/lib.rs:49', 'Rust: a chain that starts in the repository (`util::lookup().version()`) still resolves')
 lacks(r, 'clock_version', 'Rust: `Clock::now().version()` starts at a type the repository does not define: a dependency\'s method')
+for (const fn of ['arg_chain', 'turbo_version', 'inline_version', 'package_version', 'new_version']) has(r, `${fn}  function  core/src/lib.rs`, `Rust: \`${fn}\` starts in the repository (an argument's \`Mode::Fast\`, a turbofish, an inline \`mod\`, the crate's own package name, a repository type are not dependencies)`)
+lacks(r, 'output_version', 'Rust: `Output::builder().version()` stays in the dependency even though the repository has a module named `builder`')
+lacks(r, 'sdk_version', 'Rust: `aws_sdk::util::Output::builder()` is decided by its root crate, not by a later segment named like a repository module')
 lacks(r, 'crate_version', 'Rust: `semver::parse(..).version()` starts at a crate the repository does not have: a dependency\'s method')
+r = await q('callers', { symbol: 'Ledger.save_all' })
+has(r, 'audit  function  svc/app/service.py', 'Python: a SCREAMING_CASE constant head (`DEFAULT.entries.save_all()`) is the repository\'s own value, not a dependency type')
+r = await q('callers', { symbol: 'Ledger.update' })
+has(r, 'AuditLedger.update  method  svc/app/models.py', 'Python: `super().update()` reaches the parent even though `update` is a standard-library name')
+lacks(r, 'refresh  function  svc/app/service.py', 'Python: `rows.update()` on an untyped receiver is a dict/set method, not Ledger.update')
+r = await q('callers', { symbol: 'Base.describe', repo: 'web' })
+has(r, 'main  function  web/src/app.ts:4', 'TS: `c.describe()` on a typed receiver still links to the inherited method')
+lacks(r, 'formatAll', 'TS: `new Intl.NumberFormat(..).describe()` starts at a type the repository does not define')
 r = await q('callers', { symbol: 'Circle.has', repo: 'web' })
-lacks(r, 'total', 'TS: `seen.has(2)` on an untyped receiver is a Set/Map method, not Circle.has')
+lacks(r, 'total  function  web/src/app.ts', 'TS: `seen.has(2)` on an untyped receiver is a Set/Map method, not Circle.has')
 r = await q('hierarchy', { symbol: 'Shape', repo: 'core' })
 has(r, 'Circle  struct  core/src/geo.rs:7', 'Rust: `impl Shape for Circle` is an IMPLEMENTS edge')
 
@@ -230,6 +277,24 @@ r = await q('sql', { sql: "SELECT count(*) AS n FROM edges WHERE kind = 'IMPORTS
 has(r, 'n\n13', 'sql: a read-only SELECT')
 has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: anything but SELECT is refused')
 
+{ // the page of the polyglot project: its exact modules and links, and which files belong to none
+  const { renderGraph } = await import('../lib/render.mjs')
+  const pageP = await renderGraph({ dbPath: path.join(PROJ, '.grimoire/graph/graph.db') })
+  const DP = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageP)[1].replace(/\\u003c/g, '<'))
+  const mods = DP.system.modules.map((m) => `${m.repo}:${m.key}:${m.files}`).join(' ')
+  const links = DP.system.links.map(([a, b, n]) => `${DP.system.modules[a].repo}:${DP.system.modules[a].key}>${DP.system.modules[b].key}:${n}`).join(' ')
+  ok(mods === 'core:src:4 shop:cart:1 shop:pricing:1 svc:app:4 web:src:4' && links === 'shop:cart>pricing:1', `system map of the fixture: five modules, one link (${mods} | ${links})`)
+  const modOf = (repo, p) => { const f = DP.files.find((x) => x[1] === repo && x[2] === p); return f ? f[8] : 'missing' }
+  ok(modOf('shop', 'cart/cart.go') === 1 && modOf('shop', 'pricing/pricing.go') === 2 && modOf('shop', 'cart/cart_test.go') === -1 && modOf('web', 'src/app.test.ts') === -1,
+    'each production file names its module; test files belong to none')
+  const script = (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(pageP) || [])[1] || ''
+  const csp = (/script-src '([^']+)'/.exec(pageP) || [])[1] || ''
+  const { createHash } = await import('node:crypto')
+  const scriptSrc = (/script-src ([^;"]+)/.exec(pageP) || [])[1] || ''
+  ok(csp === `sha256-${createHash('sha256').update(script, 'utf8').digest('base64')}` && !scriptSrc.includes('unsafe-inline'),
+    'the CSP admits the page\'s own script by its hash, and no inline handler: an escaping slip cannot run code')
+}
+
 // ── 3 · incremental refresh ──
 console.log('\n3 · incremental refresh')
 const circle = path.join(PROJ, 'web/src/geo/circle.ts')
@@ -242,6 +307,14 @@ r = await q('callers', { symbol: 'main', repo: 'web' })
 has(r, 'report  function  web/src/report.ts:3  [import]', 'a new file is picked up')
 has(await q('search', { query: 'slug' }), 'Nothing named like', 'a deleted file leaves the graph')
 has(await q('status'), 'files: python 4', 'status counts follow')
+{ // an index built by an older grimoire rebuilds on the next query, not only on the next write
+  const { openStore } = await import('../lib/store.mjs')
+  const old = await openStore(path.join(PROJ, '.grimoire/graph/graph.db'))
+  old.prepare("UPDATE meta SET value = '2' WHERE key = 'schema'").run(); old.close()
+  await q('search', { query: 'Circle' })
+  has(await q('sql', { sql: "SELECT value FROM meta WHERE key = 'schema'" }), 'value\n3', 'a query on an older schema rebuilds the index first')
+  has(await q('sql', { sql: 'SELECT count(*) AS n FROM churn' }), 'n\n0', 'the rebuilt index has the churn table (empty: the fixture is not a git repository)')
+}
 
 // ── 4 · MCP over stdio ──
 console.log('\n4 · MCP server')
@@ -281,6 +354,9 @@ git(MAIN, 'init', '-q', '-b', 'main'); git(MAIN, 'add', '-A'); git(MAIN, '-c', '
 const refresh = (root) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'refresh', '--root', root], { encoding: 'utf8' })
 writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  return 2\n}\n'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'two')
 writeFileSync(path.join(MAIN, 'src/c.ts'), 'export const c = 1\n'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'three')
+mkdirSync(path.join(MAIN, 'gen'))
+for (let i = 0; i < 26; i++) writeFileSync(path.join(MAIN, `gen/g${i}.ts`), `export const g${i} = ${i}\n`)
+git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'a sweep of 26 files')
 let rf = refresh(MAIN)
 ok(rf.status === 0 && existsSync(path.join(MAIN, '.grimoire/graph/graph.db')), `refresh builds the first index when grimoire.config.json has a graph block (${rf.stdout.trim() || rf.stderr.trim()})`)
 const BARE = path.join(SANDBOX, 'bare'); mkdirSync(BARE)
@@ -290,7 +366,19 @@ const WT = path.join(SANDBOX, 'wt')
 git(MAIN, 'worktree', 'add', '-q', '-b', 'feat', WT)
 { // churn: how many recent commits touched each file, for the hotspot treemap
   const churn = await call('graph_sql', { sql: 'SELECT path, n FROM churn ORDER BY path' }, { root: MAIN })
-  has(churn, 'src/a.ts\t2\nsrc/c.ts\t1', 'churn: commits per file over the indexed history (a.ts in 2 commits, c.ts in 1)')
+  ok(churn.trim() === 'path\tn\nsrc/a.ts\t2\nsrc/c.ts\t1', `churn: commits per file (a.ts in 2, c.ts in 1); a sweep of more than 25 files counts for none of them (${JSON.stringify(churn.slice(0, 60))})`)
+}
+{ // a repository dropped from the config leaves nothing behind, its churn included
+  const DR = path.join(SANDBOX, 'drop')
+  for (const r of ['keep', 'gone']) {
+    mkdirSync(path.join(DR, r), { recursive: true }); writeFileSync(path.join(DR, r, 'x.ts'), 'export const x = 1\n')
+    git(path.join(DR, r), 'init', '-q', '-b', 'main'); git(path.join(DR, r), 'add', '-A'); git(path.join(DR, r), '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'one')
+  }
+  const cfg = (names) => writeFileSync(path.join(DR, 'grimoire.config.json'), JSON.stringify({ repos: names.map((n) => ({ name: n, path: n })), graph: {} }))
+  cfg(['keep', 'gone']); await call('graph_index', {}, { root: DR })
+  cfg(['keep']); await call('graph_index', {}, { root: DR })
+  const left = await call('graph_sql', { sql: 'SELECT repo, path, n FROM churn ORDER BY repo' }, { root: DR })
+  ok(left.trim() === 'repo\tpath\tn\nkeep\tx.ts\t1', `dropping a repository drops its churn too (${JSON.stringify(left.trim())})`)
 }
 ok(mainCheckout(WT) === MAIN && mainCheckout(MAIN) === null, 'a linked worktree finds its main checkout; the main checkout has none')
 writeFileSync(path.join(WT, 'src/b.ts'), "import { base } from './a'\n\nexport function onBranch(): number {\n  return base()\n}\n")
@@ -308,8 +396,8 @@ ok(/default-src 'none'/.test(page) && !/<script[^>]+src=/.test(page) && !/https?
   const pageM = rm.status === 0 ? readFileSync(rm.stdout.trim(), 'utf8') : ''
   const DM = JSON.parse(((/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageM) || [])[1] || 'null').replace(/\\u003c/g, '<'))
   const row = (p) => DM && DM.files.find((f) => f[2] === p)
-  ok(row('src/a.ts') && row('src/a.ts')[7] === 2 && row('src/c.ts')[7] === 1, `files carry their churn for the hotspot map (${JSON.stringify(row('src/a.ts'))})`)
-  ok(DM && DM.system && DM.system.modules.map((m) => `${m.repo}:${m.key}:${m.files}`).join(' ') === 'main:src:2', `the page carries the system map's modules (${JSON.stringify(DM && DM.system)})`)
+  ok(!!row('src/a.ts') && !!row('src/c.ts') && row('src/a.ts')[7] === 2 && row('src/c.ts')[7] === 1, `files carry their churn for the hotspot map (${JSON.stringify(row('src/a.ts'))})`)
+  ok(DM && DM.system && DM.system.modules.map((m) => `${m.repo}:${m.key}:${m.files}`).join(' ') === 'main:gen:26 main:src:2', `the page carries the system map's modules (${JSON.stringify(DM && DM.system)})`)
   const script = (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(pageM) || [])[1] || ''
   let compiles = false
   try { new (await import('node:vm')).Script(script); compiles = script.length > 1000 } catch (e) { console.log('       ' + e.message) }

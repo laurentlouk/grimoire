@@ -8,7 +8,7 @@
 // checkout's first (freshness.mjs), so it only re-parses what its branch changed.
 import { existsSync } from 'node:fs'
 import { loadProject, scanRepo } from './project.mjs'
-import { openStore } from './store.mjs'
+import { openStore, SCHEMA_VERSION } from './store.mjs'
 import { runIndex } from './run.mjs'
 import { seed } from './freshness.mjs'
 import { Graph, sql, FOOTER } from './query.mjs'
@@ -99,9 +99,12 @@ export const TOOLS = [
   },
 ]
 
-// Files that moved since the last index, per repo (cheap: stat only, no parsing).
+// Files that moved since the last index, per repo (cheap: stat only, no parsing). An index built by
+// an older grimoire is stale as a whole: the next refresh rebuilds it with the current rules.
 function staleness(project, db) {
   const out = {}
+  const schema = (() => { try { return db.prepare("SELECT value FROM meta WHERE key = 'schema'").get()?.value } catch { return null } })()
+  if (schema && schema !== SCHEMA_VERSION) { for (const repo of project.repos) out[repo.name] = 'built by an older grimoire: rebuilt on the next query'; return out }
   for (const repo of project.repos) {
     const known = new Map(db.prepare('SELECT path, size, mtime FROM files WHERE repo = ?').all(repo.name).map((f) => [f.path, f]))
     let changed = 0

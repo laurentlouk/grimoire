@@ -11,6 +11,7 @@
 //   refs     unresolved names as extracted (call sites with the receiver's stated type when the
 //            syntax gives it, supertypes); imports: import statements
 //   cochange files that changed in the same commits (from git log), n = commits shared
+//   churn    per file, n = recent commits that touched it (same window as cochange)
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 

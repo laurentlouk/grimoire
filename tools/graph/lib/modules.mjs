@@ -1,6 +1,6 @@
 // grimoire graph · modules, the system map's units. A module is a folder of production code:
-// a repository's top-level folders, except that a folder holding most of its repository splits into
-// its subfolders (files right in it stay at its level), until no folder dominates. On a typical
+// a repository's top-level folders, except that a folder holding more than a third of its repository
+// splits into its subfolders (files right in it stay at its level), until no folder dominates. On a typical
 // repository that gives tens of modules where the file map has thousands of files.
 //
 // The system map links two modules when files of one use files of the other: the count is the

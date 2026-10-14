@@ -9,7 +9,8 @@ A local index of every repository in the project: definitions and how they relat
 | | |
 | --- | --- |
 | **Nodes** | files, functions, methods, constructors, classes, structs, interfaces, traits, protocols, enums, types, modules, namespaces, macros (test code is marked, and so is test-support code: Storybook stories, mocks, fixtures) |
-| **Edges** | `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, plus co-change pairs and per-file churn (how many recent commits touched it) from git history |
+| **Edges** | `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, plus co-change pairs from git history |
+| **History** | per-file churn: how many of the last 400 non-merge commits touched the file (commits touching more than 25 files skipped) |
 | **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL, HCL / Terraform (file nodes only, searchable by path) |
 | **Storage** | one SQLite file, `.grimoire/graph/graph.db` (gitignored with the rest of `.grimoire/`) |
 
@@ -28,6 +29,8 @@ There is no type checker. A call is linked by name, narrowed by what the syntax 
 | `same-file` · `same-package` | defined in the calling file, or its directory (Go, Java, Kotlin, Swift, C#) |
 | `unique-name` | the only definition of that name in the repository |
 | `ambiguous` | one of up to three same-named definitions; each gets an edge (`strict: true` drops them) |
+
+`unique-name` and `ambiguous` are the **name guesses**: `graph_status` reports their share per repository, and the page draws them apart (dashed, or hidden until asked). Every other confidence is called *resolved by syntax* here, though `import`, `same-file` and `same-package` still match a name within the scope the syntax gives.
 
 A call on a receiver whose type the repository does not define (a `HashMap`, a `Request`), or a name with more than three candidates, stays unresolved: those go to dependencies. So does a standard-library method name (`len`, `get`, `has`, `map`… listed per language in `COMMON_METHODS`, `lib/langs.mjs`) on a receiver whose type the syntax does not state, and any method on a chain that starts at a type or crate the repository does not define (`Utc::now().timestamp()`, `PutItemOutput::builder().build()`). Without that, the one `len` a repository defines collects every `.len()` in it. **A missing edge proves nothing**: dynamic dispatch, callbacks, reflection, config wiring, string-keyed routes and other repositories are invisible, so "no callers" is confirmed with grep.
 
@@ -63,7 +66,7 @@ node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
 
 ## Seeing it
 
-`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview; a system map of modules (`lib/modules.mjs`: folders of production code, a dominant folder split into its subfolders, linked by the file pairs that use each other through links resolved by syntax, ranked in the order code flows) that opens onto the file-level map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`); every file and symbol as a neighbourhood, what uses it on the left and what it uses on the right; and hotspots (a size × churn treemap, most called, widest fan-out, most used, co-change), ranked by resolved links. Test code and ambiguous links are hidden until asked for; every view has a plain anchor (`#sym-12`, `#file-3`, `#mod-4`). No network, no CDN. It stays local.
+`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview; a system map of modules (`lib/modules.mjs`: folders of production code, a folder holding more than a third of its repository split into its subfolders, linked by the file pairs that use each other through links resolved by syntax, ranked in the order code flows) that opens onto the file-level map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`); every file and symbol as a neighbourhood, what uses it on the left and what it uses on the right; and hotspots (a size × churn treemap, most called, widest fan-out, most used, co-change), ranked by resolved links. Test code and ambiguous links are hidden until asked for (the system map never shows them); each lane draws its 14 largest modules; every view has a plain anchor (`#sym-12`, `#file-3`, `#mod-4`), valid until the next full rebuild. No network, no CDN: the page's CSP admits only its own script, by hash. It stays local.
 
 ## Freshness
 

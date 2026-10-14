@@ -182,16 +182,35 @@ export function resolveRepo(db, repo, repoAbs) {
   const seen = new Set()
   const emit = (src, dst, kind, conf, line) => { const k = `${src}|${dst}|${kind}`; if (seen.has(k) || src === dst && kind !== 'CALLS') return; seen.add(k); edgeIns.run(src, dst, kind, conf, line) }
   const inFiles = (cands, files) => cands.filter((c) => files.some((f) => f.id === c.file_id))
-  // A receiver chain whose first segment is a type the repository does not define
-  // (`UpdateItemOutput::builder().build()`, `Utc::now().timestamp()`) or, in Rust, a crate path the
-  // repository has no module for (`chrono::Utc::now()`), yields a dependency's value: its methods
-  // are the dependency's too, whatever the repository happens to name the same.
-  const moduleNames = new Set([...fileById.values()].flatMap((f) => [path.posix.basename(noExt(f.path)), ...f.dir.split('/')]))
+  // A receiver that starts at a type the repository does not define (`Utc::now().timestamp()`,
+  // `UpdateItemOutput::builder().build()`, `new Intl.NumberFormat(..).format()`) or, in Rust, at a
+  // crate the repository does not have (`chrono::Utc::now()`, `std::env::var`) yields a dependency's
+  // value: its methods are the dependency's, whatever the repository names the same. Only the path
+  // before the first call counts, segment by segment; a repository type, namespace or module anywhere
+  // on it keeps the chain in the repository. SCREAMING_CASE heads are constants, not types, and a
+  // property path with no call (`Api.users`, `App\Models\User`) is left to the rules below.
+  const moduleNames = new Set([...fileById.values()].flatMap((f) => [path.posix.basename(noExt(f.path)), ...f.dir.split('/')]).flatMap((m) => [m, m.replace(/-/g, '_')]))
+  for (const n of nodes) if (n.kind === 'module') moduleNames.add(n.name)
+  if (files.some((f) => f.lang === 'rust')) { // a crate is named by its Cargo.toml, not its folder (`lib/` → `my_lib`)
+    const dirs = new Set([...fileById.values()].filter((f) => f.family === 'rust').flatMap((f) => { const up = []; for (let x = f.dir; ; x = path.posix.dirname(x)) { up.push(x); if (x === '.' || x === '/') break } return up }))
+    for (const d of dirs) { try { const m = /^\s*\[package\][^[]*?^\s*name\s*=\s*"([^"]+)"/ms.exec(readFileSync(path.join(repoAbs, d, 'Cargo.toml'), 'utf8')); if (m) moduleNames.add(m[1].replace(/-/g, '_')) } catch {} }
+  }
+  const IDENT = /^[A-Za-z_$][\w$]*/
+  const isRepoScope = (family, name) => moduleNames.has(name) || (byName.get(`${family}|${name}`) || []).some((c) => CLASSY.has(c.kind) || c.kind === 'namespace')
   const startsInDependency = (qual, family) => {
-    const head = qual.split(/::|\.|->|\\/)[0].replace(/\(.*$/s, '').trim()
-    if (!head || head === qual || SELF.test(head)) return false
-    if (/^[A-Z]/.test(head)) return !(byName.get(`${family}|${head}`) || []).length
-    return family === 'rust' && qual.includes('::') && !/^(crate|self|super)$/.test(head) && !moduleNames.has(head)
+    const constructed = /^new\s/.test(qual), lead = qual.replace(/^(new|await)\s+/, '')
+    const cut = lead.indexOf('(')
+    const segs = (cut < 0 ? lead : lead.slice(0, cut)).split(/::|\.|->|\\/).map((x) => (IDENT.exec(x.replace(/^[\s?!]+/, '')) || [''])[0]).filter(Boolean)
+    // the segment called first (`builder` in `Output::builder()`) is a function, not a scope; after
+    // `new`, the whole path names a type
+    const scopes = cut >= 0 && !constructed ? segs.slice(0, -1) : segs
+    if (!segs.length || SELF.test(segs[0])) return false
+    const head = segs[0]
+    // a Rust path is decided by its root: `aws_sdk::types::error::X` is the crate's even where the
+    // repository has an `error` module (a turbofish `make::<T>()` is not a path)
+    if (family === 'rust' && /^[a-z_]/.test(head) && lead.startsWith(head + '::') && lead[head.length + 2] !== '<') return !/^(crate|self|super)$/.test(head) && !moduleNames.has(head)
+    if (scopes.some((x) => isRepoScope(family, x))) return false
+    return cut >= 0 && /^[A-Z]/.test(head) && /[a-z]/.test(head)
   }
   const stats = { calls: 0, resolved: 0 }
 
@@ -258,7 +277,7 @@ export function resolveRepo(db, repo, repoAbs) {
       if (!pick) {
         // `x.len()`, `seen.has(k)`: an untyped receiver calling a standard-library name is that
         // library's method far more often than the repo's one definition of the name.
-        if (COMMON_METHODS[from.family]?.has(name)) continue
+        if (COMMON_METHODS[from.family]?.has(name) && !/^(super\(.*\)|parent)$/.test(qual)) continue // `super().update()` is the parent's
         const methods = cands.filter((c) => c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
         pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import', (c) => b.files.has(c.file_id)]])
       }
