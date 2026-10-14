@@ -8,9 +8,9 @@ A local index of every repository in the project: definitions and how they relat
 
 | | |
 | --- | --- |
-| **Nodes** | files, functions, methods, constructors, classes, structs, interfaces, traits, protocols, enums, types, modules, namespaces, macros (test code is marked) |
+| **Nodes** | files, functions, methods, constructors, classes, structs, interfaces, traits, protocols, enums, types, modules, namespaces, macros (test code is marked, and so is test-support code: Storybook stories, mocks, fixtures) |
 | **Edges** | `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, plus co-change pairs from git history |
-| **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL (file nodes only, searchable by path) |
+| **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL, Terraform and Terragrunt (file nodes only, searchable by path) |
 | **Storage** | one SQLite file, `.grimoire/graph/graph.db` (gitignored with the rest of `.grimoire/`) |
 
 Parsing is [tree-sitter](https://tree-sitter.github.io/) (WASM grammars); storage is Node's built-in `node:sqlite`, so it needs **Node ≥ 22.5**.
@@ -29,7 +29,7 @@ There is no type checker. A call is linked by name, narrowed by what the syntax 
 | `unique-name` | the only definition of that name in the repository |
 | `ambiguous` | one of up to three same-named definitions; each gets an edge (`strict: true` drops them) |
 
-A call on a receiver whose type the repository does not define (a `HashMap`, a `Request`), or a name with more than three candidates, stays unresolved: those go to dependencies. **A missing edge proves nothing**: dynamic dispatch, callbacks, reflection, config wiring, string-keyed routes and other repositories are invisible, so "no callers" is confirmed with grep.
+A call on a receiver whose type the repository does not define (a `HashMap`, a `Request`), or a name with more than three candidates, stays unresolved: those go to dependencies. So does a standard-library method name (`len`, `get`, `has`, `map`… listed per language in `COMMON_METHODS`, `lib/langs.mjs`) on a receiver whose type the syntax does not state, and any method on a chain that starts at a type or crate the repository does not define (`Utc::now().timestamp()`, `PutItemOutput::builder().build()`). Without that, the one `len` a repository defines collects every `.len()` in it. **A missing edge proves nothing**: dynamic dispatch, callbacks, reflection, config wiring, string-keyed routes and other repositories are invisible, so "no callers" is confirmed with grep.
 
 ## Using it
 

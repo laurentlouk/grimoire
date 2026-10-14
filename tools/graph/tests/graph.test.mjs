@@ -91,6 +91,23 @@ for (const [f, want] of Object.entries(expect)) {
 ok(!facts['a.js'].calls.includes('require'), 'a require() is an import, not a call')
 ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every((d) => !d.startsWith('method run')), 'Rust: free functions stay functions; impl members become methods of their type')
 
+// ── 1b · which files count, and as what ──
+{
+  const { TEST_PATH } = await import('../lib/langs.mjs')
+  const { scanRepo } = await import('../lib/project.mjs')
+  const support = ['src/components/Button.stories.tsx', '.storybook/preview.tsx', '.storybook/stories/atoms/Badge.stories.tsx', 'lib/src/mocks/mock_dynamodb.rs', 'src/__mocks__/api.ts', 'lib/src/fixtures/mod.rs', 'app/__fixtures__/user.ts']
+  const prod = ['src/components/Button.tsx', 'src/mockup/view.ts', 'lib/src/fixture_loader.rs', 'src/stories.ts', 'lib/src/application/mod.rs']
+  const wrong = [...support.filter((p) => !TEST_PATH.test(p)).map((p) => `${p} should be test code`), ...prod.filter((p) => TEST_PATH.test(p)).map((p) => `${p} should be production code`)]
+  ok(!wrong.length, `stories, mocks and fixtures are test code; look-alike production paths are not${wrong.length ? ': ' + wrong.join(' · ') : ''}`)
+  ok(['infra/prod/eks/terragrunt.hcl', 'modules/vpc/main.tf', 'env/prod.tfvars'].every((p) => langOf(p) === 'other'), 'Terraform and Terragrunt files are indexed by name')
+  const TF = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-tf-')))
+  for (const rel of ['main.tf', 'infra/prod/eks/terragrunt.hcl', 'env/prod.tfvars', '.terraform/modules/vpc/main.tf', 'infra/prod/eks/.terragrunt-cache/abc/main.tf']) { mkdirSync(path.dirname(path.join(TF, rel)), { recursive: true }); writeFileSync(path.join(TF, rel), 'locals {}\n') }
+  spawnSync('git', ['-C', TF, 'init', '-q'])
+  const scanned = scanRepo({ abs: TF }, { exclude: [], maxBytes: 1 << 20 }).map((f) => f.path).sort()
+  ok(JSON.stringify(scanned) === JSON.stringify(['env/prod.tfvars', 'infra/prod/eks/terragrunt.hcl', 'main.tf']), `Terraform's and Terragrunt's caches are never indexed (${scanned.join(', ')})`)
+  rmSync(TF, { recursive: true, force: true })
+}
+
 // ── 2 · a polyglot project ──
 console.log('\n2 · polyglot project (TypeScript · Rust · Python · Go)')
 const SANDBOX = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-graph-')))

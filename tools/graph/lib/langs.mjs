@@ -342,7 +342,7 @@ export const LANGS = {
   swift: { wasm: 'swift', family: 'swift', exts: ['.swift'], spec: swift },
 }
 // Indexed as file nodes only (searchable by path, reachable through imports), no symbols.
-export const FILE_ONLY_EXTS = ['.vue', '.svelte', '.scala', '.dart', '.lua', '.ex', '.exs', '.zig', '.sol', '.ml', '.m', '.mm', '.sh', '.bash', '.sql', '.proto', '.graphql', '.gql']
+export const FILE_ONLY_EXTS = ['.vue', '.svelte', '.scala', '.dart', '.lua', '.ex', '.exs', '.zig', '.sol', '.ml', '.m', '.mm', '.sh', '.bash', '.sql', '.proto', '.graphql', '.gql', '.tf', '.tfvars', '.hcl']
 
 // Method names each family's standard library defines on its everyday types (collections,
 // strings, options, results, promises, streams). A call `x.len()` on a receiver whose type the
@@ -377,5 +377,6 @@ for (const [id, l] of Object.entries(LANGS)) for (const e of l.exts) BY_EXT.set(
 export const langOf = (file) => { const m = /(\.[^./]+)$/.exec(file); return m ? BY_EXT.get(m[1].toLowerCase()) || (FILE_ONLY_EXTS.includes(m[1].toLowerCase()) ? 'other' : null) : null }
 export const familyOf = (lang) => (LANGS[lang] ? LANGS[lang].family : lang)
 
-// A file is a test file when its path says so, in any of the usual conventions.
-export const TEST_PATH = /(^|\/)(tests?|__tests__|spec|specs|testing)\/|[._-](test|spec)s?\.[^/]+$|(^|\/)test_[^/]+\.py$|_test\.(go|py|rb|exs?)$|Tests?\.(java|kt|cs|swift|php)$/
+// A file is test code when its path says so, in any of the usual conventions. Test-support code
+// counts too: Storybook stories, mocks and fixtures exercise the product but are not part of it.
+export const TEST_PATH = /(^|\/)(tests?|__tests__|spec|specs|testing|\.storybook|__mocks__|mocks?|__fixtures__|fixtures?)\/|[._-](test|spec)s?\.[^/]+$|\.stories\.[^/]+$|(^|\/)test_[^/]+\.py$|_test\.(go|py|rb|exs?)$|Tests?\.(java|kt|cs|swift|php)$/
