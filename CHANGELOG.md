@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.11.0 — trust and see
+
+The code graph's first release on its roadmap: make the links worth trusting, then draw them so a
+project of thousands of files still reads. Measured on a four-repository project (2,432 files):
+before, 30.6% of call links were name guesses and the map was one spiral of 1,500 dots.
+
+**Links worth trusting**
+- On a receiver whose type the syntax does not state, a standard-library method name (`len`,
+  `get`, `has`, `map`…, listed per language in `COMMON_METHODS`) is no longer linked by name to
+  the one method the repository happens to define with that name. One `len` had collected 305
+  false callers that way; it now has 2.
+- A method on a chain that starts at a type or crate the repository does not define
+  (`UpdateItemOutput::builder().build()`, `chrono::Utc::now().timestamp()`) is a dependency's,
+  and is not linked either (157 false callers on one `build`).
+- Result on that project: call links 21,710 → 19,232, name guesses 30.6% → 22.6%.
+- Storybook stories, `mocks/`, `__mocks__/`, `fixtures/` and `__fixtures__/` count as test code
+  (172 files there), so they no longer rank as the most connected production code.
+- `.tf`, `.tfvars` and `.hcl` files are indexed by name (an infrastructure repository showed 0 of
+  193 files); the infrastructure tools' cache folders never are.
+- `graph_status` reports per repository how many call links are name guesses.
+- Schema 3: an existing index rebuilds once, so it takes the new rules at once instead of file by
+  file. It adds `churn`: how many recent commits touched each file.
+
+**A page that groups before it draws**
+- Map opens on a system map: one lane per repository, its modules (folders of production code,
+  a dominant folder split into its subfolders, `lib/modules.mjs`) in the order code flows, each
+  line a module using another, its width the file pairs linked by syntax. Modules in a cycle share
+  a rank. Hover for links and counts; click a module for its files on the file map, fitted to it.
+  That project reads as 83 modules instead of 1,500 dots.
+- A symbol or a file opens beside the list as a neighbourhood: what uses it on the left, what it
+  uses on the right; resolved links solid and first, unique-name dashed, ambiguous hidden; every
+  hidden count said; the full lists one click away.
+- Test code and ambiguous links stay hidden until their toggle is on, in every view. The file
+  map's cap goes to production code first.
+- Hotspots rank by links resolved by syntax, name guesses counted apart, and open on a
+  size × churn treemap (log-scale colour).
+- File labels carry their folder; tables wrap paths and keep their counts visible; views have
+  plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`).
+- A generated 10,000-file index renders in under half a second into a 3.3 MB page.
+
+**Checks**
+- `tools/graph/tests/graph.test.mjs`: 106 checks (84 before), including the false-link fixtures in
+  Rust and TypeScript, file classes, churn, modules and their ranks, the production-first cap, and
+  a check that the page script compiles (it caught `html()`'s `</` rewrite breaking a regex).
+- New eval case `graph` #5.
+
 ## 0.10.0 — trust the learning
 
 Three changes that turn promises the harness already made into checks, drawn from a comparison

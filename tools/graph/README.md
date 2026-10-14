@@ -10,7 +10,7 @@ A local index of every repository in the project: definitions and how they relat
 | --- | --- |
 | **Nodes** | files, functions, methods, constructors, classes, structs, interfaces, traits, protocols, enums, types, modules, namespaces, macros (test code is marked, and so is test-support code: Storybook stories, mocks, fixtures) |
 | **Edges** | `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, plus co-change pairs and per-file churn (how many recent commits touched it) from git history |
-| **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL, Terraform and Terragrunt (file nodes only, searchable by path) |
+| **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL, HCL / Terraform (file nodes only, searchable by path) |
 | **Storage** | one SQLite file, `.grimoire/graph/graph.db` (gitignored with the rest of `.grimoire/`) |
 
 Parsing is [tree-sitter](https://tree-sitter.github.io/) (WASM grammars); storage is Node's built-in `node:sqlite`, so it needs **Node ≥ 22.5**.
@@ -37,7 +37,7 @@ As MCP tools (the plugin declares the server in `.mcp.json`; agents see `mcp__pl
 
 | Tool | Answers |
 | --- | --- |
-| `graph_status` | what is indexed, how much resolved, what changed since |
+| `graph_status` | what is indexed, how much resolved, how many call links are name guesses, what changed since |
 | `graph_index` | build or refresh (incremental); `full: true` rebuilds |
 | `graph_search` | definitions by name or `*` pattern, files by path fragment |
 | `graph_symbol` | one definition: signature, container, members, caller/callee/subtype/test counts |
@@ -63,7 +63,7 @@ node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
 
 ## Seeing it
 
-`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview, the file-level dependency map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`, the biggest files named, the rest on hover), every file and symbol with its callers, callees, dependencies and supertypes, and hotspots (most called, widest fan-out, most depended-on, co-change). No network, no CDN. It stays local.
+`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview; a system map of modules (`lib/modules.mjs`: folders of production code, a dominant folder split into its subfolders, linked by the file pairs that use each other through links resolved by syntax, ranked in the order code flows) that opens onto the file-level map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`); every file and symbol as a neighbourhood, what uses it on the left and what it uses on the right; and hotspots (a size × churn treemap, most called, widest fan-out, most used, co-change), ranked by resolved links. Test code and ambiguous links are hidden until asked for; every view has a plain anchor (`#sym-12`, `#file-3`, `#mod-4`). No network, no CDN. It stays local.
 
 ## Freshness
 
@@ -106,6 +106,7 @@ tools/graph/
   lib/resolve.mjs              names → edges, per repository, with confidence
   lib/indexer.mjs · worker.mjs · run.mjs   incremental indexing, in a child process
   lib/store.mjs · query.mjs · cochange.mjs · project.mjs · deps.mjs
+  lib/modules.mjs · layout.mjs · render.mjs   the page: modules and the system map, the file map's layout, the HTML
   tests/graph.test.mjs         node tools/graph/tests/graph.test.mjs
 ```
 

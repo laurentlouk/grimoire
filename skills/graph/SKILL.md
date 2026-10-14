@@ -1,6 +1,6 @@
 ---
 name: graph
-description: Browse the code graph as a local HTML page, or refresh it. Use when the user says "show the graph", "visualize the codebase", "open the code map", "what depends on what", "show me the call graph", "which files are hotspots", or "rebuild the graph index". Refreshes the index with the deterministic indexer, renders one self-contained page (overview, dependency map, files, symbols with callers and callees, hotspots) and opens it locally.
+description: Browse the code graph as a local HTML page, or refresh it. Use when the user says "show the graph", "visualize the codebase", "open the code map", "what depends on what", "show me the call graph", "which files are hotspots", or "rebuild the graph index". Refreshes the index with the deterministic indexer, renders one self-contained page (overview, system map of modules, file map, files and symbols as neighbourhoods, hotspots) and opens it locally.
 ---
 
 # Graph: the code graph as a page
@@ -24,10 +24,11 @@ Run it from the project root so it finds `grimoire.config.json`. It refreshes th
 
 The page is one file with no network access:
 
-- **Overview**: repositories with their HEAD and index time, languages, file, symbol and edge counts.
-- **Map**: files as a dependency map (imports and calls between files), one named cluster per directory, colored by repository. The layout is computed once at render time and is the same every time. The most connected files carry their name, more appear as you zoom in, and hovering a file names it and highlights what it uses and what uses it. The 1,500 most connected files when there are more. Drag, zoom, click a file to open it, double-click to reset the view.
-- **Files** and **Symbols**: search everything; a file shows what it depends on, what uses it and what it defines; a symbol shows where it is, its callers and callees with how each edge was resolved, and its supertypes and subtypes.
-- **Hotspots**: most-called symbols, widest fan-out, most depended-on files, files that change together in git history.
+- **Overview**: repositories with their HEAD and index time, languages, production and test files, modules, symbol and link counts, and how many call links are name guesses.
+- **Map**: opens on the **system map**: one lane per repository, its modules (folders of production code, a dominant folder split into its subfolders) in the order code flows, a line per module using another, its width the number of file pairs linked by syntax. Hover a module for its links and their counts; click it for its files on the **file map** (one cluster per directory, coloured by repository, laid out once at render time, labels carry their folder). Drag, zoom, double-click to reset.
+- **Files** and **Symbols**: search everything; a file or a symbol opens beside the list as a neighbourhood: what uses it on the left, what it uses on the right, links resolved by syntax solid and first, name matches dashed, every hidden count said; the full lists stay one click away, with supertypes and subtypes.
+- **Hotspots**: a size × churn treemap (area is file size, colour is how many recent commits touched it), most-called symbols, widest fan-out and most-used files ranked by links resolved by syntax (name guesses counted apart), files that change together in git history.
+- **Test code** and **Ambiguous links** are hidden until their toggle is on. Every view has a plain anchor (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`) to link it from a note.
 
 ## Rules
 
