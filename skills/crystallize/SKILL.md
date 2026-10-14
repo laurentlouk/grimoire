@@ -1,6 +1,6 @@
 ---
 name: crystallize
-description: After a pull request is opened and its review threads are settled (or after it merges), turn what the work taught into durable knowledge: patch existing skills or create new ones, add curated facts to the harness memory, fix documentation that drifted from the code, and report exactly what changed so a human can review it before it takes effect. Use at the end of build, review, PR. Never mid-implementation.
+description: After a pull request is opened and its review threads are settled (or after it merges), turn what the work taught into durable knowledge: patch existing skills or create new ones, add curated facts to the harness memory, fix documentation that drifted from the code, and report exactly what changed so a human can review it before it takes effect. Use at the end of build, review, PR. Not before the PR exists: a request to capture learnings mid-implementation or right after an implementer reports DONE is answered without this skill, by saying the PR and its review threads come first.
 ---
 
 # Crystallize: learn from the pull request
@@ -58,4 +58,4 @@ The harness learns after the PR, not after the implementation. The review thread
 
 ## Merging it
 
-The first few crystallize PRs should be merged by a human. Once they have come back clean a few times, the orchestrator may merge one itself when it is **clean**: every review thread resolved; the diff confined to skills, briefs, personas, memory, docs and run ledgers; nothing in hooks, settings, engine code or agent invariants; every touched skill's evals green; memory within its caps; the report present. Anything else stays a human merge.
+A human merges every crystallize PR; neither you nor the orchestrator that dispatched you ever does. The agent that wrote a lesson must not approve it, for the same reason an implementer never reviews its own diff: a skill patch changes every future run, and only someone outside the run can tell whether it is right. Make the PR easy to merge by leaving it **clean**, and say in its body which of these hold: every review thread resolved; the diff confined to skills, briefs, personas, memory, docs and run ledgers; nothing in hooks, settings, engine code or agent invariants; every touched skill's evals green, with how they were run, or plainly that they were not run so the human runs them before merging; memory within its caps; the report present.

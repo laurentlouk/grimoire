@@ -19,4 +19,6 @@ Severity is a gate. Blocker and major send the work back; minor and nit are reco
 
 Route every failing finding back to the implementer and re-review, bounded (the unattended loop allows three fix rounds per stage and uses a cheap guard to decide whether the whole panel must re-run). Always end on a review.
 
+**A fix must not weaken a test.** On every re-review, read the fix's own diff (the head before the fix to the head after it), not only the whole change: a test the change added and a fix then loosened looks, in the whole diff, like one weak test that was always there. A test that existed before the fix and proves less after it (an assertion removed or loosened, an expected value changed to match what the code now does, a test skipped, focused or deleted) is a blocker, unless a finding said that test was wrong or asked for the behaviour its new expectation encodes. The loop does this with a fact sheet of the fix diff (`workflows/briefs/guard.md`).
+
 On PASS the PR is ready once every review thread on it, from bots and humans alike, has an explicit resolution (fixed with a commit, tracked with a ticket, or declined with a reason). Then merge per your merge policy. **Next:** `crystallize`, so the harness learns from the PR and its threads, then ship.

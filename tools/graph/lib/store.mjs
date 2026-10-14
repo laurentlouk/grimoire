@@ -11,10 +11,11 @@
 //   refs     unresolved names as extracted (call sites with the receiver's stated type when the
 //            syntax gives it, supertypes); imports: import statements
 //   cochange files that changed in the same commits (from git log), n = commits shared
+//   churn    per file, n = recent commits that touched it (same window as cochange)
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '2'
+export const SCHEMA_VERSION = '3'
 
 let sqlite = null
 async function driver() {
@@ -42,6 +43,8 @@ CREATE INDEX IF NOT EXISTS edges_src ON edges(src, kind);
 CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst, kind);
 CREATE TABLE IF NOT EXISTS cochange(repo TEXT, a TEXT, b TEXT, n INTEGER);
 CREATE INDEX IF NOT EXISTS cochange_a ON cochange(repo, a);
+CREATE TABLE IF NOT EXISTS churn(repo TEXT, path TEXT, n INTEGER);
+CREATE INDEX IF NOT EXISTS churn_repo ON churn(repo, path);
 `
 
 export async function openStore(dbPath, { readOnly = false } = {}) {
@@ -52,7 +55,7 @@ export async function openStore(dbPath, { readOnly = false } = {}) {
   db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;')
   const v = (() => { try { return db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value } catch { return null } })()
   if (v && v !== SCHEMA_VERSION) {
-    for (const t of ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange']) db.exec(`DROP TABLE IF EXISTS ${t}`)
+    for (const t of ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn']) db.exec(`DROP TABLE IF EXISTS ${t}`)
   }
   db.exec(DDL)
   db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('schema', ?)").run(SCHEMA_VERSION)

@@ -42,6 +42,16 @@ be agreeable.
 A FAIL must carry at least one blocker/major finding naming `path:line` — a FAIL with no
 actionable finding cannot be acted on and is treated as gating anyway, so be specific.
 
+## A fix that weakened a test
+Only when your header has a "Did the fix weaken a test?" section: you are the one reviewer of
+this round who judges it, whatever your lens. Run it once and judge each candidate. A test that
+existed before the fix and proves less after it (an assertion removed or loosened, an expected
+value changed to match what the code now does, a test skipped, focused or deleted) is a
+**blocker** at that test's `path:line` (a removed line keeps its line before the fix; say so in
+the issue), unless one of the findings the fix answered (listed under the command) said that
+test was wrong or asked for the behaviour its new expectation encodes. A rename or a split that
+keeps the check is not a weakening. A fix must make the code meet its tests, never the reverse.
+
 ## Terminal sweep: read by lens
 In the terminal stage the subject is the whole integrated branch. Do not read it in full: take
 the `--stat` first, then read only the files your persona's Scope section names. Five reviewers

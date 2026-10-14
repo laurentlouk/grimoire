@@ -54,6 +54,164 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
 - A writer returning nothing still marks the writer dead after two in a row, resends included, and
   nothing is resent once it is dead.
 
+## 0.11.0 — trust and see
+
+The code graph's first release on its roadmap: make the links worth trusting, then draw them so a
+project of thousands of files still reads. Measured on a four-repository project (2,432 files):
+before, 30.6% of call links were name guesses and the map was one spiral of 1,500 dots.
+
+**Links worth trusting**
+- On a receiver whose type the syntax does not state, a standard-library method name (`len`,
+  `get`, `has`, `update`…, listed per language in `COMMON_METHODS`) is no longer linked by name to
+  the one method the repository happens to define with that name. One `len` had collected 305
+  false callers that way; it now has 2. `self.len()`, `Type::len(x)`, a typed receiver and
+  `super().update()` still resolve.
+- A method on a chain that starts in a dependency is the dependency's: a call chain whose path
+  before its first call starts at a type the repository does not define
+  (`UpdateItemOutput::builder().build()`, `new Intl.NumberFormat(..).format()`), or a Rust path
+  rooted at a crate the repository does not have (`chrono::Utc::now()`, `std::env::var`). A type,
+  namespace or module the index knows anywhere on that path, or a call heading it to the
+  repository's own constructor or factory (`Order().total()`, `NewBuilder().Build()`), keeps the
+  chain in the repository;
+  SCREAMING_CASE heads are constants; a Rust crate counts as the repository's by its folder, an
+  inline `mod` or its Cargo.toml package name; a turbofish or a call argument is not a path.
+- A standard-library name on a receiver the syntax constructs from a repository type
+  (`Store::new().len()`, `new Store().get()`, `Reg.getInstance().add()`, `Store.shared`) is that
+  type's; `self.__class__` and `type(self)` count as `self`.
+- Result on that project: call links 21,710 → 19,286, name guesses 30.6% → 22.7%. Some 170
+  `import` and `same-file` links went too: the same `len`/`get` calls, matched within a file.
+- Storybook stories, `mocks/`, `__mocks__/`, `fixtures/` and `__fixtures__/` count as test code
+  (172 files there), so they no longer rank as the most connected production code.
+- `.tf`, `.tfvars` and `.hcl` files are indexed by name (an infrastructure repository showed 0 of
+  193 files); the infrastructure tools' cache folders and lock files never are.
+- `graph_status` reports per repository how many call links are name guesses (`unique-name` and
+  `ambiguous`; the README defines the term).
+- Schema 3: an index built by an older version rebuilds once, on the next query or write, so it
+  takes the new rules at once. It adds `churn`: how many of the last 400 non-merge commits touched
+  each file, commits touching more than 25 indexed files left out. A repository dropped from the configuration
+  drops its churn too.
+
+**A page that groups before it draws**
+- Map opens on a system map: one lane per repository drawing its 14 largest modules (folders of
+  production code; a folder holding more than 35% of its repository splits into its
+  subfolders, `lib/modules.mjs`), in the order code flows, each line a module using another, its
+  width the file pairs linked by syntax. Modules in a cycle share a rank; links across repositories
+  are drawn but rank nothing. It never shows test code or name guesses. Hover for links and
+  counts; click a module for its files on the file map, fitted to it. That project reads as 52
+  drawn modules of 83 instead of 1,500 dots.
+- A symbol or a file opens beside the list as a neighbourhood: what uses it on the left, what it
+  uses on the right; resolved links solid and first, unique-name dashed, ambiguous hidden; every
+  hidden count said; the full lists one click away. A file link is as sure as its surest edge.
+- Test code and ambiguous links stay hidden until their toggle is on, in the lists, the
+  neighbourhoods and the file map, whose cap goes to production code first and whose ranking no
+  name guess decides.
+- Hotspots rank by links resolved by syntax, name guesses counted apart, and open on a treemap
+  of the 400 largest files by size and churn, its legend giving each colour's real range.
+- File labels carry their folder; tables wrap paths and keep their counts visible; views have
+  plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`). They hold for the index the page was
+  rendered from: a re-parsed file gets new ids, and module numbers shift as modules change.
+- Keyboard: every list row and link is a real link (`#sym-`, `#file-`, `#mod-`), drawn modules,
+  neighbourhood items and treemap tiles are buttons (Enter or Space), focus moves to what opened,
+  the header keeps focus across re-renders and the search keeps its caret.
+- The CSP admits only the page's own script, by its SHA-256, instead of any inline script: a name
+  that slipped past escaping could no longer run code. One did during this work (an `esc()` whose
+  last two replacements a trailing comment had swallowed); a test now pins `esc()` itself.
+- A generated 10,000-file index renders in about a second into a 3.3 MB page.
+
+**Checks**
+- `tools/graph/tests/graph.test.mjs`: 164 checks (84 before): false links and their legitimate
+  look-alikes in Rust, TypeScript and Python; file classes; churn (and a sweep that counts for
+  none); schema migration on a query; modules, ranks and cross-repository links; the fixture's
+  exact system map; the page helpers (escaping, anchors, link sureness, churn bands, treemap,
+  lane cap, defaults); the file map's ambiguous-only flag; the CSP hash; and the page's own script
+  run against a stub DOM: every view renders, anchors open what they name, the test toggle changes
+  what a neighbourhood hides. Each rule that keeps a chain in the repository has its own fixture,
+  checked by mutation.
+- Three independent reviews (engine, page, tests and docs) found one blocker, six majors and a
+  dozen minors; a re-review of the fixes found one regression (a chain headed by the repository's
+  own constructor was dropped) and a wrong claim about anchors. A third round on the whole release
+  found constructed receivers losing standard-library names, list rows a keyboard could not reach, a
+  search caret that jumped, per-repository co-change lost behind a global limit, and tests that a
+  regression could pass. All are fixed in this release.
+- New eval case `graph` #5.
+
+## 0.10.0 — trust the learning
+
+Three changes that turn promises the harness already made into checks, drawn from a comparison
+with Anthropic's [AI-native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook):
+every gate trusts the tests, so a fix may not weaken them; what CI checks should fail before a
+push, not after it, without any key; and the agent that wrote a lesson may not approve it.
+
+**A fix must not weaken a test**
+- Loosening the test that exposed a finding is the cheapest way to make the finding go away, and
+  nothing caught it: the precheck only checks that tests moved with behaviour, and the
+  whole-task diff a re-review reads shows a test the task added and a fix then weakened as one
+  weak test, added. Every fix a review sends back (spec, quality and the terminal sweep) now gets
+  a fact sheet built from the fix's own diff by one fixed command (no model, no per-repo
+  configuration): the test files that existed before the fix and that it deleted, the assertions
+  it removed from them, the skips or focus markers it added. The terminal sweep has no task
+  range, so its fix range comes from the fix's own report, and its guard now reads the fix diff
+  too instead of having to find the commits.
+- The guard reads it and sends an unjustified weakening to the panel with a reason starting
+  `test weakened:`. In a re-review round exactly one reviewer gets it (break-it, else the spec
+  hawk, else the first lens), with the findings the fix answered, and raises it as a blocker
+  unless one of them asked for that test change (`briefs/guard.md`, `briefs/review.md`). The
+  verifier of that round is handed the fix diff too, since the whole range cannot show a removed
+  line (`briefs/verify.md`). The interactive `review` skill applies the same rule.
+- A removed assertion is cited by its line before the fix. Deletions of empty or binary test
+  files are listed, renames are followed (a test moved and loosened shows under its new path),
+  docs are never tests, and the sheet stops at 60 lines of 240 characters with a count of the rest.
+- Tested for real against a temp git repo in bash, zsh and dash: a removed `expect()`, an added
+  `it.skip`, an emptied Go `t.Errorf`, a deleted `test_*.py`, a Rust `#[ignore]`, a JUnit
+  `@Disabled`, an NUnit `[Ignore]`, a Cypress `should()`, a `tests.py`, a path with a space, a
+  renamed and loosened test; not code outside test paths, not docs, not tests the fix added;
+  `(none)` for a clean fix and a plain failure line when git cannot read the range. The engine
+  side covers the guard, one judge per re-review round (also on its retry), the verifier, and a
+  second fix round reading the second fix (`workflows/tests/fix-test-integrity.test.mjs`).
+
+**A pre-push check, no key**
+- `.githooks/pre-push` (`npm run hooks` once per clone) runs the fast checks CI runs, the drift
+  check and the generated `evals/` in sync with `skills/*/evals/evals.json`, on exactly the
+  commit being pushed (a temporary worktree, so uncommitted edits never skew it), and blocks the
+  push when one fails. No model, no API key, no sign-in; about a second per pushed commit. The
+  full test suite (minutes) stays in CI. It never wedges a push on its own problems (no node, a
+  commit it cannot check out), and `git push --no-verify` skips it (`scripts/pre-push.test.mjs`,
+  through a real `git push`).
+- Running the eval cases stays manual and paid: `claude plugin eval .`, which needs the
+  command-line `claude` signed in. Nothing in grimoire needs an API key.
+- New cases: `review` #5 (a fix that loosens an assertion and skips a test is not passed) and
+  `crystallize` #5 (a clean crystallize PR is still not merged by its author).
+
+**The re-flag count crystallize reads**
+- `render-logs.mjs summary` counted any guard PASS in a repo whose terminal slot did not end
+  PASS as "re-flagged by the terminal sweep". So a sweep that died, or whose reviewers were
+  unavailable, counted as a re-flag, and a repair task that landed after the re-flag counted
+  too. Meanwhile the real case was missed: a sweep that raised a blocker, fixed it and passed.
+  Its reviews belong to `<repo>:final`, which mapped to no repo.
+- It now counts per-task guard PASSes (the sweep's own guard can't re-flag itself) whose repo
+  the sweep re-flagged after the pass. A re-flag is a blocking terminal review, even one a fix
+  then cleared, or a FAIL verdict. The match is still per repo, not per finding, so read the
+  number as an upper bound. On the new test's run it reads 1 of 4, where the old count read
+  3 of 5 (`scripts/render-logs.test.mjs` §6). The figure `crystallize` uses to decide whether
+  to tighten the guard brief no longer rests on harness failures.
+
+**`crystallize` is not loaded before the PR exists**
+- A pre-PR request ("capture the learnings now, before the PR") loaded the skill just to
+  decline. Its description said "Never mid-implementation", but that wasn't enough for the
+  model to skip loading it, so eval case `crystallize-2`, which expects the skill not to fire,
+  failed. The description now says such a request is answered without the skill, by saying
+  the PR and its review threads come first.
+- In-session runs, judged by whether each transcript opened the skill: the negative case
+  loaded it in 0 of 3 runs with the new description, against 2 of 3 with the old; the four
+  positive cases still loaded it, 4 of 4. Every run still declined correctly and wrote nothing.
+
+**A human merges every crystallize PR**
+- The `crystallize` skill let the orchestrator merge a "clean" crystallize PR once a few had
+  come back clean; its loop brief said never merge, and the engine never did. They now agree: a
+  human merges, because the agent that wrote a lesson must not approve it. The clean checklist
+  stays, as what the PR body reports so the merge is quick, and "evals green" says how they
+  were run.
+
 ## 0.9.1 — the 0.9.0 follow-ups
 
 The minor findings recorded from the last review rounds of 0.9.0 (issue #14). None blocked a run

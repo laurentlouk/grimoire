@@ -230,15 +230,18 @@ function runFacts(run) {
     else if (r === f.round) f.pass = f.pass && e.verdict === 'PASS'
   }
   const fr = Object.values(firstRound)
-  // repos whose terminal review failed
-  const termFail = new Set()
-  for (const e of ev) {
-    if (e.type === 'terminal' && e.repo != null && e.verdict !== 'PASS') termFail.add(e.repo)
-    if (e.type === 'review' && e.stage === 'terminal' && e.verdict === 'FAIL') {
-      const repo = e.repo ?? taskRepo[e.task]
-      if (repo != null) termFail.add(repo)
-    }
-  }
+  // A task's repo. A terminal slot (`<repo>:final`) emits no route, dispatch or settle, so its
+  // reviews and guards are placed by their id; without it they belonged to no repo at all.
+  const repoOf = (e) => e.repo ?? taskRepo[e.task] ?? (/^(.+):final$/.exec(String(e.task ?? '')) || [])[1]
+  // Where each repo's terminal sweep RE-FLAGGED it, latest position (events are in order): a
+  // blocking terminal review, even one a fix then cleared, or a FAIL verdict. A sweep that died
+  // or whose reviewers were unavailable flagged nothing: a harness failure, not a re-flag.
+  const reflaggedAt = {}
+  ev.forEach((e, i) => {
+    const flagged = (e.type === 'terminal' && e.verdict === 'FAIL') || (e.type === 'review' && e.stage === 'terminal' && e.verdict === 'FAIL' && e.discarded !== true)
+    const repo = flagged ? repoOf(e) : null
+    if (repo != null) reflaggedAt[repo] = i
+  })
   // verify overturns, attributed to the persona(s) whose gating findings were checked
   const overturned = {}
   for (const e of ev) {
@@ -257,14 +260,19 @@ function runFacts(run) {
   for (const e of ev) if (e.type === 'fix') fixes[e.model ?? 'unknown'] = (fixes[e.model ?? 'unknown'] || 0) + 1
   const escal = {}
   for (const e of ev) if (e.type === 'escalate') { const k = `${e.from ?? '?'}→${e.to ?? '?'}`; escal[k] = (escal[k] || 0) + 1 }
-  const guards = ev.filter((e) => e.type === 'guard' && e.decision === 'PASS')
+  // Per-task guard PASSes (the terminal sweep's own guard judges the sweep's fixes: the sweep
+  // cannot re-flag itself), and those whose repo the sweep re-flagged AFTER the pass. Per repo,
+  // not per finding: review events carry counts, not locations, so a pass in a repo re-flagged
+  // for something else still counts. Read the second number as an upper bound.
+  const guards = []
+  ev.forEach((e, i) => { if (e.type === 'guard' && e.decision === 'PASS' && e.stage !== 'terminal') guards.push([e, i]) })
   return {
     tasks: tasks.size,
     firstRound: { passed: fr.filter((f) => f.pass).length, total: fr.length },
     fixes,
     escal,
     guardPass: guards.length,
-    guardReflagged: guards.filter((g) => termFail.has(g.repo ?? taskRepo[g.task])).length,
+    guardReflagged: guards.filter(([g, i]) => reflaggedAt[repoOf(g)] > i).length,
     overturned,
     replans: ev.filter((e) => e.type === 'replan').length,
     halted: run.status === 'halted' || ev.some((e) => e.type === 'halt'),
@@ -880,7 +888,7 @@ function client(score) {
       ['version', (g) => g.version], ['briefs', (g) => g.briefsHash], ['runs', (g) => g.runs], ['tasks', (g) => g.tasks],
       ['1st-round pass', (g) => `${pct(g.firstRoundPassRate)} (${g.firstRound.passed}/${g.firstRound.total})`],
       ['fix rounds by model', (g) => kv(g.fixRoundsByModel)],
-      ['guard PASS → terminal FAIL', (g) => `${g.guardPassReflagged} / ${g.guardPass}`],
+      ['guard PASS → re-flagged by terminal', (g) => `${g.guardPassReflagged} / ${g.guardPass}`],
       ['overturned by verify', (g) => Object.entries(g.overturnedByPersona).map(([p, o]) => `${p} ${o.overturned}/${o.checked}`).join(', ') || '—'],
       ['escalations', (g) => `${g.escalations}${g.escalations ? ` (${kv(g.escalationsByPath)})` : ''}`],
       ['replans', (g) => g.replans], ['halts', (g) => g.halts],

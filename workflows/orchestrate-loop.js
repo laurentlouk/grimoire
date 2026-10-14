@@ -1276,8 +1276,9 @@ ${ship.lock.push(cmd).split('\n').map((l) => `  ${l}`).join('\n')}
 ${landedHere.length ? landedHere.map((d) => `  - ${d.id}${d.ticket && d.ticket !== d.id && d.ticket !== 'NO_TICKET' ? ` (ticket ${d.ticket})` : ''}${d.title ? ` — ${defang(unclose(d.title))}` : ''}: ${defang(unclose(scrubPaths(trim(d.summary, 700)))) || '(no report)'}`).join('\n') : '  - (no task summaries recorded)'}`
 }
 
-// `who` names this dispatch's own worktree (see runBlock).
-function reviewPrompt(task, mode, persona, range, who) {
+// `who` names this dispatch's own worktree (see runBlock). `integrity`: the weakened-test fact
+// sheet, for the one reviewer of a re-review round that judges it (see reviewRound).
+function reviewPrompt(task, mode, persona, range, who, integrity = '') {
   return `${memoryBlock('reviewer')}${brief('review')}You are reviewing as: **${persona.name}** — your lens is \`${PERSONAS_DIR}/${persona.id}.md\` (read it, including its Scope section). Mode: **${mode}**.
 
 Repo: ${repoPath(task.repo)} (branch ${task.branch || '(feature branch)'}). ${artifacts()}
@@ -1287,7 +1288,7 @@ ${task.taskText}
 Spec excerpt:
 ${task.specExcerpt || '(see the spec/plan)'}
 
-${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${runBlock(task, who, reviewedHead(task, range))}`
+${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${integrity}${runBlock(task, who, reviewedHead(task, range))}`
 }
 
 // The TERMINAL sweep judges the whole integrated branch, but each persona reads only the
@@ -1308,8 +1309,10 @@ git -C ${path} log --oneline ${BASE_BRANCH}..${branch}
 }
 
 // The review GUARD — verifies a fix against the exact findings that gated.
-function guardPrompt(task, gate, fix, fixFrom, range, round) {
+// `fixed`: {from, head}, the fix's own range (see runReviewStage).
+function guardPrompt(task, gate, fix, fixed, range, round) {
   const r = range || {}
+  const { from: fixFrom, head: fixHead } = fixed || {}
   const path = repoPath(task.repo)
   return `${brief('guard')}Task ${task.id} in \`${path}\` (branch ${task.branch || '(feature branch)'}).
 
@@ -1321,16 +1324,69 @@ ${fix.summary || '(no summary given)'}
 
 ## The fix diff
 ${
-    fixFrom && r.headSha
+    fixFrom && fixHead
       ? `\`\`\`bash
-git -C ${path} diff ${fixFrom}..${r.headSha}        # ← the fix you are judging
+git -C ${path} diff ${fixFrom}..${fixHead}        # ← the fix you are judging
 \`\`\`
-${rangeFrom(r) ? `Whole-task context when you need it: \`git -C ${path} diff ${rangeFrom(r)}..${r.headSha}\`` : ''}`
+${rangeFrom(r) && r.headSha ? `Whole-task context when you need it: \`git -C ${path} diff ${rangeFrom(r)}..${r.headSha}\`` : ''}`
       : `The implementer did not report usable SHAs — establish the fix commits yourself before judging:
 \`\`\`bash
 git -C ${path} log --oneline ${BASE_BRANCH}..HEAD
 \`\`\``
-  }${runBlock(task, `guard-r${round || 1}`, reviewedHead(task, range))}`
+  }${testIntegrityBlock(task, fixFrom, fixHead)}${runBlock(task, `guard-r${round || 1}`, reviewedHead(task, range))}`
+}
+
+// ── did the FIX weaken a test? ──
+// A fix must make the code meet its tests, never the tests meet the code, and loosening the test
+// that exposed a finding is the cheapest way to make the finding go away. The whole-task diff
+// cannot show it: a test the task added in its red step and then weakened in a fix reads as one
+// weak test, added. So this reads the fix's OWN diff, and only test files that existed before the
+// fix: the ones it deleted, the assertions it removed from them, the skips or focus markers it
+// added to them. Path and keyword heuristics in one fixed command (no model, no per-repo
+// configuration), so every line is a candidate the judge weighs, never a verdict. Judged by the guard
+// (which can only pass or re-review) and by ONE reviewer of a re-review round (which can raise
+// it as a blocker); the rule is in briefs/guard.md and briefs/review.md. The patterns use
+// bracket expressions instead of backslashes so `awk -v` passes them through unchanged; the
+// program runs the same under BSD awk, gawk and mawk. Deletions come from `--name-status`, so an
+// empty or binary test file is listed too; renames are followed (-M), so a test moved and
+// loosened in one fix shows its removed assertions under its new path. Docs are never tests.
+const TEST_PATH_RE = '(^|/)(tests?|Tests?|__tests__|specs?|testing|e2e)/|(^|/)tests?[.][^/]*$|(^|/)test_[^/]*$|(^|/)conftest[.]py$|_test[.][^/]*$|[.](test|spec|cy)[.][^/]*$|_spec[.][^/]*$|(Tests?|Spec|[a-z0-9]IT)[.][^/]*$'
+const TEST_DOC_RE = '[.](md|mdx|rst|txt|adoc)$'
+const TEST_ASSERT_RE = 'assert|expect|should|verify|raises|require[.]|t[.](error|fatal|fail)|[.]to(be|equal|strictequal|have|match|throw|contain)|must'
+const TEST_SKIP_RE = 'skip|xit[(]|xdescribe|xtest|xcontext|[.]only[(]|fit[(]|fdescribe|@ignore|[[]ignore|@disabled|[.]disabled[(]|xfail|pending|[.]todo[(]'
+const TEST_INTEGRITY_AWK = [
+  'function o(s){c++;if(c<=60)print substr(s,1,240)}', // at most 60 lines of at most 240 characters
+  '/^!! /{o($0);next}',
+  '/^D\\t/{p=substr($0,3);if(p~tp&&p!~dx)o("deleted test file: " p);next}',
+  '/^diff --git /{h=1;t=0;next}',
+  '/^@@/{h=0;split($2,a,",");ol=substr(a[1],2)+0;split($3,b,",");nl=substr(b[1],2)+0;next}',
+  'h&&/^[+][+][+] /{f=substr($0,7);sub(/\\t$/,"",f);t=(f~tp&&f!~dx);next}',
+  'h{next}',
+  '/^-/{if(t&&tolower($0)~ar)o("removed assertion: " f ":" ol " (before the fix): " substr($0,2));ol++;next}',
+  '/^[+]/{if(t&&tolower($0)~sr)o("added skip/focus: " f ":" nl ": " substr($0,2));nl++;next}',
+  'END{if(!c)print "(none)";else if(c>60)print "... and " c-60 " more"}',
+].join(' ')
+// `findings`: the blocking findings the fix answered, for a reviewer whose header does not
+// already list them (the guard's does). A test change one of them asked for is not a weakening.
+function testIntegrityBlock(task, fixFrom, head, findings = null) {
+  if (!fixFrom || !head || fixFrom === head) return ''
+  const path = repoPath(task.repo)
+  const diff = `git -C ${path} -c core.quotePath=false diff --no-color --no-ext-diff -M`
+  return `
+
+## Did the fix weaken a test? Run this once, in one Bash call
+A fix must make the code meet its tests, never the tests meet the code. For the fix's own diff only (\`${fixFrom}..${head}\`), this lists the test files that existed before it and that it deleted, the assertions it removed from them (cited by their line before the fix), and the skips or focus markers it added to them:
+\`\`\`bash
+{ ${diff} --name-status --diff-filter=D ${fixFrom}..${head} && ${diff} --src-prefix=a/ --dst-prefix=b/ -U0 --diff-filter=MR ${fixFrom}..${head} || echo '!! the diff failed: read the fix diff yourself'; } | awk -v tp='${TEST_PATH_RE}' -v dx='${TEST_DOC_RE}' -v ar='${TEST_ASSERT_RE}' -v sr='${TEST_SKIP_RE}' '${TEST_INTEGRITY_AWK}'
+\`\`\`
+Every line is a candidate matched on path and keyword, not a verdict, and \`(none)\` is not proof either: judge it as your brief's weakened-test rule says.${
+    findings && findings.length
+      ? `
+
+The blocking findings this fix answered:
+${findings.map((f) => `- [${f.severity}${f.persona ? ` · ${f.persona}` : ''}] ${f.file || '?'}:${f.line || '?'} — ${f.issue}`).join('\n')}`
+      : ''
+  }`
 }
 
 // The PRECHECK — one cheap structural look between the implementer and the panel.
@@ -1405,7 +1461,21 @@ A non-zero exit is a FAIL with \`check: "ancestry"\`: the work is on another bra
 }
 
 // The finding VERIFIER — one dispatch per failing review round, before any fix is bought.
-function verifyPrompt(task, mode, findings, range, attempt) {
+// `fixed`: {from, head} when this round re-reviewed a fix. A weakened-test finding is about a change
+// in the fix's own diff, invisible in the whole range (see testIntegrityBlock), so the verifier is
+// handed that diff too, or it would overturn the finding for not finding the removed line.
+function verifyPrompt(task, mode, findings, range, attempt, fixed = null) {
+  const head = fixed && fixed.head
+  const fixDiff =
+    fixed && fixed.from && head && fixed.from !== head
+      ? `
+
+## This round re-reviewed a fix
+The fix's own diff, where a test it weakened shows (a removed line is cited by its line BEFORE the fix):
+\`\`\`bash
+git -C ${repoPath(task.repo)} diff ${fixed.from}..${head}
+\`\`\``
+      : ''
   return `${brief('verify')}Task ${task.id} in \`${repoPath(task.repo)}\` (branch ${task.branch || '(feature branch)'}) — ${mode} review. ${artifacts()}
 
 ## The gating findings to verify (numbered — return one result per number)
@@ -1414,7 +1484,7 @@ ${findings.map((f, i) => `${i + 1}. [${f.severity}${f.persona ? ` · ${f.persona
 ## Task (verbatim — what the change had to do)
 ${task.taskText}
 
-${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${runBlock(task, `verify-${mode}-r${attempt || 0}`, reviewedHead(task, range))}`
+${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${fixDiff}${runBlock(task, `verify-${mode}-r${attempt || 0}`, reviewedHead(task, range))}`
 }
 
 // The telemetry WRITER — a fixed shell script, so the cheap agent only has to run it. Each
@@ -3870,10 +3940,10 @@ const overturned = [] // gating findings the verifier REJECTED with evidence —
 // a REJECTED finding counts only with cited evidence. A dead verifier keeps every finding
 // (fail safe to the reviewers). Synthesized findings (a FAIL with no finding) are not sent:
 // there is nothing concrete to verify.
-async function verifyFindings(task, mode, findings, range, attempt, phaseName) {
+async function verifyFindings(task, mode, findings, range, attempt, phaseName, fixed = null) {
   if (!VERIFY_FINDINGS || !findings.length) return { kept: findings, rejected: [] }
   reviewStats.verifyChecks++
-  const v = await agentT(verifyPrompt(task, mode, findings, range, attempt), {
+  const v = await agentT(verifyPrompt(task, mode, findings, range, attempt, fixed), {
     label: `verify:${task.id}:${mode}#${attempt}`,
     phase: phaseName,
     model: 'sonnet',
@@ -3897,12 +3967,18 @@ async function verifyFindings(task, mode, findings, range, attempt, phaseName) {
 // One review round of a stage: every persona at once, then the personas that returned nothing
 // once more. → {reviews} or {reviews, unavailable: [persona]}. `tag` keeps the labels (and the
 // reviewers' worktrees) unique when a stage's round 0 runs again on a later head (see runTask).
-async function reviewRound(task, mode, personas, phaseName, range, attempt, tag = '') {
+// `fixed`: {from, head, findings}, the range of the fix this round re-reviews and the findings it
+// answered. One reviewer, not the whole panel, gets the weakened-test fact sheet for it (the
+// adversarial lens when the panel has it, else the spec hawk, else the first lens), so a
+// weakened test is raised once, not once per lens.
+async function reviewRound(task, mode, personas, phaseName, range, attempt, tag = '', fixed = null) {
+  const integrity = fixed ? testIntegrityBlock(task, fixed.from, fixed.head, fixed.findings) : ''
+  const judge = integrity ? personas.find((p) => p.id === 'break-it') || personas.find((p) => p.id === 'spec-hawk') || personas[0] : null
   const round = async (who, retry) =>
     (
       await parallel(
         who.map((p) => () =>
-          agentT(reviewPrompt(task, mode, p, range, `${p.id}-r${attempt}${tag ? `-${tag.replace(/^~/, '')}` : ''}${retry ? `-retry${retry}` : ''}`), {
+          agentT(reviewPrompt(task, mode, p, range, `${p.id}-r${attempt}${tag ? `-${tag.replace(/^~/, '')}` : ''}${retry ? `-retry${retry}` : ''}`, p === judge ? integrity : ''), {
             label: `${p.id}:${task.id}${attempt ? `#${attempt}` : ''}${tag}${retry ? `~r${retry}` : ''}`,
             phase: phaseName,
             model: 'sonnet',
@@ -3969,8 +4045,9 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range, 
   reviewStats.stages++
   log(`   · ${task.id} (${task.repo}): ${mode} review — ${personas.length} reviewer(s)…`)
   let aggregate = null
+  let fixed = null // {from, findings} of the latest fix: a re-review round checks it for weakened tests
   for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-    const { reviews, unavailable } = attempt === 0 && first ? await first : await reviewRound(task, mode, personas, phaseName, range, attempt)
+    const { reviews, unavailable } = attempt === 0 && first ? await first : await reviewRound(task, mode, personas, phaseName, range, attempt, '', fixed)
     if (unavailable) {
       for (const p of unavailable) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: attempt })
       return { verdict: 'UNAVAILABLE', findings: [], advisory: [], summary: `the ${mode} lens(es) ${unavailable.map((p) => p.name).join(', ')} returned nothing, ${REVIEWER_RETRIES + 1} time(s)` }
@@ -3995,7 +4072,7 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range, 
     // One exception, so the gate can't be talked past: a reviewer that returns FAIL with NO
     // findings at all gave us nothing to verify, so we cannot classify it as a nit — it gates,
     // carrying its summary as a synthesized major.
-    const checked = await verifyFindings(task, mode, findings.filter(isGating), range, attempt, phaseName)
+    const checked = await verifyFindings(task, mode, findings.filter(isGating), range, attempt, phaseName, fixed)
     overturned.push(...checked.rejected.map((f) => ({ task: task.id, repo: task.repo, stage: mode, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue, evidence: f.overturnedBy })))
     const gating = checked.kept
     const advisory = findings.filter((f) => !isGating(f))
@@ -4045,6 +4122,13 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range, 
     // The fix moved HEAD — advance the range in place so the re-review (and the later quality
     // stage) judges the fixed code, not the stale range.
     if (range) Object.assign(range, reviewRange(fix, range))
+    // The fix's own range, which the guard, the next round's judge and its verifier read. The
+    // terminal sweep has no task range (it judges the whole run branch), so there it comes from
+    // the fix's report: where it started, else the parent of its first commit.
+    const fixCommits = ((fix.commits || []).map(asSha)).filter(Boolean)
+    fixed = range
+      ? { from: fixFrom, head: range.headSha, findings: gate }
+      : { from: asSha(fix.startSha) || (fixCommits[0] ? `${fixCommits[0]}^` : null), head: asSha(fix.headSha) || fixCommits[fixCommits.length - 1] || null, findings: gate }
     // A fix can pull in files the original task never touched — so it feeds the gate-condition
     // decision too.
     recordTouched(task, fix)
@@ -4058,7 +4142,7 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range, 
     // a fresh full-panel round.
     if (mode !== 'spec' && personas.length > 1) {
       guardChecks.checked++
-      const g = await agentT(guardPrompt(task, gate, fix, fixFrom, range, attempt + 1), {
+      const g = await agentT(guardPrompt(task, gate, fix, fixed, range, attempt + 1), {
         label: `guard:${task.id}#${attempt + 1}`,
         phase: phaseName,
         model: 'sonnet',

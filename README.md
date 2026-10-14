@@ -68,12 +68,12 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 /crystallize         # after the PR: patch/create skills, add memory facts, sync docs, one reviewable PR
 /orchestrate {specPath, planPath, project, repos}   # or run the whole build half unattended
 /grimoire:logs       # what the loop decided, and why: a local HTML report of every run
-/grimoire:graph      # the code graph as a local HTML page: dependency map, files, symbols, hotspots
+/grimoire:graph      # the code graph as a local HTML page: system map, file map, neighbourhoods, hotspots
 ```
 
 `/orchestrate` needs a fourth input besides the three design artifacts: `repos`, the list of repositories with their owning agent, tags (for review-lens selection) and gate command. It previews first, with a wall-clock estimate (a strict blocked-by chain runs one task at a time). Once it runs, every landed task is pushed to one draft PR per repo, and a halted or killed run picks up where it stopped when you invoke `/orchestrate` on the same project again. Leave the session alone while it runs: a message sent to it reaches the prompts of the agents the run dispatches, so give instructions after the run, or stop it first. `workflows/README.md` has the full reference.
 
-**🧠 How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
+**🧠 How the harness learns.** `roast` treats the code as the source of truth and fixes documentation that drifted from it. `crystallize` runs after a PR, reads its review threads, and turns what they taught into skill patches, memory facts and doc fixes, in a PR a human reviews and merges. The loop does this automatically at the end of every run, and reads the previous runs' ledgers at the start of the next one. Memory is small, capped and declarative on purpose (`memory/README.md`); procedures belong in skills.
 
 **🔍 Explore before asking; don't guess: built in.** If a fact is discoverable in the docs, the code, schemas, contracts, config or git history, an agent finds it before asking and never states a discoverable fact as a guess; only decisions the owner holds (product/UX calls, cost or vendor trade-offs, priorities, context outside the codebase) come back as questions, and an inconclusive search says what was checked and what is still unknown. Nothing to paste into `CLAUDE.md`: the rule is carried by the skills that ask (`roast`, `to-plan`, `to-issues`, `implement`, `launch-agent`, `setup`), the team-agent template, every scout and the reviewer, and the loop's briefs and dispatch header, so no project can miss it.
 
@@ -81,7 +81,7 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 
 The plugin ships a code graph (`tools/graph`): every repository of the project parsed with tree-sitter into a local SQLite graph of definitions and their relations (`CALLS`, `IMPORTS`, `EXTENDS` / `IMPLEMENTS`, tests, git co-change), for TypeScript/JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP and Swift. Scouts and the design skills reach it as MCP tools (`graph_search`, `graph_callers`, `graph_impact`, `graph_path`, `graph_hierarchy`, `graph_file`, `graph_sql`, …) to answer *where is it* and *what relates to what* in one call instead of a dozen greps: who calls this, what a change reaches and which tests cover it, how a request gets to a write.
 
-It is a map for research, never the source of truth: every answer is a `path:line` lead with the confidence of its edge, and what the code does or whether it is right is always read in the code. The reviewer does not get it at all. Incremental (only changed files re-parse, queries refresh themselves), no service to run, and its parser runtime installs itself on first index. Indexing is always the deterministic script, never a model: the plugin's `SubagentStop` hook re-runs it after every implementer and integrate step, and each worktree gets its own index, seeded from the main checkout's. `/grimoire:graph` renders all of it as one local page (dependency map, files, symbols with callers and callees, hotspots). `/grimoire:setup` proposes it; the reference is [`tools/graph/README.md`](tools/graph/README.md).
+It is a map for research, never the source of truth: every answer is a `path:line` lead with the confidence of its edge, and what the code does or whether it is right is always read in the code. The reviewer does not get it at all. Incremental (only changed files re-parse, queries refresh themselves), no service to run, and its parser runtime installs itself on first index. Indexing is always the deterministic script, never a model: the plugin's `SubagentStop` hook re-runs it after every implementer and integrate step, and each worktree gets its own index, seeded from the main checkout's. `/grimoire:graph` renders all of it as one local page: a system map of modules that opens onto the file map, every file and symbol as a neighbourhood (what uses it, what it uses), and hotspots by size and churn, with test code and ambiguous links hidden until asked for and unique-name matches drawn dashed. `/grimoire:setup` proposes it; the reference is [`tools/graph/README.md`](tools/graph/README.md).
 
 ## 🔭 Seeing what the loop decided: `/grimoire:logs`
 
@@ -139,7 +139,7 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`skills/crystallize`](skills/crystallize/SKILL.md) | Post-PR learning into skills, memory and docs |
 | [`skills/orchestrate`](skills/orchestrate/SKILL.md) · [`skills/adaptive-replanning`](skills/adaptive-replanning/SKILL.md) | Front door and failure behaviour of the loop |
 | [`skills/logs`](skills/logs/SKILL.md) | Read, render and prune the loop's decision journal |
-| [`skills/graph`](skills/graph/SKILL.md) | Browse the code graph as a local page: map, files, symbols, hotspots |
+| [`skills/graph`](skills/graph/SKILL.md) | Browse the code graph as a local page: system map, file map, neighbourhoods, hotspots |
 | [`agents/`](agents) | scouts (`codebase-scout`, `reference-scout`, `contract-checker`, `tracker-scout`, `design-scout`, `security-scout`, `perf-scout`), the `reviewer`, and the specialists `migration-engineer` and `test-engineer` the loop can route tasks to |
 | [`templates/`](templates) | the team-agent definition to copy per repository |
 | [`skills/implement`](skills/implement/SKILL.md) · [`skills/review`](skills/review/SKILL.md) | Build one issue through its team agent; gate it with the diverse-lens panel |
@@ -158,7 +158,10 @@ npm test               # engine, guard, renderer and code-graph tests (the graph
 npm run check          # drift: roster ↔ agents, briefs ↔ engine, evals present, config documented
 npm run evals:check    # evals/ is up to date with skills/*/evals/evals.json
 claude plugin eval .   # run the skill evals (paid; see evals/README.md)
+npm run hooks          # once per clone: the pre-push check below
 ```
+
+The pre-push check runs CI's fast checks (`npm run check`, `npm run evals:check`) on exactly the commit being pushed, in about a second, and blocks the push when one fails: no model, no API key, no sign-in. The full test suite stays in CI. It is opt-in per clone, `git push --no-verify` skips it, and once `core.hooksPath` points at `.githooks`, hooks in `.git/hooks` stop running.
 
 What changed in each release: [CHANGELOG.md](CHANGELOG.md).
 

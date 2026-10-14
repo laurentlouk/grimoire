@@ -30,14 +30,14 @@ halted.
 - Memory: declarative dated facts only, within the caps the skill sets, add/replace/remove —
   removing stale entries is expected; list each removed entry verbatim in the report. Never
   narratives, environment paths, secrets, or one-offs.
-- Do NOT merge the PR you open — that stays a human call under the rule in the `crystallize`
-  skill.
+- Do NOT merge the PR you open, and nothing in the run merges it either: a human merges every
+  crystallize PR (the `crystallize` skill's "Merging it" says why, and what to report).
 - Docs follow code: where a doc disagreed with the shipped code, fix the doc.
 - NEVER touch hook scripts, settings files, the invariant sections of the project's agent
   instructions, or anything inside a cloned repo's checkout.
 - Commit on the ledger branch, push it, open ONE PR titled `[NO_TICKET] crystallize: <project>
-  — <n> PR(s)` whose body is the concatenated report summaries. If, after reading everything,
-  NOTHING durable was learned, still write the report(s) saying why, and open the PR with the
-  ledger and reports.
+  — <n> PR(s)` whose body is the concatenated report summaries, then which of the skill's clean
+  conditions hold. If, after reading everything, NOTHING durable was learned, still write the
+  report(s) saying why, and open the PR with the ledger and reports.
 
 Return the structured object; `summary` is the one screen a human reads.

@@ -105,6 +105,7 @@ function dropRepo(db, repo) {
   tx(db, () => {
     for (const { id } of db.prepare('SELECT id FROM files WHERE repo = ?').all(repo)) removeFile(db, id)
     db.prepare('DELETE FROM cochange WHERE repo = ?').run(repo)
+    db.prepare('DELETE FROM churn WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM repos WHERE name = ?').run(repo)
   })
 }

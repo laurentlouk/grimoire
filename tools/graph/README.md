@@ -8,9 +8,10 @@ A local index of every repository in the project: definitions and how they relat
 
 | | |
 | --- | --- |
-| **Nodes** | files, functions, methods, constructors, classes, structs, interfaces, traits, protocols, enums, types, modules, namespaces, macros (test code is marked) |
+| **Nodes** | files, functions, methods, constructors, classes, structs, interfaces, traits, protocols, enums, types, modules, namespaces, macros (test code is marked, and so is test-support code: Storybook stories, mocks, fixtures) |
 | **Edges** | `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, plus co-change pairs from git history |
-| **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL (file nodes only, searchable by path) |
+| **History** | per-file churn: how many of the last 400 non-merge commits touched the file (commits touching more than 25 indexed files skipped) |
+| **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL, HCL / Terraform (file nodes only, searchable by path) |
 | **Storage** | one SQLite file, `.grimoire/graph/graph.db` (gitignored with the rest of `.grimoire/`) |
 
 Parsing is [tree-sitter](https://tree-sitter.github.io/) (WASM grammars); storage is Node's built-in `node:sqlite`, so it needs **Node ≥ 22.5**.
@@ -29,7 +30,9 @@ There is no type checker. A call is linked by name, narrowed by what the syntax 
 | `unique-name` | the only definition of that name in the repository |
 | `ambiguous` | one of up to three same-named definitions; each gets an edge (`strict: true` drops them) |
 
-A call on a receiver whose type the repository does not define (a `HashMap`, a `Request`), or a name with more than three candidates, stays unresolved: those go to dependencies. **A missing edge proves nothing**: dynamic dispatch, callbacks, reflection, config wiring, string-keyed routes and other repositories are invisible, so "no callers" is confirmed with grep.
+`unique-name` and `ambiguous` are the **name guesses**: `graph_status` reports their share per repository, and the page draws them apart (dashed, or hidden until asked). Every other confidence is called *resolved by syntax* here, though `import`, `same-file` and `same-package` still match a name within the scope the syntax gives.
+
+A call on a receiver whose type the repository does not define (a `HashMap`, a `Request`), or a name with more than three candidates, stays unresolved: those go to dependencies. So does a standard-library method name (`len`, `get`, `has`, `map`… listed per language in `COMMON_METHODS`, `lib/langs.mjs`) on a receiver whose type the syntax does not state, and any method on a chain that starts at a type or crate the repository does not define (`Utc::now().timestamp()`, `PutItemOutput::builder().build()`). Without that, the one `len` a repository defines collects every `.len()` in it. **A missing edge proves nothing**: dynamic dispatch, callbacks, reflection, config wiring, string-keyed routes and other repositories are invisible, so "no callers" is confirmed with grep.
 
 ## Using it
 
@@ -37,7 +40,7 @@ As MCP tools (the plugin declares the server in `.mcp.json`; agents see `mcp__pl
 
 | Tool | Answers |
 | --- | --- |
-| `graph_status` | what is indexed, how much resolved, what changed since |
+| `graph_status` | what is indexed, how much resolved, how many call links are name guesses, what changed since |
 | `graph_index` | build or refresh (incremental); `full: true` rebuilds |
 | `graph_search` | definitions by name or `*` pattern, files by path fragment |
 | `graph_symbol` | one definition: signature, container, members, caller/callee/subtype/test counts |
@@ -63,11 +66,11 @@ node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
 
 ## Seeing it
 
-`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview, the file-level dependency map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`, the biggest files named, the rest on hover), every file and symbol with its callers, callees, dependencies and supertypes, and hotspots (most called, widest fan-out, most depended-on, co-change). No network, no CDN. It stays local.
+`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview; a system map of modules (`lib/modules.mjs`: folders of production code, a folder holding more than 35% of its repository split into its subfolders, linked by the file pairs that use each other through links resolved by syntax, ranked in the order code flows) that opens onto the file-level map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`); every file and symbol as a neighbourhood, what uses it on the left and what it uses on the right; and hotspots (a size × churn treemap, most called, widest fan-out, most used, co-change), ranked by resolved links. Test code and ambiguous links are hidden until asked for (the system map never shows them); each lane draws its 14 largest modules; every view has a plain anchor (`#sym-12`, `#file-3`, `#mod-4`); `#sym-` and `#file-` numbers are index ids that change when that file is re-parsed, and `#mod-` numbers follow the modules' order, which shifts when modules gain or lose files or links: an anchor holds for the index the page was rendered from. No network, no CDN: the page's CSP admits only its own script, by hash. It stays local.
 
 ## Freshness
 
-`graph_index` re-parses only files whose size or mtime moved and whose content hash changed, drops deleted files, and re-resolves the edges of a repository that changed. Every query first checks (stat only) whether files moved and refreshes incrementally if they did, at most every 15 s per process. A project that was never indexed is not indexed implicitly by a query: the first `graph_index` installs the parser runtime and can take a while on a large tree.
+`graph_index` re-parses only files whose size or mtime moved and whose content hash changed, drops deleted files, and re-resolves the edges of a repository that changed. An index built by another grimoire version (its schema differs) is rebuilt in full, on the next query or index. Every query first checks (stat only) whether files moved and refreshes incrementally if they did, at most every 15 s per process. A project that was never indexed is not indexed implicitly by a query: the first `graph_index` installs the parser runtime and can take a while on a large tree.
 
 Indexing is always this script, never a model. Three things run it:
 
@@ -106,6 +109,7 @@ tools/graph/
   lib/resolve.mjs              names → edges, per repository, with confidence
   lib/indexer.mjs · worker.mjs · run.mjs   incremental indexing, in a child process
   lib/store.mjs · query.mjs · cochange.mjs · project.mjs · deps.mjs
+  lib/modules.mjs · layout.mjs · render.mjs   the page: modules and the system map, the file map's layout, the HTML
   tests/graph.test.mjs         node tools/graph/tests/graph.test.mjs
 ```
 
