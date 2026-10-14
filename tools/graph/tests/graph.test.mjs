@@ -303,6 +303,18 @@ ok(rd.stdout.trim() === path.join(WT, '.grimoire/graph/graph.html') && page.star
 const blob = JSON.parse((/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page) || [])[1] || 'null')
 ok(blob && blob.files.some((f) => f[2] === 'src/b.ts') && blob.nodes.some((n) => n[3] === 'onBranch') && blob.edges.length > 0, 'the page carries every file, symbol and edge of the index')
 ok(/default-src 'none'/.test(page) && !/<script[^>]+src=/.test(page) && !/https?:\/\//.test(page.replace(/<script type="application\/json"[\s\S]*?<\/script>/, '')), 'the page is self-contained: a CSP, no external script, no URL outside the data')
+{ // what the page carries beyond the index rows: churn, modules, and a client that compiles
+  const rm = spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'render', '--root', MAIN], { encoding: 'utf8' })
+  const pageM = rm.status === 0 ? readFileSync(rm.stdout.trim(), 'utf8') : ''
+  const DM = JSON.parse(((/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageM) || [])[1] || 'null').replace(/\\u003c/g, '<'))
+  const row = (p) => DM && DM.files.find((f) => f[2] === p)
+  ok(row('src/a.ts') && row('src/a.ts')[7] === 2 && row('src/c.ts')[7] === 1, `files carry their churn for the hotspot map (${JSON.stringify(row('src/a.ts'))})`)
+  ok(DM && DM.system && DM.system.modules.map((m) => `${m.repo}:${m.key}:${m.files}`).join(' ') === 'main:src:2', `the page carries the system map's modules (${JSON.stringify(DM && DM.system)})`)
+  const script = (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(pageM) || [])[1] || ''
+  let compiles = false
+  try { new (await import('node:vm')).Script(script); compiles = script.length > 1000 } catch (e) { console.log('       ' + e.message) }
+  ok(compiles, 'the page script compiles')
+}
 mkdirSync(path.join(WT, 'src/<b>'), { recursive: true })
 writeFileSync(path.join(WT, 'src/<b>/x.ts'), 'export function tagged(): number {\n  return 1\n}\n')
 const rd2 = spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'render', '--root', WT], { encoding: 'utf8' })
@@ -320,11 +332,14 @@ const { layoutMap } = await import('../lib/layout.mjs')
   for (let i = 1; i <= 1900; i++) ins.run(i, 'big', `src/f${i}.ts`, 'typescript', 100000 + i)
   for (let i = 1901; i <= 2000; i++) ins.run(i, 'small', `lib/g${i}.ts`, 'typescript', 100000 + i)
   for (let i = 1; i < 1900; i++) edge.run(100000 + i, 100000 + i + 1) // big is densely linked, small not at all
+  const insT = db.prepare('INSERT INTO files(id, repo, path, lang, is_test, node_id) VALUES(?, ?, ?, ?, 1, ?)')
+  for (let i = 2001; i <= 2050; i++) { insT.run(i, 'big', `tests/t${i}.ts`, 'typescript', 100000 + i); for (let j = 1; j <= 40; j++) edge.run(100000 + i, 100000 + j) } // tests: the most linked of all
   db.close()
   const pageCap = await renderGraph({ dbPath: path.join(CAP, '.grimoire/graph/graph.db') })
   const Dc = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageCap)[1].replace(/\\u003c/g, '<'))
   const smallShown = Dc.map.files.filter((id) => id > 1900).length
   ok(Dc.map.files.length === 1500 && smallShown >= 70, `the 1500-file map cap is shared per repo: the unlinked small repo keeps ${smallShown} of its 100`)
+  ok(Dc.map.files.every((id) => id <= 2000), `the map's cap goes to production code first: test files, however linked, only fill free slots (${Dc.map.files.filter((id) => id > 2000).length} test files kept)`)
   ok(Dc.map.totals.small === 100 && Dc.map.totals.big === 1900, 'per-repo totals reach the page for the note')
 }
 const lf = [...Array(60)].map((_, i) => ({ id: i, repo: i < 40 ? 'a' : 'b', path: `${i % 3 ? 'src' : 'lib'}/f${i}.ts`, deg: i % 9 }))
