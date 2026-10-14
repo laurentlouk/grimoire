@@ -330,7 +330,8 @@ function journalWriter(prompt, { lie = false } = {}) {
   }, { extraArgs: { precheck: false, verifyFindings: false, runId: 'run-7', runMeta: { grimoireVersion: '0.6.0', briefsHash: 'abc123' }, telemetry: { flushEvery: 3 } } })
   const events = writes.flatMap((w) => w.events)
   const types = events.map((e) => e.type)
-  ok(labels.filter((l) => l.startsWith('journal#')).length === writes.length && writes.length >= 2, `flushed in ${writes.length} chunk(s) of ≤ 3`)
+  // `journal#N.rjK`: this writer never confirms run.json (it predates the receipt), so the final one is resent alone
+  ok(labels.filter((l) => /^journal#\d+$/.test(l)).length === writes.length && writes.length >= 2, `flushed in ${writes.length} chunk(s) of ≤ 3`)
   ok(writes.every((w) => w.dir === '.grimoire/runs/run-7'), 'every chunk goes to <telemetryDir>/<runId>')
   ok(writes.every((w) => w.file === String(w.events[0].seq).padStart(8, '0')), 'each chunk file is named by its first seq (a retried flush overwrites, never duplicates)')
   ok(events.every((e, i) => e.seq === i + 1), 'sequence numbers are gap-free and ordered')

@@ -285,7 +285,9 @@ await guard('H-4', async () => {
   const unflagged = await run('', [T('PROJ-1')], happy, { args: { ...QUIET, runId: 'run-r', resumeState: { version: 2, runId: 'run-r', attempt: 1, lastSeq: 9, landedTasks: [CK('PROJ-1', 'aaaaaaa'), rp({ replan: undefined }), rp({ id: '#9' })] } }, index: { reconcile: lines, runBranches: [BRANCH()] }, quiet: true })
   eq(unflagged.result.resumedLanded.map((x) => x.id), ['PROJ-1'], 'unflagged, or an id that reads as an issue reference (#9): not absorbed')
   const written = await run('', [T('PROJ-1')], (label, p, o) => happy(label), { args: { ...QUIET, runId: 'run-w', telemetry: { dir: fresh('tel'), flushEvery: 1000 } }, quiet: true })
-  ok(written.calls.some((c) => c.label.startsWith('journal#')) && written.calls.filter((c) => c.label.startsWith('journal#')).every((c) => JSON.parse(unb64(heredocs(c.prompt)[1])).checkpoint.runId === 'run-w'), 'the checkpoint records its runId')
+  // the flushes, not the resends (this writer confirms nothing, so each chunk is resent in pieces that carry no run.json)
+  const flushesW = written.calls.filter((c) => /^journal#\d+$/.test(c.label))
+  ok(flushesW.length > 0 && flushesW.every((c) => JSON.parse(unb64(heredocs(c.prompt)[1])).checkpoint.runId === 'run-w'), 'the checkpoint records its runId')
 })
 
 // ══════════════ H-5 · counters bounded by what the project plausibly reaches; the local checkpoint wins ══════════════

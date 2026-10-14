@@ -225,8 +225,10 @@ const hydratedIds = (calls) => calls.filter((c) => c.label.startsWith('hydrate:'
   eq(detail.map((t) => [t.id, t.headSha, t.commits, t.summary, t.files]), [['PROJ-1', 'aaaaaaa', ['aaaaaaa'], 'built it', ['src/a.ts']], ['PROJ-2', 'bbbbbbb', ['bbbbbbb'], 'built B', ['src/b.ts']]],
     "each task's commits, summary and paths go to landed.jsonl once (the gate condition reads the paths after a resume, when the record has them)")
   ok(cp.landed.includes('PROJ-1') && Array.isArray(cp.pending), '`landed` and `pending` are still there for older readers')
-  const firstFlush = chunks[0].run.checkpoint
-  ok(firstFlush.landedTasks.length === 1 && firstFlush.landedTasks[0].id === 'PROJ-1' && chunks[0].landed.map((t) => t.id).join() === 'PROJ-1', 'the first flush already holds PROJ-1, and its detail: both were written when PROJ-1 landed')
+  // the first flush goes before the first dispatch (nothing landed yet); the next is PROJ-1's landing
+  const atLanding = chunks.find((c) => c.run.checkpoint.landedTasks.length)
+  ok(chunks[0].run.checkpoint.landedTasks.length === 0 && !!atLanding && atLanding.run.checkpoint.landedTasks.length === 1 && atLanding.run.checkpoint.landedTasks[0].id === 'PROJ-1' && atLanding.landed.map((t) => t.id).join() === 'PROJ-1',
+    'the start flush holds nothing landed; the first flush after it already holds PROJ-1, and its detail: both were written when PROJ-1 landed')
 }
 {
   chunks.length = 0

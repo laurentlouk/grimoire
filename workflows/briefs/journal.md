@@ -14,6 +14,9 @@ not a worktree), then return what it printed.
   yourself, do not read the files back, do not commit anything (the directory is local and
   gitignored).
 - If the script fails, do not retry with a modified version — return what it printed.
+- A script may carry one payload only, when the engine sends a chunk or the final `run.json`
+  again: it then prints `LINES 0` / `BYTES 0`, or `RUNJSON kept: not sent with this script`, for
+  the part it does not carry. That is normal: report it as printed.
 - A `RUNJSON kept` line is normal: a newer checkpoint is already on disk and the script left it.
   A `RUNJSON bad`, `LANDED bad` or `CHUNK bad` line means a payload did not arrive intact and was
   not written: report it as printed, never repair it.
