@@ -8,4 +8,7 @@ export class Circle extends Base implements Shape {
   area(): number {
     return Math.PI * square(this.r)
   }
+  has(other: number): boolean {
+    return other < this.r
+  }
 }

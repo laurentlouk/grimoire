@@ -13,11 +13,12 @@
 //   unique-name   the only definition of that name in the repository
 //   ambiguous     one of ≤ MAX_AMBIGUOUS definitions of that name (each gets an edge)
 //   path          an import resolved to a file by its path
-// A name with more candidates than that, or on a receiver whose type the repository does not
-// define, stays unresolved: most such calls go to the standard library or a dependency.
+// A name with more candidates than that, on a receiver whose type the repository does not define,
+// or a standard-library method name (COMMON_METHODS) on a receiver whose type the syntax does not
+// state, stays unresolved: most such calls go to the standard library or a dependency.
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { familyOf } from './langs.mjs'
+import { familyOf, COMMON_METHODS } from './langs.mjs'
 
 const MAX_AMBIGUOUS = 3
 const CALLABLE = new Set(['function', 'method', 'constructor'])
@@ -181,6 +182,17 @@ export function resolveRepo(db, repo, repoAbs) {
   const seen = new Set()
   const emit = (src, dst, kind, conf, line) => { const k = `${src}|${dst}|${kind}`; if (seen.has(k) || src === dst && kind !== 'CALLS') return; seen.add(k); edgeIns.run(src, dst, kind, conf, line) }
   const inFiles = (cands, files) => cands.filter((c) => files.some((f) => f.id === c.file_id))
+  // A receiver chain whose first segment is a type the repository does not define
+  // (`UpdateItemOutput::builder().build()`, `Utc::now().timestamp()`) or, in Rust, a crate path the
+  // repository has no module for (`chrono::Utc::now()`), yields a dependency's value: its methods
+  // are the dependency's too, whatever the repository happens to name the same.
+  const moduleNames = new Set([...fileById.values()].flatMap((f) => [path.posix.basename(noExt(f.path)), ...f.dir.split('/')]))
+  const startsInDependency = (qual, family) => {
+    const head = qual.split(/::|\.|->|\\/)[0].replace(/\(.*$/s, '').trim()
+    if (!head || head === qual || SELF.test(head)) return false
+    if (/^[A-Z]/.test(head)) return !(byName.get(`${family}|${head}`) || []).length
+    return family === 'rust' && qual.includes('::') && !/^(crate|self|super)$/.test(head) && !moduleNames.has(head)
+  }
   const stats = { calls: 0, resolved: 0 }
 
   for (const r of refs) {
@@ -236,6 +248,7 @@ export function resolveRepo(db, repo, repoAbs) {
         if (members.length) pick = { nodes: members, conf: 'qualified' }
         else if (hit.length) pick = { nodes: hit.slice(0, MAX_AMBIGUOUS), conf: 'import' }
       }
+      else if (startsInDependency(qual, from.family)) continue
       if (!pick) {
         const types = classesNamed(from.family, qLast)
         const members = cands.filter((c) => types.some((t) => t.id === c.parent_id))
@@ -243,6 +256,9 @@ export function resolveRepo(db, repo, repoAbs) {
         else if (/^[A-Z]/.test(qLast) && !types.length && !/[.(]/.test(qual)) continue // a type the repo does not define: a dependency
       }
       if (!pick) {
+        // `x.len()`, `seen.has(k)`: an untyped receiver calling a standard-library name is that
+        // library's method far more often than the repo's one definition of the name.
+        if (COMMON_METHODS[from.family]?.has(name)) continue
         const methods = cands.filter((c) => c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
         pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import', (c) => b.files.has(c.file_id)]])
       }

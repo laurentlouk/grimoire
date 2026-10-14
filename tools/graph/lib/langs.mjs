@@ -344,6 +344,34 @@ export const LANGS = {
 // Indexed as file nodes only (searchable by path, reachable through imports), no symbols.
 export const FILE_ONLY_EXTS = ['.vue', '.svelte', '.scala', '.dart', '.lua', '.ex', '.exs', '.zig', '.sol', '.ml', '.m', '.mm', '.sh', '.bash', '.sql', '.proto', '.graphql', '.gql']
 
+// Method names each family's standard library defines on its everyday types (collections,
+// strings, options, results, promises, streams). A call `x.len()` on a receiver whose type the
+// syntax does not state is almost always one of those, so resolution never links such a call by
+// name alone: on a big repository the one user-defined `len` or `get` otherwise collects every
+// `.len()` or `.get()` in it. Typed, self and qualified receivers still resolve these names.
+const words = (s) => new Set(s.trim().split(/\s+/))
+export const COMMON_METHODS = {
+  js: words(`map filter reduce reduceRight forEach find findIndex findLast some every includes indexOf lastIndexOf push pop shift unshift slice splice concat join sort reverse flat flatMap fill at
+    keys values entries get set has delete clear add size then catch finally toString toJSON valueOf toFixed toLocaleString
+    trim trimStart trimEnd split replace replaceAll startsWith endsWith padStart padEnd toLowerCase toUpperCase charAt charCodeAt substring match matchAll test exec
+    bind call apply json text blob arrayBuffer`),
+  python: words(`append extend insert remove pop clear index count sort reverse copy keys values items get update setdefault add discard union intersection difference
+    split rsplit join strip lstrip rstrip replace startswith endswith format lower upper encode decode find read write close readline readlines splitlines`),
+  rust: words(`len is_empty contains contains_key insert remove get get_mut push push_str pop clear iter iter_mut into_iter map map_err and_then or_else ok_or ok_or_else
+    unwrap unwrap_or unwrap_or_else unwrap_or_default expect is_some is_none is_ok is_err ok err clone cloned copied to_string to_owned to_vec as_str as_ref as_mut as_bytes
+    into try_into eq ne cmp partial_cmp hash fmt next collect extend keys values entry or_insert or_insert_with or_default first last split trim join
+    starts_with ends_with replace parse lock read write filter find any all count sum min max sort sort_by sort_unstable dedup retain truncate append drain
+    take skip chain zip enumerate rev fold for_each flatten flat_map borrow borrow_mut as_deref`),
+  go: words(`String Error Close Read Write Len Lock Unlock RLock RUnlock Done Err Value Wait Load Store`),
+  jvm: words(`get set put add remove contains containsKey isEmpty size clear iterator stream map filter collect forEach equals hashCode toString compareTo
+    length charAt substring trim split append toList orElse orElseGet orElseThrow isPresent let also apply takeIf`),
+  csharp: words(`Add Remove Contains ContainsKey Clear ToString Equals GetHashCode Select Where First FirstOrDefault Any All ToList ToArray OrderBy GetValueOrDefault TryGetValue Dispose`),
+  ruby: words(`each map select reject find include? push pop shift keys values fetch merge to_s to_i to_a to_h length size empty? nil? first last join split strip gsub sub`),
+  php: words(`get set has add remove count toArray first all`),
+  swift: words(`append insert remove contains isEmpty first last map filter reduce compactMap forEach sorted joined split`),
+  c: words(`push_back emplace_back size empty begin end find insert erase clear at front back data c_str`),
+}
+
 const BY_EXT = new Map()
 for (const [id, l] of Object.entries(LANGS)) for (const e of l.exts) BY_EXT.set(e, id)
 export const langOf = (file) => { const m = /(\.[^./]+)$/.exec(file); return m ? BY_EXT.get(m[1].toLowerCase()) || (FILE_ONLY_EXTS.includes(m[1].toLowerCase()) ? 'other' : null) : null }

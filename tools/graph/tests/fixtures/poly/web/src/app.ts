@@ -8,5 +8,6 @@ export function main(): number {
 }
 
 function total(shapes: Circle[]): number {
-  return shapes.reduce((s, x) => s + x.area(), 0)
+  const seen = shapes.map((x) => x.area())
+  return shapes.reduce((s, x) => s + x.area(), 0) + (seen.has(2) ? 1 : 0)
 }
