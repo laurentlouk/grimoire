@@ -10,6 +10,8 @@
 //     the resolved edges and their confidence, through the same `call()` the MCP server uses
 //  3. incremental refresh: an edit, a new file and a deletion show up in the next query
 //  4. the MCP server over stdio: initialize, tools/list, tools/call, read-only SQL
+//  5. worktrees, the lock, the hook's refresh, churn, and the page (data, CSP, its script run in a stub DOM)
+//  1b-1d (between 1 and 2): which files count and as what, modules and the system map, the page's helpers
 //
 //  Needs the parser runtime (web-tree-sitter + grammars): `npm ci --prefix tools/graph`, or a
 //  prior index that installed it into the user cache. Without it the file is skipped, except
@@ -95,7 +97,7 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
 {
   const { TEST_PATH } = await import('../lib/langs.mjs')
   const { scanRepo } = await import('../lib/project.mjs')
-  const support = ['src/components/Button.stories.tsx', '.storybook/preview.tsx', '.storybook/stories/atoms/Badge.stories.tsx', 'lib/src/mocks/mock_dynamodb.rs', 'src/__mocks__/api.ts', 'lib/src/fixtures/mod.rs', 'app/__fixtures__/user.ts']
+  const support = ['internal/mock/client.go', 'test/fixture/user.json', 'src/components/Button.stories.tsx', '.storybook/preview.tsx', '.storybook/stories/atoms/Badge.stories.tsx', 'lib/src/mocks/mock_dynamodb.rs', 'src/__mocks__/api.ts', 'lib/src/fixtures/mod.rs', 'app/__fixtures__/user.ts']
   const prod = ['src/components/Button.tsx', 'src/mockup/view.ts', 'lib/src/fixture_loader.rs', 'src/stories.ts', 'lib/src/application/mod.rs']
   const wrong = [...support.filter((p) => !TEST_PATH.test(p)).map((p) => `${p} should be test code`), ...prod.filter((p) => TEST_PATH.test(p)).map((p) => `${p} should be production code`)]
   ok(!wrong.length, `stories, mocks and fixtures are test code; look-alike production paths are not${wrong.length ? ': ' + wrong.join(' · ') : ''}`)
@@ -138,6 +140,15 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   ok(S.modules.filter((m) => m.repo === 'app').map((m) => m.key).join(' ') === 'app components hooks',
     `system map: a lane lists its modules in the order code flows, users above what they use (${mods})`)
   ok(JSON.stringify(systemMap(fs, nodes, edges)) === JSON.stringify(S), 'system map: deterministic')
+  // as the page calls it: files carry their file node, nodes are definitions only, imports join file nodes
+  const fsN = fs.map((f) => ({ ...f, node_id: 1000 + f.id }))
+  const I = systemMap(fsN, [], [{ src: 1007, dst: 1001, kind: 'IMPORTS', confidence: 'path' }])
+  const il = I.links.map(([a, b, n]) => `${I.modules[a].key}>${I.modules[b].key}:${n}`).join(' ')
+  ok(il === 'gql>lib/src/cqrs:1', `system map: a module linked only by an import, through the files' own nodes (${il})`)
+  const chain = systemMap([F(1, 'z', 'a/x.ts'), F(2, 'z', 'b/x.ts'), F(3, 'z', 'c/x.ts')], [{ id: 1, file_id: 1 }, { id: 2, file_id: 2 }, { id: 3, file_id: 3 }],
+    [{ src: 1, dst: 2, kind: 'CALLS', confidence: 'import' }, { src: 2, dst: 3, kind: 'CALLS', confidence: 'import' }, { src: 1, dst: 3, kind: 'CALLS', confidence: 'import' }])
+  const cr = chain.modules.map((m) => `${m.key}:${m.rank}`).join(' ')
+  ok(cr === 'a:0 b:1 c:2', `system map: a module sits below its longest chain of users, not its nearest (${cr})`)
   const C = systemMap(fs, nodes, [...edges, E(10, 9, 'IMPORTS', 'path')]) // hooks → components closes a cycle
   const ranks = C.modules.filter((m) => m.repo === 'app').map((m) => `${m.key}:${m.rank}`).join(' ')
   ok(ranks === 'app:0 components:1 hooks:1', `system map: modules in a cycle share one rank, below their users (${ranks})`)
@@ -156,8 +167,8 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   ok(R.cut('abcdefgh', 5) === 'abcd…' && R.cutL('src/geo/circle.ts', 9) === '…ircle.ts' && R.cut('ab', 5) === 'ab', 'cut keeps the start of a name, cutL the end of a path')
   ok(R.plural(1, 'file') === '1 file' && R.plural(0, 'file') === '0 files' && R.plural(1500, 'link') === '1,500 links', 'plural')
   const tabs = ['overview', 'map', 'files', 'symbols', 'hotspots']
-  ok(JSON.stringify([R.parseHash('#sym-12', tabs), R.parseHash('#file-3', tabs), R.parseHash('#mod-0', tabs), R.parseHash('#map', tabs), R.parseHash('#nope', tabs), R.parseHash('#sym-x', tabs), R.parseHash('', tabs)])
-    === '[{"kind":"sym","id":12},{"kind":"file","id":3},{"kind":"mod","id":0},{"kind":"tab","tab":"map"},null,null,null]', 'parseHash: plain anchors only, anything else ignored')
+  ok(JSON.stringify([R.parseHash('#sym-12', tabs), R.parseHash('#file-3', tabs), R.parseHash('#mod-0', tabs), R.parseHash('#map', tabs), R.parseHash('#nope', tabs), R.parseHash('#sym-x', tabs), R.parseHash('', tabs), R.parseHash('#sym-12abc', tabs), R.parseHash('x#sym-12', tabs)])
+    === '[{"kind":"sym","id":12},{"kind":"file","id":3},{"kind":"mod","id":0},{"kind":"tab","tab":"map"},null,null,null,null,null]', 'parseHash: plain anchors only, anything else ignored')
   ok([R.pairConf([3, 1, 2, 0]), R.pairConf([2, 0, 1, 1]), R.pairConf([2, 0, 0, 2])].join(' ') === 'resolved unique-name ambiguous', 'a file link is as sure as its surest edge')
   ok([0, 1, 2, 3, 7, 20, 400].map((c) => R.heatOf(c, 400)).join(' ') === '0 1 1 1 2 2 4' && R.heatOf(1, 1) === 4, 'heatOf: log-scale churn bands')
   ok(JSON.stringify(R.heatBands(400)) === '[[1,1,4],[2,5,20],[3,21,89],[4,90,400]]' && JSON.stringify(R.heatBands(1)) === '[[4,1,1]]' && JSON.stringify(R.heatBands(0)) === '[]', `heatBands: the legend's real ranges (${JSON.stringify(R.heatBands(400))})`)
@@ -165,16 +176,17 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   const area = sq.reduce((a, [, , w, h]) => a + w * h, 0)
   ok(sq.length === 7 && Math.abs(area - 24) < 1e-9 && sq.every(([x, y, w, h]) => x >= -1e-9 && y >= -1e-9 && x + w <= 6 + 1e-9 && y + h <= 4 + 1e-9) && Math.abs(sq[0][2] * sq[0][3] - 6) < 1e-9, 'squarify: every value gets an area in proportion, inside the rectangle')
   ok(JSON.stringify(R.squarify([], 0, 0, 10, 10)) === '[]' && JSON.stringify(R.squarify([0, 0], 0, 0, 10, 10)) === '[[0,0,0,0],[0,0,0,0]]', 'squarify: nothing to draw draws nothing')
-  const mods = [{ i: 0, files: 2 }, { i: 1, files: 9 }, { i: 2, files: 5 }, { i: 3, files: 1 }]
-  const lp = R.lanePick(mods, 2)
-  ok(lp.shown.map((m) => m.i).join(' ') === '1 2' && lp.rest === 2 && R.lanePick(mods, 14).rest === 0, 'lanePick: a lane keeps its largest modules, in flow order, and counts the rest')
+  const mods = [{ i: 0, files: 5 }, { i: 1, files: 9 }, { i: 2, files: 1 }, { i: 3, files: 7 }]
+  const lp = R.lanePick(mods, 3)
+  ok(lp.shown.map((m) => m.i).join(' ') === '0 1 3' && lp.rest === 1 && R.lanePick(mods, 14).rest === 0, `lanePick: a lane keeps its largest modules, in flow order, and counts the rest (${lp.shown.map((m) => m.i)})`)
   ok(R.INITIAL.tests === false && R.INITIAL.guesses === false && R.INITIAL.tab === 'overview' && R.INITIAL.mapMode === 'modules' && R.LANE_MAX === 14 && R.MAXCOL === 12, 'the page opens on the overview, modules first, with test code and ambiguous links hidden')
   // the file map: a link whose every edge is ambiguous is flagged, and ranks no file
-  const md = R.mapData([{ id: 1, repo: 'r', path: 'a.ts', is_test: 0, node_id: 11 }, { id: 2, repo: 'r', path: 'b.ts', is_test: 0, node_id: 12 }, { id: 3, repo: 'r', path: 'c.ts', is_test: 0, node_id: 13 }],
-    [], [{ src: 11, dst: 12, kind: 'CALLS', confidence: 'ambiguous' }, { src: 11, dst: 13, kind: 'CALLS', confidence: 'import' }, { src: 11, dst: 13, kind: 'CALLS', confidence: 'ambiguous' }])
+  const md = R.mapData([{ id: 1, repo: 'r', path: 'a.ts', is_test: 0, node_id: 11 }, { id: 2, repo: 'r', path: 'b.ts', is_test: 0, node_id: 12 }, { id: 3, repo: 'r', path: 'c.ts', is_test: 0, node_id: 13 }, { id: 4, repo: 'r', path: 'd.ts', is_test: 0, node_id: 14 }],
+    [], [{ src: 11, dst: 12, kind: 'CALLS', confidence: 'ambiguous' }, { src: 11, dst: 13, kind: 'CALLS', confidence: 'import' }, { src: 11, dst: 13, kind: 'CALLS', confidence: 'ambiguous' }, { src: 11, dst: 14, kind: 'CALLS', confidence: 'unique-name' }])
   const byId = (id) => md.files.indexOf(id)
   const flags = md.links.map(([a, b, w, amb]) => `${md.files[a]}-${md.files[b]}:${w}:${amb}`).sort().join(' ')
-  ok(flags === '1-2:1:1 1-3:2:0' && md.deg[byId(2)] === 0 && md.deg[byId(3)] === 1, `file map: ambiguous-only links are flagged and rank no file (${flags}; deg ${md.deg})`)
+  ok(flags === '1-2:1:1 1-3:2:0 1-4:1:0' && md.deg[byId(1)] === 1 && md.deg[byId(2)] === 0 && md.deg[byId(3)] === 1 && md.deg[byId(4)] === 0,
+    `file map: ambiguous-only links are flagged to hide, and no name guess ranks a file (${flags}; deg ${md.deg})`)
 }
 
 // ── 2 · a polyglot project ──
@@ -226,22 +238,31 @@ lacks(r, 'name_count', 'Rust: `names.len()` on an untyped receiver is the standa
 lacks(r, 'core/src/geo.rs:32  [', 'Rust: `self.items.len()` inside Registry::len is not a call to itself')
 has(r, 'Registry.count  method  core/src/geo.rs', 'Rust: `self.len()` resolves a standard-library name within its own type')
 has(r, 'path_len  function  core/src/lib.rs', 'Rust: `Registry::len(r)` resolves a standard-library name on a qualified path')
+has(r, 'fresh_len  function  core/src/lib.rs', 'Rust: `Registry::new().len()` is the constructed type\'s len')
+has(r, 'crate_fresh_len  function  core/src/lib.rs', 'Rust: `crate::geo::Registry::new().len()` too, through a crate path')
 r = await q('callers', { symbol: 'Registry.refresh_all' })
 has(r, 'refresh  function  core/src/lib.rs:35', 'Rust: a name the standard library does not use still resolves on an untyped receiver')
 r = await q('callers', { symbol: 'Registry.version' })
 has(r, 'local_version  function  core/src/lib.rs:49', 'Rust: a chain that starts in the repository (`util::lookup().version()`) still resolves')
 lacks(r, 'clock_version', 'Rust: `Clock::now().version()` starts at a type the repository does not define: a dependency\'s method')
-for (const fn of ['arg_chain', 'turbo_version', 'inline_version', 'package_version', 'new_version']) has(r, `${fn}  function  core/src/lib.rs`, `Rust: \`${fn}\` starts in the repository (an argument's \`Mode::Fast\`, a turbofish, an inline \`mod\`, the crate's own package name, a repository type are not dependencies)`)
+for (const fn of ['arg_chain', 'turbo_version', 'inline_version', 'package_version', 'new_version', 'lib_name_version', 'crate_new_version', 'builder_version', 'turbo_dep', 'path_dep_version']) has(r, `${fn}  function  core/src/lib.rs`, `Rust: \`${fn}\` starts in the repository (an argument's \`Mode::Fast\`, a turbofish, an inline \`mod\`, the crate's own package name, a repository type are not dependencies)`)
 lacks(r, 'output_version', 'Rust: `Output::builder().version()` stays in the dependency even though the repository has a module named `builder`')
 lacks(r, 'sdk_version', 'Rust: `aws_sdk::util::Output::builder()` is decided by its root crate, not by a later segment named like a repository module')
 lacks(r, 'crate_version', 'Rust: `semver::parse(..).version()` starts at a crate the repository does not have: a dependency\'s method')
 r = await q('callers', { symbol: 'Ledger.save_all' })
+has(r, 'audit2  function  svc/app/service.py', 'Python: a SCREAMING_CASE head with a call (`DEFAULT.get_ledger().save_all()`) is a constant, not a dependency type')
 has(r, 'audit  function  svc/app/service.py', 'Python: a SCREAMING_CASE constant head (`DEFAULT.entries.save_all()`) is the repository\'s own value, not a dependency type')
 r = await q('callers', { symbol: 'Ledger.update' })
 has(r, 'AuditLedger.update  method  svc/app/models.py', 'Python: `super().update()` reaches the parent even though `update` is a standard-library name')
 lacks(r, 'refresh  function  svc/app/service.py', 'Python: `rows.update()` on an untyped receiver is a dict/set method, not Ledger.update')
+has(r, 'touch  function  svc/app/service.py', 'Python: `Ledger().update()` is the constructed type\'s update')
+r = await q('callers', { symbol: 'AuditLedger.update' })
+has(r, 'AuditLedger.again  method  svc/app/models.py', 'Python: `self.__class__.update(self)` is the class\'s own update')
+r = await q('callers', { symbol: 'Café.servir' })
+has(r, 'commande  function  svc/app/service.py', 'Python: a non-ASCII class (`Café.fabrique().servir()`) is the repository\'s own')
 r = await q('callers', { symbol: 'Base.describe', repo: 'web' })
 has(r, 'main  function  web/src/app.ts:4', 'TS: `c.describe()` on a typed receiver still links to the inherited method')
+has(r, 'geoUnit  function  web/src/app.ts', 'TS: `Geo.Circle.unit()` reaches a repository class further down the path')
 lacks(r, 'formatAll', 'TS: `new Intl.NumberFormat(..).describe()` starts at a type the repository does not define')
 r = await q('callers', { symbol: 'Order.total_order' })
 has(r, 'order_total  function  svc/app/service.py', 'Python: `Order().total_order()` starts at the repository\'s own class')
@@ -251,6 +272,7 @@ r = await q('callers', { symbol: 'Meters.double_it' })
 has(r, 'meters  function  core/src/lib.rs', 'Rust: `Meters(5.0).double_it()` starts at the repository\'s own tuple struct')
 r = await q('callers', { symbol: 'Circle.has', repo: 'web' })
 lacks(r, 'total  function  web/src/app.ts', 'TS: `seen.has(2)` on an untyped receiver is a Set/Map method, not Circle.has')
+has(r, 'hasRadius  function  web/src/app.ts', 'TS: `new Circle(3).has(1)` is the constructed type\'s has')
 r = await q('hierarchy', { symbol: 'Shape', repo: 'core' })
 has(r, 'Circle  struct  core/src/geo.rs:7', 'Rust: `impl Shape for Circle` is an IMPLEMENTS edge')
 
@@ -300,6 +322,54 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   const scriptSrc = (/script-src ([^;"]+)/.exec(pageP) || [])[1] || ''
   ok(csp === `sha256-${createHash('sha256').update(script, 'utf8').digest('base64')}` && !scriptSrc.includes('unsafe-inline'),
     'the CSP admits the page\'s own script by its hash, and no inline handler: an escaping slip cannot run code')
+  const helpers = ['esc', 'cut', 'cutL', 'plural', 'parseHash', 'pairConf', 'heatOf', 'heatBands', 'squarify', 'lanePick']
+  ok(helpers.every((n) => script.includes(`function ${n}(`)), `the page carries every helper its client calls (${helpers.filter((n) => !script.includes(`function ${n}(`)).join(', ') || 'all'})`)
+
+  // Run the page's own script against a small stub DOM: every view renders, anchors open what they
+  // name, and the test-code toggle changes what a neighbourhood hides.
+  const vm = await import('node:vm')
+  const run = (hash) => {
+    const listeners = {}
+    class El {
+      constructor(tag) { this.tagName = tag.toUpperCase(); this.nodeType = 1; this.kids = []; this.attrs = {}; this.on = {}; this.dataset = {}; this.html = ''; this.value = ''; this.checked = false; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} } }
+      setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-(.)/g, (_, c) => c.toUpperCase())] = String(v); if (k === 'checked') this.checked = true }
+      getAttribute(k) { return this.attrs[k] ?? null }
+      append(...c) { this.kids.push(...c) }
+      addEventListener(t, f) { (this.on[t] = this.on[t] || []).push(f) }
+      set innerHTML(v) { this.html = v; this.firstChild = new El('svg') }
+      get innerHTML() { return this.html }
+      querySelectorAll() { return [] }
+      focus() {} blur() {} setSelectionRange() {}
+      get offsetHeight() { return 0 }
+    }
+    const doc = { createElement: (t) => new El(t), getElementById: () => ({ textContent: blob }), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null, querySelector: () => null }
+    const loc = { hash }
+    const win = { addEventListener: (t, f) => { listeners[t] = f }, innerWidth: 1400, scrollTo() {} }
+    vm.runInNewContext(script, { document: doc, window: win, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
+    const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
+    const find = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = find(k, pred); if (f) return f } return null }
+    const go = (h) => { loc.hash = h; listeners.hashchange() }
+    return { text: () => (doc.body.kids || []).map(dump).join(' '), go, find: (pred) => (doc.body.kids || []).map((k) => find(k, pred)).find(Boolean), hash: () => loc.hash }
+  }
+  const blob = /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageP)[1]
+  try {
+  const views = {}
+  const pg = run('#overview')
+  views.overview = /production files/.test(pg.text())
+  pg.go('#map'); views.map = /data-mod="/.test(pg.text()) && /class="mlink"/.test(pg.text())
+  pg.go('#hotspots'); views.hotspots = /class="tile"/.test(pg.text())
+  pg.go('#files'); views.files = /#file-\d+/.test(pg.text())
+  const cart = DP.system.modules.findIndex((m) => m.repo === 'shop' && m.key === 'cart')
+  pg.go(`#mod-${cart}`); views.module = /Files of/.test(pg.text()) && pg.hash() === `#mod-${cart}`
+  ok(Object.values(views).every(Boolean), `the page script renders every view and opens a module by its anchor (${JSON.stringify(views)})`)
+  const total = DP.nodes.find((n) => n[3] === 'Cart.Total')
+  pg.go(`#sym-${total[0]}`)
+  const hidden = /1 in test code hidden/.test(pg.text()) && !/aria-label="TestTotal/.test(pg.text()) // the drawing hides it; the full list below keeps it
+  const tog = pg.find((n) => n.dataset && n.dataset.ctl === 'tog-tests')
+  tog.on.change[0]({ target: { checked: true } })
+  const shown = !/in test code hidden/.test(pg.text()) && /data-sym="\d+"[^>]*aria-label="TestTotal/.test(pg.text())
+  ok(hidden && shown && pg.hash() === `#sym-${total[0]}`, `a neighbourhood hides its test callers and says so until the toggle shows them (hidden ${hidden}, shown ${shown})`)
+  } catch (e) { ok(false, `the page script runs (${e.message})`) }
 }
 
 // ── 3 · incremental refresh ──
@@ -404,6 +474,12 @@ ok(/default-src 'none'/.test(page) && !/<script[^>]+src=/.test(page) && !/https?
   const DM = JSON.parse(((/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageM) || [])[1] || 'null').replace(/\\u003c/g, '<'))
   const row = (p) => DM && DM.files.find((f) => f[2] === p)
   ok(!!row('src/a.ts') && !!row('src/c.ts') && row('src/a.ts')[7] === 2 && row('src/c.ts')[7] === 1, `files carry their churn for the hotspot map (${JSON.stringify(row('src/a.ts'))})`)
+  // a later commit recounts: each file one row, never a stale or a doubled one; a non-ASCII path counts too
+  writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  return 3\n}\n'); writeFileSync(path.join(MAIN, 'src/café.ts'), 'export const c = 2\n')
+  git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'four')
+  refresh(MAIN)
+  const again = (await call('graph_sql', { sql: "SELECT path, n FROM churn WHERE path LIKE 'src/%' ORDER BY path" }, { root: MAIN })).trim()
+  ok(again === 'path\tn\nsrc/a.ts\t3\nsrc/c.ts\t1\nsrc/café.ts\t1', `churn after a new commit: recounted, one row a file, non-ASCII paths included (${JSON.stringify(again)})`)
   ok(DM && DM.system && DM.system.modules.map((m) => `${m.repo}:${m.key}:${m.files}`).join(' ') === 'main:gen:26 main:src:2', `the page carries the system map's modules (${JSON.stringify(DM && DM.system)})`)
   const script = (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(pageM) || [])[1] || ''
   let compiles = false
@@ -436,6 +512,22 @@ const { layoutMap } = await import('../lib/layout.mjs')
   ok(Dc.map.files.length === 1500 && smallShown >= 70, `the 1500-file map cap is shared per repo: the unlinked small repo keeps ${smallShown} of its 100`)
   ok(Dc.map.files.every((id) => id <= 2000), `the map's cap goes to production code first: test files, however linked, only fill free slots (${Dc.map.files.filter((id) => id > 2000).length} test files kept)`)
   ok(Dc.map.totals.small === 100 && Dc.map.totals.big === 1900, 'per-repo totals reach the page for the note')
+}
+{ // change together: each repository keeps its own strongest pairs, each pair once
+  const { openStore } = await import('../lib/store.mjs')
+  const { renderGraph } = await import('../lib/render.mjs')
+  const CO = path.join(SANDBOX, 'co'); mkdirSync(path.join(CO, '.grimoire/graph'), { recursive: true })
+  const db = await openStore(path.join(CO, '.grimoire/graph/graph.db'))
+  db.exec("INSERT INTO repos(name, root) VALUES('busy', 'busy'), ('quiet', 'quiet')")
+  const ins = db.prepare('INSERT INTO cochange(repo, a, b, n) VALUES(?, ?, ?, ?)')
+  for (let i = 0; i < 150; i++) { ins.run('busy', `a${i}.ts`, `b${i}.ts`, 9 + (i % 5)); ins.run('busy', `b${i}.ts`, `a${i}.ts`, 9 + (i % 5)) } // stored both ways, as cochange.mjs does
+  ins.run('quiet', 'x.ts', 'y.ts', 3); ins.run('quiet', 'y.ts', 'x.ts', 3)
+  db.close()
+  const pageCo = await renderGraph({ dbPath: path.join(CO, '.grimoire/graph/graph.db') })
+  const Dco = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageCo)[1].replace(/\\u003c/g, '<'))
+  const quiet = Dco.cochange.filter(([r]) => r === 'quiet'), busy = Dco.cochange.filter(([r]) => r === 'busy')
+  ok(JSON.stringify(quiet) === '[["quiet","x.ts","y.ts",3]]' && busy.length === 25 && busy.every(([, a, b]) => a < b),
+    `change together: a quiet repository keeps its pair beside a busy one, 25 per repository, each pair once (${quiet.length} quiet, ${busy.length} busy)`)
 }
 const lf = [...Array(60)].map((_, i) => ({ id: i, repo: i < 40 ? 'a' : 'b', path: `${i % 3 ? 'src' : 'lib'}/f${i}.ts`, deg: i % 9 }))
 const ll = [...Array(120)].map((_, i) => [i % 60, (i * 7 + 3) % 60, 1 + (i % 3)]).filter(([x, y]) => x !== y)

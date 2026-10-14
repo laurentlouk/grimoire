@@ -114,3 +114,33 @@ impl Meters {
 pub fn meters() -> f64 {
     Meters(5.0).double_it()
 }
+
+// A standard-library name on a value the syntax constructs from a repository type is that type's.
+pub fn fresh_len() -> usize {
+    Registry::new().len()
+}
+
+pub fn crate_fresh_len() -> usize {
+    crate::geo::Registry::new().len()
+}
+
+pub fn lib_name_version() -> u32 {
+    geocore_lib::util::lookup().version()
+}
+
+// Each rule that keeps a chain in the repository, on its own.
+pub fn crate_new_version() -> u32 {
+    crate::geo::Registry::new().version()
+}
+
+pub fn builder_version() -> u32 {
+    builder::make().version()
+}
+
+pub fn turbo_dep() -> u32 {
+    parse::<u8>().version()
+}
+
+pub fn path_dep_version() -> u32 {
+    local_geo::make().version()
+}

@@ -1,4 +1,4 @@
-from .models import User, Ledger, Order
+from .models import User, Ledger, Order, Café
 from app import util
 
 
@@ -21,3 +21,15 @@ def refresh(rows):
 
 def order_total():
     return Order().total_order()
+
+
+def touch():
+    return Ledger().update()
+
+
+def commande():
+    return Café.fabrique().servir()
+
+
+def audit2():
+    return DEFAULT.get_ledger().save_all()

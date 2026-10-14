@@ -1,3 +1,6 @@
+[lib]
+name = "geocore_lib"
+
 [package]
 authors = ["A <a@b.c>"]
 name = "geo-core"
@@ -5,3 +8,4 @@ version = "0.1.0"
 
 [dependencies]
 name = "decoy"
+local-geo = { path = "../geo" }

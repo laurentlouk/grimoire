@@ -100,11 +100,11 @@ export const TOOLS = [
 ]
 
 // Files that moved since the last index, per repo (cheap: stat only, no parsing). An index built by
-// an older grimoire is stale as a whole: the next refresh rebuilds it with the current rules.
+// another grimoire version is stale as a whole: the next refresh rebuilds it with the current rules.
 function staleness(project, db) {
   const out = {}
   const schema = (() => { try { return db.prepare("SELECT value FROM meta WHERE key = 'schema'").get()?.value } catch { return null } })()
-  if (schema && schema !== SCHEMA_VERSION) { for (const repo of project.repos) out[repo.name] = 'built by an older grimoire: rebuilt on the next query'; return out }
+  if (schema && schema !== SCHEMA_VERSION) { for (const repo of project.repos) out[repo.name] = 'built by another grimoire version: rebuilt on the next query'; return out }
   for (const repo of project.repos) {
     const known = new Map(db.prepare('SELECT path, size, mtime FROM files WHERE repo = ?').all(repo.name).map((f) => [f.path, f]))
     let changed = 0

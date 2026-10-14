@@ -15,3 +15,11 @@ function total(shapes: Circle[]): number {
 export function formatAll(): string {
   return new Intl.NumberFormat('en').describe()
 }
+
+export function hasRadius(): boolean {
+  return new Circle(3).has(1)
+}
+
+export function geoUnit(): string {
+  return Geo.Circle.unit().describe()
+}

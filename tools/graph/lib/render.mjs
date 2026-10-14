@@ -11,7 +11,8 @@
 //   hotspots   a size × churn map, most-called symbols and most-used files (links resolved by syntax
 //              only), strongest co-change
 // Test code and ambiguous links are hidden until asked for; unique-name matches are drawn dashed.
-// Views have plain anchors (#sym-12, #file-3, #mod-4) a note can link; their ids change when the file is re-parsed.
+// Views have plain anchors (#sym-12, #file-3, #mod-4): they hold for the index the page was rendered
+// from (a re-parsed file gets new ids; module numbers shift as modules change).
 // The helpers below the data section are pure, exported for the tests, and injected into the page.
 // Like every graph answer, the page is a map: read the code at the path:line it points to.
 import { createHash } from 'node:crypto'
@@ -29,7 +30,8 @@ export async function renderGraph(project) {
     const files = db.prepare('SELECT id, repo, path, lang, size, is_test, node_id FROM files ORDER BY repo, path').all()
     const nodes = db.prepare("SELECT id, file_id, kind, COALESCE(qualname, name) AS name, line, is_test FROM nodes WHERE kind != 'file'").all()
     const edges = db.prepare('SELECT src, dst, kind, confidence FROM edges').all()
-    const cochange = db.prepare('SELECT repo, a, b, n FROM cochange ORDER BY n DESC LIMIT 200').all()
+    // each repository's 25 strongest pairs, each once (cochange.mjs stores both directions)
+    const cochange = db.prepare('SELECT repo, a, b, n FROM (SELECT repo, a, b, n, ROW_NUMBER() OVER (PARTITION BY repo ORDER BY n DESC, a, b) AS rk FROM cochange WHERE a < b) WHERE rk <= 25 ORDER BY n DESC, repo, a, b').all()
     const hasChurn = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'churn'").get() // an index built before schema 3 has none
     const churn = new Map(hasChurn ? db.prepare('SELECT repo, path, n FROM churn').all().map((c) => [`${c.repo}\0${c.path}`, c.n]) : [])
     const system = systemMap(files, nodes, edges)
@@ -55,19 +57,20 @@ export async function renderGraph(project) {
 }
 
 // The file-level graph for the file map: most connected files, weighted links, positions, groups.
-// A link whose every edge is ambiguous is flagged [a, b, w, 1]: the page hides it until asked, and it
-// counts for no file's rank, so name guesses never decide which files make the map.
+// A link whose every edge is ambiguous is flagged [a, b, w, 1]: the page hides it until asked. Only
+// links resolved by syntax rank a file, so no name guess decides which files make the map.
 export function mapData(files, nodes, edges) {
   const fileOfNode = new Map()
   for (const f of files) fileOfNode.set(f.node_id, f.id)
   for (const n of nodes) fileOfNode.set(n.id, n.file_id)
-  const w = new Map(), sure = new Map(), deg = new Map()
+  const w = new Map(), sure = new Map(), shown = new Map(), deg = new Map()
   for (const e of edges) {
     const a = fileOfNode.get(e.src), b = fileOfNode.get(e.dst)
     if (a === undefined || b === undefined || a === b) continue
     const k = a < b ? `${a},${b}` : `${b},${a}`
     w.set(k, (w.get(k) || 0) + 1)
-    if (e.confidence !== 'ambiguous') sure.set(k, (sure.get(k) || 0) + 1)
+    if (e.confidence !== 'ambiguous') shown.set(k, true)
+    if (e.confidence !== 'ambiguous' && e.confidence !== 'unique-name') sure.set(k, (sure.get(k) || 0) + 1)
   }
   for (const k of sure.keys()) { const [a, b] = k.split(',').map(Number); deg.set(a, (deg.get(a) || 0) + 1); deg.set(b, (deg.get(b) || 0) + 1) }
   // Production code first: test files only take slots production code leaves free. The cap is
@@ -88,7 +91,7 @@ export function mapData(files, nodes, edges) {
   }
   const at = new Map(keep.map((f, i) => [f.id, i]))
   const links = []
-  for (const [k, v] of w) { const [a, b] = k.split(',').map(Number); if (at.has(a) && at.has(b)) links.push([at.get(a), at.get(b), v, sure.has(k) ? 0 : 1]) }
+  for (const [k, v] of w) { const [a, b] = k.split(',').map(Number); if (at.has(a) && at.has(b)) links.push([at.get(a), at.get(b), v, shown.has(k) ? 0 : 1]) }
   links.sort((x, y) => x[0] - y[0] || x[1] - y[1])
   const { pos, groups } = layoutMap(keep, links)
   return { files: keep.map((f) => f.id), deg: keep.map((f) => f.deg), pos, links, groups, total: production, totals }
@@ -261,7 +264,7 @@ function client() {
   const S = D.system || { modules: [], links: [] }
   const modules = S.modules.map((m, i) => ({ ...m, i, list: [], uses: new Map(), usedBy: new Map() }))
   for (const f of files.values()) if (f.module >= 0 && modules[f.module]) modules[f.module].list.push(f)
-  for (const [a, b, n] of S.links) { modules[a].uses.set(b, n); modules[b].usedBy.set(a, n) }
+  for (const [a, b, n] of S.links) if (modules[a] && modules[b]) { modules[a].uses.set(b, n); modules[b].usedBy.set(a, n) }
   const loc = (n) => `${n.file ? n.file.shown : '?'}:${n.line}`
   const short = (p) => p.split('/').slice(-2).join('/') // parent/file: never a bare index.ts
   const perRepo = new Map(D.repos.map((r) => [r.name, { files: 0, tests: 0, symbols: 0, modules: 0 }]))
@@ -293,7 +296,7 @@ function client() {
         : st.tab === 'files' && st.sel && st.sel.file ? `#file-${st.sel.file.id}` : `#${st.tab}`
     if (location.hash !== want) { try { history.replaceState(null, '', want) } catch {} }
   }
-  window.addEventListener('hashchange', () => { readHash(); render() })
+  window.addEventListener('hashchange', () => { readHash(); st.focusMain = true; render(); if (window.innerWidth <= 1100) window.scrollTo({ top: 0 }) })
 
   // ── overview ──
   function overview() {
@@ -337,7 +340,7 @@ function client() {
     const rows = Math.max(L.items.length + L.pills.length, R.items.length + R.pills.length, 2)
     const H = top + rows * (rowH + gap) + 8
     const fy = top + Math.max(0, (Math.max(L.items.length, R.items.length, 1) * (rowH + gap) - gap) / 2 - focusH / 2)
-    const parts = [`<svg viewBox="-2 0 ${W + 4} ${H}" role="group" aria-label="${esc(focus.label)}: ${esc(leftTitle)} ${L.total}, ${esc(rightTitle)} ${R.total}">`,
+    const parts = [`<svg viewBox="-2 0 ${W + 4} ${H}" role="group" focusable="false" aria-label="${esc(focus.label)}: ${esc(leftTitle)} ${L.total}, ${esc(rightTitle)} ${R.total}">`,
       '<defs><marker id="nb-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0L8,4L0,8z" class="arrow"/></marker></defs>',
       `<text class="head" x="0" y="14">${esc(leftTitle.toUpperCase())} · ${L.total}</text>`,
       `<text class="head" x="${R0}" y="14">${esc(rightTitle.toUpperCase())} · ${R.total}</text>`]
@@ -370,13 +373,13 @@ function client() {
       if (g.dataset.sym) select({ sym: nodes.get(Number(g.dataset.sym)) }); else select({ file: files.get(Number(g.dataset.file)) })
     }
     box.addEventListener('click', open)
-    box.addEventListener('keydown', (e) => { if (activate(e)) { e.preventDefault(); open(e) } })
+    box.addEventListener('keydown', (e) => { if (activate(e) && e.target.closest('[data-sym],[data-file],[data-mod]')) { e.preventDefault(); open(e) } })
     return box
   }
 
   function symDetail(n) {
     const it = ([m, conf]) => ({ sym: m.id, label: m.name, sub: loc(m), repo: m.file && m.file.repo, conf, test: m.test })
-    const list = (title, xs, label) => h('div', null, h('h2', null, `${title} (${xs.length})`),
+    const list = (title, xs, label) => h('div', null, h('h2', null, `${title} (${xs.length}${xs.length > 200 ? ', the first 200 listed' : ''})`),
       xs.length ? h('ul', { class: 'links' }, xs.slice(0, 200).map(([m, tag]) => h('li', null, jumpSym(m), h('span', { class: 'pill' }, label ? tag : tag || '')))) : h('div', { class: 'muted' }, 'none found (a missing link proves nothing: check with grep)'))
     return h('div', { class: 'detail' },
       h('h3', null, n.name, h('span', { class: 'pill' }, n.kind), n.test ? h('span', { class: 'pill' }, 'test') : null),
@@ -393,8 +396,8 @@ function client() {
     const mod = f.module >= 0 ? modules[f.module] : null
     return h('div', { class: 'detail' },
       h('h3', { class: 'mono' }, f.shown), h('div', { class: 'muted' }, `${f.repo} · ${f.lang}${f.test ? ' · test code' : ''} · ${plural(f.defs.length, 'definition')}${f.churn ? ` · in ${plural(f.churn, 'recent commit')}` : ''}`,
-        mod ? h('span', null, ' · module ', h('a', { class: 'jump mono', onclick: () => { openModule(mod.i); render() } }, mod.key)) : null),
-      neighbourhood({ label: short(f.path), sub: f.shown, kind: `${plural(f.in.size, 'file')} use it · it uses ${f.out.size}`, repo: f.repo }, 'Used by', [...f.in].map(it), 'Uses', [...f.out].map(it)),
+        mod ? h('span', null, ' · module ', h('a', { class: 'jump mono', href: `#mod-${mod.i}` }, mod.key)) : null),
+      neighbourhood({ label: short(f.path), sub: f.shown, kind: `${plural(f.in.size, 'file')} use${f.in.size === 1 ? 's' : ''} it · it uses ${f.out.size}`, repo: f.repo }, 'Used by', [...f.in].map(it), 'Uses', [...f.out].map(it)),
       h('p', { class: 'note' }, 'Solid: at least one link resolved by syntax · dashed: unique-name matches only · dotted: ambiguous matches only. Arrows point from the file that uses to the file it uses.'),
       h('details', null, h('summary', null, `Every file it uses (${f.out.size}), every file using it (${f.in.size}), its ${plural(f.defs.length, 'definition')}`),
         h('div', { class: 'grid2' },
@@ -403,11 +406,12 @@ function client() {
         h('h2', null, 'Definitions'),
         h('ul', { class: 'links' }, f.defs.slice().sort((a, b) => a.line - b.line).map((n) => h('li', null, jumpSym(n), h('span', { class: 'pill' }, n.kind))))))
   }
-  const jumpFile = (f) => h('a', { class: 'jump mono', onclick: () => select({ file: f }) }, f.shown)
-  const jumpSym = (n) => h('a', { class: 'jump' }, h('span', { onclick: () => select({ sym: n }) }, n.name), h('span', { class: 'muted mono' }, `  ${loc(n)}`))
+  // real links: the keyboard reaches them, and the anchor they set is the navigation (readHash)
+  const jumpFile = (f, text) => h('a', { class: 'jump mono', href: `#file-${f.id}` }, text || f.shown)
+  const jumpSym = (n) => h('span', null, h('a', { class: 'jump', href: `#sym-${n.id}` }, n.name), h('span', { class: 'muted mono' }, `  ${loc(n)}`))
   function select(sel) {
     if (!sel || (!sel.sym && !sel.file)) return
-    st.sel = sel; st.tab = sel.file ? 'files' : 'symbols'
+    st.sel = sel; st.tab = sel.file ? 'files' : 'symbols'; st.focusMain = true
     render()
     if (window.innerWidth <= 1100) window.scrollTo({ top: 0 })
   }
@@ -419,7 +423,7 @@ function client() {
     const sel = st.sel && st.sel.sym
     const list = q ? h('div', null,
       h('table', null, h('tr', null, h('th', null, 'symbol'), h('th', null, 'kind'), h('th', null, 'where'), h('th', { class: 'n' }, 'callers'), h('th', { class: 'n' }, 'callees')),
-        hits.map((n) => h('tr', { class: `click${sel === n ? ' on' : ''}`, onclick: () => select({ sym: n }) }, h('td', { class: 'name' }, n.name), h('td', null, n.kind), h('td', { class: 'mono' }, loc(n)),
+        hits.map((n) => h('tr', { class: `click${sel === n ? ' on' : ''}`, onclick: () => select({ sym: n }) }, h('td', { class: 'name' }, h('a', { class: 'jump', href: `#sym-${n.id}` }, n.name)), h('td', null, n.kind), h('td', { class: 'mono' }, loc(n)),
           h('td', { class: 'n' }, n.callers.filter(([, c]) => !GUESS.has(c)).length), h('td', { class: 'n' }, n.callees.filter(([, c]) => !GUESS.has(c)).length)))),
       h('p', { class: 'note' }, `${hits.length === 300 ? 'First 300 matches; narrow the search. ' : ''}Counts are links resolved by syntax.${st.tests ? '' : ' Test code hidden.'}`))
       : null
@@ -431,7 +435,7 @@ function client() {
     const sel = st.sel && st.sel.file
     const list = h('div', null,
       h('table', null, h('tr', null, h('th', null, 'file'), h('th', null, 'language'), h('th', { class: 'n' }, 'definitions'), h('th', { class: 'n' }, 'uses'), h('th', { class: 'n' }, 'used by')),
-        fs.slice(0, 500).map((f) => h('tr', { class: `click${sel === f ? ' on' : ''}`, onclick: () => select({ file: f }) }, h('td', { class: 'mono' }, f.shown, f.test ? h('span', { class: 'pill' }, 'test') : null), h('td', null, f.lang), h('td', { class: 'n' }, f.defs.length), h('td', { class: 'n' }, resolvedOf(f.out).length), h('td', { class: 'n' }, resolvedOf(f.in).length)))),
+        fs.slice(0, 500).map((f) => h('tr', { class: `click${sel === f ? ' on' : ''}`, onclick: () => select({ file: f }) }, h('td', { class: 'mono' }, jumpFile(f), f.test ? h('span', { class: 'pill' }, 'test') : null), h('td', null, f.lang), h('td', { class: 'n' }, f.defs.length), h('td', { class: 'n' }, resolvedOf(f.out).length), h('td', { class: 'n' }, resolvedOf(f.in).length)))),
       h('p', { class: 'note' }, `${fs.length > 500 ? `First 500 of ${fs.length} files; search to narrow. ` : ''}Uses and used by count files linked by syntax.${st.tests ? '' : ' Test code hidden.'}`))
     return withSide(list, sel ? fileDetail(sel) : null)
   }
@@ -442,7 +446,7 @@ function client() {
     if (!top.length) return h('p', { class: 'muted' }, 'No file sizes in the index.')
     const W = 1200, H = 520, maxC = Math.max(0, ...top.map((f) => f.churn))
     const rects = squarify(top.map((f) => f.size), 0, 0, W, H)
-    const parts = [`<svg viewBox="0 0 ${W} ${H}" role="group" aria-label="The ${plural(top.length, 'largest file')}: area is size, colour is how many recent commits touched it">`]
+    const parts = [`<svg viewBox="0 0 ${W} ${H}" role="group" focusable="false" aria-label="The ${plural(top.length, 'largest file')}: area is size, colour is how many recent commits touched it">`]
     top.forEach((f, i) => {
       const [x, y, w, hh] = rects[i], heat = heatOf(f.churn, maxC)
       parts.push(`<g data-file="${f.id}" tabindex="0" role="button" aria-label="${esc(f.shown)}, ${(f.size / 1024).toFixed(1)} KB, ${plural(f.churn, 'recent commit')}"><title>${esc(f.shown)}\n${(f.size / 1024).toFixed(1)} KB · ${plural(f.churn, 'recent commit')}</title><rect class="tile" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(0, w).toFixed(1)}" height="${Math.max(0, hh).toFixed(1)}" fill="var(--heat${heat})"/>` +
@@ -453,7 +457,7 @@ function client() {
     box.innerHTML = parts.join('')
     const open = (e) => { const g = e.target.closest('[data-file]'); if (g) select({ file: files.get(Number(g.dataset.file)) }) }
     box.addEventListener('click', open)
-    box.addEventListener('keydown', (e) => { if (activate(e)) { e.preventDefault(); open(e) } })
+    box.addEventListener('keydown', (e) => { if (activate(e) && e.target.closest('[data-sym],[data-file],[data-mod]')) { e.preventDefault(); open(e) } })
     const sw = (k, t) => h('span', null, h('i', { class: 'swatch', style: `background:var(--heat${k})` }), ' ', t)
     const legend = maxC
       ? h('div', { class: 'legend' }, h('span', { class: 'muted' }, 'Area: file size. Colour: commits touching it among the last 400, commits touching more than 25 indexed files left out (log scale):'), sw(0, 'none'),
@@ -468,10 +472,10 @@ function client() {
     const guessed = (xs) => xs.filter(([m, c]) => GUESS.has(c) && showSym(m)).length
     const top = (xs, key, n = 20) => xs.map((x) => [x, key(x)]).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, n)
     const symTable = (title, rows, col, side) => h('div', null, h('h2', null, title), h('table', null, h('tr', null, h('th', null, 'symbol'), h('th', null, 'where'), h('th', { class: 'n' }, col), h('th', { class: 'n' }, 'guesses')),
-      rows.map(([n, v]) => h('tr', { class: 'click', onclick: () => select({ sym: n }) }, h('td', { class: 'name' }, n.name), h('td', { class: 'mono' }, loc(n)), h('td', { class: 'n' }, v), h('td', { class: 'n muted' }, guessed(n[side]))))))
+      rows.map(([n, v]) => h('tr', { class: 'click', onclick: () => select({ sym: n }) }, h('td', { class: 'name' }, h('a', { class: 'jump', href: `#sym-${n.id}` }, n.name)), h('td', { class: 'mono' }, loc(n)), h('td', { class: 'n' }, v), h('td', { class: 'n muted' }, guessed(n[side]))))))
     const fileTable = (title, rows, col) => h('div', null, h('h2', null, title), h('table', null, h('tr', null, h('th', null, 'file'), h('th', { class: 'n' }, col)),
-      rows.map(([f, v]) => h('tr', { class: 'click', onclick: () => select({ file: f }) }, h('td', { class: 'mono' }, f.shown), h('td', { class: 'n' }, v)))))
-    const co = D.cochange.filter(([repo]) => !st.repo || repo === st.repo).slice(0, 25)
+      rows.map(([f, v]) => h('tr', { class: 'click', onclick: () => select({ file: f }) }, h('td', { class: 'mono' }, jumpFile(f)), h('td', { class: 'n' }, v)))))
+    const co = D.cochange.filter(([repo]) => !st.repo || repo === st.repo).slice(0, 25) // already strongest first
     return h('section', null,
       h('p', { class: 'note' }, `Ranked by links resolved by syntax; name guesses (unique-name, ambiguous) are counted apart.${st.tests ? '' : ' Test code hidden.'}`),
       h('h2', null, 'Size and churn'), treemap(fs),
@@ -479,7 +483,7 @@ function client() {
       h('div', { class: 'grid2' }, fileTable('Most used files', top(fs, (f) => resolvedOf(f.in).length), 'files using it'), fileTable('Files using the most', top(fs, (f) => resolvedOf(f.out).length), 'files it uses')),
       h('h2', null, 'Change together (git history)'),
       co.length ? h('table', null, h('tr', null, h('th', null, 'repo'), h('th', null, 'file'), h('th', null, 'file'), h('th', { class: 'n' }, 'commits')), co.map(([r, a, b, n]) => h('tr', null, h('td', null, r), h('td', { class: 'mono' }, a), h('td', { class: 'mono' }, b), h('td', { class: 'n' }, n))))
-        : h('p', { class: 'muted' }, 'No co-change data (no git history indexed).'))
+        : h('p', { class: 'muted' }, 'No files here changed together in two or more recent commits (or no git history is indexed).'))
   }
 
   // ── map: modules first ──
@@ -504,13 +508,13 @@ function client() {
     const shownLinks = S.links.filter(([a, b]) => pos.has(a) && pos.has(b))
     const maxN = Math.max(1, ...shownLinks.map((l) => l[2]))
     const drawn = lanes.reduce((a, l) => a + l.shown.length, 0), total = lanes.reduce((a, l) => a + l.shown.length + l.rest, 0)
-    const parts = [`<svg viewBox="0 0 ${W} ${H}" role="group" aria-label="System map: ${plural(drawn, 'module')} of ${total} in ${plural(lanes.length, 'repository lane')}, linked by how many files use each other">`,
+    const parts = [`<svg viewBox="0 0 ${W} ${H}" role="group" focusable="false" aria-label="System map: ${plural(drawn, 'module')} of ${total} in ${plural(lanes.length, 'repository lane')}, linked by how many files use each other">`,
       '<defs><marker id="sm-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0L8,4L0,8z" class="arrow"/></marker></defs>']
     lanes.forEach((l, li) => {
       const x = left + li * (laneW + gapX)
       parts.push(`<rect class="lane" x="${x}" y="${top - 12}" width="${laneW}" height="${(l.shown.length + (l.rest ? 1 : 0)) * (boxH + rowGap) + 8}" rx="10" opacity=".6"/>`,
         `<rect x="${x}" y="${top - 12}" width="${laneW}" height="3" fill="${repoColor.get(l.repo)}"/>`,
-        `<text class="head" x="${x}" y="${top - 20}">${esc(l.repo.toUpperCase())} · ${l.files.toLocaleString()} FILE${l.files === 1 ? '' : 'S'}</text>`)
+        `<text class="head" x="${x}" y="${top - 20}">${esc(cut(l.repo.toUpperCase(), 22))} · ${l.files.toLocaleString()} FILE${l.files === 1 ? '' : 'S'}</text>`)
     })
     const labels = []
     for (const [a, b, n] of shownLinks) {
@@ -554,9 +558,9 @@ function client() {
     svg.addEventListener('focusin', (e) => { const g = e.target.closest('[data-mod]'); light(g ? Number(g.dataset.mod) : null) })
     svg.addEventListener('focusout', (e) => { if (!svg.contains(e.relatedTarget)) light(null) })
     svg.addEventListener('mouseleave', () => light(null))
-    const open = (e) => { const g = e.target.closest('[data-mod]'); if (g) { openModule(Number(g.dataset.mod)); render() } }
+    const open = (e) => { const g = e.target.closest('[data-mod]'); if (g) { openModule(Number(g.dataset.mod)); st.focusMain = true; render() } }
     svg.addEventListener('click', open)
-    svg.addEventListener('keydown', (e) => { if (activate(e)) { e.preventDefault(); open(e) } })
+    svg.addEventListener('keydown', (e) => { if (activate(e) && e.target.closest('[data-sym],[data-file],[data-mod]')) { e.preventDefault(); open(e) } })
     return h('section', null, h('div', { class: 'toolbar' }, seg, h('span', { class: 'muted' }, `showing ${drawn} of ${plural(total, 'module')} · ${plural(shownLinks.length, 'link')} between them`)), box,
       h('p', { class: 'note' }, `A module is a folder of production code; a folder holding more than 35% of its repository is split into its subfolders. Each lane draws its ${LANE_MAX} largest modules, in the order code flows: a module sits below the modules that use it. A line is a module using another, its width the number of file pairs linked by syntax. This map never shows test code or name guesses, whatever the toggles say. Arcs on the left go down a lane, arcs on the right go up it (a cycle). Hover a module for its links and counts, click it for its files.`))
   }
@@ -566,7 +570,7 @@ function client() {
   window.addEventListener('mouseup', () => { drag = null })
   const M = D.map
   const mapFiles = M.files.map((id, i) => ({ f: files.get(id), x: M.pos[i][0], y: M.pos[i][1], deg: M.deg[i], r: 2.5 + Math.min(9, Math.sqrt(M.deg[i])), nb: new Map() }))
-  for (const [a, b, , amb] of M.links) { mapFiles[a].nb.set(b, !!amb); mapFiles[b].nb.set(a, !!amb) }
+  for (const [a, b, , amb] of M.links) if (mapFiles[a] && mapFiles[b]) { mapFiles[a].nb.set(b, !!amb); mapFiles[b].nb.set(a, !!amb) }
   const byDeg = mapFiles.map((_, i) => i).sort((a, b) => mapFiles[b].deg - mapFiles[a].deg)
   function scopeOf(mi) { // a module's files and the files they link to by syntax
     if (mi === null || !modules[mi]) return null
@@ -579,14 +583,15 @@ function client() {
     const vis = (m) => showFile(m.f) && (!scope || scope.has(m.f.id))
     const shown = mapFiles.filter(vis), prod = shown.filter((m) => !m.f.test).length, tests = shown.length - prod
     const mod = st.module !== null ? modules[st.module] : null
+    const core = mod ? new Set(mod.list.map((f) => f.id)) : null
+    const onMap = core ? mapFiles.filter((m) => core.has(m.f.id)).length : 0
     const wrap = h('div', { id: 'map' }), canvas = h('canvas', { role: 'img', 'aria-label': mod ? `File map of ${mod.key} and its neighbours` : 'File map' }), tip = h('div', { id: 'tip' })
     wrap.append(canvas, tip)
     const legend = h('div', { class: 'legend' }, D.repos.filter((r) => !st.repo || r.name === st.repo).map((r) => h('span', null, h('i', { style: `background:${repoColor.get(r.name)}` }), r.name)))
     const head = h('div', { class: 'toolbar' }, seg, mod
-      ? h('span', null, 'Files of ', h('b', { class: 'mono' }, mod.key), ` (${mod.repo}, ${plural(mod.files, 'file')}) and the files they link to by syntax · `, h('a', { class: 'jump', onclick: () => { st.module = null; render() } }, 'all files'))
+      ? h('span', null, 'Files of ', h('b', { class: 'mono' }, mod.key), ` (${mod.repo}, ${onMap < mod.files ? `${onMap} of its ${plural(mod.files, 'file')} on the map, the most connected; the map holds ${D.mapMax.toLocaleString()} at most` : plural(mod.files, 'file')}) and the files they link to by syntax · `, h('a', { class: 'jump', onclick: () => { st.module = null; render() } }, 'all files'))
       : h('span', { class: 'muted' }, `${prod.toLocaleString()} of ${plural(st.repo ? M.totals[st.repo] || 0 : M.total, 'production file')}${tests ? `, and ${plural(tests, 'test file')} where room was left` : ''} · the ${D.mapMax.toLocaleString()} most connected at most`))
     const note = h('p', { class: 'note' }, `Grouped by directory · the biggest are named, hover for the rest · lines are imports and calls between files${st.guesses ? '' : ', ambiguous-only links hidden'} · drag to pan, scroll to zoom, click to open, double-click to reset`)
-    const core = mod ? new Set(mod.list.map((f) => f.id)) : null
     requestAnimationFrame(() => drawMap(canvas, tip, vis, core ? (m) => core.has(m.f.id) : vis))
     return h('section', null, head, legend, wrap, note)
   }
@@ -611,7 +616,7 @@ function client() {
     const fit = () => ({ k: fitK, x: W / 2 - ((x0 + x1) / 2) * fitK, y: H / 2 - ((y0 + y1) / 2) * fitK })
     const view = fit()
     let hover = -1
-    const selIdx = () => (st.sel && st.sel.file ? mapFiles.findIndex((m) => m.f === st.sel.file) : -1)
+    const selIdx = () => { const i = st.sel && st.sel.file ? mapFiles.findIndex((m) => m.f === st.sel.file) : -1; return i >= 0 && vis(mapFiles[i]) ? i : -1 }
     const sx = (x) => view.x + x * view.k, sy = (y) => view.y + y * view.k
     const groupsShown = M.groups.filter((g) => (!st.repo || g.key.startsWith(st.repo + ':')) && mapFiles.some((m) => vis(m) && Math.hypot(m.x - g.x, m.y - g.y) <= g.r))
     function draw() {
@@ -712,15 +717,18 @@ function client() {
       h('span', { class: 'muted' }, `generated ${D.generatedAt.slice(0, 16).replace('T', ' ')} UTC · a map, not the code: read it at the path:line`))
   }
   function render(keepFocus) {
-    // the header is rebuilt: hand keyboard focus back to the control that had it
+    // the header is rebuilt: hand keyboard focus back to the control that had it, the caret where it was
     const ctl = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.ctl : null
+    const caret = search ? [search.selectionStart, search.selectionEnd] : null
     const view = { overview, map: mapView, files: filesView, symbols, hotspots }[st.tab]()
     const hd = header()
     document.body.replaceChildren(hd, h('main', null, view))
     document.documentElement.style.setProperty('--hdr', `${hd.offsetHeight + 12}px`)
     writeHash()
-    if (keepFocus) { search.focus(); const n = search.value.length; search.setSelectionRange(n, n) }
+    if (keepFocus) { search.focus(); if (caret && caret[0] !== null) search.setSelectionRange(caret[0], caret[1]) }
+    else if (st.focusMain) { const t = document.querySelector('main .detail h3') || document.querySelector('main .toolbar'); if (t) { t.tabIndex = -1; t.focus({ preventScroll: true }) } }
     else if (ctl) { const el = document.querySelector(`[data-ctl="${ctl}"]`); if (el) el.focus() }
+    st.focusMain = false
   }
   readHash()
   render()

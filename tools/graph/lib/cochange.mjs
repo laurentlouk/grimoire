@@ -10,7 +10,7 @@ const COMMITS = 400, WIDE = 25, MIN = 2, PER_FILE = 12
 export function cochange(db, repo) {
   db.prepare('DELETE FROM cochange WHERE repo = ?').run(repo.name)
   db.prepare('DELETE FROM churn WHERE repo = ?').run(repo.name)
-  const r = spawnSync('git', ['-C', repo.abs, 'log', `-n${COMMITS}`, '--no-merges', '--name-only', '--relative', '--format=%x00', '--', '.'], { encoding: 'utf8', maxBuffer: 1 << 27 })
+  const r = spawnSync('git', ['-c', 'core.quotepath=off', '-C', repo.abs, 'log', `-n${COMMITS}`, '--no-merges', '--name-only', '--relative', '--format=%x00', '--', '.'], { encoding: 'utf8', maxBuffer: 1 << 27 })
   if (r.status !== 0) return
   const indexed = new Set(db.prepare('SELECT path FROM files WHERE repo = ?').all(repo.name).map((f) => f.path))
   const pairs = new Map(), churn = new Map()

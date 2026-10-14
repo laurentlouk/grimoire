@@ -21,7 +21,10 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
   chain in the repository;
   SCREAMING_CASE heads are constants; a Rust crate counts as the repository's by its folder, an
   inline `mod` or its Cargo.toml package name; a turbofish or a call argument is not a path.
-- Result on that project: call links 21,710 → 19,282, name guesses 30.6% → 22.7%. Some 170
+- A standard-library name on a receiver the syntax constructs from a repository type
+  (`Store::new().len()`, `new Store().get()`, `Reg.getInstance().add()`, `Store.shared`) is that
+  type's; `self.__class__` and `type(self)` count as `self`.
+- Result on that project: call links 21,710 → 19,286, name guesses 30.6% → 22.7%. Some 170
   `import` and `same-file` links went too: the same `len`/`get` calls, matched within a file.
 - Storybook stories, `mocks/`, `__mocks__/`, `fixtures/` and `__fixtures__/` count as test code
   (172 files there), so they no longer rank as the most connected production code.
@@ -51,7 +54,8 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
 - Hotspots rank by links resolved by syntax, name guesses counted apart, and open on a treemap
   of the 400 largest files by size and churn, its legend giving each colour's real range.
 - File labels carry their folder; tables wrap paths and keep their counts visible; views have
-  plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`), valid while the file they point into is not re-parsed (ids change when it is).
+  plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`). They hold for the index the page was
+  rendered from: a re-parsed file gets new ids, and module numbers shift as modules change.
 - Keyboard: modules, neighbourhood items and treemap tiles are buttons (Enter or Space), and the
   header keeps focus across re-renders.
 - The CSP admits only the page's own script, by its SHA-256, instead of any inline script: a name
@@ -60,15 +64,20 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
 - A generated 10,000-file index renders in about a second into a 3.3 MB page.
 
 **Checks**
-- `tools/graph/tests/graph.test.mjs`: 143 checks (84 before): false links and their legitimate
+- `tools/graph/tests/graph.test.mjs`: 163 checks (84 before): false links and their legitimate
   look-alikes in Rust, TypeScript and Python; file classes; churn (and a sweep that counts for
   none); schema migration on a query; modules, ranks and cross-repository links; the fixture's
   exact system map; the page helpers (escaping, anchors, link sureness, churn bands, treemap,
-  lane cap, defaults); the file map's ambiguous-only flag; the CSP hash; a page script that
-  compiles.
+  lane cap, defaults); the file map's ambiguous-only flag; the CSP hash; and the page's own script
+  run against a stub DOM: every view renders, anchors open what they name, the test toggle changes
+  what a neighbourhood hides. Each rule that keeps a chain in the repository has its own fixture,
+  checked by mutation.
 - Three independent reviews (engine, page, tests and docs) found one blocker, six majors and a
   dozen minors; a re-review of the fixes found one regression (a chain headed by the repository's
-  own constructor was dropped) and a wrong claim about anchors. All are fixed in this release.
+  own constructor was dropped) and a wrong claim about anchors. A third round on the whole release
+  found constructed receivers losing standard-library names, list rows a keyboard could not reach, a
+  search caret that jumped, per-repository co-change lost behind a global limit, and tests that a
+  regression could pass. All are fixed in this release.
 - New eval case `graph` #5.
 
 ## 0.10.0 — trust the learning
