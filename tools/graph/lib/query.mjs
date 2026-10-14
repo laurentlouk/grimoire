@@ -119,6 +119,8 @@ export class Graph {
       lines.push(`  files: ${langs}`)
       lines.push(`  symbols: ${counts}   edges: ${edges || 'none'}`)
       lines.push(`  call sites resolved: ${calls.resolved}/${calls.calls}${conf ? ` (${conf})` : ''}`)
+      const g = this.one("SELECT sum(e.confidence IN ('ambiguous','unique-name')) g, count(*) n FROM edges e JOIN nodes x ON x.id = e.src JOIN files f ON f.id = x.file_id WHERE f.repo = ? AND e.kind = 'CALLS'", r.name)
+      if (g.n) lines.push(`  name guesses: ${Math.round((100 * g.g) / g.n)}% of ${g.n} call links (ambiguous + unique-name)`)
     }
     return lines.join('\n')
   }

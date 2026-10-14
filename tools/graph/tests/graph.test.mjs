@@ -123,6 +123,10 @@ has(idx, 'shop: 3 files, 3 parsed', 'index: the Go repo too')
 const st = await q('status')
 has(st, 'files: typescript 5', 'status: languages per repo')
 has(st, 'EXTENDS 1, IMPLEMENTS 1', 'status: edge counts per kind')
+{ // status: how many call links are name guesses, from the index itself
+  const tally = (await q('sql', { sql: "SELECT sum(confidence IN ('ambiguous','unique-name')) AS g, count(*) AS n FROM edges e JOIN nodes x ON x.id = e.src JOIN files f ON f.id = x.file_id WHERE e.kind = 'CALLS' AND f.repo = 'core'" })).split('\n')[1].split('\t').map(Number)
+  has(st, `name guesses: ${Math.round((100 * tally[0]) / tally[1])}% of ${tally[1]} call links (ambiguous + unique-name)`, 'status: the share of call links that are name guesses, per repo')
+}
 
 let r = await q('callers', { symbol: 'square', repo: 'web', depth: 3 })
 has(r, 'Circle.area  method  web/src/geo/circle.ts:8  [import]', 'TS: a named import resolves the call to the imported file')
@@ -240,6 +244,8 @@ writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  
 const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' })
 git(MAIN, 'init', '-q', '-b', 'main'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init')
 const refresh = (root) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'refresh', '--root', root], { encoding: 'utf8' })
+writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  return 2\n}\n'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'two')
+writeFileSync(path.join(MAIN, 'src/c.ts'), 'export const c = 1\n'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'three')
 let rf = refresh(MAIN)
 ok(rf.status === 0 && existsSync(path.join(MAIN, '.grimoire/graph/graph.db')), `refresh builds the first index when grimoire.config.json has a graph block (${rf.stdout.trim() || rf.stderr.trim()})`)
 const BARE = path.join(SANDBOX, 'bare'); mkdirSync(BARE)
@@ -247,6 +253,10 @@ rf = refresh(BARE)
 ok(rf.status === 0 && !existsSync(path.join(BARE, '.grimoire')), 'refresh is a silent no-op in a project that never set the graph up')
 const WT = path.join(SANDBOX, 'wt')
 git(MAIN, 'worktree', 'add', '-q', '-b', 'feat', WT)
+{ // churn: how many recent commits touched each file, for the hotspot treemap
+  const churn = await call('graph_sql', { sql: 'SELECT path, n FROM churn ORDER BY path' }, { root: MAIN })
+  has(churn, 'src/a.ts\t2\nsrc/c.ts\t1', 'churn: commits per file over the indexed history (a.ts in 2 commits, c.ts in 1)')
+}
 ok(mainCheckout(WT) === MAIN && mainCheckout(MAIN) === null, 'a linked worktree finds its main checkout; the main checkout has none')
 writeFileSync(path.join(WT, 'src/b.ts'), "import { base } from './a'\n\nexport function onBranch(): number {\n  return base()\n}\n")
 r = await call('graph_callers', { symbol: 'base' }, { root: WT })
