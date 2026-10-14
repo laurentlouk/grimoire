@@ -101,3 +101,16 @@ pub fn path_len(r: &Registry) -> usize {
 pub fn new_version() -> u32 {
     Registry::new().version()
 }
+
+// The head of a chain can be the repository's own constructor or factory.
+pub struct Meters(pub f64);
+
+impl Meters {
+    pub fn double_it(&self) -> f64 {
+        self.0 * 2.0
+    }
+}
+
+pub fn meters() -> f64 {
+    Meters(5.0).double_it()
+}

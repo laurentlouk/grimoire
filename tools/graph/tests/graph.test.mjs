@@ -187,15 +187,16 @@ const q = (tool, args = {}) => call(`graph_${tool}`, args, { root: PROJ })
 has(await q('status'), 'not been built', 'before graph_index, queries point at it instead of indexing implicitly')
 const idx = await q('index')
 has(idx, 'web: 5 files, 5 parsed', 'index: every repository of grimoire.config.json is indexed')
-has(idx, 'shop: 3 files, 3 parsed', 'index: the Go repo too')
+has(idx, 'shop: 4 files, 4 parsed', 'index: the Go repo too')
 
 const st = await q('status')
 has(st, 'files: typescript 5', 'status: languages per repo')
 has(st, 'EXTENDS 1, IMPLEMENTS 1', 'status: edge counts per kind')
 // shop (Go): New → Cart (`&Cart{}`) [same-file], Cart.Total → pricing.Sum [import], TestTotal → New
-// [same-package], and `c.Total()` on `c := New()`, whose type the syntax does not state: the one name
-// guess of its 4 call links.
-has(st, 'name guesses: 25% of 4 call links (ambiguous + unique-name)', 'status: the share of call links that are name guesses, per repo')
+// [same-package], NewBuilder → Builder (`&Builder{}`), Build → NewBuilder and Build → BuildThing
+// (`NewBuilder().BuildThing()`) [same-file], and `c.Total()` on `c := New()`, whose type the syntax
+// does not state: the one name guess of its 7 call links.
+has(st, 'name guesses: 14% of 7 call links (ambiguous + unique-name)', 'status: the share of call links that are name guesses, per repo')
 
 let r = await q('callers', { symbol: 'square', repo: 'web', depth: 3 })
 has(r, 'Circle.area  method  web/src/geo/circle.ts:8  [import]', 'TS: a named import resolves the call to the imported file')
@@ -242,6 +243,12 @@ lacks(r, 'refresh  function  svc/app/service.py', 'Python: `rows.update()` on an
 r = await q('callers', { symbol: 'Base.describe', repo: 'web' })
 has(r, 'main  function  web/src/app.ts:4', 'TS: `c.describe()` on a typed receiver still links to the inherited method')
 lacks(r, 'formatAll', 'TS: `new Intl.NumberFormat(..).describe()` starts at a type the repository does not define')
+r = await q('callers', { symbol: 'Order.total_order' })
+has(r, 'order_total  function  svc/app/service.py', 'Python: `Order().total_order()` starts at the repository\'s own class')
+r = await q('callers', { symbol: 'BuildThing' })
+has(r, 'Build  function  shop/builder/builder.go', 'Go: `NewBuilder().BuildThing()` starts at the repository\'s own factory')
+r = await q('callers', { symbol: 'Meters.double_it' })
+has(r, 'meters  function  core/src/lib.rs', 'Rust: `Meters(5.0).double_it()` starts at the repository\'s own tuple struct')
 r = await q('callers', { symbol: 'Circle.has', repo: 'web' })
 lacks(r, 'total  function  web/src/app.ts', 'TS: `seen.has(2)` on an untyped receiver is a Set/Map method, not Circle.has')
 r = await q('hierarchy', { symbol: 'Shape', repo: 'core' })
@@ -283,9 +290,9 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   const DP = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageP)[1].replace(/\\u003c/g, '<'))
   const mods = DP.system.modules.map((m) => `${m.repo}:${m.key}:${m.files}`).join(' ')
   const links = DP.system.links.map(([a, b, n]) => `${DP.system.modules[a].repo}:${DP.system.modules[a].key}>${DP.system.modules[b].key}:${n}`).join(' ')
-  ok(mods === 'core:src:4 shop:cart:1 shop:pricing:1 svc:app:4 web:src:4' && links === 'shop:cart>pricing:1', `system map of the fixture: five modules, one link (${mods} | ${links})`)
+  ok(mods === 'core:src:4 shop:builder:1 shop:cart:1 shop:pricing:1 svc:app:4 web:src:4' && links === 'shop:cart>pricing:1', `system map of the fixture: five modules, one link (${mods} | ${links})`)
   const modOf = (repo, p) => { const f = DP.files.find((x) => x[1] === repo && x[2] === p); return f ? f[8] : 'missing' }
-  ok(modOf('shop', 'cart/cart.go') === 1 && modOf('shop', 'pricing/pricing.go') === 2 && modOf('shop', 'cart/cart_test.go') === -1 && modOf('web', 'src/app.test.ts') === -1,
+  ok(modOf('shop', 'cart/cart.go') === 2 && modOf('shop', 'pricing/pricing.go') === 3 && modOf('shop', 'cart/cart_test.go') === -1 && modOf('web', 'src/app.test.ts') === -1,
     'each production file names its module; test files belong to none')
   const script = (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(pageP) || [])[1] || ''
   const csp = (/script-src '([^']+)'/.exec(pageP) || [])[1] || ''

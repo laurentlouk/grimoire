@@ -22,3 +22,8 @@ class Ledger:
 class AuditLedger(Ledger):
     def update(self):
         return super().update()
+
+
+class Order:
+    def total_order(self):
+        return 0

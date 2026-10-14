@@ -1,4 +1,4 @@
-from .models import User, Ledger
+from .models import User, Ledger, Order
 from app import util
 
 
@@ -17,3 +17,7 @@ def audit():
 
 def refresh(rows):
     return rows.update()
+
+
+def order_total():
+    return Order().total_order()

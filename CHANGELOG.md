@@ -15,8 +15,10 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
 - A method on a chain that starts in a dependency is the dependency's: a call chain whose path
   before its first call starts at a type the repository does not define
   (`UpdateItemOutput::builder().build()`, `new Intl.NumberFormat(..).format()`), or a Rust path
-  rooted at a crate the repository does not have (`chrono::Utc::now()`, `std::env::var`). A
-  repository type, namespace or module anywhere on that path keeps the chain in the repository;
+  rooted at a crate the repository does not have (`chrono::Utc::now()`, `std::env::var`). A type,
+  namespace or module the index knows anywhere on that path, or a call heading it to the
+  repository's own constructor or factory (`Order().total()`, `NewBuilder().Build()`), keeps the
+  chain in the repository;
   SCREAMING_CASE heads are constants; a Rust crate counts as the repository's by its folder, an
   inline `mod` or its Cargo.toml package name; a turbofish or a call argument is not a path.
 - Result on that project: call links 21,710 → 19,282, name guesses 30.6% → 22.7%. Some 170
@@ -29,12 +31,12 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
   `ambiguous`; the README defines the term).
 - Schema 3: an index built by an older version rebuilds once, on the next query or write, so it
   takes the new rules at once. It adds `churn`: how many of the last 400 non-merge commits touched
-  each file, sweeps of more than 25 files left out. A repository dropped from the configuration
+  each file, commits touching more than 25 indexed files left out. A repository dropped from the configuration
   drops its churn too.
 
 **A page that groups before it draws**
 - Map opens on a system map: one lane per repository drawing its 14 largest modules (folders of
-  production code; a folder holding more than a third of its repository splits into its
+  production code; a folder holding more than 35% of its repository splits into its
   subfolders, `lib/modules.mjs`), in the order code flows, each line a module using another, its
   width the file pairs linked by syntax. Modules in a cycle share a rank; links across repositories
   are drawn but rank nothing. It never shows test code or name guesses. Hover for links and
@@ -49,7 +51,7 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
 - Hotspots rank by links resolved by syntax, name guesses counted apart, and open on a treemap
   of the 400 largest files by size and churn, its legend giving each colour's real range.
 - File labels carry their folder; tables wrap paths and keep their counts visible; views have
-  plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`), valid until the next full rebuild.
+  plain anchors (`#sym-12`, `#file-3`, `#mod-4`, `#hotspots`), valid while the file they point into is not re-parsed (ids change when it is).
 - Keyboard: modules, neighbourhood items and treemap tiles are buttons (Enter or Space), and the
   header keeps focus across re-renders.
 - The CSP admits only the page's own script, by its SHA-256, instead of any inline script: a name
@@ -58,14 +60,15 @@ before, 30.6% of call links were name guesses and the map was one spiral of 1,50
 - A generated 10,000-file index renders in about a second into a 3.3 MB page.
 
 **Checks**
-- `tools/graph/tests/graph.test.mjs`: 140 checks (84 before): false links and their legitimate
+- `tools/graph/tests/graph.test.mjs`: 143 checks (84 before): false links and their legitimate
   look-alikes in Rust, TypeScript and Python; file classes; churn (and a sweep that counts for
   none); schema migration on a query; modules, ranks and cross-repository links; the fixture's
   exact system map; the page helpers (escaping, anchors, link sureness, churn bands, treemap,
   lane cap, defaults); the file map's ambiguous-only flag; the CSP hash; a page script that
   compiles.
 - Three independent reviews (engine, page, tests and docs) found one blocker, six majors and a
-  dozen minors; all are fixed in this release.
+  dozen minors; a re-review of the fixes found one regression (a chain headed by the repository's
+  own constructor was dropped) and a wrong claim about anchors. All are fixed in this release.
 - New eval case `graph` #5.
 
 ## 0.10.0 — trust the learning

@@ -193,7 +193,13 @@ export function resolveRepo(db, repo, repoAbs) {
   for (const n of nodes) if (n.kind === 'module') moduleNames.add(n.name)
   if (files.some((f) => f.lang === 'rust')) { // a crate is named by its Cargo.toml, not its folder (`lib/` → `my_lib`)
     const dirs = new Set([...fileById.values()].filter((f) => f.family === 'rust').flatMap((f) => { const up = []; for (let x = f.dir; ; x = path.posix.dirname(x)) { up.push(x); if (x === '.' || x === '/') break } return up }))
-    for (const d of dirs) { try { const m = /^\s*\[package\][^[]*?^\s*name\s*=\s*"([^"]+)"/ms.exec(readFileSync(path.join(repoAbs, d, 'Cargo.toml'), 'utf8')); if (m) moduleNames.add(m[1].replace(/-/g, '_')) } catch {} }
+    for (const d of dirs) {
+      let toml = ''
+      try { toml = readFileSync(path.join(repoAbs, d, 'Cargo.toml'), 'utf8') } catch { continue }
+      const pkg = toml.split(/^\s*\[/m).find((sec) => /^package\]/.test(sec)) || '' // the [package] table, up to the next header
+      const m = /^\s*name\s*=\s*"([^"]+)"/m.exec(pkg)
+      if (m) moduleNames.add(m[1].replace(/-/g, '_'))
+    }
   }
   const IDENT = /^[A-Za-z_$][\w$]*/
   const isRepoScope = (family, name) => moduleNames.has(name) || (byName.get(`${family}|${name}`) || []).some((c) => CLASSY.has(c.kind) || c.kind === 'namespace')
@@ -206,6 +212,9 @@ export function resolveRepo(db, repo, repoAbs) {
     const scopes = cut >= 0 && !constructed ? segs.slice(0, -1) : segs
     if (!segs.length || SELF.test(segs[0])) return false
     const head = segs[0]
+    // `Order().total()`, `NewServer(80).Start()`, `Meters(5.0).double_it()`: the call heading the
+    // chain is the repository's own constructor or factory
+    if (segs.length === 1 && cut >= 0 && (byName.get(`${family}|${head}`) || []).length) return false
     // a Rust path is decided by its root: `aws_sdk::types::error::X` is the crate's even where the
     // repository has an `error` module (a turbofish `make::<T>()` is not a path)
     if (family === 'rust' && /^[a-z_]/.test(head) && lead.startsWith(head + '::') && lead[head.length + 2] !== '<') return !/^(crate|self|super)$/.test(head) && !moduleNames.has(head)

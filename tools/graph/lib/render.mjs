@@ -11,7 +11,7 @@
 //   hotspots   a size × churn map, most-called symbols and most-used files (links resolved by syntax
 //              only), strongest co-change
 // Test code and ambiguous links are hidden until asked for; unique-name matches are drawn dashed.
-// Views have plain anchors (#sym-12, #file-3, #mod-4) a note can link until the next re-index.
+// Views have plain anchors (#sym-12, #file-3, #mod-4) a note can link; their ids change when the file is re-parsed.
 // The helpers below the data section are pure, exported for the tests, and injected into the page.
 // Like every graph answer, the page is a map: read the code at the path:line it points to.
 import { createHash } from 'node:crypto'
@@ -156,7 +156,7 @@ const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands,
 function html(data) {
   // Every "<" becomes \\u003c, so no data string can close the <script> element.
   const blob = JSON.stringify(data).replace(/</g, '\\u003c').split(String.fromCharCode(0x2028)).join('\\u2028').split(String.fromCharCode(0x2029)).join('\\u2029')
-  const js = `${HELPERS.map((f) => f.toString()).join('\n')}\nconst INITIAL = ${JSON.stringify(INITIAL)}, LANE_MAX = ${LANE_MAX}, MAXCOL = ${MAXCOL};\n(${client.toString()})()`.replace(/<\//g, '<\\/')
+  const js = `${HELPERS.map((f) => f.toString()).join('\n')}\nconst INITIAL = ${JSON.stringify(INITIAL)}, LANE_MAX = ${LANE_MAX}, MAXCOL = ${MAXCOL};\n(${client.toString()})()`.replace(/<\//g, '<\\/').replace(/\r\n?/g, '\n') // LF only: a browser normalises line ends before it hashes
   const hash = createHash('sha256').update(js, 'utf8').digest('base64')
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -456,7 +456,7 @@ function client() {
     box.addEventListener('keydown', (e) => { if (activate(e)) { e.preventDefault(); open(e) } })
     const sw = (k, t) => h('span', null, h('i', { class: 'swatch', style: `background:var(--heat${k})` }), ' ', t)
     const legend = maxC
-      ? h('div', { class: 'legend' }, h('span', { class: 'muted' }, 'Area: file size. Colour: commits touching it among the last 400, sweeps of more than 25 files left out (log scale):'), sw(0, 'none'),
+      ? h('div', { class: 'legend' }, h('span', { class: 'muted' }, 'Area: file size. Colour: commits touching it among the last 400, commits touching more than 25 indexed files left out (log scale):'), sw(0, 'none'),
         heatBands(maxC).map(([b, lo, hi]) => sw(b, lo === hi ? String(lo) : `${lo}–${hi}`)))
       : h('p', { class: 'note' }, 'Area: file size. No git history is indexed, so colour says nothing about churn.')
     return h('div', null, box, legend)
@@ -510,7 +510,7 @@ function client() {
       const x = left + li * (laneW + gapX)
       parts.push(`<rect class="lane" x="${x}" y="${top - 12}" width="${laneW}" height="${(l.shown.length + (l.rest ? 1 : 0)) * (boxH + rowGap) + 8}" rx="10" opacity=".6"/>`,
         `<rect x="${x}" y="${top - 12}" width="${laneW}" height="3" fill="${repoColor.get(l.repo)}"/>`,
-        `<text class="head" x="${x}" y="${top - 20}">${esc(l.repo.toUpperCase())} · ${esc(plural(l.files, 'FILE'))}</text>`)
+        `<text class="head" x="${x}" y="${top - 20}">${esc(l.repo.toUpperCase())} · ${l.files.toLocaleString()} FILE${l.files === 1 ? '' : 'S'}</text>`)
     })
     const labels = []
     for (const [a, b, n] of shownLinks) {
@@ -558,7 +558,7 @@ function client() {
     svg.addEventListener('click', open)
     svg.addEventListener('keydown', (e) => { if (activate(e)) { e.preventDefault(); open(e) } })
     return h('section', null, h('div', { class: 'toolbar' }, seg, h('span', { class: 'muted' }, `showing ${drawn} of ${plural(total, 'module')} · ${plural(shownLinks.length, 'link')} between them`)), box,
-      h('p', { class: 'note' }, `A module is a folder of production code; a folder holding more than a third of its repository is split into its subfolders. Each lane draws its ${LANE_MAX} largest modules, in the order code flows: a module sits below the modules that use it. A line is a module using another, its width the number of file pairs linked by syntax. This map never shows test code or name guesses, whatever the toggles say. Arcs on the left go down a lane, arcs on the right go up it (a cycle). Hover a module for its links and counts, click it for its files.`))
+      h('p', { class: 'note' }, `A module is a folder of production code; a folder holding more than 35% of its repository is split into its subfolders. Each lane draws its ${LANE_MAX} largest modules, in the order code flows: a module sits below the modules that use it. A line is a module using another, its width the number of file pairs linked by syntax. This map never shows test code or name guesses, whatever the toggles say. Arcs on the left go down a lane, arcs on the right go up it (a cycle). Hover a module for its links and counts, click it for its files.`))
   }
 
   // ── map: files (laid out once, drawn on a canvas) ──
