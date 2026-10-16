@@ -24,9 +24,10 @@
 //              sides of a set (below) hold is neither listed nor counted.
 //  Objects merge key by key; the user's keys keep their order and added keys are appended.
 //  Arrays are values, compared whole, except:
-//    keyed     repos[] by `name`, specialists[] by `agent`, hooks.<Event>[] by `matcher`
-//              (absent = ""): an entry is a unit (added or kept whole), a matched one is
-//              merged key by key, `repos[api].gate`. The current order stays; added entries
+//    keyed     repos[] by `name`, specialists[] by `agent`, manager.sources[] by `id`,
+//              hooks.<Event>[] by `matcher` (absent = ""): an entry is a unit (added or kept
+//              whole), a matched one is merged key by key, `repos[api].gate`,
+//              `manager.sources[linear].scope`. The current order stays; added entries
 //              append. Entries without their key, or with a duplicate one, make the array a
 //              value again. An added repos[] entry on the path of another entry is warned about
 //              on stderr (a renamed repo would otherwise be kept twice).
@@ -80,6 +81,7 @@ export const RULES = {
   keyed: [
     { pattern: tokens('repos'), id: (e) => (typeof e.name === 'string' ? e.name : null) },
     { pattern: tokens('specialists'), id: (e) => (typeof e.agent === 'string' ? e.agent : null) },
+    { pattern: tokens('manager.sources'), id: (e) => (typeof e.id === 'string' ? e.id : null) },
     { pattern: tokens('hooks.*'), id: (e) => (e.matcher === undefined ? '' : typeof e.matcher === 'string' ? e.matcher : null) },
   ],
   sets: [
