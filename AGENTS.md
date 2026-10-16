@@ -54,7 +54,7 @@ Create one from `templates/team-agent.md` per repository. Interactive dispatches
 | `codebase-scout` | where / how does X work today | haiku |
 | `reference-scout` | how do credible open-source projects using our stack do this; never a stack change | sonnet |
 | `reviewer` | spec or quality verdict on a diff | sonnet |
-| `tracker-scout` | what a ticket actually requires: criteria, status, links, scope-changing comments | haiku |
+| `tracker-scout` | what a ticket actually requires: criteria, status, links, scope-changing comments; for the manager briefing, a source's open issues as WorkItems. Inherits the session's tools to reach tracker connectors; the guard keeps it read-only | haiku |
 | `design-scout` | components, tokens, measurements, assets, states from the design source | haiku |
 | `contract-checker` | do both sides of a cross-repo contract agree; release ordering | sonnet |
 | `security-scout` | one security question: authn/authz path, secret handling, input validation, dependency advisories | sonnet |
