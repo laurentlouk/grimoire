@@ -16,12 +16,15 @@
 //    • a missing current file: everything is ADDED, and --write creates it
 //    • idempotence: the merged output as current, with the same proposal, gives no ADDED and
 //      no CHANGED; a declined change is still a difference, so it is listed again
-//    • secrets never reach the output, text or --json: every string under `env`, every string
-//      under a key named like a token, key, password, credential or auth, and in any string a
-//      bearer token, URL credentials, `token=`/`api-key:`-style pairs and known token formats
-//      (sk_, ghp_, github_pat_, xoxb-, AKIA…) print as «redacted», the rest of the string kept;
-//      the written file keeps the real values; numbers stay visible; an empty proposal lists the
-//      whole current file as KEPT, redacted (how setup reads it)
+//    • secrets of known shapes are masked in the output, text and --json: every string under
+//      `env`, every string under a key named like a token, key, password, credential or auth,
+//      and in any value a bearer or `Authorization:` header, URL credentials, `token=`/
+//      `api-key:` pairs, `--token X`-style flags, `mysql -pX`, `curl -u`, cookies, secret query
+//      parameters, JWTs, Slack webhooks and token formats (sk_live_…, ghp_…, github_pat_…,
+//      xoxb-…, AKIA/ASIA…) print as «redacted», the rest of the string kept; keys and paths are
+//      never masked (a repo named sk-frontend keeps its name and its --approve hint); the written
+//      file keeps the real values; numbers stay visible; an empty proposal lists the whole
+//      current file as KEPT, redacted (how setup reads it)
 //    • .claude/settings.json: permissions lists are sets (user entries kept, proposed ones
 //      appended once), hooks are matched by matcher and their commands merged as a set keyed by
 //      type and command, so a user's entry with extra fields is kept, not duplicated
@@ -453,7 +456,7 @@ try {
   }
 
   // ══════ 12 · secrets: env, keys, and secrets inside any string ══════
-  section('12 · secrets never reach the output: every env value, secret-looking keys, and secrets inside any string')
+  section('12 · secrets of known shapes are masked in the output: every env value, secret-looking keys, and known shapes inside any string')
   {
     const d = project()
     const SECRETS = ['sk_live_STRIPE0000secret', 'github_pat_11ABCDEFG0123456789', 'hunter2db', 'otel-secret-token-42', 'sk-live-123abcdef', 'xoxb-1234567890-abcdef',
@@ -483,7 +486,7 @@ try {
     const t = cli(d, '--current', 'settings.json', '--proposed', 'proposal.json')
     ok(t.status === 0, `exits 0 (stderr: ${t.stderr.trim()})`)
     const leaks = (r) => SECRETS.filter((s) => r.stdout.includes(s) || r.stderr.includes(s))
-    same(leaks(t), [], 'no secret appears in the text output')
+    same(leaks(t), [], 'none of these secrets appears in the text output')
     const kept = '  (only in the current file)'
     same(lines(t.stdout).filter((l) => l.startsWith('  ')), [
       '  ADDED    permissions.allow[]  "Bash(gh api -H \\"x-api-key: «redacted»\\" /user)"',
@@ -503,7 +506,7 @@ try {
     ], 'each secret is masked and the rest of its string kept: a bearer header, URL credentials, token= and api-key: pairs, an AWS key; every env value and every value under a secret-looking key')
 
     const j = cli(d, '--current', 'settings.json', '--proposed', 'proposal.json', '--json')
-    same(leaks(j), [], 'no secret appears in the --json output either')
+    same(leaks(j), [], 'none appears in the --json output either')
     same(json(j) && json(j).added.map((e) => e.value), ['Bash(gh api -H "x-api-key: «redacted»" /user)', { type: 'command', command: './report.sh --token=«redacted» --verbose' }], '--json masks the same way')
 
     const w = cli(d, '--current', 'settings.json', '--proposed', 'proposal.json', '--approve', 'env.STRIPE_KEY', '--approve', 'registry', '--write')
@@ -636,6 +639,69 @@ try {
     const r = spawnSync('sh', ['-c', `${q(process.execPath)} ${q(SCRIPT)} --current grimoire.config.json --proposed proposal.json --approve ${hints[0]} --approve ${hints[1]} --write`], { cwd: d, encoding: 'utf8' })
     ok(r.status === 0 && r.stderr === '' && readFileSync(join(d, 'grimoire.config.json'), 'utf8') === pretty({ "it's": 2, repos: [{ name: "o'neil", path: 'x', agent: 'a', gate: { run: 'make e2e' } }] }),
       `pasted into a shell, the hints approve exactly those keys (stderr: ${r.stderr.trim()})`)
+  }
+
+  // ══════ 19 · keys and paths are never masked ══════
+  section('19 · a name that looks like a token prefix keeps its name in paths and hints; real token shapes in values are still masked')
+  {
+    const d = project()
+    const cur = {
+      repos: [{ name: 'sk-frontend', path: 'repositories/sk-frontend', agent: 'web-engineer', gate: null }],
+      specialists: [{ agent: 'pk-checkout-engineer', repos: ['sk-frontend'] }],
+    }
+    const prop = {
+      repos: [{ name: 'sk-frontend', path: 'repositories/sk-frontend', agent: 'web-engineer', gate: { run: 'npm run e2e' } }],
+      specialists: [{ agent: 'pk-checkout-engineer', repos: ['sk-frontend', 'api'] }],
+    }
+    writeFileSync(join(d, 'grimoire.config.json'), pretty(cur))
+    writeFileSync(join(d, 'proposal.json'), pretty(prop))
+    const t = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json')
+    same(lines(t.stdout).filter((l) => l.startsWith('  ')), [
+      `  CHANGED  repos[sk-frontend].gate  null → {"run":"npm run e2e"}  (kept: needs --approve 'repos[sk-frontend].gate')`,
+      `  CHANGED  specialists[pk-checkout-engineer].repos  ["sk-frontend"] → ["sk-frontend","api"]  (kept: needs --approve 'specialists[pk-checkout-engineer].repos')`,
+    ], 'sk-frontend and pk-checkout-engineer print as themselves, in the paths and in the values')
+    const hints = [...t.stdout.matchAll(/needs --approve ('.*')\)$/gm)].map((m) => m[1])
+    same(hints.map((h) => spawnSync('sh', ['-c', `printf %s ${h}`], { encoding: 'utf8' }).stdout), ['repos[sk-frontend].gate', 'specialists[pk-checkout-engineer].repos'], 'the shell reads each hint back as the exact path')
+    const q = (s) => `'${s.replace(/'/g, `'"'"'`)}'`
+    const r = spawnSync('sh', ['-c', `${q(process.execPath)} ${q(SCRIPT)} --current grimoire.config.json --proposed proposal.json --approve ${hints[0]} --approve ${hints[1]} --write`], { cwd: d, encoding: 'utf8' })
+    ok(r.status === 0 && r.stderr === '' && readFileSync(join(d, 'grimoire.config.json'), 'utf8') === pretty(prop), `pasted into a shell, the two hints approve both keys (stderr: ${r.stderr.trim()})`)
+
+    const e = project()
+    const TOKENS = ['ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'github_pat_11ABCDEFG0123456789_abcdefghij', 'sk-ant-api03-AbCdEf1234567890XYZ', 'sk_live_51HxYzABCDEFGHIJKLMN', 'xoxb-123456789012-abcdefghijkl']
+    writeFileSync(join(e, 'settings.json'), pretty({ permissions: { allow: [...TOKENS.map((x) => `Bash(./deploy.sh ${x})`), 'Bash(cd repositories/sk-frontend && npm test)', 'Bash(./run.sh pk-checkout-engineer rk-tools)'] } }))
+    writeFileSync(join(e, 'proposal.json'), '{}\n')
+    const j = json(cli(e, '--current', 'settings.json', '--proposed', 'proposal.json', '--json'))
+    same(j && j.kept[0].value, { allow: [...TOKENS.map(() => 'Bash(./deploy.sh «redacted»)'), 'Bash(cd repositories/sk-frontend && npm test)', 'Bash(./run.sh pk-checkout-engineer rk-tools)'] },
+      'ghp_ (36), github_pat_, sk-ant-, sk_live_ and xoxb- tokens are masked in values; ordinary names with those prefixes are not')
+  }
+
+  // ══════ 20 · the leak shapes in permission and command strings ══════
+  section('20 · each known secret shape inside a permission or command string is masked, the rest of the string kept')
+  {
+    const d = project()
+    const SHAPES = [
+      ['--token X', 'Bash(gh release upload --token ghsplainvalue v1)', 'Bash(gh release upload --token «redacted» v1)'],
+      ['--password X', 'Bash(psql --password hunter2pw -h db)', 'Bash(psql --password «redacted» -h db)'],
+      ['--api-key=X', 'Bash(tool --api-key=abc123xyz run)', 'Bash(tool --api-key=«redacted» run)'],
+      ['--with-token X', 'Bash(gh auth login --with-token tok999abc)', 'Bash(gh auth login --with-token «redacted»)'],
+      ['a flag naming a variable stays', 'Bash(gh release upload --token $GH_TOKEN v1)', 'Bash(gh release upload --token $GH_TOKEN v1)'],
+      ['mysql -pX', 'Bash(mysql -u root -pS3cretPass mydb)', 'Bash(mysql -u root -p«redacted» mydb)'],
+      ['curl -u user:pass', 'Bash(curl -u deploy:hunter2 https://x.example.com)', 'Bash(curl -u «redacted» https://x.example.com)'],
+      ['Authorization: token X', 'Bash(curl -H "Authorization: token plainabc" https://api.example.com)', 'Bash(curl -H "Authorization: «redacted»" https://api.example.com)'],
+      ['Cookie: …', 'Bash(curl -H "Cookie: session=abc123; theme=dark" https://x.example.com)', 'Bash(curl -H "Cookie: «redacted»" https://x.example.com)'],
+      ['?key=', 'WebFetch(https://maps.example.com/api?key=AIzaPlain123&format=json)', 'WebFetch(https://maps.example.com/api?key=«redacted»&format=json)'],
+      ['&token=', 'WebFetch(https://x.example.com/feed?format=rss&token=plaintok77)', 'WebFetch(https://x.example.com/feed?format=rss&token=«redacted»)'],
+      ['a JWT', 'Bash(curl -H "X-Id: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" https://x.example.com)', 'Bash(curl -H "X-Id: «redacted»" https://x.example.com)'],
+      ['a Slack webhook', 'Bash(curl -X POST https://hooks.slack.com/services/T0001/B0002/abcdefXYZ)', 'Bash(curl -X POST https://hooks.slack.com/services/«redacted»)'],
+      ['an ASIA key', 'Bash(aws sts get-caller-identity ASIAABCDEFGHIJKLMNOP)', 'Bash(aws sts get-caller-identity «redacted»)'],
+    ]
+    writeFileSync(join(d, 'settings.json'), pretty({ permissions: { allow: SHAPES.map(([, raw]) => raw) } }))
+    writeFileSync(join(d, 'proposal.json'), '{}\n')
+    const j = json(cli(d, '--current', 'settings.json', '--proposed', 'proposal.json', '--json'))
+    const got = (j && j.kept[0] && j.kept[0].value.allow) || []
+    SHAPES.forEach(([shape, , want], i) => {
+      ok(got[i] === want, `${shape}: ${JSON.stringify(want)}${got[i] === want ? '' : ` (got ${JSON.stringify(got[i])})`}`)
+    })
   }
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
