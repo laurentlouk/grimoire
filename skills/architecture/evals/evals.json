@@ -1,0 +1,55 @@
+[
+  {
+    "id": 1,
+    "query": "Draw the architecture of this project, like archify does: the services, the datastores and how they talk to each other.",
+    "should_trigger": true,
+    "expected_output": "Takes archify only as the user's reference for the look: never installs or calls it. Checks grimoire.config.json and that the graph has an index, then drafts with node <root>/tools/graph/graph.mjs architecture draft --out docs/architecture/<slug>.architecture.json. Refines the draft by reading the code (entry points, config, I/O call sites): names components by responsibility, sets types, adds datastores, queues and external APIs seen in config with sources, labels each connection with what flows and sets via where a line crosses a process. Runs graph.mjs architecture check until it reports no error and answers each warning, removes \"draft\": true, renders the page and opens it at the Architecture tab, and reports the file path, what the diagram shows and the check's result.",
+    "expectations": [
+      { "text": "Drafts with the graph.mjs architecture draft script rather than writing the whole JSON from scratch", "passed": null, "evidence": "" },
+      { "text": "Uses grimoire's own format and page; does not install, call or convert to archify", "passed": null, "evidence": "" },
+      { "text": "Reads code or config before naming components or adding ones the draft did not have", "passed": null, "evidence": "" },
+      { "text": "Runs graph.mjs architecture check and resolves its errors", "passed": null, "evidence": "" },
+      { "text": "Renders the graph page and points the user at the Architecture tab", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "We added a billing worker last week and the architecture diagram in docs/architecture is out of date. Update it.",
+    "should_trigger": true,
+    "expected_output": "Starts from the existing diagram, never a fresh draft over it. Runs graph.mjs architecture check on it first and reads its warnings as the drift (a module no component covers, links no line draws). Reads the billing worker's code and config, adds it as a worker component with paths, sources and its connections (what it consumes, what it writes), keeps the existing refined names and layout, and checks again until there is no error.",
+    "expectations": [
+      { "text": "Edits the existing diagram file in place instead of re-drafting over it", "passed": null, "evidence": "" },
+      { "text": "Uses the check's warnings to find what drifted", "passed": null, "evidence": "" },
+      { "text": "Adds the worker with sources read from its code", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Who calls OrderService.place?",
+    "should_trigger": false,
+    "expected_output": "A narrow call question is answered with the graph_callers tool (or a scout) and confirmed in the code. No architecture diagram is drafted or edited.",
+    "expectations": [
+      { "text": "Does not draft or edit an architecture diagram", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Make me a bar chart of test coverage per package.",
+    "should_trigger": false,
+    "expected_output": "A numeric chart is not an architecture diagram; the architecture skill is not used.",
+    "expectations": [
+      { "text": "Does not run graph.mjs architecture", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 5,
+    "query": "Show me how the checkout path flows through our repos, with the trust boundaries.",
+    "should_trigger": true,
+    "expected_output": "Treats it as a slice: drafts (or starts from the existing diagram), keeps only the components on the checkout path, adds trust boundaries (kind trust) found in the auth code or config, marks the main path with the emphasis variant and cross-repository calls with via, says in a card what was left out, checks it, then renders and shows the Route tracing between the entry and the store.",
+    "expectations": [
+      { "text": "Keeps the diagram to the checkout path and says what is left out", "passed": null, "evidence": "" },
+      { "text": "Adds trust boundaries backed by code or config", "passed": null, "evidence": "" },
+      { "text": "Checks the diagram with graph.mjs architecture check before showing it", "passed": null, "evidence": "" }
+    ]
+  }
+]

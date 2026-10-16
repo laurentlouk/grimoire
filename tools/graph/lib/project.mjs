@@ -6,6 +6,7 @@
 //   graph.repos    names from repos[] to index (default: all of them)
 //   graph.dir      index location (default .grimoire/graph, next to the loop's telemetry)
 //   graph.exclude  extra path globs to skip; graph.maxFileKB (default 512)
+//   graph.architectureDir  where the architecture diagrams live (default docs/architecture)
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
@@ -34,15 +35,16 @@ export function loadProject(rootArg) {
     dbPath: path.join(root, g.dir || '.grimoire/graph', 'graph.db'),
     exclude: compileGlobs(g.exclude || []),
     maxBytes: (Number(g.maxFileKB) || 512) * 1024,
+    architectureDir: path.resolve(root, g.architectureDir || 'docs/architecture'),
   }
 }
 
 // Directories never worth indexing: dependencies, build output, caches, generated trees.
-const SKIP_DIRS = new Set(['node_modules', '.git', '.grimoire', '.worktrees', 'vendor', 'dist', 'build', 'out', 'target', '.next', '.nuxt', '.svelte-kit', '.turbo', 'coverage', '__pycache__', '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache', 'Pods', 'DerivedData', '.gradle', '.idea', 'bower_components', 'third_party', '.terraform', '.terragrunt-cache'])
+export const SKIP_DIRS = new Set(['node_modules', '.git', '.grimoire', '.worktrees', 'vendor', 'dist', 'build', 'out', 'target', '.next', '.nuxt', '.svelte-kit', '.turbo', 'coverage', '__pycache__', '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache', 'Pods', 'DerivedData', '.gradle', '.idea', 'bower_components', 'third_party', '.terraform', '.terragrunt-cache'])
 const SKIP_FILE = /\.(min|bundle|generated|pb)\.[^/]+$|\.d\.ts$|(^|\/)(package-lock|yarn\.lock|pnpm-lock)|\.terraform\.lock\.hcl$/
 
 // Minimal globs: `*` within a segment, `**` across segments, a bare name matches any segment.
-function compileGlobs(globs) {
+export function compileGlobs(globs) {
   return globs.map((g) => {
     if (!/[*/]/.test(g)) return new RegExp(`(^|/)${g.replace(/[.+?^${}()|[\]\\]/g, '\\$&')}(/|$)`)
     const re = g.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*\*\/?/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*')
@@ -50,27 +52,30 @@ function compileGlobs(globs) {
   })
 }
 
-const skipped = (rel, project) => rel.split('/').some((s) => SKIP_DIRS.has(s)) || SKIP_FILE.test(rel) || project.exclude.some((re) => re.test(rel))
+export const skipped = (rel, project) => rel.split('/').some((s) => SKIP_DIRS.has(s)) || SKIP_FILE.test(rel) || project.exclude.some((re) => re.test(rel))
 
-// Every indexable file of a repository: git's view (tracked + untracked, .gitignore honoured)
-// when it is a git work tree, a directory walk otherwise.
-export function scanRepo(repo, project) {
-  let rels = null
-  const git = spawnSync('git', ['-C', repo.abs, 'ls-files', '-co', '--exclude-standard', '-z'], { encoding: 'utf8', maxBuffer: 1 << 28 })
-  if (git.status === 0) rels = git.stdout.split('\0').filter(Boolean)
-  else {
-    rels = []
-    const walk = (dir, rel) => {
-      let ents = []
-      try { ents = readdirSync(dir, { withFileTypes: true }) } catch { return }
-      for (const e of ents) {
-        const r = rel ? `${rel}/${e.name}` : e.name
-        if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) walk(path.join(dir, e.name), r) }
-        else if (e.isFile()) rels.push(r)
-      }
+// Every file of a directory, relative to it: git's view (tracked + untracked, .gitignore
+// honoured) when it is a git work tree, a directory walk otherwise.
+export function listPaths(abs) {
+  const git = spawnSync('git', ['-C', abs, 'ls-files', '-co', '--exclude-standard', '-z'], { encoding: 'utf8', maxBuffer: 1 << 28 })
+  if (git.status === 0) return git.stdout.split('\0').filter(Boolean)
+  const rels = []
+  const walk = (dir, rel) => {
+    let ents = []
+    try { ents = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of ents) {
+      const r = rel ? `${rel}/${e.name}` : e.name
+      if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) walk(path.join(dir, e.name), r) }
+      else if (e.isFile()) rels.push(r)
     }
-    walk(repo.abs, '')
   }
+  walk(abs, '')
+  return rels
+}
+
+// Every indexable file of a repository.
+export function scanRepo(repo, project) {
+  const rels = listPaths(repo.abs)
   const out = []
   for (const rel of rels) {
     const lang = langOf(rel)

@@ -20,8 +20,9 @@ and no key. Running the cases is manual and paid, and needs the command-line `cl
 | Skill | Cases | Positive | Negative | Edge |
 | --- | --- | --- | --- | --- |
 | adaptive-replanning | 4 | 1 | 1 | 2 |
+| architecture | 5 | 1 | 2 | 2 |
 | crystallize | 5 | 1 | 1 | 3 |
-| graph | 5 | 1 | 2 | 2 |
+| graph | 7 | 1 | 3 | 3 |
 | implement | 5 | 1 | 1 | 3 |
 | launch-agent | 5 | 1 | 1 | 3 |
 | logs | 5 | 1 | 1 | 3 |
