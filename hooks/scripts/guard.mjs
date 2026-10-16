@@ -50,7 +50,11 @@ const WRITE_VERBS = new Set([
   'upsert', 'apply', 'approve', 'decline', 'cancel', 'close', 'reopen', 'comment', 'schedule', 'invite', 'transfer',
   'buy', 'purchase', 'pay', 'deploy', 'rollback', 'promote', 'revoke', 'rename', 'change', 'modify', 'toggle',
   'enable', 'disable', 'exec', 'execute', 'run', 'invoke',
+  'pause', 'unpause', 'stop', 'kill', 'start', 'restart', 'reset', 'clear', 'purge', 'activate', 'deactivate',
+  'invalidate', 'accept', 'reject', 'grant', 'attach', 'detach', 'link', 'unlink', 'subscribe', 'unsubscribe',
+  'import', 'sync', 'stage', 'record', 'generate',
 ])
+// Left out on purpose: `issue`, `verify` and `test` read as nouns or reads too often.
 const FOLD = process.platform === 'darwin' || process.platform === 'win32'
 
 class Deny extends Error {}
