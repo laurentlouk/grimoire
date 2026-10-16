@@ -43,7 +43,8 @@ const body = readFileSync(`${DIR}/orchestrate-loop.js`, 'utf8').replace(/^export
 const { cksum, b64 } = new Function(`${body.slice(body.indexOf('const B64_CHARS'), body.indexOf('// A heredoc that lands as a decoded file'))}\nreturn { cksum, b64 }`)()
 
 let PASS = 0, FAIL = 0
-const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
+const okTo = (log) => (c, m) => { if (c) { PASS++; log(`   ✓ ${m}`) } else { FAIL++; log(`   ✗ FAIL: ${m}`) } }
+const ok = okTo((l) => console.log(l))
 const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.stringify(a) === JSON.stringify(b) ? '' : ` (got ${JSON.stringify(a)})`}`)
 const unb64 = (s) => Buffer.from(String(s).replace(/\s+/g, ''), 'base64').toString('utf8')
 
@@ -412,12 +413,89 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     const { prompt } = await run('', [A], happy, { args: { ...QUIET, repos: repoAt(path), execute: !preview, resumeState: { version: 2, attempt: 1, lastSeq: 1, landedTasks } }, index: { inputProblems: ['stop after the index'] } })
     return (/## Also RECONCILE[\s\S]*?```bash\n([\s\S]*?)\n```/.exec(prompt('parse-index')) || [])[1]
   }
-  const exec = (shell, script, extra = {}) => {
+  // a script run without blocking the event loop (RC-6 and RC-7, started below, keep running meanwhile,
+  // and RC-6's times are read when its scripts end): its stdout and how long it took
+  const timed = (shell, script, extra, opts = {}) => new Promise((res) => {
     const t0 = Date.now()
-    const r = spawnSync(shell, ['-c', script], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: `${BIN}:${process.env.PATH}`, GH_FAKE_JSON: '[]', ...extra }, timeout: 120000 })
-    return { out: r.stdout || '', err: r.stderr || '', ms: Date.now() - t0 }
-  }
+    const c = spawn(shell, ['-c', script], { cwd: W0, env: { ...env, ...extra }, ...opts })
+    let out = ''
+    c.stdout.setEncoding('utf8')
+    c.stdout.on('data', (d) => (out += d))
+    c.on('close', () => res({ out, ms: Date.now() - t0 }))
+  })
+  const exec = (shell, script, extra = {}) => timed(shell, script, { PATH: `${BIN}:${process.env.PATH}`, GH_FAKE_JSON: '[]', ...extra }, { timeout: 120000 })
   const lines = (out, kind) => out.split('\n').filter((l) => l.startsWith(`${kind} `))
+  // a case run in every shell at once, each shell on a clone of its own: each gets its own ok, whose
+  // lines are printed in shell order once all have run, so the output reads as one shell after another
+  const perShell = async (fn) => {
+    const logs = shells.map(() => [])
+    const runs = await Promise.allSettled(shells.map((shell, k) => fn(shell, okTo((l) => logs[k].push(l)))))
+    for (const l of logs.flat()) console.log(l)
+    const bad = runs.find((r) => r.status === 'rejected')
+    if (bad) throw bad.reason
+  }
+
+  // a clone of the run branch for a background case alone
+  const clone = (name) => { sh(`git clone -q origin.git ${name} 2>/dev/null`); const d = join(W0, name); sh(`git checkout -q ${RUN_BRANCH}`, d); return d }
+  // RC-6 and RC-7 mostly wait (deadlines; 1-s polls without perl or timeout) on repos and clones of their
+  // own, so they start here and run while RC-0 … RC-5 do, RC-6's cases side by side; their checks print
+  // in their place below
+  const rc6 = (async () => {
+    const srv = net.createServer((s) => s.on('error', () => {}))
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r))
+    const port = srv.address().port
+    const HB = join(W0, 'hangbin')
+    mkdirSync(HB)
+    writeFileSync(join(HB, 'gh'), '#!/bin/sh\nexec sleep 6071\n')
+    chmodSync(join(HB, 'gh'), 0o755)
+    const repos = ['api', 'web', 'ios'].map((name) => {
+      sh(`git init -q -b main hang-${name}`)
+      const d = join(W0, `hang-${name}`)
+      commit(d, 'base')
+      sh(`git remote add origin http://127.0.0.1:${port}/x.git`, d)
+      return { ...REPOS[0], name, path: d }
+    })
+    const { prompt } = await run('', [A], happy, { args: { ...QUIET, repos, resumeState: { version: 2, attempt: 1, lastSeq: 1, landedTasks: [] } }, index: { inputProblems: ['stop'] } })
+    const s = (/## Also RECONCILE[\s\S]*?```bash\n([\s\S]*?)\n```/.exec(prompt('parse-index')) || [])[1]
+    // origin answers, gh hangs; and a local git that hangs: each on a clone of its own
+    const GB = join(W0, 'ghhang')
+    mkdirSync(GB)
+    writeFileSync(join(GB, 'gh'), '#!/bin/sh\nexec sleep 6071\n')
+    chmodSync(join(GB, 'gh'), 0o755)
+    const s2 = await scriptFor(clone('work-ghhang'), [LANDED('PROJ-1', c1)])
+    const LB = join(W0, 'gitlock')
+    mkdirSync(LB)
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
+    writeFileSync(join(LB, 'git'), `#!/bin/sh\ncase "$*" in *merge-base*) exec sleep 6071 ;; esac\nexec ${realGit} "$@"\n`)
+    chmodSync(join(LB, 'git'), 0o755)
+    const s3 = await scriptFor(clone('work-gitlock'), [LANDED('PROJ-1', c1)])
+    const [hangs, gh, git] = await Promise.all([
+      Promise.all(shells.map((shell) => timed(shell, s, { PATH: `${HB}:${process.env.PATH}`, GRIMOIRE_RECONCILE_DEADLINE: '4' }))),
+      timed(shells[0], s2, { PATH: `${GB}:${process.env.PATH}`, GRIMOIRE_RECONCILE_DEADLINE: '3' }),
+      timed(shells[0], s3, { PATH: `${LB}:${BIN}:${process.env.PATH}`, GRIMOIRE_RECONCILE_DEADLINE: '2', GH_FAKE_JSON: '[]' }),
+    ])
+    srv.close()
+    spawnSync('sh', ['-c', 'pkill -f "sleep 6071" 2>/dev/null; true'])
+    return { s, index: prompt('parse-index'), hangs, gh, git }
+  })()
+  const rc7 = (async () => {
+    const LIM = join(W0, 'limbin')
+    mkdirSync(LIM)
+    const which = (c) => spawnSync('sh', ['-c', `command -v ${c}`], { encoding: 'utf8' }).stdout.trim()
+    for (const c of ['git', 'date', 'mktemp', 'grep', 'wc', 'tr', 'cksum', 'cut', 'sleep', 'rm', 'cat', 'jq', 'kill', 'printf', 'env', 'sed', 'awk', 'dirname', 'basename', 'uname', 'ls', 'expr', 'head', 'tail', 'git-remote-http']) {
+      const p = which(c)
+      if (p && p.startsWith('/') && !existsSync(join(LIM, c))) symlinkSync(p, join(LIM, c))
+    }
+    for (const sh0 of shells) { const p = which(sh0); if (p && !existsSync(join(LIM, sh0))) symlinkSync(p, join(LIM, sh0)) }
+    writeFileSync(join(LIM, 'gh'), readFileSync(join(BIN, 'gh')))
+    chmodSync(join(LIM, 'gh'), 0o755)
+    const script = await scriptFor(clone('work-noperl'), [LANDED('PROJ-1', c1)])
+    const bare = (await timed(join(LIM, shells[0]), script, { PATH: LIM, GH_FAKE_JSON: '[]' })).out
+    writeFileSync(join(LIM, 'timeout'), `#!/bin/sh\necho "$1" >> ${JSON.stringify(join(W0, 'timeout.log'))}\nshift\nexec "$@"\n`)
+    chmodSync(join(LIM, 'timeout'), 0o755)
+    const viaTimeout = (await timed(join(LIM, shells[0]), script, { PATH: LIM, GH_FAKE_JSON: '[]' })).out
+    return { bare, viaTimeout }
+  })()
 
   console.log('\n── RC-0 · the generated script has no parameter zsh would read as a modifier or a subscript')
   for (const preview of [false, true]) {
@@ -427,14 +505,14 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   }
 
   console.log('\n── RC-1 · a fresh clone where the run branch exists ONLY on origin (the zsh blocker)')
-  for (const shell of shells) {
+  await perShell(async (shell, ok) => {
     const F = join(W0, `fresh-${shell}`)
     sh(`git clone -q --single-branch -b main origin.git fresh-${shell} 2>/dev/null`)
     ok(!sh(`git rev-parse -q --verify refs/remotes/origin/${RUN_BRANCH}`, F), `${shell}: the clone has no origin/${RUN_BRANCH} yet`)
-    const { out } = exec(shell, await scriptFor(F, [LANDED('PROJ-1', c1), LANDED('PROJ-2', c2)]))
+    const { out } = await exec(shell, await scriptFor(F, [LANDED('PROJ-1', c1), LANDED('PROJ-2', c2)]))
     ok(out.includes(`BRANCH repo=api local=${c2} remote=${c2} sync=created fetch=ok ahead=2`), `${shell}: fetched, local branch created from origin; origin's branch is 2 commits past the base`)
     ok(out.includes(`TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)} local=yes origin=yes onBranch=yes inBase=no`) && out.includes(`TASK id=PROJ-2 repo=api sha=${c2.slice(0, 12)} local=yes origin=yes onBranch=yes inBase=no`), `${shell}: both landed tasks verified — nothing runs again`)
-  }
+  })
 
   // the run's own checkout for the rest
   sh('git clone -q origin.git work 2>/dev/null')
@@ -455,7 +533,7 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     ]
     for (const shell of shells) {
       rmSync(GH_LOG, { force: true })
-      const { out } = exec(shell, await scriptFor(Wk, [LANDED('PROJ-1', c1)]), { GH_FAKE_JSON: prJson(prs), GH_LOG })
+      const { out } = await exec(shell, await scriptFor(Wk, [LANDED('PROJ-1', c1)]), { GH_FAKE_JSON: prJson(prs), GH_LOG })
       const tok = tokenOf(mine)
       const prl = lines(out, 'PR')
       ok(readFileSync(GH_LOG, 'utf8').trim().split('\n').length === 1, `${shell}: one gh call per repo (the two are merged)`)
@@ -469,107 +547,56 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     }
     console.log('\n── RC-3 · the TASK lines one marker yields are capped')
     const many = stateOf({ landedTasks: Array.from({ length: 110 }, (_, k) => [`T-${k}`, c1]) })
-    const { out: capOut } = exec(shells[0], await scriptFor(Wk, []), { GH_FAKE_JSON: prJson([{ number: 1, url: PR_URL, state: 'OPEN', isDraft: true, isCrossRepository: false, body: markerBody(many) }]) })
+    const { out: capOut } = await exec(shells[0], await scriptFor(Wk, []), { GH_FAKE_JSON: prJson([{ number: 1, url: PR_URL, state: 'OPEN', isDraft: true, isCrossRepository: false, body: markerBody(many) }]) })
     ok(tokenOf(many).length <= 8000, `(a marker within its bound: ${tokenOf(many).length} characters)`)
     eq(lines(capOut, 'TASK').length, 100, '110 listed → 100 TASK lines (MARKER_TASK_CAP)')
   } else console.log('\n   (jq not installed — RC-2 and RC-3 are skipped)')
 
   console.log('\n── RC-4 · read-only (a preview): never creates or fast-forwards a branch; checks against origin')
-  for (const shell of shells) {
+  await perShell(async (shell, ok) => {
     const R = join(W0, `ro-${shell}`)
     sh(`git clone -q --single-branch -b main origin.git ro-${shell} 2>/dev/null`)
-    const ro = exec(shell, await scriptFor(R, [LANDED('PROJ-1', c1)], { preview: true })).out
+    const ro = (await exec(shell, await scriptFor(R, [LANDED('PROJ-1', c1)], { preview: true }))).out
     ok(ro.includes(`BRANCH repo=api local=none remote=${c2} sync=remote-only fetch=ok ahead=2`) && !sh(`git rev-parse -q --verify refs/heads/${RUN_BRANCH}`, R), `${shell}: remote-only, no local branch created (ahead=2: a fresh start would refuse)`)
     ok(ro.includes(`TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)} local=no origin=yes onBranch=yes inBase=no`), `${shell}: verified against origin`)
     sh(`git branch -q ${RUN_BRANCH} ${c1} && git checkout -q ${RUN_BRANCH}`, R)
-    const behind = exec(shell, await scriptFor(R, [LANDED('PROJ-2', c2)], { preview: true })).out
+    const behind = (await exec(shell, await scriptFor(R, [LANDED('PROJ-2', c2)], { preview: true }))).out
     ok(behind.includes(`local=${c1} remote=${c2} sync=behind fetch=ok`) && sh('git rev-parse HEAD', R) === c1, `${shell}: behind stays behind — not fast-forwarded`)
     ok(behind.includes(`TASK id=PROJ-2 repo=api sha=${c2.slice(0, 12)} local=no origin=yes onBranch=yes`), `${shell}: a head origin holds is verified for the proof`)
-  }
+  })
 
   console.log('\n── RC-5 · execute: a dirty checkout behind origin stays behind (the run refuses), a bad origin says fetch=failed')
   {
     const D = join(W0, 'dirty')
     sh('git clone -q origin.git dirty 2>/dev/null')
     sh(`git checkout -q -b ${RUN_BRANCH} ${c1} && echo x > f.txt && git add f.txt`, D)
-    const { out } = exec(shells[0], await scriptFor(D, [LANDED('PROJ-2', c2)]))
+    const { out } = await exec(shells[0], await scriptFor(D, [LANDED('PROJ-2', c2)]))
     ok(out.includes(`local=${c1} remote=${c2} sync=behind fetch=ok`) && sh('git rev-parse HEAD', D) === c1, 'behind, untouched')
     ok(out.includes(`TASK id=PROJ-2 repo=api sha=${c2.slice(0, 12)} local=no origin=yes onBranch=no`), 'and its local branch does not hold PROJ-2')
     sh('git remote set-url origin /nonexistent/x.git', D)
-    ok(exec(shells[0], await scriptFor(D, [])).out.includes('fetch=failed'), 'fetch=failed')
+    ok((await exec(shells[0], await scriptFor(D, []))).out.includes('fetch=failed'), 'fetch=failed')
   }
 
   console.log('\n── RC-6 · one deadline for the whole script, repos in parallel (origin and gh both hang)')
   {
-    const srv = net.createServer((s) => s.on('error', () => {}))
-    await new Promise((r) => srv.listen(0, '127.0.0.1', r))
-    const port = srv.address().port
-    const HB = join(W0, 'hangbin')
-    mkdirSync(HB)
-    writeFileSync(join(HB, 'gh'), '#!/bin/sh\nexec sleep 6071\n')
-    chmodSync(join(HB, 'gh'), 0o755)
-    const repos = ['api', 'web', 'ios'].map((name) => {
-      sh(`git init -q -b main hang-${name}`)
-      const d = join(W0, `hang-${name}`)
-      commit(d, 'base')
-      sh(`git remote add origin http://127.0.0.1:${port}/x.git`, d)
-      return { ...REPOS[0], name, path: d }
-    })
-    const { prompt } = await run('', [A], happy, { args: { ...QUIET, repos, resumeState: { version: 2, attempt: 1, lastSeq: 1, landedTasks: [] } }, index: { inputProblems: ['stop'] } })
-    const s = (/## Also RECONCILE[\s\S]*?```bash\n([\s\S]*?)\n```/.exec(prompt('parse-index')) || [])[1]
-    ok(/DL=\$\{GRIMOIRE_RECONCILE_DEADLINE:-90\}/.test(s) && /Run this script ONCE[\s\S]*returns within about 90 s/.test(prompt('parse-index')), 'the deadline is 90 s (the Bash tool allows 120 s)')
-    for (const shell of shells) {
-      const r = await new Promise((res) => {
-        const t0 = Date.now()
-        const c = spawn(shell, ['-c', s], { cwd: W0, env: { ...env, PATH: `${HB}:${process.env.PATH}`, GRIMOIRE_RECONCILE_DEADLINE: '4' } })
-        let out = ''
-        c.stdout.on('data', (d) => (out += d))
-        c.on('close', () => res({ out, ms: Date.now() - t0 }))
-      })
+    const { s, index, hangs, gh, git } = await rc6 // started before RC-0
+    ok(/DL=\$\{GRIMOIRE_RECONCILE_DEADLINE:-90\}/.test(s) && /Run this script ONCE[\s\S]*returns within about 90 s/.test(index), 'the deadline is 90 s (the Bash tool allows 120 s)')
+    shells.forEach((shell, i) => {
+      const r = hangs[i]
       ok(r.ms < 12000, `${shell}: three hanging repos return in ${Math.round(r.ms / 100) / 10} s (deadline 4 s; sequential 30-s limits took 181 s)`)
       ok(['api', 'web', 'ios'].every((n) => r.out.includes(`BRANCH repo=${n} local=none remote=none sync=missing fetch=failed ahead=none`)), `${shell}: a BRANCH line per repo, fetch=failed, ahead=none`)
       ok(lines(r.out, 'PR').length === 3 && lines(r.out, 'PR').every((l) => / none \(/.test(l)), `${shell}: a PR line per repo saying why there is none`)
-    }
-    srv.close()
+    })
     // origin answers, gh hangs: the gh call is cut at the deadline (exit 142), the BRANCH line is there
-    const GB = join(W0, 'ghhang')
-    mkdirSync(GB)
-    writeFileSync(join(GB, 'gh'), '#!/bin/sh\nexec sleep 6071\n')
-    chmodSync(join(GB, 'gh'), 0o755)
-    const s2 = await scriptFor(Wk, [LANDED('PROJ-1', c1)])
-    const t0 = Date.now()
-    const g = spawnSync(shells[0], ['-c', s2], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: `${GB}:${process.env.PATH}`, GRIMOIRE_RECONCILE_DEADLINE: '3' } })
-    ok(Date.now() - t0 < 10000 && /^PR repo=api none \(gh failed: exit 142\)$/m.test(g.stdout) && g.stdout.includes(`TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)}`), `a hanging gh is cut at the deadline (exit 142) in ${Math.round((Date.now() - t0) / 100) / 10} s; the branch and its tasks are still reported`)
+    ok(gh.ms < 10000 && /^PR repo=api none \(gh failed: exit 142\)$/m.test(gh.out) && gh.out.includes(`TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)}`), `a hanging gh is cut at the deadline (exit 142) in ${Math.round(gh.ms / 100) / 10} s; the branch and its tasks are still reported`)
     // a LOCAL git command that hangs (no per-command limit): the backstop kills the repo's job after the deadline
-    const LB = join(W0, 'gitlock')
-    mkdirSync(LB)
-    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
-    writeFileSync(join(LB, 'git'), `#!/bin/sh\ncase "$*" in *merge-base*) exec sleep 6071 ;; esac\nexec ${realGit} "$@"\n`)
-    chmodSync(join(LB, 'git'), 0o755)
-    const t1 = Date.now()
-    const h = spawnSync(shells[0], ['-c', s2], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: `${LB}:${BIN}:${process.env.PATH}`, GRIMOIRE_RECONCILE_DEADLINE: '2', GH_FAKE_JSON: '[]' } })
-    ok(Date.now() - t1 < 15000 && /^WARN repo=api: the reconcile did not finish within 2 s, its lines may be incomplete$/m.test(h.stdout), `a hung local git: the job is stopped ${Math.round((Date.now() - t1) / 100) / 10} s in and the WARN line says so`)
-    spawnSync('sh', ['-c', 'pkill -f "sleep 6071" 2>/dev/null; true'])
+    ok(git.ms < 15000 && /^WARN repo=api: the reconcile did not finish within 2 s, its lines may be incomplete$/m.test(git.out), `a hung local git: the job is stopped ${Math.round(git.ms / 100) / 10} s in and the WARN line says so`)
   }
 
   console.log('\n── RC-7 · no perl: timeout/gtimeout, else in the background, killed at the limit, with a warning')
   {
-    const LIM = join(W0, 'limbin')
-    mkdirSync(LIM)
-    const which = (c) => spawnSync('sh', ['-c', `command -v ${c}`], { encoding: 'utf8' }).stdout.trim()
-    for (const c of ['git', 'date', 'mktemp', 'grep', 'wc', 'tr', 'cksum', 'cut', 'sleep', 'rm', 'cat', 'jq', 'kill', 'printf', 'env', 'sed', 'awk', 'dirname', 'basename', 'uname', 'ls', 'expr', 'head', 'tail', 'git-remote-http']) {
-      const p = which(c)
-      if (p && p.startsWith('/') && !existsSync(join(LIM, c))) symlinkSync(p, join(LIM, c))
-    }
-    for (const sh0 of shells) { const p = which(sh0); if (p && !existsSync(join(LIM, sh0))) symlinkSync(p, join(LIM, sh0)) }
-    writeFileSync(join(LIM, 'gh'), readFileSync(join(BIN, 'gh')))
-    chmodSync(join(LIM, 'gh'), 0o755)
-    const script = await scriptFor(Wk, [LANDED('PROJ-1', c1)])
-    const bare = spawnSync(join(LIM, shells[0]), ['-c', script], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: LIM, GH_FAKE_JSON: '[]' } }).stdout
+    const { bare, viaTimeout } = await rc7 // started before RC-0
     ok(/^WARN no perl, timeout or gtimeout here: each fetch and gh call runs in the background and is killed at its time limit$/m.test(bare) && bare.includes(`TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)}`), 'warned, and it still checks')
-    writeFileSync(join(LIM, 'timeout'), `#!/bin/sh\necho "$1" >> ${JSON.stringify(join(W0, 'timeout.log'))}\nshift\nexec "$@"\n`)
-    chmodSync(join(LIM, 'timeout'), 0o755)
-    const viaTimeout = spawnSync(join(LIM, shells[0]), ['-c', script], { cwd: W0, encoding: 'utf8', env: { ...env, PATH: LIM, GH_FAKE_JSON: '[]' } }).stdout
     ok(!/^WARN/m.test(viaTimeout) && existsSync(join(W0, 'timeout.log')) && readFileSync(join(W0, 'timeout.log'), 'utf8').trim().split('\n').every((n) => Number(n) >= 1 && Number(n) <= 30), 'timeout is used, each limit within 1–30 s')
   }
   console.log('\n── RC-8 · the base is fetched too: a stale origin/main never misjudges inBase or ahead')
@@ -585,13 +612,13 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
     sh(`git push -q origin ${RUN_BRANCH}`, P8)
     for (const shell of shells) sh(`git clone -q o8.git stale8-${shell} 2>/dev/null && git -C stale8-${shell} branch -q ${RUN_BRANCH} origin/${RUN_BRANCH}`)
     sh(`git checkout -q main && git merge -q --ff-only ${RUN_BRANCH} && git push -q origin main`, P8)
-    for (const shell of shells) {
+    await perShell(async (shell, ok) => {
       const S8 = join(W0, `stale8-${shell}`)
       ok(sh(`git rev-parse refs/remotes/origin/main`, S8) !== d1, `${shell}: the clone's origin/main predates the upstream merge`)
-      const { out } = exec(shell, await scriptFor(S8, [LANDED('PROJ-1', d1)]))
+      const { out } = await exec(shell, await scriptFor(S8, [LANDED('PROJ-1', d1)]))
       ok(out.includes(`BRANCH repo=api local=${d1} remote=${d1} sync=same fetch=ok ahead=0`), `${shell}: after fetching the base, origin's run branch is 0 commits past it`)
       ok(out.includes(`TASK id=PROJ-1 repo=api sha=${d1.slice(0, 12)} local=yes origin=yes onBranch=no inBase=yes`), `${shell}: the task merged upstream reads inBase=yes (the tracker absorbs it), never a branch-only landing`)
-    }
+    })
   }
   rmSync(W0, { recursive: true, force: true })
 }
