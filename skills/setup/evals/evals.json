@@ -133,7 +133,7 @@
     "id": 6,
     "query": "We set grimoire up here a few months ago: grimoire.config.json, .claude/settings.json, memory/, AGENTS.md and CLAUDE.md are all in place. Since then we added an infra repo under repositories/infra. Re-run the setup to bring it up to date.",
     "should_trigger": true,
-    "expected_output": "Treats this as a re-run: reads the existing grimoire.config.json, .claude/settings.json, memory/, .claude/agents/, AGENTS.md and CLAUDE.md before proposing anything, and never opens secret files. Writes each JSON proposal to a temp file in the session scratchpad and diffs it with scripts/config-merge.mjs without --write. Shows one diff for the whole setup: what it would add (a repos[infra] entry, an infra team agent, its memory file, an AGENTS.md row), any changed keys as separate decisions, and what it leaves alone. Changes no project file before the user's yes; on the yes, writes the JSON files with config-merge.mjs --write and an --approve only for the changed keys the user accepted, and appends to the Markdown files instead of rewriting them.",
+    "expected_output": "Treats this as a re-run: reads the existing grimoire.config.json, .claude/settings.json, memory/, .claude/agents/, AGENTS.md and CLAUDE.md before proposing anything, and never opens secret files. Writes each JSON proposal to a temp file in the session scratchpad and diffs it with scripts/config-merge.mjs without --write. Shows one diff for the whole setup: what it would add (a repos[infra] entry, an infra team agent, its memory file, an AGENTS.md row), any changed keys as separate decisions, and what it leaves alone. Changes no project file before the user's yes. On the yes, writes grimoire.config.json with config-merge.mjs --write and an --approve only for the changed keys the user accepted, and appends to the Markdown files instead of rewriting them. It never writes .claude/settings.json itself: it prints the exact --write command, with absolute paths and a quoted --approve per accepted change, for the user to run, then re-runs the dry run to confirm.",
     "expectations": [
       {
         "text": "Reads the existing grimoire.config.json, .claude/settings.json, memory, agents, AGENTS.md and CLAUDE.md before proposing, and treats their values as the user's choices",
@@ -157,6 +157,11 @@
       },
       {
         "text": "Proposes appends or diffs for AGENTS.md, CLAUDE.md and memory files instead of overwriting them, and does not open or quote any secret file",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not run --write on .claude/settings.json itself; it prints the command for the user to run",
         "passed": null,
         "evidence": ""
       }
