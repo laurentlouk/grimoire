@@ -16,7 +16,8 @@
 //    • idempotence: the merged output as current, with the same proposal, gives no ADDED and
 //      no CHANGED; a declined change is still a difference, so it is listed again
 //    • secret-looking values (token|secret|password|apikey|api_key keys) are «redacted» in the
-//      printed diff, text and --json, and intact in the written file; numbers stay visible
+//      printed diff, text and --json, and intact in the written file; numbers stay visible;
+//      an empty proposal lists the whole current file as KEPT, redacted (how setup reads it)
 //    • .claude/settings.json: permissions lists are sets (user entries kept, proposed ones
 //      appended once), hooks are matched by matcher and their commands merged as a set
 //    • an --approve that names no CHANGED key warns on stderr and is ignored
@@ -325,6 +326,20 @@ try {
     const j = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json')
     ok(SECRETS.every((s) => !j.stdout.includes(s)), 'no secret value appears in the --json output either')
     same(json(j) && json(j).changed[1], { path: 'slack.botToken', current: '«redacted»', proposed: '«redacted»', approved: false }, '--json shows a changed secret as «redacted» on both sides')
+
+    // How setup reads a JSON file without putting its secrets in context: an empty proposal.
+    writeFileSync(join(d, 'empty.json'), '{}\n')
+    const e = cli(d, '--current', 'grimoire.config.json', '--proposed', 'empty.json', '--write', '--json')
+    same(json(e) && { added: json(e).added, changed: json(e).changed, kept: json(e).kept, written: json(e).written }, {
+      added: [], changed: [],
+      kept: [
+        { path: 'maxOutputTokens', value: 4000000 },
+        { path: 'env', value: { GITHUB_TOKEN: '«redacted»', LOG_LEVEL: 'debug' } },
+        { path: 'slack', value: { botToken: '«redacted»' } },
+      ],
+      written: null,
+    }, 'against an empty proposal every key is listed as KEPT, secrets redacted, and even --write writes nothing')
+    ok(readFileSync(join(d, 'grimoire.config.json'), 'utf8') === pretty(cur), 'the file is untouched')
   }
 
   // ══════ 8 · .claude/settings.json ══════
