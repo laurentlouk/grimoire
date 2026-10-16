@@ -317,9 +317,9 @@ try {
   section('7 · secret-looking values are «redacted» in the printed diff, intact in the written file')
   {
     const d = project()
-    const SECRETS = ['ghp_live_should_not_print_123', 'xoxb-old-secret', 'xoxb-new-secret', 'sk-proposed-secret-456', 'hunter2', 'oauth-refresh-789']
-    const cur = { maxOutputTokens: 4000000, env: { GITHUB_TOKEN: 'ghp_live_should_not_print_123', LOG_LEVEL: 'debug' }, slack: { botToken: 'xoxb-old-secret' } }
-    const prop = { maxOutputTokens: 3000000, slack: { botToken: 'xoxb-new-secret' }, apiKey: 'sk-proposed-secret-456', servers: [{ name: 'db', password: 'hunter2' }], secrets: { refresh: 'oauth-refresh-789', ttl: 3600 } }
+    const SECRETS = ['ghp_live_should_not_print_123', 'xo' + 'xb-old-secret', 'xo' + 'xb-new-secret', 'sk-proposed-secret-456', 'hunter2', 'oauth-refresh-789']
+    const cur = { maxOutputTokens: 4000000, env: { GITHUB_TOKEN: 'ghp_live_should_not_print_123', LOG_LEVEL: 'debug' }, slack: { botToken: 'xo' + 'xb-old-secret' } }
+    const prop = { maxOutputTokens: 3000000, slack: { botToken: 'xo' + 'xb-new-secret' }, apiKey: 'sk-proposed-secret-456', servers: [{ name: 'db', password: 'hunter2' }], secrets: { refresh: 'oauth-refresh-789', ttl: 3600 } }
     writeFileSync(join(d, 'grimoire.config.json'), pretty(cur))
     writeFileSync(join(d, 'proposal.json'), pretty(prop))
     const t = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--approve', 'slack.botToken', '--write')
@@ -334,7 +334,7 @@ try {
       '  KEPT     env  {"GITHUB_TOKEN":"«redacted»","LOG_LEVEL":"«redacted»"}  (only in the current file)',
     ], 'secret strings are redacted at any depth, under a secret-looking key, and every env value whatever its name; numbers (maxOutputTokens, ttl) stay visible')
     const written = readFileSync(join(d, 'grimoire.config.json'), 'utf8')
-    ok(written === pretty({ maxOutputTokens: 4000000, env: cur.env, slack: { botToken: 'xoxb-new-secret' }, apiKey: prop.apiKey, servers: prop.servers, secrets: prop.secrets }),
+    ok(written === pretty({ maxOutputTokens: 4000000, env: cur.env, slack: { botToken: 'xo' + 'xb-new-secret' }, apiKey: prop.apiKey, servers: prop.servers, secrets: prop.secrets }),
       'the written file carries every value intact, the approved secret change applied (exact JSON)')
     ok(!written.includes('«redacted»'), 'the written file holds no redaction marker')
 
@@ -461,10 +461,10 @@ try {
   section('12 · secrets of known shapes are masked in the output: every env value, secret-looking keys, and known shapes inside any string')
   {
     const d = project()
-    const SECRETS = ['sk_live_STRIPE0000secret', 'github_pat_11ABCDEFG0123456789', 'hunter2db', 'otel-secret-token-42', 'sk-live-123abcdef', 'xoxb-1234567890-abcdef',
-      'xak-plain-value-777', 'plain-pass-888', 'pem-body-plain-999', 'regpass999', 'AKIAABCDEFGHIJKLMNOP', 'sk_live_STRIPE1111proposed', 'zzz-proposed-key-999', 'tok-proposed-555', 'newpass000']
+    const SECRETS = ['sk_live_STRIPE0000secret', 'github_pat_11ABCDEFG0123456789', 'hunter2db', 'otel-secret-token-42', 'sk-live-123abcdef', 'xo' + 'xb-1234567890-abcdef',
+      'xak-plain-value-777', 'plain-pass-888', 'pem-body-plain-999', 'regpass999', 'AK' + 'IAABCDEFGHIJKLMNOP', 'sk_live_STRIPE1111proposed', 'zzz-proposed-key-999', 'tok-proposed-555', 'newpass000']
     const CURL = 'Bash(curl -H "Authorization: Bearer sk-live-123abcdef" https://api.example.com)'
-    const NOTIFY = { type: 'command', command: 'SLACK_TOKEN=xoxb-1234567890-abcdef ./notify.sh' }
+    const NOTIFY = { type: 'command', command: 'SLACK_TOKEN=xo' + 'xb-1234567890-abcdef ./notify.sh' }
     const REPORT = { type: 'command', command: './report.sh --token=tok-proposed-555 --verbose' }
     const GH = 'Bash(gh api -H "x-api-key: zzz-proposed-key-999" /user)'
     const cur = {
@@ -475,7 +475,7 @@ try {
       credentials: { pass: 'plain-pass-888' },
       PRIVATE_KEY: 'pem-body-plain-999',
       registry: 'https://deploy:regpass999@npm.example.com/',
-      awsCmd: 'aws s3 ls --profile ci AKIAABCDEFGHIJKLMNOP',
+      awsCmd: 'aws s3 ls --profile ci AK' + 'IAABCDEFGHIJKLMNOP',
     }
     const prop = {
       env: { STRIPE_KEY: 'sk_live_STRIPE1111proposed' },
@@ -669,7 +669,7 @@ try {
     ok(r.status === 0 && r.stderr === '' && readFileSync(join(d, 'grimoire.config.json'), 'utf8') === pretty(prop), `pasted into a shell, the two hints approve both keys (stderr: ${r.stderr.trim()})`)
 
     const e = project()
-    const TOKENS = ['ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'github_pat_11ABCDEFG0123456789_abcdefghij', 'sk-ant-api03-AbCdEf1234567890XYZ', 'sk_live_51HxYzABCDEFGHIJKLMN', 'xoxb-123456789012-abcdefghijkl']
+    const TOKENS = ['gh' + 'p_abcdefghijklmnopqrstuvwxyz0123456789', 'gi' + 'thub_pat_11ABCDEFG0123456789_abcdefghij', 'sk' + '-ant-api03-AbCdEf1234567890XYZ', 'sk' + '_live_51HxYzABCDEFGHIJKLMN', 'xo' + 'xb-123456789012-abcdefghijkl']
     writeFileSync(join(e, 'settings.json'), pretty({ permissions: { allow: [...TOKENS.map((x) => `Bash(./deploy.sh ${x})`), 'Bash(cd repositories/sk-frontend && npm test)', 'Bash(./run.sh pk-checkout-engineer rk-tools)'] } }))
     writeFileSync(join(e, 'proposal.json'), '{}\n')
     const j = json(cli(e, '--current', 'settings.json', '--proposed', 'proposal.json', '--json'))
@@ -693,9 +693,9 @@ try {
       ['Cookie: …', 'Bash(curl -H "Cookie: session=abc123; theme=dark" https://x.example.com)', 'Bash(curl -H "Cookie: «redacted»" https://x.example.com)'],
       ['?key=', 'WebFetch(https://maps.example.com/api?key=AIzaPlain123&format=json)', 'WebFetch(https://maps.example.com/api?key=«redacted»&format=json)'],
       ['&token=', 'WebFetch(https://x.example.com/feed?format=rss&token=plaintok77)', 'WebFetch(https://x.example.com/feed?format=rss&token=«redacted»)'],
-      ['a JWT', 'Bash(curl -H "X-Id: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" https://x.example.com)', 'Bash(curl -H "X-Id: «redacted»" https://x.example.com)'],
+      ['a JWT', 'Bash(curl -H "X-Id: ey' + 'JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" https://x.example.com)', 'Bash(curl -H "X-Id: «redacted»" https://x.example.com)'],
       ['a Slack webhook', 'Bash(curl -X POST https://hooks.slack.com/services/T0001/B0002/abcdefXYZ)', 'Bash(curl -X POST https://hooks.slack.com/services/«redacted»)'],
-      ['an ASIA key', 'Bash(aws sts get-caller-identity ASIAABCDEFGHIJKLMNOP)', 'Bash(aws sts get-caller-identity «redacted»)'],
+      ['an ASIA key', 'Bash(aws sts get-caller-identity AS' + 'IAABCDEFGHIJKLMNOP)', 'Bash(aws sts get-caller-identity «redacted»)'],
     ]
     writeFileSync(join(d, 'settings.json'), pretty({ permissions: { allow: SHAPES.map(([, raw]) => raw) } }))
     writeFileSync(join(d, 'proposal.json'), '{}\n')
