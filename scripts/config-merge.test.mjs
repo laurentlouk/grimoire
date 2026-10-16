@@ -25,7 +25,8 @@
 //      xoxb-…, AKIA/ASIA…) print as «redacted», the rest of the string kept; keys and paths are
 //      never masked (a repo named sk-frontend keeps its name and its --approve hint); the written
 //      file keeps the real values; numbers stay visible; an empty proposal lists the whole
-//      current file as KEPT, redacted (how setup reads it)
+//      current file as KEPT, redacted (how setup reads it), a .mcp.json's header tokens, env
+//      values and credentialed URLs included
 //    • .claude/settings.json: permissions lists are sets (user entries kept, proposed ones
 //      appended once), hooks are matched by matcher and their commands merged as a set keyed by
 //      type and command, so a user's entry with extra fields is kept, not duplicated
@@ -742,6 +743,33 @@ try {
     writeFileSync(join(a, 'proposal.json'), pretty({ manager: { sources: [LINEAR] } }))
     const v = json(cli(a, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
     same(v && v.changed.map((c) => c.path), ['manager.sources'], 'two sources with one id are not keyable: the array is one value, CHANGED whole')
+  }
+
+  // ══════ 22 · .mcp.json read through the script ══════
+  section('22 · a .mcp.json diffed against {} (how setup reads it): header tokens, env keys and credentialed URLs print as «redacted», server names and plain fields stay')
+  {
+    const d = project()
+    const MCP = {
+      mcpServers: {
+        github: { type: 'http', url: 'https://api.githubcopilot.com/mcp/x/issues/readonly', headers: { Authorization: 'Bearer ghp_plainvalue1234567890abcd' } },
+        linear: { command: 'npx', args: ['-y', 'mcp-remote', 'https://mcp.linear.app/mcp', '--header', 'Authorization: Bearer lin_api_plain123'], env: { LINEAR_API_KEY: 'lin_api_plain123', AUTH_HEADER: 'Bearer lin_api_plain123' } },
+        jira: { type: 'http', url: 'https://bot:hunter2@jira.example.com/mcp?api_key=plainkey99' },
+        expo: { command: 'npx', args: ['expo-mcp', '--dev-server-url', 'http://localhost:8081'] },
+      },
+    }
+    writeFileSync(join(d, '.mcp.json'), pretty(MCP))
+    writeFileSync(join(d, 'empty.json'), '{}\n')
+    const r = cli(d, '--current', '.mcp.json', '--proposed', 'empty.json', '--json')
+    const j = json(r)
+    const s = (j && j.kept[0] && j.kept[0].value) || {}
+    ok(r.status === 0 && j && j.kept.length === 1 && j.kept[0].path === 'mcpServers', 'the whole file is listed as KEPT, nothing added or written')
+    same(s.github && s.github.headers, { Authorization: '«redacted»' }, 'a remote server\'s Authorization header prints as «redacted»')
+    same(s.linear && s.linear.env, { LINEAR_API_KEY: '«redacted»', AUTH_HEADER: '«redacted»' }, 'every env value of an mcp-remote entry prints as «redacted»')
+    same(s.linear && s.linear.args, ['-y', 'mcp-remote', 'https://mcp.linear.app/mcp', '--header', 'Authorization: «redacted»'], 'an Authorization header passed as an argument is masked, the rest kept')
+    ok(s.jira && s.jira.url === 'https://«redacted»@jira.example.com/mcp?api_key=«redacted»', `URL credentials and a key parameter are masked (got ${JSON.stringify(s.jira && s.jira.url)})`)
+    same(s.github && s.github.url, 'https://api.githubcopilot.com/mcp/x/issues/readonly', 'a plain URL stays readable, so setup can tell a read-only endpoint')
+    same(s.expo, MCP.mcpServers.expo, 'a server with no secret prints as it is')
+    ok(!/plainvalue|lin_api_plain|hunter2|plainkey99/.test(r.stdout), 'no secret value appears anywhere in the output')
   }
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
