@@ -251,6 +251,7 @@ This is inspired by Symphony's issue model and Linear's importer types. The scri
 | Where should state live? | `.grimoire/manager/`, which is already gitignored | `.gitignore:3`; `render-logs.mjs` layout |
 | What does a new skill or agent need to pass CI? | Skill: `SKILL.md`, at least 3 evals of both polarities, generated `evals/`, the README badge. Agent: frontmatter, an `AGENTS.md` row, and a memory file if it writes | `check-drift.mjs`; `build-evals.mjs` |
 | Is a new config key checked? | The example's top-level keys must appear in `workflows/README.md`, so `manager` gets a "not read by the loop" row like `guard` and `graph` | `check-drift.mjs:219-228` |
+| Does a subagent see the session's claude.ai connectors? | Yes, when its definition has no `tools:` line: a probe on 2026-10-16 loaded the Linear connector's tools with ToolSearch and read real issues. So `tracker-scout` drops `tools:` and gets a memory file, and the guard's MCP rule keeps it read-only | in-session probe (ODY-871 prep) |
 | Does the hooks change need the harness manifest regenerated? | Yes. `hooks/hooks.json` and `guard.mjs` are in its scope (`npm run harness:manifest`) | `harness-manifest.mjs:10` |
 
 ## Docs drift fixed
