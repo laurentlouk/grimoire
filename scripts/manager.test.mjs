@@ -828,6 +828,19 @@ try {
     ok(JSON.stringify(EP.front.sources) === '["linear","runs"]' && EP.front.partial === false && /runs \(3\)/.test(latest(e2e)), 'its status goes into the sources like the others: runs (3), not "not reported"')
     ok(EP.front.counts.runsNeedingUs === 3 && EP.front.counts.prsFailing === 0 && EP.front.counts.urgent === 0, `the front matter counts the runs under Do in counts.runsNeedingUs, not as urgent (${JSON.stringify(EP.front.counts)})`)
     ok(/\*\*R-halted\*\* · Halted project · run · halted/.test(E(EP, 'R-halted').line), `a run's line names it a run and its status (${E(EP, 'R-halted').line})`)
+    // The journal lives in the main checkout (render-logs, the loop's writer): a briefing whose
+    // --root is a linked worktree reads the main checkout's runs, not the worktree's.
+    const rmain = join(TMP, 'runs-wt-main'), rlane = join(TMP, 'runs-wt-lane')
+    mkdirSync(rmain)
+    const rgit = (...a) => spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...a], { cwd: rmain, encoding: 'utf8' })
+    rgit('init', '-q'); rgit('commit', '-q', '--allow-empty', '-m', 'x')
+    const radded = rgit('worktree', 'add', '-q', rlane)
+    writeRun(join(rmain, '.grimoire', 'runs'), 'R-main-halted', { project: 'Main project', status: 'halted', startedAt: at(-2 * DAY), updatedAt: at(-DAY) },
+      [{ type: 'halt', reason: 'exhausted replan budget (3)' }, { type: 'run.end', status: 'halted', done: 1, failed: 1, blocked: 0, stillRunning: 0 }])
+    const wt = brief([], { root: rlane, config: { manager: { sources: [{ id: 'runs', category: 'runs', kind: 'grimoire' }] } } })
+    ok(radded.status === 0 && wt.status === 0 && groupOf(parse(latest(wt)), 'R-main-halted') === 'Do' && /runs \(1\)/.test(latest(wt)),
+      `brief --root <a linked worktree> reads the runs in its main checkout and lists the halted one under Do (${radded.stderr.trim() || wt.stderr.trim() || 'ok'})`)
+
     const bare = join(TMP, 'runs-none')
     const nod = brief([], { root: bare, config: { manager: { sources: [{ id: 'runs', category: 'runs', kind: 'grimoire' }] } } })
     ok(nod.status === 0 && /runs \(0\)/.test(latest(nod)) && !/Not checked/.test(latest(nod)) && nod.stderr === '', 'no runs dir in the project: the briefing is written, runs (0), nothing not checked, nothing on stderr')
@@ -847,7 +860,7 @@ try {
     ok(['checks', 'reviewDecision', 'reviewRequested', 'isDraft'].every((f) => bad.some((e) => e.startsWith(`items[0].${f}:`))), `and checked: checks, reviewDecision, reviewRequested, isDraft (${bad.join(' | ')})`)
     const V = mod.view(items, {}, null, NOW)
     const p = (n) => V.groups.flatMap((g) => g.items).find((i) => i.id === `acme/api#${n}`)
-    ok(p(1).group === 'decide' && p(1).reasons[0] === 'review requested', `a review requested from the team → Decide (${p(1).reasons.join('; ')})`)
+    ok(p(1).group === 'decide' && p(1).reasons[0] === 'review requested', `a pending review request → Decide (${p(1).reasons.join('; ')})`)
     ok(p(2).group === 'do' && p(2).reasons.includes('CI failing'), 'failing CI → Do')
     ok(p(3).group === 'do' && p(3).reasons.includes('approved, not merged'), 'approved and not merged → Do')
     ok(p(4).group === 'notnow' && p(4).reasons[0] === 'a draft', 'a draft → Not now, whatever its CI or review says')

@@ -29,7 +29,7 @@
         "kind": { "enum": ["issue", "pr", "run"] },
         "stateType": { "description": "The tracker state mapped onto Linear's state types. completed and canceled items are counted, not listed.", "enum": ["triage", "backlog", "unstarted", "started", "completed", "canceled"] },
         "nativeState": { "description": "The tracker's own status name (\"In Review\").", "type": ["string", "null"] },
-        "priority": { "description": "Linear's scale: 0 none (ranks last), 1 urgent, 2 high, 3 medium, 4 low. null or absent: 0.", "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "priority": { "description": "Linear's scale: 0 none (ranks last), 1 urgent, 2 high, 3 medium, 4 low. null or absent: the script maps nativePriority by manager.priorityLabels; with nativePriority absent too, the most urgent of labels[] that maps; else 0. An explicit value, 0 included, is kept: no fallback.", "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
         "nativePriority": { "description": "The tracker's own priority (\"Highest\", a P1 label). With priority absent or null, a label here is mapped by manager.priorityLabels (case-insensitive; the defaults when the config has none), the same table the scout uses.", "type": ["string", "number", "null"] },
         "assignee": { "description": "Who it is assigned to (a display name), or null when unassigned.", "type": ["string", "null"] },
         "dueAt": { "$ref": "#/$defs/date" },
@@ -57,7 +57,7 @@
         "nextStep": { "description": "One line: what to do next, from what the ticket says.", "type": ["string", "null"] },
         "reviewDecision": { "description": "A pull request's (kind pr) review decision, GitHub's value as gh gives it; null or absent when the repo requires none (gh's empty string). APPROVED and not merged is Do.", "enum": ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", null] },
         "checks": { "description": "A pull request's CI, from statusCheckRollup: failing when any check failed, errored, timed out, was cancelled or needs action; else pending while any runs or waits; else passing. null or absent: no checks. failing is Do.", "enum": ["passing", "failing", "pending", null] },
-        "reviewRequested": { "description": "A pull request with a review still requested from someone on the team (reviewRequests not empty). true is Decide.", "type": ["boolean", "null"] },
+        "reviewRequested": { "description": "A pull request with a review request still pending, from anyone asked (reviewRequests not empty). true is Decide.", "type": ["boolean", "null"] },
         "isDraft": { "description": "A draft pull request. true is Not now, whatever its checks or review say.", "type": ["boolean", "null"] },
         "needsAttention": { "description": "A grimoire run's (kind run) tasks that never landed or are still running past their limit. Written by scripts/manager.mjs, never by a scout.", "type": ["integer", "null"], "minimum": 0 },
         "haltReason": { "description": "Why a halted grimoire run (kind run) stopped, its halt's first line. Written by scripts/manager.mjs, never by a scout.", "type": ["string", "null"] }

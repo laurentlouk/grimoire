@@ -297,12 +297,13 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   `requireHook.raw` when set, or GitHub's MCP) and maps each PR onto four new optional,
   null-tolerant WorkItem fields: `reviewDecision`, `checks` (`passing` / `failing` / `pending`, from
   the status rollup), `reviewRequested` and `isDraft`. The script places a PR by its own rules,
-  first match wins: a draft → Not now, a review requested from the team → Decide, failing CI or an
-  approval not merged → Do, the rest → Waiting on others. A PR is never counted urgent, and its
-  review and checks are part of its hash, so a change badges it **changed**.
+  first match wins: a draft → Not now, a pending review request (anyone asked) → Decide, failing
+  CI or an approval not merged → Do, the rest → Waiting on others. A PR is never counted urgent,
+  and its review and checks are part of its hash, so a change badges it **changed**.
 - **Grimoire runs that need us.** With a `runs` source in `manager.sources`, `brief` reads the run
   journals itself (no scout), through render-logs' `loadRuns` and `runOutcome`, under
-  `telemetry.dir` (default `.grimoire/runs`) in the project. Each project's latest run is listed
+  `telemetry.dir` (default `.grimoire/runs`) in the project's main checkout, also when `--root` is
+  a linked worktree. Each project's latest run is listed
   under Do when it halted (with the halt's first line), is still "running" with no journal write
   for 12 h, or drained with tasks that need attention; its next step names `/grimoire:orchestrate`
   on the project. A drained run with nothing pending is left out, and no runs directory is
@@ -314,11 +315,12 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   same line as before.
 - **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
   absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
-  reported by the skill", and makes the briefing partial. An `ok` source whose count is not its
+  reported by the skill", and makes the briefing partial; without `--sources`, a configured source
+  with no items reads the same way, since nothing said it was read. An `ok` source whose count is not its
   number of items shows both, flagged "count mismatch", and is not trusted as complete. The
   stalled rule reads the later of `lastActivityAt` and `updatedAt`. With neither `priority` nor
   `nativePriority`, the most urgent label in `labels[]` maps. Checks: `scripts/manager.test.mjs`
-  (325 in all).
+  (326 in all).
 
 ## 0.11.0 — trust and see
 

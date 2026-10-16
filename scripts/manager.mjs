@@ -52,11 +52,12 @@
 //                repoCheck) · Waiting on others: the scout's reading (bucketHint "waiting") ·
 //                Not now: the rest. completed and canceled items are counted, not listed.
 //    PRs         (kind pr) by their own rules, first match wins (placePr): a draft → Not now ·
-//                a review requested from the team → Decide · failing CI, or approved and not
+//                a pending review request → Decide · failing CI, or approved and not
 //                merged → Do · the rest → Waiting on others. Never counted urgent; bucketHint is
 //                not read.
 //    runs        (kind run) the runs source: with a manager.sources entry of category runs, brief
-//                reads <root>/<telemetry.dir> (default .grimoire/runs) itself, no scout, through
+//                reads <telemetry.dir> (default .grimoire/runs) itself, against the main checkout
+//                when --root is a linked worktree (where the journal lives), no scout, through
 //                render-logs' loadRuns and runOutcome (readRuns). Each project's latest run is
 //                listed under Do when it halted, is still "running" with no journal write for
 //                STALE_HOURS (12), or drained with tasks that need attention; its next step names
@@ -487,8 +488,8 @@ export function repoCheck(it, config) { // eslint-disable-line no-unused-vars
   return it.repo ? { name: it.repo, available: null, note: 'availability not checked yet' } : null
 }
 
-// A pull request (spec D7), from its fields alone: a draft is Not now, whatever else holds; a review
-// requested from the team is Decide; failing CI, or an approval not merged, is Do; the rest waits on
+// A pull request (spec D7), from its fields alone: a draft is Not now, whatever else holds; a
+// pending review request (from anyone asked) is Decide; failing CI, or an approval not merged, is Do; the rest waits on
 // others (the author, a reviewer, CI). The issue rules are not read: a PR is never counted urgent.
 export function placePr(it) {
   if (it.isDraft === true) return { group: 'notnow', reasons: ['a draft'] }
@@ -693,7 +694,9 @@ export function runItems(rows, sourceId = 'runs') {
   }
   const out = [], seen = new Set()
   for (const { o, project } of latest.values()) {
-    const needsAttention = (o.tasks?.failed ?? 0) + (o.tasks?.inFlight ?? 0)
+    // a whole number, 0 or more, whatever the journal held: the script's own items never fail validation
+    const tally = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+    const needsAttention = Math.max(0, Math.trunc(tally(o.tasks?.failed) + tally(o.tasks?.inFlight)))
     if (seen.has(o.runId) || !(o.status === 'halted' || o.stale === true || (o.status === 'drained' && needsAttention > 0))) continue
     seen.add(o.runId)
     const halt = o.status === 'halted' && Array.isArray(o.halts) && o.halts.length ? o.halts[o.halts.length - 1] : null
@@ -1091,12 +1094,14 @@ function main(argv) {
   }
 
   // The runs source (manager.sources, category runs) is read here, not by a scout: its runs join the
-  // items and its status the sources, in place of any entry the skill wrote for it.
+  // items and its status the sources, in place of any entry the skill wrote for it. A relative
+  // telemetry.dir resolves against the main checkout when --root is a linked worktree, where the
+  // loop's writer and render-logs keep the journal.
   let items = input.value
   const runsSource = mc.sources.find((s) => s.category === 'runs')
   if (runsSource) {
     const t = isObj(config.telemetry) && typeof config.telemetry.dir === 'string' && config.telemetry.dir ? config.telemetry.dir : '.grimoire/runs'
-    const runs = readRuns(resolve(root, t), { sourceId: runsSource.id, now })
+    const runs = readRuns(resolve(mainCheckout(root) ?? root, t), { sourceId: runsSource.id, now })
     items = [...items, ...runs.items]
     sources = [...(sources ?? inferSources(input.value)).filter((s) => !(isObj(s) && s.id === runsSource.id)), runs.source]
   }
@@ -1134,8 +1139,8 @@ const isMain = () => { try { return Boolean(process.argv[1]) && realpathSync(pro
 if (isMain()) {
   try { process.exitCode = main(process.argv.slice(2)) } catch (e) {
     // a state file the script can't read or write (a directory where a file goes, a read-only
-    // disk): one line, not a stack trace
-    console.error(`manager: ${String(e && e.message ? e.message : e).split('\n')[0]}`)
+    // disk): its message, not a stack trace. A validation message (view's) keeps its whole list.
+    console.error(`manager: ${String(e && e.message ? e.message : e)}`)
     process.exitCode = 1
   }
 }

@@ -61,7 +61,7 @@ Prefix it with the raw prefix the brief gives (`requireHook.raw`, e.g. `rtk prox
 - `sourceId`: the source's `id`. `id`: `owner/repo#<number>`. `key`: `<repo>#<number>`. `title`, `url`, `kind: "pr"`, `stateType: "started"`, `nativeState`: `draft` or `open`. `assignee`: the author's login. `updatedAt`. `repo`: the `repos[]` name whose remote is that repo, or null.
 - `reviewDecision`: gh's value as is (`APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`); empty → null.
 - `checks`, from `statusCheckRollup`: `failing` when any check run's conclusion is `FAILURE`, `TIMED_OUT`, `CANCELLED`, `ACTION_REQUIRED` or `STARTUP_FAILURE`, or any status context's state is `FAILURE` or `ERROR`; else `pending` when any check run's status is not `COMPLETED` or any status context is `PENDING` or `EXPECTED`; else `passing`. An empty rollup → null.
-- `reviewRequested`: true when `reviewRequests` is not empty (a person or a team still asked to review), else false. `isDraft`: as gh gives it.
+- `reviewRequested`: true when `reviewRequests` is not empty (a review request still pending, whoever was asked), else false. `isDraft`: as gh gives it.
 - `nextStep`: one line ("Review it", "Fix the failing check", "Merge it"). Leave `bucketHint` out: a PR's group is the script's rules alone.
 
 The cap counts the PRs of all the repos together: stop there, and add the cap line when more were open (a repo that returned `<cap + 1>` has more).
