@@ -82,7 +82,7 @@ On approval, run the tracker writes the user took (the priority labels below), o
 `/grimoire:manager` reads the trackers through the sources bound here. This section runs inside steps 1 to 3, through the same diff: on a re-run the current `manager` block is the user's, so what they set stays unless they approve a change, and a value is re-derived only when the project shows it is stale.
 
 **Detect** which trackers the project uses, from:
-- the docs, `CLAUDE.md`, `AGENTS.md` and PR templates (ticket keys such as `ODY-123`, tracker links);
+- the docs, `CLAUDE.md`, `AGENTS.md` and PR templates (ticket keys such as `ENG-123`, tracker links);
 - `.mcp.json` and the session's connectors (ToolSearch: "linear", "jira", "atlassian", "github");
 - each repo's `git remote get-url origin`, and whether its GitHub Issues are in use (`gh issue list --repo <owner/repo> --limit 1`);
 - the config's `toolHints.tracker` and `claim`.
@@ -94,7 +94,7 @@ A GitHub remote alone makes a `prs` source, not a tracker. GitHub Issues is a tr
 **Sources** (`manager.sources[]`): one per tracker, then `prs` and `runs`.
 
 ```json
-{ "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, the claude.ai connector)", "readOnly": "guard", "scope": { "teams": ["ODY"] }, "verifiedAt": "2026-10-16T09:30:00Z" }
+{ "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, the claude.ai connector)", "readOnly": "guard", "scope": { "teams": ["ENG"] }, "verifiedAt": "2026-10-16T09:30:00Z" }
 ```
 
 - `id` is unique: it becomes the WorkItems' `sourceId`. `category` is `tracker`, `prs` or `runs`. `kind` is `linear`, `jira` or `github` (`grimoire` for runs).
@@ -119,7 +119,7 @@ A rule matches how a command starts, so it is a backstop (`gh api … -f` posts 
 
 **Repo labels** (`manager.repoLabels`, a tracker label → a `repos[].name`). When the tracker's labels name repos, the briefing routes an issue by its label before any judgment. List the labels with their descriptions (Linear `list_issue_labels` for the team, Jira's labels or components, `gh label list --json name,description`).
 - A label maps to a repo when its description names that repo's stack or role as step 1 found it, or its name is the repo's name and its description doesn't point elsewhere.
-- The description wins over the name. Odyyy's `frontend` reads "Expo / React Native mobile app", so it maps to the Expo repo, not the web app.
+- The description wins over the name. A `frontend` label that reads "React Native mobile app" maps to the mobile repo, not the web app.
 - A label the descriptions don't tie to one repo (no description, or two candidates) is left out, and the proposal lists it as unmapped. Never guess one.
 
 Show the map for confirmation. A single-repo project needs none.

@@ -173,8 +173,9 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   - Each source is read once before the diff and gets `verifiedAt`; a failing one is shown with
     its fix and not written. `config-merge.mjs` matches `manager.sources[]` by `id`.
   - `manager.repoLabels` (new) maps tracker labels to `repos[]` names from the labels'
-    descriptions, the description winning over the name: Odyyy's `frontend` is the Expo app, not
-    the web app. A label the descriptions don't tie to one repo is left out and named.
+    descriptions, the description winning over the name: a `frontend` label described as the
+    mobile app maps to the mobile repo, not the web app. A label the descriptions don't tie to one
+    repo is left out and named.
   - For a GitHub tracker, the default `priorityLabels` (`priority: urgent` … `low`, `P0`–`P3`,
     `critical`); when the repo has no priority label, an offer to create the four `priority:`
     labels with `gh label create`, listed as a tracker write and run only on a yes.
