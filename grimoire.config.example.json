@@ -22,12 +22,13 @@
   "graph": { "enabled": true, "dir": ".grimoire/graph", "exclude": ["**/generated/**"], "maxFileKB": 512 },
   "manager": {
     "sources": [
-      { "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, read-only endpoint)", "readOnly": "endpoint", "scope": { "teams": ["ENG"] } },
-      { "id": "prs", "category": "prs", "kind": "github", "hint": "gh CLI, authenticated", "readOnly": "permission-rule", "scope": { "repos": ["acme/api", "acme/app"] } },
+      { "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, the claude.ai connector)", "readOnly": "guard", "scope": { "teams": ["ENG"] }, "verifiedAt": "2026-10-16T09:30:00Z" },
+      { "id": "prs", "category": "prs", "kind": "github", "hint": "gh CLI, authenticated", "readOnly": "guard", "scope": { "repos": ["acme/api", "acme/mobile"] }, "verifiedAt": "2026-10-16T09:30:00Z" },
       { "id": "runs", "category": "runs", "kind": "grimoire" }
     ],
     "urgent": { "priorityAtMost": 2, "dueWithinDays": 2, "blocksAtLeast": 2, "stalledDays": 5 },
     "priorityLabels": { "priority: urgent": 1, "priority: high": 2, "priority: medium": 3, "priority: low": 4, "P0": 1, "P1": 2, "P2": 3, "P3": 4, "critical": 1 },
+    "repoLabels": { "backend": "api", "frontend": "mobile", "infra": "infra" },
     "maxItemsPerSource": 200,
     "schedule": { "kind": "desktop-task", "when": "weekdays 08:30" },
     "share": null,
@@ -37,6 +38,7 @@
     {
       "name": "api",
       "path": "repositories/api",
+      "remote": "git@github.com:acme/api.git",
       "agent": "api-engineer",
       "tags": ["backend"],
       "gate": { "run": "make e2e-test E2E_LOCK_WAIT=1800", "stamp": "tests/e2e/.e2e-green" },
