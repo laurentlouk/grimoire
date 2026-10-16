@@ -30,9 +30,9 @@
     "priorityLabels": { "priority: urgent": 1, "priority: high": 2, "priority: medium": 3, "priority: low": 4, "P0": 1, "P1": 2, "P2": 3, "P3": 4, "critical": 1 },
     "repoLabels": { "backend": "api", "frontend": "mobile", "infra": "infra" },
     "maxItemsPerSource": 200,
-    "schedule": { "kind": "desktop-task", "when": "weekdays 08:30" },
+    "schedule": { "kind": "desktop-task", "when": "30 8 * * 1-5", "taskId": "grimoire-manager-acme", "verifiedAt": "2026-10-16T09:45:00Z" },
     "share": null,
-    "budgetUsd": null
+    "budgetUsd": 1
   },
   "repos": [
     {
