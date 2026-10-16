@@ -733,13 +733,14 @@ try {
   const MIN = 60000
   const headlineCli = (root, { now = NOW, config = null, extra = [] } = {}) =>
     spawnSync(process.execPath, [SCRIPT, 'headline', '--root', root, ...(now ? ['--now', now] : []), ...(config ? ['--config', config] : []), ...extra], { cwd: TMP, encoding: 'utf8', env: ENV })
-  // A latest.md written by hand: front matter fields (each value as JSON) and a body, or raw text.
+  // A latest.md written by hand: front matter fields (each value as JSON, an undefined one left
+  // out) and a body, or raw text.
   let h = 0
   function fixture(front, { body = '# Briefing\n', root = null, raw = null, config = null } = {}) {
     const dir = root || join(TMP, `h${++h}`)
     const mdir = join(dir, '.grimoire', 'manager')
     mkdirSync(mdir, { recursive: true })
-    const head = Object.entries(front).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join('\n')
+    const head = Object.entries(front).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join('\n')
     writeFileSync(join(mdir, 'latest.md'), raw ?? `---\n${head}\n---\n\n${body}`)
     if (config !== null) writeFileSync(join(dir, 'grimoire.config.json'), typeof config === 'string' ? config : JSON.stringify(config))
     return { root: dir, mdir }
@@ -863,11 +864,7 @@ try {
       'no generatedAt': { generatedAt: undefined }, 'a generatedAt that is no time': { generatedAt: 'yesterday' }, 'an impossible date': { generatedAt: '2026-02-30T10:00:00Z' },
       'partial not a boolean': { partial: 'yes' }, 'notChecked not an array': { notChecked: 'jira' }, 'an id outside [A-Za-z0-9._-]': { notChecked: ['jira', 'bad id/..'] },
     }
-    for (const [what, over] of Object.entries(bad)) {
-      const f = front(over)
-      for (const k of Object.keys(f)) if (f[k] === undefined) delete f[k]
-      ok(silent(headlineCli(fixture(f).root)), `a corrupt front matter (${what}): nothing, exit 0`)
-    }
+    for (const [what, over] of Object.entries(bad)) ok(silent(headlineCli(fixture(front(over)).root)), `a corrupt front matter (${what}): nothing, exit 0`)
     const asDir = join(TMP, 'h-dir'); mkdirSync(join(asDir, '.grimoire', 'manager', 'latest.md'), { recursive: true })
     ok(silent(headlineCli(asDir)), 'a latest.md that is a directory: nothing, exit 0')
     ok(silent(headlineCli(join(TMP, 'no-such-root'))), 'a root that does not exist: nothing, exit 0')
