@@ -84,7 +84,8 @@ function loadConfig(projectDir) {
     protectedPaths: strs(g.protectedPaths) || [],
     memoryDir: memoryDir.trim().replace(/^\.\//, '').replace(/\/+$/, ''),
     memoryDenied: new Set([...ROSTER_AGENTS, ...repoAgents, ...(strs(g.memoryDeniedAgents) || [])]),
-    // A project's own agent may share a plugin agent's bare name (`reviewer`): the config naming it wins.
+    // A project's own agent may share a plugin agent's bare name (`reviewer`): the config naming it
+    // exempts it. Read only for an agent_type without a namespace (see checkMcp).
     readOnly: new Set(READ_ONLY_AGENTS.filter((a) => !repoAgents.includes(a))),
   }
 }
@@ -425,7 +426,11 @@ function writeVerb(tool) { // the first known verb decides: a write verb, or nul
 
 function checkMcp(name, input, readOnly) {
   const agentType = agentOf(input)
-  if (!readOnly.has(agentType) || process.env.GRIMOIRE_GUARD_ALLOW === '1') return
+  // The config's exemption is for a project's own agent (no namespace); the plugin's `grimoire:reviewer`
+  // stays bound even when a configured repo agent shares its bare name.
+  const namespaced = typeof input.agent_type === 'string' && input.agent_type.includes(':')
+  const bound = namespaced ? READ_ONLY_AGENTS.includes(agentType) : readOnly.has(agentType)
+  if (!bound || process.env.GRIMOIRE_GUARD_ALLOW === '1') return
   let end = name.length
   while (end > 'mcp__'.length && name[end - 1] === '_') end-- // `save_issue__` is still `save_issue`
   const rest = name.slice('mcp__'.length, end), cut = rest.lastIndexOf('__')

@@ -34,7 +34,7 @@ Commands are split the way the shell would (`;`, `&&`, `||`, `|`, newlines, `$(â
   - a read verb allows: `get`, `list`, `search`, `read`, `fetch`, `find`, `query`, `view`, `show`, `describe`, `count`, `aggregate`, `lookup`, `check`, `status`, `inspect`, `analyze`, `explain`, `export`, `download`;
   - a write verb denies: `save`, `create`, `update`, `delete`, `send`, `reply`, `share`, `submit`, `resolve`, `trash`, `label`, `respond`, `upsert`, `exec`, `run`, `pause`, `stop`, `start`, `invalidate`, `sync` and the rest of `WRITE_VERBS` in `guard.mjs` (89 in all). `issue`, `verify` and `test` are left out on purpose: they read as nouns or reads too often.
   - So `slack_send_message` is a write (`slack` is no verb, `send` is), `list_task_runs` a read (`list` comes first), and a name with no known verb (`graph_index`) passes. Only whole words count: `saved`, `forwarding` and `labels` are not verbs.
-- The implementers (`migration-engineer`, `test-engineer`), generic subagents and the main session are never blocked by this rule. Nor is any agent `grimoire.config.json` names in `repos[].agent` or `specialists[].agent`, even one that shares a plugin agent's bare name (a project's own `reviewer`).
+- The implementers (`migration-engineer`, `test-engineer`), generic subagents and the main session are never blocked by this rule. Nor is a project's own agent that `grimoire.config.json` names in `repos[].agent` or `specialists[].agent`, even one that shares a plugin agent's bare name: an `agent_type` of `reviewer` (no namespace) is the project's and passes, while `grimoire:reviewer` is the plugin's and stays bound.
 
 ## Configuration
 
