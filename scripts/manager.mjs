@@ -13,6 +13,7 @@
 //  output. The file is refused whole, exit 1, on any invalid item: one line per problem,
 //  naming the item's index and field (`items[3].priority: …`), never its value, since ticket
 //  text and whatever a scout copied are data that can hold anything. Nothing is written then.
+//  null in an optional field reads as absent; a required field is never null.
 //
 //  Defaults: --root ← the main checkout when the cwd is in a git work tree (as render-logs
 //  does, so every linked worktree shares one ledger), else the cwd · --config ←
@@ -114,7 +115,10 @@ function toMs(now) {
 // ── validation (skills/manager/workitem.schema.json, by hand: no dependency) ──
 // Each check returns null, or [subpath, message]. Messages never carry the value.
 const fail = (msg, at = '') => [at, msg]
-const nullable = (check) => (v) => { if (v === null) return null; const r = check(v); return r && [r[0], `${r[1]} or null`] }
+// Every optional field takes null, which reads as absent (the scout is told to leave out, or
+// null, what it could not read); a required one never does. "or null" names the field's own type
+// only, not an element's or a sub-field's.
+const nullable = (check) => (v) => { if (v === null) return null; const r = check(v); return r && [r[0], r[0] ? r[1] : `${r[1]} or null`] }
 const C = {
   string: (v) => (typeof v === 'string' ? null : fail('expected a string')),
   nonEmpty: (v) => (typeof v === 'string' && v.length > 0 ? null : fail('expected a non-empty string')),
@@ -136,22 +140,22 @@ const PROJECT = { id: C.string, name: C.string, sliced: C.bool }
 const FIELDS = {
   sourceId: (v) => (typeof v === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(v) ? null : fail('expected 1 to 64 letters, digits, ".", "_" or "-"')),
   id: C.nonEmpty,
-  key: C.nonEmpty,
+  key: nullable(C.nonEmpty),
   title: C.nonEmpty,
   url: nullable(C.string),
   kind: C.oneOf(KINDS),
   stateType: C.oneOf(STATE_TYPES),
   nativeState: nullable(C.string),
-  priority: (v) => (Number.isInteger(v) && v >= 0 && v <= 4 ? null : fail('expected an integer from 0 to 4')),
+  priority: nullable((v) => (Number.isInteger(v) && v >= 0 && v <= 4 ? null : fail('expected an integer from 0 to 4'))),
   nativePriority: nullable((v) => (typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v)) ? null : fail('expected a string or a number'))),
   assignee: nullable(C.string),
   dueAt: nullable(C.date),
   createdAt: nullable(C.date),
   updatedAt: nullable(C.date),
   lastActivityAt: nullable(C.date),
-  blockedBy: C.refs,
-  blocks: C.refs,
-  parentOf: C.refs,
+  blockedBy: nullable(C.refs),
+  blocks: nullable(C.refs),
+  parentOf: nullable(C.refs),
   project: nullable((v) => {
     if (!isObj(v)) return fail('expected an object')
     for (const k of Object.keys(v)) {
@@ -163,9 +167,9 @@ const FIELDS = {
   }),
   repo: nullable(C.string),
   slaAt: nullable(C.date),
-  hasAcceptanceCriteria: C.bool,
+  hasAcceptanceCriteria: nullable(C.bool),
   linkedPr: nullable(C.string),
-  labels: C.strings,
+  labels: nullable(C.strings),
   bucketHint: nullable(C.oneOf(HINTS)),
   nextStep: nullable(C.string),
 }
@@ -342,7 +346,8 @@ export function view(items, config, ledger, now) {
     const p = place(it, ctx)
     const prev = isObj(seen[ledgerKey(it)]) ? seen[ledgerKey(it)] : null
     return {
-      sourceId: it.sourceId, id: it.id, key: it.key, title: it.title, url: it.url, kind: it.kind,
+      // only a safe http(s) url, or null: no rendering of the model can get a javascript: href
+      sourceId: it.sourceId, id: it.id, key: it.key, title: it.title, url: safeUrl(it.url), kind: it.kind,
       stateType: it.stateType, nativeState: it.nativeState, priority: it.priority, priorityName: PRIORITY_NAMES[it.priority],
       assignee: it.assignee, dueAt: it.dueAt, createdAt: it.createdAt, project: it.project, labels: it.labels, linkedPr: it.linkedPr,
       repo: repoCheck(it, config), urgent: p.urgent, group: p.group, reasons: p.reasons, nextStep: it.nextStep,
@@ -376,19 +381,23 @@ export function nextLedger(v, ledger) {
 }
 
 // ── Markdown ──
-// Ticket text on one line, Markdown and HTML inert: control characters and newlines become
-// spaces (no text can start a heading or a list item), &, < and > become entities (no tag, no
-// autolink), and the characters that make emphasis, code, links or tables are backslashed.
+// Ticket text on one line, Markdown and HTML inert: bidi controls are dropped (they reorder what a
+// reader sees), control characters and newlines become spaces (no text can start a heading or a
+// list item), a `scheme://` or `www.` is broken into `scheme[:]//` and `www[.]` (GFM would make it
+// a link on its own), &, < and > become entities (no tag, no <autolink>), and the characters that
+// make emphasis, code, links or tables are backslashed.
 const MAX_TEXT = 200
+const BIDI = /[\u202a-\u202e\u2066-\u2069]/g
 export function md(s, max = MAX_TEXT) {
-  let t = String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\s]+/g, ' ').trim()
+  let t = String(s ?? '').replace(BIDI, '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\s]+/g, ' ').trim()
   const chars = Array.from(t)
   if (chars.length > max) t = `${chars.slice(0, max - 1).join('')}…`
+  t = t.replace(/([A-Za-z][A-Za-z0-9+.-]*):\/\//g, '$1[:]//').replace(/\b(www)\./gi, '$1[.]')
   return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\`*_[\]()|~]/g, '\\$&')
 }
 // Only an http(s) url is a link, with the characters that could end or break it percent-encoded.
 export function safeUrl(u) {
-  if (typeof u !== 'string' || !/^https?:\/\/\S+$/i.test(u) || /[\u0000-\u001f\u007f]/.test(u)) return null
+  if (typeof u !== 'string' || !/^https?:\/\/\S+$/i.test(u) || /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(u)) return null
   return u.replace(/[()<>"'`[\]\\|]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)
 }
 
