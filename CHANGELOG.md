@@ -83,18 +83,22 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     a symlink is written through, and nothing is touched when nothing changes.
   - It names each file by absolute path, and a symlink's target, and warns when an added repo
     sits on another repo's path.
-- **Secrets stay out of context.** The two JSON files are read only through the script, and its
-  output prints `«redacted»` for:
+- **Secrets of known shapes are masked.** The two JSON files are read only through the script,
+  and its output prints `«redacted»` for:
   - every `env` value;
   - every value under a key named like a token, key, password, credential or auth;
-  - bearer tokens, URL credentials, `token=`-style pairs and known token formats inside any
-    string, the rest of the string kept.
+  - inside any value, with the rest of the string kept: `Authorization:` and bearer headers,
+    `token=`-style pairs, `--token X`-style flags, `mysql -pX`, `curl -u`, cookies, URL
+    credentials, secret query parameters, JWTs, Slack webhooks, and token formats such as
+    `ghp_…` and AKIA/ASIA keys.
 
-  An invalid file's error gives its line and column only. The written file keeps the real values.
+  Keys and paths are never masked, so a repo named like a token prefix keeps its `--approve`
+  hint. An invalid file's error gives its line and column only. The written file keeps the real
+  values.
 - **The user applies `.claude/settings.json`.** The guard closes that file to agents, so setup
   writes `grimoire.config.json` itself, but for the settings it prints the exact `--write`
   command and the user runs it. A dry run then confirms what is left.
-- Checks: `scripts/config-merge.test.mjs` (101), and the setup evals `setup-6` (a configured
+- Checks: `scripts/config-merge.test.mjs` (119), and the setup evals `setup-6` (a configured
   project re-run changes nothing before the yes, and never writes the settings itself) and
   `setup-7` (a hand-edited gate is kept).
 
