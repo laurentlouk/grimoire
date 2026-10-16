@@ -81,7 +81,8 @@ function archData(project, idx) {
   const roots = project.root ? docRoots(project) : null
   for (const { file, doc, error } of project.root ? readDiagrams(project.architectureDir) : []) {
     const rel = path.relative(project.root, path.join(project.architectureDir, file)).split(path.sep).join('/')
-    out.push(error ? { file: rel, title: file, errors: [error] } : packArch(doc, analyze(doc, idx, roots), { file: rel }))
+    // one broken diagram is reported in its own place, never takes the page down
+    try { out.push(error ? { file: rel, title: file, errors: [error] } : packArch(doc, analyze(doc, idx, roots), { file: rel })) } catch (e) { out.push({ file: rel, title: file, errors: [`could not be checked: ${e.message}`] }) }
   }
   if (idx.files.some((f) => !f.is_test)) { const d = draftArch(idx, { title: 'From the graph' }); out.push(packArch(d, analyze(d, idx, null), { auto: true })) }
   return out
@@ -205,10 +206,13 @@ function html(data, served) {
   // Every "<" becomes \\u003c, so no data string can close the <script> element.
   const blob = JSON.stringify(data).replace(/</g, '\\u003c').split(String.fromCharCode(0x2028)).join('\\u2028').split(String.fromCharCode(0x2029)).join('\\u2029')
   const js = `${HELPERS.map((f) => f.toString()).join('\n')}\nconst INITIAL = ${JSON.stringify(INITIAL)}, LANE_MAX = ${LANE_MAX}, MAXCOL = ${MAXCOL};\n(${client.toString()})()`.replace(/<\//g, '<\\/').replace(/\r\n?/g, '\n') // LF only: a browser normalises line ends before it hashes
+  // the script must never open an HTML comment or a script element: either would change where the
+  // browser ends this <script> (the helpers spell them in pieces)
+  if (/<!--|<script/i.test(js)) throw new Error('the page script holds "<!--" or "<script"; spell it in pieces')
   const hash = createHash('sha256').update(js, 'utf8').digest('base64')
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; img-src 'none'${served ? "; connect-src 'self'" : ''}"><meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; img-src 'none'; base-uri 'none'; form-action 'none'${served ? "; connect-src 'self'" : ''}"><meta name="referrer" content="no-referrer">
 <title>grimoire code graph</title><style>${CSS}</style></head>
 <body><noscript>This page needs JavaScript to render the code graph.</noscript>
 <script type="application/json" id="graph-data">${blob}</script>
@@ -847,7 +851,7 @@ function client() {
     writeHash()
     if (keepFocus) { search.focus(); if (caret && caret[0] !== null) search.setSelectionRange(caret[0], caret[1]) }
     else {
-      const t = st.focusMain && (document.querySelector('main .detail h3') || document.querySelector('main .toolbar'))
+      const t = st.focusMain && (document.querySelector('main .detail h3') || document.querySelector('main [data-focus]') || document.querySelector('main .toolbar'))
       if (t) { t.tabIndex = -1; t.focus({ preventScroll: true }) }
       else if (ctl) { const el = document.querySelector(`[data-ctl="${ctl}"]`); if (el) el.focus() }
     }

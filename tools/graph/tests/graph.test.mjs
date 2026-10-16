@@ -375,6 +375,24 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   } catch (e) { ok(false, `the page script runs (${e.message})`) }
 }
 
+{ // the architecture CLI on the polyglot project: draft, refuse to overwrite, check; serve's --port
+  const cli = (...args) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), ...args, '--root', PROJ], { encoding: 'utf8' })
+  const out = path.join(PROJ, 'docs/architecture/poly.architecture.json')
+  const d1 = cli('architecture', 'draft', '--out', out, '--title', 'Poly')
+  const drafted = existsSync(out) ? JSON.parse(readFileSync(out, 'utf8')) : null
+  ok(d1.status === 0 && d1.stdout.includes(out) && drafted && drafted.draft === true && drafted.title === 'Poly' && drafted.components.length > 0, `architecture draft writes a draft and prints its path (${d1.stderr.trim().slice(0, 200)})`)
+  const d2 = cli('architecture', 'draft', '--out', out)
+  ok(d2.status === 1 && /exists/.test(d2.stderr), 'architecture draft never overwrites without --force')
+  const ck = cli('architecture', 'check')
+  ok(ck.status === 0 && /poly\.architecture\.json: passes/.test(ck.stdout), `architecture check finds the project's diagrams and passes a fresh draft (${ck.stdout.trim().slice(0, 200)})`)
+  writeFileSync(path.join(PROJ, 'docs/architecture/bad.architecture.json'), '{ nope')
+  const bad = cli('architecture', 'check')
+  ok(bad.status === 1 && /bad\.architecture\.json: does not parse/.test(bad.stdout) && !/does not parse: does not parse/.test(bad.stdout), 'a diagram that does not parse fails the check, said once')
+  rmSync(path.join(PROJ, 'docs'), { recursive: true, force: true })
+  const sv = cli('serve', '--port', 'abc')
+  ok(sv.status === 1 && /--port takes a number/.test(sv.stderr), 'serve refuses a port that is not a number')
+}
+
 // ── 3 · incremental refresh ──
 console.log('\n3 · incremental refresh')
 const circle = path.join(PROJ, 'web/src/geo/circle.ts')

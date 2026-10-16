@@ -15,10 +15,13 @@
 export function docsClient(ctx) {
   const { D, h, st, files, render, plural, jumpFile } = ctx
   const SERVE = D.serve || null
+  const RICH_MAX = 200000 // a longer note shows as plain text and is left out of the links
+  const MAC = /Mac|iPhone|iPad/.test((typeof navigator !== 'undefined' && navigator.platform) || '')
   const docs = (D.docs || []).map(([repo, root, path, text, hash, big], i) => {
     const shown = root && root !== '.' ? `${root}/${path}` : path
     const base = path.split('/').pop()
-    return { i, repo, root, path, text, hash, big: !!big, shown, name: base.replace(/\.(md|markdown)$/i, ''), dir: shown.includes('/') ? shown.slice(0, shown.lastIndexOf('/')) : '' }
+    // a textarea hands back LF only: a CRLF note is saved back with CRLF
+    return { i, repo, root, path, text, hash, big: !!big, eol: text.includes('\r\n') ? '\r\n' : '\n', shown, name: base.replace(/\.(md|markdown)$/i, ''), dir: shown.includes('/') ? shown.slice(0, shown.lastIndexOf('/')) : '' }
   })
   const multi = new Set(docs.map((d) => d.repo)).size > 1
   const drafts = new Map() // doc index → unsaved text
@@ -48,13 +51,16 @@ export function docsClient(ctx) {
       const anchor = heading ? mdSlug(heading) : undefined
       if (!name.trim()) return anchor ? { anchor } : null
       const n = lower(name.trim().replace(/\.(md|markdown)$/i, ''))
-      const d = n.includes('/') ? byPath.get(n) || byPath.get(lower(norm(`${from.root !== '.' ? from.root + '/' : ''}${n}`))) || pick(docs.filter((x) => lower(x.shown.replace(/\.(md|markdown)$/i, '')).endsWith('/' + n)), from) : pick(byName.get(n), from)
-      return d ? { doc: d.i, anchor } : { missing: name.trim() }
+      // a path is read from the note's own repository first, then the project, then as a suffix
+      const d = n.includes('/') ? byPath.get(lower(norm(`${from.root !== '.' ? from.root + '/' : ''}${n}`))) || byPath.get(n) || pick(docs.filter((x) => lower(x.shown.replace(/\.(md|markdown)$/i, '')).endsWith('/' + n)), from) : pick(byName.get(n), from)
+      if (d) return { doc: d.i, anchor }
+      return /\.[a-z0-9]{1,8}$/i.test(name.trim()) && !/\.(md|markdown)$/i.test(name.trim()) ? null : { missing: name.trim() } // an image or a file is no missing note
     }
     if (ref.kind === 'md') {
       let [p, frag] = t.split('#')
       try { p = decodeURIComponent(p) } catch {}
-      const anchor = frag ? frag.toLowerCase() : undefined
+      try { frag = frag && decodeURIComponent(frag) } catch {}
+      const anchor = frag ? mdSlug(frag) || frag.toLowerCase() : undefined
       if (!p) return anchor ? { anchor } : null
       const rootPre = from.root && from.root !== '.' ? from.root + '/' : ''
       const full = norm(p.startsWith('/') ? rootPre + p.slice(1) : `${from.dir ? from.dir + '/' : ''}${p}`)
@@ -66,8 +72,8 @@ export function docsClient(ctx) {
     if (ref.kind === 'code') {
       const m = /^(.+?)(?::(\d+)(?:-\d+)?)?$/.exec(t)
       const p = m[1].replace(/^\.\//, '')
-      const rel = norm(`${from.dir ? from.dir + '/' : ''}${p}`)
-      for (const k of [p, rel]) { const d = byPath.get(lower(k)); if (d) return { doc: d.i }; const f = fileByShown.get(k); if (f) return { file: f.id, line: m[2] } }
+      const rel = norm(`${from.dir ? from.dir + '/' : ''}${p}`), inRepo = norm(`${from.root !== '.' ? from.root + '/' : ''}${p}`)
+      for (const k of [inRepo, rel, p]) { const d = byPath.get(lower(k)); if (d) return { doc: d.i }; const f = fileByShown.get(k); if (f) return { file: f.id, line: m[2] } }
       if (!/\.[a-z0-9]{1,8}$/i.test(p)) return null
       const cands = (tail.get(lower(p.split('/').pop())) || []).filter((c) => lower(c.shown) === lower(p) || lower(c.shown).endsWith('/' + lower(p)))
       if (cands.length !== 1) return null
@@ -81,8 +87,8 @@ export function docsClient(ctx) {
   const refsOf = new Map()
   function analyzeDoc(d) {
     const out = {}
-    mdToHtml(d.text, (r) => resolve(r, d), out)
-    refsOf.set(d.i, { refs: out.refs, headings: out.headings })
+    if (d.text.length <= RICH_MAX) try { mdToHtml(d.text, (r) => resolve(r, d), out) } catch { out.refs = []; out.headings = [] }
+    refsOf.set(d.i, { refs: out.refs || [], headings: out.headings || [] })
   }
   function links() {
     if (linked) return linked
@@ -105,6 +111,7 @@ export function docsClient(ctx) {
   const lineWith = (text, needle) => { const l = text.split('\n').find((x) => x.includes(needle)); return l ? l.trim().slice(0, 160) : '' }
 
   // ── explorer ──
+  let opened = null
   function explorer(cur) {
     const q = st.q.trim().toLowerCase()
     const head = h('div', { class: 'xhead' }, h('b', null, 'Notes'), h('span', { class: 'muted' }, ` ${docs.length.toLocaleString()}`),
@@ -119,9 +126,10 @@ export function docsClient(ctx) {
       return h('nav', { class: 'explorer', 'aria-label': 'Notes' }, head, h('p', { class: 'note' }, `${hits.length >= 200 ? 'First 200' : plural(hits.length, 'note')} matching “${st.q.trim()}”`),
         h('ul', { class: 'tree flat' }, hits.map(([d, snip]) => h('li', null, h('a', { class: `xfile${cur === d ? ' on' : ''}`, href: `#doc-${d.i}` }, d.name, drafts.has(d.i) ? h('span', { class: 'dirty', title: 'unsaved' }, ' ●') : null, h('span', { class: 'xpath muted' }, d.dir || (multi ? d.repo : '')), snip ? h('span', { class: 'snip' }, snip) : null)))))
     }
-    // a tree per repository: folders open on the way to the current note, or when opened
+    // a tree per repository: the folders on the way to a note open when it is opened (and can be
+    // closed again), the others when clicked
     const open = st.docOpen
-    if (cur) { const parts = cur.shown.split('/'); for (let k = 1; k < parts.length; k++) open.add(`${cur.repo}:${parts.slice(0, k).join('/')}`) }
+    if (cur && opened !== cur) { opened = cur; const parts = cur.shown.split('/'); for (let k = 1; k < parts.length; k++) open.add(`${cur.repo}:${parts.slice(0, k).join('/')}`) }
     const tree = (repo, list) => {
       const root = { dirs: new Map(), files: [] }
       for (const d of list) { let node = root; const parts = d.shown.split('/'); for (const p of parts.slice(0, -1)) node = node.dirs.get(p) || node.dirs.set(p, { dirs: new Map(), files: [] }).get(p); node.files.push(d) }
@@ -144,6 +152,7 @@ export function docsClient(ctx) {
   const setStatus = (s) => { status = s; const el = document.getElementById('doc-status'); if (el) el.textContent = s }
   function body(d, text) {
     const art = h('article', { class: 'md', id: 'doc-body' })
+    if (text.length > RICH_MAX) { art.append(h('p', { class: 'note' }, 'A long note: shown as plain text.'), h('pre', null, text)); return art }
     art.innerHTML = mdToHtml(text, (r) => resolve(r, d))
     art.addEventListener('click', (e) => {
       const a = e.target.closest && e.target.closest('a')
@@ -168,7 +177,7 @@ export function docsClient(ctx) {
     const text = textOf(d)
     const seg = h('div', { class: 'seg' }, [['read', 'Read'], ['edit', 'Edit'], ['split', 'Split']].map(([m, label]) =>
       h('button', { 'data-ctl': `doc-${m}`, 'aria-pressed': String(mode === m), disabled: !SERVE && m !== 'read' ? 'disabled' : null, title: !SERVE && m !== 'read' ? 'Serve the page to edit: graph.mjs serve' : m === 'read' ? 'Reading view (Ctrl/⌘-E)' : m === 'edit' ? 'Source (Ctrl/⌘-E)' : 'Source and reading view side by side', onclick: () => { st.docMode = m; st.focusEditor = m !== 'read'; render() } }, label)))
-    const crumbs = h('div', { class: 'crumbs mono' }, multi ? h('span', { class: 'muted' }, `${d.repo} / `) : null, d.dir ? h('span', { class: 'muted' }, `${d.dir} / `) : null, h('b', null, d.shown.split('/').pop()))
+    const crumbs = h('div', { class: 'crumbs mono', 'data-focus': '', tabindex: '-1' }, multi ? h('span', { class: 'muted' }, `${d.repo} / `) : null, d.dir ? h('span', { class: 'muted' }, `${d.dir} / `) : null, h('b', null, d.shown.split('/').pop()))
     const saveBtn = SERVE ? h('button', { class: 'primary', 'data-ctl': 'doc-save', disabled: drafts.has(d.i) ? null : 'disabled', onclick: () => save(d) }, 'Save') : null
     const head = h('div', { class: 'notehead' }, crumbs, h('span', { class: 'grow' }), h('span', { id: 'doc-status', class: 'muted', role: 'status' }, status || (drafts.has(d.i) ? 'unsaved changes' : '')), saveBtn, seg)
     const conflict = d.conflict ? h('div', { class: 'callout callout-danger' }, h('div', { class: 'callout-title' }, 'This note changed on disk since you opened it'),
@@ -181,7 +190,7 @@ export function docsClient(ctx) {
       const ta = h('textarea', { class: 'editor', id: 'doc-editor', spellcheck: 'false', 'aria-label': `Source of ${d.shown}` })
       ta.value = text
       ta.addEventListener('input', () => {
-        if (ta.value === d.text) drafts.delete(d.i); else drafts.set(d.i, ta.value)
+        if (ta.value === d.text.replace(/\r\n/g, '\n')) drafts.delete(d.i); else drafts.set(d.i, ta.value)
         setStatus(drafts.has(d.i) ? 'unsaved changes' : '')
         const sb = document.querySelector('[data-ctl="doc-save"]'); if (sb) sb.disabled = !drafts.has(d.i)
         if (preview) { clearTimeout(preview.t); preview.t = setTimeout(() => { const nb = body(d, ta.value); preview.el.replaceWith(nb); preview.el = nb }, 120) }
@@ -216,13 +225,15 @@ export function docsClient(ctx) {
     const unresolved = [...L.missing.values()].reduce((a, s) => a + s.size, 0)
     return h('div', { class: 'note-pane' },
       h('div', { class: 'cards' }, [[docs.length, 'notes'], [[...L.back.values()].reduce((a, m) => a + m.size, 0), 'links between notes'], [L.mentions.size, 'indexed files mentioned'], [unresolved, 'unresolved links']].map(([v, l]) => h('div', { class: 'card' }, h('b', null, v.toLocaleString()), h('span', null, l)))),
-      h('h2', null, 'At the top'), h('ul', { class: 'links' }, top.map((d) => h('li', null, h('a', { class: 'jump', href: `#doc-${d.i}` }, d.shown)))),
+      h('h2', { 'data-focus': '', tabindex: '-1' }, 'At the top'), h('ul', { class: 'links' }, top.map((d) => h('li', null, h('a', { class: 'jump', href: `#doc-${d.i}` }, d.shown)))),
       most.length ? h('div', null, h('h2', null, 'Most linked'), h('ul', { class: 'links' }, most.map(([d, n]) => h('li', null, h('a', { class: 'jump', href: `#doc-${d.i}` }, d.shown), h('span', { class: 'pill' }, n))))) : null,
       h('p', { class: 'note' }, SERVE ? 'Pick a note, or search. Ctrl/⌘-E switches reading and editing; Ctrl/⌘-S saves.' : 'Pick a note, or search. This page is a read-only snapshot: graph.mjs serve opens it with editing.'))
   }
+  let shownDoc = null
   function view() {
     if (!docs.length) return h('section', null, h('p', { class: 'muted' }, 'No Markdown notes in the indexed repositories.'))
     const d = st.doc !== null && docs[st.doc] ? docs[st.doc] : null
+    if (d !== shownDoc) { shownDoc = d; status = '' } // a status belongs to the note it was about
     const sec = h('section', { class: `docs${d ? '' : ' nodoc'}` }, explorer(d), d ? note(d) : home(), d ? rail(d) : null)
     if (d && st.docAnchor) { const a = st.docAnchor; st.docAnchor = null; requestAnimationFrame(() => scrollTo(a)) }
     if (d && (st.focusEditor || st.editorCaret)) {
@@ -250,18 +261,19 @@ export function docsClient(ctx) {
   }
   async function save(d) {
     if (!SERVE) { setStatus('Read-only snapshot: serve the page to save'); return }
-    if (!drafts.has(d.i)) return
-    const text = drafts.get(d.i)
+    if (!drafts.has(d.i) || d.saving) return
+    const draft = drafts.get(d.i), text = d.eol === '\r\n' ? draft.replace(/\r?\n/g, '\r\n') : draft
     setStatus('Saving…')
+    d.saving = true // a focus recheck waits for the save, or it would read our own write as a conflict
     try {
       const r = await api('PUT', { repo: d.repo, path: d.path, text, base: d.hash })
       if (r.ok) {
-        d.hash = r.j.hash; d.text = text
-        if (drafts.get(d.i) === text) drafts.delete(d.i) // typing during the save keeps the newer text unsaved
+        d.hash = r.j.hash; d.text = text; d.conflict = null
+        if (drafts.get(d.i) === draft) drafts.delete(d.i) // typing during the save keeps the newer text unsaved
         refresh(d); status = `Saved ${new Date().toLocaleTimeString()}`; rerender()
       } else if (r.status === 409 && r.j.text !== undefined) { d.conflict = { text: r.j.text, hash: r.j.hash }; status = 'Not saved: changed on disk'; rerender() }
       else setStatus(`Not saved: ${r.j.error || `HTTP ${r.status}`}`)
-    } catch (e) { setStatus(`Not saved: the server is not answering (${e.message})`) }
+    } catch (e) { setStatus(`Not saved: the server is not answering (${e.message})`) } finally { d.saving = false }
   }
   async function newNote(suggest, repo) {
     const p = window.prompt(`New note in ${repo}, path from the repository root:`, suggest)
@@ -286,9 +298,10 @@ export function docsClient(ctx) {
   async function recheck() {
     if (!SERVE || st.tab !== 'docs' || st.doc === null || !docs[st.doc]) return
     const d = docs[st.doc]
+    if (d.saving || d.big) return
     try {
       const r = await api('GET', null, `?repo=${encodeURIComponent(d.repo)}&path=${encodeURIComponent(d.path)}`)
-      if (!r.ok || r.j.hash === d.hash) return
+      if (!r.ok || r.j.hash === d.hash || d.saving) return
       if (drafts.has(d.i)) { d.conflict = { text: r.j.text, hash: r.j.hash }; rerender() } else { d.text = r.j.text; d.hash = r.j.hash; refresh(d); status = 'Reloaded: changed on disk'; rerender() }
     } catch {}
   }
@@ -297,12 +310,14 @@ export function docsClient(ctx) {
     if (st.tab !== 'docs' || !(e.metaKey || e.ctrlKey) || e.altKey) return
     const k = e.key.toLowerCase(), d = st.doc !== null ? docs[st.doc] : null
     if (k === 's' && d) { e.preventDefault(); save(d) }
-    if (k === 'e' && d && SERVE) { e.preventDefault(); st.docMode = st.docMode === 'read' ? 'edit' : 'read'; st.focusEditor = st.docMode !== 'read'; render() }
+    if (k === 'e' && d && SERVE && (MAC ? e.metaKey : e.ctrlKey)) { // on a Mac, Ctrl-E stays end-of-line
+      e.preventDefault(); st.docMode = st.docMode === 'read' ? 'edit' : 'read'; st.focusEditor = st.docMode !== 'read'; render()
+    }
   })
   window.addEventListener('beforeunload', (e) => { if (drafts.size) { e.preventDefault(); e.returnValue = '' } })
 
   return {
-    view, count: docs.length,
+    view,
     has: (i) => !!docs[i],
     // notes that mention a file, for the Files tab
     mentionsOf: (f) => [...(links().mentions.get(f.id) || [])].map((i) => docs[i]),

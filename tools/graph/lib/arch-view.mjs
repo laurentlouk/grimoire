@@ -134,7 +134,7 @@ export function archClient(ctx) {
       const g = e.target.closest('[data-comp]')
       if (!g) { if (st.archSel) { st.archSel = null; st.archTrace = null; rerender() } return }
       st.archSel = st.archSel === g.dataset.comp && !st.archTrace ? null : g.dataset.comp
-      st.archTrace = null; st.archTo = null
+      st.archTrace = null; st.archTo = null; st.focusMain = true // the keyboard lands on the passport
       rerender()
     }
     svg.addEventListener('click', open)
@@ -210,7 +210,7 @@ export function archClient(ctx) {
       h('ul', null, (a.errors || []).map((e) => h('li', { class: 'err' }, e)), (a.warnings || []).map((w) => h('li', null, w)), (a.info || []).map((w) => h('li', { class: 'muted' }, w)))) : (a.info || []).length ? h('p', { class: 'note' }, a.info.join(' · ')) : null
     const sel = st.archSel && a.comps.some((c) => c.id === st.archSel) ? passport(a, st.archSel) : null
     const draw = diagram(a)
-    const cards = (a.cards || []).length ? h('div', { class: 'cards arch-cards' }, a.cards.map((c) => h('div', { class: `card acard c-${c.color || 'slate'}` }, h('div', { class: 'acard-title' }, h('i', null), c.title), h('ul', null, c.items.map((x) => h('li', null, x)))))) : null
+    const cards = Array.isArray(a.cards) && a.cards.length ? h('div', { class: 'cards arch-cards' }, a.cards.map((c) => h('div', { class: `card acard c-${c.color || 'slate'}` }, h('div', { class: 'acard-title' }, h('i', null), c.title), h('ul', null, c.items.map((x) => h('li', null, x)))))) : null
     const note = h('p', { class: 'note' }, `${a.file ? `${a.file} · ` : ''}Click a component for its passport; Upstream, Downstream and Route follow the drawn lines. A line the graph confirms is solid; one it cannot see between two code components is dashed amber, unless it says what carries it (via). The graph is a map: read the code at the sources.`)
     return h('section', null, head, a.summary ? h('p', { class: 'summary' }, a.summary) : null, banner, problems, legend,
       sel ? h('section', { class: 'split rev' }, h('div', null, draw), h('aside', { class: 'side' }, sel)) : draw, note, cards)

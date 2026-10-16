@@ -19,17 +19,21 @@ export function mdSlug(s) {
   return String(s).toLowerCase().trim().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s/g, '-')
 }
 
-// '---\nkey: value\n---\nbody' → { props: [[key, value]], body, lines: lines the front matter took }
+// '---\nkey: value\n---\nbody' → { props: [[key, value]], body }. Only a block whose every line
+// reads as YAML (key: value, a list item, an indented continuation, a comment) is front matter; any
+// other opening --- is a rule, and the text after it stays in the note.
 export function mdFront(src) {
-  const m = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(src)
-  if (!m) return { props: [], body: src, lines: 0 }
+  const m = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)??---[ \t]*(?:\r?\n|$)/.exec(src)
+  const KEY = /^([\p{L}_][^:]*?|"[^"]*"|'[^']*'):(?:[ \t]+(.*)|[ \t]*)$/u // any language, or quoted
+  const yaml = (l) => !l.trim() || KEY.test(l) || /^\s*-(\s|$)/.test(l) || /^\s+\S/.test(l) || /^#/.test(l)
+  if (!m || !(m[1] || '').split(/\r?\n/).every(yaml)) return { props: [], body: src }
   const props = []
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = /^([A-Za-z_][\w .-]*?):[ \t]*(.*)$/.exec(line)
-    if (kv) props.push([kv[1], kv[2].trim().replace(/^(['"])(.*)\1$/, '$2')])
+  for (const line of (m[1] || '').split(/\r?\n/)) {
+    const kv = KEY.exec(line)
+    if (kv) props.push([kv[1].replace(/^(['"])(.*)\1$/, '$2'), (kv[2] || '').trim().replace(/^(['"])(.*)\1$/, '$2')])
     else if (props.length && /^\s*-\s+|^\s+\S/.test(line)) { const last = props[props.length - 1]; last[1] = (last[1] ? last[1] + ', ' : '') + line.trim().replace(/^-\s+/, '') }
   }
-  return { props, body: src.slice(m[0].length), lines: m[0].split('\n').length - 1 }
+  return { props, body: src.slice(m[0].length) }
 }
 
 // Render a note. link(ref) → null | { doc, anchor } | { file, line } | { missing } | { url } | { anchor }
@@ -40,21 +44,28 @@ export function mdToHtml(src, link, out) {
   const VOID = new Set(['br', 'hr'])
   const CALLOUTS = new Set(['note', 'info', 'tip', 'hint', 'important', 'success', 'check', 'done', 'question', 'help', 'faq', 'warning', 'caution', 'attention', 'failure', 'fail', 'missing', 'danger', 'error', 'bug', 'example', 'quote', 'cite', 'abstract', 'summary', 'tldr', 'todo'])
   const mdEsc = (x) => String(x).replace(/&/g, '&amp;').replace(/[<]/g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  // text keeps the entities it spells (&amp; &nbsp; &#124;): an entity cannot open a tag
+  const escText = (x) => mdEsc(x).replace(/&amp;(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z][a-z0-9]{1,31});/gi, '&$1;')
+  const CMT = '<!' + '--' // never spelled out: the page's script must not hold an HTML comment opener
   out = out || {}
   out.headings = []; out.refs = []
   const slugs = new Map()
   const ask = (ref) => { const r = link ? link(ref) : null; out.refs.push({ ...ref, to: r }); return r }
   const body = mdFront(String(src)).body.replace(/\r\n?/g, '\n')
-  // reference-style definitions: [label]: url "title" (never a footnote [^1]: …)
+  // reference-style definitions: [label]: url "title" (never a footnote [^1]: …), outside code
   const defs = new Map()
+  let fenced = null
   const lines = body.split('\n').filter((l) => {
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(l)
+    if (f && (!fenced || (f[1][0] === fenced[0] && f[1].length >= fenced.length))) { fenced = fenced ? null : f[1]; return true }
+    if (fenced) return true
     const m = /^ {0,3}\[([^\]^][^\]]*)\]:\s*<?(\S+?)>?(?:\s+["'(].*["')])?\s*$/.exec(l)
     if (m) { defs.set(m[1].toLowerCase(), m[2]); return false }
     return true
   })
 
-  const anchorOf = (text) => {
-    const base = mdSlug(text.replace(/<[^>]*>/g, '')) || 'section'
+  const anchorOf = (plain) => {
+    const base = mdSlug(plain) || 'section'
     const n = slugs.get(base) || 0
     slugs.set(base, n + 1)
     return n ? `${base}-${n}` : base
@@ -71,20 +82,24 @@ export function mdToHtml(src, link, out) {
   const safeUrl = (u) => /^(https?:|mailto:)/i.test(u) ? u : null
 
   // ── inline ── (sticky regexes from i: no slicing per character)
+  // Every span is bounded, and a search that found nothing is not repeated, so a hostile note
+  // costs linear time.
   const RX = {
     esc: /\\([!-/:-@[-`{-~])/y, brk: /\\\n/y, ticks: /`+/y,
-    wiki: /(!?)\[\[([^\]\n]+?)\]\]/y,
-    img: /!\[([^\]\n]*)\]\(\s*<?([^)\s>]*)>?(?:\s+"([^"]*)")?\s*\)/y,
-    link: /\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\](?:\(\s*<?([^)\s>]*)>?(?:\s+"([^"]*)")?\s*\)|\[([^\]\n]*)\])/y,
-    auto: /<((?:https?|mailto):[^\s<>]+)>/iy, comment: /<!--[\s\S]*?-->/y, tag: /<(\/?)([a-zA-Z][\w-]*)\b[^<>]*?(\/?)>/y,
-    bare: /(?:https?:\/\/|www\.)[^\s<]*[^\s<.,;:!?)\]'"*_~]/iy, hard: / {2,}\n/y,
+    wiki: /(!?)\[\[([^\]\n]{1,300}?)\]\]/y,
+    img: /!\[([^\]\n]{0,300})\]\(\s*<?([^)\s>]{0,2000})>?(?:\s+"([^"\n]{0,300})")?\s*\)/y,
+    link: /\[((?:[^[\]\n]|\[[^[\]\n]{0,300}\]){0,300})\](?:\(\s*<?([^)\s>]{0,2000})>?(?:\s+"([^"\n]{0,300})")?\s*\)|\[([^\]\n]{0,300})\])/y,
+    auto: /<((?:https?|mailto):[^\s<>]{1,2000})>/iy, tag: /<(\/?)([a-zA-Z][\w-]{0,30})\b[^<>]{0,500}?(\/?)>/y,
+    bare: /(?:https?:\/\/|www\.)[^\s<]{0,2000}[^\s<.,;:!?)\]'"*_~]/iy,
   }
-  function inline(text) {
+  function inline(text, inLink) {
     text = String(text).replace(/\u0000/g, '')
     const keep = []
     const hold = (html) => `\u0000${keep.push(html) - 1}\u0000`
     let s = '', i = 0, m
     const at = (re) => { re.lastIndex = i; return re.exec(text) }
+    const unclosed = new Set() // backtick run lengths with no closing run after this point
+    let noCommentEnd = false
     while (i < text.length) {
       const c = text[i]
       if (c === '\\') {
@@ -92,7 +107,8 @@ export function mdToHtml(src, link, out) {
         if ((m = at(RX.brk))) { s += hold('<br>'); i += 2; continue }
       } else if (c === '`') {
         const run = at(RX.ticks)[0]
-        const end = text.indexOf(run, i + run.length)
+        const end = unclosed.has(run.length) ? -1 : text.indexOf(run, i + run.length)
+        if (end < 0) unclosed.add(run.length)
         if (end > 0 && text[end + run.length] !== '`') {
           let code = text.slice(i + run.length, end)
           if (/^ .* $/.test(code)) code = code.slice(1, -1)
@@ -106,47 +122,57 @@ export function mdToHtml(src, link, out) {
         if ((m = at(RX.wiki))) {
           const [target, alias] = m[2].split('|')
           const label = (alias || target).trim()
+          if (inLink) { s += hold(`<span>${mdEsc(label)}</span>`); i += m[0].length; continue }
           const r = ask({ kind: m[1] ? 'embed' : 'wiki', target: target.trim(), text: label })
           s += hold(linkTag(r, mdEsc(label), target.trim()) || `<span class="unresolved">${mdEsc(label)}</span>`)
           i += m[0].length; continue
         }
         if (c === '!' && (m = at(RX.img))) {
-          const url = safeUrl(m[2]), alt = m[1] || m[2]
+          const url = inLink ? null : safeUrl(m[2]), alt = m[1] || m[2]
           s += hold(url ? `<a class="external img" href="${mdEsc(url)}" target="_blank" rel="noopener noreferrer" title="image (not loaded)">${mdEsc(alt)}</a>` : `<span class="img" title="${mdEsc(m[2])}">${mdEsc(alt)}</span>`)
           i += m[0].length; continue
         }
-        if (c === '[' && (m = at(RX.link))) {
+        if (c === '[' && !inLink && (m = at(RX.link))) {
           const label = m[1]
           const href = m[2] !== undefined ? m[2] : defs.get((m[4] || label).toLowerCase())
           if (href !== undefined) {
             const r = ask({ kind: /^[a-z][a-z0-9+.-]*:/i.test(href) ? 'url' : 'md', target: href, text: label })
-            const inner = inline(label)
+            const inner = inline(label, true)
             s += hold(linkTag(r, inner, m[3]) || (safeUrl(href) ? linkTag({ url: href }, inner, m[3]) : `<span class="unresolved" title="${mdEsc(href)}">${inner}</span>`))
             i += m[0].length; continue
           }
         }
       } else if (c === '<') {
-        if ((m = at(RX.auto))) { s += hold(linkTag({ url: m[1] }, mdEsc(m[1]))); i += m[0].length; continue }
-        if ((m = at(RX.comment))) { i += m[0].length; continue }
+        if ((m = at(RX.auto))) { s += hold(inLink ? mdEsc(m[1]) : linkTag({ url: m[1] }, mdEsc(m[1]))); i += m[0].length; continue }
+        if (text.startsWith(CMT, i) && !noCommentEnd) {
+          const end = text.indexOf('-->', i + 4)
+          if (end >= 0) { i = end + 3; continue }
+          noCommentEnd = true
+        }
         if ((m = at(RX.tag))) {
           const tag = m[2].toLowerCase()
           if (ALLOWED.has(tag)) s += hold(m[1] ? (VOID.has(tag) ? '' : `</${tag}>`) : `<${tag}>`)
           i += m[0].length; continue
         }
-      } else if ((c === 'h' || c === 'w' || c === 'H' || c === 'W') && !/[\p{L}\p{N}_/]/u.test(text[i - 1] || '') && (m = at(RX.bare))) {
+      } else if ((c === 'h' || c === 'w' || c === 'H' || c === 'W') && !inLink && !/[\p{L}\p{N}_/]/u.test(text[i - 1] || '') && (m = at(RX.bare))) {
         const url = /^www\./i.test(m[0]) ? `https:/${'/'}${m[0]}` : m[0] // (no literal URL in the page's script)
         s += hold(linkTag({ url }, mdEsc(m[0]))); i += m[0].length; continue
-      } else if (c === ' ' && text[i + 1] === ' ' && (m = at(RX.hard))) { s += hold('<br>'); i += m[0].length; continue }
+      } else if (c === ' ' && text[i + 1] === ' ') { // a run of spaces: a hard break when a newline ends it
+        let j = i
+        while (text[j] === ' ') j++
+        if (text[j] === '\n') { s += hold('<br>'); i = j + 1; continue }
+        s += text.slice(i, j); i = j; continue
+      }
       s += c; i++
     }
-    let e = mdEsc(s)
-    e = e.replace(/\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/g, '<strong><em>$1</em></strong>')
-      .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
-      .replace(/(^|[^\p{L}\p{N}_])__(?=\S)([\s\S]*?\S)__(?![\p{L}\p{N}_])/gu, '$1<strong>$2</strong>')
-      .replace(/\*(?=[^\s*])([\s\S]*?[^\s*])\*/g, '<em>$1</em>')
-      .replace(/(^|[^\p{L}\p{N}_])_(?=[^\s_])([\s\S]*?[^\s_])_(?![\p{L}\p{N}_])/gu, '$1<em>$2</em>')
-      .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>')
-      .replace(/==(?=\S)([\s\S]*?\S)==/g, '<mark>$1</mark>')
+    let e = escText(s)
+    e = e.replace(/\*\*\*(?=\S)([\s\S]{0,800}?\S)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*(?=\S)([\s\S]{0,800}?\S)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^\p{L}\p{N}_])__(?=\S)([\s\S]{0,800}?\S)__(?![\p{L}\p{N}_])/gu, '$1<strong>$2</strong>')
+      .replace(/\*(?=[^\s*])([\s\S]{0,800}?[^\s*])\*/g, '<em>$1</em>')
+      .replace(/(^|[^\p{L}\p{N}_])_(?=[^\s_])([\s\S]{0,800}?[^\s_])_(?![\p{L}\p{N}_])/gu, '$1<em>$2</em>')
+      .replace(/~~(?=\S)([\s\S]{0,800}?\S)~~/g, '<del>$1</del>')
+      .replace(/==(?=\S)([\s\S]{0,800}?\S)==/g, '<mark>$1</mark>')
       .replace(/(^|[\s(])#([\p{L}_][\p{L}\p{N}_/-]*)/gu, '$1<span class="tag">#$2</span>')
     return e.replace(/\u0000(\d+)\u0000/g, (_, n) => keep[Number(n)])
   }
@@ -158,25 +184,33 @@ export function mdToHtml(src, link, out) {
   const QUOTE = /^ {0,3}> ?/
   const ITEM = /^( *)([-*+]|\d{1,9}[.)])(?:[ \t]+(.*)|[ \t]*$)/
   const TDELIM = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/
-  const HTML = /^ {0,3}<\/?([a-zA-Z][\w-]*)(?:[\s>/]|$)|^ {0,3}<!--/
+  const HTML = /^ {0,3}<\/?([a-zA-Z][\w-]*)(?:[\s>/]|$)|^ {0,3}<!-{2}/
   const SETEXT = /^ {0,3}(=+|-+)[ \t]*$/
   const indentOf = (l) => /^ */.exec(l.replace(/\t/g, '    '))[0].length
   const startsBlock = (l, next) => FENCE.test(l) || ATX.test(l) || HR.test(l) || QUOTE.test(l) || HTML.test(l) || (l.includes('|') && next !== undefined && TDELIM.test(next) && next.includes('-'))
   const cells = (row) => { let r = row.trim(); if (r.startsWith('|')) r = r.slice(1); if (r.endsWith('|') && !r.endsWith('\\|')) r = r.slice(0, -1); return r.split(/(?<!\\)\|/).map((x) => x.trim().replace(/\\\|/g, '|')) }
 
   function heading(level, text) {
-    const id = anchorOf(text)
-    out.headings.push({ level, text: text.replace(/\[\[([^\]|]+)\|?([^\]]*)\]\]/g, (_, a, b) => b || a).replace(/[*_`~=]/g, ''), slug: id })
-    return `<h${level} id="h-${mdEsc(id)}">${inline(text)}</h${level}>`
+    const html = inline(text)
+    const plain = html.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim()
+    const id = anchorOf(plain)
+    out.headings.push({ level, text: plain, slug: id })
+    return `<h${level} id="h-${mdEsc(id)}">${html}</h${level}>`
   }
 
-  function blocks(ls) {
+  function blocks(ls, depth = 0) {
+    if (depth > 30) return `<p>${inline(ls.join('\n'))}</p>` // a note nested past reason renders flat
     const html = []
     let i = 0
     while (i < ls.length) {
       const l = ls[i]
       if (!l.trim()) { i++; continue }
       let m
+      if (l.trimStart().startsWith(CMT)) { // an HTML comment, blank lines and all, shows nothing; what follows it on its last line stays
+        while (i < ls.length && !ls[i].includes('-->')) i++
+        if (i < ls.length) { const rest = ls[i].slice(ls[i].indexOf('-->') + 3); if (rest.trim()) { ls = ls.slice(); ls[i] = rest; continue } }
+        i++; continue
+      }
       if ((m = FENCE.exec(l))) {
         const [, ind, fence, lang] = m
         const body = []
@@ -195,9 +229,9 @@ export function mdToHtml(src, link, out) {
         if (c) {
           const kind = CALLOUTS.has(c[1].toLowerCase()) ? c[1].toLowerCase() : 'note'
           const title = c[3] || c[1][0].toUpperCase() + c[1].slice(1).toLowerCase()
-          const inner = blocks(q.slice(1))
+          const inner = blocks(q.slice(1), depth + 1)
           html.push(c[2] ? `<details class="callout callout-${kind}"${c[2] === '+' ? ' open' : ''}><summary class="callout-title">${inline(title)}</summary>${inner}</details>` : `<div class="callout callout-${kind}"><div class="callout-title">${inline(title)}</div>${inner}</div>`)
-        } else html.push(`<blockquote>${blocks(q)}</blockquote>`)
+        } else html.push(`<blockquote>${blocks(q, depth + 1)}</blockquote>`)
         continue
       }
       if (l.includes('|') && i + 1 < ls.length && TDELIM.test(ls[i + 1]) && ls[i + 1].includes('-')) {
@@ -209,7 +243,7 @@ export function mdToHtml(src, link, out) {
         html.push(`<div class="table"><table><thead><tr>${head.map((c, k) => `<th${st(k)}>${inline(c)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${head.map((_, k) => `<td${st(k)}>${inline(r[k] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`)
         continue
       }
-      if ((m = ITEM.exec(l))) { i = list(ls, i, html); continue }
+      if ((m = ITEM.exec(l))) { i = list(ls, i, html, depth); continue }
       if (HTML.test(l)) {
         const chunk = []
         while (i < ls.length && ls[i].trim()) { chunk.push(ls[i]); i++ }
@@ -236,7 +270,7 @@ export function mdToHtml(src, link, out) {
   }
 
   // one list, from line i: items at the same indent and of the same kind; returns the next line
-  function list(ls, i, html) {
+  function list(ls, i, html, depth) {
     const first = ITEM.exec(ls[i])
     const ind = first[1].length, ordered = /\d/.test(first[2]), start = ordered ? parseInt(first[2], 10) : 1
     const items = []
@@ -268,7 +302,7 @@ export function mdToHtml(src, link, out) {
       let task = ''
       const t = /^\[([ xX])\][ \t]+/.exec(content[0])
       if (t) { task = `<input type="checkbox" disabled${t[1] !== ' ' ? ' checked' : ''}> `; content[0] = content[0].slice(t[0].length) }
-      let inner = blocks(content)
+      let inner = blocks(content, depth + 1)
       if (!loose) inner = inner.replace(/^<p>([\s\S]*?)<\/p>/, '$1')
       return `<li${task ? ' class="task"' : ''}>${task}${inner}</li>`
     })

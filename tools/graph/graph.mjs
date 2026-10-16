@@ -53,7 +53,9 @@ if (cmd === 'serve') {
     if (!project.enabled) { console.error('graph: disabled for this project (grimoire.config.json: graph.enabled = false)'); process.exit(1) }
     await seed(project)
     if (!existsSync(project.dbPath)) { console.error('graph: no index yet; build it first: node tools/graph/graph.mjs index'); process.exit(1) }
-    const s = await serve(project, { port: Number(opt('port')) || 0, log: (m) => process.stderr.write(`graph serve: ${m}\n`) })
+    const port = opt('port') === null ? 0 : Number(opt('port'))
+    if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error(`graph serve: --port takes a number from 0 to 65535, not ${JSON.stringify(opt('port'))}`); process.exit(1) }
+    const s = await serve(project, { port, log: (m) => process.stderr.write(`graph serve: ${m}\n`) })
     console.log(s.url)
     console.error('graph serve: local only (127.0.0.1); the address carries its access token. Ctrl-C stops it.')
     const stop = () => s.close().then(() => process.exit(0))
@@ -79,6 +81,7 @@ if (cmd === 'serve') {
     const idx = loadIndex(db)
     db.close()
     const roots = docRoots(project)
+    const shown = (p) => { const r = path.relative(process.cwd(), p); return r && !r.startsWith('..') ? r : p } // relative when under the cwd
     const report = (file, doc) => {
       const a = analyze(doc, idx, roots)
       console.log(`${file}: ${a.errors.length ? `${a.errors.length} error(s)` : 'passes'}, ${a.warnings.length} warning(s)`)
@@ -96,17 +99,17 @@ if (cmd === 'serve') {
       mkdirSync(path.dirname(out), { recursive: true })
       writeFileSync(out, JSON.stringify(doc, null, 2) + '\n')
       console.log(out)
-      report(path.relative(process.cwd(), out) || out, doc)
+      report(shown(out), doc)
       process.exit(0)
     }
     if (sub === 'check') {
       const list = positional.length
-        ? positional.map((f) => { try { return { file: f, doc: JSON.parse(readFileSync(path.resolve(f), 'utf8')) } } catch (e) { return { file: f, error: e.message } } })
-        : readDiagrams(project.architectureDir).map((d) => ({ ...d, file: path.relative(process.cwd(), path.join(project.architectureDir, d.file)) }))
-      if (!list.length) { console.log(`no diagram in ${path.relative(process.cwd(), project.architectureDir) || project.architectureDir} yet: graph.mjs architecture draft writes one`); process.exit(0) }
+        ? positional.map((f) => { let text; try { text = readFileSync(path.resolve(f), 'utf8') } catch (e) { return { file: f, error: `cannot be read: ${e.code || e.message}` } } try { return { file: f, doc: JSON.parse(text) } } catch (e) { return { file: f, error: `does not parse: ${e.message}` } } })
+        : readDiagrams(project.architectureDir).map((d) => ({ ...d, file: shown(path.join(project.architectureDir, d.file)) }))
+      if (!list.length) { console.log(`no diagram in ${shown(project.architectureDir)} yet: graph.mjs architecture draft writes one`); process.exit(0) }
       let errors = 0
       for (const d of list) {
-        if (d.error) { console.log(`${d.file}: does not parse: ${d.error}`); errors++; continue }
+        if (d.error) { console.log(`${d.file}: ${d.error}`); errors++; continue }
         errors += report(d.file, d.doc)
       }
       process.exit(errors ? 1 : 0)

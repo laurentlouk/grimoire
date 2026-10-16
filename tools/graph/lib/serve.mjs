@@ -2,9 +2,11 @@
 //
 //   GET  /?t=<token>     the page, rendered fresh (the index refreshed first), with saving enabled
 //   GET  /api/doc?repo=&path=   a note's text and hash, as on disk now
-//   PUT  /api/doc {repo, path, text, base?, create?}   write a note; `base` is the hash it was
-//                         loaded with, and a note that changed on disk since is refused (409, with the
-//                         disk text); `create` makes a new note (and its folders), never overwrites
+//   PUT  /api/doc {repo, path, text, base, create?}   write a note; `base` (required unless
+//                         creating) is the hash it was loaded with, and a note that changed on disk
+//                         since is refused (409, with the disk text); `create` makes a new note (and
+//                         its folders), never overwrites. A symlinked note is written through to its
+//                         real file, so the link stays; a read-only note is refused.
 //
 // It listens on the loopback interface only, and every request must name it as its host (a page
 // elsewhere cannot rebind a domain to it). Every request carries the token printed at start: in the
@@ -14,7 +16,7 @@
 // renamed over it). Nothing else on disk is reachable through it.
 import http from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, statSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, statSync, unlinkSync, accessSync, constants } from 'node:fs'
 import path from 'node:path'
 import { renderGraph } from './render.mjs'
 import { resolveDoc, docHash } from './docs.mjs'
@@ -56,6 +58,7 @@ export async function serve(project, { port = 0, log = () => {}, refresh = true 
         if (req.method === 'GET') {
           const r = resolveDoc(project, url.searchParams.get('repo'), url.searchParams.get('path'))
           if (r.error) return send(res, 404, { error: r.error })
+          if (statSync(r.abs).size > project.maxBytes) return send(res, 413, { error: 'too large to edit here' })
           const text = readFileSync(r.abs, 'utf8')
           return send(res, 200, { text, hash: docHash(text) })
         }
@@ -67,7 +70,9 @@ export async function serve(project, { port = 0, log = () => {}, refresh = true 
           const r = resolveDoc(project, body.repo, body.path, { create: !!body.create })
           if (r.error) return send(res, 400, { error: r.error })
           if (body.create && !r.created) return send(res, 409, { error: 'that note exists already' })
-          if (!r.created && body.base) {
+          if (!r.created) {
+            if (typeof body.base !== 'string' || !body.base) return send(res, 400, { error: 'base (the hash the note was loaded with) is required' })
+            try { accessSync(r.abs, constants.W_OK) } catch { return send(res, 403, { error: 'the note is read-only' }) }
             const disk = readFileSync(r.abs, 'utf8')
             if (docHash(disk) !== body.base) return send(res, 409, { error: 'changed on disk since it was loaded', text: disk, hash: docHash(disk) })
           }
@@ -85,7 +90,7 @@ export async function serve(project, { port = 0, log = () => {}, refresh = true 
       return send(res, 404, { error: 'not found' })
     } catch (e) {
       log(`error: ${e.message}`)
-      return send(res, 500, { error: e.message })
+      return send(res, 500, { error: 'the server failed; its terminal says why' })
     }
   })
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve) })

@@ -140,7 +140,8 @@ export function validate(doc) {
     if (seen.has(key)) warnings.push(`${at}: drawn twice; one line per direction reads better (put both labels in one)`)
     seen.add(key)
   }
-  if (doc.connections !== undefined && !Array.isArray(doc.connections)) errors.push('connections: must be a list')
+  for (const f of ['connections', 'boundaries', 'cards']) if (doc[f] !== undefined && !Array.isArray(doc[f])) errors.push(`${f}: must be a list`)
+  for (const f of ['summary']) if (doc[f] !== undefined && typeof doc[f] !== 'string') errors.push(`${f}: must be a string`)
   for (const [k, b] of (Array.isArray(doc.boundaries) ? doc.boundaries : []).entries()) {
     const at = `boundaries[${k}]${b && b.label ? ` (${b.label})` : ''}`
     if (!b || typeof b !== 'object') { errors.push(`${at}: not an object`); continue }
@@ -216,7 +217,8 @@ export function bindCode(doc, idx) {
     if (!c.imports || !c.imports.length) return
     for (const im of idx.imports) if (!testFile.has(im.file_id) && c.imports.some((p) => importMatches(im.source, p))) importers[ci].add(im.file_id)
   })
-  comps.forEach((c, b) => { for (const fa of importers[b]) for (const a of compsOf.get(fa) || []) if (a !== b) { const k = `${a}>${b}`; if (!pairs.has(`${fa}>${b}`)) { pairs.add(`${fa}>${b}`); count.set(k, (count.get(k) || 0) + 1) } } })
+  // one importing file counts once per (its component, the imported one): a file in two components counts for each
+  comps.forEach((c, b) => { for (const fa of importers[b]) for (const a of compsOf.get(fa) || []) if (a !== b) { const k = `${a}>${b}`, p = `${fa}>${a}>${b}`; if (!pairs.has(p)) { pairs.add(p); count.set(k, (count.get(k) || 0) + 1) } } })
   const at = new Map(comps.map((c, i) => [c.id, i]))
   const declared = new Set(conns.map((e) => `${at.get(e.from)}>${at.get(e.to)}`))
   const evidence = conns.map((e) => count.get(`${at.get(e.from)}>${at.get(e.to)}`) || 0)
@@ -268,7 +270,7 @@ export const BOX = { w: 184, h: 64, cellW: 296, cellH: 124, margin: 36 }
 // Positions every component, wraps every boundary, routes every connection. Components that give
 // col and row keep them; the rest are placed by flow: a column per step from the components
 // nothing points to, boundaries as horizontal bands, rows ordered to cut crossings.
-// → { boxes: [{ x, y, w, h, col, row }], bounds: [{ x, y, w, h, level }], routes: [{ d, lx, ly, side }],
+// → { boxes: [{ x, y, w, h, col, row }], bounds: [{ x, y, w, h, level, label, kind }], routes: [{ d, lx, ly, tw, chars }],
 //     W, H, problems: [string] }
 export function layoutArch(doc) {
   const comps = doc.components || [], n = comps.length

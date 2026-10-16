@@ -55,6 +55,13 @@ page as an Obsidian-like vault, editable when the page is served
   atomically. A save from a copy that changed on disk since is refused with the disk text, and the
   page offers to load it or overwrite; a served page reloads a note changed on disk when it gets
   focus back.
+- Symlinks follow one rule, listing and saving alike: a note whose real file is outside its
+  repository, or is not itself a Markdown note outside skipped and excluded folders, is never read
+  into the page nor written, and a note symlinked to another note is saved through to its real
+  file, so the link stays. Read-only notes
+  are refused, a CRLF note is saved back with CRLF, and Markdown renders in linear time on any
+  input (a note past 200 KB shows as plain text). One malformed diagram is reported in its place
+  and never takes the page down.
 
 ## Unreleased — the run scorecard, and a journal that arrives whole
 

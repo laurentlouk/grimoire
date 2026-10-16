@@ -12,7 +12,8 @@
 //  5. the page: both tabs rendered by the page's own script in a stub DOM
 //
 //  Needs no parser runtime: indexes here are built by hand (sections 2) or empty (4, 5).
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, readdirSync, lstatSync, chmodSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -87,6 +88,26 @@ Setext
   const t0 = Date.now(); mdToHtml(big, () => null)
   ok(Date.now() - t0 < 1500, `a 330 KB paragraph renders in linear time (${Date.now() - t0} ms)`)
   ok(mdToHtml('a\nb  \nc\\\nd', () => null) === '<p>a\nb<br>c<br>d</p>', 'soft breaks stay spaces; two spaces or a backslash break the line')
+
+  // what the review found
+  const p = (x) => mdToHtml(x, () => null)
+  ok(p('---\n\nIntro paragraph\n\n---\nBody') === '<hr>\n<p>Intro paragraph</p>\n<hr>\n<p>Body</p>' && p('---\n---\nBody') === '<p>Body</p>', 'front matter: only YAML is taken, an opening rule keeps the text after it, an empty block is empty')
+  ok(p('```\n[docs]: https://x.example\n[ERROR]: failed\n```') === '<pre><code>[docs]: https://x.example\n[ERROR]: failed</code></pre>', 'a line shaped like a link definition stays inside a code block')
+  ok(p('a &amp; b &lt; c &nbsp;d &#124; e & f `&amp;`') === '<p>a &amp; b &lt; c &nbsp;d &#124; e &amp; f <code>&amp;amp;</code></p>', 'entities in text are kept; in code they are text')
+  const badge = p('[![b](https://i.example/b.svg)](https://l.example)')
+  ok((badge.match(/<a /g) || []).length === 1 && badge.includes('<span class="img"'), `a badge is one link, its image inside as text (${badge})`)
+  const o2 = {}; mdToHtml('## A [link](https://x.example) here', () => null, o2)
+  ok(o2.headings[0].slug === 'a-link-here' && o2.headings[0].text === 'A link here', "a heading's anchor and outline text come from its rendered text")
+  ok(p('<!' + '-- a\n\nstill hidden -->\nshown') === '<p>shown</p>', 'an HTML comment hides its text, blank lines and all')
+  ok(p('<!' + '-- note --> visible text here') === '<p>visible text here</p>' && p('<!' + '-- c --><b>bold</b> rest') === '<b>bold</b> rest', 'what follows a comment on its line stays')
+  ok(JSON.stringify(mdFront('---\ntítulo: x\n"title": y\ntime: 10:30\n---\nBody')) === '{"props":[["título","x"],["title","y"],["time","10:30"]],"body":"Body"}', 'front matter keys in any language, or quoted')
+  let deep = true
+  try { p('>'.repeat(5000) + ' x') } catch { deep = false }
+  ok(deep, 'a note nested thousands deep renders instead of overflowing the stack')
+  for (const [name, x] of [['a run of spaces', 'a' + ' '.repeat(160000) + 'b'], ['unclosed strong', '**a '.repeat(20000)], ['unclosed images', '![a]('.repeat(10000)], ['unclosed code', '`a'.repeat(50000)], ['unclosed comments', ('<!' + '--a').repeat(30000)], ['unclosed wikilinks', '[[a'.repeat(30000)]]) {
+    const t1 = Date.now(); p(x)
+    ok(Date.now() - t1 < 1500, `hostile input renders in linear time: ${name} (${Date.now() - t1} ms)`)
+  }
 }
 
 // ── 2 · architecture ──
@@ -149,6 +170,17 @@ console.log('\n2 · architecture')
   ok(d.draft === true && A.validate(d).errors.length === 0 && ids === 'api-routes:backend api-scripts:cli api-db:database web-src:frontend postgres:database', `the draft: modules typed, the external service its imports name, valid (${ids})`)
   ok(JSON.stringify(d.connections.map((c) => `${c.from}>${c.to}`)) === '["api-routes>api-db","api-scripts>api-db","web-src>api-routes","api-db>postgres"]' && d.boundaries.length === 2, `the draft links modules by syntax only and boxes each repository (${d.connections.map((c) => `${c.from}>${c.to}`)})`)
   ok(A.analyze(d, idx, null).warnings.length === 0, 'a fresh draft passes its own check without warnings')
+
+  // what the review found: lists that are not lists, one importing file in two components, odd graphs
+  const nl = A.validate({ schema: 1, title: 't', components: [{ id: 'a', label: 'A', type: 'cli' }], boundaries: 'x', cards: {}, summary: 3 })
+  ok(['boundaries: must be a list', 'cards: must be a list', 'summary: must be a string'].every((x) => nl.errors.includes(x)), `boundaries and cards must be lists (${nl.errors})`)
+  const both = { schema: 1, title: 't', components: [{ id: 'x', label: 'X', type: 'backend', paths: ['api:db'] }, { id: 'y', label: 'Y', type: 'backend', paths: ['api:db/user.ts'] }, { id: 'pg', label: 'PG', type: 'database', imports: ['pg'] }], connections: [{ from: 'x', to: 'pg' }, { from: 'y', to: 'pg' }] }
+  ok(JSON.stringify(A.bindCode(both, idx).evidence) === '[1,1]', `a file in two components is evidence for each (${A.bindCode(both, idx).evidence})`)
+  for (const [name, dg] of [['a cycle', { components: [{ id: 'a', label: 'A', type: 'cli' }, { id: 'b', label: 'B', type: 'cli' }, { id: 'c', label: 'C', type: 'cli' }], connections: [{ from: 'a', to: 'b' }, { from: 'b', to: 'c' }, { from: 'c', to: 'a' }] }],
+    ['one component', { components: [{ id: 'a', label: 'A', type: 'cli' }] }], ['no lines', { components: [{ id: 'a', label: 'A', type: 'cli' }, { id: 'b', label: 'B', type: 'cli' }] }]]) {
+    const L2 = A.layoutArch(dg)
+    ok(L2.boxes.every((b) => Number.isFinite(b.x) && Number.isFinite(b.y)) && L2.W > 0 && !L2.boxes.some((b, i) => L2.boxes.some((o, j) => i < j && b.x < o.x + o.w && b.x + b.w > o.x && b.y < o.y + o.h && b.y + b.h > o.y)), `layout of ${name}: every box placed, none overlapping`)
+  }
   ok(JSON.stringify(A.parseSource('api:src/a.ts:3-9', ['api'])) === '{"repo":"api","path":"src/a.ts","start":3,"end":9}' && JSON.stringify(A.parseSource('README.md', ['api'])) === '{"path":"README.md"}' && A.parseSource('x:y.ts:4', ['api']).path === 'x:y.ts'
     && JSON.stringify(A.parseSource('.claude-plugin/plugin.json:1-25', ['api'])) === '{"path":".claude-plugin/plugin.json","start":1,"end":25}' && A.parseSource('src/a.ts:7', ['api']).start === 7, 'sources: repo:path:lines, a bare path with lines, a colon that names no repository')
 }
@@ -174,6 +206,29 @@ const HUB = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-docs-')))
   const refused = [[hub, '../x.md'], [hub, '/etc/x.md'], [hub, 'docs/../AGENTS.md'], [hub, 'a.js'], ['api', 'node_modules/p/README.md'], [hub, 'repos/api/README.md'], ['api', 'escape/n.md', { create: true }], ['nope', 'a.md'], [hub, 'missing.md'], [hub, 'x\\y.md']]
   const bad = refused.filter(([r, p, o]) => !R(r, p, o).startsWith('error'))
   ok(!bad.length, `refused: parent paths, absolute, non-Markdown, skipped folders, another repository's note from the hub, a symlink out, unknown repos, missing notes (${JSON.stringify(bad)})`)
+
+  // what the review found: symlinks and letter case
+  symlinkSync('AGENTS.md', path.join(HUB, 'CLAUDE.md'))
+  symlinkSync(path.join(HUB, 'nowhere.md'), path.join(HUB, 'dangling.md'))
+  ok(R(hub, 'CLAUDE.md') === 'AGENTS.md', 'a symlinked note resolves to its real file, so a save keeps the link')
+  ok(R(hub, 'dangling.md', { create: true }).startsWith('error') && [['api', 'Node_Modules/x.md'], ['api', '.GIT/x.md'], [hub, 'Repos/Api/x.md']].every(([r, p2]) => R(r, p2, { create: true }).startsWith('error')),
+    'refused too: a dangling symlink, and a skipped folder or another repository spelled in another case')
+  const G = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-git-')))
+  const secret = `${G}-secret.txt`
+  writeFileSync(path.join(G, 'README.md'), '# r\n'); writeFileSync(secret, 'TOP-SECRET')
+  writeFileSync(path.join(G, 'grimoire.config.json'), JSON.stringify({ graph: { exclude: ['private'] } }))
+  writeFileSync(path.join(G, 'deploy.sh'), 'echo deploy\n'); mkdirSync(path.join(G, 'private')); writeFileSync(path.join(G, 'private/p.md'), 'private')
+  symlinkSync(secret, path.join(G, 'leak.md')); symlinkSync('README.md', path.join(G, 'CLAUDE.md'))
+  if (spawnSync('git', ['init', '-q'], { cwd: G }).status !== 0) console.log('   - skipped: git is not available')
+  else {
+    symlinkSync('.git/config', path.join(G, 'gitcfg.md')); symlinkSync('deploy.sh', path.join(G, 'script.md')); symlinkSync('private/p.md', path.join(G, 'viapriv.md')); symlinkSync('.git', path.join(G, 'gitdir'))
+    const gp = loadProject(G), gname = path.basename(G)
+    const gd = scanDocs(gp).map((d) => `${d.path}:${/SECRET|\[core\]|deploy|private/.test(d.text)}`).join(' ')
+    ok(gd === 'CLAUDE.md:false README.md:false', `a listed symlink is read only when its real file is a note of the repository: not a file outside it, .git/config, a script or an excluded note (${gd})`)
+    const gr = (p2, o) => resolveDoc(gp, gname, p2, o)
+    ok(['leak.md', 'gitcfg.md', 'script.md', 'viapriv.md'].every((p2) => gr(p2).error) && gr('gitdir/x.md', { create: true }).error && gr('CLAUDE.md').abs === path.join(G, 'README.md'),
+      'and none of them is served or written, nor a note created through a folder linked into .git; a note linked to a note is')
+  }
 }
 
 // ── 4 · the server ──
@@ -213,6 +268,22 @@ else {
     w = await put({ repo: hub, path: '../outside/x.md', text: 'x', create: true })
     ok(w.status === 400 && !existsSync(path.join(HUB, '../outside/x.md')), 'a path out of the repository is refused')
     ok((await put({ repo: 'api', path: 'escape/x.md', text: 'x', create: true })).status === 400 && !existsSync(path.join(HUB, 'outside/x.md')), 'a symlinked folder out of the repository is refused')
+    // what the review found
+    ok((await put({ repo: hub, path: 'AGENTS.md', text: 'no base' })).status === 400 && readFileSync(path.join(HUB, 'AGENTS.md'), 'utf8') === '# Agents v2\n', 'a save must name the version it edits')
+    const cl = JSON.parse((await req(`/api/doc?repo=${hub}&path=CLAUDE.md`)).text)
+    w = await put({ repo: hub, path: 'CLAUDE.md', text: '# Agents v3\n', base: cl.hash })
+    ok(w.status === 200 && lstatSync(path.join(HUB, 'CLAUDE.md')).isSymbolicLink() && readFileSync(path.join(HUB, 'AGENTS.md'), 'utf8') === '# Agents v3\n', 'a save through a symlinked note writes its real file and keeps the link')
+    if (!(process.getuid && process.getuid() === 0)) { // root writes through any mode
+      writeFileSync(path.join(HUB, 'docs/locked.md'), '# Locked\n'); chmodSync(path.join(HUB, 'docs/locked.md'), 0o444)
+      const lk = JSON.parse((await req(`/api/doc?repo=${hub}&path=docs/locked.md`)).text)
+      ok((await put({ repo: hub, path: 'docs/locked.md', text: 'x', base: lk.hash })).status === 403 && readFileSync(path.join(HUB, 'docs/locked.md'), 'utf8') === '# Locked\n', 'a read-only note is refused')
+    }
+    symlinkSync('../grimoire.config.json', path.join(HUB, 'docs/cfg.md'))
+    const cfgBefore = readFileSync(path.join(HUB, 'grimoire.config.json'), 'utf8')
+    ok((await req(`/api/doc?repo=${hub}&path=docs/cfg.md`)).status === 404 && (await put({ repo: hub, path: 'docs/cfg.md', text: 'PWNED', base: docHash(cfgBefore) })).status === 400 && readFileSync(path.join(HUB, 'grimoire.config.json'), 'utf8') === cfgBefore,
+      'a .md symlink to a file that is not a note is neither served nor written')
+    writeFileSync(path.join(HUB, 'docs/huge.md'), 'x'.repeat(600 * 1024))
+    ok((await req(`/api/doc?repo=${hub}&path=docs/huge.md`)).status === 413, 'a note past the size limit is not served for editing')
     ok(readdirTmp(HUB).length === 0, 'no temporary file is left behind')
   } finally { await s.close() }
 }
@@ -228,11 +299,18 @@ else {
   mkdirSync(project.architectureDir, { recursive: true })
   writeFileSync(path.join(project.architectureDir, 'hub.architecture.json'), JSON.stringify({ schema: 1, title: 'Hub', summary: 'The hub.', components: [{ id: 'users', label: 'Users', type: 'external' }, { id: 'api', label: 'API', type: 'backend', sources: ['api:README.md:1'] }], connections: [{ from: 'users', to: 'api', label: 'HTTPS' }], cards: [{ title: 'Note', color: 'rose', items: ['one'] }] }))
   writeFileSync(path.join(project.architectureDir, 'broken.architecture.json'), '{ nope')
+  writeFileSync(path.join(project.architectureDir, 'badtypes.architecture.json'), JSON.stringify({ schema: 1, title: 'Bad', components: [{ id: 'a', label: 'A', type: 'cli' }], boundaries: 'x', cards: 'abc' }))
+  writeFileSync(path.join(HUB, 'docs/links.md'), 'See [[guide]], ![[pic.png]], [[Node.js]], [steps](guide.md#Setup%20Steps) and `repos/api/README.md`.\n')
+  writeFileSync(path.join(HUB, 'docs/Node.js.md'), '# Node\n')
+  writeFileSync(path.join(HUB, 'repos/api/docs/guide.md'), '# API guide\n')
+  writeFileSync(path.join(HUB, 'repos/api/docs/a.markdown'), 'Read [[docs/guide]].\n')
   const page = await renderGraph(project)
   const D = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page)[1].replace(/\\u003c/g, '<'))
-  ok(D.arch.map((a) => `${a.file}:${a.errors && !a.comps ? 'error' : a.comps.length}`).join(' ') === 'docs/architecture/broken.architecture.json:error docs/architecture/hub.architecture.json:2', `saved diagrams are listed, a broken one with its error (${D.arch.map((a) => a.file)})`)
-  ok(!page.includes("connect-src") && D.serve === undefined && D.docs.length === 5, 'a rendered (not served) page cannot save, and carries every note')
+  ok(D.arch.map((a) => `${a.file}:${a.errors && !a.comps ? 'error' : a.comps.length}`).join(' ') === 'docs/architecture/badtypes.architecture.json:error docs/architecture/broken.architecture.json:error docs/architecture/hub.architecture.json:2' && D.arch[0].errors.includes('boundaries: must be a list'),
+    `saved diagrams are listed; one that does not parse or check carries its errors and takes nothing else down (${D.arch.map((a) => a.file)})`)
+  ok(!page.includes('connect-src') && D.serve === undefined && D.docs.length === scanDocs(project).length && page.includes("base-uri 'none'; form-action 'none'"), 'a rendered (not served) page cannot save, carries every note, and allows no base or form target')
   const script = (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(page) || [])[1] || ''
+  ok(!/<!--|<script/i.test(script), 'the page script never opens an HTML comment or a script element')
   ok(['mdToHtml', 'mdFront', 'mdSlug', 'archClient', 'docsClient'].every((n) => script.includes(`function ${n}(`)), 'the page carries the Markdown helpers and both tabs')
   const vm = await import('node:vm')
   const blob = /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page)[1]
@@ -254,16 +332,26 @@ else {
   const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
   const text = () => (doc.body.kids || []).map(dump).join(' ')
   const go = (h) => { loc.hash = h; listeners.hashchange() }
-  ok(loc.hash === '#arch-0' && /does not pass its check/.test(text()) && /does not parse/.test(text()), 'the Architecture tab opens on the first diagram; a broken one says why it is not drawn')
+  ok(loc.hash === '#arch-0' && /does not pass its check/.test(text()) && /boundaries: must be a list/.test(text()), 'the Architecture tab opens on the first diagram; a broken one says why it is not drawn')
   go('#arch-1')
-  ok(/data-comp="users"/.test(text()) && /HTTPS/.test(text()) && /The hub\./.test(text()) && /acard c-rose/.test(text()), 'a diagram: its components, labelled lines, summary and cards')
+  ok(/does not parse/.test(text()), 'a diagram that does not parse says so')
   go('#arch-2')
-  ok(/Drafted from the graph on this render/.test(text()) || /No architecture diagram/.test(text()) || D.arch.length === 2, 'the auto draft is offered when the index has production code')
-  const guide = D.docs.findIndex((d) => d[2] === 'docs/guide.md'), agents = D.docs.findIndex((d) => d[2] === 'AGENTS.md')
+  ok(/data-comp="users"/.test(text()) && /HTTPS/.test(text()) && /The hub\./.test(text()) && /acard c-rose/.test(text()), 'a diagram: its components, labelled lines, summary and cards')
+  ok(D.arch.length === 3, 'an index with no production code offers no drafted diagram')
+  const at = (repo, p2) => D.docs.findIndex((d) => d[0] === repo && d[2] === p2)
+  const hubName = path.basename(HUB), guide = at(hubName, 'docs/guide.md'), agents = at(hubName, 'AGENTS.md'), apiGuide = at('api', 'docs/guide.md'), apiReadme = at('api', 'README.md')
   go(`#doc-${agents}`)
-  ok(/<h1 id="h-agents-v2">Agents v2<\/h1>/.test(text()) && /Read-only snapshot/.test(text()) && /disabled/.test(text()), `a note renders read-only on a page that is not served (${loc.hash})`)
+  ok(/<h1 id="h-agents-v3">Agents v3<\/h1>/.test(text()) && /Read-only snapshot/.test(text()) && /disabled/.test(text()), `a note renders read-only on a page that is not served (${loc.hash})`)
   go(`#doc-${guide}`)
-  ok(/Backlinks \(0\)/.test(text()) || /Backlinks/.test(text()), 'a note shows its backlinks')
+  ok(/Backlinks \(1\)/.test(text()) && /links/.test(text()), 'a note lists the note that links to it')
+  go(`#doc-${at(hubName, 'docs/links.md')}`)
+  const links = text()
+  ok(links.includes(`data-doc="${guide}" data-anchor="setup-steps"`) && links.includes(`data-doc="${apiReadme}"`) && links.includes(`data-doc="${at(hubName, 'docs/Node.js.md')}"`) && !links.includes('data-new="pic.png"') && /Unresolved links/.test(links) === false,
+    'links: a percent-encoded heading, a path naming a note, a note with a dot in its name, and an image embed that is no missing note')
+  go(`#doc-${at('api', 'docs/a.markdown')}`)
+  ok(text().includes(`data-doc="${apiGuide}"`), "a wikilink path resolves in the note's own repository first")
+  go(`#doc-${apiGuide}`)
+  ok(/Backlinks \(1\)/.test(text()), "and the repository's note counts the backlink")
   go('#docs')
   ok(/notes/.test(text()) && /At the top/.test(text()), 'the Docs home: counts and the top-level notes')
 }
