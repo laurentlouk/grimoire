@@ -65,6 +65,26 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
   - `scriptsDir` overrides where the file is; the default is next to `briefsDir`.
 - Each event is serialized once: the byte count and the chunk share its line.
 
+**Setup (`skills/setup`, `scripts/config-merge.mjs`)**
+
+Re-running `/grimoire:setup` on a project already set up was not handled: nothing checked for an
+existing `grimoire.config.json`, `.claude/settings.json` or memory before writing, and the
+no-overwrite rule named only `CLAUDE.md`, `AGENTS.md` and agent definitions.
+- **A re-run reads what is there, shows one diff, and writes only what is approved.** Step 0 gains a
+  "Re-run" part beside migration mode. Hand-edited values are the user's choice, and secrets are
+  referenced, never read. The no-overwrite rule now covers the config, the settings and memory.
+- **`scripts/config-merge.mjs` makes the JSON diff.** It takes the current file and a proposal kept
+  in the session scratchpad, and prints each key as ADDED, CHANGED or KEPT.
+  - A CHANGED key is applied only when an `--approve` names its path, such as `repos[api].gate`.
+  - `repos[]` are matched by `name` and `specialists[]` by `agent`; a gate is compared whole.
+  - Permission lists and a hook group's commands are sets: the user's entries stay, and the
+    proposed ones are added once.
+  - Without `--write` it writes nothing. With it, the write is atomic, and skipped when nothing
+    changes. Values under a token, secret, password or API-key name print as `«redacted»`.
+  - Through it, setup can write `.claude/settings.json`, which the guard closes to `Write` and `Edit`.
+- Checks: `scripts/config-merge.test.mjs` (72), and the setup evals `setup-6` (a configured project
+  re-run changes nothing before the yes) and `setup-7` (a hand-edited gate is kept).
+
 ## 0.11.0 — trust and see
 
 The code graph's first release on its roadmap: make the links worth trusting, then draw them so a
