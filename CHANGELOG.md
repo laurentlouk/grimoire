@@ -252,6 +252,34 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   `manager.priorityLabels`; states onto the six state types, the native ones kept).
 - `grimoire.config.example.json` has the `manager` block, documented in `workflows/README.md` as not
   read by the loop.
+- **Every urgency rule.** Two more, each a named function next to the others and set in
+  `manager.urgent`:
+  - not started (backlog or unstarted) and blocking at least `blocksAtLeast` (2) open issues:
+    "blocks 3 open issues". A blocked id the briefing did not read counts as open;
+  - started with no activity for at least `stalledDays` (5) calendar days, from `lastActivityAt`,
+    else `updatedAt`: "no activity for 6 days".
+- **New and changed, from the ledger.** An item not in the last briefing is badged **new**; one
+  whose state, priority, assignee, due date, blockers, labels or linked PR changed, **changed**.
+  The items gone since, or now completed or canceled, are counted as resolved, not listed. The
+  counts are in the view model and the front matter (`counts.new`, `.changed`, `.resolved`); the
+  first briefing (no ledger) says "first briefing" (`firstBriefing: true`) and badges nothing.
+- **Partial sources.** `brief --sources <file>` takes what each scout reported, which the skill
+  now writes: `ok`, `capped` (its count shows as "≥ N", never as complete) or `failed` (listed
+  under **Not checked** with its reason and fix, and `partial: true`). An item a failed or capped
+  source didn't show is neither resolved nor dropped from the ledger. `tracker-scout` replies in
+  prose naming the routes it tried when a source can't be read, never `[]`, and says so when it
+  stops at `maxItemsPerSource`. Without `--sources`, the sources are inferred from the items.
+- **`priorityLabels`** maps labels to 0–4 case-insensitively, defaulting to `priority: urgent` /
+  `high` / `medium` / `low`, `P0`–`P3` and `critical`; a config map replaces the defaults. The
+  scout applies it, and the script maps a `nativePriority` label itself when `priority` is
+  absent, so the result is the same whoever maps it. An unknown priority ranks last.
+- **Robustness.** A corrupt or old-schema ledger starts over, said once on stderr, with no crash;
+  the ledger's `firstSeenAt` is re-checked; a date-time must be a real calendar day and clock
+  time (`2026-02-30T10:00:00Z` is refused); `--items=/dir/a=b.json` splits at the first `=`; a
+  stale lock is moved aside, re-checked and only then unlinked, so two runs breaking it never
+  both hold it; a `.lock` that is a directory, or any state file the script can't use, is a
+  one-line error. Checks: `scripts/manager.test.mjs` (222), and the eval `manager-5` (a source
+  that can't be read is listed as not checked, with its fix).
 
 ## 0.11.0 — trust and see
 
