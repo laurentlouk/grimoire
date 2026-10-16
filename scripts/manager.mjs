@@ -1052,12 +1052,13 @@ function pageClient(planLaunch, safeUrl) {
     const pickable = Boolean(it.group === 'ai' && it.launch && it.launch.shown)
     let head
     if (it.group === 'ai' || it.heldBack) {
-      const box = h('input', { type: 'checkbox', id: `pick-${n}`, disabled: !pickable, 'data-ref': `${it.sourceId}:${it.id}`,
+      // labelled by its id, described by its title (and the fix, when held back)
+      const box = h('input', { type: 'checkbox', id: `pick-${n}`, disabled: !pickable, 'data-ref': `${it.sourceId}:${it.id}`, 'aria-describedby': `title-${n}${it.heldBack ? ` fix-${n}` : ''}`,
         onchange: () => { if (box.checked) st.ticked.add(it); else st.ticked.delete(it); update() } })
       if (pickable) ready.push({ it, box })
       head = [box, h('label', { for: `pick-${n}`, class: 'key' }, t(it.key))]
     } else head = [h('b', { class: 'key' }, t(it.key))]
-    const title = url ? h('a', { href: url, rel: 'noopener noreferrer', target: '_blank' }, t(it.title)) : h('span', null, t(it.title))
+    const title = url ? h('a', { href: url, rel: 'noopener noreferrer', target: '_blank', id: `title-${n}` }, t(it.title)) : h('span', { id: `title-${n}` }, t(it.title))
     const badges = [it.urgent && h('span', { class: 'badge b-urgent' }, 'urgent'), it.badge && h('span', { class: `badge b-${it.badge === 'new' ? 'new' : 'changed'}` }, t(it.badge))]
     const state = t(it.nativeState ?? it.stateType)
     const meta = it.kind === 'pr' ? ['PR', state, it.assignee ? t(it.assignee) : 'no author read']
@@ -1069,7 +1070,7 @@ function pageClient(planLaunch, safeUrl) {
       h('p', { class: 'meta' }, meta.join(' · ')),
       h('p', { class: 'why' }, `why: ${(it.reasons || []).map(t).join('; ')}`),
       it.nextStep ? h('p', { class: 'next-step' }, `next: ${t(it.nextStep)}`) : null,
-      it.heldBack ? h('p', { class: 'fix' }, `Held back by its repo (${t(it.repo.reason)}: ${t(it.repo.path)}). Fix it first: ${t(it.repo.fix)}`) : null,
+      it.heldBack ? h('p', { class: 'fix', id: `fix-${n}` }, `Held back by its repo (${t(it.repo.reason)}: ${t(it.repo.path)}). Fix it first: ${t(it.repo.fix)}`) : null,
       it.group === 'ai' && !pickable ? h('p', { class: 'fix' }, 'Its tracker id is not a plain id, so no launch prompt carries it: launch it from a session.') : null)
     rows.push({ it, el })
     return el
