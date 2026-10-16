@@ -280,6 +280,18 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   both hold it; a `.lock` that is a directory, or any state file the script can't use, is a
   one-line error. Checks: `scripts/manager.test.mjs` (222), and the eval `manager-5` (a source
   that can't be read is listed as not checked, with its fix).
+- **Every session opens with the briefing's headline.** A new `SessionStart` hook,
+  `hooks/scripts/briefing.sh`, runs `manager.mjs headline`, which reads `latest.md`'s front matter
+  (in a linked worktree, the main checkout's too, and the newer wins) and prints one line:
+  `grimoire manager · 2 urgent, 3 ready for AI · 1 new · briefing 5 h old (/grimoire:manager)`.
+  "first briefing" replaces the new count on the first; the page's path follows when `briefing.html`
+  exists; a partial briefing adds `partial: <ids> not checked` (brief now writes `notChecked` to
+  the front matter); and past `manager.schedule`'s interval the line ends `stale, run
+  /grimoire:manager` (`when` read leniently: a cron line, hourly, every N, weekly; daily, weekdays,
+  no schedule or text it can't read is 24 h). It reads files only, never runs a briefing, and
+  prints ids and counts, never ticket text: one line under 10,000 characters. No briefing, a
+  corrupt one, an unreadable root or no `node` prints nothing, exit 0. Checks:
+  `scripts/manager.test.mjs` (287 in all).
 
 ## 0.11.0 — trust and see
 

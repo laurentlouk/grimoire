@@ -73,9 +73,23 @@
 //
 //  Exit: 0 written · 1 invalid items, sources or config, or a state file that can't be used
 //  · 2 usage · 3 a briefing is in progress.
+//
+//  node scripts/manager.mjs headline [--root <dir>] [--now <iso>] [--config <file>]
+//      → one line from <root>/.grimoire/manager/latest.md's front matter, for the SessionStart
+//        hook (hooks/scripts/briefing.sh), which puts it in every session:
+//        grimoire manager · 2 urgent, 3 ready for AI · 1 new · briefing 5 h old (/grimoire:manager)
+//        "first briefing" in place of the new count on the first; the age in min under 1 h, h
+//        under 48 h, days after; then "· page <path>" when briefing.html exists, "· partial: <ids>
+//        not checked" (front matter notChecked; the first ten, then how many more), and last
+//        "· stale, run /grimoire:manager" past manager.schedule's interval (scheduleInterval:
+//        24 h with no schedule, or one it can't read). In a linked worktree the main checkout's
+//        briefing is read too, where brief writes it, and the newer one wins.
+//      It reads files and spawns nothing, and prints ids and counts only, never ticket text: one
+//      line, under 10,000 characters, no control characters. No briefing, a corrupt front
+//      matter, an unreadable root or any error prints nothing. Always exit 0.
 //  Plain Node ≥ 20, no dependencies.
-import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, writeSync, closeSync, lstatSync, linkSync, rmSync, realpathSync, existsSync } from 'node:fs'
-import { resolve, join, dirname, sep } from 'node:path'
+import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, readSync, writeSync, closeSync, lstatSync, statSync, linkSync, rmSync, realpathSync, existsSync } from 'node:fs'
+import { resolve, join, dirname, basename, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -166,8 +180,9 @@ const C = {
   },
 }
 const PROJECT = { id: C.string, name: C.string, sliced: C.bool }
+const SOURCE_ID = /^[A-Za-z0-9._-]{1,64}$/
 const FIELDS = {
-  sourceId: (v) => (typeof v === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(v) ? null : fail('expected 1 to 64 letters, digits, ".", "_" or "-"')),
+  sourceId: (v) => (typeof v === 'string' && SOURCE_ID.test(v) ? null : fail('expected 1 to 64 letters, digits, ".", "_" or "-"')),
   id: C.nonEmpty,
   key: nullable(C.nonEmpty),
   title: C.nonEmpty,
@@ -578,6 +593,8 @@ export function renderMarkdown(v) {
     `generatedAt: ${JSON.stringify(v.generatedAt)}`,
     `firstBriefing: ${JSON.stringify(v.firstBriefing)}`,
     `partial: ${JSON.stringify(v.partial)}`,
+    // the sources that could not be read: the headline names them
+    `notChecked: ${JSON.stringify(v.sources.filter((s) => s.status === 'failed').map((s) => s.id))}`,
     `sources: ${JSON.stringify(v.sources.map((s) => s.id))}`,
     `counts: ${JSON.stringify(c)}`,
     '---',
@@ -605,6 +622,142 @@ export function renderMarkdown(v) {
     for (const it of g.items) L.push(...itemLines(it))
   }
   return `${L.join('\n')}\n`
+}
+
+// ── the session headline (`headline`, hooks/scripts/briefing.sh) ──
+// One line from latest.md's front matter, injected into every session at its start: so ids and
+// counts only, never ticket text, and nothing printed that the front matter's own checks did not
+// pass. It reads files and spawns nothing (a hook has 5 s).
+const MINUTE = 60000
+export const HEADLINE_MAX = 10000
+const FRONT_MAX = 1 << 20 // the front matter is read from latest.md's first MiB
+const IDS_SHOWN = 10
+const PATH_MAX = 4096
+// what never goes into the line: control characters, line and paragraph separators, bidi controls
+const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/
+
+// latest.md's front matter → { key: value }, each value the JSON renderMarkdown writes; null when
+// the text has none, a line in it is not `key: <JSON>`, or it is never closed.
+export function frontMatter(text) {
+  const lines = String(text ?? '').split(/\r?\n/)
+  if (lines[0] !== '---') return null
+  const out = Object.create(null) // a key is the file's text: "__proto__" stays a key
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '---') return out
+    const m = /^([A-Za-z][A-Za-z0-9_]*): (.*)$/.exec(lines[i])
+    if (!m) return null
+    try { out[m[1]] = JSON.parse(m[2]) } catch { return null }
+  }
+  return null
+}
+
+// How often a briefing is due, in ms, from manager.schedule (or its `when` given alone), read
+// leniently: a cron line (`0 * * * *` and any fixed minute hourly, `*/15 * * * *` every 15 min,
+// `0 */6 * * *` every 6 h, a fixed hour daily), "hourly", "every N minutes | hours | days",
+// "weekly". Anything else is 24 h: "daily", "weekdays 08:30" (a weekend reads as stale), no
+// schedule, and text it can't read.
+export function scheduleInterval(schedule) {
+  const when = typeof schedule === 'string' ? schedule : isObj(schedule) && typeof schedule.when === 'string' ? schedule.when : ''
+  const s = when.trim().toLowerCase()
+  const cron = s.split(/\s+/)
+  if (cron.length === 5 && cron.every((f) => /^[\d*,/-]+$/.test(f))) {
+    const step = (f) => { const m = /^\*\/(\d+)$/.exec(f); return m && +m[1] > 0 ? +m[1] : null }
+    const [min, hour] = cron
+    if (hour === '*') return min === '*' ? MINUTE : step(min) ? step(min) * MINUTE : HOUR
+    return step(hour) ? step(hour) * HOUR : DAY
+  }
+  if (/\b(hourly|every hour)\b/.test(s)) return HOUR
+  const every = /\bevery (\d+) ?(minutes?|mins?|hours?|hrs?|h|days?|d)\b/.exec(s)
+  if (every && +every[1] > 0) return +every[1] * (every[2][0] === 'm' ? MINUTE : every[2][0] === 'd' ? DAY : HOUR)
+  if (/\b(weekly|every week)\b/.test(s)) return 7 * DAY
+  return DAY
+}
+
+// minutes under 1 h, hours under 48 h, days after
+const ageText = (ms) => (ms < HOUR ? `${Math.floor(ms / MINUTE)} min` : ms < 48 * HOUR ? `${Math.floor(ms / HOUR)} h` : `${Math.floor(ms / DAY)} days`)
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0
+
+// The headline from a parsed front matter, or null when it is not one brief writes (generatedAt
+// a real time; counts.urgent, .ai and .new whole numbers; partial and firstBriefing booleans;
+// notChecked source ids). Pure. interval: scheduleInterval's; page: briefing.html's path, or null.
+export function headline(front, { now, interval = DAY, page = null } = {}) {
+  if (!isObj(front) || !isObj(front.counts)) return null
+  const c = front.counts
+  const generated = parseTime(front.generatedAt)
+  const ids = front.notChecked ?? []
+  if (!Number.isFinite(generated) || !isCount(c.urgent) || !isCount(c.ai) || (c.new !== undefined && !isCount(c.new))) return null
+  if ([front.partial, front.firstBriefing].some((b) => b !== undefined && typeof b !== 'boolean')) return null
+  if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string' && SOURCE_ID.test(id))) return null
+  const age = Math.max(0, toMs(now) - generated) // a briefing from the future (clock skew) is 0 min old
+  const parts = ['grimoire manager', `${c.urgent} urgent, ${c.ai} ready for AI`]
+  if (front.firstBriefing === true) parts.push('first briefing')
+  else if (c.new > 0) parts.push(`${c.new} new`)
+  parts.push(`briefing ${ageText(age)} old (/grimoire:manager)`)
+  if (typeof page === 'string' && page.length <= PATH_MAX && !UNSAFE.test(page)) parts.push(`page ${page}`)
+  if (front.partial === true || ids.length) {
+    const more = ids.length > IDS_SHOWN ? ` and ${ids.length - IDS_SHOWN} more` : ''
+    parts.push(`partial: ${ids.length ? `${ids.slice(0, IDS_SHOWN).join(', ')}${more}` : 'some sources'} not checked`)
+  }
+  if (age > interval) parts.push('stale, run /grimoire:manager')
+  const line = parts.join(' · ')
+  return line.length < HEADLINE_MAX && !UNSAFE.test(line) ? line : null
+}
+
+// The main checkout of the linked worktree at dir, from files only: its .git is a file naming the
+// worktree's git dir, whose commondir names the shared .git. null for a plain checkout, a
+// submodule (no commondir) or no git: the same answer stateRoot gets from git.
+export function mainCheckout(dir) {
+  try {
+    const dotgit = join(dir, '.git')
+    if (!statSync(dotgit).isFile()) return null
+    const m = /^gitdir: *(.+?)\s*$/m.exec(readFileSync(dotgit, 'utf8'))
+    if (!m) return null
+    const gitdir = resolve(dir, m[1])
+    const common = resolve(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim())
+    return basename(common) === '.git' ? dirname(common) : null
+  } catch { return null }
+}
+
+const isFile = (p) => { try { return statSync(p).isFile() } catch { return false } }
+// A regular file's first max bytes, or null. Checked before it is opened: a FIFO would block.
+function readHead(file, max) {
+  try {
+    const st = statSync(file)
+    if (!st.isFile()) return null
+    const fd = openSync(file, 'r')
+    try {
+      const buf = Buffer.alloc(Math.min(st.size, max))
+      return buf.subarray(0, readSync(fd, buf, 0, buf.length, 0)).toString('utf8')
+    } finally { closeSync(fd) }
+  } catch { return null }
+}
+
+// `headline`: prints the line, or nothing. Never an error and never stderr, so the hook only ever
+// adds the line: a bad --now, no briefing, a corrupt one, an unreadable root, anything thrown.
+function headlineMain(args) {
+  try {
+    const now = args.now === undefined ? Date.now() : typeof args.now === 'string' ? Date.parse(args.now) : NaN
+    if (!Number.isFinite(now)) return 0
+    const root = resolve(typeof args.root === 'string' ? args.root : process.cwd())
+    // brief writes to the main checkout; a session in a linked worktree reads it, and its own too
+    // (a brief run with --root there): the newer briefing wins.
+    const roots = [...new Set([root, mainCheckout(root)].filter(Boolean))]
+    // The schedule: --config, else the project's grimoire.config.json, else the main checkout's.
+    // A config that is missing, unreadable or not JSON is no schedule: 24 h.
+    const configFile = typeof args.config === 'string' ? resolve(args.config) : roots.map((r) => join(r, 'grimoire.config.json')).find(isFile)
+    const config = configFile && isFile(configFile) ? readJson(configFile) : null
+    const interval = scheduleInterval(isObj(config) && isObj(config.manager) ? config.manager.schedule : null)
+    let best = null
+    for (const r of roots) {
+      const dir = join(r, '.grimoire', 'manager')
+      const front = frontMatter(readHead(join(dir, 'latest.md'), FRONT_MAX))
+      const page = join(dir, 'briefing.html')
+      const line = front && headline(front, { now, interval, page: isFile(page) ? page : null })
+      if (line && (!best || parseTime(front.generatedAt) > best.at)) best = { line, at: parseTime(front.generatedAt) }
+    }
+    if (best) process.stdout.write(`${best.line}\n`)
+  } catch { /* silent: the session starts without a headline */ }
+  return 0
 }
 
 // ── files, lock ──
@@ -690,7 +843,10 @@ function parseArgs(argv) {
   return out
 }
 
-const USAGE = 'usage: node scripts/manager.mjs brief --items <file> [--sources <file>] [--config grimoire.config.json] [--ledger <path>] [--now <iso>] [--root <dir>]'
+const USAGE = [
+  'usage: node scripts/manager.mjs brief --items <file> [--sources <file>] [--config grimoire.config.json] [--ledger <path>] [--now <iso>] [--root <dir>]',
+  '       node scripts/manager.mjs headline [--root <dir>] [--now <iso>] [--config <file>]',
+].join('\n')
 
 // Reads a JSON file the user or a scout wrote. Node's parse error can quote the source, so the
 // message names the file only.
@@ -723,7 +879,8 @@ function readLedger(file) {
 function main(argv) {
   const args = parseArgs(argv)
   const cmd = args._[0]
-  if (cmd !== 'brief') { console.error(cmd ? `unknown command: ${cmd} (expected brief)\n${USAGE}` : USAGE); return 2 }
+  if (cmd === 'headline') return headlineMain(args)
+  if (cmd !== 'brief') { console.error(cmd ? `unknown command: ${cmd} (expected brief or headline)\n${USAGE}` : USAGE); return 2 }
   if (typeof args.items !== 'string') { console.error(`brief needs --items <file>\n${USAGE}`); return 2 }
   if (args.sources !== undefined && typeof args.sources !== 'string') { console.error(`--sources needs a file\n${USAGE}`); return 2 }
   const now = args.now === undefined ? Date.now() : typeof args.now === 'string' ? Date.parse(args.now) : NaN
