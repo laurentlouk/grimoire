@@ -45,6 +45,10 @@
 //      never ticket text
 //    • the wrapper prints the line for $CLAUDE_PROJECT_DIR (else $PWD) and exits 0 with no output
 //      when node is missing or fails
+//  And (ODY-874), what ODY-872's review found: a --sources file holding null is refused; a
+//  manager.sources id missing from --sources is not checked ("not reported by the skill"); an ok
+//  source whose count differs from its items is flagged and not trusted as complete; stalled reads
+//  the later of lastActivityAt and updatedAt; labels[] map to a priority when nothing else does
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, readdirSync, chmodSync, symlinkSync } from 'node:fs'
 import { join, dirname, resolve, delimiter } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -480,7 +484,7 @@ try {
     ok(urgent(P, 'ST-5') && /no activity for 5 days/.test(E(P, 'ST-5').why), 'started with no activity for 5 days = stalledDays (default 5) is urgent: "no activity for 5 days"')
     ok(!urgent(P, 'ST-4'), 'no activity for 4 days, just under stalledDays, is not urgent')
     ok(urgent(P, 'ST-6u') && /no activity for 6 days/.test(E(P, 'ST-6u').why), 'without lastActivityAt, updatedAt is read: "no activity for 6 days"')
-    ok(!urgent(P, 'ST-recent'), 'lastActivityAt comes before updatedAt: recent activity on an old update is not stalled')
+    ok(!urgent(P, 'ST-recent'), 'the later of lastActivityAt and updatedAt is read: recent activity on an old update is not stalled')
     ok(!urgent(P, 'ST-unstarted'), 'only started work stalls')
     ok(!urgent(P, 'ST-nodates'), 'started with neither date is not stalled (nothing to read)')
     ok(groupOf(P, 'BL-2') === 'Do' && groupOf(P, 'ST-5') === 'Do', 'an assigned issue urgent by these rules goes to Do')
@@ -726,6 +730,43 @@ try {
     ok(badMap.status === 0 && /manager\.priorityLabels/.test(badMap.stderr) && urgent(BM, 'BM-2') && !urgent(BM, 'BM-1'), 'an entry outside 0–4 is named on stderr and skipped; the others apply')
     const notObj = brief([item('NO-1', { nativePriority: 'P0' })], { config: { manager: { priorityLabels: 'P0' } } })
     ok(notObj.status === 0 && /manager\.priorityLabels/.test(notObj.stderr) && urgent(parse(latest(notObj)), 'NO-1'), 'a priorityLabels that is not an object is named on stderr, and the defaults apply')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('ODY-872 follow-ups: a null --sources, an unreported source, a count mismatch, stalled, labels[]')
+  {
+    // In process (view, renderMarkdown, nextLedger) except the file-level refusal.
+    const nul = brief([item('L-1')], { sources: 'null' })
+    ok(nul.status === 1 && /sources: expected a JSON array/.test(nul.stderr) && !existsSync(join(nul.mdir, 'latest.md')), `a --sources file holding null is refused, not read as absent (${nul.stderr.trim().split('\n').slice(-1)[0]})`)
+    let threw = ''
+    try { mod.view([item('L-1')], {}, null, NOW, null) } catch (e) { threw = e.message }
+    ok(/sources: expected a JSON array/.test(threw), 'and view() refuses null sources the same way; only undefined means "infer them from the items"')
+
+    const config = { manager: { sources: [{ id: 'linear', category: 'tracker', kind: 'linear' }, { id: 'jira', category: 'tracker', kind: 'jira' }] } }
+    const UV = mod.view([item('L-1')], config, null, NOW, [{ id: 'linear', status: 'ok', count: 1 }])
+    const um = mod.renderMarkdown(UV)
+    ok(um.includes('- Not checked: jira (not reported by the skill)') && UV.partial === true && /^notChecked: \["jira"\]$/m.test(um),
+      'a manager.sources entry missing from --sources is listed under Not checked, "not reported by the skill", and makes the briefing partial')
+
+    const prevLedger = mod.nextLedger(mod.view([item('M-1'), item('M-2'), item('M-3')], {}, null, at(-DAY)), null)
+    const MV = mod.view([item('M-1'), item('M-2')], {}, prevLedger, NOW, [{ id: 'linear', status: 'ok', count: 3 }])
+    const mline = mod.renderMarkdown(MV).split('\n').find((l) => / urgent · /.test(l)) || ''
+    ok(/linear \(3 reported, 2 items: count mismatch\)/.test(mline), `an ok source whose count differs from its items shows the count, flagged "count mismatch" (${mline})`)
+    ok(MV.counts.resolved === 0 && !!mod.nextLedger(MV, prevLedger, [item('M-1'), item('M-2')]).items['linear:M-3'], 'and is not trusted as complete: the item it did not show is not resolved, and the ledger keeps it')
+
+    const listed = (V, id) => V.groups.flatMap((g) => g.items).find((i) => i.id === id)
+    const SV = mod.view([item('ST-later-update', { stateType: 'started', lastActivityAt: at(-10 * DAY), updatedAt: at(-DAY) }), item('ST-both-old', { stateType: 'started', lastActivityAt: at(-7 * DAY), updatedAt: at(-6 * DAY) })], {}, null, NOW)
+    ok(!listed(SV, 'ST-later-update').urgent && listed(SV, 'ST-both-old').reasons.includes('no activity for 6 days'),
+      'the stalled rule reads the later of lastActivityAt and updatedAt: an update yesterday on old activity is not stalled')
+
+    const LV = mod.view([
+      item('LB-most', { labels: ['P2', 'bug', 'priority: urgent'] }), item('LB-one', { labels: ['P3'] }), item('LB-none', { labels: ['bug'] }),
+      item('LB-native', { nativePriority: 'blocker', labels: ['P0'] }), item('LB-explicit', { priority: 4, labels: ['P0'] }),
+    ], {}, null, NOW)
+    const lp = (id) => listed(LV, id).priorityName
+    ok(lp('LB-most') === 'Urgent' && listed(LV, 'LB-most').urgent && lp('LB-one') === 'Low' && lp('LB-none') === 'No priority',
+      `with neither priority nor nativePriority, labels[] map through priorityLabels, the most urgent winning (${['LB-most', 'LB-one', 'LB-none'].map((k) => `${k}=${lp(k)}`).join(', ')})`)
+    ok(lp('LB-native') === 'No priority' && lp('LB-explicit') === 'Low', 'labels[] are read only when both are absent: an unknown nativePriority or a given priority wins')
   }
 
   // ──────────────────────────────────────────────────────────────────────────

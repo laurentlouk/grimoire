@@ -20,8 +20,12 @@
 //  {id, status: "ok" | "failed" | "capped", reason?, fix?, count?}. capped: the scout stopped at
 //  maxItemsPerSource, so its count shows as "≥ N" · failed: it could not be read; it is listed
 //  under "Not checked" with its reason and fix, has no items, and makes the briefing partial.
-//  Every source with items needs an entry; the file is refused like the items. Without it, the
-//  sources are the items' sourceIds, all read in full.
+//  Every source with items needs an entry; the file is refused like the items, and one holding
+//  null is refused too (not a list). Without the flag, the sources are the items' sourceIds, all
+//  read in full. Either way, a manager.sources id the list does not name is "Not checked: <id>
+//  (not reported by the skill)" and makes the briefing partial: a configured source is never
+//  silently absent. An ok source whose count is not its number of items shows both, flagged
+//  "count mismatch", and is not trusted as complete (what it did not show is not resolved).
 //
 //  Defaults: --root ← the main checkout when the cwd is in a git work tree (as render-logs
 //  does, so every linked worktree shares one ledger), else the cwd · --config ←
@@ -34,13 +38,14 @@
 //                24 h or has · due today, overdue, or due within manager.urgent.dueWithinDays (2)
 //                calendar days · not started (backlog, unstarted) and blocking at least
 //                manager.urgent.blocksAtLeast (2) open issues, an id the briefing did not read
-//                counting as open · started with no activity (lastActivityAt, else updatedAt)
-//                for at least manager.urgent.stalledDays (5) calendar days. Each rule is a small
+//                counting as open · started with no activity (the later of lastActivityAt and
+//                updatedAt) for at least manager.urgent.stalledDays (5) calendar days. Each rule is a small
 //                named function in URGENCY_RULES; each returns the human reason
 //                ("priority Urgent", "blocks 3 open issues", "no activity for 6 days") or null.
 //    priority    with no priority, a nativePriority label is mapped by manager.priorityLabels
 //                (case-insensitive; DEFAULT_PRIORITY_LABELS when the config has none), the same
-//                mapping the scout applies. An unknown label is no priority, which ranks last.
+//                mapping the scout applies; with neither priority nor nativePriority, the most
+//                urgent of labels[] that maps. An unknown label is no priority, which ranks last.
 //    groups      Decide: triage, or urgent with no assignee · Do: any other urgent item ·
 //                Hand to AI: an issue with acceptance criteria, unassigned, nothing open
 //                blocking it, no linked PR, no sub-issues (AI_CHECKS; the repo check is a seam,
@@ -288,12 +293,23 @@ export function validateSources(list, items) {
   return errors
 }
 
-// The briefing's sources, sorted by id: the --sources list, or the items' sourceIds, all read.
-function sourcesOf(all, list) {
-  const given = list ?? [...new Set(all.map((it) => it.sourceId))].map((id) => ({ id, status: 'ok' }))
-  return given.map((s) => {
+// The items' sourceIds as sources, each read in full: what the briefing assumes without --sources.
+export const inferSources = (items) => [...new Set(items.filter(isObj).map((it) => it.sourceId))].map((id) => ({ id, status: 'ok' }))
+
+// The briefing's sources, sorted by id: the --sources list (undefined: the items' sourceIds, all
+// read), then every manager.sources id it does not name, not checked: a configured source is never
+// silently absent. An ok source whose count is not its number of items is flagged mismatch.
+// complete: read in full and trusted, so what it did not show is resolved (ok, no mismatch).
+const NOT_REPORTED = 'not reported by the skill'
+function sourcesOf(all, list, configured = []) {
+  const given = list === undefined ? inferSources(all) : list
+  const named = new Set(given.map((s) => s.id))
+  const missing = configured.filter((id) => !named.has(id)).map((id) => ({ id, status: 'failed', reason: NOT_REPORTED }))
+  return [...given, ...missing].map((s) => {
     const items = all.filter((it) => it.sourceId === s.id).length
-    return { id: s.id, status: s.status, items, count: s.count ?? items, reason: s.reason ?? null, fix: s.fix ?? null }
+    const count = s.count ?? items
+    const mismatch = s.status === 'ok' && count !== items
+    return { id: s.id, status: s.status, items, count, mismatch, complete: s.status === 'ok' && !mismatch, reason: s.reason ?? null, fix: s.fix ?? null }
   }).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
@@ -303,14 +319,24 @@ function labelPriority(native, labels) {
   const p = labels.get(native.trim().toLowerCase())
   return p === undefined ? null : p
 }
+// The most urgent of labels[] that map (1 before 4; 0, no priority, only when nothing else maps),
+// or null when none does.
+function labelsPriority(list, labels) {
+  const mapped = list.map((l) => labelPriority(l, labels)).filter((p) => p !== null)
+  if (!mapped.length) return null
+  const ranked = mapped.filter((p) => p > 0)
+  return ranked.length ? Math.min(...ranked) : 0
+}
 
 // A validated WorkItem with its defaults filled in; the input is never mutated. With no
-// priority, a nativePriority label maps through manager.priorityLabels, as the scout's would.
+// priority, a nativePriority label maps through manager.priorityLabels, as the scout's would;
+// with neither, the most urgent of labels[] that maps.
 function normalize(it, labels) {
   return {
     sourceId: it.sourceId, id: it.id, key: it.key ?? it.id, title: it.title, url: it.url ?? null,
     kind: it.kind, stateType: it.stateType, nativeState: it.nativeState ?? null,
-    priority: it.priority ?? labelPriority(it.nativePriority, labels) ?? 0, nativePriority: it.nativePriority ?? null, assignee: it.assignee || null,
+    priority: it.priority ?? (it.nativePriority == null ? labelsPriority(it.labels ?? [], labels) : labelPriority(it.nativePriority, labels)) ?? 0,
+    nativePriority: it.nativePriority ?? null, assignee: it.assignee || null,
     dueAt: it.dueAt ?? null, createdAt: it.createdAt ?? null, updatedAt: it.updatedAt ?? null, lastActivityAt: it.lastActivityAt ?? null,
     blockedBy: [...(it.blockedBy ?? [])], blocks: [...(it.blocks ?? [])], parentOf: [...(it.parentOf ?? [])],
     project: it.project ? { ...it.project } : null, repo: it.repo ?? null, slaAt: it.slaAt ?? null,
@@ -338,8 +364,24 @@ export function managerConfig(config) {
       stalledDays: pick('stalledDays', (v) => Number.isInteger(v) && v >= 1, 'a whole number of days, 1 or more'),
     },
     priorityLabels: labelMap(m.priorityLabels, warnings),
+    sources: configSources(m.sources, warnings),
     warnings,
   }
+}
+
+// manager.sources[] → [{ id, category }], read leniently (setup writes it): an entry with no usable
+// id is named on stderr and skipped, a repeated id counted once.
+function configSources(raw, warnings) {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) { warnings.push('manager.sources: expected an array of sources; none is read from the config'); return [] }
+  const out = [], seen = new Set()
+  raw.forEach((s, i) => {
+    if (!isObj(s) || typeof s.id !== 'string' || !SOURCE_ID.test(s.id)) { warnings.push(`manager.sources[${i}]: expected an object with an id of 1 to 64 letters, digits, ".", "_" or "-"; skipped`); return }
+    if (seen.has(s.id)) return
+    seen.add(s.id)
+    out.push({ id: s.id, category: typeof s.category === 'string' ? s.category : null })
+  })
+  return out
 }
 
 // manager.priorityLabels → Map(lower-cased label → 0–4). The config's own map replaces the
@@ -384,11 +426,12 @@ export const URGENCY_RULES = [
     const open = openRefs([...new Set(it.blocks)], ctx).length
     return open >= ctx.urgent.blocksAtLeast ? `blocks ${plural(open, 'open issue')}` : null
   },
-  // Started work gone quiet: calendar days since lastActivityAt, else updatedAt; neither, no reading.
+  // Started work gone quiet: calendar days since the later of lastActivityAt and updatedAt; neither,
+  // no reading.
   function stalled(it, ctx) {
-    const last = it.lastActivityAt ?? it.updatedAt
-    if (it.stateType !== 'started' || last === null) return null
-    const idle = daysFrom(parseTime(last), ctx.now)
+    const last = Math.max(...[it.lastActivityAt, it.updatedAt].filter((d) => d !== null).map(parseTime))
+    if (it.stateType !== 'started' || !Number.isFinite(last)) return null
+    const idle = daysFrom(last, ctx.now)
     return idle >= ctx.urgent.stalledDays ? `no activity for ${plural(idle, 'day')}` : null
   },
 ]
@@ -475,12 +518,13 @@ function overallNext(c) {
 
 // ── the view model ──
 // The one function every rendering reads. Pure: same items, config, ledger, now and sources,
-// same view. sources is the --sources list, or null to infer it from the items.
-export function view(items, config, ledger, now, sources = null) {
-  const errors = [...validate(items), ...(sources === null ? [] : validateSources(sources, items))]
+// same view. sources is the --sources list, or undefined (left out) to infer it from the items;
+// null is refused like anything else that is not a list.
+export function view(items, config, ledger, now, sources) {
+  const errors = [...validate(items), ...(sources === undefined ? [] : validateSources(sources, items))]
   if (errors.length) throw new Error(`invalid WorkItems or sources:\n${errors.slice(0, MAX_ERRORS).join('\n')}`)
   const t = toMs(now)
-  const { urgent, priorityLabels } = managerConfig(config)
+  const { urgent, priorityLabels, sources: configured } = managerConfig(config)
   const all = items.map((it) => normalize(it, priorityLabels))
   const states = new Map()
   for (const it of all) for (const ref of new Set([it.id, it.key])) if (!states.has(ref)) states.set(ref, it.stateType)
@@ -502,10 +546,11 @@ export function view(items, config, ledger, now, sources = null) {
       firstSeenAt: prev && Number.isFinite(parseTime(prev.firstSeenAt)) ? prev.firstSeenAt : generatedAt, hash,
     }
   })
-  const srcs = sourcesOf(all, sources)
+  const srcs = sourcesOf(all, sources, configured.map((s) => s.id))
   // Resolved since the last briefing: a ledger item read now as completed or canceled, or missing
-  // from a source read in full. Missing from a failed or capped source is unknown, not resolved.
-  const complete = new Set(srcs.filter((s) => s.status === 'ok').map((s) => s.id))
+  // from a source read in full. Missing from a failed or capped source, or from one whose count
+  // does not match its items, is unknown, not resolved.
+  const complete = new Set(srcs.filter((s) => s.complete).map((s) => s.id))
   const read = new Map(all.map((it) => [ledgerKey(it), it]))
   let resolved = 0
   if (seen) for (const key of Object.keys(seen)) {
@@ -530,8 +575,8 @@ export function view(items, config, ledger, now, sources = null) {
 }
 
 // The ledger after this briefing: this run's sources and listed items, earlier sources kept.
-// An earlier item this run did not see because its source failed, was capped or was not read
-// keeps its entry, so it is neither resolved now nor new when it comes back. items: the
+// An earlier item this run did not see because its source failed, was capped, did not match its
+// count or was not read keeps its entry, so it is neither resolved now nor new when it comes back. items: the
 // WorkItems the view was built from (an earlier item read closed is dropped, not kept).
 export function nextLedger(v, ledger, items = []) {
   const usable = usableLedger(ledger)
@@ -541,7 +586,7 @@ export function nextLedger(v, ledger, items = []) {
   const out = Object.create(null)
   if (usable) {
     const read = new Set((Array.isArray(items) ? items : []).filter(isObj).map((it) => `${it.sourceId}:${it.id}`))
-    const complete = new Set(v.sources.filter((s) => s.status === 'ok').map((s) => s.id))
+    const complete = new Set(v.sources.filter((s) => s.complete).map((s) => s.id))
     for (const [key, e] of Object.entries(ledger.items)) if (isObj(e) && !read.has(key) && !complete.has(sourceOfKey(key))) out[key] = e
   }
   for (const g of v.groups) for (const it of g.items) out[ledgerKey(it)] = { firstSeenAt: it.firstSeenAt, lastHash: it.hash, lastBucket: it.group }
@@ -583,8 +628,13 @@ function itemLines(it) {
   return lines
 }
 
-// A source in the counts line: its items, "≥ N" when capped (never presented as complete), or not checked.
-const sourceText = (s) => `${md(s.id, 64)} (${s.status === 'failed' ? 'not checked' : s.status === 'capped' ? `≥ ${Math.max(s.count, s.items)}` : s.items})`
+// A source in the counts line: its items, "≥ N" when capped, the count it reported beside its items
+// on a mismatch (neither presented as complete), or not checked.
+function sourceText(s) {
+  const what = s.status === 'failed' ? 'not checked' : s.status === 'capped' ? `≥ ${Math.max(s.count, s.items)}`
+    : s.mismatch ? `${s.count} reported, ${plural(s.items, 'item')}: count mismatch` : s.items
+  return `${md(s.id, 64)} (${what})`
+}
 
 export function renderMarkdown(v) {
   const c = v.counts
@@ -900,15 +950,15 @@ function main(argv) {
 
   const input = readInput(resolve(args.items), 'items')
   if (input.error) { console.error(input.error); return 1 }
-  let sources = null
+  let sources // undefined: no --sources; a file holding null is refused below, like any non-array
   if (typeof args.sources === 'string') {
     const s = readInput(resolve(args.sources), 'sources')
     if (s.error) { console.error(s.error); return 1 }
     sources = s.value
   }
-  const errors = [...validate(input.value), ...(sources === null ? [] : validateSources(sources, input.value))]
+  const errors = [...validate(input.value), ...(sources === undefined ? [] : validateSources(sources, input.value))]
   if (errors.length) {
-    console.error(`refusing the WorkItems in ${resolve(args.items)}${sources === null ? '' : ` with the sources in ${resolve(args.sources)}`}:`)
+    console.error(`refusing the WorkItems in ${resolve(args.items)}${sources === undefined ? '' : ` with the sources in ${resolve(args.sources)}`}:`)
     for (const e of errors.slice(0, MAX_ERRORS)) console.error(`  ${e}`)
     if (errors.length > MAX_ERRORS) console.error(`  … and ${errors.length - MAX_ERRORS} more`)
     return 1
