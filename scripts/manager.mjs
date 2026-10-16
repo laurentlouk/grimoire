@@ -96,6 +96,9 @@
 //      → one line from <root>/.grimoire/manager/latest.md's front matter, for the SessionStart
 //        hook (hooks/scripts/briefing.sh), which puts it in every session:
 //        grimoire manager · 2 urgent, 3 ready for AI · 1 new · briefing 5 h old (/grimoire:manager)
+//        with "· N runs need you" (counts.runsNeedingUs: the runs under Do) and "· N PRs failing
+//        CI" (counts.prsFailing: open, not a draft) after the ready-for-AI part when above 0, and
+//        nothing when a front matter written before them lacks the keys;
 //        "first briefing" in place of the new count on the first; the age in min under 1 h, h
 //        under 48 h, days after; then "· page <path>" when briefing.html exists, "· partial: <ids>
 //        not checked" (front matter notChecked; the first ten, then how many more), and last
@@ -626,6 +629,9 @@ export function view(items, config, ledger, now, sources) {
     decide: size('decide'), do: size('do'), ai: size('ai'), waiting: size('waiting'), notnow: size('notnow'),
     closed: all.length - listed.length,
     new: listed.filter((it) => it.badge === 'new').length, changed: listed.filter((it) => it.badge === 'changed').length, resolved,
+    // not urgent (the issue rules), but what people forget: the headline names them
+    runsNeedingUs: listed.filter((it) => it.kind === 'run' && it.group === 'do').length,
+    prsFailing: listed.filter((it) => it.kind === 'pr' && it.checks === 'failing' && it.isDraft !== true).length,
   }
   return {
     schemaVersion: SCHEMA_VERSION, generatedAt,
@@ -852,11 +858,14 @@ export function headline(front, { now, interval = DAY, page = null } = {}) {
   const c = front.counts
   const generated = parseTime(front.generatedAt)
   const ids = front.notChecked ?? []
-  if (!Number.isFinite(generated) || !isCount(c.urgent) || !isCount(c.ai) || (c.new !== undefined && !isCount(c.new))) return null
+  if (!Number.isFinite(generated) || !isCount(c.urgent) || !isCount(c.ai) || ['new', 'runsNeedingUs', 'prsFailing'].some((k) => c[k] !== undefined && !isCount(c[k]))) return null
   if ([front.partial, front.firstBriefing].some((b) => b !== undefined && typeof b !== 'boolean')) return null
   if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string' && SOURCE_ID.test(id))) return null
   const age = Math.max(0, toMs(now) - generated) // a briefing from the future (clock skew) is 0 min old
   const parts = ['grimoire manager', `${c.urgent} urgent, ${c.ai} ready for AI`]
+  // a briefing written before these counts has neither key: the line is unchanged
+  if (c.runsNeedingUs > 0) parts.push(`${plural(c.runsNeedingUs, 'run')} need${c.runsNeedingUs === 1 ? 's' : ''} you`)
+  if (c.prsFailing > 0) parts.push(`${c.prsFailing} PR${c.prsFailing === 1 ? '' : 's'} failing CI`)
   if (front.firstBriefing === true) parts.push('first briefing')
   else if (c.new > 0) parts.push(`${c.new} new`)
   parts.push(`briefing ${ageText(age)} old (/grimoire:manager)`)

@@ -826,6 +826,7 @@ try {
     ok(e2e.status === 0 && groupOf(EP, 'R-halted') === 'Do' && groupOf(EP, 'R-stale') === 'Do' && groupOf(EP, 'R-attention') === 'Do' && !entry(EP, 'R-clean'),
       `brief reads the runs under telemetry.dir in the project and lists those that need us under Do (${e2e.stderr.trim()})`)
     ok(JSON.stringify(EP.front.sources) === '["linear","runs"]' && EP.front.partial === false && /runs \(3\)/.test(latest(e2e)), 'its status goes into the sources like the others: runs (3), not "not reported"')
+    ok(EP.front.counts.runsNeedingUs === 3 && EP.front.counts.prsFailing === 0 && EP.front.counts.urgent === 0, `the front matter counts the runs under Do in counts.runsNeedingUs, not as urgent (${JSON.stringify(EP.front.counts)})`)
     ok(/\*\*R-halted\*\* · Halted project · run · halted/.test(E(EP, 'R-halted').line), `a run's line names it a run and its status (${E(EP, 'R-halted').line})`)
     const bare = join(TMP, 'runs-none')
     const nod = brief([], { root: bare, config: { manager: { sources: [{ id: 'runs', category: 'runs', kind: 'grimoire' }] } } })
@@ -852,6 +853,7 @@ try {
     ok(p(4).group === 'notnow' && p(4).reasons[0] === 'a draft', 'a draft → Not now, whatever its CI or review says')
     ok(p(5).group === 'waiting' && p(6).group === 'waiting', 'otherwise → Waiting on others, all fields null included')
     ok([1, 2, 3, 4, 5, 6].every((n) => p(n).urgent === false) && V.counts.urgent === 0, 'a PR is placed by the PR rules alone, never counted urgent')
+    ok(V.counts.prsFailing === 2 && V.counts.runsNeedingUs === 0, `counts.prsFailing: the open PRs failing CI, wherever they are placed, a draft not counted (${V.counts.prsFailing})`)
     const L = mod.nextLedger(mod.view([pr(7, { checks: 'pending' })], {}, null, at(-DAY)), null)
     const again = mod.view([pr(7, { checks: 'failing' })], {}, L, NOW).groups.flatMap((g) => g.items)[0]
     ok(again.badge === 'changed', 'a PR whose checks changed is badged changed')
@@ -1005,6 +1007,17 @@ try {
       try { ok(silent(headlineCli(locked.root)), 'an unreadable root (mode 000): nothing, exit 0') } finally { chmodSync(locked.root, 0o755) }
     }
     ok(silent(headlineCli(fixture(front()).root, { now: 'not-a-date' })), 'a --now that is no date: nothing, exit 0')
+  }
+
+  section('headline: the runs that need us and the PRs failing CI (ODY-874)')
+  {
+    const line = (c) => mod.headline(front({ counts: counts(c) }), { now: NOW })
+    ok(line({ runsNeedingUs: 2, prsFailing: 1 }) === 'grimoire manager · 2 urgent, 3 ready for AI · 2 runs need you · 1 PR failing CI · 1 new · briefing 5 h old (/grimoire:manager)',
+      `after the ready-for-AI part: "· 2 runs need you · 1 PR failing CI" (${line({ runsNeedingUs: 2, prsFailing: 1 })})`)
+    ok(line({ runsNeedingUs: 1, prsFailing: 3 }).includes(' · 1 run needs you · 3 PRs failing CI · '), 'singular and plural')
+    ok(line({ runsNeedingUs: 0, prsFailing: 0 }) === FRESH, 'at 0 they are left out')
+    ok(line({}) === FRESH && !('runsNeedingUs' in counts()), 'an older latest.md without the keys gives the line unchanged')
+    ok(line({ runsNeedingUs: '2' }) === null && line({ prsFailing: -1 }) === null, 'a count that is not a whole number is a corrupt front matter: no line')
   }
 
   section('headline: bounds, ids and counts only')

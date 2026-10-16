@@ -270,13 +270,18 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   for 12 h, or drained with tasks that need attention; its next step names `/grimoire:orchestrate`
   on the project. A drained run with nothing pending is left out, and no runs directory is
   `runs (0)`, no error. Its status joins the sources like the others.
+- **The headline names what people forget.** PRs and runs are never counted urgent, so `brief` adds
+  `counts.runsNeedingUs` (the runs under Do) and `counts.prsFailing` (open PRs failing CI, drafts
+  left out) to the front matter, and `headline` appends `· 2 runs need you · 1 PR failing CI` after
+  the ready-for-AI part when either is above 0. An older `latest.md` without the keys gives the
+  same line as before.
 - **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
   absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
   reported by the skill", and makes the briefing partial. An `ok` source whose count is not its
   number of items shows both, flagged "count mismatch", and is not trusted as complete. The
   stalled rule reads the later of `lastActivityAt` and `updatedAt`. With neither `priority` nor
   `nativePriority`, the most urgent label in `labels[]` maps. Checks: `scripts/manager.test.mjs`
-  (318 in all).
+  (325 in all).
 
 ## 0.11.0 — trust and see
 
