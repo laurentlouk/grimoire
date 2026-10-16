@@ -234,10 +234,13 @@ try {
   writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'api', agent: 'api-engineer' }] }))
   expectAllow(mcp('mcp__abc__save_issue', 'api-engineer', e), 'a repo agent the config names (memory-denied, never MCP-denied) · save_issue')
   expectReadOnly(mcp('mcp__abc__save_issue', 'tracker-scout', e), 'tracker-scout', 'mcp__abc__save_issue', 'tracker-scout · save_issue under a project config')
-  // A project's own agent may share a plugin agent's bare name; the config naming it wins.
+  // A project's own agent (no namespace) may share a plugin agent's bare name; the config naming it
+  // exempts it. The plugin's own agent (`grimoire:reviewer`) stays bound regardless.
   expectReadOnly(mcp('mcp__a__create_pull_request_review', 'reviewer'), 'reviewer', 'mcp__a__create_pull_request_review', 'reviewer · create_pull_request_review with no config naming a reviewer', 'create')
+  expectReadOnly(mcp('mcp__a__create_pull_request_review', 'grimoire:reviewer'), 'reviewer', 'mcp__a__create_pull_request_review', 'grimoire:reviewer · the same call with no such config', 'create')
   writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'x', agent: 'reviewer' }] }))
   expectAllow(mcp('mcp__a__create_pull_request_review', 'reviewer', e), "a repo agent the config names 'reviewer' is never read-only")
+  expectReadOnly(mcp('mcp__a__create_pull_request_review', 'grimoire:reviewer', e), 'reviewer', 'mcp__a__create_pull_request_review', "the plugin's grimoire:reviewer stays bound when a repo agent shares its name", 'create')
   expectReadOnly(mcp('mcp__a__save_issue', 'tracker-scout', e), 'tracker-scout', 'mcp__a__save_issue', 'the other read-only agents stay bound under that config', 'save')
   writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ specialists: [{ agent: 'tracker-scout', repos: ['x'] }] }))
   expectAllow(mcp('mcp__a__save_issue', 'tracker-scout', e), "a specialist the config names 'tracker-scout' is never read-only")
