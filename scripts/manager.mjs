@@ -949,8 +949,8 @@ export function frontMatter(text) {
 //   a cron line   `0 * * * *` and any fixed minute: hourly · `*/15 * * * *` every 15 min ·
 //                 `0 */6 * * *` every 6 h · a fixed hour: daily · day of the week `1-5`: the same,
 //                 on weekdays · any other restricted day of the week (`30 8 * * 1`, `0 9 * * 1,4`)
-//                 or a restricted day of the month (`0 9 1 * *`): a week (7 days), the longest it
-//                 waits that a weekly schedule can be told from
+//                 or a restricted day of the month (`0 9 1 * *`): a week (7 days), a weekly
+//                 schedule's gap (so a monthly one reads as stale after a week, not after a day)
 //   text          "hourly", "every N minutes | hours | days", "weekly", a day's name ("every
 //                 monday 09:00"): a week · "weekdays" with any of them, or alone ("weekdays
 //                 08:30"): on weekdays
