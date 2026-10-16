@@ -8,7 +8,7 @@
     ".mcp.json": "f6667436ee59516743f79390597bd9509f3c5983e6f121c18c72b3b86ed18ba4",
     "hooks/hooks.json": "b2a8a7ce0a42dc7a801d96d7ef4f9fa69477d877d3f792bc271cedec3f7a6ac1",
     "hooks/scripts/guard.sh": "62b809b6738af5b06654b6855f1f73cab62e67c0a6048afe35962ce025850d3c",
-    "hooks/scripts/guard.mjs": "b0cb71313b333688554149591741aa3440ab15b2bfce7525ee8e0a5be03f483e",
+    "hooks/scripts/guard.mjs": "0e8c9471fedb00dbec7206c2bae19767dd5dfc6dfc4d4fc51e60d36dc87e1d28",
     "hooks/scripts/graph-refresh.sh": "1c6d2a808e4998a35eb0c2a2d02c20e00ddd3e2820df05796d17fe62959fd0ea"
   }
 }

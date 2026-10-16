@@ -59,6 +59,8 @@ const FOLD = process.platform === 'darwin' || process.platform === 'win32'
 
 class Deny extends Error {}
 const deny = (msg) => { throw new Deny(`grimoire guard: ${msg}`) }
+// The subagent's bare name (`grimoire:reviewer` → `reviewer`); '' in the main session.
+const agentOf = (input) => (typeof input.agent_type === 'string' ? input.agent_type.replace(/^.*:/, '') : '')
 
 function readJSON(file) {
   try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return null }
@@ -82,6 +84,8 @@ function loadConfig(projectDir) {
     protectedPaths: strs(g.protectedPaths) || [],
     memoryDir: memoryDir.trim().replace(/^\.\//, '').replace(/\/+$/, ''),
     memoryDenied: new Set([...ROSTER_AGENTS, ...repoAgents, ...(strs(g.memoryDeniedAgents) || [])]),
+    // A project's own agent may share a plugin agent's bare name (`reviewer`): the config naming it wins.
+    readOnly: new Set(READ_ONLY_AGENTS.filter((a) => !repoAgents.includes(a))),
   }
 }
 
@@ -396,7 +400,7 @@ function checkRules(relPath, ctx, input) {
     if (PROTECTED_DIRS.some(under)) deny(`writes under hooks/ are refused (the guard itself lives there); ${how}.`)
     for (const p of ctx.protectedPaths) if (p.endsWith('/') ? under(p) : rel === f(p.replace(/^\.\//, '')) || under(p)) deny(`writes to ${rel} are refused (guard.protectedPaths); ${how}.`)
   }
-  const agentType = typeof input.agent_type === 'string' ? input.agent_type.replace(/^.*:/, '') : ''
+  const agentType = agentOf(input)
   if (!allow && agentType && !/crystalliz/i.test(agentType) && ctx.memoryDenied.has(agentType) && under(ctx.memoryDir + '/')) {
     deny(`agent '${agentType}' may not write ${rel}: memory is written only by the crystallize step after a PR; report the fact in your result instead, or set GRIMOIRE_GUARD_ALLOW=1.`)
   }
@@ -404,10 +408,13 @@ function checkRules(relPath, ctx, input) {
 
 // ─────────────────────────────── mcp rule ───────────────────────────────
 // `mcp__<server>__<tool>`. A server id can hold `_`, `-` and digits (`plugin_grimoire_graph`,
-// `055f8362-1877-…`), so the tool is what follows the LAST `__`.
-// The tool's words: split on `_`, `-` (anything not a letter or digit) and camelCase boundaries
+// `055f8362-1877-…`), so the tool is what follows the LAST `__`, trailing `_` dropped first.
+// The tool's words: split on anything not a letter or digit (`_`, `-`) and on camelCase boundaries
 // (`createJiraIssue`, `getHTTPStatus`), lowercased. Whole words only: `saved` is not `save`.
-const words = (tool) => tool.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w.toLowerCase())
+// Only the first 64 characters are read (tool names are shorter): a run of capitals backtracks
+// the acronym split quadratically, and 100k of them would outlast the hook's timeout.
+const MAX_TOOL = 64
+const words = (tool) => tool.slice(0, MAX_TOOL).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w.toLowerCase())
 function writeVerb(tool) { // the first known verb decides: a write verb, or null for a read or no verb
   for (const w of words(tool)) {
     if (READ_VERBS.has(w)) return null
@@ -416,10 +423,12 @@ function writeVerb(tool) { // the first known verb decides: a write verb, or nul
   return null
 }
 
-function checkMcp(name, input) {
-  const agentType = typeof input.agent_type === 'string' ? input.agent_type.replace(/^.*:/, '') : ''
-  if (!agentType || !READ_ONLY_AGENTS.includes(agentType) || process.env.GRIMOIRE_GUARD_ALLOW === '1') return
-  const rest = name.slice('mcp__'.length), cut = rest.lastIndexOf('__')
+function checkMcp(name, input, readOnly) {
+  const agentType = agentOf(input)
+  if (!readOnly.has(agentType) || process.env.GRIMOIRE_GUARD_ALLOW === '1') return
+  let end = name.length
+  while (end > 'mcp__'.length && name[end - 1] === '_') end-- // `save_issue__` is still `save_issue`
+  const rest = name.slice('mcp__'.length, end), cut = rest.lastIndexOf('__')
   if (cut < 0) return
   const verb = writeVerb(rest.slice(cut + 2))
   if (verb) deny(`agent '${agentType}' may not call ${name}: the plugin's scouts and reviewer are read-only and '${verb}' names a write; report the proposed write in your result (the main session applies writes), or set GRIMOIRE_GUARD_ALLOW=1.`)
@@ -440,10 +449,14 @@ function main() {
   const cwd = typeof input.cwd === 'string' && path.isAbsolute(input.cwd) ? input.cwd : process.cwd()
   const envDir = process.env.CLAUDE_PROJECT_DIR
   const projectDir = envDir && path.isAbsolute(envDir) ? envDir : cwd
+  // Every MCP call now reaches the guard. One from outside the read-only set (the main session, most
+  // subagents) passes before the config is read: the config can only shrink that set.
+  const mcpCall = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__')
+  if (mcpCall && !READ_ONLY_AGENTS.includes(agentOf(input))) return 0
   const cfg = loadConfig(projectDir)
   if (!cfg.enabled) return 0
-  // Every MCP call now reaches the guard: judge it by name alone, before any git call.
-  if (typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__')) return verdict(() => checkMcp(input.tool_name, input))
+  // An MCP call is judged by name alone, before any git call.
+  if (mcpCall) return verdict(() => checkMcp(input.tool_name, input, cfg.readOnly))
   const tmpRoots = [tmpdir(), '/tmp', '/private/tmp', '/var/tmp', '/private/var/folders', process.env.TMPDIR, input.scratchpad_dir]
     .filter((p) => typeof p === 'string' && path.isAbsolute(p))
   const commonDir = git(projectDir, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
