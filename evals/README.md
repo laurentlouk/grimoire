@@ -26,11 +26,11 @@ and no key. Running the cases is manual and paid, and needs the command-line `cl
 | implement | 5 | 1 | 1 | 3 |
 | launch-agent | 5 | 1 | 1 | 3 |
 | logs | 5 | 1 | 1 | 3 |
-| manager | 5 | 1 | 1 | 3 |
+| manager | 8 | 1 | 1 | 6 |
 | orchestrate | 12 | 1 | 1 | 10 |
 | review | 5 | 1 | 1 | 3 |
 | roast | 5 | 1 | 1 | 3 |
-| setup | 7 | 1 | 1 | 5 |
+| setup | 11 | 1 | 2 | 8 |
 | tdd | 4 | 1 | 1 | 2 |
 | to-issues | 4 | 1 | 1 | 2 |
 | to-plan | 3 | 1 | 1 | 1 |

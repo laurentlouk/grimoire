@@ -1,10 +1,11 @@
 # Hooks
 
-Three hooks ship with the plugin (`hooks.json`). All are silent unless they have something to say, and all fail open: a hook that breaks must never wedge a session.
+Four hooks ship with the plugin (`hooks.json`). All are silent unless they have something to say, and all fail open: a hook that breaks must never wedge a session.
 
 | Hook | Event · matcher | What it does |
 | --- | --- | --- |
 | `scripts/first-run.sh` | `SessionStart` | One line pointing at `/grimoire:setup` while the project has no `AGENTS.md` and no `memory/`. |
+| `scripts/briefing.sh` → `scripts/manager.mjs headline` | `SessionStart` | One line from the latest manager briefing (`.grimoire/manager/latest.md`, the main checkout's in a linked worktree): urgent and ready-for-AI counts, new items, its age, the page when `briefing.html` exists, the sources not checked when it is partial, and "stale" once it is older than `manager.schedule`'s interval (24 h without one). Reads files only, never runs a briefing; ids and counts only, never ticket text. Silent with no briefing or a corrupt one. |
 | `scripts/guard.sh` → `guard.mjs` | `PreToolUse` · `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit\|mcp__.*` | Blocks a narrow set of irreversible actions, and MCP writes by the plugin's read-only agents, so an unattended loop cannot do them by mistake. |
 | `scripts/graph-refresh.sh` | `SubagentStop` · async | Re-indexes the code graph after every subagent (an implementer's commit, an integrate merge), with the deterministic indexer, never a model: `tools/graph/graph.mjs refresh`. Runs in the background, so nothing waits on it. |
 

@@ -161,9 +161,46 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
 - **The user applies `.claude/settings.json`.** The guard closes that file to agents, so setup
   writes `grimoire.config.json` itself, but for the settings it prints the exact `--write`
   command and the user runs it. A dry run then confirms what is left.
-- Checks: `scripts/config-merge.test.mjs` (119), and the setup evals `setup-6` (a configured
-  project re-run changes nothing before the yes, and never writes the settings itself) and
-  `setup-7` (a hand-edited gate is kept).
+- **The manager section binds the briefing's sources to read-only official tools.** It rides on
+  the re-run diff, so a hand-edited source or threshold is kept.
+  - It detects the trackers from the docs, `.mcp.json`, the session's connectors, PR templates,
+    git remotes and `toolHints.tracker`, and proposes `manager.sources`: one per tracker, a `prs`
+    source over the GitHub remotes, and `runs`. Each has a `hint`, a `scope`, and `readOnly`, what
+    holds it today: `endpoint` (Linear's `/mcp/readonly`, GitHub's `/x/issues/readonly`) or `flag`
+    (`--read-only`) only when the route already uses it, `admin-group` (a read-only account),
+    `permission-rule` (`gh` for issues), or `guard` for a claude.ai connector and for the `gh` PR
+    source, which only the guard's MCP rule and the scout's instructions hold. A stronger route is
+    proposed apart, for the user to apply. Only the vendors' own tools and claude.ai connectors,
+    never a community server.
+  - Secrets stay out of context: `.mcp.json` joins the files read only through `config-merge.mjs`
+    (its `headers` and `env` print as `«redacted»`), and a remote URL is read with its credentials
+    stripped by `sed` as it is read.
+  - Each source is read once before the diff and gets `verifiedAt`, again after the user corrects
+    its scope or hint; a failing one is shown with its fix and not written. `config-merge.mjs`
+    matches `manager.sources[]` by `id`, and a re-run reuses the id of a current source with the
+    same kind and scope.
+  - `manager.repoLabels` (new) maps tracker labels to `repos[]` names from the labels'
+    descriptions, the description winning over the name: a `frontend` label described as the
+    mobile app maps to the mobile repo, not the web app. A label the descriptions don't tie to one
+    repo is left out and named.
+  - For a GitHub tracker, the default `priorityLabels` (`priority: urgent` … `low`, `P0`–`P3`,
+    `critical`); when the repo has no priority label, an offer to create the four `priority:`
+    labels with `gh label create`, listed as a tracker write and run only when the user's answer
+    names them. Labels are listed with `--limit 200`, so a long list can't hide them.
+  - The `gh` permission rules: deny what the pipeline never runs (`gh issue close`, `delete`,
+    `transfer`, `gh pr merge`, `close`), ask for what `to-issues` and claims do. The urgency
+    defaults and `maxItemsPerSource: 200`; a re-run builds them and `priorityLabels` from the
+    current block, so a hand-set value never shows as changed back to a default. An optional
+    `repos[].remote` for a hub of nested clones, which the loop ignores.
+  - `grimoire.config.example.json`'s `manager` block follows the spec: a `guard` Linear source,
+    the default priority labels, `repoLabels`, and a repo `remote`.
+- Checks: `scripts/config-merge.test.mjs` (135, a `.mcp.json` read against `{}` included), and
+  the setup evals `setup-6` (a configured project re-run changes nothing before the yes, and
+  never writes the settings itself), `setup-7` (a hand-edited gate is kept), `setup-8` (a Linear
+  hub gets a `guard` source, `prs`, `runs` and `frontend` mapped to the mobile repo, with no
+  secret read raw), `setup-9` (a GitHub repo without priority labels is offered them, created
+  only when named), `setup-10` (a hand-set `stalledDays` shows no change) and `setup-11` (the
+  briefing itself is the manager's).
 
 **Guard (`hooks/scripts/guard.mjs`)**
 - **Scouts can't write through MCP tools.** The manager's scouts read trackers through whatever
@@ -196,7 +233,7 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     24 h or past, due today, overdue or within `dueWithinDays` (2) calendar days;
   - Decide: triage, or urgent with no assignee. Do: any other urgent item. Hand to AI: an issue
     with acceptance criteria, unassigned, nothing open blocking it, no linked PR, no sub-issues
-    (the repo check comes with launching);
+    (the rest of D8, the repo check among it, came with launching: below);
   - the model's `bucketHint` moves an item only between the non-urgent groups: it never makes one
     urgent, nor moves one out of Decide or Do;
   - the order: urgent, priority (none last), due date, oldest created, id.
@@ -243,6 +280,79 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   both hold it; a `.lock` that is a directory, or any state file the script can't use, is a
   one-line error. Checks: `scripts/manager.test.mjs` (222), and the eval `manager-5` (a source
   that can't be read is listed as not checked, with its fix).
+- **Every session opens with the briefing's headline.** A new `SessionStart` hook,
+  `hooks/scripts/briefing.sh`, runs `manager.mjs headline`, which reads `latest.md`'s front matter
+  (in a linked worktree, the main checkout's too, and the newer wins) and prints one line:
+  `grimoire manager · 2 urgent, 3 ready for AI · 1 new · briefing 5 h old (/grimoire:manager)`.
+  "first briefing" replaces the new count on the first; the page's path follows when `briefing.html`
+  exists; a partial briefing adds `partial: <ids> not checked` (brief now writes `notChecked` to
+  the front matter); and past `manager.schedule`'s interval the line ends `stale, run
+  /grimoire:manager` (`when` read leniently: a cron line, hourly, every N, weekly; daily, weekdays,
+  no schedule or text it can't read is 24 h). It reads files only, never runs a briefing, and
+  prints ids and counts, never ticket text: one line under 10,000 characters. No briefing, a
+  corrupt one, an unreadable root or no `node` prints nothing, exit 0. Checks:
+  `scripts/manager.test.mjs` (287 in all).
+- **Open pull requests.** A `prs` source (`category: prs`, `scope.repos`) is dispatched with the
+  tracker sources: `tracker-scout` reads `gh pr list --state open --json …` per repo (behind
+  `requireHook.raw` when set, or GitHub's MCP) and maps each PR onto four new optional,
+  null-tolerant WorkItem fields: `reviewDecision`, `checks` (`passing` / `failing` / `pending`, from
+  the status rollup), `reviewRequested` and `isDraft`. The script places a PR by its own rules,
+  first match wins: a draft → Not now, a pending review request (anyone asked) → Decide, failing
+  CI or an approval not merged → Do, the rest → Waiting on others. A PR is never counted urgent,
+  and its review and checks are part of its hash, so a change badges it **changed**.
+- **Grimoire runs that need us.** With a `runs` source in `manager.sources`, `brief` reads the run
+  journals itself (no scout), through render-logs' `loadRuns` and `runOutcome`, under
+  `telemetry.dir` (default `.grimoire/runs`) in the project's main checkout, also when `--root` is
+  a linked worktree. Each project's latest run is listed
+  under Do when it halted (with the halt's first line), is still "running" with no journal write
+  for 12 h, or drained with tasks that need attention; its next step names `/grimoire:orchestrate`
+  on the project. A drained run with nothing pending is left out, and no runs directory is
+  `runs (0)`, no error. Its status joins the sources like the others.
+- **The headline names what people forget.** PRs and runs are never counted urgent, so `brief` adds
+  `counts.runsNeedingUs` (the runs under Do) and `counts.prsFailing` (open PRs failing CI, drafts
+  left out) to the front matter, and `headline` appends `· 2 runs need you · 1 PR failing CI` after
+  the ready-for-AI part when either is above 0. An older `latest.md` without the keys gives the
+  same line as before.
+- **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
+  absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
+  reported by the skill", and makes the briefing partial; without `--sources`, a configured source
+  with no items reads the same way, since nothing said it was read. An `ok` source whose count is not its
+  number of items shows both, flagged "count mismatch", and is not trusted as complete. The
+  stalled rule reads the later of `lastActivityAt` and `updatedAt`. With neither `priority` nor
+  `nativePriority`, the most urgent label in `labels[]` maps. Checks: `scripts/manager.test.mjs`
+  (326 in all).
+- **Launch from the briefing.** After the briefing, the skill offers the ready issues as
+  multi-select checkboxes, one question per project, and one per source for the issues with no
+  project (GitHub Issues), at most 4 options each, plus **All ready**,
+  and starts what the user ticks: one new conversation per tracker project, through the host's
+  session tool when ToolSearch finds one (the desktop app has one), else a prompt per project to
+  paste. Headless runs skip the step.
+  - **Hand to AI applies every D8 condition.** On top of the earlier ones: not started (an In
+    Progress issue is not handed to AI), the assignee may be `claim.identity`, the issue maps to a
+    `repos[]` entry (first through `manager.repoLabels`, so `frontend` reaches the mobile repo,
+    then through its `repo`, else to a single-repo project's one entry), and that repo is
+    available. Each failure is a reason: "no repo
+    mapped: no label in repoLabels", "repo not checked out: repositories/webapp, fix: …".
+    Only issues: a PR or a run keeps its own rules and has no repo check. `brief --check-repos`
+    runs the check; without it a repo shows as "availability not checked".
+  - **`manager.mjs repos`** reports each `repos[]` entry as JSON: available when its path is a git
+    work tree (a directory a hub ignores must be a clone of its own), a registered submodule
+    initialised. A failure carries its fix, and the command when it is one: `git clone --
+    <remote> <path>` for a missing nested clone, `git submodule update --init -- <path>` for an
+    uninitialised submodule (the `--` keeps a path that starts with `-` from reading as an
+    option). A remote with any credential (on http(s), ftp or git URLs, any user name, a bare
+    token included; a password anywhere) is never printed: the fix is prose, with no command.
+    The skill runs a fix only on the user's yes. Clones `repos[]` doesn't name are ignored.
+  - **`manager.mjs launch-plan --ids …`** re-checks the ticked ids against the WorkItems and a
+    fresh repos check, and groups them per tracker project: a sliced project goes to
+    `/grimoire:orchestrate`, a loose ready issue to `/grimoire:implement` then `/grimoire:review`,
+    an issue without acceptance criteria to `/grimoire:roast` first. Groups that share a checkout
+    run one after the other (`waitsFor`), never in parallel: a checkout is compared by its real
+    path, so `repositories/webapp` and `repositories/webapp/` are one. Each prompt is self-contained and
+    carries ids, routes and repo paths only, never a ticket's title, body, labels or project
+    name: the launched conversation reads the tickets itself. An unknown, ambiguous or ineligible
+    id is refused with its reason. Checks: `scripts/manager.test.mjs` (384 in all, the repos
+    check on real temp git repos), and the evals `manager-6` to `manager-8`.
 
 **Tests (`scripts/run-tests.mjs`, the loop-durability files)**
 

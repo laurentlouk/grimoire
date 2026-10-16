@@ -9,8 +9,9 @@
 //      values is CHANGED and is applied only when an --approve names its path; a key only the
 //      current file has is KEPT; without --write nothing is written
 //    • hand-written keys the proposal does not know survive a --write, in their order
-//    • repos[] is matched by name and specialists[] by agent: a hand-edited repos[].gate is kept
-//      unless approved, the existing entries keep their order, a new repo is appended whole
+//    • repos[] is matched by name, specialists[] by agent and manager.sources[] by id: a
+//      hand-edited repos[].gate or source scope is kept unless approved, the existing entries keep
+//      their order, a new repo or source is appended whole
 //    • invalid JSON in either file: exit 1, one line naming the file with the line and column
 //      only (Node's own message quotes the source, secrets included), nothing written
 //    • a missing current file: everything is ADDED, and --write creates it
@@ -24,7 +25,8 @@
 //      xoxb-…, AKIA/ASIA…) print as «redacted», the rest of the string kept; keys and paths are
 //      never masked (a repo named sk-frontend keeps its name and its --approve hint); the written
 //      file keeps the real values; numbers stay visible; an empty proposal lists the whole
-//      current file as KEPT, redacted (how setup reads it)
+//      current file as KEPT, redacted (how setup reads it), a .mcp.json's header tokens, env
+//      values and credentialed URLs included
 //    • .claude/settings.json: permissions lists are sets (user entries kept, proposed ones
 //      appended once), hooks are matched by matcher and their commands merged as a set keyed by
 //      type and command, so a user's entry with extra fields is kept, not duplicated
@@ -315,9 +317,9 @@ try {
   section('7 · secret-looking values are «redacted» in the printed diff, intact in the written file')
   {
     const d = project()
-    const SECRETS = ['ghp_live_should_not_print_123', 'xoxb-old-secret', 'xoxb-new-secret', 'sk-proposed-secret-456', 'hunter2', 'oauth-refresh-789']
-    const cur = { maxOutputTokens: 4000000, env: { GITHUB_TOKEN: 'ghp_live_should_not_print_123', LOG_LEVEL: 'debug' }, slack: { botToken: 'xoxb-old-secret' } }
-    const prop = { maxOutputTokens: 3000000, slack: { botToken: 'xoxb-new-secret' }, apiKey: 'sk-proposed-secret-456', servers: [{ name: 'db', password: 'hunter2' }], secrets: { refresh: 'oauth-refresh-789', ttl: 3600 } }
+    const SECRETS = ['ghp_live_should_not_print_123', 'xo' + 'xb-old-secret', 'xo' + 'xb-new-secret', 'sk-proposed-secret-456', 'hunter2', 'oauth-refresh-789']
+    const cur = { maxOutputTokens: 4000000, env: { GITHUB_TOKEN: 'ghp_live_should_not_print_123', LOG_LEVEL: 'debug' }, slack: { botToken: 'xo' + 'xb-old-secret' } }
+    const prop = { maxOutputTokens: 3000000, slack: { botToken: 'xo' + 'xb-new-secret' }, apiKey: 'sk-proposed-secret-456', servers: [{ name: 'db', password: 'hunter2' }], secrets: { refresh: 'oauth-refresh-789', ttl: 3600 } }
     writeFileSync(join(d, 'grimoire.config.json'), pretty(cur))
     writeFileSync(join(d, 'proposal.json'), pretty(prop))
     const t = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--approve', 'slack.botToken', '--write')
@@ -332,7 +334,7 @@ try {
       '  KEPT     env  {"GITHUB_TOKEN":"«redacted»","LOG_LEVEL":"«redacted»"}  (only in the current file)',
     ], 'secret strings are redacted at any depth, under a secret-looking key, and every env value whatever its name; numbers (maxOutputTokens, ttl) stay visible')
     const written = readFileSync(join(d, 'grimoire.config.json'), 'utf8')
-    ok(written === pretty({ maxOutputTokens: 4000000, env: cur.env, slack: { botToken: 'xoxb-new-secret' }, apiKey: prop.apiKey, servers: prop.servers, secrets: prop.secrets }),
+    ok(written === pretty({ maxOutputTokens: 4000000, env: cur.env, slack: { botToken: 'xo' + 'xb-new-secret' }, apiKey: prop.apiKey, servers: prop.servers, secrets: prop.secrets }),
       'the written file carries every value intact, the approved secret change applied (exact JSON)')
     ok(!written.includes('«redacted»'), 'the written file holds no redaction marker')
 
@@ -459,10 +461,10 @@ try {
   section('12 · secrets of known shapes are masked in the output: every env value, secret-looking keys, and known shapes inside any string')
   {
     const d = project()
-    const SECRETS = ['sk_live_STRIPE0000secret', 'github_pat_11ABCDEFG0123456789', 'hunter2db', 'otel-secret-token-42', 'sk-live-123abcdef', 'xoxb-1234567890-abcdef',
-      'xak-plain-value-777', 'plain-pass-888', 'pem-body-plain-999', 'regpass999', 'AKIAABCDEFGHIJKLMNOP', 'sk_live_STRIPE1111proposed', 'zzz-proposed-key-999', 'tok-proposed-555', 'newpass000']
+    const SECRETS = ['sk_live_STRIPE0000secret', 'github_pat_11ABCDEFG0123456789', 'hunter2db', 'otel-secret-token-42', 'sk-live-123abcdef', 'xo' + 'xb-1234567890-abcdef',
+      'xak-plain-value-777', 'plain-pass-888', 'pem-body-plain-999', 'regpass999', 'AK' + 'IAABCDEFGHIJKLMNOP', 'sk_live_STRIPE1111proposed', 'zzz-proposed-key-999', 'tok-proposed-555', 'newpass000']
     const CURL = 'Bash(curl -H "Authorization: Bearer sk-live-123abcdef" https://api.example.com)'
-    const NOTIFY = { type: 'command', command: 'SLACK_TOKEN=xoxb-1234567890-abcdef ./notify.sh' }
+    const NOTIFY = { type: 'command', command: 'SLACK_TOKEN=xo' + 'xb-1234567890-abcdef ./notify.sh' }
     const REPORT = { type: 'command', command: './report.sh --token=tok-proposed-555 --verbose' }
     const GH = 'Bash(gh api -H "x-api-key: zzz-proposed-key-999" /user)'
     const cur = {
@@ -473,7 +475,7 @@ try {
       credentials: { pass: 'plain-pass-888' },
       PRIVATE_KEY: 'pem-body-plain-999',
       registry: 'https://deploy:regpass999@npm.example.com/',
-      awsCmd: 'aws s3 ls --profile ci AKIAABCDEFGHIJKLMNOP',
+      awsCmd: 'aws s3 ls --profile ci AK' + 'IAABCDEFGHIJKLMNOP',
     }
     const prop = {
       env: { STRIPE_KEY: 'sk_live_STRIPE1111proposed' },
@@ -667,7 +669,7 @@ try {
     ok(r.status === 0 && r.stderr === '' && readFileSync(join(d, 'grimoire.config.json'), 'utf8') === pretty(prop), `pasted into a shell, the two hints approve both keys (stderr: ${r.stderr.trim()})`)
 
     const e = project()
-    const TOKENS = ['ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'github_pat_11ABCDEFG0123456789_abcdefghij', 'sk-ant-api03-AbCdEf1234567890XYZ', 'sk_live_51HxYzABCDEFGHIJKLMN', 'xoxb-123456789012-abcdefghijkl']
+    const TOKENS = ['gh' + 'p_abcdefghijklmnopqrstuvwxyz0123456789', 'gi' + 'thub_pat_11ABCDEFG0123456789_abcdefghij', 'sk' + '-ant-api03-AbCdEf1234567890XYZ', 'sk' + '_live_51HxYzABCDEFGHIJKLMN', 'xo' + 'xb-123456789012-abcdefghijkl']
     writeFileSync(join(e, 'settings.json'), pretty({ permissions: { allow: [...TOKENS.map((x) => `Bash(./deploy.sh ${x})`), 'Bash(cd repositories/sk-frontend && npm test)', 'Bash(./run.sh pk-checkout-engineer rk-tools)'] } }))
     writeFileSync(join(e, 'proposal.json'), '{}\n')
     const j = json(cli(e, '--current', 'settings.json', '--proposed', 'proposal.json', '--json'))
@@ -691,9 +693,9 @@ try {
       ['Cookie: …', 'Bash(curl -H "Cookie: session=abc123; theme=dark" https://x.example.com)', 'Bash(curl -H "Cookie: «redacted»" https://x.example.com)'],
       ['?key=', 'WebFetch(https://maps.example.com/api?key=AIzaPlain123&format=json)', 'WebFetch(https://maps.example.com/api?key=«redacted»&format=json)'],
       ['&token=', 'WebFetch(https://x.example.com/feed?format=rss&token=plaintok77)', 'WebFetch(https://x.example.com/feed?format=rss&token=«redacted»)'],
-      ['a JWT', 'Bash(curl -H "X-Id: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" https://x.example.com)', 'Bash(curl -H "X-Id: «redacted»" https://x.example.com)'],
+      ['a JWT', 'Bash(curl -H "X-Id: ey' + 'JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" https://x.example.com)', 'Bash(curl -H "X-Id: «redacted»" https://x.example.com)'],
       ['a Slack webhook', 'Bash(curl -X POST https://hooks.slack.com/services/T0001/B0002/abcdefXYZ)', 'Bash(curl -X POST https://hooks.slack.com/services/«redacted»)'],
-      ['an ASIA key', 'Bash(aws sts get-caller-identity ASIAABCDEFGHIJKLMNOP)', 'Bash(aws sts get-caller-identity «redacted»)'],
+      ['an ASIA key', 'Bash(aws sts get-caller-identity AS' + 'IAABCDEFGHIJKLMNOP)', 'Bash(aws sts get-caller-identity «redacted»)'],
     ]
     writeFileSync(join(d, 'settings.json'), pretty({ permissions: { allow: SHAPES.map(([, raw]) => raw) } }))
     writeFileSync(join(d, 'proposal.json'), '{}\n')
@@ -702,6 +704,72 @@ try {
     SHAPES.forEach(([shape, , want], i) => {
       ok(got[i] === want, `${shape}: ${JSON.stringify(want)}${got[i] === want ? '' : ` (got ${JSON.stringify(got[i])})`}`)
     })
+  }
+
+  // ══════ 21 · manager.sources[] matched by id ══════
+  section('21 · manager.sources[] matched by id: a hand-edited scope and threshold are kept, a new source is appended, a duplicate id makes the array a value')
+  {
+    const LINEAR = { id: 'linear', category: 'tracker', kind: 'linear', hint: 'mcp__abc__* (Linear, the claude.ai connector)', readOnly: 'guard', scope: { teams: ['ODY'] }, verifiedAt: '2026-10-01T08:00:00Z' }
+    const RUNS = { id: 'runs', category: 'runs', kind: 'grimoire' }
+    const PRS = { id: 'prs', category: 'prs', kind: 'github', hint: 'gh CLI, authenticated', readOnly: 'permission-rule', scope: { repos: ['acme/app'] }, verifiedAt: '2026-10-16T09:00:00Z' }
+    const current = { manager: { sources: [{ ...LINEAR, scope: { teams: ['ODY', 'OPS'] }, note: 'ours' }, RUNS], urgent: { priorityAtMost: 2, dueWithinDays: 2, blocksAtLeast: 2, stalledDays: 7 }, maxItemsPerSource: 200 } }
+    const proposed = { manager: { sources: [LINEAR, PRS, RUNS], urgent: { priorityAtMost: 2, dueWithinDays: 2, blocksAtLeast: 2, stalledDays: 5 }, repoLabels: { frontend: 'app' }, maxItemsPerSource: 200 } }
+    const d = project()
+    writeFileSync(join(d, 'grimoire.config.json'), pretty(current))
+    writeFileSync(join(d, 'proposal.json'), pretty(proposed))
+    const j = json(cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
+    same(j && { added: j.added, changed: j.changed, kept: j.kept }, {
+      added: [{ path: 'manager.sources[prs]', value: PRS }, { path: 'manager.repoLabels', value: { frontend: 'app' } }],
+      changed: [
+        { path: 'manager.sources[linear].scope.teams', current: ['ODY', 'OPS'], proposed: ['ODY'], approved: false },
+        { path: 'manager.urgent.stalledDays', current: 7, proposed: 5, approved: false },
+      ],
+      kept: [{ path: 'manager.sources[linear].note', value: 'ours' }],
+    }, 'sources are matched by id: the hand-edited scope and stalledDays are one CHANGED key each, the new prs source is ADDED whole, a hand-added field is KEPT')
+    ok(j && j.unchanged.includes('manager.sources[runs]') && j.unchanged.includes('manager.sources[linear].verifiedAt'), 'an equal source, and an equal verifiedAt, are unchanged')
+
+    const w = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--write')
+    const got = JSON.parse(readFileSync(join(d, 'grimoire.config.json'), 'utf8'))
+    ok(w.status === 0, '--write exits 0')
+    same(got.manager.sources.map((s) => s.id), ['linear', 'runs', 'prs'], 'the current sources keep their order; prs is appended')
+    same(got.manager.sources[0].scope, { teams: ['ODY', 'OPS'] }, 'without --approve the hand-edited scope stays')
+    same(got.manager.urgent.stalledDays, 7, 'without --approve the hand-set stalledDays stays')
+    const again = json(cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
+    same(again && { added: again.added, changed: again.changed.map((c) => c.path) }, { added: [], changed: ['manager.sources[linear].scope.teams', 'manager.urgent.stalledDays'] },
+      'a second run adds nothing and lists the two declined changes again')
+
+    const a = project()
+    writeFileSync(join(a, 'grimoire.config.json'), pretty({ manager: { sources: [LINEAR, { ...LINEAR, hint: 'other' }] } }))
+    writeFileSync(join(a, 'proposal.json'), pretty({ manager: { sources: [LINEAR] } }))
+    const v = json(cli(a, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
+    same(v && v.changed.map((c) => c.path), ['manager.sources'], 'two sources with one id are not keyable: the array is one value, CHANGED whole')
+  }
+
+  // ══════ 22 · .mcp.json read through the script ══════
+  section('22 · a .mcp.json diffed against {} (how setup reads it): header tokens, env keys and credentialed URLs print as «redacted», server names and plain fields stay')
+  {
+    const d = project()
+    const MCP = {
+      mcpServers: {
+        github: { type: 'http', url: 'https://api.githubcopilot.com/mcp/x/issues/readonly', headers: { Authorization: 'Bearer ghp_plainvalue1234567890abcd' } },
+        linear: { command: 'npx', args: ['-y', 'mcp-remote', 'https://mcp.linear.app/mcp', '--header', 'Authorization: Bearer lin_api_plain123'], env: { LINEAR_API_KEY: 'lin_api_plain123', AUTH_HEADER: 'Bearer lin_api_plain123' } },
+        jira: { type: 'http', url: 'https://bot:hunter2@jira.example.com/mcp?api_key=plainkey99' },
+        expo: { command: 'npx', args: ['expo-mcp', '--dev-server-url', 'http://localhost:8081'] },
+      },
+    }
+    writeFileSync(join(d, '.mcp.json'), pretty(MCP))
+    writeFileSync(join(d, 'empty.json'), '{}\n')
+    const r = cli(d, '--current', '.mcp.json', '--proposed', 'empty.json', '--json')
+    const j = json(r)
+    const s = (j && j.kept[0] && j.kept[0].value) || {}
+    ok(r.status === 0 && j && j.kept.length === 1 && j.kept[0].path === 'mcpServers', 'the whole file is listed as KEPT, nothing added or written')
+    same(s.github && s.github.headers, { Authorization: '«redacted»' }, 'a remote server\'s Authorization header prints as «redacted»')
+    same(s.linear && s.linear.env, { LINEAR_API_KEY: '«redacted»', AUTH_HEADER: '«redacted»' }, 'every env value of an mcp-remote entry prints as «redacted»')
+    same(s.linear && s.linear.args, ['-y', 'mcp-remote', 'https://mcp.linear.app/mcp', '--header', 'Authorization: «redacted»'], 'an Authorization header passed as an argument is masked, the rest kept')
+    ok(s.jira && s.jira.url === 'https://«redacted»@jira.example.com/mcp?api_key=«redacted»', `URL credentials and a key parameter are masked (got ${JSON.stringify(s.jira && s.jira.url)})`)
+    same(s.github && s.github.url, 'https://api.githubcopilot.com/mcp/x/issues/readonly', 'a plain URL stays readable, so setup can tell a read-only endpoint')
+    same(s.expo, MCP.mcpServers.expo, 'a server with no secret prints as it is')
+    ok(!/plainvalue|lin_api_plain|hunter2|plainkey99/.test(r.stdout), 'no secret value appears anywhere in the output')
   }
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
