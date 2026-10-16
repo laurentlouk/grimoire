@@ -42,7 +42,7 @@ Each decision gives the alternative rejected and why.
 - *Rejected:* one agent doing everything in prose (ranking drifts between runs and can't be tested), and a long-running daemon (grimoire has none, and the user rejected cloud and CI for v1).
 
 **D4 · Binding sources to tools.**
-- `manager.sources[]` names each source by category (`tracker`, `prs`, `runs`) and kind (`linear`, `jira`, `github`). Its `hint` uses the same format as `toolHints`. It also records the scope and how read-only is enforced (`endpoint`, `flag`, `admin-group`, `permission-rule`).
+- `manager.sources[]` names each source by category (`tracker`, `prs`, `runs`) and kind (`linear`, `jira`, `github`). Its `hint` uses the same format as `toolHints`. It also records the scope and how read-only is enforced (`endpoint`, `flag`, `admin-group`, `permission-rule`, or `guard` for a claude.ai connector, which only the guard's MCP rule holds read-only).
 - Scouts use the existing tool fallback (`orchestrate-loop.js:681`): configured hint → another connector via ToolSearch → an authenticated CLI → report.
 - Setup proposes the vendor's read-only route where one exists: Linear `/mcp/readonly`, GitHub `/x/issues/readonly` or `--read-only`, a read-only API key.
 - *Rejected:* a normalised connector layer in code (D1 rules out the products, and Symphony's spec warns against generic CRUD), and hard-coding tool names (connector ids are opaque and differ per account).
@@ -91,7 +91,7 @@ Each decision gives the alternative rejected and why.
   - it has no assignee, or the assignee is `claim.identity`;
   - no PR is linked to it;
   - it is not a parent issue;
-  - it maps to a `repos[]` entry the same way the loop's index does;
+  - it maps to a `repos[]` entry: first through `manager.repoLabels` (tracker label → repo name, proposed by setup from the tracker's label descriptions), then the same way the loop's index does;
   - that repo is available: `repos[].path` exists and is a git work tree, and if it is a submodule, it has been initialised.
 - **An unavailable repo** leaves the issue unticked, with the reason and the fix (`git submodule update --init <path>`). The fix runs only on a yes.
 - **In a session**, the briefing offers the eligible issues as checkboxes (AskUserQuestion multi-select, at most 4 per group and 4 groups, plus "all ready"). It launches what is ticked:
@@ -104,7 +104,7 @@ Each decision gives the alternative rejected and why.
 
 **D9 · Triggers (owner).**
 - **On demand:** `/grimoire:manager`.
-- **Optional local schedule:** a desktop scheduled task when the host has them, else cron running `claude -p "/grimoire:manager"` with `--max-budget-usd` and `--permission-prompts none`.
+- **Optional local schedule:** a desktop scheduled task when the host has them (the Claude desktop app exposes a scheduled-tasks tool, so setup creates it through that tool), else cron running `claude -p "/grimoire:manager"` with `--max-budget-usd` and `--permission-prompts none`.
 - **No API key, ever (owner, 2026-10-16).** Scheduled runs never use `--bare`, which requires `ANTHROPIC_API_KEY`. They run under the user's own Claude login. Tests follow the same rule: plain node tests in CI, and behaviour checks run as subagents inside a session, never `claude plugin eval` or an API-key run.
 - **Stale warning:** the session headline says when the latest briefing is older than the schedule interval, or older than 24 h without a schedule.
 - *Rejected:* a cloud routine (a fresh clone every run, so the ledger has no home, and no local CLIs) and a GitHub Actions cron (GitHub-centric, needs an API-key secret). Both stay possible later, once the ledger has a durable home.
@@ -143,6 +143,21 @@ Each decision gives the alternative rejected and why.
   - **The panel only:** nothing visual outside the desktop app.
   - **A local server behind the page with a Launch button:** a running process, plus a localhost endpoint able to start agents, is a cross-site request risk to design around, for one click saved.
 
+**D13 · Aligned with the tools the team actually uses (audit, 2026-10-16).** Checked against the four projects that run grimoire (`odyyy-orchestrator`, `website`, `lab`, `iDeaLex`) and the tools this machine and session have.
+- **Trackers.**
+  - **Linear** (team Odyyy) is used by the hub, through the claude.ai connector, so its `readOnly` is `guard`.
+  - **GitHub Issues** through the authenticated `gh` CLI is used by the three single-repo projects.
+  - **Jira** is supported by the design but used by none, so it stays untested against a real workspace.
+- **Repo mapping.** Odyyy's Linear labels name the repos: `webapp` → `webapp`, `backend` → `odyyy-backend`, `infra` → `cloud`, and **`frontend` → `odyyy-app`, the Expo mobile app, not the web app**. A judgment-only match can misroute that, so `manager.repoLabels` is explicit, proposed by setup from the label descriptions, and used before judgment.
+- **GitHub priority.** None of the three GitHub repos has a priority label, so every issue would read as unknown priority.
+  - Setup offers to create `priority: urgent`, `priority: high`, `priority: medium` and `priority: low`, with `gh label create`, only on the user's yes.
+  - The default `priorityLabels` recognises those names plus `P0`–`P3` and `critical`.
+- **Hub layout.** The hub's repos are independent clones under `repositories/`, gitignored, with no submodules, alongside extra working clones (e.g. `odyyy-app-level-up`) that are not in `repos[]`. The availability check treats a path as available when it exists and is a git work tree, and setup may record `repos[].remote`, so the fix for a missing clone can name its URL. Extra clones are ignored.
+- **Host tools the later slices rely on, all present in the desktop app:** the visualize tool (D12 panel), the session-starting tool (D8), the scheduled-tasks tool (D9), and the Slack and Linear document connectors plus `gh` for the shared post (D6).
+- **Runtime:** Node 24 (≥ 20 required) and Claude Code 2.1.270 (`--permission-prompts none` needs ≥ 2.1.259).
+- **Not in this machine's tools,** so the later signal and email slices must say what they use instead: no App Store Connect tool (D1 rules out third-party CLIs), and no Linear, Jira or `asc` CLI. Available for those slices: Sentry, PostHog and Vercel connectors, and Gmail and Calendar connectors.
+- **Shipping.** The marketplace serves grimoire 0.11.0. These features reach the four projects when a version that includes them is released and each project runs `/plugin update grimoire@grimoire`, then `/grimoire:setup` to add its `manager` block.
+
 ## The `WorkItem` (scout output, validated by the script)
 
 - **Identity:** `sourceId`, `id`, `key`, `title`, `url`.
@@ -161,12 +176,13 @@ This is inspired by Symphony's issue model and Linear's importer types. The scri
 ```json
 "manager": {
   "sources": [
-    { "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, read-only endpoint)", "readOnly": "endpoint", "scope": { "teams": ["ENG"] } },
+    { "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, the claude.ai connector)", "readOnly": "guard", "scope": { "teams": ["ENG"] } },
     { "id": "prs", "category": "prs", "kind": "github", "hint": "gh CLI, authenticated", "readOnly": "permission-rule", "scope": { "repos": ["acme/api", "acme/app"] } },
     { "id": "runs", "category": "runs", "kind": "grimoire" }
   ],
   "urgent": { "priorityAtMost": 2, "dueWithinDays": 2, "blocksAtLeast": 2, "stalledDays": 5 },
-  "priorityLabels": { "P0": 1, "P1": 2, "P2": 3 },
+  "priorityLabels": { "priority: urgent": 1, "priority: high": 2, "priority: medium": 3, "priority: low": 4, "P0": 1, "P1": 2, "P2": 3, "P3": 4, "critical": 1 },
+  "repoLabels": { "webapp": "webapp", "backend": "odyyy-backend", "frontend": "odyyy-app", "infra": "cloud" },
   "maxItemsPerSource": 200,
   "schedule": { "kind": "desktop-task", "when": "weekdays 08:30" },
   "share": null,
