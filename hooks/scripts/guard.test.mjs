@@ -174,14 +174,16 @@ try {
 
   console.log('\n── mcp tools (read-only agents)')
   // Connector tool names are opaque per account (`mcp__<server>__<tool>`, the server id holding
-  // `_`, `-` and digits), so the rule reads the tool part after the last `__` and its leading verb.
+  // `_`, `-` and digits), so the rule reads the tool part after the last `__`, split into words
+  // on `_`, `-` and camelCase; the first known verb decides (a read allows, a write denies).
   const mcp = (tool, agentType, o) => guard({ tool_name: tool, tool_input: { id: 'ODY-1' }, ...(agentType === undefined ? {} : { agent_id: 'm1', agent_type: agentType }) }, o)
-  const expectReadOnly = (r, agent, tool, m) => {
-    const line = denied(r) && r.err.includes(`'${agent}'`) && r.err.includes(tool) && /read-only/.test(r.err) && /report the proposed write in your result/.test(r.err)
+  const expectReadOnly = (r, agent, tool, m, verb) => {
+    const line = denied(r) && r.err.includes(`'${agent}'`) && r.err.includes(tool) && /read-only/.test(r.err) && /report the proposed write in your result/.test(r.err) &&
+      (verb === undefined || r.err.includes(`'${verb}' names a write`))
     ok(line, `deny · ${m}${line ? '' : ` (exit ${r.code}, stderr: ${r.err || '∅'})`}`)
   }
   const first = mcp('mcp__abc__save_issue', 'grimoire:tracker-scout')
-  ok(first.code === 2 && first.err === "grimoire guard: agent 'tracker-scout' may not call mcp__abc__save_issue: the plugin's scouts and reviewer are read-only and 'save_' names a write; report the proposed write in your result (the main session applies writes), or set GRIMOIRE_GUARD_ALLOW=1.",
+  ok(first.code === 2 && first.err === "grimoire guard: agent 'tracker-scout' may not call mcp__abc__save_issue: the plugin's scouts and reviewer are read-only and 'save' names a write; report the proposed write in your result (the main session applies writes), or set GRIMOIRE_GUARD_ALLOW=1.",
     `deny · the exact line for a namespaced tracker-scout's save_issue (exit ${first.code}, stderr: ${first.err || '∅'})`)
   expectReadOnly(mcp('mcp__abc__create_comment', 'grimoire:tracker-scout'), 'tracker-scout', 'mcp__abc__create_comment', 'tracker-scout · create_comment')
   expectReadOnly(mcp('mcp__x__send_message', 'reviewer'), 'reviewer', 'mcp__x__send_message', 'reviewer · send_message')
@@ -189,17 +191,29 @@ try {
   expectReadOnly(mcp('mcp__claude_ai_Linear__update_issue', 'grimoire:tracker-scout'), 'tracker-scout', 'mcp__claude_ai_Linear__update_issue', 'a server id with underscores')
   expectReadOnly(mcp('mcp__hub__github__create_issue', 'tracker-scout'), 'tracker-scout', 'mcp__hub__github__create_issue', 'a server id holding `__` (an aggregator): the tool follows the last `__`')
   expectReadOnly(mcp('mcp__abc__Delete_Comment', 'design-scout'), 'design-scout', 'mcp__abc__Delete_Comment', 'the verb in another letter case')
-  for (const [agent, tool] of [['codebase-scout', 'reply_to_thread'], ['reference-scout', 'forward'], ['contract-checker', 'merge_diff'], ['security-scout', 'set_status'], ['perf-scout', 'add_label'], ['tracker-scout', 'remove_label'], ['tracker-scout', 'mark_notification']]) {
-    expectReadOnly(mcp(`mcp__srv__${tool}`, agent), agent, `mcp__srv__${tool}`, `${agent} · ${tool}`)
+  for (const [agent, tool, verb] of [['codebase-scout', 'reply_to_thread', 'reply'], ['reference-scout', 'forward', 'forward'], ['contract-checker', 'merge_diff', 'merge'], ['security-scout', 'set_status', 'set'], ['perf-scout', 'add_label', 'add'], ['tracker-scout', 'remove_label', 'remove'], ['tracker-scout', 'mark_notification', 'mark']]) {
+    expectReadOnly(mcp(`mcp__srv__${tool}`, agent), agent, `mcp__srv__${tool}`, `${agent} · ${tool}`, verb)
+  }
+  // The first known verb decides, wherever it sits: a vendor prefix (`slack_`) is not a verb.
+  for (const [tool, verb] of [['slack_send_message', 'send'], ['slack_schedule_message', 'schedule'], ['slack_update_canvas', 'update'], ['slack_add_reaction', 'add'],
+    ['share_issue', 'share'], ['submit_diff_review', 'submit'], ['resolve_diff_thread', 'resolve'], ['retire_issue_label', 'retire'], ['createJiraIssue', 'create'],
+    ['trash_message', 'trash'], ['label_message', 'label'], ['respond_to_event', 'respond'], ['exec', 'exec'], ['execute_sentry_tool', 'execute'],
+    ['run_scheduled_task', 'run'], ['issue_upsert', 'upsert'], ['SAVE_ISSUE', 'save']]) {
+    expectReadOnly(mcp(`mcp__srv-1__${tool}`, 'tracker-scout'), 'tracker-scout', `mcp__srv-1__${tool}`, `tracker-scout · ${tool} ('${verb}' decides)`, verb)
   }
   expectAllow(mcp('mcp__abc__list_issues', 'grimoire:tracker-scout'), 'tracker-scout · list_issues')
   expectAllow(mcp('mcp__abc__get_issue', 'grimoire:tracker-scout'), 'tracker-scout · get_issue')
   expectAllow(mcp('mcp__plugin_grimoire_graph__graph_search', 'grimoire:codebase-scout'), 'codebase-scout · the graph server (underscores in the server id)')
   expectAllow(mcp('mcp__055f8362-1877-48fa__get_issue', 'tracker-scout'), 'a dashed server id with a read tool')
   expectAllow(mcp('mcp__save_service__list_items', 'tracker-scout'), 'a write verb in the server id is not the tool (trap)')
-  expectAllow(mcp('mcp__abc__list_saved_views', 'tracker-scout'), 'a write verb inside the tool name, not leading it (trap)')
-  expectAllow(mcp('mcp__abc__settings_get', 'tracker-scout'), "'settings' is not 'set_' (trap)")
-  expectAllow(mcp('mcp__abc__address_lookup', 'tracker-scout'), "'address' is not 'add_' (trap)")
+  expectAllow(mcp('mcp__abc__list_saved_views', 'tracker-scout'), "'saved' is not a verb, and 'list' comes first (trap)")
+  expectAllow(mcp('mcp__abc__settings_get', 'tracker-scout'), "'settings' is not 'set', and 'get' reads (trap)")
+  expectAllow(mcp('mcp__abc__address_lookup', 'tracker-scout'), "'address' is not 'add', and 'lookup' reads (trap)")
+  for (const [tool, why] of [['get_label', "'get' comes before 'label'"], ['list_issue_labels', "'labels' is not 'label'"], ['forwarding_rules_list', "'forwarding' is not 'forward'"],
+    ['slack_read_channel', "'read' after a vendor prefix"], ['slack_search_public', "'search' after a vendor prefix"], ['getJiraIssue', 'camelCase read'],
+    ['graph_search', "'search' reads"], ['graph_index', 'no known verb: fails open'], ['list_task_runs', "'list' comes first, and 'runs' is not 'run'"]]) {
+    expectAllow(mcp(`mcp__srv-1__${tool}`, 'tracker-scout'), `tracker-scout · ${tool} (${why})`)
+  }
   expectAllow(mcp('mcp__abc__save_issue'), 'the main session (no agent_type) · save_issue')
   expectAllow(mcp('mcp__abc__save_issue', 'general-purpose'), 'a generic subagent · save_issue')
   expectAllow(mcp('mcp__abc__save_issue', 'api-engineer'), 'a repo agent · save_issue')
