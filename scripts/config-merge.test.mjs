@@ -9,8 +9,9 @@
 //      values is CHANGED and is applied only when an --approve names its path; a key only the
 //      current file has is KEPT; without --write nothing is written
 //    • hand-written keys the proposal does not know survive a --write, in their order
-//    • repos[] is matched by name and specialists[] by agent: a hand-edited repos[].gate is kept
-//      unless approved, the existing entries keep their order, a new repo is appended whole
+//    • repos[] is matched by name, specialists[] by agent and manager.sources[] by id: a
+//      hand-edited repos[].gate or source scope is kept unless approved, the existing entries keep
+//      their order, a new repo or source is appended whole
 //    • invalid JSON in either file: exit 1, one line naming the file with the line and column
 //      only (Node's own message quotes the source, secrets included), nothing written
 //    • a missing current file: everything is ADDED, and --write creates it
@@ -702,6 +703,45 @@ try {
     SHAPES.forEach(([shape, , want], i) => {
       ok(got[i] === want, `${shape}: ${JSON.stringify(want)}${got[i] === want ? '' : ` (got ${JSON.stringify(got[i])})`}`)
     })
+  }
+
+  // ══════ 21 · manager.sources[] matched by id ══════
+  section('21 · manager.sources[] matched by id: a hand-edited scope and threshold are kept, a new source is appended, a duplicate id makes the array a value')
+  {
+    const LINEAR = { id: 'linear', category: 'tracker', kind: 'linear', hint: 'mcp__abc__* (Linear, the claude.ai connector)', readOnly: 'guard', scope: { teams: ['ODY'] }, verifiedAt: '2026-10-01T08:00:00Z' }
+    const RUNS = { id: 'runs', category: 'runs', kind: 'grimoire' }
+    const PRS = { id: 'prs', category: 'prs', kind: 'github', hint: 'gh CLI, authenticated', readOnly: 'permission-rule', scope: { repos: ['acme/app'] }, verifiedAt: '2026-10-16T09:00:00Z' }
+    const current = { manager: { sources: [{ ...LINEAR, scope: { teams: ['ODY', 'OPS'] }, note: 'ours' }, RUNS], urgent: { priorityAtMost: 2, dueWithinDays: 2, blocksAtLeast: 2, stalledDays: 7 }, maxItemsPerSource: 200 } }
+    const proposed = { manager: { sources: [LINEAR, PRS, RUNS], urgent: { priorityAtMost: 2, dueWithinDays: 2, blocksAtLeast: 2, stalledDays: 5 }, repoLabels: { frontend: 'app' }, maxItemsPerSource: 200 } }
+    const d = project()
+    writeFileSync(join(d, 'grimoire.config.json'), pretty(current))
+    writeFileSync(join(d, 'proposal.json'), pretty(proposed))
+    const j = json(cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
+    same(j && { added: j.added, changed: j.changed, kept: j.kept }, {
+      added: [{ path: 'manager.sources[prs]', value: PRS }, { path: 'manager.repoLabels', value: { frontend: 'app' } }],
+      changed: [
+        { path: 'manager.sources[linear].scope.teams', current: ['ODY', 'OPS'], proposed: ['ODY'], approved: false },
+        { path: 'manager.urgent.stalledDays', current: 7, proposed: 5, approved: false },
+      ],
+      kept: [{ path: 'manager.sources[linear].note', value: 'ours' }],
+    }, 'sources are matched by id: the hand-edited scope and stalledDays are one CHANGED key each, the new prs source is ADDED whole, a hand-added field is KEPT')
+    ok(j && j.unchanged.includes('manager.sources[runs]') && j.unchanged.includes('manager.sources[linear].verifiedAt'), 'an equal source, and an equal verifiedAt, are unchanged')
+
+    const w = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--write')
+    const got = JSON.parse(readFileSync(join(d, 'grimoire.config.json'), 'utf8'))
+    ok(w.status === 0, '--write exits 0')
+    same(got.manager.sources.map((s) => s.id), ['linear', 'runs', 'prs'], 'the current sources keep their order; prs is appended')
+    same(got.manager.sources[0].scope, { teams: ['ODY', 'OPS'] }, 'without --approve the hand-edited scope stays')
+    same(got.manager.urgent.stalledDays, 7, 'without --approve the hand-set stalledDays stays')
+    const again = json(cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
+    same(again && { added: again.added, changed: again.changed.map((c) => c.path) }, { added: [], changed: ['manager.sources[linear].scope.teams', 'manager.urgent.stalledDays'] },
+      'a second run adds nothing and lists the two declined changes again')
+
+    const a = project()
+    writeFileSync(join(a, 'grimoire.config.json'), pretty({ manager: { sources: [LINEAR, { ...LINEAR, hint: 'other' }] } }))
+    writeFileSync(join(a, 'proposal.json'), pretty({ manager: { sources: [LINEAR] } }))
+    const v = json(cli(a, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
+    same(v && v.changed.map((c) => c.path), ['manager.sources'], 'two sources with one id are not keyable: the array is one value, CHANGED whole')
   }
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
