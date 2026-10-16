@@ -89,7 +89,9 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
   `manager.mjs brief`. It never writes to the tracker.
 - **The ranking is a tested script, not the model's judgment.** The scouts return WorkItems against
   `skills/manager/workitem.schema.json`, and the script refuses the whole file on any invalid item,
-  naming the item and field, never the value. From the fields and one `--now`:
+  naming the item and field, never the value. null in an optional field reads as absent: an
+  unread `hasAcceptanceCriteria` shows as "not checked", never as "none". From the fields and one
+  `--now`:
   - urgent: priority Urgent or High (`manager.urgent.priorityAtMost`), an SLA breaching within
     24 h or past, due today, overdue or within `dueWithinDays` (2) calendar days;
   - Decide: triage, or urgent with no assignee. Do: any other urgent item. Hand to AI: an issue
@@ -101,11 +103,14 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
 - **The files:** `.grimoire/manager/briefings/<YYYYMMDD-HHMMSS>.md`, `latest.md` (front matter with
   the counts, `generatedAt`, `partial` and the sources) and `ledger.json` (when each item was first
   seen, a hash of what matters, its last group), under one `.lock` broken after 30 minutes; a held
-  lock exits 3. Ticket text is escaped for Markdown and HTML, and only an http(s) url is a link.
-  `view()` builds the one view model the page and the panel will render from.
+  lock exits 3. Ticket text is escaped for Markdown and HTML, its `scheme://` and `www.` can't
+  become GFM autolinks, and its bidi controls are dropped. `view()` builds the one view model the
+  page and the panel will render from, and it carries only safe http(s) urls (null otherwise).
 - **`tracker-scout` reaches the tracker's connectors.** Its `tools:` line is gone, so it inherits the
   session's tools (a probe confirmed a subagent loads the claude.ai connectors with ToolSearch);
-  the guard's MCP rule keeps it read-only, and it has a memory file now. It maps native fields onto
+  `disallowedTools` takes away Write, Edit, MultiEdit and NotebookEdit, the guard refuses its MCP
+  writes, and a `gh` write through Bash is held by its instructions and setup's permission rule. It
+  has a memory file now. It maps native fields onto
   the WorkItem (Linear's priority as is, Jira Highest..Lowest to 1..4, GitHub labels by
   `manager.priorityLabels`; states onto the six state types, the native ones kept).
 - `grimoire.config.example.json` has the `manager` block, documented in `workflows/README.md` as not
