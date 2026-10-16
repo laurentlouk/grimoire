@@ -73,7 +73,7 @@ Implementers with a narrower lens than the repo's owner, dispatched into that re
 1. Write `agents/<name>.md` (frontmatter `name`, `description`, optional `tools`, `model`; body is the system prompt).
 2. Add its row here.
 3. Team agent, specialist or reviewer: create `memory/agents/<name>.md` and add the "Your memory (read it first)" section to its definition.
-4. Add its evals.
+4. Cover it in the evals of the skill that dispatches it (`skills/<skill>/evals/evals.json`): evals are written per skill, and there is no per-agent eval suite.
 
 ## When to add an agent
-Only when telemetry shows a recurring task kind failing on the same lens, run after run; one bad PR is a memory entry or a skill patch, not an agent. `crystallize` proposes it; a human approves. Each new agent needs its definition, its row here, its memory file (implementers and the reviewer) and its evals; the drift check in CI (`scripts/check-drift.mjs`) fails the build when any of them is missing.
+Only when telemetry shows a recurring task kind failing on the same lens, run after run; one bad PR is a memory entry or a skill patch, not an agent. `crystallize` proposes it; a human approves. Each new agent needs its definition, its row here and its memory file (implementers, the reviewer, and any agent that can write: no `tools:` line, or Write/Edit in it). The drift check in CI (`scripts/check-drift.mjs`) fails the build when any of them is missing. Its evals live with the skill that dispatches it.
