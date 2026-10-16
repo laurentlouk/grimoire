@@ -7,7 +7,7 @@
   "items": { "$ref": "#/$defs/workItem" },
   "$defs": {
     "date": {
-      "description": "An ISO 8601 date (YYYY-MM-DD, read in the machine's time zone) or date-time.",
+      "description": "An ISO 8601 date (YYYY-MM-DD, read in the machine's time zone) or date-time. It must name a real calendar day and clock time: the script refuses 2026-02-30T10:00:00Z, which the pattern alone allows.",
       "type": ["string", "null"],
       "pattern": "^\\d{4}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:?\\d{2})?)?$"
     },
@@ -30,14 +30,14 @@
         "stateType": { "description": "The tracker state mapped onto Linear's state types. completed and canceled items are counted, not listed.", "enum": ["triage", "backlog", "unstarted", "started", "completed", "canceled"] },
         "nativeState": { "description": "The tracker's own status name (\"In Review\").", "type": ["string", "null"] },
         "priority": { "description": "Linear's scale: 0 none (ranks last), 1 urgent, 2 high, 3 medium, 4 low. null or absent: 0.", "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
-        "nativePriority": { "description": "The tracker's own priority (\"Highest\", a P1 label).", "type": ["string", "number", "null"] },
+        "nativePriority": { "description": "The tracker's own priority (\"Highest\", a P1 label). With priority absent or null, a label here is mapped by manager.priorityLabels (case-insensitive; the defaults when the config has none), the same table the scout uses.", "type": ["string", "number", "null"] },
         "assignee": { "description": "Who it is assigned to (a display name), or null when unassigned.", "type": ["string", "null"] },
         "dueAt": { "$ref": "#/$defs/date" },
         "createdAt": { "$ref": "#/$defs/date" },
         "updatedAt": { "$ref": "#/$defs/date" },
-        "lastActivityAt": { "$ref": "#/$defs/date" },
+        "lastActivityAt": { "description": "The newest activity seen (the update, the last comment). Started work with none for manager.urgent.stalledDays is urgent; absent, updatedAt is read.", "$ref": "#/$defs/date" },
         "blockedBy": { "description": "The open items blocking this one. Absent means none.", "$ref": "#/$defs/refs" },
-        "blocks": { "description": "The open items this one blocks. Absent means none.", "$ref": "#/$defs/refs" },
+        "blocks": { "description": "The open items this one blocks. Absent means none. Not started work blocking manager.urgent.blocksAtLeast open items is urgent; an id the briefing did not read counts as open.", "$ref": "#/$defs/refs" },
         "parentOf": { "description": "This item's sub-issues. Non-empty makes it a parent issue.", "$ref": "#/$defs/refs" },
         "project": {
           "type": ["object", "null"],

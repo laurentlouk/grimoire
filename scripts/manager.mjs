@@ -569,7 +569,7 @@ function itemLines(it) {
 }
 
 // A source in the counts line: its items, "≥ N" when capped (never presented as complete), or not checked.
-const sourceText = (s) => `${md(s.id, 64)} (${s.status === 'failed' ? 'not checked' : s.status === 'capped' ? `≥ ${s.count}` : s.items})`
+const sourceText = (s) => `${md(s.id, 64)} (${s.status === 'failed' ? 'not checked' : s.status === 'capped' ? `≥ ${Math.max(s.count, s.items)}` : s.items})`
 
 export function renderMarkdown(v) {
   const c = v.counts
