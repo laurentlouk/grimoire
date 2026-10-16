@@ -161,9 +161,35 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
 - **The user applies `.claude/settings.json`.** The guard closes that file to agents, so setup
   writes `grimoire.config.json` itself, but for the settings it prints the exact `--write`
   command and the user runs it. A dry run then confirms what is left.
-- Checks: `scripts/config-merge.test.mjs` (119), and the setup evals `setup-6` (a configured
-  project re-run changes nothing before the yes, and never writes the settings itself) and
-  `setup-7` (a hand-edited gate is kept).
+- **The manager section binds the briefing's sources to read-only official tools.** It rides on
+  the re-run diff, so a hand-edited source or threshold is kept.
+  - It detects the trackers from the docs, `.mcp.json`, the session's connectors, PR templates,
+    git remotes and `toolHints.tracker`, and proposes `manager.sources`: one per tracker, a `prs`
+    source over the GitHub remotes, and `runs`. Each has a `hint`, a `scope`, and `readOnly`:
+    `endpoint` (Linear's `/mcp/readonly`, GitHub's `/x/issues/readonly`), `flag` (`--read-only`),
+    `admin-group` (a read-only account), `permission-rule` (`gh`), or `guard` for a claude.ai
+    connector, which only the guard's MCP rule holds read-only. Only the vendors' own tools and
+    claude.ai connectors, never a community server.
+  - Each source is read once before the diff and gets `verifiedAt`; a failing one is shown with
+    its fix and not written. `config-merge.mjs` matches `manager.sources[]` by `id`.
+  - `manager.repoLabels` (new) maps tracker labels to `repos[]` names from the labels'
+    descriptions, the description winning over the name: Odyyy's `frontend` is the Expo app, not
+    the web app. A label the descriptions don't tie to one repo is left out and named.
+  - For a GitHub tracker, the default `priorityLabels` (`priority: urgent` … `low`, `P0`–`P3`,
+    `critical`); when the repo has no priority label, an offer to create the four `priority:`
+    labels with `gh label create`, listed as a tracker write and run only on a yes.
+  - The `gh` permission rules: deny what the pipeline never runs (`gh issue close`, `delete`,
+    `transfer`), ask for what `to-issues` and claims do. The urgency defaults and
+    `maxItemsPerSource: 200`. An optional `repos[].remote` for a hub of nested clones, which the
+    loop ignores.
+  - `grimoire.config.example.json`'s `manager` block follows the spec: a `guard` Linear source,
+    the default priority labels, `repoLabels`, and a repo `remote`.
+- Checks: `scripts/config-merge.test.mjs` (127), and the setup evals `setup-6` (a configured
+  project re-run changes nothing before the yes, and never writes the settings itself),
+  `setup-7` (a hand-edited gate is kept), `setup-8` (a Linear hub gets a `guard` source, `prs`,
+  `runs` and `frontend` mapped to the mobile repo), `setup-9` (a GitHub repo without priority
+  labels is offered them, on a yes only), `setup-10` (a hand-set `stalledDays` is kept) and
+  `setup-11` (the briefing itself is the manager's).
 
 **Guard (`hooks/scripts/guard.mjs`)**
 - **Scouts can't write through MCP tools.** The manager's scouts read trackers through whatever
