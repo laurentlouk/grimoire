@@ -502,7 +502,9 @@ export function mapRepo(it, ctx) {
   return { problem: 'no repo mapped: no label in repoLabels' }
 }
 
-// The mapped repo and its availability (the `repo` of a view item), or null when none maps.
+// The mapped repo and its availability (the `repo` of a view item), or null when none maps. Its
+// note is one of four fixed phrases (the item line prints it as is); the reason and fix of an
+// unavailable repo reach the briefing through the item's reasons, escaped.
 export function repoCheck(it, ctx) {
   const m = mapRepo(it, ctx)
   if (m.problem) return null
@@ -510,7 +512,7 @@ export function repoCheck(it, ctx) {
   const a = ctx.availability ? ctx.availability.get(m.name) : undefined
   if (!a) return { ...base, available: null, note: ctx.availability ? 'not in the repos check' : 'availability not checked' }
   if (a.available === true) return { ...base, available: true, note: 'checked out' }
-  return { ...base, available: false, note: String(a.reason ?? 'not available'), reason: String(a.reason ?? 'not available'), fix: String(a.fix ?? 'run manager.mjs repos'), command: typeof a.command === 'string' ? a.command : null }
+  return { ...base, available: false, note: 'not available', reason: String(a.reason ?? 'not available'), fix: String(a.fix ?? 'run manager.mjs repos'), command: typeof a.command === 'string' ? a.command : null }
 }
 
 function place(it, ctx) {

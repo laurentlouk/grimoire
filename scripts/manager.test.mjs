@@ -974,6 +974,7 @@ try {
     repo(join(hub, 'repositories', 'webapp-level-up'))
     mkdirSync(join(hub, 'repositories', 'notgit')); writeFileSync(join(hub, 'repositories', 'notgit', 'README'), 'x')
     writeFileSync(join(hub, 'repositories', 'afile'), 'x')
+    const PW = ['not', 'a', 'secret'].join('-') // a password in a remote, built at runtime: no credential-shaped literal in the repo
     const config = { repos: [
       { name: 'webapp', path: 'repositories/webapp' },
       { name: 'odyyy-app', path: 'repositories/odyyy-app', remote: 'git@github.com:acme/odyyy-app.git' },
@@ -981,7 +982,7 @@ try {
       { name: 'notgit', path: 'repositories/notgit' },
       { name: 'afile', path: 'repositories/afile' },
       { name: 'sub', path: 'libs/sub' },
-      { name: 'leaky', path: 'repositories/leaky', remote: 'https://user:hunter2@example.com/leaky.git' },
+      { name: 'leaky', path: 'repositories/leaky', remote: `https://user:${PW}@example.com/leaky.git` },
     ] }
     writeFileSync(join(hub, 'grimoire.config.json'), JSON.stringify(config))
     const r = cli(['repos', '--root', hub, '--config', join(hub, 'grimoire.config.json')])
@@ -1005,7 +1006,7 @@ try {
     ok(s.available === false && s.submodule === true && s.reason === 'submodule not initialised' && s.fix === 'git submodule update --init libs/sub' && s.command === s.fix,
       `an uninitialised submodule: "git submodule update --init <path>" (${s.reason}, ${s.fix})`)
     const lk = byName(res, 'leaky')
-    ok(lk.command === null && !JSON.stringify(lk).includes('hunter2'), 'a remote that carries a password is never printed nor offered as a command')
+    ok(lk.command === null && !JSON.stringify(lk).includes(PW), 'a remote that carries a password is never printed nor offered as a command')
 
     const mod = await import(SCRIPT)
     const init = mod.checkRepos({ repos: [{ name: 'sub', path: 'libs/sub' }] }, origin).repos[0]
