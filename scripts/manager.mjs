@@ -51,6 +51,18 @@
 //                blocking it, no linked PR, no sub-issues (AI_CHECKS; the repo check is a seam,
 //                repoCheck) · Waiting on others: the scout's reading (bucketHint "waiting") ·
 //                Not now: the rest. completed and canceled items are counted, not listed.
+//    PRs         (kind pr) by their own rules, first match wins (placePr): a draft → Not now ·
+//                a review requested from the team → Decide · failing CI, or approved and not
+//                merged → Do · the rest → Waiting on others. Never counted urgent; bucketHint is
+//                not read.
+//    runs        (kind run) the runs source: with a manager.sources entry of category runs, brief
+//                reads <root>/<telemetry.dir> (default .grimoire/runs) itself, no scout, through
+//                render-logs' loadRuns and runOutcome (readRuns). Each project's latest run is
+//                listed under Do when it halted, is still "running" with no journal write for
+//                STALE_HOURS (12), or drained with tasks that need attention; its next step names
+//                /grimoire:orchestrate on the project. A drained run with nothing pending, or one
+//                still writing, is left out. Its status joins the sources like the others (no dir:
+//                ok, 0), in place of any entry --sources has for it. Never counted urgent.
 //    bucketHint  the model's reading. It moves an item only between the non-urgent groups
 //                (Hand to AI, Waiting on others, Not now): it never makes an item urgent, never
 //                moves one out of Decide or Do, and never makes an issue ready for AI.
@@ -61,7 +73,7 @@
 //
 //  The ledger (`schemaVersion` 1) keeps per source `lastRunAt`/`lastStatus` and per item
 //  (`<sourceId>:<id>`) `firstSeenAt`, `lastHash` (state, priority, assignee, due date,
-//  blockers, labels, PR) and `lastBucket`. Against it each listed item is badged **new** (not
+//  blockers, labels, PR; a PR's review and checks, a run's attention) and `lastBucket`. Against it each listed item is badged **new** (not
 //  in it) or **changed** (another hash), and the items gone since, or now completed or
 //  canceled, are counted as resolved, not listed. An item a source did not show this run
 //  (failed, capped, not read) is neither resolved nor dropped from the ledger. No ledger is
@@ -98,6 +110,7 @@ import { resolve, join, dirname, basename, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { loadRuns, runOutcome, STALE_HOURS } from './render-logs.mjs'
 
 const HOUR = 3600000
 const DAY = 86400000
@@ -122,6 +135,8 @@ const HINT_TO = new Set(['waiting', 'notnow'])
 const OPEN = new Set(['triage', 'backlog', 'unstarted', 'started'])
 const STATE_TYPES = ['triage', 'backlog', 'unstarted', 'started', 'completed', 'canceled']
 const KINDS = ['issue', 'pr', 'run']
+const REVIEW_DECISIONS = ['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED'] // GitHub's, as gh gives them
+const CHECKS = ['passing', 'failing', 'pending']
 const HINTS = GROUPS.map((g) => g.id)
 export const PRIORITY_NAMES = ['No priority', 'Urgent', 'High', 'Medium', 'Low']
 
@@ -221,6 +236,14 @@ const FIELDS = {
   labels: nullable(C.strings),
   bucketHint: nullable(C.oneOf(HINTS)),
   nextStep: nullable(C.string),
+  // a pull request's (kind pr)
+  reviewDecision: nullable(C.oneOf(REVIEW_DECISIONS)),
+  checks: nullable(C.oneOf(CHECKS)),
+  reviewRequested: nullable(C.bool),
+  isDraft: nullable(C.bool),
+  // a grimoire run's (kind run, written by readRuns)
+  needsAttention: nullable((v) => (Number.isInteger(v) && v >= 0 ? null : fail('expected a whole number, 0 or more'))),
+  haltReason: nullable(C.string),
 }
 const REQUIRED = ['sourceId', 'id', 'title', 'kind', 'stateType']
 // A field name is the scout's, not the ticket's, but it is still printed only when it looks like one.
@@ -342,6 +365,8 @@ function normalize(it, labels) {
     project: it.project ? { ...it.project } : null, repo: it.repo ?? null, slaAt: it.slaAt ?? null,
     hasAcceptanceCriteria: it.hasAcceptanceCriteria ?? null, linkedPr: it.linkedPr || null, labels: [...(it.labels ?? [])],
     bucketHint: it.bucketHint ?? null, nextStep: it.nextStep ?? null,
+    reviewDecision: it.reviewDecision ?? null, checks: it.checks ?? null, reviewRequested: it.reviewRequested ?? null, isDraft: it.isDraft ?? null,
+    needsAttention: it.needsAttention ?? null, haltReason: it.haltReason ?? null,
   }
 }
 
@@ -458,7 +483,39 @@ export function repoCheck(it, config) { // eslint-disable-line no-unused-vars
   return it.repo ? { name: it.repo, available: null, note: 'availability not checked yet' } : null
 }
 
+// A pull request (spec D7), from its fields alone: a draft is Not now, whatever else holds; a review
+// requested from the team is Decide; failing CI, or an approval not merged, is Do; the rest waits on
+// others (the author, a reviewer, CI). The issue rules are not read: a PR is never counted urgent.
+export function placePr(it) {
+  if (it.isDraft === true) return { group: 'notnow', reasons: ['a draft'] }
+  const owed = [it.checks === 'failing' && 'CI failing', it.reviewDecision === 'APPROVED' && 'approved, not merged'].filter(Boolean)
+  if (it.reviewRequested === true) return { group: 'decide', reasons: ['review requested', ...owed] }
+  if (owed.length) return { group: 'do', reasons: owed }
+  const waiting = [it.reviewDecision === 'CHANGES_REQUESTED' && 'changes requested: waiting on the author', it.checks === 'pending' && 'CI running',
+    it.reviewDecision === 'REVIEW_REQUIRED' && 'a review is required, none requested yet'].filter(Boolean)
+  return { group: 'waiting', reasons: waiting.length ? waiting : ['open: no review requested, CI not failing, not approved'] }
+}
+
+// A grimoire run (readRuns), from its fields alone: halted; still "running" with no journal write for
+// STALE_HOURS (its session most likely died); or drained with tasks that need attention: Do. Still
+// writing its journal: Waiting on others; drained with nothing pending: Not now (readRuns leaves both
+// out). Never counted urgent.
+export function placeRun(it, ctx) {
+  const n = it.needsAttention ?? 0
+  const attention = n > 0 ? [`${plural(n, 'task')} need${n === 1 ? 's' : ''} attention`] : []
+  if (it.nativeState === 'halted') return { group: 'do', reasons: [it.haltReason ? `halted: ${it.haltReason}` : 'halted', ...attention] }
+  if (it.nativeState === 'running') {
+    const silent = it.updatedAt === null ? NaN : ctx.now - parseTime(it.updatedAt)
+    if (silent > STALE_HOURS * HOUR) return { group: 'do', reasons: [`no journal write for ${ageText(silent)}: its session most likely died`, ...attention] }
+    return { group: 'waiting', reasons: ['running', ...attention] }
+  }
+  const state = it.nativeState ?? 'finished'
+  return n > 0 ? { group: 'do', reasons: [`${state}, ${attention[0]}`] } : { group: 'notnow', reasons: [`${state}, nothing pending`] }
+}
+
 function place(it, ctx) {
+  if (it.kind === 'pr') return { urgent: false, ...placePr(it) }
+  if (it.kind === 'run') return { urgent: false, ...placeRun(it, ctx) }
   const urgency = URGENCY_RULES.map((rule) => rule(it, ctx)).filter(Boolean)
   const urgent = urgency.length > 0
   const notReady = AI_CHECKS.map((check) => check(it, ctx)).filter(Boolean)
@@ -493,6 +550,9 @@ export function compareItems(a, b) {
 // What the ledger compares between runs (spec D10): a change here is a "changed" badge later.
 export function itemHash(it) {
   const facts = [it.stateType, it.nativeState, it.priority, it.assignee, it.dueAt, [...it.blockedBy].sort(), [...it.labels].sort(), it.linkedPr]
+  // a PR's status, a run's attention: appended for their kind only, so an issue's hash is unchanged
+  if (it.kind === 'pr') facts.push(it.reviewDecision, it.checks, it.reviewRequested, it.isDraft)
+  if (it.kind === 'run') facts.push(it.needsAttention, it.haltReason)
   return createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 16)
 }
 const ledgerKey = (it) => `${it.sourceId}:${it.id}`
@@ -509,8 +569,8 @@ function badgeOf(seen, prev, hash) {
 
 function overallNext(c) {
   const parts = []
-  if (c.decide) parts.push(`Decide ${plural(c.decide, 'item')} first: triage, or urgent with no owner.`)
-  if (c.do) parts.push(`Do ${plural(c.do, 'urgent item')}.`)
+  if (c.decide) parts.push(`Decide ${plural(c.decide, 'item')} first: triage, urgent with no owner, or a review requested.`)
+  if (c.do) parts.push(`Do ${plural(c.do, 'item')}: urgent work, failing CI, approved PRs, runs that stopped.`)
   if (c.ai) parts.push(`${plural(c.ai, 'issue')} ready to hand to AI.`)
   if (!parts.length) parts.push(`Nothing needs you right now${c.waiting ? `; ${c.waiting} waiting on others` : ''}.`)
   return parts.join(' ')
@@ -541,6 +601,7 @@ export function view(items, config, ledger, now, sources) {
       sourceId: it.sourceId, id: it.id, key: it.key, title: it.title, url: safeUrl(it.url), kind: it.kind,
       stateType: it.stateType, nativeState: it.nativeState, priority: it.priority, priorityName: PRIORITY_NAMES[it.priority],
       assignee: it.assignee, dueAt: it.dueAt, createdAt: it.createdAt, project: it.project, labels: it.labels, linkedPr: it.linkedPr,
+      checks: it.checks, reviewDecision: it.reviewDecision, reviewRequested: it.reviewRequested, isDraft: it.isDraft, needsAttention: it.needsAttention,
       repo: repoCheck(it, config), urgent: p.urgent, group: p.group, reasons: p.reasons, nextStep: it.nextStep,
       badge: badgeOf(seen, prev, hash),
       firstSeenAt: prev && Number.isFinite(parseTime(prev.firstSeenAt)) ? prev.firstSeenAt : generatedAt, hash,
@@ -593,6 +654,57 @@ export function nextLedger(v, ledger, items = []) {
   return { schemaVersion: SCHEMA_VERSION, sources, items: out }
 }
 
+// ── runs (manager.sources' runs source: the loop's journals, read here, not by a scout) ──
+// The grimoire runs that need us, as WorkItems of kind run, with the source's status. Each project's
+// latest run only (by updatedAt, the one /grimoire:orchestrate resumes), read through render-logs'
+// loadRuns and runOutcome: listed when it halted, is still "running" with no journal write for
+// STALE_HOURS, or drained with tasks that need attention (failed, or still running past their
+// limit). A drained run with nothing pending, or one still writing its journal, is left out. No dir:
+// read, nothing there (ok, 0). A dir that can't be read: failed, with the reason.
+export function readRuns(dir, { sourceId = 'runs', now = Date.now() } = {}) {
+  if (!existsSync(dir)) return { source: { id: sourceId, status: 'ok', count: 0 }, items: [] }
+  let rows
+  try { rows = loadRuns(dir).map((r) => runOutcome(r, toMs(now))) } catch (e) {
+    return { source: { id: sourceId, status: 'failed', reason: `the run journals could not be read (${e.code || 'error'})`, fix: `check that ${dir} is a readable directory` }, items: [] }
+  }
+  const items = runItems(rows, sourceId)
+  return { source: { id: sourceId, status: 'ok', count: items.length }, items }
+}
+
+const MAX_HALT = 160
+const validDate = (s) => (Number.isFinite(parseTime(s)) ? s : null)
+// runOutcome rows → the WorkItems of the runs that need us (see readRuns). Pure.
+export function runItems(rows, sourceId = 'runs') {
+  const at = (o) => { const t = parseTime(o.updatedAt); return Number.isFinite(t) ? t : -Infinity }
+  const latest = new Map()
+  for (const o of rows) {
+    if (!isObj(o) || typeof o.runId !== 'string' || !o.runId) continue
+    const project = typeof o.project === 'string' && o.project.trim() ? o.project.trim() : null
+    const key = project === null ? `\u0000${o.runId}` : project
+    if (!latest.has(key) || at(o) > at(latest.get(key).o)) latest.set(key, { o, project })
+  }
+  const out = [], seen = new Set()
+  for (const { o, project } of latest.values()) {
+    const needsAttention = (o.tasks?.failed ?? 0) + (o.tasks?.inFlight ?? 0)
+    if (seen.has(o.runId) || !(o.status === 'halted' || o.stale === true || (o.status === 'drained' && needsAttention > 0))) continue
+    seen.add(o.runId)
+    const halt = o.status === 'halted' && Array.isArray(o.halts) && o.halts.length ? o.halts[o.halts.length - 1] : null
+    const said = halt ? String(halt.reason ?? '').split('\n')[0].trim() : ''
+    const haltReason = said ? (Array.from(said).length > MAX_HALT ? `${Array.from(said).slice(0, MAX_HALT - 1).join('')}…` : said) : halt?.kind || null
+    const title = project ?? o.runId
+    const resume = `/grimoire:orchestrate on ${title}`
+    const nextStep = o.status === 'halted' ? `Read why it halted, then resume it: ${resume}`
+      : o.status === 'running' ? `Check whether its session is still alive; if not, resume it: ${resume}`
+        : `Fix what needs attention, then resume it: ${resume}`
+    out.push({
+      sourceId, id: o.runId, title, kind: 'run', stateType: 'started', nativeState: o.status,
+      createdAt: validDate(o.startedAt), updatedAt: validDate(o.updatedAt), project: project ? { name: project } : null,
+      needsAttention, haltReason, nextStep,
+    })
+  }
+  return out
+}
+
 // ── Markdown ──
 // Ticket text on one line, Markdown and HTML inert: bidi controls are dropped (they reorder what a
 // reader sees), control characters and newlines become spaces (no text can start a heading or a
@@ -620,7 +732,10 @@ function itemLines(it) {
   const parts = [`**${md(it.key, 60)}**`, title]
   if (it.urgent) parts.push('**urgent**')
   if (it.badge) parts.push(`**${it.badge}**`)
-  parts.push(it.priorityName, md(it.nativeState ?? it.stateType, 60), it.assignee ? md(it.assignee, 60) : 'unassigned')
+  const state = md(it.nativeState ?? it.stateType, 60)
+  if (it.kind === 'pr') parts.push('PR', state, it.assignee ? md(it.assignee, 60) : 'no author read')
+  else if (it.kind === 'run') parts.push('run', state)
+  else parts.push(it.priorityName, state, it.assignee ? md(it.assignee, 60) : 'unassigned')
   if (it.dueAt !== null) parts.push(`due ${localDate(parseTime(it.dueAt))}`)
   if (it.repo) parts.push(`repo ${md(it.repo.name, 60)} (${it.repo.note})`)
   const lines = [`- ${parts.join(' · ')}`, `  - why: ${it.reasons.map((r) => md(r)).join('; ')}`]
@@ -964,6 +1079,17 @@ function main(argv) {
     return 1
   }
 
+  // The runs source (manager.sources, category runs) is read here, not by a scout: its runs join the
+  // items and its status the sources, in place of any entry the skill wrote for it.
+  let items = input.value
+  const runsSource = mc.sources.find((s) => s.category === 'runs')
+  if (runsSource) {
+    const t = isObj(config.telemetry) && typeof config.telemetry.dir === 'string' && config.telemetry.dir ? config.telemetry.dir : '.grimoire/runs'
+    const runs = readRuns(resolve(root, t), { sourceId: runsSource.id, now })
+    items = [...items, ...runs.items]
+    sources = [...(sources ?? inferSources(input.value)).filter((s) => !(isObj(s) && s.id === runsSource.id)), runs.source]
+  }
+
   const dir = join(root, '.grimoire', 'manager')
   const ledgerFile = resolve(typeof args.ledger === 'string' ? args.ledger : join(dir, 'ledger.json'))
   const lock = join(dir, '.lock')
@@ -980,12 +1106,12 @@ function main(argv) {
   }
   try {
     const ledger = readLedger(ledgerFile)
-    const v = view(input.value, config, ledger, now, sources)
+    const v = view(items, config, ledger, now, sources)
     const text = renderMarkdown(v)
     const file = join(dir, 'briefings', `${stamp(now)}.md`)
     writeAtomic(file, text)
     writeAtomic(join(dir, 'latest.md'), text)
-    writeAtomic(ledgerFile, `${JSON.stringify(nextLedger(v, ledger, input.value), null, 2)}\n`)
+    writeAtomic(ledgerFile, `${JSON.stringify(nextLedger(v, ledger, items), null, 2)}\n`)
     console.log(file)
     return 0
   } finally {
