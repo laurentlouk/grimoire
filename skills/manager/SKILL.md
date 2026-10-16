@@ -142,7 +142,7 @@ So you can explain a placement without guessing:
 
 ## Share the briefing (opt-in)
 
-Only when `manager.share` in `grimoire.config.json` is set: `{ "kind": "linear-document" | "github-issue" | "slack-canvas", "target", "hint" }`. `null`, the default, or absent: skip this section. Run it right after step 5, before anything is launched, in a scheduled run too. It is the manager's only write: made by you, in this session, never by a scout, in one narrow step that finds your own post and replaces it, or creates it. Nothing else is posted, edited, commented, labelled or linked, here or anywhere.
+Only when `manager.share` in `grimoire.config.json` is set: `{ "kind": "linear-document" | "github-issue" | "slack-canvas", "target", "hint" }`. `null`, the default, or absent: skip this section. Any other kind (a legacy `slack`), or a missing target: skip the share and say so; `share-body` refuses it too (exit 1, nothing printed, the warning on stderr). Run it right after step 5, before anything is launched, in a scheduled run too. It is the manager's only write: made by you, in this session, never by a scout, in one narrow step that finds your own post and replaces it, or creates it. Nothing else is posted, edited, commented, labelled or linked, here or anywhere.
 
 1. **Render the body.** From the project root:
 
@@ -154,7 +154,7 @@ Only when `manager.share` in `grimoire.config.json` is set: `{ "kind": "linear-d
 2. **Find your own post**, by the marker `<!-- grimoire:manager-briefing v1 -->` on the body's first line, or by the canvas id. Read through the vendor's own tool, the route `hint` names, with list, search and read calls only (the guard binds the scouts, not you):
    - **`linear-document`**: the Linear connector's document list in the project (or team) `target` names, searched for `Grimoire briefing`, keeping the one whose content holds the marker. Linear can drop an HTML comment from a document's Markdown, so a document titled exactly `Grimoire briefing` in that project, created by you, is yours too.
    - **`github-issue`**: `gh issue list --repo <target> --label grimoire-briefing --state open --json number,url,body`, keeping the issue whose body holds the marker.
-   - **`slack-canvas`**: when `target` is a canvas id (`F…`), the Slack connector's canvas read of it: if it reads, it is yours. Before the first share `target` names the channel the canvas is for; then search the connector for a canvas titled `Grimoire briefing` that you created and that holds the marker.
+   - **`slack-canvas`**: when `target` is a canvas id (`F…`), the Slack connector's canvas read of it: if it reads, it is yours. Before the first share `target` names the channel the canvas is for; then search the connector for a canvas titled `Grimoire briefing` that you created and that holds the marker. A canvas can drop an HTML comment from its Markdown, so one titled exactly `Grimoire briefing`, created by you, is yours too.
 
    Two or more matches: take the most recently updated, leave the others alone, and say so.
 3. **Replace it, or create it.**
@@ -174,4 +174,4 @@ The post holds ticket titles, names and links, for everyone who can read the tar
 
 ## Keep it local
 
-The briefing holds ticket titles, names and links. Don't publish, post or share it unless the user explicitly asks, and say what it contains before you do. The launch prompts carry ids only, so they can go anywhere the user pastes them.
+The briefing holds ticket titles, names and links. Except the opt-in shared post ("Share the briefing"), don't publish, post or share it unless the user explicitly asks, and say what it contains before you do. The launch prompts carry ids only, so they can go anywhere the user pastes them.

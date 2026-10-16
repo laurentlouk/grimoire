@@ -105,7 +105,8 @@
 //        broken ([@]) so the post notifies no one. --max cuts it to fit, the last entries first,
 //        ending "… N more" (default: GitHub's 65,536 when manager.share's kind is github-issue,
 //        else none). Same latest.json, user and --now: the same bytes. Exit 0 printed · 1 no
-//        latest.json, or one this script did not write · 2 usage.
+//        latest.json, or one this script did not write, or a manager.share it can't read (an
+//        unknown kind, no target: nothing printed) · 2 usage.
 //
 //  node scripts/manager.mjs share-status --status created | updated | failed [--url <url>]
 //                                        [--reason <text>] [--root <dir>]
@@ -935,7 +936,6 @@ export function renderMarkdown(v) {
 // ledger: the new and changed badges, the "since the last briefing" line and a repo's
 // availability on this machine are one person's, so they are left out. All three destinations
 // take Markdown.
-export const SHARE_TITLE = 'Grimoire briefing'
 export const SHARE_MARKER_TEXT = 'grimoire:manager-briefing v1'
 export const SHARE_MARKER = `<!-- ${SHARE_MARKER_TEXT} -->`
 export const SHARE_KINDS = ['linear-document', 'github-issue', 'slack-canvas']
@@ -958,9 +958,11 @@ export function shareConfig(config) {
 export const shareMax = (share) => (share && KIND_MAX[share.kind]) ?? Infinity
 
 // An @mention made of ticket text would notify people where the post lands (GitHub and Linear
-// read `@name`), so its `@` becomes `[@]`, the way md() breaks `scheme://`. An email (word@host)
-// is left as it is. Then escaped as the briefing escapes it.
-const shareText = (s, max) => md(String(s ?? '').replace(/(^|[^A-Za-z0-9_.+-])@(?=[A-Za-z0-9_])/g, '$1[@]'), max)
+// read `@name`), so its `@` becomes `[@]`, the way md() breaks `scheme://`: at the start, or after
+// any character but a letter, a digit or `_` (GitHub reads `x-@octocat`, `a.@here` and `@a-@b` as
+// mentions). An email (a letter or digit before its `@`) is left as it is. Then escaped as the
+// briefing escapes it.
+const shareText = (s, max) => md(String(s ?? '').replace(/(^|[^A-Za-z0-9_])@(?=[A-Za-z0-9_])/g, '$1[@]'), max)
 
 // A due date as written when it is a day, else its minute in UTC: the same on every teammate's
 // machine. null when it is not a date.
@@ -1092,8 +1094,10 @@ function shareBodyMain(args) {
     if (!isObj(c.value)) { console.error(`config ${configFile}: the top level must be a JSON object`); return 1 }
     config = c.value
   } else if (configFile) console.error(`config ${configFile}: not found; no manager.share read`)
+  // a manager.share that is there but not one this script reads (a legacy kind, no target): no
+  // body at all, so nothing can be published to a destination nobody chose
   const { share, warnings } = shareConfig(config)
-  for (const w of warnings) console.error(w)
+  if (warnings.length) { for (const w of warnings) console.error(w); return 1 }
   const file = join(root, '.grimoire', 'manager', 'latest.json')
   const input = readInput(file, 'view model')
   if (input.error) { console.error(`${input.error}: run brief first (/grimoire:manager), whose view model the post is rendered from`); return 1 }

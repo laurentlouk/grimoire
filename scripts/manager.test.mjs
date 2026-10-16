@@ -880,6 +880,9 @@ try {
     const line = body.split('\n').find((l) => l.startsWith('- **S-1**')) ?? ''
     ok(line.includes('[&lt;b&gt;x&lt;/b&gt; \\*y\\* &amp; \\[@\\]team https\\[:\\]//evil.example &lt;https\\[:\\]//evil.example\\|click&gt;](https://linear.app/s/1)') && !/<b>|<https:\/\/evil/.test(body),
       `ticket text is escaped as in the briefing, its @mention broken (${line})`)
+    const mentions = mod.shareBody(mod.view([item('MN-1', { title: 'x-@octocat a.@here b+@channel @a-@b user@host.com' })], {}, null, NOW), { by })
+    ok(mentions.includes('x-\\[@\\]octocat a.\\[@\\]here b+\\[@\\]channel \\[@\\]a-\\[@\\]b user@host.com'),
+      `a mention after -, . or + is broken too, and the second of @a-@b; an email is left alone (${mentions.split('\n').find((l) => l.startsWith('- **MN-1**'))})`)
     // ODY-876's repo check is one machine's checkout state: its reason stays out of the post
     const down = { repos: [{ name: 'webapp', available: false, reason: 'not checked out', fix: 'clone it: git clone git@github.com:acme/webapp.git repositories/webapp' }] }
     const R = mod.view([item('R-1', { assignee: null, hasAcceptanceCriteria: true, repo: 'webapp' }), item('R-2', { assignee: 'Cy', hasAcceptanceCriteria: true, repo: 'webapp' })], { repos: [{ name: 'webapp' }] }, null, NOW, undefined, down)
@@ -895,6 +898,10 @@ try {
     ok(r.status === 0 && existsSync(join(r.mdir, 'latest.json')) && a.status === 0 && a.stdout === b.stdout && a.stdout.startsWith(`${mod.SHARE_MARKER}\n`),
       `brief saves latest.json; share-body --root --now renders it, byte-identical on a second run (${a.stderr.trim() || 'ok'})`)
     ok(cli(['share-body', '--root', join(TMP, 'no-briefing')]).status === 1 && share(['--max', '10']).status === 2, 'no latest.json: exit 1; a --max under 2,000: exit 2')
+    const badShare = (s, name) => { const f = join(r.root, `${name}.json`); writeFileSync(f, JSON.stringify({ manager: { share: s } })); return share(['--config', f]) }
+    const legacy = badShare({ kind: 'slack', target: '#team' }, 'legacy'), noTarget = badShare({ kind: 'slack-canvas' }, 'no-target')
+    ok([legacy, noTarget].every((x) => x.status === 1 && x.stdout === '' && /manager\.share: expected null or/.test(x.stderr)),
+      'a manager.share it can\'t read (a legacy slack kind, a canvas with no target): nothing on stdout, exit 1, the warning on stderr')
 
     const gh = mod.shareConfig({ manager: { share: { kind: 'github-issue', target: 'acme/api' } } })
     const canvas = mod.shareConfig({ manager: { share: { kind: 'slack-canvas', target: 'F0123ABC' } } })
