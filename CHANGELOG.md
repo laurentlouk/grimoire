@@ -68,14 +68,15 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
 **Guard (`hooks/scripts/guard.mjs`)**
 - **Scouts can't write through MCP tools.** The manager's scouts read trackers through whatever
   connector the session has, and the guard did not see MCP calls at all. Now `hooks.json` routes
-  `mcp__.*` to it, and a call from the plugin's scouts or `reviewer` is refused when its tool part
-  (after the last `__`) leads with a write verb: `save_`, `create_`, `update_`, `delete_`, `send_`,
-  `reply`, `forward`, `merge_`, `set_`, `add_`, `remove_`, `mark_`. The agent is told to report
-  the write in its result; the main session applies it.
+  `mcp__.*` to it. A call from the plugin's scouts or `reviewer` is refused when the first known
+  verb in its tool part (after the last `__`, split on `_`, `-` and camelCase) is a write:
+  `slack_send_message`, `share_issue`, `createJiraIssue` and `run_scheduled_task` are refused, while
+  `list_task_runs`, `slack_read_channel` and `getJiraIssue` pass. The deny line names the verb
+  that decided and tells the agent to report the write in its result; the main session applies it.
   - The implementers, repo agents, generic subagents and the main session are never blocked.
     `GRIMOIRE_GUARD_ALLOW=1` and `guard.enabled: false` lift it.
-  - It matches verbs, a heuristic: `issue_upsert` or a camelCase `createJiraIssue` passes. The
-    hooks README lists the limits.
+  - It reads verbs, a heuristic: a name with no known verb passes, an unknown write verb
+    (`pause_project`) included. The hooks README lists the limits.
   - An MCP call is judged by its name alone, before the guard asks git anything.
 
 ## 0.11.0 — trust and see
