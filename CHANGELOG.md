@@ -255,6 +255,28 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   prints ids and counts, never ticket text: one line under 10,000 characters. No briefing, a
   corrupt one, an unreadable root or no `node` prints nothing, exit 0. Checks:
   `scripts/manager.test.mjs` (287 in all).
+- **Open pull requests.** A `prs` source (`category: prs`, `scope.repos`) is dispatched with the
+  tracker sources: `tracker-scout` reads `gh pr list --state open --json …` per repo (behind
+  `requireHook.raw` when set, or GitHub's MCP) and maps each PR onto four new optional,
+  null-tolerant WorkItem fields: `reviewDecision`, `checks` (`passing` / `failing` / `pending`, from
+  the status rollup), `reviewRequested` and `isDraft`. The script places a PR by its own rules,
+  first match wins: a draft → Not now, a review requested from the team → Decide, failing CI or an
+  approval not merged → Do, the rest → Waiting on others. A PR is never counted urgent, and its
+  review and checks are part of its hash, so a change badges it **changed**.
+- **Grimoire runs that need us.** With a `runs` source in `manager.sources`, `brief` reads the run
+  journals itself (no scout), through render-logs' `loadRuns` and `runOutcome`, under
+  `telemetry.dir` (default `.grimoire/runs`) in the project. Each project's latest run is listed
+  under Do when it halted (with the halt's first line), is still "running" with no journal write
+  for 12 h, or drained with tasks that need attention; its next step names `/grimoire:orchestrate`
+  on the project. A drained run with nothing pending is left out, and no runs directory is
+  `runs (0)`, no error. Its status joins the sources like the others.
+- **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
+  absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
+  reported by the skill", and makes the briefing partial. An `ok` source whose count is not its
+  number of items shows both, flagged "count mismatch", and is not trusted as complete. The
+  stalled rule reads the later of `lastActivityAt` and `updatedAt`. With neither `priority` nor
+  `nativePriority`, the most urgent label in `labels[]` maps. Checks: `scripts/manager.test.mjs`
+  (318 in all).
 
 ## 0.11.0 — trust and see
 
