@@ -45,6 +45,15 @@
 //      never ticket text
 //    • the wrapper prints the line for $CLAUDE_PROJECT_DIR (else $PWD) and exits 0 with no output
 //      when node is missing or fails
+//  And (ODY-874), what ODY-872's review found: a --sources file holding null is refused; a
+//  manager.sources id missing from --sources is not checked ("not reported by the skill"); an ok
+//  source whose count differs from its items is flagged and not trusted as complete; stalled reads
+//  the later of lastActivityAt and updatedAt; labels[] map to a priority when nothing else does
+//    • runs (fixture run dirs, render-logs' layout): halted, stale and drained-with-attention runs
+//      under Do with the resume command, a clean drain left out, a project's latest run only, no
+//      runs dir is no error; telemetry.dir resolved against --root, the runs source in the sources
+//    • PRs, one per bucket: review requested → Decide, failing CI and approved → Do, draft → Not
+//      now, the rest → Waiting on others; the fields optional and null-tolerant
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, readdirSync, chmodSync, symlinkSync } from 'node:fs'
 import { join, dirname, resolve, delimiter } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -261,7 +270,7 @@ try {
     ok(groupOf(P, 'NA-noac') === 'Not now' && /no acceptance criteria/.test(E(P, 'NA-noac').why), 'no acceptance criteria: not ready for AI')
     ok(groupOf(P, 'REST') === 'Not now' && /acceptance criteria not checked/.test(E(P, 'REST').why) && !/no acceptance criteria/.test(E(P, 'REST').why),
       'an item whose acceptance criteria the scout did not read says "not checked", not "none", and is not ready either')
-    ok(groupOf(P, 'NA-pr-kind') === 'Not now', 'only an issue is handed to AI, never a PR')
+    ok(groupOf(P, 'NA-pr-kind') === 'Waiting on others', 'only an issue is handed to AI, never a PR (a PR with nothing owed waits on others)')
     ok(groupOf(P, 'W') === 'Waiting on others' && /Wait for the vendor/.test(E(P, 'W').next), 'the scout\'s "waiting" reading moves a non-urgent item to Waiting on others, with its next step')
     ok(groupOf(P, 'H-do') === 'Not now' && !urgent(P, 'H-do'), 'bucketHint "do" never makes an item urgent or puts it in Do')
     ok(groupOf(P, 'H-decide') === 'Not now', 'bucketHint "decide" never moves a non-urgent item into Decide')
@@ -480,7 +489,7 @@ try {
     ok(urgent(P, 'ST-5') && /no activity for 5 days/.test(E(P, 'ST-5').why), 'started with no activity for 5 days = stalledDays (default 5) is urgent: "no activity for 5 days"')
     ok(!urgent(P, 'ST-4'), 'no activity for 4 days, just under stalledDays, is not urgent')
     ok(urgent(P, 'ST-6u') && /no activity for 6 days/.test(E(P, 'ST-6u').why), 'without lastActivityAt, updatedAt is read: "no activity for 6 days"')
-    ok(!urgent(P, 'ST-recent'), 'lastActivityAt comes before updatedAt: recent activity on an old update is not stalled')
+    ok(!urgent(P, 'ST-recent'), 'the later of lastActivityAt and updatedAt is read: recent activity on an old update is not stalled')
     ok(!urgent(P, 'ST-unstarted'), 'only started work stalls')
     ok(!urgent(P, 'ST-nodates'), 'started with neither date is not stalled (nothing to read)')
     ok(groupOf(P, 'BL-2') === 'Do' && groupOf(P, 'ST-5') === 'Do', 'an assigned issue urgent by these rules goes to Do')
@@ -729,6 +738,141 @@ try {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
+  section('ODY-872 follow-ups: a null --sources, an unreported source, a count mismatch, stalled, labels[]')
+  {
+    // In process (view, renderMarkdown, nextLedger) except the file-level refusal.
+    const nul = brief([item('L-1')], { sources: 'null' })
+    ok(nul.status === 1 && /sources: expected a JSON array/.test(nul.stderr) && !existsSync(join(nul.mdir, 'latest.md')), `a --sources file holding null is refused, not read as absent (${nul.stderr.trim().split('\n').slice(-1)[0]})`)
+    let threw = ''
+    try { mod.view([item('L-1')], {}, null, NOW, null) } catch (e) { threw = e.message }
+    ok(/sources: expected a JSON array/.test(threw), 'and view() refuses null sources the same way; only undefined means "infer them from the items"')
+
+    const config = { manager: { sources: [{ id: 'linear', category: 'tracker', kind: 'linear' }, { id: 'jira', category: 'tracker', kind: 'jira' }] } }
+    const UV = mod.view([item('L-1')], config, null, NOW, [{ id: 'linear', status: 'ok', count: 1 }])
+    const um = mod.renderMarkdown(UV)
+    ok(um.includes('- Not checked: jira (not reported by the skill)') && UV.partial === true && /^notChecked: \["jira"\]$/m.test(um),
+      'a manager.sources entry missing from --sources is listed under Not checked, "not reported by the skill", and makes the briefing partial')
+
+    const prevLedger = mod.nextLedger(mod.view([item('M-1'), item('M-2'), item('M-3')], {}, null, at(-DAY)), null)
+    const MV = mod.view([item('M-1'), item('M-2')], {}, prevLedger, NOW, [{ id: 'linear', status: 'ok', count: 3 }])
+    const mline = mod.renderMarkdown(MV).split('\n').find((l) => / urgent · /.test(l)) || ''
+    ok(/linear \(3 reported, 2 items: count mismatch\)/.test(mline), `an ok source whose count differs from its items shows the count, flagged "count mismatch" (${mline})`)
+    ok(MV.counts.resolved === 0 && !!mod.nextLedger(MV, prevLedger, [item('M-1'), item('M-2')]).items['linear:M-3'], 'and is not trusted as complete: the item it did not show is not resolved, and the ledger keeps it')
+
+    const listed = (V, id) => V.groups.flatMap((g) => g.items).find((i) => i.id === id)
+    const SV = mod.view([item('ST-later-update', { stateType: 'started', lastActivityAt: at(-10 * DAY), updatedAt: at(-DAY) }), item('ST-both-old', { stateType: 'started', lastActivityAt: at(-7 * DAY), updatedAt: at(-6 * DAY) })], {}, null, NOW)
+    ok(!listed(SV, 'ST-later-update').urgent && listed(SV, 'ST-both-old').reasons.includes('no activity for 6 days'),
+      'the stalled rule reads the later of lastActivityAt and updatedAt: an update yesterday on old activity is not stalled')
+
+    const LV = mod.view([
+      item('LB-most', { labels: ['P2', 'bug', 'priority: urgent'] }), item('LB-one', { labels: ['P3'] }), item('LB-none', { labels: ['bug'] }),
+      item('LB-native', { nativePriority: 'blocker', labels: ['P0'] }), item('LB-explicit', { priority: 4, labels: ['P0'] }),
+    ], {}, null, NOW)
+    const lp = (id) => listed(LV, id).priorityName
+    ok(lp('LB-most') === 'Urgent' && listed(LV, 'LB-most').urgent && lp('LB-one') === 'Low' && lp('LB-none') === 'No priority',
+      `with neither priority nor nativePriority, labels[] map through priorityLabels, the most urgent winning (${['LB-most', 'LB-one', 'LB-none'].map((k) => `${k}=${lp(k)}`).join(', ')})`)
+    ok(lp('LB-native') === 'No priority' && lp('LB-explicit') === 'Low', 'labels[] are read only when both are absent: an unknown nativePriority or a given priority wins')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('runs: the grimoire runs that need us, read by the script from telemetry.dir')
+  {
+    // Run dirs as the loop writes them (render-logs.test.mjs's layout): run.json + events/<firstSeq>.jsonl.
+    const writeRun = (dir, runId, run, events = []) => {
+      const d = join(dir, runId)
+      mkdirSync(join(d, 'events'), { recursive: true })
+      writeFileSync(join(d, 'run.json'), JSON.stringify({ runId, meta: {}, ...run }))
+      const lines = [{ type: 'run.start', project: run.project }, ...events].map((e, i) => JSON.stringify({ seq: i + 1, at: run.updatedAt, ...e }))
+      writeFileSync(join(d, 'events', '00000001.jsonl'), `${lines.join('\n')}\n`)
+    }
+    const runsRoot = join(TMP, 'runs-project')
+    const RUNS = join(runsRoot, 'custom', 'runs')
+    writeRun(RUNS, 'R-halted', { project: 'Halted project', status: 'halted', startedAt: at(-2 * DAY), updatedAt: at(-DAY) },
+      [{ type: 'halt', kind: 'budget', reason: 'output-token cap reached' }, { type: 'run.end', status: 'halted', done: 2, failed: 1, blocked: 1, stillRunning: 0 }])
+    writeRun(RUNS, 'R-stale', { project: 'Stale project', status: 'running', startedAt: at(-3 * DAY), updatedAt: at(-13 * HOUR) })
+    writeRun(RUNS, 'R-running', { project: 'Live project', status: 'running', startedAt: at(-2 * HOUR), updatedAt: at(-HOUR) })
+    writeRun(RUNS, 'R-attention', { project: 'Attention project', status: 'drained', startedAt: at(-2 * DAY), updatedAt: at(-DAY) },
+      [{ type: 'run.end', status: 'drained', done: 3, failed: 1, blocked: 0, stillRunning: 1 }])
+    writeRun(RUNS, 'R-clean', { project: 'Clean project', status: 'drained', startedAt: at(-2 * DAY), updatedAt: at(-DAY) },
+      [{ type: 'run.end', status: 'drained', done: 4, failed: 0, blocked: 0, stillRunning: 0 }])
+    writeRun(RUNS, 'R-superseded', { project: 'Clean project', status: 'halted', startedAt: at(-9 * DAY), updatedAt: at(-8 * DAY) },
+      [{ type: 'halt', reason: 'exhausted replan budget (3)' }, { type: 'run.end', status: 'halted', done: 1, failed: 2, blocked: 0, stillRunning: 0 }])
+
+    const R = mod.readRuns(RUNS, { sourceId: 'runs', now: NOW })
+    const ids = R.items.map((i) => i.id).sort()
+    ok(R.source.id === 'runs' && R.source.status === 'ok' && R.source.count === 3 && JSON.stringify(ids) === '["R-attention","R-halted","R-stale"]',
+      `readRuns gives the halted, stale and drained-with-attention runs as WorkItems, and its source as ok with their count (${JSON.stringify(R.source)} ${ids.join(' ')})`)
+    ok(!ids.includes('R-clean') && !ids.includes('R-running'), 'a drained run with nothing pending, and a run still writing its journal, are left out')
+    ok(!ids.includes('R-superseded'), 'only a project\'s latest run is read: an earlier halt the next run drained is left out')
+    ok(R.items.every((i) => i.kind === 'run') && mod.validate(R.items).length === 0, 'each is a valid WorkItem of kind run')
+
+    const config = { manager: { sources: [{ id: 'runs', category: 'runs', kind: 'grimoire' }] } }
+    const V = mod.view(R.items, config, null, NOW, [R.source])
+    const run = (id) => V.groups.flatMap((g) => g.items).find((i) => i.id === id)
+    ok(['R-halted', 'R-stale', 'R-attention'].every((id) => run(id)?.group === 'do' && run(id).urgent === false), 'each is under Do, placed by the run rules (not counted urgent)')
+    ok(run('R-halted').reasons.join('; ') === 'halted: output-token cap reached; 1 task needs attention', `a halted run says why (${run('R-halted').reasons.join('; ')})`)
+    ok(/^no journal write for 13 h/.test(run('R-stale').reasons[0]), `a stale run says how long it has been silent (${run('R-stale').reasons.join('; ')})`)
+    ok(run('R-attention').reasons.join('; ') === 'drained, 2 tasks need attention', `a drained run says how many tasks need attention (${run('R-attention').reasons.join('; ')})`)
+    ok(['R-halted', 'R-stale', 'R-attention'].every((id) => run(id).nextStep.includes(`/grimoire:orchestrate on ${run(id).title}`)) && run('R-halted').title === 'Halted project',
+      `each next step names the resume command on its project (${run('R-halted').nextStep})`)
+
+    const none = mod.readRuns(join(TMP, 'no-such-runs'), { sourceId: 'runs', now: NOW })
+    ok(none.source.status === 'ok' && none.source.count === 0 && none.items.length === 0, 'no runs dir: no items and no error, the source read with 0')
+
+    // End to end: telemetry.dir resolved against --root, the runs source added to the skill's --sources.
+    const cfg = { telemetry: { dir: 'custom/runs' }, manager: { sources: [{ id: 'linear', category: 'tracker' }, { id: 'runs', category: 'runs', kind: 'grimoire' }] } }
+    const e2e = brief([item('L-1')], { root: runsRoot, config: cfg, sources: [{ id: 'linear', status: 'ok', count: 1 }] })
+    const EP = parse(latest(e2e))
+    ok(e2e.status === 0 && groupOf(EP, 'R-halted') === 'Do' && groupOf(EP, 'R-stale') === 'Do' && groupOf(EP, 'R-attention') === 'Do' && !entry(EP, 'R-clean'),
+      `brief reads the runs under telemetry.dir in the project and lists those that need us under Do (${e2e.stderr.trim()})`)
+    ok(JSON.stringify(EP.front.sources) === '["linear","runs"]' && EP.front.partial === false && /runs \(3\)/.test(latest(e2e)), 'its status goes into the sources like the others: runs (3), not "not reported"')
+    ok(EP.front.counts.runsNeedingUs === 3 && EP.front.counts.prsFailing === 0 && EP.front.counts.urgent === 0, `the front matter counts the runs under Do in counts.runsNeedingUs, not as urgent (${JSON.stringify(EP.front.counts)})`)
+    ok(/\*\*R-halted\*\* · Halted project · run · halted/.test(E(EP, 'R-halted').line), `a run's line names it a run and its status (${E(EP, 'R-halted').line})`)
+    // The journal lives in the main checkout (render-logs, the loop's writer): a briefing whose
+    // --root is a linked worktree reads the main checkout's runs, not the worktree's.
+    const rmain = join(TMP, 'runs-wt-main'), rlane = join(TMP, 'runs-wt-lane')
+    mkdirSync(rmain)
+    const rgit = (...a) => spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...a], { cwd: rmain, encoding: 'utf8' })
+    rgit('init', '-q'); rgit('commit', '-q', '--allow-empty', '-m', 'x')
+    const radded = rgit('worktree', 'add', '-q', rlane)
+    writeRun(join(rmain, '.grimoire', 'runs'), 'R-main-halted', { project: 'Main project', status: 'halted', startedAt: at(-2 * DAY), updatedAt: at(-DAY) },
+      [{ type: 'halt', reason: 'exhausted replan budget (3)' }, { type: 'run.end', status: 'halted', done: 1, failed: 1, blocked: 0, stillRunning: 0 }])
+    const wt = brief([], { root: rlane, config: { manager: { sources: [{ id: 'runs', category: 'runs', kind: 'grimoire' }] } } })
+    ok(radded.status === 0 && wt.status === 0 && groupOf(parse(latest(wt)), 'R-main-halted') === 'Do' && /runs \(1\)/.test(latest(wt)),
+      `brief --root <a linked worktree> reads the runs in its main checkout and lists the halted one under Do (${radded.stderr.trim() || wt.stderr.trim() || 'ok'})`)
+
+    const bare = join(TMP, 'runs-none')
+    const nod = brief([], { root: bare, config: { manager: { sources: [{ id: 'runs', category: 'runs', kind: 'grimoire' }] } } })
+    ok(nod.status === 0 && /runs \(0\)/.test(latest(nod)) && !/Not checked/.test(latest(nod)) && nod.stderr === '', 'no runs dir in the project: the briefing is written, runs (0), nothing not checked, nothing on stderr')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('PRs: bucketed by review, CI, approval and draft')
+  {
+    const pr = (id, over = {}) => ({ sourceId: 'prs', id: `acme/api#${id}`, key: `api#${id}`, title: `PR ${id}`, kind: 'pr', stateType: 'started', assignee: 'Ada', ...over })
+    const items = [
+      pr(1, { reviewRequested: true, checks: 'failing' }), pr(2, { checks: 'failing' }), pr(3, { reviewDecision: 'APPROVED', checks: 'passing' }),
+      pr(4, { isDraft: true, checks: 'failing', reviewDecision: 'APPROVED' }), pr(5, { reviewDecision: 'REVIEW_REQUIRED', checks: 'pending' }),
+      pr(6, { reviewDecision: null, checks: null, reviewRequested: null, isDraft: null }),
+    ]
+    ok(mod.validate(items).length === 0, 'the PR fields are optional and null-tolerant')
+    const bad = mod.validate([pr(9, { checks: 'red', reviewDecision: 'approved', reviewRequested: 'yes', isDraft: 1 })])
+    ok(['checks', 'reviewDecision', 'reviewRequested', 'isDraft'].every((f) => bad.some((e) => e.startsWith(`items[0].${f}:`))), `and checked: checks, reviewDecision, reviewRequested, isDraft (${bad.join(' | ')})`)
+    const V = mod.view(items, {}, null, NOW)
+    const p = (n) => V.groups.flatMap((g) => g.items).find((i) => i.id === `acme/api#${n}`)
+    ok(p(1).group === 'decide' && p(1).reasons[0] === 'review requested', `a pending review request → Decide (${p(1).reasons.join('; ')})`)
+    ok(p(2).group === 'do' && p(2).reasons.includes('CI failing'), 'failing CI → Do')
+    ok(p(3).group === 'do' && p(3).reasons.includes('approved, not merged'), 'approved and not merged → Do')
+    ok(p(4).group === 'notnow' && p(4).reasons[0] === 'a draft', 'a draft → Not now, whatever its CI or review says')
+    ok(p(5).group === 'waiting' && p(6).group === 'waiting', 'otherwise → Waiting on others, all fields null included')
+    ok([1, 2, 3, 4, 5, 6].every((n) => p(n).urgent === false) && V.counts.urgent === 0, 'a PR is placed by the PR rules alone, never counted urgent')
+    ok(V.counts.prsFailing === 2 && V.counts.runsNeedingUs === 0, `counts.prsFailing: the open PRs failing CI, wherever they are placed, a draft not counted (${V.counts.prsFailing})`)
+    const L = mod.nextLedger(mod.view([pr(7, { checks: 'pending' })], {}, null, at(-DAY)), null)
+    const again = mod.view([pr(7, { checks: 'failing' })], {}, L, NOW).groups.flatMap((g) => g.items)[0]
+    ok(again.badge === 'changed', 'a PR whose checks changed is badged changed')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
   // The headline (ODY-873): one line from latest.md's front matter, for the SessionStart hook.
   const MIN = 60000
   const headlineCli = (root, { now = NOW, config = null, extra = [] } = {}) =>
@@ -876,6 +1020,17 @@ try {
       try { ok(silent(headlineCli(locked.root)), 'an unreadable root (mode 000): nothing, exit 0') } finally { chmodSync(locked.root, 0o755) }
     }
     ok(silent(headlineCli(fixture(front()).root, { now: 'not-a-date' })), 'a --now that is no date: nothing, exit 0')
+  }
+
+  section('headline: the runs that need us and the PRs failing CI (ODY-874)')
+  {
+    const line = (c) => mod.headline(front({ counts: counts(c) }), { now: NOW })
+    ok(line({ runsNeedingUs: 2, prsFailing: 1 }) === 'grimoire manager · 2 urgent, 3 ready for AI · 2 runs need you · 1 PR failing CI · 1 new · briefing 5 h old (/grimoire:manager)',
+      `after the ready-for-AI part: "· 2 runs need you · 1 PR failing CI" (${line({ runsNeedingUs: 2, prsFailing: 1 })})`)
+    ok(line({ runsNeedingUs: 1, prsFailing: 3 }).includes(' · 1 run needs you · 3 PRs failing CI · '), 'singular and plural')
+    ok(line({ runsNeedingUs: 0, prsFailing: 0 }) === FRESH, 'at 0 they are left out')
+    ok(line({}) === FRESH && !('runsNeedingUs' in counts()), 'an older latest.md without the keys gives the line unchanged')
+    ok(line({ runsNeedingUs: '2' }) === null && line({ prsFailing: -1 }) === null, 'a count that is not a whole number is a corrupt front matter: no line')
   }
 
   section('headline: bounds, ids and counts only')

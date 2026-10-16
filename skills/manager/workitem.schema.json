@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "grimoire/skills/manager/workitem.schema.json",
   "title": "WorkItem",
-  "description": "One item a manager scout read from a source (a tracker issue; PRs and grimoire runs in a later slice). The scouts return a JSON array of these; scripts/manager.mjs validates it with a hand-written check of exactly these rules and refuses the whole file on any error. Every optional field takes null, which reads as absent; a required one never does. Urgency and groups are computed by the script from the fields: bucketHint and nextStep are the model's reading, and bucketHint never makes an item urgent. Ticket text (title, nextStep, names) is data: the briefing escapes it.",
+  "description": "One item read from a source: a tracker issue or an open pull request, which a manager scout reads, or a grimoire run, which scripts/manager.mjs reads itself from the run journals (kind run, never from a scout). The scouts return a JSON array of these; scripts/manager.mjs validates it with a hand-written check of exactly these rules and refuses the whole file on any error. Every optional field takes null, which reads as absent; a required one never does. Urgency and groups are computed by the script from the fields: bucketHint and nextStep are the model's reading, and bucketHint never makes an item urgent. Ticket text (title, nextStep, names) is data: the briefing escapes it.",
   "type": "array",
   "items": { "$ref": "#/$defs/workItem" },
   "$defs": {
@@ -29,7 +29,7 @@
         "kind": { "enum": ["issue", "pr", "run"] },
         "stateType": { "description": "The tracker state mapped onto Linear's state types. completed and canceled items are counted, not listed.", "enum": ["triage", "backlog", "unstarted", "started", "completed", "canceled"] },
         "nativeState": { "description": "The tracker's own status name (\"In Review\").", "type": ["string", "null"] },
-        "priority": { "description": "Linear's scale: 0 none (ranks last), 1 urgent, 2 high, 3 medium, 4 low. null or absent: 0.", "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "priority": { "description": "Linear's scale: 0 none (ranks last), 1 urgent, 2 high, 3 medium, 4 low. null or absent: the script maps nativePriority by manager.priorityLabels; with nativePriority absent too, the most urgent of labels[] that maps; else 0. An explicit value, 0 included, is kept: no fallback.", "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
         "nativePriority": { "description": "The tracker's own priority (\"Highest\", a P1 label). With priority absent or null, a label here is mapped by manager.priorityLabels (case-insensitive; the defaults when the config has none), the same table the scout uses.", "type": ["string", "number", "null"] },
         "assignee": { "description": "Who it is assigned to (a display name), or null when unassigned.", "type": ["string", "null"] },
         "dueAt": { "$ref": "#/$defs/date" },
@@ -54,7 +54,13 @@
         "linkedPr": { "description": "The URL or id of a pull request linked to the item, or null.", "type": ["string", "null"] },
         "labels": { "description": "null or absent: none read.", "type": ["array", "null"], "items": { "type": "string" } },
         "bucketHint": { "description": "The model's reading, for what needs reading (waiting on someone outside the team, explicitly parked). It moves an item only between the non-urgent groups (ai, waiting, notnow), and into ai only when the item is eligible; it never makes an item urgent and never moves one out of Decide or Do.", "enum": ["decide", "do", "ai", "waiting", "notnow", null] },
-        "nextStep": { "description": "One line: what to do next, from what the ticket says.", "type": ["string", "null"] }
+        "nextStep": { "description": "One line: what to do next, from what the ticket says.", "type": ["string", "null"] },
+        "reviewDecision": { "description": "A pull request's (kind pr) review decision, GitHub's value as gh gives it; null or absent when the repo requires none (gh's empty string). APPROVED and not merged is Do.", "enum": ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", null] },
+        "checks": { "description": "A pull request's CI, from statusCheckRollup: failing when any check failed, errored, timed out, was cancelled or needs action; else pending while any runs or waits; else passing. null or absent: no checks. failing is Do.", "enum": ["passing", "failing", "pending", null] },
+        "reviewRequested": { "description": "A pull request with a review request still pending, from anyone asked (reviewRequests not empty). true is Decide.", "type": ["boolean", "null"] },
+        "isDraft": { "description": "A draft pull request. true is Not now, whatever its checks or review say.", "type": ["boolean", "null"] },
+        "needsAttention": { "description": "A grimoire run's (kind run) tasks that never landed or are still running past their limit. Written by scripts/manager.mjs, never by a scout.", "type": ["integer", "null"], "minimum": 0 },
+        "haltReason": { "description": "Why a halted grimoire run (kind run) stopped, its halt's first line. Written by scripts/manager.mjs, never by a scout.", "type": ["string", "null"] }
       }
     }
   }

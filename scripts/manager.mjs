@@ -20,8 +20,12 @@
 //  {id, status: "ok" | "failed" | "capped", reason?, fix?, count?}. capped: the scout stopped at
 //  maxItemsPerSource, so its count shows as "≥ N" · failed: it could not be read; it is listed
 //  under "Not checked" with its reason and fix, has no items, and makes the briefing partial.
-//  Every source with items needs an entry; the file is refused like the items. Without it, the
-//  sources are the items' sourceIds, all read in full.
+//  Every source with items needs an entry; the file is refused like the items, and one holding
+//  null is refused too (not a list). Without the flag, the sources are the items' sourceIds, all
+//  read in full. Either way, a manager.sources id the list does not name is "Not checked: <id>
+//  (not reported by the skill)" and makes the briefing partial: a configured source is never
+//  silently absent. An ok source whose count is not its number of items shows both, flagged
+//  "count mismatch", and is not trusted as complete (what it did not show is not resolved).
 //
 //  Defaults: --root ← the main checkout when the cwd is in a git work tree (as render-logs
 //  does, so every linked worktree shares one ledger), else the cwd · --config ←
@@ -34,18 +38,32 @@
 //                24 h or has · due today, overdue, or due within manager.urgent.dueWithinDays (2)
 //                calendar days · not started (backlog, unstarted) and blocking at least
 //                manager.urgent.blocksAtLeast (2) open issues, an id the briefing did not read
-//                counting as open · started with no activity (lastActivityAt, else updatedAt)
-//                for at least manager.urgent.stalledDays (5) calendar days. Each rule is a small
-//                named function in URGENCY_RULES; each returns the human reason
+//                counting as open · started with no activity (the later of lastActivityAt and
+//                updatedAt) for at least manager.urgent.stalledDays (5) calendar days. Each rule
+//                is a small named function in URGENCY_RULES; each returns the human reason
 //                ("priority Urgent", "blocks 3 open issues", "no activity for 6 days") or null.
 //    priority    with no priority, a nativePriority label is mapped by manager.priorityLabels
 //                (case-insensitive; DEFAULT_PRIORITY_LABELS when the config has none), the same
-//                mapping the scout applies. An unknown label is no priority, which ranks last.
+//                mapping the scout applies; with neither priority nor nativePriority, the most
+//                urgent of labels[] that maps. An unknown label is no priority, which ranks last.
 //    groups      Decide: triage, or urgent with no assignee · Do: any other urgent item ·
 //                Hand to AI: an issue with acceptance criteria, unassigned, nothing open
 //                blocking it, no linked PR, no sub-issues (AI_CHECKS; the repo check is a seam,
 //                repoCheck) · Waiting on others: the scout's reading (bucketHint "waiting") ·
 //                Not now: the rest. completed and canceled items are counted, not listed.
+//    PRs         (kind pr) by their own rules, first match wins (placePr): a draft → Not now ·
+//                a pending review request → Decide · failing CI, or approved and not
+//                merged → Do · the rest → Waiting on others. Never counted urgent; bucketHint is
+//                not read.
+//    runs        (kind run) the runs source: with a manager.sources entry of category runs, brief
+//                reads <telemetry.dir> (default .grimoire/runs) itself, against the main checkout
+//                when --root is a linked worktree (where the journal lives), no scout, through
+//                render-logs' loadRuns and runOutcome (readRuns). Each project's latest run is
+//                listed under Do when it halted, is still "running" with no journal write for
+//                STALE_HOURS (12), or drained with tasks that need attention; its next step names
+//                /grimoire:orchestrate on the project. A drained run with nothing pending, or one
+//                still writing, is left out. Its status joins the sources like the others (no dir:
+//                ok, 0), in place of any entry --sources has for it. Never counted urgent.
 //    bucketHint  the model's reading. It moves an item only between the non-urgent groups
 //                (Hand to AI, Waiting on others, Not now): it never makes an item urgent, never
 //                moves one out of Decide or Do, and never makes an issue ready for AI.
@@ -56,8 +74,9 @@
 //
 //  The ledger (`schemaVersion` 1) keeps per source `lastRunAt`/`lastStatus` and per item
 //  (`<sourceId>:<id>`) `firstSeenAt`, `lastHash` (state, priority, assignee, due date,
-//  blockers, labels, PR) and `lastBucket`. Against it each listed item is badged **new** (not
-//  in it) or **changed** (another hash), and the items gone since, or now completed or
+//  blockers, labels, PR; a PR's review and checks, a run's attention) and `lastBucket`.
+//  Against it each listed item is badged **new** (not in it) or **changed** (another hash),
+//  and the items gone since, or now completed or
 //  canceled, are counted as resolved, not listed. An item a source did not show this run
 //  (failed, capped, not read) is neither resolved nor dropped from the ledger. No ledger is
 //  the first briefing: nothing is badged. A corrupt or other-version ledger starts over the
@@ -78,6 +97,9 @@
 //      → one line from <root>/.grimoire/manager/latest.md's front matter, for the SessionStart
 //        hook (hooks/scripts/briefing.sh), which puts it in every session:
 //        grimoire manager · 2 urgent, 3 ready for AI · 1 new · briefing 5 h old (/grimoire:manager)
+//        with "· N runs need you" (counts.runsNeedingUs: the runs under Do) and "· N PRs failing
+//        CI" (counts.prsFailing: open, not a draft) after the ready-for-AI part when above 0, and
+//        nothing when a front matter written before them lacks the keys;
 //        "first briefing" in place of the new count on the first; the age in min under 1 h, h
 //        under 48 h, days after; then "· page <path>" when briefing.html exists, "· partial: <ids>
 //        not checked" (front matter notChecked; the first ten, then how many more), and last
@@ -93,6 +115,7 @@ import { resolve, join, dirname, basename, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { loadRuns, runOutcome, STALE_HOURS } from './render-logs.mjs'
 
 const HOUR = 3600000
 const DAY = 86400000
@@ -117,6 +140,8 @@ const HINT_TO = new Set(['waiting', 'notnow'])
 const OPEN = new Set(['triage', 'backlog', 'unstarted', 'started'])
 const STATE_TYPES = ['triage', 'backlog', 'unstarted', 'started', 'completed', 'canceled']
 const KINDS = ['issue', 'pr', 'run']
+const REVIEW_DECISIONS = ['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED'] // GitHub's, as gh gives them
+const CHECKS = ['passing', 'failing', 'pending']
 const HINTS = GROUPS.map((g) => g.id)
 export const PRIORITY_NAMES = ['No priority', 'Urgent', 'High', 'Medium', 'Low']
 
@@ -216,6 +241,14 @@ const FIELDS = {
   labels: nullable(C.strings),
   bucketHint: nullable(C.oneOf(HINTS)),
   nextStep: nullable(C.string),
+  // a pull request's (kind pr)
+  reviewDecision: nullable(C.oneOf(REVIEW_DECISIONS)),
+  checks: nullable(C.oneOf(CHECKS)),
+  reviewRequested: nullable(C.bool),
+  isDraft: nullable(C.bool),
+  // a grimoire run's (kind run, written by readRuns)
+  needsAttention: nullable((v) => (Number.isInteger(v) && v >= 0 ? null : fail('expected a whole number, 0 or more'))),
+  haltReason: nullable(C.string),
 }
 const REQUIRED = ['sourceId', 'id', 'title', 'kind', 'stateType']
 // A field name is the scout's, not the ticket's, but it is still printed only when it looks like one.
@@ -288,12 +321,23 @@ export function validateSources(list, items) {
   return errors
 }
 
-// The briefing's sources, sorted by id: the --sources list, or the items' sourceIds, all read.
-function sourcesOf(all, list) {
-  const given = list ?? [...new Set(all.map((it) => it.sourceId))].map((id) => ({ id, status: 'ok' }))
-  return given.map((s) => {
+// The items' sourceIds as sources, each read in full: what the briefing assumes without --sources.
+export const inferSources = (items) => [...new Set(items.filter(isObj).map((it) => it.sourceId))].map((id) => ({ id, status: 'ok' }))
+
+// The briefing's sources, sorted by id: the --sources list (undefined: the items' sourceIds, all
+// read), then every manager.sources id it does not name, not checked: a configured source is never
+// silently absent. An ok source whose count is not its number of items is flagged mismatch.
+// complete: read in full and trusted, so what it did not show is resolved (ok, no mismatch).
+const NOT_REPORTED = 'not reported by the skill'
+function sourcesOf(all, list, configured = []) {
+  const given = list === undefined ? inferSources(all) : list
+  const named = new Set(given.map((s) => s.id))
+  const missing = configured.filter((id) => !named.has(id)).map((id) => ({ id, status: 'failed', reason: NOT_REPORTED }))
+  return [...given, ...missing].map((s) => {
     const items = all.filter((it) => it.sourceId === s.id).length
-    return { id: s.id, status: s.status, items, count: s.count ?? items, reason: s.reason ?? null, fix: s.fix ?? null }
+    const count = s.count ?? items
+    const mismatch = s.status === 'ok' && count !== items
+    return { id: s.id, status: s.status, items, count, mismatch, complete: s.status === 'ok' && !mismatch, reason: s.reason ?? null, fix: s.fix ?? null }
   }).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
@@ -303,19 +347,31 @@ function labelPriority(native, labels) {
   const p = labels.get(native.trim().toLowerCase())
   return p === undefined ? null : p
 }
+// The most urgent of labels[] that map (1 before 4; 0, no priority, only when nothing else maps),
+// or null when none does.
+function labelsPriority(list, labels) {
+  const mapped = list.map((l) => labelPriority(l, labels)).filter((p) => p !== null)
+  if (!mapped.length) return null
+  const ranked = mapped.filter((p) => p > 0)
+  return ranked.length ? Math.min(...ranked) : 0
+}
 
 // A validated WorkItem with its defaults filled in; the input is never mutated. With no
-// priority, a nativePriority label maps through manager.priorityLabels, as the scout's would.
+// priority, a nativePriority label maps through manager.priorityLabels, as the scout's would;
+// with neither, the most urgent of labels[] that maps.
 function normalize(it, labels) {
   return {
     sourceId: it.sourceId, id: it.id, key: it.key ?? it.id, title: it.title, url: it.url ?? null,
     kind: it.kind, stateType: it.stateType, nativeState: it.nativeState ?? null,
-    priority: it.priority ?? labelPriority(it.nativePriority, labels) ?? 0, nativePriority: it.nativePriority ?? null, assignee: it.assignee || null,
+    priority: it.priority ?? (it.nativePriority == null ? labelsPriority(it.labels ?? [], labels) : labelPriority(it.nativePriority, labels)) ?? 0,
+    nativePriority: it.nativePriority ?? null, assignee: it.assignee || null,
     dueAt: it.dueAt ?? null, createdAt: it.createdAt ?? null, updatedAt: it.updatedAt ?? null, lastActivityAt: it.lastActivityAt ?? null,
     blockedBy: [...(it.blockedBy ?? [])], blocks: [...(it.blocks ?? [])], parentOf: [...(it.parentOf ?? [])],
     project: it.project ? { ...it.project } : null, repo: it.repo ?? null, slaAt: it.slaAt ?? null,
     hasAcceptanceCriteria: it.hasAcceptanceCriteria ?? null, linkedPr: it.linkedPr || null, labels: [...(it.labels ?? [])],
     bucketHint: it.bucketHint ?? null, nextStep: it.nextStep ?? null,
+    reviewDecision: it.reviewDecision ?? null, checks: it.checks ?? null, reviewRequested: it.reviewRequested ?? null, isDraft: it.isDraft ?? null,
+    needsAttention: it.needsAttention ?? null, haltReason: it.haltReason ?? null,
   }
 }
 
@@ -338,8 +394,24 @@ export function managerConfig(config) {
       stalledDays: pick('stalledDays', (v) => Number.isInteger(v) && v >= 1, 'a whole number of days, 1 or more'),
     },
     priorityLabels: labelMap(m.priorityLabels, warnings),
+    sources: configSources(m.sources, warnings),
     warnings,
   }
+}
+
+// manager.sources[] → [{ id, category }], read leniently (setup writes it): an entry with no usable
+// id is named on stderr and skipped, a repeated id counted once.
+function configSources(raw, warnings) {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) { warnings.push('manager.sources: expected an array of sources; none is read from the config'); return [] }
+  const out = [], seen = new Set()
+  raw.forEach((s, i) => {
+    if (!isObj(s) || typeof s.id !== 'string' || !SOURCE_ID.test(s.id)) { warnings.push(`manager.sources[${i}]: expected an object with an id of 1 to 64 letters, digits, ".", "_" or "-"; skipped`); return }
+    if (seen.has(s.id)) return
+    seen.add(s.id)
+    out.push({ id: s.id, category: typeof s.category === 'string' ? s.category : null })
+  })
+  return out
 }
 
 // manager.priorityLabels → Map(lower-cased label → 0–4). The config's own map replaces the
@@ -384,11 +456,12 @@ export const URGENCY_RULES = [
     const open = openRefs([...new Set(it.blocks)], ctx).length
     return open >= ctx.urgent.blocksAtLeast ? `blocks ${plural(open, 'open issue')}` : null
   },
-  // Started work gone quiet: calendar days since lastActivityAt, else updatedAt; neither, no reading.
+  // Started work gone quiet: calendar days since the later of lastActivityAt and updatedAt; neither,
+  // no reading.
   function stalled(it, ctx) {
-    const last = it.lastActivityAt ?? it.updatedAt
-    if (it.stateType !== 'started' || last === null) return null
-    const idle = daysFrom(parseTime(last), ctx.now)
+    const last = Math.max(...[it.lastActivityAt, it.updatedAt].filter((d) => d !== null).map(parseTime))
+    if (it.stateType !== 'started' || !Number.isFinite(last)) return null
+    const idle = daysFrom(last, ctx.now)
     return idle >= ctx.urgent.stalledDays ? `no activity for ${plural(idle, 'day')}` : null
   },
 ]
@@ -415,7 +488,39 @@ export function repoCheck(it, config) { // eslint-disable-line no-unused-vars
   return it.repo ? { name: it.repo, available: null, note: 'availability not checked yet' } : null
 }
 
+// A pull request (spec D7), from its fields alone: a draft is Not now, whatever else holds; a
+// pending review request (from anyone asked) is Decide; failing CI, or an approval not merged, is Do; the rest waits on
+// others (the author, a reviewer, CI). The issue rules are not read: a PR is never counted urgent.
+export function placePr(it) {
+  if (it.isDraft === true) return { group: 'notnow', reasons: ['a draft'] }
+  const owed = [it.checks === 'failing' && 'CI failing', it.reviewDecision === 'APPROVED' && 'approved, not merged'].filter(Boolean)
+  if (it.reviewRequested === true) return { group: 'decide', reasons: ['review requested', ...owed] }
+  if (owed.length) return { group: 'do', reasons: owed }
+  const waiting = [it.reviewDecision === 'CHANGES_REQUESTED' && 'changes requested: waiting on the author', it.checks === 'pending' && 'CI running',
+    it.reviewDecision === 'REVIEW_REQUIRED' && 'a review is required, none requested yet'].filter(Boolean)
+  return { group: 'waiting', reasons: waiting.length ? waiting : ['open: no review requested, CI not failing, not approved'] }
+}
+
+// A grimoire run (readRuns), from its fields alone: halted; still "running" with no journal write for
+// STALE_HOURS (its session most likely died); or drained with tasks that need attention: Do. Still
+// writing its journal: Waiting on others; drained with nothing pending: Not now (readRuns leaves both
+// out). Never counted urgent.
+export function placeRun(it, ctx) {
+  const n = it.needsAttention ?? 0
+  const attention = n > 0 ? [`${plural(n, 'task')} need${n === 1 ? 's' : ''} attention`] : []
+  if (it.nativeState === 'halted') return { group: 'do', reasons: [it.haltReason ? `halted: ${it.haltReason}` : 'halted', ...attention] }
+  if (it.nativeState === 'running') {
+    const silent = it.updatedAt === null ? NaN : ctx.now - parseTime(it.updatedAt)
+    if (silent > STALE_HOURS * HOUR) return { group: 'do', reasons: [`no journal write for ${ageText(silent)}: its session most likely died`, ...attention] }
+    return { group: 'waiting', reasons: ['running', ...attention] }
+  }
+  const state = it.nativeState ?? 'finished'
+  return n > 0 ? { group: 'do', reasons: [`${state}, ${attention[0]}`] } : { group: 'notnow', reasons: [`${state}, nothing pending`] }
+}
+
 function place(it, ctx) {
+  if (it.kind === 'pr') return { urgent: false, ...placePr(it) }
+  if (it.kind === 'run') return { urgent: false, ...placeRun(it, ctx) }
   const urgency = URGENCY_RULES.map((rule) => rule(it, ctx)).filter(Boolean)
   const urgent = urgency.length > 0
   const notReady = AI_CHECKS.map((check) => check(it, ctx)).filter(Boolean)
@@ -450,6 +555,9 @@ export function compareItems(a, b) {
 // What the ledger compares between runs (spec D10): a change here is a "changed" badge later.
 export function itemHash(it) {
   const facts = [it.stateType, it.nativeState, it.priority, it.assignee, it.dueAt, [...it.blockedBy].sort(), [...it.labels].sort(), it.linkedPr]
+  // a PR's status, a run's attention: appended for their kind only, so an issue's hash is unchanged
+  if (it.kind === 'pr') facts.push(it.reviewDecision, it.checks, it.reviewRequested, it.isDraft)
+  if (it.kind === 'run') facts.push(it.needsAttention, it.haltReason)
   return createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 16)
 }
 const ledgerKey = (it) => `${it.sourceId}:${it.id}`
@@ -466,8 +574,8 @@ function badgeOf(seen, prev, hash) {
 
 function overallNext(c) {
   const parts = []
-  if (c.decide) parts.push(`Decide ${plural(c.decide, 'item')} first: triage, or urgent with no owner.`)
-  if (c.do) parts.push(`Do ${plural(c.do, 'urgent item')}.`)
+  if (c.decide) parts.push(`Decide ${plural(c.decide, 'item')} first: triage, urgent with no owner, or a review requested.`)
+  if (c.do) parts.push(`Do ${plural(c.do, 'item')}.`)
   if (c.ai) parts.push(`${plural(c.ai, 'issue')} ready to hand to AI.`)
   if (!parts.length) parts.push(`Nothing needs you right now${c.waiting ? `; ${c.waiting} waiting on others` : ''}.`)
   return parts.join(' ')
@@ -475,12 +583,13 @@ function overallNext(c) {
 
 // ── the view model ──
 // The one function every rendering reads. Pure: same items, config, ledger, now and sources,
-// same view. sources is the --sources list, or null to infer it from the items.
-export function view(items, config, ledger, now, sources = null) {
-  const errors = [...validate(items), ...(sources === null ? [] : validateSources(sources, items))]
+// same view. sources is the --sources list, or undefined (left out) to infer it from the items;
+// null is refused like anything else that is not a list.
+export function view(items, config, ledger, now, sources) {
+  const errors = [...validate(items), ...(sources === undefined ? [] : validateSources(sources, items))]
   if (errors.length) throw new Error(`invalid WorkItems or sources:\n${errors.slice(0, MAX_ERRORS).join('\n')}`)
   const t = toMs(now)
-  const { urgent, priorityLabels } = managerConfig(config)
+  const { urgent, priorityLabels, sources: configured } = managerConfig(config)
   const all = items.map((it) => normalize(it, priorityLabels))
   const states = new Map()
   for (const it of all) for (const ref of new Set([it.id, it.key])) if (!states.has(ref)) states.set(ref, it.stateType)
@@ -497,15 +606,17 @@ export function view(items, config, ledger, now, sources = null) {
       sourceId: it.sourceId, id: it.id, key: it.key, title: it.title, url: safeUrl(it.url), kind: it.kind,
       stateType: it.stateType, nativeState: it.nativeState, priority: it.priority, priorityName: PRIORITY_NAMES[it.priority],
       assignee: it.assignee, dueAt: it.dueAt, createdAt: it.createdAt, project: it.project, labels: it.labels, linkedPr: it.linkedPr,
+      checks: it.checks, reviewDecision: it.reviewDecision, reviewRequested: it.reviewRequested, isDraft: it.isDraft, needsAttention: it.needsAttention,
       repo: repoCheck(it, config), urgent: p.urgent, group: p.group, reasons: p.reasons, nextStep: it.nextStep,
       badge: badgeOf(seen, prev, hash),
       firstSeenAt: prev && Number.isFinite(parseTime(prev.firstSeenAt)) ? prev.firstSeenAt : generatedAt, hash,
     }
   })
-  const srcs = sourcesOf(all, sources)
+  const srcs = sourcesOf(all, sources, configured.map((s) => s.id))
   // Resolved since the last briefing: a ledger item read now as completed or canceled, or missing
-  // from a source read in full. Missing from a failed or capped source is unknown, not resolved.
-  const complete = new Set(srcs.filter((s) => s.status === 'ok').map((s) => s.id))
+  // from a source read in full. Missing from a failed or capped source, or from one whose count
+  // does not match its items, is unknown, not resolved.
+  const complete = new Set(srcs.filter((s) => s.complete).map((s) => s.id))
   const read = new Map(all.map((it) => [ledgerKey(it), it]))
   let resolved = 0
   if (seen) for (const key of Object.keys(seen)) {
@@ -519,6 +630,9 @@ export function view(items, config, ledger, now, sources = null) {
     decide: size('decide'), do: size('do'), ai: size('ai'), waiting: size('waiting'), notnow: size('notnow'),
     closed: all.length - listed.length,
     new: listed.filter((it) => it.badge === 'new').length, changed: listed.filter((it) => it.badge === 'changed').length, resolved,
+    // not urgent (the issue rules), but what people forget: the headline names them
+    runsNeedingUs: listed.filter((it) => it.kind === 'run' && it.group === 'do').length,
+    prsFailing: listed.filter((it) => it.kind === 'pr' && it.checks === 'failing' && it.isDraft !== true).length,
   }
   return {
     schemaVersion: SCHEMA_VERSION, generatedAt,
@@ -530,9 +644,10 @@ export function view(items, config, ledger, now, sources = null) {
 }
 
 // The ledger after this briefing: this run's sources and listed items, earlier sources kept.
-// An earlier item this run did not see because its source failed, was capped or was not read
-// keeps its entry, so it is neither resolved now nor new when it comes back. items: the
-// WorkItems the view was built from (an earlier item read closed is dropped, not kept).
+// An earlier item this run did not see because its source failed, was capped, did not match its
+// count or was not read keeps its entry, so it is neither resolved now nor new when it comes
+// back. items: the WorkItems the view was built from (an earlier item read closed is dropped,
+// not kept).
 export function nextLedger(v, ledger, items = []) {
   const usable = usableLedger(ledger)
   const sources = Object.create(null) // a source id is the scout's text: "__proto__" stays a key
@@ -541,11 +656,64 @@ export function nextLedger(v, ledger, items = []) {
   const out = Object.create(null)
   if (usable) {
     const read = new Set((Array.isArray(items) ? items : []).filter(isObj).map((it) => `${it.sourceId}:${it.id}`))
-    const complete = new Set(v.sources.filter((s) => s.status === 'ok').map((s) => s.id))
+    const complete = new Set(v.sources.filter((s) => s.complete).map((s) => s.id))
     for (const [key, e] of Object.entries(ledger.items)) if (isObj(e) && !read.has(key) && !complete.has(sourceOfKey(key))) out[key] = e
   }
   for (const g of v.groups) for (const it of g.items) out[ledgerKey(it)] = { firstSeenAt: it.firstSeenAt, lastHash: it.hash, lastBucket: it.group }
   return { schemaVersion: SCHEMA_VERSION, sources, items: out }
+}
+
+// ── runs (manager.sources' runs source: the loop's journals, read here, not by a scout) ──
+// The grimoire runs that need us, as WorkItems of kind run, with the source's status. Each project's
+// latest run only (by updatedAt, the one /grimoire:orchestrate resumes), read through render-logs'
+// loadRuns and runOutcome: listed when it halted, is still "running" with no journal write for
+// STALE_HOURS, or drained with tasks that need attention (failed, or still running past their
+// limit). A drained run with nothing pending, or one still writing its journal, is left out. No dir:
+// read, nothing there (ok, 0). A dir that can't be read: failed, with the reason.
+export function readRuns(dir, { sourceId = 'runs', now = Date.now() } = {}) {
+  if (!existsSync(dir)) return { source: { id: sourceId, status: 'ok', count: 0 }, items: [] }
+  let rows
+  try { rows = loadRuns(dir).map((r) => runOutcome(r, toMs(now))) } catch (e) {
+    return { source: { id: sourceId, status: 'failed', reason: `the run journals could not be read (${e.code || 'error'})`, fix: `check that ${dir} is a readable directory` }, items: [] }
+  }
+  const items = runItems(rows, sourceId)
+  return { source: { id: sourceId, status: 'ok', count: items.length }, items }
+}
+
+const MAX_HALT = 160
+const validDate = (s) => (Number.isFinite(parseTime(s)) ? s : null)
+// runOutcome rows → the WorkItems of the runs that need us (see readRuns). Pure.
+export function runItems(rows, sourceId = 'runs') {
+  const at = (o) => { const t = parseTime(o.updatedAt); return Number.isFinite(t) ? t : -Infinity }
+  const latest = new Map()
+  for (const o of rows) {
+    if (!isObj(o) || typeof o.runId !== 'string' || !o.runId) continue
+    const project = typeof o.project === 'string' && o.project.trim() ? o.project.trim() : null
+    const key = project === null ? `\u0000${o.runId}` : project
+    if (!latest.has(key) || at(o) > at(latest.get(key).o)) latest.set(key, { o, project })
+  }
+  const out = [], seen = new Set()
+  for (const { o, project } of latest.values()) {
+    // a whole number, 0 or more, whatever the journal held: the script's own items never fail validation
+    const tally = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+    const needsAttention = Math.max(0, Math.trunc(tally(o.tasks?.failed) + tally(o.tasks?.inFlight)))
+    if (seen.has(o.runId) || !(o.status === 'halted' || o.stale === true || (o.status === 'drained' && needsAttention > 0))) continue
+    seen.add(o.runId)
+    const halt = o.status === 'halted' && Array.isArray(o.halts) && o.halts.length ? o.halts[o.halts.length - 1] : null
+    const said = halt ? String(halt.reason ?? '').split('\n')[0].trim() : ''
+    const haltReason = said ? (Array.from(said).length > MAX_HALT ? `${Array.from(said).slice(0, MAX_HALT - 1).join('')}…` : said) : halt?.kind || null
+    const title = project ?? o.runId
+    const resume = `/grimoire:orchestrate on ${title}`
+    const nextStep = o.status === 'halted' ? `Read why it halted, then resume it: ${resume}`
+      : o.status === 'running' ? `Check whether its session is still alive; if not, resume it: ${resume}`
+        : `Fix what needs attention, then resume it: ${resume}`
+    out.push({
+      sourceId, id: o.runId, title, kind: 'run', stateType: 'started', nativeState: o.status,
+      createdAt: validDate(o.startedAt), updatedAt: validDate(o.updatedAt), project: project ? { name: project } : null,
+      needsAttention, haltReason, nextStep,
+    })
+  }
+  return out
 }
 
 // ── Markdown ──
@@ -575,7 +743,10 @@ function itemLines(it) {
   const parts = [`**${md(it.key, 60)}**`, title]
   if (it.urgent) parts.push('**urgent**')
   if (it.badge) parts.push(`**${it.badge}**`)
-  parts.push(it.priorityName, md(it.nativeState ?? it.stateType, 60), it.assignee ? md(it.assignee, 60) : 'unassigned')
+  const state = md(it.nativeState ?? it.stateType, 60)
+  if (it.kind === 'pr') parts.push('PR', state, it.assignee ? md(it.assignee, 60) : 'no author read')
+  else if (it.kind === 'run') parts.push('run', state)
+  else parts.push(it.priorityName, state, it.assignee ? md(it.assignee, 60) : 'unassigned')
   if (it.dueAt !== null) parts.push(`due ${localDate(parseTime(it.dueAt))}`)
   if (it.repo) parts.push(`repo ${md(it.repo.name, 60)} (${it.repo.note})`)
   const lines = [`- ${parts.join(' · ')}`, `  - why: ${it.reasons.map((r) => md(r)).join('; ')}`]
@@ -583,8 +754,13 @@ function itemLines(it) {
   return lines
 }
 
-// A source in the counts line: its items, "≥ N" when capped (never presented as complete), or not checked.
-const sourceText = (s) => `${md(s.id, 64)} (${s.status === 'failed' ? 'not checked' : s.status === 'capped' ? `≥ ${Math.max(s.count, s.items)}` : s.items})`
+// A source in the counts line: its items, "≥ N" when capped, the count it reported beside its items
+// on a mismatch (neither presented as complete), or not checked.
+function sourceText(s) {
+  const what = s.status === 'failed' ? 'not checked' : s.status === 'capped' ? `≥ ${Math.max(s.count, s.items)}`
+    : s.mismatch ? `${s.count} reported, ${plural(s.items, 'item')}: count mismatch` : s.items
+  return `${md(s.id, 64)} (${what})`
+}
 
 export function renderMarkdown(v) {
   const c = v.counts
@@ -685,11 +861,14 @@ export function headline(front, { now, interval = DAY, page = null } = {}) {
   const c = front.counts
   const generated = parseTime(front.generatedAt)
   const ids = front.notChecked ?? []
-  if (!Number.isFinite(generated) || !isCount(c.urgent) || !isCount(c.ai) || (c.new !== undefined && !isCount(c.new))) return null
+  if (!Number.isFinite(generated) || !isCount(c.urgent) || !isCount(c.ai) || ['new', 'runsNeedingUs', 'prsFailing'].some((k) => c[k] !== undefined && !isCount(c[k]))) return null
   if ([front.partial, front.firstBriefing].some((b) => b !== undefined && typeof b !== 'boolean')) return null
   if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string' && SOURCE_ID.test(id))) return null
   const age = Math.max(0, toMs(now) - generated) // a briefing from the future (clock skew) is 0 min old
   const parts = ['grimoire manager', `${c.urgent} urgent, ${c.ai} ready for AI`]
+  // a briefing written before these counts has neither key: the line is unchanged
+  if (c.runsNeedingUs > 0) parts.push(`${plural(c.runsNeedingUs, 'run')} need${c.runsNeedingUs === 1 ? 's' : ''} you`)
+  if (c.prsFailing > 0) parts.push(`${c.prsFailing} PR${c.prsFailing === 1 ? '' : 's'} failing CI`)
   if (front.firstBriefing === true) parts.push('first briefing')
   else if (c.new > 0) parts.push(`${c.new} new`)
   parts.push(`briefing ${ageText(age)} old (/grimoire:manager)`)
@@ -900,18 +1079,31 @@ function main(argv) {
 
   const input = readInput(resolve(args.items), 'items')
   if (input.error) { console.error(input.error); return 1 }
-  let sources = null
+  let sources // undefined: no --sources; a file holding null is refused below, like any non-array
   if (typeof args.sources === 'string') {
     const s = readInput(resolve(args.sources), 'sources')
     if (s.error) { console.error(s.error); return 1 }
     sources = s.value
   }
-  const errors = [...validate(input.value), ...(sources === null ? [] : validateSources(sources, input.value))]
+  const errors = [...validate(input.value), ...(sources === undefined ? [] : validateSources(sources, input.value))]
   if (errors.length) {
-    console.error(`refusing the WorkItems in ${resolve(args.items)}${sources === null ? '' : ` with the sources in ${resolve(args.sources)}`}:`)
+    console.error(`refusing the WorkItems in ${resolve(args.items)}${sources === undefined ? '' : ` with the sources in ${resolve(args.sources)}`}:`)
     for (const e of errors.slice(0, MAX_ERRORS)) console.error(`  ${e}`)
     if (errors.length > MAX_ERRORS) console.error(`  … and ${errors.length - MAX_ERRORS} more`)
     return 1
+  }
+
+  // The runs source (manager.sources, category runs) is read here, not by a scout: its runs join the
+  // items and its status the sources, in place of any entry the skill wrote for it. A relative
+  // telemetry.dir resolves against the main checkout when --root is a linked worktree, where the
+  // loop's writer and render-logs keep the journal.
+  let items = input.value
+  const runsSource = mc.sources.find((s) => s.category === 'runs')
+  if (runsSource) {
+    const t = isObj(config.telemetry) && typeof config.telemetry.dir === 'string' && config.telemetry.dir ? config.telemetry.dir : '.grimoire/runs'
+    const runs = readRuns(resolve(mainCheckout(root) ?? root, t), { sourceId: runsSource.id, now })
+    items = [...items, ...runs.items]
+    sources = [...(sources ?? inferSources(input.value)).filter((s) => !(isObj(s) && s.id === runsSource.id)), runs.source]
   }
 
   const dir = join(root, '.grimoire', 'manager')
@@ -930,12 +1122,12 @@ function main(argv) {
   }
   try {
     const ledger = readLedger(ledgerFile)
-    const v = view(input.value, config, ledger, now, sources)
+    const v = view(items, config, ledger, now, sources)
     const text = renderMarkdown(v)
     const file = join(dir, 'briefings', `${stamp(now)}.md`)
     writeAtomic(file, text)
     writeAtomic(join(dir, 'latest.md'), text)
-    writeAtomic(ledgerFile, `${JSON.stringify(nextLedger(v, ledger, input.value), null, 2)}\n`)
+    writeAtomic(ledgerFile, `${JSON.stringify(nextLedger(v, ledger, items), null, 2)}\n`)
     console.log(file)
     return 0
   } finally {
@@ -947,8 +1139,8 @@ const isMain = () => { try { return Boolean(process.argv[1]) && realpathSync(pro
 if (isMain()) {
   try { process.exitCode = main(process.argv.slice(2)) } catch (e) {
     // a state file the script can't read or write (a directory where a file goes, a read-only
-    // disk): one line, not a stack trace
-    console.error(`manager: ${String(e && e.message ? e.message : e).split('\n')[0]}`)
+    // disk): its message, not a stack trace. A validation message (view's) keeps its whole list.
+    console.error(`manager: ${String(e && e.message ? e.message : e)}`)
     process.exitCode = 1
   }
 }
