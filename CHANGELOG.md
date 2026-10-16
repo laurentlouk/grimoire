@@ -73,7 +73,8 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
   `slack_send_message`, `share_issue`, `createJiraIssue` and `run_scheduled_task` are refused, while
   `list_task_runs`, `slack_read_channel` and `getJiraIssue` pass. The deny line names the verb
   that decided and tells the agent to report the write in its result; the main session applies it.
-  - The implementers, repo agents, generic subagents and the main session are never blocked.
+  - The implementers, generic subagents and the main session are never blocked, nor is any agent
+    the config names in `repos` or `specialists`, even a project's own `reviewer`.
     `GRIMOIRE_GUARD_ALLOW=1` and `guard.enabled: false` lift it.
   - It reads verbs, a heuristic: a name with no known verb passes, an unknown write verb
     (`issue_cert`) included. The hooks README lists the limits.
