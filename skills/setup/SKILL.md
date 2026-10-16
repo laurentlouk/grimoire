@@ -1,14 +1,35 @@
 ---
 name: setup
-description: First-run setup of the grimoire harness in an existing project. Use right after installing the plugin, or when the user says "set up grimoire", "create the agents for this project", "bootstrap the harness". Explores the repositories, proposes a team agent per repo, the memory stores, the roster (AGENTS.md), the loop's repos configuration with its gates, and the CLAUDE.md lines, then writes them on the user's approval.
+description: First-run setup of the grimoire harness in an existing project, and its re-run as an update. Use right after installing the plugin, or when the user says "set up grimoire", "create the agents for this project", "bootstrap the harness", "re-run setup", "update the grimoire setup". Explores the repositories, proposes a team agent per repo, the memory stores, the roster (AGENTS.md), the loop's repos configuration with its gates, and the CLAUDE.md lines, then writes them on the user's approval. On a project already set up, it shows one diff of what it would add, change or keep, and writes only what the user approves.
 ---
 
 # Set up the harness in this project
 
 Everything the harness needs is derivable from the project except the decisions that are the owner's. Explore first, propose once, write on a yes.
 
-## 0 · Migration mode
-If the project already carries copies of what the plugin ships — skills named like grimoire's (`roast`, `to-plan`, `to-issues`, `implement`, `review`, `crystallize`, `orchestrate`, `launch-agent`, `tdd`, `adaptive-replanning`, `setup`, `logs`), agents named like grimoire's scouts, specialists and reviewer, a `.claude/workflows/` with `orchestrate-loop.js`, or a memory README — list them as **duplicates the plugin now provides** and propose deleting them, so a plugin update reaches the project without a second copy drifting. Keep anything project-specific: team-agent definitions, memory data files, stack skills, hooks, docs. Never delete without the user's yes.
+## 0 · Migration mode and re-runs
+
+**Migration.** If the project already carries copies of what the plugin ships — skills named like grimoire's (`roast`, `to-plan`, `to-issues`, `implement`, `review`, `crystallize`, `orchestrate`, `launch-agent`, `tdd`, `adaptive-replanning`, `setup`, `logs`), agents named like grimoire's scouts, specialists and reviewer, a `.claude/workflows/` with `orchestrate-loop.js`, or a memory README — list them as **duplicates the plugin now provides** and propose deleting them, so a plugin update reaches the project without a second copy drifting. Keep anything project-specific: team-agent definitions, memory data files, stack skills, hooks, docs. Never delete without the user's yes.
+
+**Re-run.** When the project already has a `grimoire.config.json`, `.claude/settings.json`, `memory/`, `.claude/agents/`, `AGENTS.md` or `CLAUDE.md`, the run updates what is there. Read them first, before exploring. What they hold is the user's choice, including what they edited by hand: re-derive a value only when the code shows it is stale, and say so.
+
+- **Secrets are referenced, never read.** Do not open `.env*`, credential or key files, and do not repeat a secret value. Name the variable or the file that holds it. `.claude/settings.json` can hold tokens in its `env`, so read the two JSON files through the script below, never raw: its output redacts every string under a key named like a token, secret, password or API key. To see one before you propose anything, diff it against an empty proposal (`{}`); every key is then listed as KEPT.
+- **The JSON files go through `config-merge.mjs`.** Write the full file you would propose on a first run to a temp file in the session scratchpad, never in the project. Then run the script on it (the plugin root is the directory two levels above this `SKILL.md`):
+
+  ```sh
+  node <plugin root>/scripts/config-merge.mjs --current grimoire.config.json --proposed <scratchpad>/grimoire.config.json
+  node <plugin root>/scripts/config-merge.mjs --current .claude/settings.json --proposed <scratchpad>/settings.json
+  ```
+
+  Without `--write` it writes nothing. It lists each key as one of these:
+  - **ADDED**: the current file lacks it.
+  - **CHANGED**: both files hold it with different values. It is the user's call, one key at a time.
+  - **KEPT**: only the user's file has it. It always stays.
+
+  `repos[]` entries are matched by `name` and `specialists[]` by `agent`, so a hand-edited `repos[api].gate` shows as one CHANGED key, never as a silent overwrite. Permission lists and hook commands are merged as sets: the user's entries stay, and yours are added once. Values under secret-looking keys print as `«redacted»`.
+- **The Markdown files are never rewritten.** For `CLAUDE.md`, `AGENTS.md`, agent definitions and memory files, propose an append or a diff. A memory file only gains new facts, within its cap. A missing one, for a new agent, is created.
+- **Show one diff for the whole setup,** grouped by file: the script's lists for the JSON files, then the proposed appends and diffs. Say what is left alone. Then ask for one yes, and for which CHANGED keys to take. When nothing is added or changed, say the setup is current and write nothing.
+- **Write only on a yes.** Run the same command again with `--write` and one `--approve '<path>'` for each CHANGED key the user accepted, quoted as printed (zsh globs on `[`). Added keys are written, and declined and kept keys stay as the user wrote them. A declined change is still a difference, so the next re-run lists it again. The guard refuses agent `Write` and `Edit` calls on `.claude/settings.json`, so this command, approved by the user like any other, is how setup changes that file.
 
 ## 1 · Explore (read-only, in one fan-out)
 
@@ -50,4 +71,4 @@ State what you could not determine and what you assumed. Do not ask a question y
 
 ## 3 · Write
 
-On approval, write the files. Do not overwrite an existing `CLAUDE.md`, `AGENTS.md` or agent definition; append or show the diff and let the user apply it. Verify each agent file has valid frontmatter (`name`, `description`) and that every memory file starts with its header comment and stays within its cap. Finish by listing what was created and the two commands that come next: `/roast <idea>` to start the design pipeline, and `/orchestrate` once a project has been sliced.
+On approval, write the files. Do not overwrite an existing `CLAUDE.md`, `AGENTS.md`, agent definition, `grimoire.config.json`, `.claude/settings.json` or memory file. The Markdown ones get an append, or a diff the user applies. The JSON ones are written by `config-merge.mjs --write`, with an `--approve` for each change the user took (step 0); on a first run the current file is missing, so everything in it is added. Verify each agent file has valid frontmatter (`name`, `description`) and that every memory file starts with its header comment and stays within its cap. Finish by listing what was created and the two commands that come next: `/roast <idea>` to start the design pipeline, and `/orchestrate` once a project has been sliced.
