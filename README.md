@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)](#-setup)
-[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-14-success)](#-what-is-in-the-box)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-15-success)](#-what-is-in-the-box)
 [![Stack-agnostic](https://img.shields.io/badge/stack-agnostic-lightgrey)](#)
 
 Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) plus the pieces around them that make an agent workflow repeatable: an agent roster (`AGENTS.md`), curated memory (`memory/`), and an unattended build loop (`workflows/`) that ends every run by crystallizing what it learned back into the skills. Stack-agnostic, tracker-agnostic (Jira, Linear, GitHub Issues, or other).
@@ -70,6 +70,7 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 /grimoire:logs       # what the loop decided, and why: a local HTML report of every run
 /grimoire:graph      # the code graph as a local HTML page: architecture, system map, file map, neighbourhoods, hotspots, docs
 /grimoire:architecture  # an architecture diagram the code backs: drafted from the graph, refined from the code, checked
+/grimoire:manager    # the briefing: what is urgent, what to decide, what to hand to AI, ranked from the tracker
 ```
 
 `/orchestrate` needs a fourth input besides the three design artifacts: `repos`, the list of repositories with their owning agent, tags (for review-lens selection) and gate command. It previews first, with a wall-clock estimate (a strict blocked-by chain runs one task at a time). Once it runs, every landed task is pushed to one draft PR per repo, and a halted or killed run picks up where it stopped when you invoke `/orchestrate` on the same project again. Leave the session alone while it runs: a message sent to it reaches the prompts of the agents the run dispatches, so give instructions after the run, or stop it first. `workflows/README.md` has the full reference.
@@ -146,6 +147,7 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`skills/logs`](skills/logs/SKILL.md) | Read, render and prune the loop's decision journal |
 | [`skills/graph`](skills/graph/SKILL.md) | Browse the code graph as a local page: architecture, system map, file map, neighbourhoods, hotspots, and the docs as a vault (editable when served) |
 | [`skills/architecture`](skills/architecture/SKILL.md) | An architecture diagram the code backs: drafted from the graph, refined by reading the code, checked against the index |
+| [`skills/manager`](skills/manager/SKILL.md) | The briefing: tracker issues ranked and grouped by what the team owes, by read-only scouts and a tested script |
 | [`agents/`](agents) | scouts (`codebase-scout`, `reference-scout`, `contract-checker`, `tracker-scout`, `design-scout`, `security-scout`, `perf-scout`), the `reviewer`, and the specialists `migration-engineer` and `test-engineer` the loop can route tasks to |
 | [`templates/`](templates) | the team-agent definition to copy per repository |
 | [`skills/implement`](skills/implement/SKILL.md) · [`skills/review`](skills/review/SKILL.md) | Build one issue through its team agent; gate it with the diverse-lens panel |
@@ -156,12 +158,12 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`tools/graph/`](tools/graph/README.md) | the code graph: indexer, MCP server (`.mcp.json`), CLI, the page and its local server, research-only |
 | [`docs/architecture/`](docs/architecture/grimoire.architecture.json) | grimoire's own architecture diagram, checked against its code graph |
 | [`.harness/`](.harness/README.md) | the MCP policy and a manifest of the files that decide what agents may do; checked in CI |
-| [`scripts/`](scripts) · [`evals/`](evals/README.md) | the log renderer, the setup re-run's config merge, the drift check CI runs, and the skill evals (`skills/*/evals/evals.json`, generated into `evals/` for `claude plugin eval`) |
+| [`scripts/`](scripts) · [`evals/`](evals/README.md) | the log renderer, the setup re-run's config merge, the manager briefing, the drift check CI runs, and the skill evals (`skills/*/evals/evals.json`, generated into `evals/` for `claude plugin eval`) |
 
 ## 🧪 Developing grimoire
 
 ```sh
-npm test               # engine, guard, renderer and code-graph tests (the graph's need `npm ci --prefix tools/graph`)
+npm test               # engine, guard, renderer, manager and code-graph tests (the graph's need `npm ci --prefix tools/graph`)
 npm run check          # drift: roster ↔ agents, briefs ↔ engine, evals present, config documented
 npm run evals:check    # evals/ is up to date with skills/*/evals/evals.json
 claude plugin eval .   # run the skill evals (paid; see evals/README.md)

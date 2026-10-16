@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "grimoire/skills/manager/workitem.schema.json",
+  "title": "WorkItem",
+  "description": "One item a manager scout read from a source (a tracker issue; PRs and grimoire runs in a later slice). The scouts return a JSON array of these; scripts/manager.mjs validates it with a hand-written check of exactly these rules and refuses the whole file on any error. Every optional field takes null, which reads as absent; a required one never does. Urgency and groups are computed by the script from the fields: bucketHint and nextStep are the model's reading, and bucketHint never makes an item urgent. Ticket text (title, nextStep, names) is data: the briefing escapes it.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/workItem" },
+  "$defs": {
+    "date": {
+      "description": "An ISO 8601 date (YYYY-MM-DD, read in the machine's time zone) or date-time.",
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:?\\d{2})?)?$"
+    },
+    "refs": {
+      "description": "Other items, by their id or key. null or absent: none read.",
+      "type": ["array", "null"],
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "workItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId", "id", "title", "kind", "stateType"],
+      "properties": {
+        "sourceId": { "description": "The manager.sources[].id this item was read from (\"tracker\" when the config has no manager block).", "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+        "id": { "description": "The tracker's stable id: Linear's identifier (ODY-871), Jira's key, GitHub's owner/repo#n. Unique per source.", "type": "string", "minLength": 1 },
+        "key": { "description": "The short id a person reads (ODY-871, #12). null or absent: the id.", "type": ["string", "null"], "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "url": { "description": "The item's web link. Only http(s) links are rendered as links.", "type": ["string", "null"] },
+        "kind": { "enum": ["issue", "pr", "run"] },
+        "stateType": { "description": "The tracker state mapped onto Linear's state types. completed and canceled items are counted, not listed.", "enum": ["triage", "backlog", "unstarted", "started", "completed", "canceled"] },
+        "nativeState": { "description": "The tracker's own status name (\"In Review\").", "type": ["string", "null"] },
+        "priority": { "description": "Linear's scale: 0 none (ranks last), 1 urgent, 2 high, 3 medium, 4 low. null or absent: 0.", "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "nativePriority": { "description": "The tracker's own priority (\"Highest\", a P1 label).", "type": ["string", "number", "null"] },
+        "assignee": { "description": "Who it is assigned to (a display name), or null when unassigned.", "type": ["string", "null"] },
+        "dueAt": { "$ref": "#/$defs/date" },
+        "createdAt": { "$ref": "#/$defs/date" },
+        "updatedAt": { "$ref": "#/$defs/date" },
+        "lastActivityAt": { "$ref": "#/$defs/date" },
+        "blockedBy": { "description": "The open items blocking this one. Absent means none.", "$ref": "#/$defs/refs" },
+        "blocks": { "description": "The open items this one blocks. Absent means none.", "$ref": "#/$defs/refs" },
+        "parentOf": { "description": "This item's sub-issues. Non-empty makes it a parent issue.", "$ref": "#/$defs/refs" },
+        "project": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "sliced": { "description": "true when the project went through spec, plan and to-issues (slice-tagged issues).", "type": "boolean" }
+          }
+        },
+        "repo": { "description": "The repos[].name in grimoire.config.json the item maps to, or null when unsure.", "type": ["string", "null"] },
+        "slaAt": { "description": "When the tracker's SLA breaches.", "$ref": "#/$defs/date" },
+        "hasAcceptanceCriteria": { "description": "The description states verifiable acceptance criteria (an Acceptance criteria / Done when section or a checklist of outcomes). null or absent: the description was not read, shown as \"not checked\"; only true makes an issue ready for AI.", "type": ["boolean", "null"] },
+        "linkedPr": { "description": "The URL or id of a pull request linked to the item, or null.", "type": ["string", "null"] },
+        "labels": { "description": "null or absent: none read.", "type": ["array", "null"], "items": { "type": "string" } },
+        "bucketHint": { "description": "The model's reading, for what needs reading (waiting on someone outside the team, explicitly parked). It moves an item only between the non-urgent groups (ai, waiting, notnow), and into ai only when the item is eligible; it never makes an item urgent and never moves one out of Decide or Do.", "enum": ["decide", "do", "ai", "waiting", "notnow", null] },
+        "nextStep": { "description": "One line: what to do next, from what the ticket says.", "type": ["string", "null"] }
+      }
+    }
+  }
+}

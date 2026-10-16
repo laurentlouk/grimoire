@@ -1,5 +1,5 @@
 {
-  "$comment": "grimoire.config.json — the project's harness configuration. Written by /grimoire:setup, read by /orchestrate, /grimoire:logs and the guard hook. Keep it at the project root.",
+  "$comment": "grimoire.config.json — the project's harness configuration. Written by /grimoire:setup, read by /orchestrate, /grimoire:logs, /grimoire:manager and the guard hook. Keep it at the project root.",
   "baseBranch": "origin/main",
   "memoryDir": "memory",
   "runsDir": "runs",
@@ -20,6 +20,19 @@
   ],
   "guard": { "enabled": true, "protectedBranches": ["main", "release/*"] },
   "graph": { "enabled": true, "dir": ".grimoire/graph", "exclude": ["**/generated/**"], "maxFileKB": 512 },
+  "manager": {
+    "sources": [
+      { "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, read-only endpoint)", "readOnly": "endpoint", "scope": { "teams": ["ENG"] } },
+      { "id": "prs", "category": "prs", "kind": "github", "hint": "gh CLI, authenticated", "readOnly": "permission-rule", "scope": { "repos": ["acme/api", "acme/app"] } },
+      { "id": "runs", "category": "runs", "kind": "grimoire" }
+    ],
+    "urgent": { "priorityAtMost": 2, "dueWithinDays": 2, "blocksAtLeast": 2, "stalledDays": 5 },
+    "priorityLabels": { "P0": 1, "P1": 2, "P2": 3 },
+    "maxItemsPerSource": 200,
+    "schedule": { "kind": "desktop-task", "when": "weekdays 08:30" },
+    "share": null,
+    "budgetUsd": null
+  },
   "repos": [
     {
       "name": "api",

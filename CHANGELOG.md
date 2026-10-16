@@ -181,6 +181,41 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     (`issue_cert`) included. The hooks README lists the limits.
   - An MCP call is judged by its name alone, before the guard asks git anything.
 
+**Manager (`skills/manager`, `scripts/manager.mjs`)**
+- **`/grimoire:manager` writes a briefing from the tracker:** what the team owes, grouped Decide /
+  Do / Hand to AI / Waiting on others / Not now, each item with why it is there, its next step and
+  its link. The skill dispatches `tracker-scout` once per tracker source in `manager.sources` (or
+  `toolHints.tracker`, and says so, when there is no `manager` block yet), then runs
+  `manager.mjs brief`. It never writes to the tracker.
+- **The ranking is a tested script, not the model's judgment.** The scouts return WorkItems against
+  `skills/manager/workitem.schema.json`, and the script refuses the whole file on any invalid item,
+  naming the item and field, never the value. null in an optional field reads as absent: an
+  unread `hasAcceptanceCriteria` shows as "not checked", never as "none". From the fields and one
+  `--now`:
+  - urgent: priority Urgent or High (`manager.urgent.priorityAtMost`), an SLA breaching within
+    24 h or past, due today, overdue or within `dueWithinDays` (2) calendar days;
+  - Decide: triage, or urgent with no assignee. Do: any other urgent item. Hand to AI: an issue
+    with acceptance criteria, unassigned, nothing open blocking it, no linked PR, no sub-issues
+    (the repo check comes with launching);
+  - the model's `bucketHint` moves an item only between the non-urgent groups: it never makes one
+    urgent, nor moves one out of Decide or Do;
+  - the order: urgent, priority (none last), due date, oldest created, id.
+- **The files:** `.grimoire/manager/briefings/<YYYYMMDD-HHMMSS>.md`, `latest.md` (front matter with
+  the counts, `generatedAt`, `partial` and the sources) and `ledger.json` (when each item was first
+  seen, a hash of what matters, its last group), under one `.lock` broken after 30 minutes; a held
+  lock exits 3. Ticket text is escaped for Markdown and HTML, its `scheme://` and `www.` can't
+  become GFM autolinks, and its bidi controls are dropped. `view()` builds the one view model the
+  page and the panel will render from, and it carries only safe http(s) urls (null otherwise).
+- **`tracker-scout` reaches the tracker's connectors.** Its `tools:` line is gone, so it inherits the
+  session's tools (a probe confirmed a subagent loads the claude.ai connectors with ToolSearch);
+  `disallowedTools` takes away Write, Edit, MultiEdit and NotebookEdit, the guard refuses its MCP
+  writes, and a `gh` write through Bash is held by its instructions and setup's permission rule. It
+  has a memory file now. It maps native fields onto
+  the WorkItem (Linear's priority as is, Jira Highest..Lowest to 1..4, GitHub labels by
+  `manager.priorityLabels`; states onto the six state types, the native ones kept).
+- `grimoire.config.example.json` has the `manager` block, documented in `workflows/README.md` as not
+  read by the loop.
+
 ## 0.11.0 — trust and see
 
 The code graph's first release on its roadmap: make the links worth trusting, then draw them so a
