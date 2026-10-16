@@ -233,7 +233,7 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     24 h or past, due today, overdue or within `dueWithinDays` (2) calendar days;
   - Decide: triage, or urgent with no assignee. Do: any other urgent item. Hand to AI: an issue
     with acceptance criteria, unassigned, nothing open blocking it, no linked PR, no sub-issues
-    (the repo check comes with launching);
+    (the rest of D8, the repo check among it, came with launching: below);
   - the model's `bucketHint` moves an item only between the non-urgent groups: it never makes one
     urgent, nor moves one out of Decide or Do;
   - the order: urgent, priority (none last), due date, oldest created, id.
@@ -318,7 +318,8 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   canvas when the session has the Slack connector, replaced in place with no channel message)
   gives the team one view. `brief` now saves its view model as `latest.json`; `manager.mjs
   share-body` renders the post from it in Markdown: the groups, reasons, next steps, counts, Not
-  checked and "≥ N", without the new and changed badges (one person's ledger), ending "generated
+  checked and "≥ N", without the new and changed badges or a repo's availability (one person's
+  ledger, one machine's checkouts), ending "generated
   by <git user.name> · at <time> · covering <sources>", with a hidden `<!-- grimoire:manager-briefing
   v1 -->` marker the skill finds its own post by (a canvas, by its id). Ticket text is escaped as
   in the briefing, its @mentions broken so the post notifies no one, and the body cut to a GitHub
@@ -326,7 +327,7 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   vendor's tool, replaces it or creates it, and records the outcome with `share-status`: a failure
   is a "Share: failed (<reason>)" line in the local briefing, never filed anywhere. It is the
   manager's only write. `config-merge.mjs` compares `manager.share` whole. Checks:
-  `scripts/manager.test.mjs` (342 in all), `scripts/config-merge.test.mjs`.
+  `scripts/manager.test.mjs` (401 in all, with launching), `scripts/config-merge.test.mjs`.
 - **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
   absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
   reported by the skill", and makes the briefing partial; without `--sources`, a configured source
@@ -335,6 +336,38 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   stalled rule reads the later of `lastActivityAt` and `updatedAt`. With neither `priority` nor
   `nativePriority`, the most urgent label in `labels[]` maps. Checks: `scripts/manager.test.mjs`
   (326 in all).
+- **Launch from the briefing.** After the briefing, the skill offers the ready issues as
+  multi-select checkboxes, one question per project, and one per source for the issues with no
+  project (GitHub Issues), at most 4 options each, plus **All ready**,
+  and starts what the user ticks: one new conversation per tracker project, through the host's
+  session tool when ToolSearch finds one (the desktop app has one), else a prompt per project to
+  paste. Headless runs skip the step.
+  - **Hand to AI applies every D8 condition.** On top of the earlier ones: not started (an In
+    Progress issue is not handed to AI), the assignee may be `claim.identity`, the issue maps to a
+    `repos[]` entry (first through `manager.repoLabels`, so `frontend` reaches the mobile repo,
+    then through its `repo`, else to a single-repo project's one entry), and that repo is
+    available. Each failure is a reason: "no repo
+    mapped: no label in repoLabels", "repo not checked out: repositories/webapp, fix: …".
+    Only issues: a PR or a run keeps its own rules and has no repo check. `brief --check-repos`
+    runs the check; without it a repo shows as "availability not checked".
+  - **`manager.mjs repos`** reports each `repos[]` entry as JSON: available when its path is a git
+    work tree (a directory a hub ignores must be a clone of its own), a registered submodule
+    initialised. A failure carries its fix, and the command when it is one: `git clone --
+    <remote> <path>` for a missing nested clone, `git submodule update --init -- <path>` for an
+    uninitialised submodule (the `--` keeps a path that starts with `-` from reading as an
+    option). A remote with any credential (on http(s), ftp or git URLs, any user name, a bare
+    token included; a password anywhere) is never printed: the fix is prose, with no command.
+    The skill runs a fix only on the user's yes. Clones `repos[]` doesn't name are ignored.
+  - **`manager.mjs launch-plan --ids …`** re-checks the ticked ids against the WorkItems and a
+    fresh repos check, and groups them per tracker project: a sliced project goes to
+    `/grimoire:orchestrate`, a loose ready issue to `/grimoire:implement` then `/grimoire:review`,
+    an issue without acceptance criteria to `/grimoire:roast` first. Groups that share a checkout
+    run one after the other (`waitsFor`), never in parallel: a checkout is compared by its real
+    path, so `repositories/webapp` and `repositories/webapp/` are one. Each prompt is self-contained and
+    carries ids, routes and repo paths only, never a ticket's title, body, labels or project
+    name: the launched conversation reads the tickets itself. An unknown, ambiguous or ineligible
+    id is refused with its reason. Checks: `scripts/manager.test.mjs` (384 in all, the repos
+    check on real temp git repos), and the evals `manager-6` to `manager-8`.
 
 ## 0.11.0 — trust and see
 
