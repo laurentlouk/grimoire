@@ -36,10 +36,11 @@ g('worktree', 'add', '-q', '-b', 'feat/x', path.join(PROJ, '.worktrees', 'feat-x
 const EMPTY = path.join(SANDBOX, 'empty') // a non-git project with its own config
 mkdirSync(EMPTY)
 
-function guard(payload, { env = {}, cwd = PROJ, project = cwd, cmd = process.execPath, args = [GUARD] } = {}) {
+function guard(payload, { env = {}, cwd = PROJ, project = cwd, cmd = process.execPath, args = [GUARD], timeout } = {}) {
   const input = typeof payload === 'string' ? payload : JSON.stringify({ hook_event_name: 'PreToolUse', cwd, ...payload })
   const r = spawnSync(cmd, args, {
     input,
+    timeout,
     encoding: 'utf8',
     env: { ...process.env, CLAUDE_PROJECT_DIR: project, GRIMOIRE_GUARD_ALLOW: '', ...env },
   })
@@ -233,6 +234,13 @@ try {
   writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'api', agent: 'api-engineer' }] }))
   expectAllow(mcp('mcp__abc__save_issue', 'api-engineer', e), 'a repo agent the config names (memory-denied, never MCP-denied) · save_issue')
   expectReadOnly(mcp('mcp__abc__save_issue', 'tracker-scout', e), 'tracker-scout', 'mcp__abc__save_issue', 'tracker-scout · save_issue under a project config')
+  // A project's own agent may share a plugin agent's bare name; the config naming it wins.
+  expectReadOnly(mcp('mcp__a__create_pull_request_review', 'reviewer'), 'reviewer', 'mcp__a__create_pull_request_review', 'reviewer · create_pull_request_review with no config naming a reviewer', 'create')
+  writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'x', agent: 'reviewer' }] }))
+  expectAllow(mcp('mcp__a__create_pull_request_review', 'reviewer', e), "a repo agent the config names 'reviewer' is never read-only")
+  expectReadOnly(mcp('mcp__a__save_issue', 'tracker-scout', e), 'tracker-scout', 'mcp__a__save_issue', 'the other read-only agents stay bound under that config', 'save')
+  writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ specialists: [{ agent: 'tracker-scout', repos: ['x'] }] }))
+  expectAllow(mcp('mcp__a__save_issue', 'tracker-scout', e), "a specialist the config names 'tracker-scout' is never read-only")
   writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ guard: { enabled: false } }))
   expectAllow(mcp('mcp__abc__save_issue', 'tracker-scout', e), 'guard.enabled: false allows the scout\'s write')
   expectAllow(mcp('mcp__abc__save_issue', 'grimoire:tracker-scout', { env: { GRIMOIRE_GUARD_ALLOW: '1' } }), 'GRIMOIRE_GUARD_ALLOW=1 allows the scout\'s write')
@@ -241,6 +249,14 @@ try {
   expectReadOnly(guard({ tool_name: 'mcp__abc__save_issue', tool_input: 'nope', agent_type: 'tracker-scout', cwd: 7 }), 'tracker-scout', 'mcp__abc__save_issue', 'a non-object tool_input and a non-string cwd: the tool name is still judged')
   expectAllow(mcp('mcp__save_issue', 'tracker-scout'), 'no tool part after the server id')
   expectAllow(mcp('mcp__abc__', 'tracker-scout'), 'an empty tool part')
+  expectReadOnly(mcp('mcp__a__save_issue__', 'tracker-scout'), 'tracker-scout', 'mcp__a__save_issue__', 'a trailing `__` does not empty the tool part', 'save')
+  expectReadOnly(mcp('mcp__a__create__', 'tracker-scout'), 'tracker-scout', 'mcp__a__create__', 'a trailing `__` after a bare verb', 'create')
+  // A pathological name must not stall the hook (5 s timeout in hooks.json): the tool part is capped.
+  for (const [tool, verdict, m] of [[`mcp__a__${'A'.repeat(100000)}`, allowed, '100k capitals (no verb in the first 64)'],
+    [`mcp__a__save_${'A'.repeat(100000)}`, denied, "100k capitals after 'save_'"], [`mcp__a__save${'_'.repeat(100000)}`, denied, '100k trailing underscores']]) {
+    const t0 = Date.now(), r = mcp(tool, 'tracker-scout', { timeout: 5000 }), ms = Date.now() - t0
+    ok(verdict(r) && ms < 2000, `${verdict === allowed ? 'allow' : 'deny'} · ${m}, in ${ms} ms (exit ${r.code})`)
+  }
   // The rule only runs on calls hooks.json routes to the guard (Claude Code matchers are regexes).
   const pre = JSON.parse(readFileSync(path.join(HERE, '..', 'hooks.json'), 'utf8')).hooks.PreToolUse.find((h) => /guard\.sh/.test(JSON.stringify(h.hooks)))
   const routes = (t) => new RegExp(`^(?:${pre.matcher})$`).test(t)
