@@ -11,6 +11,8 @@
 //   NotebookEdit            .claude/hooks/ and guard.protectedPaths (override: GRIMOIRE_GUARD_ALLOW=1)
 //                         · <memoryDir>/ when a named roster agent (not crystallize) writes it
 //                         · the same paths in every linked git worktree of the project's repository
+//   mcp__<server>__<tool> · a <tool> whose first known verb is a write, when a read-only agent (a
+//                           scout, the reviewer) calls it (override: GRIMOIRE_GUARD_ALLOW=1)
 //
 // Deny = exit 2 with one line on stderr (Claude Code shows it to the agent and skips the call).
 // Everything else, including malformed input or config and any internal error, exits 0
@@ -24,17 +26,41 @@ const DEFAULT_BRANCHES = ['main', 'master', 'trunk', 'develop', 'release/*']
 const PROTECTED_FILES = ['.claude/settings.json', '.claude/settings.local.json']
 // `.claude/hooks/`, not a root `hooks/`: many app layouts keep source code in a root `hooks/`.
 const PROTECTED_DIRS = ['.claude/hooks/']
-// Agents that must never write memory: the plugin's scouts and reviewer, plus every repo's
+// The plugin's read-only agents: its scouts and the reviewer. They may not call an MCP tool whose
+// name leads with a write verb; the main session applies writes. The implementers (the specialists,
+// every repo's owning agent) write by design, so they are not here.
+const READ_ONLY_AGENTS = [
+  'reviewer', 'codebase-scout', 'reference-scout', 'contract-checker', 'tracker-scout', 'design-scout',
+  'security-scout', 'perf-scout',
+]
+// Agents that must never write memory: the read-only agents and the specialists, plus every repo's
 // owning agent from grimoire.config.json. crystallize runs as a generic subagent (or in the
 // main session), so an allow-list by agent_type is impossible; a deny-list of known names is.
-const ROSTER_AGENTS = [
-  'reviewer', 'codebase-scout', 'reference-scout', 'contract-checker', 'tracker-scout', 'design-scout',
-  'security-scout', 'perf-scout', 'migration-engineer', 'test-engineer',
-]
+const ROSTER_AGENTS = [...READ_ONLY_AGENTS, 'migration-engineer', 'test-engineer']
+// Connector tool names are opaque per account, so the MCP rule reads the tool's words: the first
+// known verb decides, a read allows and a write denies, and a name with no known verb passes.
+const READ_VERBS = new Set([
+  'get', 'list', 'search', 'read', 'fetch', 'find', 'query', 'view', 'show', 'describe', 'count', 'aggregate',
+  'lookup', 'check', 'status', 'inspect', 'analyze', 'explain', 'export', 'download',
+])
+const WRITE_VERBS = new Set([
+  'save', 'create', 'update', 'delete', 'send', 'reply', 'forward', 'merge', 'set', 'add', 'remove', 'mark',
+  'share', 'unshare', 'submit', 'resolve', 'retire', 'restore', 'trash', 'untrash', 'label', 'unlabel', 'respond',
+  'archive', 'unarchive', 'assign', 'move', 'upload', 'publish', 'post', 'edit', 'write', 'patch', 'put', 'insert',
+  'upsert', 'apply', 'approve', 'decline', 'cancel', 'close', 'reopen', 'comment', 'schedule', 'invite', 'transfer',
+  'buy', 'purchase', 'pay', 'deploy', 'rollback', 'promote', 'revoke', 'rename', 'change', 'modify', 'toggle',
+  'enable', 'disable', 'exec', 'execute', 'run', 'invoke',
+  'pause', 'unpause', 'stop', 'kill', 'start', 'restart', 'reset', 'clear', 'purge', 'activate', 'deactivate',
+  'invalidate', 'accept', 'reject', 'grant', 'attach', 'detach', 'link', 'unlink', 'subscribe', 'unsubscribe',
+  'import', 'sync', 'stage', 'record', 'generate',
+])
+// Left out on purpose: `issue`, `verify` and `test` read as nouns or reads too often.
 const FOLD = process.platform === 'darwin' || process.platform === 'win32'
 
 class Deny extends Error {}
 const deny = (msg) => { throw new Deny(`grimoire guard: ${msg}`) }
+// The subagent's bare name (`grimoire:reviewer` → `reviewer`); '' in the main session.
+const agentOf = (input) => (typeof input.agent_type === 'string' ? input.agent_type.replace(/^.*:/, '') : '')
 
 function readJSON(file) {
   try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return null }
@@ -58,6 +84,9 @@ function loadConfig(projectDir) {
     protectedPaths: strs(g.protectedPaths) || [],
     memoryDir: memoryDir.trim().replace(/^\.\//, '').replace(/\/+$/, ''),
     memoryDenied: new Set([...ROSTER_AGENTS, ...repoAgents, ...(strs(g.memoryDeniedAgents) || [])]),
+    // A project's own agent may share a plugin agent's bare name (`reviewer`): the config naming it
+    // exempts it. Read only for an agent_type without a namespace (see checkMcp).
+    readOnly: new Set(READ_ONLY_AGENTS.filter((a) => !repoAgents.includes(a))),
   }
 }
 
@@ -372,13 +401,52 @@ function checkRules(relPath, ctx, input) {
     if (PROTECTED_DIRS.some(under)) deny(`writes under hooks/ are refused (the guard itself lives there); ${how}.`)
     for (const p of ctx.protectedPaths) if (p.endsWith('/') ? under(p) : rel === f(p.replace(/^\.\//, '')) || under(p)) deny(`writes to ${rel} are refused (guard.protectedPaths); ${how}.`)
   }
-  const agentType = typeof input.agent_type === 'string' ? input.agent_type.replace(/^.*:/, '') : ''
+  const agentType = agentOf(input)
   if (!allow && agentType && !/crystalliz/i.test(agentType) && ctx.memoryDenied.has(agentType) && under(ctx.memoryDir + '/')) {
     deny(`agent '${agentType}' may not write ${rel}: memory is written only by the crystallize step after a PR; report the fact in your result instead, or set GRIMOIRE_GUARD_ALLOW=1.`)
   }
 }
 
+// ─────────────────────────────── mcp rule ───────────────────────────────
+// `mcp__<server>__<tool>`. A server id can hold `_`, `-` and digits (`plugin_grimoire_graph`,
+// `055f8362-1877-…`), so the tool is what follows the LAST `__`, trailing `_` dropped first.
+// The tool's words: split on anything not a letter or digit (`_`, `-`) and on camelCase boundaries
+// (`createJiraIssue`, `getHTTPStatus`), lowercased. Whole words only: `saved` is not `save`.
+// Only the first 64 characters are read (tool names are shorter): a run of capitals backtracks
+// the acronym split quadratically, and 100k of them would outlast the hook's timeout.
+const MAX_TOOL = 64
+const words = (tool) => tool.slice(0, MAX_TOOL).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w.toLowerCase())
+function writeVerb(tool) { // the first known verb decides: a write verb, or null for a read or no verb
+  for (const w of words(tool)) {
+    if (READ_VERBS.has(w)) return null
+    if (WRITE_VERBS.has(w)) return w
+  }
+  return null
+}
+
+function checkMcp(name, input, readOnly) {
+  const agentType = agentOf(input)
+  // The config's exemption is for a project's own agent (no namespace); the plugin's `grimoire:reviewer`
+  // stays bound even when a configured repo agent shares its bare name.
+  const namespaced = typeof input.agent_type === 'string' && input.agent_type.includes(':')
+  const bound = namespaced ? READ_ONLY_AGENTS.includes(agentType) : readOnly.has(agentType)
+  if (!bound || process.env.GRIMOIRE_GUARD_ALLOW === '1') return
+  let end = name.length
+  while (end > 'mcp__'.length && name[end - 1] === '_') end-- // `save_issue__` is still `save_issue`
+  const rest = name.slice('mcp__'.length, end), cut = rest.lastIndexOf('__')
+  if (cut < 0) return
+  const verb = writeVerb(rest.slice(cut + 2))
+  if (verb) deny(`agent '${agentType}' may not call ${name}: the plugin's scouts and reviewer are read-only and '${verb}' names a write; report the proposed write in your result (the main session applies writes), or set GRIMOIRE_GUARD_ALLOW=1.`)
+}
+
 // ─────────────────────────────── main ───────────────────────────────
+function verdict(check) {
+  try { check() } catch (e) {
+    if (e instanceof Deny) { process.stderr.write(e.message.replace(/\s*\n\s*/g, ' ') + '\n'); return 2 }
+  }
+  return 0
+}
+
 function main() {
   let input
   try { input = JSON.parse(readFileSync(0, 'utf8')) } catch { return 0 }
@@ -386,24 +454,26 @@ function main() {
   const cwd = typeof input.cwd === 'string' && path.isAbsolute(input.cwd) ? input.cwd : process.cwd()
   const envDir = process.env.CLAUDE_PROJECT_DIR
   const projectDir = envDir && path.isAbsolute(envDir) ? envDir : cwd
+  // Every MCP call now reaches the guard. One from outside the read-only set (the main session, most
+  // subagents) passes before the config is read: the config can only shrink that set.
+  const mcpCall = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__')
+  if (mcpCall && !READ_ONLY_AGENTS.includes(agentOf(input))) return 0
   const cfg = loadConfig(projectDir)
   if (!cfg.enabled) return 0
+  // An MCP call is judged by name alone, before any git call.
+  if (mcpCall) return verdict(() => checkMcp(input.tool_name, input, cfg.readOnly))
   const tmpRoots = [tmpdir(), '/tmp', '/private/tmp', '/var/tmp', '/private/var/folders', process.env.TMPDIR, input.scratchpad_dir]
     .filter((p) => typeof p === 'string' && path.isAbsolute(p))
   const commonDir = git(projectDir, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
   const ctx = { projectDir, commonDir, isProtected: branchMatcher(cfg.branches), protectedPaths: cfg.protectedPaths, memoryDir: cfg.memoryDir, memoryDenied: cfg.memoryDenied, tmpRoots }
   const ti = input.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {}
-  try {
+  return verdict(() => {
     switch (input.tool_name) {
       case 'Bash': checkBash(ti.command, cwd, ctx); break
       case 'Write': case 'Edit': case 'MultiEdit': checkWrite(ti.file_path, cwd, ctx, input); break
       case 'NotebookEdit': checkWrite(ti.notebook_path || ti.file_path, cwd, ctx, input); break
     }
-  } catch (e) {
-    if (e instanceof Deny) { process.stderr.write(e.message.replace(/\s*\n\s*/g, ' ') + '\n'); return 2 }
-    return 0
-  }
-  return 0
+  })
 }
 
 let code = 0

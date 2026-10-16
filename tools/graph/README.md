@@ -66,7 +66,27 @@ node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
 
 ## Seeing it
 
-`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview; a system map of modules (`lib/modules.mjs`: folders of production code, a folder holding more than 35% of its repository split into its subfolders, linked by the file pairs that use each other through links resolved by syntax, ranked in the order code flows) that opens onto the file-level map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`); every file and symbol as a neighbourhood, what uses it on the left and what it uses on the right; and hotspots (a size × churn treemap, most called, widest fan-out, most used, co-change), ranked by resolved links. Test code and ambiguous links are hidden until asked for (the system map never shows them); each lane draws its 14 largest modules; every view has a plain anchor (`#sym-12`, `#file-3`, `#mod-4`); `#sym-` and `#file-` numbers are index ids that change when that file is re-parsed, and `#mod-` numbers follow the modules' order, which shifts when modules gain or lose files or links: an anchor holds for the index the page was rendered from. No network, no CDN: the page's CSP admits only its own script, by hash. It stays local.
+`node tools/graph/graph.mjs render` (or `/grimoire:graph`) refreshes the index, then writes one self-contained page, `.grimoire/graph/graph.html` (`--out` elsewhere): an overview; a system map of modules (`lib/modules.mjs`: folders of production code, a folder holding more than 35% of its repository split into its subfolders, linked by the file pairs that use each other through links resolved by syntax, ranked in the order code flows) that opens onto the file-level map (one cluster per directory, laid out once and deterministically by `lib/layout.mjs`); every file and symbol as a neighbourhood, what uses it on the left and what it uses on the right; and hotspots (a size × churn treemap, most called, widest fan-out, most used, co-change), ranked by resolved links. Test code and ambiguous links are hidden until asked for (the system map never shows them); each lane draws its 14 largest modules; every view has a plain anchor (`#sym-12`, `#file-3`, `#mod-4`, `#arch-0`, `#doc-7`); `#sym-` and `#file-` numbers are index ids that change when that file is re-parsed, and `#mod-`, `#arch-` and `#doc-` numbers follow the order of modules, diagrams and notes, which shifts as they change: an anchor holds for the index the page was rendered from. No network, no CDN: the page's CSP admits only its own script, by hash. It stays local.
+
+Two more tabs:
+
+- **Architecture** draws the diagrams in `docs/architecture/*.architecture.json` (below) and one drafted from the graph on every render: typed components in their boundaries, labelled lines, a passport per component, upstream and downstream reach, route tracing along the drawn lines, and the code links no line draws.
+- **Docs** is every Markdown note of the project (`lib/docs.mjs`: each repository's `.md` and `.markdown` files, the graph's skips and excludes applied, plus the project root's own in a hub), rendered in the page by `lib/md.mjs` (CommonMark's common subset, GFM tables and task lists, Obsidian callouts, `[[wikilinks]]`, embeds as links, tags, front matter as properties; raw HTML only as attribute-free allowlisted tags; linear time on any input, and a note past 200 KB shows as plain text) as a vault: tree and search, outline, backlinks, the indexed files a note names (and, on a file's page, the notes naming it).
+
+### Editing the notes: `serve`
+
+`node tools/graph/graph.mjs serve [--port n]` serves the same page on `127.0.0.1` (`lib/serve.mjs`), re-rendered on every load, with one difference: its Docs tab can save. It prints one address carrying a random access token. It answers only requests that name it as their host (no DNS rebinding) and carry the token (in the page's address, then as a header the page sends: a cross-origin page can neither read it nor send it without a CORS preflight, which is never granted), refuses cross-origin writes and non-JSON bodies, and writes only `.md` / `.markdown` files inside the project's repositories (no `..`, no absolute path, no skipped folder in any letter case, no symlink out, no read-only note), each through a temporary file renamed over it; a note symlinked to another note is written through to its real file, so the link stays, and a symlink whose real file is not itself a note (`x.md → .git/config`, a script, an excluded folder) is refused. A save must name the hash the note was loaded with; one from a copy that changed on disk since is refused with the disk text (409), and the page offers to load it or overwrite. New notes may create their folders, never overwrite. Listing follows the same rule: a symlink out of a repository is never read into the page, served or not. The page's CSP adds `connect-src 'self'`, only when served.
+
+## Architecture diagrams
+
+A diagram is `docs/architecture/<name>.architecture.json` (`graph.architectureDir` moves the folder). [archify](https://github.com/tt-a1i/archify) was the example; the format is grimoire's own, shaped by what the code graph can check and free to evolve with it (no dependency, no compatibility promise): `components` (`id`, `label`, `sublabel`, `type`: frontend · backend · worker · database · messagebus · cloud · security · external · library · cli, `paths` globs of its code, `imports` package prefixes reaching it, `sources` as `repo:path:start-end`, `note`, `tag`, optional `col`/`row`), `connections` (`from`, `to`, `label`, `variant`: default · emphasis · security · async · dashed, `via` for what carries a line the code graph cannot see), `boundaries` (`label`, `kind`, `wraps`) and `cards`. `/grimoire:architecture` writes and refines them.
+
+```sh
+node tools/graph/graph.mjs architecture draft [--out <file>] [--title t] [--force]   # a draft from the graph
+node tools/graph/graph.mjs architecture check [<file>…]                              # check against the index
+```
+
+`lib/arch.mjs` drafts deterministically (one component per module of the system map, typed by folder names and the frameworks it imports, external services from imports of known client libraries, a line per module link resolved by syntax) and checks: the schema, every `paths` glob matching indexed production files, every source existing with its lines, each line between two code components counted in file pairs linked by syntax (or in files importing a component's `imports`), lines the code shows only the other way, code links no line draws, files in two components, and the share of production files covered. It lays a diagram out by flow (a column per step, top-level boundaries as bands, rows ordered to cut crossings, free components placed beside their neighbours outside the bands), unless every component gives its `col` and `row`.
 
 ## Freshness
 
@@ -87,7 +107,7 @@ Measured on this machine: ripgrep (114 Rust files) 0.7 s, FastAPI (1,147 Python 
 ## Configuration (`grimoire.config.json`)
 
 ```json
-"graph": { "enabled": true, "repos": ["api", "web"], "dir": ".grimoire/graph", "exclude": ["generated/**", "fixtures"], "maxFileKB": 512 }
+"graph": { "enabled": true, "repos": ["api", "web"], "dir": ".grimoire/graph", "exclude": ["generated/**", "fixtures"], "maxFileKB": 512, "architectureDir": "docs/architecture" }
 ```
 
 All optional. Without a config the project root is one repository. `repos` defaults to every entry of the top-level `repos[]`; `exclude` adds to the built-in skips (dependencies, build output, caches, minified and generated files, `.d.ts`). `enabled: false` turns every tool into a pointer back to grep.
@@ -110,7 +130,11 @@ tools/graph/
   lib/indexer.mjs · worker.mjs · run.mjs   incremental indexing, in a child process
   lib/store.mjs · query.mjs · cochange.mjs · project.mjs · deps.mjs
   lib/modules.mjs · layout.mjs · render.mjs   the page: modules and the system map, the file map's layout, the HTML
+  lib/arch.mjs · arch-view.mjs architecture diagrams: draft, check, layout · the Architecture tab
+  lib/docs.mjs · md.mjs · docs-view.mjs        the notes and what may be written · Markdown · the Docs tab
+  lib/serve.mjs                the page on 127.0.0.1, saving notes
   tests/graph.test.mjs         node tools/graph/tests/graph.test.mjs
+  tests/arch-docs.test.mjs     node tools/graph/tests/arch-docs.test.mjs (no parser runtime needed)
 ```
 
 Adding a language: a spec in `lib/langs.mjs` (dump a sample's tree with web-tree-sitter to find the node types), a sample in `tests/fixtures/langs/` with its expected facts in the test.

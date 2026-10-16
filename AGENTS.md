@@ -10,7 +10,7 @@ The orchestrator is the main agent. It runs the pipeline (`roast` → `to-plan` 
 | --- | --- | --- | --- |
 | **Memory** (facts) | small, capped, always-injected declarative facts: one shared store, one per team agent | `memory/harness.md`, `memory/agents/<agent>.md` (rules in `memory/README.md`) | `crystallize` only |
 | **Skills** (procedures) | how to do recurring things, patched or created after each PR | `skills/<name>/SKILL.md` + `evals/` | `crystallize` (eval-gated), humans |
-| **Docs** (team truth) | conventions, domain references, specs, plans, crystallize reports | `docs/` | `roast` (drift fixes), `crystallize`, humans |
+| **Docs** (team truth) | conventions, domain references, specs, plans, crystallize reports, architecture diagrams (`docs/architecture/`, checked against the code graph) | `docs/` | `roast` (drift fixes), `crystallize`, `architecture`, humans |
 
 Agents never write memory mid-task. The lesson is extracted afterwards by `crystallize`, when the PR's review threads exist as signal.
 
