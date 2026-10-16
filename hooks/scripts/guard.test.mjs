@@ -13,7 +13,7 @@
 //  `echo "git push origin main"` is ALLOWED; `bash -c "…"`, `eval`, and $(…) are
 //  executed, so their bodies are checked.
 import { spawnSync, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import path from 'node:path'
 
@@ -171,6 +171,59 @@ try {
   expectAllow(bash('git push origin main', e), 'guard.enabled: false turns it off')
   writeFileSync(path.join(EMPTY, 'grimoire.config.json'), '{ not json')
   expectDeny(bash('git push origin main', e), 'a malformed config falls back to defaults')
+
+  console.log('\n── mcp tools (read-only agents)')
+  // Connector tool names are opaque per account (`mcp__<server>__<tool>`, the server id holding
+  // `_`, `-` and digits), so the rule reads the tool part after the last `__` and its leading verb.
+  const mcp = (tool, agentType, o) => guard({ tool_name: tool, tool_input: { id: 'ODY-1' }, ...(agentType === undefined ? {} : { agent_id: 'm1', agent_type: agentType }) }, o)
+  const expectReadOnly = (r, agent, tool, m) => {
+    const line = denied(r) && r.err.includes(`'${agent}'`) && r.err.includes(tool) && /read-only/.test(r.err) && /report the proposed write in your result/.test(r.err)
+    ok(line, `deny · ${m}${line ? '' : ` (exit ${r.code}, stderr: ${r.err || '∅'})`}`)
+  }
+  const first = mcp('mcp__abc__save_issue', 'grimoire:tracker-scout')
+  ok(first.code === 2 && first.err === "grimoire guard: agent 'tracker-scout' may not call mcp__abc__save_issue: the plugin's scouts and reviewer are read-only and 'save_' names a write; report the proposed write in your result (the main session applies writes), or set GRIMOIRE_GUARD_ALLOW=1.",
+    `deny · the exact line for a namespaced tracker-scout's save_issue (exit ${first.code}, stderr: ${first.err || '∅'})`)
+  expectReadOnly(mcp('mcp__abc__create_comment', 'grimoire:tracker-scout'), 'tracker-scout', 'mcp__abc__create_comment', 'tracker-scout · create_comment')
+  expectReadOnly(mcp('mcp__x__send_message', 'reviewer'), 'reviewer', 'mcp__x__send_message', 'reviewer · send_message')
+  expectReadOnly(mcp('mcp__055f8362-1877-48fa__save_issue', 'tracker-scout'), 'tracker-scout', 'mcp__055f8362-1877-48fa__save_issue', 'a server id with dashes and digits')
+  expectReadOnly(mcp('mcp__claude_ai_Linear__update_issue', 'grimoire:tracker-scout'), 'tracker-scout', 'mcp__claude_ai_Linear__update_issue', 'a server id with underscores')
+  expectReadOnly(mcp('mcp__abc__Delete_Comment', 'design-scout'), 'design-scout', 'mcp__abc__Delete_Comment', 'the verb in another letter case')
+  for (const [agent, tool] of [['codebase-scout', 'reply_to_thread'], ['reference-scout', 'forward'], ['contract-checker', 'merge_diff'], ['security-scout', 'set_status'], ['perf-scout', 'add_label'], ['tracker-scout', 'remove_label'], ['tracker-scout', 'mark_notification']]) {
+    expectReadOnly(mcp(`mcp__srv__${tool}`, agent), agent, `mcp__srv__${tool}`, `${agent} · ${tool}`)
+  }
+  expectAllow(mcp('mcp__abc__list_issues', 'grimoire:tracker-scout'), 'tracker-scout · list_issues')
+  expectAllow(mcp('mcp__abc__get_issue', 'grimoire:tracker-scout'), 'tracker-scout · get_issue')
+  expectAllow(mcp('mcp__plugin_grimoire_graph__graph_search', 'grimoire:codebase-scout'), 'codebase-scout · the graph server (underscores in the server id)')
+  expectAllow(mcp('mcp__055f8362-1877-48fa__get_issue', 'tracker-scout'), 'a dashed server id with a read tool')
+  expectAllow(mcp('mcp__save_service__list_items', 'tracker-scout'), 'a write verb in the server id is not the tool (trap)')
+  expectAllow(mcp('mcp__abc__list_saved_views', 'tracker-scout'), 'a write verb inside the tool name, not leading it (trap)')
+  expectAllow(mcp('mcp__abc__settings_get', 'tracker-scout'), "'settings' is not 'set_' (trap)")
+  expectAllow(mcp('mcp__abc__address_lookup', 'tracker-scout'), "'address' is not 'add_' (trap)")
+  expectAllow(mcp('mcp__abc__save_issue'), 'the main session (no agent_type) · save_issue')
+  expectAllow(mcp('mcp__abc__save_issue', 'general-purpose'), 'a generic subagent · save_issue')
+  expectAllow(mcp('mcp__abc__save_issue', 'api-engineer'), 'a repo agent · save_issue')
+  expectAllow(mcp('mcp__abc__save_issue', 'grimoire:migration-engineer'), 'migration-engineer (an implementer) · save_issue')
+  expectAllow(mcp('mcp__abc__create_comment', 'test-engineer'), 'test-engineer (an implementer) · create_comment')
+  expectAllow(mcp('save_issue', 'tracker-scout'), 'a non-MCP tool named like a write passes through')
+  expectAllow(guard({ tool_name: 'Read', tool_input: { file_path: path.join(PROJ, 'README.md') }, agent_id: 'm2', agent_type: 'tracker-scout' }), 'a scout · Read, unchanged')
+  expectAllow(guard({ tool_name: 'Bash', tool_input: { command: 'git log main' }, agent_id: 'm3', agent_type: 'tracker-scout' }), 'a scout · Bash, unchanged')
+  expectDeny(guard({ tool_name: 'Bash', tool_input: { command: 'git push origin main' }, agent_id: 'm4', agent_type: 'tracker-scout' }), 'a scout · a protected push, still denied by the Bash rule')
+  writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'api', agent: 'api-engineer' }] }))
+  expectAllow(mcp('mcp__abc__save_issue', 'api-engineer', e), 'a repo agent the config names (memory-denied, never MCP-denied) · save_issue')
+  expectReadOnly(mcp('mcp__abc__save_issue', 'tracker-scout', e), 'tracker-scout', 'mcp__abc__save_issue', 'tracker-scout · save_issue under a project config')
+  writeFileSync(path.join(EMPTY, 'grimoire.config.json'), JSON.stringify({ guard: { enabled: false } }))
+  expectAllow(mcp('mcp__abc__save_issue', 'tracker-scout', e), 'guard.enabled: false allows the scout\'s write')
+  expectAllow(mcp('mcp__abc__save_issue', 'grimoire:tracker-scout', { env: { GRIMOIRE_GUARD_ALLOW: '1' } }), 'GRIMOIRE_GUARD_ALLOW=1 allows the scout\'s write')
+  expectAllow(guard('{"tool_name":"mcp__abc__save_issue","agent_type":"tracker-scout"'), 'malformed stdin on an MCP call')
+  expectAllow(guard({ tool_name: 'mcp__abc__save_issue', agent_type: 42 }), 'a non-string agent_type')
+  expectReadOnly(guard({ tool_name: 'mcp__abc__save_issue', tool_input: 'nope', agent_type: 'tracker-scout', cwd: 7 }), 'tracker-scout', 'mcp__abc__save_issue', 'a non-object tool_input and a non-string cwd: the tool name is still judged')
+  expectAllow(mcp('mcp__save_issue', 'tracker-scout'), 'no tool part after the server id')
+  expectAllow(mcp('mcp__abc__', 'tracker-scout'), 'an empty tool part')
+  // The rule only runs on calls hooks.json routes to the guard (Claude Code matchers are regexes).
+  const pre = JSON.parse(readFileSync(path.join(HERE, '..', 'hooks.json'), 'utf8')).hooks.PreToolUse.find((h) => /guard\.sh/.test(JSON.stringify(h.hooks)))
+  const routes = (t) => new RegExp(`^(?:${pre.matcher})$`).test(t)
+  ok(['mcp__abc__save_issue', 'mcp__055f8362-1877-48fa__save_issue', 'Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'].every(routes) && !routes('Read') && !routes('Glob'),
+    `hooks.json routes mcp__* calls and the write tools to the guard, not Read (matcher: ${pre.matcher})`)
 
   console.log('\n── robustness')
   expectAllow(guard('not json at all'), 'malformed stdin')
