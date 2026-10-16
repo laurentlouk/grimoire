@@ -187,6 +187,7 @@ try {
   expectReadOnly(mcp('mcp__x__send_message', 'reviewer'), 'reviewer', 'mcp__x__send_message', 'reviewer · send_message')
   expectReadOnly(mcp('mcp__055f8362-1877-48fa__save_issue', 'tracker-scout'), 'tracker-scout', 'mcp__055f8362-1877-48fa__save_issue', 'a server id with dashes and digits')
   expectReadOnly(mcp('mcp__claude_ai_Linear__update_issue', 'grimoire:tracker-scout'), 'tracker-scout', 'mcp__claude_ai_Linear__update_issue', 'a server id with underscores')
+  expectReadOnly(mcp('mcp__hub__github__create_issue', 'tracker-scout'), 'tracker-scout', 'mcp__hub__github__create_issue', 'a server id holding `__` (an aggregator): the tool follows the last `__`')
   expectReadOnly(mcp('mcp__abc__Delete_Comment', 'design-scout'), 'design-scout', 'mcp__abc__Delete_Comment', 'the verb in another letter case')
   for (const [agent, tool] of [['codebase-scout', 'reply_to_thread'], ['reference-scout', 'forward'], ['contract-checker', 'merge_diff'], ['security-scout', 'set_status'], ['perf-scout', 'add_label'], ['tracker-scout', 'remove_label'], ['tracker-scout', 'mark_notification']]) {
     expectReadOnly(mcp(`mcp__srv__${tool}`, agent), agent, `mcp__srv__${tool}`, `${agent} · ${tool}`)

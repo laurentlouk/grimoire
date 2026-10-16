@@ -11,6 +11,8 @@
 //   NotebookEdit            .claude/hooks/ and guard.protectedPaths (override: GRIMOIRE_GUARD_ALLOW=1)
 //                         · <memoryDir>/ when a named roster agent (not crystallize) writes it
 //                         · the same paths in every linked git worktree of the project's repository
+//   mcp__<server>__<tool> · a write verb leading <tool> when a read-only agent (a scout, the reviewer)
+//                           calls it (override: GRIMOIRE_GUARD_ALLOW=1)
 //
 // Deny = exit 2 with one line on stderr (Claude Code shows it to the agent and skips the call).
 // Everything else, including malformed input or config and any internal error, exits 0
@@ -24,13 +26,19 @@ const DEFAULT_BRANCHES = ['main', 'master', 'trunk', 'develop', 'release/*']
 const PROTECTED_FILES = ['.claude/settings.json', '.claude/settings.local.json']
 // `.claude/hooks/`, not a root `hooks/`: many app layouts keep source code in a root `hooks/`.
 const PROTECTED_DIRS = ['.claude/hooks/']
-// Agents that must never write memory: the plugin's scouts and reviewer, plus every repo's
+// The plugin's read-only agents: its scouts and the reviewer. They may not call an MCP tool whose
+// name leads with a write verb; the main session applies writes. The implementers (the specialists,
+// every repo's owning agent) write by design, so they are not here.
+const READ_ONLY_AGENTS = [
+  'reviewer', 'codebase-scout', 'reference-scout', 'contract-checker', 'tracker-scout', 'design-scout',
+  'security-scout', 'perf-scout',
+]
+// Agents that must never write memory: the read-only agents and the specialists, plus every repo's
 // owning agent from grimoire.config.json. crystallize runs as a generic subagent (or in the
 // main session), so an allow-list by agent_type is impossible; a deny-list of known names is.
-const ROSTER_AGENTS = [
-  'reviewer', 'codebase-scout', 'reference-scout', 'contract-checker', 'tracker-scout', 'design-scout',
-  'security-scout', 'perf-scout', 'migration-engineer', 'test-engineer',
-]
+const ROSTER_AGENTS = [...READ_ONLY_AGENTS, 'migration-engineer', 'test-engineer']
+// Connector tool names are opaque per account; this is a heuristic over the usual write verbs.
+const WRITE_VERB = /^(?:save_|create_|update_|delete_|send_|reply|forward|merge_|set_|add_|remove_|mark_)/i
 const FOLD = process.platform === 'darwin' || process.platform === 'win32'
 
 class Deny extends Error {}
@@ -378,7 +386,26 @@ function checkRules(relPath, ctx, input) {
   }
 }
 
+// ─────────────────────────────── mcp rule ───────────────────────────────
+// `mcp__<server>__<tool>`. A server id can hold `_`, `-` and digits (`plugin_grimoire_graph`,
+// `055f8362-1877-…`), so the tool is what follows the LAST `__`.
+function checkMcp(name, input) {
+  const agentType = typeof input.agent_type === 'string' ? input.agent_type.replace(/^.*:/, '') : ''
+  if (!agentType || !READ_ONLY_AGENTS.includes(agentType) || process.env.GRIMOIRE_GUARD_ALLOW === '1') return
+  const rest = name.slice('mcp__'.length), cut = rest.lastIndexOf('__')
+  if (cut < 0) return
+  const verb = WRITE_VERB.exec(rest.slice(cut + 2))
+  if (verb) deny(`agent '${agentType}' may not call ${name}: the plugin's scouts and reviewer are read-only and '${verb[0]}' names a write; report the proposed write in your result (the main session applies writes), or set GRIMOIRE_GUARD_ALLOW=1.`)
+}
+
 // ─────────────────────────────── main ───────────────────────────────
+function verdict(check) {
+  try { check() } catch (e) {
+    if (e instanceof Deny) { process.stderr.write(e.message.replace(/\s*\n\s*/g, ' ') + '\n'); return 2 }
+  }
+  return 0
+}
+
 function main() {
   let input
   try { input = JSON.parse(readFileSync(0, 'utf8')) } catch { return 0 }
@@ -388,22 +415,20 @@ function main() {
   const projectDir = envDir && path.isAbsolute(envDir) ? envDir : cwd
   const cfg = loadConfig(projectDir)
   if (!cfg.enabled) return 0
+  // Every MCP call now reaches the guard: judge it by name alone, before any git call.
+  if (typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__')) return verdict(() => checkMcp(input.tool_name, input))
   const tmpRoots = [tmpdir(), '/tmp', '/private/tmp', '/var/tmp', '/private/var/folders', process.env.TMPDIR, input.scratchpad_dir]
     .filter((p) => typeof p === 'string' && path.isAbsolute(p))
   const commonDir = git(projectDir, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
   const ctx = { projectDir, commonDir, isProtected: branchMatcher(cfg.branches), protectedPaths: cfg.protectedPaths, memoryDir: cfg.memoryDir, memoryDenied: cfg.memoryDenied, tmpRoots }
   const ti = input.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {}
-  try {
+  return verdict(() => {
     switch (input.tool_name) {
       case 'Bash': checkBash(ti.command, cwd, ctx); break
       case 'Write': case 'Edit': case 'MultiEdit': checkWrite(ti.file_path, cwd, ctx, input); break
       case 'NotebookEdit': checkWrite(ti.notebook_path || ti.file_path, cwd, ctx, input); break
     }
-  } catch (e) {
-    if (e instanceof Deny) { process.stderr.write(e.message.replace(/\s*\n\s*/g, ' ') + '\n'); return 2 }
-    return 0
-  }
-  return 0
+  })
 }
 
 let code = 0
