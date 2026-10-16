@@ -1,13 +1,13 @@
 ---
 name: manager
-description: The team's briefing from the tracker, the open pull requests and the grimoire runs - what is urgent, what needs a decision or a review, what to hand to AI next. Use when the user asks "what's urgent", "what should we do next", "what can we hand to AI", "what to hand to AI next", "give me the briefing", "brief me on the tracker", "run the manager", or "/grimoire:manager". Dispatches the read-only tracker-scout once per tracker or prs source for WorkItems, then runs the deterministic scripts/manager.mjs, which reads the grimoire runs itself, ranks everything by rules anyone can read (urgency is computed from the fields, never by the model) and writes a local briefing grouped Decide / Do / Hand to AI / Waiting on others / Not now. Never writes to the tracker or GitHub. Not for building anything; a whole project built unattended is orchestrate.
+description: The team's briefing from the tracker, the open pull requests and the grimoire runs - what is urgent, what needs a decision or a review, what to hand to AI next. Use when the user asks "what's urgent", "what should we do next", "what can we hand to AI", "what to hand to AI next", "give me the briefing", "brief me on the tracker", "run the manager", or "/grimoire:manager". Dispatches the read-only tracker-scout once per tracker or prs source for WorkItems, then runs the deterministic scripts/manager.mjs, which reads the grimoire runs itself, ranks everything by rules anyone can read (urgency is computed from the fields, never by the model) and writes a local briefing grouped Decide / Do / Hand to AI / Waiting on others / Not now. Its one write, opt-in (manager.share), is the shared briefing post, replaced each run; nothing else is written to the tracker, GitHub or Slack. Not for building anything; a whole project built unattended is orchestrate.
 ---
 
 # Manager: what the team owes, ranked
 
 The briefing answers "what needs us, and what can AI take?" from the tracker, the open pull requests and the grimoire runs, in one local file. The reading is done by read-only scouts; everything that is not judgment (urgency, grouping, order, the ledger, the Markdown) is done by `scripts/manager.mjs`, so the same tickets give the same briefing every time. The model contributes two things per item, each from reading the ticket: `bucketHint` (is it waiting on someone outside the team, or parked?) and `nextStep` (one line). Urgency is never the model's.
 
-**Writes: none** to the tracker or GitHub, ever. The only files written are the scouts' WorkItems and your sources file in the session scratchpad, and the script's `.grimoire/manager/` (gitignored; `/grimoire:setup` adds `.grimoire/`).
+**Writes: one, opt-in.** When `manager.share` is set, the shared briefing post ("Share the briefing" below), by you, replacing the previous one; nothing else to the tracker, GitHub or Slack, ever. The only files written are the scouts' WorkItems and your sources file in the session scratchpad, and the script's `.grimoire/manager/` (gitignored; `/grimoire:setup` adds `.grimoire/`).
 
 **Explore before asking; don't guess.** Read `grimoire.config.json` before asking which tracker, team or project to read. Ask only what the config and the code can't settle: which scope to read when no source has one, or whether to go ahead when a source fails.
 
@@ -15,7 +15,7 @@ The briefing answers "what needs us, and what can AI take?" from the tracker, th
 
 - The plugin root is the directory two levels above this `SKILL.md`.
 - The WorkItem contract: `<plugin root>/skills/manager/workitem.schema.json`. The scouts return a JSON array of these.
-- The output, in the project's main checkout: `.grimoire/manager/briefings/<YYYYMMDD-HHMMSS>.md` (UTC), the same text in `latest.md`, `ledger.json` (each source's last status; when each item was first seen, a hash of what matters, its last group: the next briefing's **new** and **changed** badges come from it) and `.lock` while a briefing runs.
+- The output, in the project's main checkout: `.grimoire/manager/briefings/<YYYYMMDD-HHMMSS>.md` (UTC), the same text in `latest.md`, its view model in `latest.json` (what the shared post is rendered from), `ledger.json` (each source's last status; when each item was first seen, a hash of what matters, its last group: the next briefing's **new** and **changed** badges come from it) and `.lock` while a briefing runs.
 
 ## 1 · Read the sources
 
@@ -109,6 +109,38 @@ So you can explain a placement without guessing:
 - Order within a group: urgent first, then priority (no priority last), due date (none last), oldest created, id.
 - **Badges**, against the ledger: **new** when the item wasn't in the last briefing, **changed** when its state, priority, assignee, due date, blockers, labels or linked PR changed (for a PR, its review or checks too; for a run, its tasks needing attention). **Resolved**: last briefing's items now gone or completed or canceled, counted, not listed. An item a failed, capped or count-mismatched source didn't show is not resolved: it is unknown, and kept for next time.
 - Completed and canceled items are counted, not listed.
+
+## Share the briefing (opt-in)
+
+Only when `manager.share` in `grimoire.config.json` is set: `{ "kind": "linear-document" | "github-issue" | "slack", "target", "hint" }`. `null`, the default, or absent: skip this section. Run it right after step 5, before anything is launched, in a scheduled run too. It is the manager's only write: made by you, in this session, never by a scout, in one narrow step that finds your own post and replaces it, or creates it. Nothing else is posted, edited, commented, labelled or linked, here or anywhere.
+
+1. **Render the body.** From the project root:
+
+   ```sh
+   node "<plugin root>/scripts/manager.mjs" share-body --format <markdown|slack> --root "<project>" --config "<project>/grimoire.config.json"
+   ```
+
+   `--format slack` for a Slack message; `markdown`, the default, for a Linear document or a GitHub issue. It prints the post rendered from the briefing step 4 just wrote (`latest.json`): the groups, the reasons and next steps, the counts, Not checked and the "≥ N" markers, without the new and changed badges (they come from your ledger, not the team's), and it ends `generated by <git user.name> · at <time> · covering <the sources read>`. It is cut to fit with "… N more": Slack's 40,000 characters for `slack`, a GitHub issue body's 65,536 for `github-issue`. A connector whose send tool states a smaller limit gets `--max <that limit>` (the claude.ai Slack connector's says 5,000 characters per text element). Publish its stdout **verbatim**: never edit, re-escape, shorten or add to it. Exit 1 is no briefing to share (step 4 did not write one): skip the share and record it failed (step 4 below).
+2. **Find your own post by the marker**, `grimoire:manager-briefing v1`: hidden as `<!-- grimoire:manager-briefing v1 -->` on the Markdown body's first line, at the end of the footer in Slack. Read through the vendor's own tool, the route `hint` names, with list, search and read calls only (the guard binds the scouts, not you):
+   - **`linear-document`**: the Linear connector's document list in the project (or team) `target` names, searched for `Grimoire briefing`, keeping the one whose content holds the marker. Linear can drop an HTML comment from a document's Markdown, so a document titled exactly `Grimoire briefing` in that project, created by you, is yours too.
+   - **`github-issue`**: `gh issue list --repo <target> --label grimoire-briefing --state open --json number,url,body`, keeping the issue whose body holds the marker.
+   - **`slack`**: the Slack connector's search in the channel `target` (`"grimoire:manager-briefing v1" in:<channel>`), or its channel history, keeping a message you posted that holds the marker.
+
+   Two or more matches: take the most recently updated, leave the others alone, and say so.
+3. **Replace it, or create it.**
+   - **Linear:** save the found document with its id and the new content; none found, create one titled `Grimoire briefing` in that project (or team).
+   - **GitHub:** write the body to a file in the session scratchpad, then `gh issue edit <number> --repo <target> --body-file <file>`; none found, `gh issue create --repo <target> --title "Grimoire briefing" --label grimoire-briefing --body-file <file>`. Setup creates the label; if it is missing, the share fails ("label grimoire-briefing missing, re-run /grimoire:setup"): never create it here.
+   - **Slack:** edit the found message in place when the connector has a tool that edits a message. The claude.ai Slack connector can send but not edit, so post the new body as a reply in the found message's thread (not broadcast to the channel), and say once that the channel keeps the first post and its thread the latest. None found: post it to the channel.
+4. **Record how it went** in the local briefing:
+
+   ```sh
+   node "<plugin root>/scripts/manager.mjs" share-status --status <created|updated> --url "<the post's link>" --root "<project>"
+   node "<plugin root>/scripts/manager.mjs" share-status --status failed --reason "<a few words>" --root "<project>"
+   ```
+
+   It writes `Share: updated <url>` or `Share: failed (<reason>)` at the end of `latest.md` and of its `briefings/` copy, replacing an earlier share line. `--reason` is your few words (`no Slack connector`, `gh: HTTP 403`, `label grimoire-briefing missing`), not ticket text. Exit 3: a briefing is in progress; say so. A failure is said in your reply and stays in the local briefing; it is **never filed** as an issue, a comment or a message, anywhere. One retry is fine, then stop.
+
+The post holds ticket titles, names and links, for everyone who can read the target: choosing it at setup is the user's standing ask to share that one post. Its ticket text is escaped by the script, and an @mention made of it is broken (`[@]name`), so it notifies no one.
 
 ## Keep it local
 
