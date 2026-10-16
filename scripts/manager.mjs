@@ -39,8 +39,8 @@
 //                calendar days · not started (backlog, unstarted) and blocking at least
 //                manager.urgent.blocksAtLeast (2) open issues, an id the briefing did not read
 //                counting as open · started with no activity (the later of lastActivityAt and
-//                updatedAt) for at least manager.urgent.stalledDays (5) calendar days. Each rule is a small
-//                named function in URGENCY_RULES; each returns the human reason
+//                updatedAt) for at least manager.urgent.stalledDays (5) calendar days. Each rule
+//                is a small named function in URGENCY_RULES; each returns the human reason
 //                ("priority Urgent", "blocks 3 open issues", "no activity for 6 days") or null.
 //    priority    with no priority, a nativePriority label is mapped by manager.priorityLabels
 //                (case-insensitive; DEFAULT_PRIORITY_LABELS when the config has none), the same
@@ -73,8 +73,9 @@
 //
 //  The ledger (`schemaVersion` 1) keeps per source `lastRunAt`/`lastStatus` and per item
 //  (`<sourceId>:<id>`) `firstSeenAt`, `lastHash` (state, priority, assignee, due date,
-//  blockers, labels, PR; a PR's review and checks, a run's attention) and `lastBucket`. Against it each listed item is badged **new** (not
-//  in it) or **changed** (another hash), and the items gone since, or now completed or
+//  blockers, labels, PR; a PR's review and checks, a run's attention) and `lastBucket`.
+//  Against it each listed item is badged **new** (not in it) or **changed** (another hash),
+//  and the items gone since, or now completed or
 //  canceled, are counted as resolved, not listed. An item a source did not show this run
 //  (failed, capped, not read) is neither resolved nor dropped from the ledger. No ledger is
 //  the first briefing: nothing is badged. A corrupt or other-version ledger starts over the
@@ -570,7 +571,7 @@ function badgeOf(seen, prev, hash) {
 function overallNext(c) {
   const parts = []
   if (c.decide) parts.push(`Decide ${plural(c.decide, 'item')} first: triage, urgent with no owner, or a review requested.`)
-  if (c.do) parts.push(`Do ${plural(c.do, 'item')}: urgent work, failing CI, approved PRs, runs that stopped.`)
+  if (c.do) parts.push(`Do ${plural(c.do, 'item')}.`)
   if (c.ai) parts.push(`${plural(c.ai, 'issue')} ready to hand to AI.`)
   if (!parts.length) parts.push(`Nothing needs you right now${c.waiting ? `; ${c.waiting} waiting on others` : ''}.`)
   return parts.join(' ')
@@ -637,8 +638,9 @@ export function view(items, config, ledger, now, sources) {
 
 // The ledger after this briefing: this run's sources and listed items, earlier sources kept.
 // An earlier item this run did not see because its source failed, was capped, did not match its
-// count or was not read keeps its entry, so it is neither resolved now nor new when it comes back. items: the
-// WorkItems the view was built from (an earlier item read closed is dropped, not kept).
+// count or was not read keeps its entry, so it is neither resolved now nor new when it comes
+// back. items: the WorkItems the view was built from (an earlier item read closed is dropped,
+// not kept).
 export function nextLedger(v, ledger, items = []) {
   const usable = usableLedger(ledger)
   const sources = Object.create(null) // a source id is the scout's text: "__proto__" stays a key
