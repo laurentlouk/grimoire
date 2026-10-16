@@ -11,19 +11,29 @@
 //    • hand-written keys the proposal does not know survive a --write, in their order
 //    • repos[] is matched by name and specialists[] by agent: a hand-edited repos[].gate is kept
 //      unless approved, the existing entries keep their order, a new repo is appended whole
-//    • invalid JSON in either file: exit 1, one line naming the file, nothing written
+//    • invalid JSON in either file: exit 1, one line naming the file with the line and column
+//      only (Node's own message quotes the source, secrets included), nothing written
 //    • a missing current file: everything is ADDED, and --write creates it
 //    • idempotence: the merged output as current, with the same proposal, gives no ADDED and
 //      no CHANGED; a declined change is still a difference, so it is listed again
-//    • secret-looking values (token|secret|password|apikey|api_key keys) are «redacted» in the
-//      printed diff, text and --json, and intact in the written file; numbers stay visible;
-//      an empty proposal lists the whole current file as KEPT, redacted (how setup reads it)
+//    • secrets never reach the output, text or --json: every string under `env`, every string
+//      under a key named like a token, key, password, credential or auth, and in any string a
+//      bearer token, URL credentials, `token=`/`api-key:`-style pairs and known token formats
+//      (sk_, ghp_, github_pat_, xoxb-, AKIA…) print as «redacted», the rest of the string kept;
+//      the written file keeps the real values; numbers stay visible; an empty proposal lists the
+//      whole current file as KEPT, redacted (how setup reads it)
 //    • .claude/settings.json: permissions lists are sets (user entries kept, proposed ones
-//      appended once), hooks are matched by matcher and their commands merged as a set
-//    • an --approve that names no CHANGED key warns on stderr and is ignored
+//      appended once), hooks are matched by matcher and their commands merged as a set keyed by
+//      type and command, so a user's entry with extra fields is kept, not duplicated
+//    • an --approve that names no CHANGED key warns on stderr and is ignored; the printed
+//      --approve hint is shell-quoted and round-trips, a `'` in the key included
 //    • --write with nothing to change leaves the file's bytes alone
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+//    • paths: the header and the wrote line name the absolute path, and a symlink's target; a
+//      live or dangling symlink is written through, never replaced; the temp file keeps the
+//      file's mode; a write failure is one line; an added repo on a kept repo's path is warned
+//    • the script runs when started through a symlinked directory
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, realpathSync, symlinkSync, lstatSync, statSync, chmodSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { isDeepStrictEqual } from 'node:util'
@@ -38,7 +48,9 @@ const same = (a, b, m) => {
   if (!c) console.log(`      got:  ${JSON.stringify(a)}\n      want: ${JSON.stringify(b)}`)
 }
 
-const ROOT = mkdtempSync(join(tmpdir(), 'grimoire-config-merge-'))
+// The real path: the CLI prints absolute paths resolved against its cwd, which the OS reports
+// without symlinks (macOS's tmpdir is under one).
+const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'grimoire-config-merge-')))
 const cli = (cwd, ...args) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf8' })
 const json = (r) => { try { return JSON.parse(r.stdout) } catch { return null } }
 const pretty = (v) => JSON.stringify(v, null, 2) + '\n'
@@ -117,15 +129,15 @@ try {
 
     const r = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json')
     ok(r.status === 0, `--json dry run exits 0 (got ${r.status}; stderr: ${r.stderr.trim()})`)
-    same(json(r), { current: 'grimoire.config.json', proposed: 'proposal.json', currentExists: true, ...DIFF, ignoredApprovals: [], written: null },
-      '--json lists every added, changed, kept and unchanged path, in file order, with full values')
+    same(json(r), { current: join(d, 'grimoire.config.json'), proposed: join(d, 'proposal.json'), currentExists: true, currentLinksTo: null, ...DIFF, ignoredApprovals: [], warnings: [], written: null },
+      '--json names both files by absolute path and lists every added, changed, kept and unchanged path, in file order, with full values')
     ok(readFileSync(join(d, 'grimoire.config.json'), 'utf8') === before, 'without --write the current file is byte-for-byte untouched')
     same(readdirSync(d).sort(), ['grimoire.config.json', 'proposal.json'], 'without --write no other file appears either')
 
     const t = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json')
     ok(t.status === 0, 'the text dry run exits 0')
     same(lines(t.stdout), [
-      'config-merge: grimoire.config.json ← proposal.json',
+      `config-merge: ${join(d, 'grimoire.config.json')} ← ${join(d, 'proposal.json')}`,
       '  ADDED    repos[infra]  ' + JSON.stringify(INFRA),
       '  ADDED    runsDir  "runs"',
       '  ADDED    telemetry  ' + JSON.stringify(TELEMETRY),
@@ -144,7 +156,7 @@ try {
     ok(w.status === 0, '--write with no --approve exits 0')
     ok(readFileSync(join(d, 'grimoire.config.json'), 'utf8') === pretty(mergedWith()),
       '--write with no --approve applies the added keys only: every changed key keeps its current value (exact JSON, 2-space, trailing newline)')
-    ok(/^wrote grimoire\.config\.json$/m.test(w.stdout), '--write says which file it wrote')
+    ok(lines(w.stdout).includes(`wrote ${join(d, 'grimoire.config.json')}`), '--write says which file it wrote, by absolute path')
     same(readdirSync(d).sort(), ['grimoire.config.json', 'proposal.json'], 'the atomic write leaves no temp file behind')
   }
 
@@ -159,7 +171,7 @@ try {
       'the two approved keys take the proposed value; the unapproved repos[api].gate keeps the hand-edited one (exact JSON)')
     const j = json(r)
     same(j && j.changed.map((c) => [c.path, c.approved]), [['maxOutputTokens', true], ['guard.protectedBranches', true], ['repos[api].gate', false]], '--json marks which changed keys were approved')
-    ok(j && j.written === 'grimoire.config.json', '--json names the written file')
+    ok(j && j.written === join(d, 'grimoire.config.json'), '--json names the written file')
     ok(r.stderr === '', 'approving changed keys prints no warning')
   }
 
@@ -211,15 +223,14 @@ try {
   }
 
   // ══════ 4 · invalid JSON ══════
-  section('4 · invalid JSON in either file: exit 1, one line naming the file, nothing written')
+  section('4 · invalid JSON in either file: exit 1, one line naming the file, its line and column, nothing written')
   {
     const d = project()
     writeFileSync(join(d, 'grimoire.config.json'), '{ "repos": [ ,] }\n')
     writeFileSync(join(d, 'proposal.json'), pretty(PROPOSED))
     const r = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--write', '--out', 'merged.json')
     ok(r.status === 1, `an invalid current file exits 1 (got ${r.status})`)
-    const err = r.stderr.trim().split('\n')
-    ok(err.length === 1 && /^config-merge: grimoire\.config\.json: invalid JSON \(.+\)$/.test(err[0]), `one stderr line naming the current file (got ${JSON.stringify(r.stderr)})`)
+    ok(r.stderr === `config-merge: ${join(d, 'grimoire.config.json')}: invalid JSON at line 1, column 14\n`, `one stderr line: the file, the line and the column (got ${JSON.stringify(r.stderr)})`)
     ok(r.stdout === '', 'nothing on stdout')
     ok(readFileSync(join(d, 'grimoire.config.json'), 'utf8') === '{ "repos": [ ,] }\n' && !existsSync(join(d, 'merged.json')), 'nothing written: the bad file as it was, no --out file')
 
@@ -227,20 +238,20 @@ try {
     writeFileSync(join(e, 'grimoire.config.json'), pretty(CURRENT))
     writeFileSync(join(e, 'proposal.json'), '{"baseBranch": "origin/main",}')
     const p = cli(e, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--write')
-    ok(p.status === 1 && /^config-merge: proposal\.json: invalid JSON \(.+\)\n$/.test(p.stderr), `an invalid proposal exits 1 with one line naming it (got ${JSON.stringify(p.stderr)})`)
+    ok(p.status === 1 && p.stderr === `config-merge: ${join(e, 'proposal.json')}: invalid JSON at line 1, column 30\n`, `an invalid proposal exits 1 with one line naming it (got ${JSON.stringify(p.stderr)})`)
     ok(readFileSync(join(e, 'grimoire.config.json'), 'utf8') === pretty(CURRENT), 'the current file is untouched')
 
     const f = project()
     writeFileSync(join(f, 'grimoire.config.json'), '[1, 2]\n')
     writeFileSync(join(f, 'proposal.json'), pretty(PROPOSED))
     const q = cli(f, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--write')
-    ok(q.status === 1 && /^config-merge: grimoire\.config\.json: the top level must be a JSON object\n$/.test(q.stderr), `a top level that is not an object is refused (got ${JSON.stringify(q.stderr)})`)
+    ok(q.status === 1 && q.stderr === `config-merge: ${join(f, 'grimoire.config.json')}: the top level must be a JSON object\n`, `a top level that is not an object is refused (got ${JSON.stringify(q.stderr)})`)
     ok(readFileSync(join(f, 'grimoire.config.json'), 'utf8') === '[1, 2]\n', 'and nothing is written')
 
     const g = project()
     writeFileSync(join(g, 'grimoire.config.json'), pretty(CURRENT))
     const m = cli(g, '--current', 'grimoire.config.json', '--proposed', 'nope.json', '--write')
-    ok(m.status === 1 && /^config-merge: nope\.json: not found\n$/.test(m.stderr), `a missing proposal exits 1 naming it (got ${JSON.stringify(m.stderr)})`)
+    ok(m.status === 1 && m.stderr === `config-merge: ${join(g, 'nope.json')}: not found\n`, `a missing proposal exits 1 naming it (got ${JSON.stringify(m.stderr)})`)
     const u = cli(g, '--current', 'grimoire.config.json')
     ok(u.status === 1 && /--proposed/.test(u.stderr), 'a missing --proposed is a usage error')
   }
@@ -253,13 +264,13 @@ try {
     const r = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json')
     ok(r.status === 0, 'exits 0')
     same(json(r), {
-      current: 'grimoire.config.json', proposed: 'proposal.json', currentExists: false,
+      current: join(d, 'grimoire.config.json'), proposed: join(d, 'proposal.json'), currentExists: false, currentLinksTo: null,
       added: Object.entries(PROPOSED).map(([path, value]) => ({ path, value })),
-      changed: [], kept: [], unchanged: [], ignoredApprovals: [], written: null,
+      changed: [], kept: [], unchanged: [], ignoredApprovals: [], warnings: [], written: null,
     }, 'every top-level key of the proposal is ADDED, nothing else is listed')
     ok(!existsSync(join(d, 'grimoire.config.json')), 'the dry run creates nothing')
     const t = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json')
-    ok(lines(t.stdout)[0] === 'config-merge: grimoire.config.json ← proposal.json (no current file: everything is added)', 'the text header says there is no current file')
+    ok(lines(t.stdout)[0] === `config-merge: ${join(d, 'grimoire.config.json')} ← ${join(d, 'proposal.json')} (no current file: everything is added)`, 'the text header says there is no current file')
 
     const w = cli(d, '--current', '.claude/settings.json', '--proposed', 'proposal.json', '--write')
     ok(w.status === 0 && readFileSync(join(d, '.claude', 'settings.json'), 'utf8') === pretty(PROPOSED), '--write creates the file, and its missing parent directory, holding the proposal')
@@ -278,7 +289,7 @@ try {
     same(j && [j.added, j.changed], [[], []], 'the second run lists nothing to add and nothing to change')
     same(j && j.kept.map((k) => k.path), ['myTeamNote', 'repos[api].timeoutMin'], 'the hand-written keys are still KEPT')
     const w = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--write')
-    ok(w.status === 0 && /^nothing to write: grimoire\.config\.json already holds the merged result$/m.test(w.stdout), 'a --write with nothing to change says so')
+    ok(w.status === 0 && lines(w.stdout).includes(`nothing to write: ${join(d, 'grimoire.config.json')} already holds the merged result`), 'a --write with nothing to change says so')
     ok(readFileSync(join(d, 'grimoire.config.json'), 'utf8') === after1, 'and leaves the file as it was')
 
     const e = project()
@@ -315,8 +326,8 @@ try {
       '  ADDED    secrets  {"refresh":"«redacted»","ttl":3600}',
       "  CHANGED  maxOutputTokens  4000000 → 3000000  (kept: needs --approve 'maxOutputTokens')",
       '  CHANGED  slack.botToken  "«redacted»" → "«redacted»"  (approved)',
-      '  KEPT     env  {"GITHUB_TOKEN":"«redacted»","LOG_LEVEL":"debug"}  (only in the current file)',
-    ], 'secret strings are redacted at any depth, under a secret-looking key; numbers (maxOutputTokens, ttl) and other strings stay visible')
+      '  KEPT     env  {"GITHUB_TOKEN":"«redacted»","LOG_LEVEL":"«redacted»"}  (only in the current file)',
+    ], 'secret strings are redacted at any depth, under a secret-looking key, and every env value whatever its name; numbers (maxOutputTokens, ttl) stay visible')
     const written = readFileSync(join(d, 'grimoire.config.json'), 'utf8')
     ok(written === pretty({ maxOutputTokens: 4000000, env: cur.env, slack: { botToken: 'xoxb-new-secret' }, apiKey: prop.apiKey, servers: prop.servers, secrets: prop.secrets }),
       'the written file carries every value intact, the approved secret change applied (exact JSON)')
@@ -334,7 +345,7 @@ try {
       added: [], changed: [],
       kept: [
         { path: 'maxOutputTokens', value: 4000000 },
-        { path: 'env', value: { GITHUB_TOKEN: '«redacted»', LOG_LEVEL: 'debug' } },
+        { path: 'env', value: { GITHUB_TOKEN: '«redacted»', LOG_LEVEL: '«redacted»' } },
         { path: 'slack', value: { botToken: '«redacted»' } },
       ],
       written: null,
@@ -439,6 +450,192 @@ try {
     const plan = mod.planMerge(CURRENT, PROPOSED, ['repos[api].gate'])
     same(plan.merged, mergedWith({ gate: PROPOSED.repos[0].gate }), 'planMerge returns the merged object with only the approved change applied')
     same(CURRENT.repos[1].gate, { run: 'make e2e-test E2E_LOCK_WAIT=1800' }, 'and does not mutate its inputs')
+  }
+
+  // ══════ 12 · secrets: env, keys, and secrets inside any string ══════
+  section('12 · secrets never reach the output: every env value, secret-looking keys, and secrets inside any string')
+  {
+    const d = project()
+    const SECRETS = ['sk_live_STRIPE0000secret', 'github_pat_11ABCDEFG0123456789', 'hunter2db', 'otel-secret-token-42', 'sk-live-123abcdef', 'xoxb-1234567890-abcdef',
+      'xak-plain-value-777', 'plain-pass-888', 'pem-body-plain-999', 'regpass999', 'AKIAABCDEFGHIJKLMNOP', 'sk_live_STRIPE1111proposed', 'zzz-proposed-key-999', 'tok-proposed-555', 'newpass000']
+    const CURL = 'Bash(curl -H "Authorization: Bearer sk-live-123abcdef" https://api.example.com)'
+    const NOTIFY = { type: 'command', command: 'SLACK_TOKEN=xoxb-1234567890-abcdef ./notify.sh' }
+    const REPORT = { type: 'command', command: './report.sh --token=tok-proposed-555 --verbose' }
+    const GH = 'Bash(gh api -H "x-api-key: zzz-proposed-key-999" /user)'
+    const cur = {
+      env: { STRIPE_KEY: 'sk_live_STRIPE0000secret', GITHUB_PAT: 'github_pat_11ABCDEFG0123456789', DATABASE_URL: 'postgres://app:hunter2db@db.internal:5432/app', OTEL_EXPORTER_OTLP_HEADERS: 'Authorization=Bearer otel-secret-token-42' },
+      permissions: { allow: [CURL, 'Bash(npm test:*)'] },
+      hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [NOTIFY] }] },
+      mcpHeaders: { 'x-api-key': 'xak-plain-value-777' },
+      credentials: { pass: 'plain-pass-888' },
+      PRIVATE_KEY: 'pem-body-plain-999',
+      registry: 'https://deploy:regpass999@npm.example.com/',
+      awsCmd: 'aws s3 ls --profile ci AKIAABCDEFGHIJKLMNOP',
+    }
+    const prop = {
+      env: { STRIPE_KEY: 'sk_live_STRIPE1111proposed' },
+      permissions: { allow: [GH] },
+      hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [REPORT] }] },
+      registry: 'https://deploy:newpass000@npm.example.com/',
+    }
+    writeFileSync(join(d, 'settings.json'), pretty(cur))
+    writeFileSync(join(d, 'proposal.json'), pretty(prop))
+    const t = cli(d, '--current', 'settings.json', '--proposed', 'proposal.json')
+    ok(t.status === 0, `exits 0 (stderr: ${t.stderr.trim()})`)
+    const leaks = (r) => SECRETS.filter((s) => r.stdout.includes(s) || r.stderr.includes(s))
+    same(leaks(t), [], 'no secret appears in the text output')
+    const kept = '  (only in the current file)'
+    same(lines(t.stdout).filter((l) => l.startsWith('  ')), [
+      '  ADDED    permissions.allow[]  "Bash(gh api -H \\"x-api-key: «redacted»\\" /user)"',
+      '  ADDED    hooks.PostToolUse[Bash].hooks[]  {"type":"command","command":"./report.sh --token=«redacted» --verbose"}',
+      "  CHANGED  env.STRIPE_KEY  \"«redacted»\" → \"«redacted»\"  (kept: needs --approve 'env.STRIPE_KEY')",
+      "  CHANGED  registry  \"https://«redacted»@npm.example.com/\" → \"https://«redacted»@npm.example.com/\"  (kept: needs --approve 'registry')",
+      '  KEPT     env.GITHUB_PAT  "«redacted»"' + kept,
+      '  KEPT     env.DATABASE_URL  "«redacted»"' + kept,
+      '  KEPT     env.OTEL_EXPORTER_OTLP_HEADERS  "«redacted»"' + kept,
+      '  KEPT     permissions.allow[]  "Bash(curl -H \\"Authorization: «redacted»\\" https://api.example.com)"' + kept,
+      '  KEPT     permissions.allow[]  "Bash(npm test:*)"' + kept,
+      '  KEPT     hooks.PostToolUse[Bash].hooks[]  {"type":"command","command":"SLACK_TOKEN=«redacted» ./notify.sh"}' + kept,
+      '  KEPT     mcpHeaders  {"x-api-key":"«redacted»"}' + kept,
+      '  KEPT     credentials  {"pass":"«redacted»"}' + kept,
+      '  KEPT     PRIVATE_KEY  "«redacted»"' + kept,
+      '  KEPT     awsCmd  "aws s3 ls --profile ci «redacted»"' + kept,
+    ], 'each secret is masked and the rest of its string kept: a bearer header, URL credentials, token= and api-key: pairs, an AWS key; every env value and every value under a secret-looking key')
+
+    const j = cli(d, '--current', 'settings.json', '--proposed', 'proposal.json', '--json')
+    same(leaks(j), [], 'no secret appears in the --json output either')
+    same(json(j) && json(j).added.map((e) => e.value), ['Bash(gh api -H "x-api-key: «redacted»" /user)', { type: 'command', command: './report.sh --token=«redacted» --verbose' }], '--json masks the same way')
+
+    const w = cli(d, '--current', 'settings.json', '--proposed', 'proposal.json', '--approve', 'env.STRIPE_KEY', '--approve', 'registry', '--write')
+    same(leaks(w), [], 'a --write prints no secret')
+    ok(readFileSync(join(d, 'settings.json'), 'utf8') === pretty({
+      env: { ...cur.env, STRIPE_KEY: 'sk_live_STRIPE1111proposed' },
+      permissions: { allow: [CURL, 'Bash(npm test:*)', GH] },
+      hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [NOTIFY, REPORT] }] },
+      mcpHeaders: cur.mcpHeaders, credentials: cur.credentials, PRIVATE_KEY: cur.PRIVATE_KEY,
+      registry: 'https://deploy:newpass000@npm.example.com/',
+      awsCmd: cur.awsCmd,
+    }), 'the written file keeps every real value, the approved secret changes applied (exact JSON)')
+  }
+
+  // ══════ 13 · invalid JSON that holds a secret ══════
+  section("13 · an invalid file's error names the line and column, never the source around it")
+  {
+    const d = project()
+    writeFileSync(join(d, 'proposal.json'), '{}\n')
+    const cases = [
+      ['{"env": {"GITHUB_TOKEN": "ghp_abcdefghijklmnop123"}, "list": [ ,]}', 1, (raw) => raw.indexOf('[ ,') + 3], // Node quotes the whole source here
+      ['{"env": {"GITHUB_TOKEN": "ghp_abcdefghijklmnop123"} "x": 1}', 1, (raw) => raw.indexOf('"x"') + 1],
+      ['{\n  "env": {"T": "ghp_abcdefghijklmnop123"},\n  "x": tru\n}\n', 3, () => 8],
+    ]
+    for (const [raw, line, col] of cases) {
+      writeFileSync(join(d, 'settings.json'), raw)
+      const r = cli(d, '--current', 'settings.json', '--proposed', 'proposal.json')
+      ok(r.status === 1 && r.stderr === `config-merge: ${join(d, 'settings.json')}: invalid JSON at line ${line}, column ${col(raw)}\n` && !r.stderr.includes('ghp_'),
+        `line ${line}, column ${col(raw)}, and no token (got ${JSON.stringify(r.stderr)})`)
+    }
+  }
+
+  // ══════ 14 · started through a symlink ══════
+  section('14 · the script runs when started through a symlinked directory or a symlinked file')
+  {
+    const d = project()
+    writeFileSync(join(d, 'grimoire.config.json'), pretty(CURRENT))
+    writeFileSync(join(d, 'proposal.json'), pretty(PROPOSED))
+    symlinkSync(dirname(SCRIPT), join(ROOT, 'linked-scripts'))
+    symlinkSync(SCRIPT, join(ROOT, 'linked-config-merge.mjs'))
+    for (const via of [join(ROOT, 'linked-scripts', 'config-merge.mjs'), join(ROOT, 'linked-config-merge.mjs')]) {
+      const r = spawnSync(process.execPath, [via, '--current', 'grimoire.config.json', '--proposed', 'proposal.json'], { cwd: d, encoding: 'utf8' })
+      ok(r.status === 0 && lines(r.stdout)[0] === `config-merge: ${join(d, 'grimoire.config.json')} ← ${join(d, 'proposal.json')}` && lines(r.stdout).length === 12,
+        `${via.slice(ROOT.length + 1)}: prints the whole diff, not a silent no-op (got ${JSON.stringify(r.stdout.slice(0, 80))})`)
+    }
+  }
+
+  // ══════ 15 · symlinked files, modes, write failures ══════
+  section('15 · a symlinked file is named with its target and written through, live or dangling; the mode is kept; a failed write is one line')
+  {
+    const d = project()
+    mkdirSync(join(d, 'dotfiles'))
+    mkdirSync(join(d, '.claude'))
+    const link = join(d, '.claude', 'settings.json'), real = join(d, 'dotfiles', 'settings.json')
+    writeFileSync(real, pretty({ permissions: { deny: ['Read(./.env)'] } }))
+    chmodSync(real, 0o600)
+    symlinkSync('../dotfiles/settings.json', link)
+    writeFileSync(join(d, 'proposal.json'), pretty({ enabledPlugins: { 'grimoire@grimoire': true } }))
+    const t = cli(d, '--current', '.claude/settings.json', '--proposed', 'proposal.json')
+    ok(lines(t.stdout)[0] === `config-merge: ${link} (symlink → ${real}) ← ${join(d, 'proposal.json')}`, 'the header names the link and the file it points at')
+    ok(json(cli(d, '--current', '.claude/settings.json', '--proposed', 'proposal.json', '--json')).currentLinksTo === real, '--json gives the target as currentLinksTo')
+    const w = cli(d, '--current', '.claude/settings.json', '--proposed', 'proposal.json', '--write')
+    ok(w.status === 0 && lines(w.stdout).includes(`wrote ${link} (symlink → ${real})`), 'the wrote line names the link and its target')
+    ok(lstatSync(link).isSymbolicLink() && readFileSync(real, 'utf8') === pretty({ permissions: { deny: ['Read(./.env)'] }, enabledPlugins: { 'grimoire@grimoire': true } }),
+      'a live symlink stays a symlink, and the file it points at holds the merge')
+    ok((statSync(real).mode & 0o777) === 0o600, 'the written file keeps its mode (0600)')
+    same(readdirSync(join(d, 'dotfiles')), ['settings.json'], 'no temp file is left beside it')
+
+    const e = project()
+    mkdirSync(join(e, '.claude'))
+    const dangling = join(e, '.claude', 'settings.json'), target = join(e, 'dotfiles', 'settings.json')
+    symlinkSync('../dotfiles/settings.json', dangling)
+    writeFileSync(join(e, 'proposal.json'), pretty({ enabledPlugins: { 'grimoire@grimoire': true } }))
+    const td = cli(e, '--current', '.claude/settings.json', '--proposed', 'proposal.json')
+    ok(lines(td.stdout)[0] === `config-merge: ${dangling} (symlink → ${target}) ← ${join(e, 'proposal.json')} (no current file: everything is added)`, 'a dangling symlink is named with its target, as a missing file')
+    const wd = cli(e, '--current', '.claude/settings.json', '--proposed', 'proposal.json', '--write')
+    ok(wd.status === 0 && lstatSync(dangling).isSymbolicLink() && readFileSync(target, 'utf8') === pretty({ enabledPlugins: { 'grimoire@grimoire': true } }),
+      'a dangling symlink is written through too: the link stays, its target is created with the merge')
+
+    const f = project()
+    writeFileSync(join(f, 'grimoire.config.json'), pretty(CURRENT))
+    writeFileSync(join(f, 'proposal.json'), pretty(PROPOSED))
+    writeFileSync(join(f, 'blocker'), 'a file where a directory should be\n')
+    const out = join(f, 'blocker', 'sub', 'merged.json')
+    const x = cli(f, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--write', '--out', 'blocker/sub/merged.json')
+    ok(x.status === 1 && new RegExp(`^config-merge: ${out.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: cannot write \\((ENOTDIR|EEXIST)\\)\\n$`).test(x.stderr),
+      `a directory that cannot be made is one line naming the file, no stack trace (got ${JSON.stringify(x.stderr)})`)
+  }
+
+  // ══════ 16 · hook items keyed by type and command ══════
+  section("16 · a hook command the user registered with extra fields is KEPT, not added a second time")
+  {
+    const d = project()
+    const MINE = { type: 'command', command: 'rtk hook claude', timeout: 5 }
+    writeFileSync(join(d, 'settings.json'), pretty({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [MINE] }] } }))
+    writeFileSync(join(d, 'proposal.json'), pretty({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'rtk hook claude' }] }] } }))
+    const j = json(cli(d, '--current', 'settings.json', '--proposed', 'proposal.json', '--json'))
+    same(j && { added: j.added, changed: j.changed, kept: j.kept }, { added: [], changed: [], kept: [{ path: 'hooks.PreToolUse[Bash].hooks[]', value: MINE }] },
+      'the same type and command is one hook: the user\'s entry, timeout included, is KEPT and nothing is added')
+    const before = readFileSync(join(d, 'settings.json'), 'utf8')
+    cli(d, '--current', 'settings.json', '--proposed', 'proposal.json', '--write')
+    ok(readFileSync(join(d, 'settings.json'), 'utf8') === before, 'and a --write leaves the file alone')
+  }
+
+  // ══════ 17 · an added repo on a kept repo's path ══════
+  section("17 · an added repos[] entry on a kept entry's path is warned about (a renamed repo)")
+  {
+    const d = project()
+    writeFileSync(join(d, 'grimoire.config.json'), pretty({ repos: [{ name: 'backend', path: 'repositories/api', agent: 'api-engineer' }] }))
+    writeFileSync(join(d, 'proposal.json'), pretty({ repos: [{ name: 'api', path: './repositories/api/', agent: 'api-engineer' }] }))
+    const r = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json')
+    const msg = 'repos[api] (added) has the same path as repos[backend] (repositories/api): a renamed repo? Both entries would be kept'
+    ok(r.status === 0 && r.stderr === `config-merge: warning: ${msg}\n`, `one warning on stderr (got ${JSON.stringify(r.stderr)})`)
+    same(json(r) && json(r).warnings, [msg], '--json lists it under warnings')
+    const t = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json')
+    ok(t.stderr === `config-merge: warning: ${msg}\n`, 'the text run warns the same way')
+  }
+
+  // ══════ 18 · the --approve hint is shell-quoted ══════
+  section("18 · the printed --approve hint round-trips through the shell, a ' in the key included")
+  {
+    const d = project()
+    writeFileSync(join(d, 'grimoire.config.json'), pretty({ "it's": 1, repos: [{ name: "o'neil", path: 'x', agent: 'a', gate: null }] }))
+    writeFileSync(join(d, 'proposal.json'), pretty({ "it's": 2, repos: [{ name: "o'neil", path: 'x', agent: 'a', gate: { run: 'make e2e' } }] }))
+    const t = cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json')
+    const hints = [...t.stdout.matchAll(/needs --approve ('.*')\)$/gm)].map((m) => m[1])
+    same(hints, [`'it'"'"'s'`, `'repos[o'"'"'neil].gate'`], "a ' is closed, escaped and reopened inside the single quotes")
+    same(hints.map((h) => spawnSync('sh', ['-c', `printf %s ${h}`], { encoding: 'utf8' }).stdout), ["it's", "repos[o'neil].gate"], 'the shell reads each hint back as the exact path')
+    const q = (s) => `'${s.replace(/'/g, `'"'"'`)}'`
+    const r = spawnSync('sh', ['-c', `${q(process.execPath)} ${q(SCRIPT)} --current grimoire.config.json --proposed proposal.json --approve ${hints[0]} --approve ${hints[1]} --write`], { cwd: d, encoding: 'utf8' })
+    ok(r.status === 0 && r.stderr === '' && readFileSync(join(d, 'grimoire.config.json'), 'utf8') === pretty({ "it's": 2, repos: [{ name: "o'neil", path: 'x', agent: 'a', gate: { run: 'make e2e' } }] }),
+      `pasted into a shell, the hints approve exactly those keys (stderr: ${r.stderr.trim()})`)
   }
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
