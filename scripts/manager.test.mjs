@@ -219,6 +219,8 @@ try {
     ok(groupOf(P, 'NA-pr') === 'Not now' && /linked PR/.test(E(P, 'NA-pr').why), 'a linked PR: not ready for AI')
     ok(groupOf(P, 'NA-parent') === 'Not now' && /parent of 2/.test(E(P, 'NA-parent').why), 'a parent issue: not ready for AI')
     ok(groupOf(P, 'NA-noac') === 'Not now' && /no acceptance criteria/.test(E(P, 'NA-noac').why), 'no acceptance criteria: not ready for AI')
+    ok(groupOf(P, 'REST') === 'Not now' && /acceptance criteria not checked/.test(E(P, 'REST').why) && !/no acceptance criteria/.test(E(P, 'REST').why),
+      'an item whose acceptance criteria the scout did not read says "not checked", not "none", and is not ready either')
     ok(groupOf(P, 'NA-pr-kind') === 'Not now', 'only an issue is handed to AI, never a PR')
     ok(groupOf(P, 'W') === 'Waiting on others' && /Wait for the vendor/.test(E(P, 'W').next), 'the scout\'s "waiting" reading moves a non-urgent item to Waiting on others, with its next step')
     ok(groupOf(P, 'H-do') === 'Not now' && !urgent(P, 'H-do'), 'bucketHint "do" never makes an item urgent or puts it in Do')
