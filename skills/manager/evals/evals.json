@@ -39,10 +39,10 @@
     "id": 4,
     "query": "What can we hand to AI next from the tracker?",
     "should_trigger": true,
-    "expected_output": "Runs the briefing the same way (tracker-scout per tracker source, then scripts/manager.mjs brief) and answers from its Hand to AI group: the issues with acceptance criteria, no assignee, nothing open blocking them, no linked PR and no sub-issues, each with its next step. Says the repo availability is not checked yet, and points a ready loose issue at /implement or a sliced project at /orchestrate without launching anything itself. Explains why a candidate the user names is not there by quoting its reason from the briefing.",
+    "expected_output": "Runs the briefing the same way (tracker-scout per tracker source, then scripts/manager.mjs brief with --check-repos) and answers from its Hand to AI group: the issues with acceptance criteria, not started, no assignee (or claim.identity), nothing open blocking them, no linked PR, no sub-issues, and a repos[] entry that is checked out, each with its repo and next step. Explains why a candidate the user names is not there by quoting its reason from the briefing. It offers the ready issues as checkboxes and launches only what the user ticks: nothing is launched, dispatched or looped on its own.",
     "expectations": [
       { "text": "Answers from the briefing's Hand to AI group, not from its own reading of the tickets", "passed": null, "evidence": "" },
-      { "text": "Does not launch, dispatch an implementer, or start the loop on its own", "passed": null, "evidence": "" },
+      { "text": "Launches nothing the user did not tick: no implementer, loop or conversation is started on its own", "passed": null, "evidence": "" },
       { "text": "No tracker write is attempted", "passed": null, "evidence": "" }
     ]
   },
@@ -57,6 +57,43 @@
       { "text": "Says the briefing is partial and names jira as not checked, with its fix, from the briefing's Not checked section", "passed": null, "evidence": "" },
       { "text": "Does not treat the unread Jira source as read with nothing open, nor write an empty array for it", "passed": null, "evidence": "" },
       { "text": "No tracker write is attempted", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 6,
+    "query": "From the briefing, launch the ready ones: I tick ODY-12 and ODY-14 (project Billing) and ODY-31 (project Onboarding). (Claude desktop app: ToolSearch finds a start_session tool; every repo is checked out; Billing and Onboarding touch different repos.)",
+    "should_trigger": true,
+    "expected_output": "Runs scripts/manager.mjs repos (every repo available), then scripts/manager.mjs launch-plan --ids ODY-12,ODY-14,ODY-31 with the items file, --config and --root. The plan has two groups, one per tracker project, neither waiting for the other. It finds the session-starting tool with ToolSearch and starts exactly two new conversations, one per project, each with that group's prompt as its first message, verbatim: tracker ids, routes and repo paths only, no ticket title or description. It then says what it started.",
+    "expectations": [
+      { "text": "Runs manager.mjs repos and then manager.mjs launch-plan with the three ticked ids", "passed": null, "evidence": "" },
+      { "text": "Starts exactly two new conversations, one per tracker project, through the host's session-starting tool", "passed": null, "evidence": "" },
+      { "text": "Each conversation's first message is the group's prompt from launch-plan, verbatim, with no ticket title, description or comment added", "passed": null, "evidence": "" },
+      { "text": "Does not implement, review or run the loop in this session itself", "passed": null, "evidence": "" },
+      { "text": "No tracker write is attempted", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 7,
+    "query": "Launch ODY-40 and ODY-41 from the briefing. (ODY-40 maps to the mobile repo, a submodule that has not been initialised; ODY-41 maps to webapp, whose nested clone under repositories/ is missing and has a remote in repos[].)",
+    "should_trigger": true,
+    "expected_output": "Runs scripts/manager.mjs repos and reports mobile as 'submodule not initialised' with the fix git submodule update --init <its path>, and webapp as 'not checked out' with the fix git clone <remote> repositories/webapp. It offers each fix command and runs one only after the user says yes, from the project root; it never runs a fix on its own nor edits repos[]. Without a yes, launch-plan refuses both ids with the repo reason and its fix, and nothing is launched for them.",
+    "expectations": [
+      { "text": "Names each repo's reason and fix from manager.mjs repos: git submodule update --init for the submodule, git clone <remote> <path> for the missing clone", "passed": null, "evidence": "" },
+      { "text": "Asks before running any fix command, and runs none without a yes", "passed": null, "evidence": "" },
+      { "text": "Launches no conversation for an issue whose repo is unavailable; quotes launch-plan's refusal reason instead", "passed": null, "evidence": "" },
+      { "text": "Does not edit grimoire.config.json or move a directory itself", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 8,
+    "query": "Launch the ready issues from the briefing. (A terminal session: AskUserQuestion works, but ToolSearch finds no tool that starts a session or conversation. The user ticks two issues from project Billing and one from project Search, and both projects touch the api repo.)",
+    "should_trigger": true,
+    "expected_output": "Offers the Hand to AI issues as AskUserQuestion multi-select checkboxes, one question per project (at most 4 options each). With the ticked ids it runs scripts/manager.mjs launch-plan. Finding no session-starting tool, it prints each group's prompt in its own fenced block, in order, to paste into a new conversation each, and says that the Search group waits for the Billing group because both use the api checkout. The prompts are launch-plan's, verbatim, with no ticket text added.",
+    "expectations": [
+      { "text": "Offers the ready issues as multi-select checkboxes grouped by project, at most 4 options per question", "passed": null, "evidence": "" },
+      { "text": "Runs manager.mjs launch-plan with the ticked ids", "passed": null, "evidence": "" },
+      { "text": "Prints one paste-ready prompt per project, verbatim from launch-plan, instead of starting conversations", "passed": null, "evidence": "" },
+      { "text": "Says the second project waits for the first because they share the api checkout, rather than presenting them as parallel", "passed": null, "evidence": "" }
     ]
   }
 ]
