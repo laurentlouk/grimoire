@@ -69,7 +69,7 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
 
 Re-running `/grimoire:setup` on a project already set up was not handled: nothing checked for an
 existing `grimoire.config.json`, `.claude/settings.json` or memory before writing, and the
-no-overwrite rule named only `CLAUDE.md`, `AGENTS.md` and agent definitions.
+no-overwrite rule named only the Markdown instructions, the roster and agent definitions.
 - **A re-run reads what is there, shows one diff, and writes only what is approved.** Step 0 gains a
   "Re-run" part beside migration mode. Hand-edited values are the user's choice, and secrets are
   referenced, never read. The no-overwrite rule now covers the config, the settings and memory.
