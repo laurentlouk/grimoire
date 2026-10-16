@@ -244,6 +244,27 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   one-line error. Checks: `scripts/manager.test.mjs` (222), and the eval `manager-5` (a source
   that can't be read is listed as not checked, with its fix).
 
+**Tests (`scripts/run-tests.mjs`, the loop-durability files)**
+
+The suite took about 9½ minutes, one file after another, and six loop-durability files spent
+most of that waiting, not computing.
+- **The files run in parallel** (the CPU count by default; `--jobs N` or `GRIMOIRE_TEST_JOBS`),
+  slowest first. The lock and concurrency trials, and the graph's millisecond-bounded rendering
+  check, run alone afterwards, so a busy machine cannot make them flaky. Each file's output is
+  printed whole when it ends, and every failure is listed at the end, not only the first.
+- **`npm run test:fast`** leaves out the six slow loop-durability files: the other 22 files in
+  about 25 s, for iterating. `npm test` and CI still run everything.
+- **The six slow files wait less and assert the same.** Their shells (bash, zsh, dash) now run
+  side by side on sandboxes of their own, setups are copied from one template instead of rebuilt,
+  fixed sleeps became waits for the condition the test then checks, and timeouts sit at the
+  smallest value that still proves the behaviour. No assertion was removed or loosened; mutated
+  copies (a slow heartbeat, a long lock wait, a late deadline) still fail.
+  - `hardening` 105 → 28 s, `followups` 105 → 41 s, `delivery-fix` 85 → 43 s, `final` 72 → 12 s,
+    `statewrite` 58 → 18 s, `resume` 46 → 11 s, each run alone.
+- **`run-durability-final`'s lock trial was flaky for a reason:** it catches a real race in the
+  ship lock, where two breakers can both take a stale lock and two ships end up inside at once.
+  The engine fix is its own change.
+
 ## 0.11.0 — trust and see
 
 The code graph's first release on its roadmap: make the links worth trusting, then draw them so a
