@@ -21,6 +21,20 @@
 //      lines, ticket text escaped, front matter counts equal view()'s
 //    • the ledger keeps firstSeenAt across runs and hashes what matters
 //    • a fresh .lock refuses with exit 3, one older than 30 min is broken
+//  And (ODY-872):
+//    • the other two urgency rules, at their threshold and just past it: not started and
+//      blocking ≥ urgent.blocksAtLeast open issues (an id not in the briefing counts as open),
+//      started with no activity for ≥ urgent.stalledDays (lastActivityAt, else updatedAt)
+//    • badges against the previous ledger: new, changed (the hash's fields only), resolved since
+//      the last briefing (counted, not listed); the first briefing badges nothing
+//    • --sources: a capped source shows "≥ N", a failed one goes under "Not checked" and makes
+//      the briefing partial; its items, and a capped source's missing ones, are not resolved
+//    • robustness: a corrupt or old-schema ledger resets the badges with one stderr line, an
+//      invalid firstSeenAt is replaced, an impossible calendar date-time is refused,
+//      --items=a=b.json is split at the first "=", two runs breaking one stale lock never both
+//      hold it, and a .lock that is a directory is a one-line error
+//    • priorityLabels: a nativePriority label maps when priority is absent, case-insensitively,
+//      with the defaults or the config's own map
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -40,14 +54,21 @@ const ENV = { ...process.env, TZ: 'UTC' }
 
 let n = 0
 // A fresh project dir per run unless one is given; items and config go next to it.
-function brief(items, { config = {}, now = NOW, root = null, extra = [], raw = null } = {}) {
+// sources: an array (or raw text) written to sources.json and passed as --sources.
+function brief(items, { config = {}, now = NOW, root = null, extra = [], raw = null, sources = null } = {}) {
   const dir = root || join(TMP, `p${++n}`)
   mkdirSync(dir, { recursive: true })
   const itemsFile = join(dir, 'items.json')
   writeFileSync(itemsFile, raw ?? JSON.stringify(items))
   const cfgFile = join(dir, 'grimoire.config.json')
   writeFileSync(cfgFile, JSON.stringify(config))
-  const args = ['brief', '--items', itemsFile, '--config', cfgFile, '--root', dir, ...(now ? ['--now', now] : []), ...extra]
+  const srcArgs = []
+  if (sources !== null) {
+    const srcFile = join(dir, 'sources.json')
+    writeFileSync(srcFile, typeof sources === 'string' ? sources : JSON.stringify(sources))
+    srcArgs.push('--sources', srcFile)
+  }
+  const args = ['brief', '--items', itemsFile, '--config', cfgFile, '--root', dir, ...(now ? ['--now', now] : []), ...srcArgs, ...extra]
   const r = spawnSync(process.execPath, [SCRIPT, ...args], { cwd: dir, encoding: 'utf8', env: ENV })
   return { ...r, root: dir, mdir: join(dir, '.grimoire', 'manager') }
 }
@@ -411,6 +432,289 @@ try {
     ok(urlOf('U-js') === null && urlOf('U-data') === null, 'view() gives a javascript: or data: url as null')
     ok(urlOf('U-ok') === 'https://example.com/a%28b%29%3Cc%3E', 'and an http(s) url percent-encoded')
     ok(urlOf('U-none') === null, 'and no url as null')
+  }
+
+  const DAY = 24 * HOUR
+  const mod = await import(SCRIPT)
+  const has = (P, key, badge) => new RegExp(`\\*\\*${badge}\\*\\*`).test(E(P, key).line)
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('urgency (ODY-872 rules): blocking open issues, stalled work, each at its threshold and just past it')
+  {
+    const r = brief([
+      item('BL-2', { blocks: ['GONE-1', 'GONE-2'] }), // ids not in the briefing count as open
+      item('BL-1', { blocks: ['GONE-1'] }),
+      item('BL-3', { stateType: 'backlog', blocks: ['OPEN-1', 'OPEN-2', 'GONE-3'] }),
+      item('OPEN-1', { stateType: 'backlog' }), item('OPEN-2', { stateType: 'started', lastActivityAt: at(-DAY) }),
+      item('BL-closed', { blocks: ['DONE-1', 'GONE-4'] }), item('DONE-1', { stateType: 'completed' }),
+      item('BL-dup', { blocks: ['GONE-5', 'GONE-5'] }),
+      item('BL-started', { stateType: 'started', lastActivityAt: at(-DAY), blocks: ['GONE-1', 'GONE-2', 'GONE-3'] }),
+      item('BL-triage', { stateType: 'triage', blocks: ['GONE-1', 'GONE-2'] }),
+      item('ST-5', { stateType: 'started', lastActivityAt: at(-5 * DAY) }),
+      item('ST-4', { stateType: 'started', lastActivityAt: at(-4 * DAY) }),
+      item('ST-6u', { stateType: 'started', updatedAt: at(-6 * DAY) }),
+      item('ST-recent', { stateType: 'started', lastActivityAt: at(-DAY), updatedAt: at(-10 * DAY) }),
+      item('ST-unstarted', { stateType: 'unstarted', lastActivityAt: at(-10 * DAY) }),
+      item('ST-nodates', { stateType: 'started' }),
+    ])
+    ok(r.status === 0, `brief exits 0 (${r.stderr.trim()})`)
+    const P = parse(latest(r))
+    ok(urgent(P, 'BL-2') && /blocks 2 open issues/.test(E(P, 'BL-2').why), 'not started and blocking 2 open issues = blocksAtLeast (default 2) is urgent: "blocks 2 open issues"')
+    ok(!urgent(P, 'BL-1'), 'blocking 1, just under blocksAtLeast, is not urgent')
+    ok(urgent(P, 'BL-3') && /blocks 3 open issues/.test(E(P, 'BL-3').why), 'a backlog issue blocking 3 open issues (2 read open, 1 not in the briefing) is urgent: "blocks 3 open issues"')
+    ok(!urgent(P, 'BL-closed'), 'a blocked issue that is completed in this briefing is not counted: 1 open left, not urgent')
+    ok(!urgent(P, 'BL-dup'), 'the same id twice counts once')
+    ok(!urgent(P, 'BL-started') && !/blocks/.test(E(P, 'BL-started').why), 'a started issue is not urgent by what it blocks (only not started work is)')
+    ok(!/blocks/.test(E(P, 'BL-triage').why), 'nor is a triage issue')
+    ok(urgent(P, 'ST-5') && /no activity for 5 days/.test(E(P, 'ST-5').why), 'started with no activity for 5 days = stalledDays (default 5) is urgent: "no activity for 5 days"')
+    ok(!urgent(P, 'ST-4'), 'no activity for 4 days, just under stalledDays, is not urgent')
+    ok(urgent(P, 'ST-6u') && /no activity for 6 days/.test(E(P, 'ST-6u').why), 'without lastActivityAt, updatedAt is read: "no activity for 6 days"')
+    ok(!urgent(P, 'ST-recent'), 'lastActivityAt comes before updatedAt: recent activity on an old update is not stalled')
+    ok(!urgent(P, 'ST-unstarted'), 'only started work stalls')
+    ok(!urgent(P, 'ST-nodates'), 'started with neither date is not stalled (nothing to read)')
+    ok(groupOf(P, 'BL-2') === 'Do' && groupOf(P, 'ST-5') === 'Do', 'an assigned issue urgent by these rules goes to Do')
+
+    const tight = parse(latest(brief([
+      item('BL-2', { blocks: ['G-1', 'G-2'] }), item('BL-3', { blocks: ['G-1', 'G-2', 'G-3'] }),
+      item('ST-6', { stateType: 'started', lastActivityAt: at(-6 * DAY) }), item('ST-7', { stateType: 'started', lastActivityAt: at(-7 * DAY) }),
+    ], { config: { manager: { urgent: { blocksAtLeast: 3, stalledDays: 7 } } } })))
+    ok(!urgent(tight, 'BL-2') && urgent(tight, 'BL-3'), 'manager.urgent.blocksAtLeast 3: blocking 2 is no longer urgent, 3 is')
+    ok(!urgent(tight, 'ST-6') && urgent(tight, 'ST-7'), 'manager.urgent.stalledDays 7: 6 days is no longer urgent, 7 is')
+    const bad = brief([item('BL-2', { blocks: ['G-1', 'G-2'] })], { config: { manager: { urgent: { blocksAtLeast: 0, stalledDays: 'five' } } } })
+    ok(bad.status === 0 && /manager\.urgent\.blocksAtLeast/.test(bad.stderr) && /manager\.urgent\.stalledDays/.test(bad.stderr) && urgent(parse(latest(bad)), 'BL-2'),
+      'an invalid blocksAtLeast or stalledDays is named on stderr and the default applies')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('badges from the ledger: new, changed, resolved since the last briefing; the first briefing')
+  {
+    const root = join(TMP, 'badges')
+    const prev = [
+      item('K-same', { priority: 3 }), item('K-renamed', { priority: 3 }), item('K-order', { labels: ['a', 'b'] }),
+      item('K-state'), item('K-prio', { priority: 3 }), item('K-assignee'), item('K-due', { dueAt: '2026-11-01' }),
+      item('K-blockers', { blockedBy: ['K-same'] }), item('K-labels', { labels: ['a', 'b'] }), item('K-pr'),
+      item('K-gone'), item('K-done'),
+    ]
+    const first = brief(prev, { root, now: at(-DAY) })
+    ok(first.status === 0, `the first briefing exits 0 (${first.stderr.trim()})`)
+    const F = parse(latest(first))
+    ok(/First briefing/.test(latest(first)) && F.front.firstBriefing === true, 'with no ledger, the briefing is labelled "first briefing" (and firstBriefing: true)')
+    ok(!/\*\*(new|changed)\*\*/.test(latest(first)) && F.front.counts.new === 0 && F.front.counts.changed === 0 && F.front.counts.resolved === 0,
+      'and badges nothing: no "N new" alarm, new, changed and resolved are 0')
+    const fixture = readJ(join(first.mdir, 'ledger.json'))
+    ok(Object.keys(fixture.items).length === prev.length, `the previous ledger fixture holds the ${prev.length} items`)
+
+    const next = [
+      item('K-same', { priority: 3 }), item('K-renamed', { priority: 3, title: 'a new title', nextStep: 'a new next step' }), item('K-order', { labels: ['b', 'a'] }),
+      item('K-state', { stateType: 'started', lastActivityAt: NOW }), item('K-prio', { priority: 4 }), item('K-assignee', { assignee: 'Bob' }),
+      item('K-due', { dueAt: '2026-11-02' }), item('K-blockers', { blockedBy: ['K-same', 'K-prio'] }), item('K-labels', { labels: ['b', 'a', 'c'] }),
+      item('K-pr', { linkedPr: 'https://github.com/acme/api/pull/9' }),
+      item('K-done', { stateType: 'completed' }), item('K-new'),
+    ]
+    const r = brief(next, { root })
+    ok(r.status === 0, `the next briefing exits 0 (${r.stderr.trim()})`)
+    const md = latest(r), P = parse(md)
+    ok(has(P, 'K-new', 'new') && !has(P, 'K-new', 'changed'), 'an item not in the ledger is badged new')
+    const changed = ['K-state', 'K-prio', 'K-assignee', 'K-due', 'K-blockers', 'K-labels', 'K-pr']
+    ok(changed.every((k) => has(P, k, 'changed')), `a change of state, priority, assignee, due date, blockers, labels or PR is badged changed (${changed.filter((k) => !has(P, k, 'changed')).join(', ') || 'all'})`)
+    ok(['K-same', 'K-renamed', 'K-order'].every((k) => entry(P, k) && !has(P, k, 'changed') && !has(P, k, 'new')), 'a new title or next step, or labels in another order, is not a change')
+    ok(!entry(P, 'K-gone') && !entry(P, 'K-done'), 'an item gone, or now completed, is not listed')
+    ok(P.front.counts.new === 1 && P.front.counts.changed === 7 && P.front.counts.resolved === 2,
+      `the front matter counts 1 new, 7 changed, 2 resolved (${JSON.stringify({ new: P.front.counts.new, changed: P.front.counts.changed, resolved: P.front.counts.resolved })})`)
+    ok(P.front.firstBriefing === false && /Since the last briefing: 1 new · 7 changed · 2 resolved/.test(md), 'and the briefing says so: "Since the last briefing: 1 new · 7 changed · 2 resolved"')
+    const V = mod.view(next, {}, fixture, NOW)
+    const badge = (id) => V.groups.flatMap((g) => g.items).find((i) => i.id === id)?.badge
+    ok(badge('K-new') === 'new' && badge('K-prio') === 'changed' && badge('K-same') === null, 'the view model carries each item\'s badge (new, changed or null)')
+    ok(V.firstBriefing === false && V.counts.new === 1 && V.counts.changed === 7 && V.counts.resolved === 2, 'and the counts')
+    const hand = { schemaVersion: 1, sources: { linear: { lastRunAt: at(-DAY), lastStatus: 'ok' } }, items: { 'linear:H-1': { firstSeenAt: '2026-10-01T00:00:00Z', lastHash: '0000000000000000', lastBucket: 'notnow' }, 'linear:H-gone': { firstSeenAt: '2026-10-01T00:00:00Z', lastHash: 'x', lastBucket: 'do' } } }
+    const H = mod.view([item('H-1'), item('H-2')], {}, hand, NOW)
+    const hb = (id) => H.groups.flatMap((g) => g.items).find((i) => i.id === id)
+    ok(hb('H-1').badge === 'changed' && hb('H-1').firstSeenAt === '2026-10-01T00:00:00Z' && hb('H-2').badge === 'new' && H.counts.resolved === 1,
+      'against a hand-written ledger: a different hash is changed, firstSeenAt is kept, an absent key is new, a missing item is resolved')
+
+    // A source that failed or was capped did not show all its items: the missing ones are not resolved, and the ledger keeps them.
+    const proot = join(TMP, 'badges-partial')
+    brief([item('J-1', { sourceId: 'jira' }), item('J-2', { sourceId: 'jira' }), item('G-1', { sourceId: 'gh' }), item('G-2', { sourceId: 'gh' })], { root: proot, now: at(-DAY) })
+    const p2 = brief([item('G-1', { sourceId: 'gh' })], { root: proot, sources: [{ id: 'jira', status: 'failed', reason: 'auth expired' }, { id: 'gh', status: 'capped', count: 1 }] })
+    const P2 = parse(latest(p2))
+    ok(p2.status === 0 && P2.front.counts.resolved === 0, `a failed source's items and a capped source's missing ones are not counted resolved (${p2.stderr.trim() || JSON.stringify(P2.front.counts)})`)
+    const L2 = readJ(join(p2.mdir, 'ledger.json'))
+    ok(['jira:J-1', 'jira:J-2', 'gh:G-2'].every((k) => L2.items[k]?.firstSeenAt === at(-DAY)), 'the ledger keeps them, with their firstSeenAt')
+    ok(L2.sources.jira?.lastStatus === 'failed' && L2.sources.gh?.lastStatus === 'capped', 'and records each source\'s status')
+    const p3 = brief([item('J-1', { sourceId: 'jira' }), item('G-1', { sourceId: 'gh' }), item('G-3', { sourceId: 'gh', stateType: 'completed' })], { root: proot, now: at(DAY), sources: [{ id: 'jira', status: 'ok' }, { id: 'gh', status: 'ok' }] })
+    const P3 = parse(latest(p3))
+    ok(!has(P3, 'J-1', 'new') && P3.front.counts.resolved === 2, `once read in full, what is missing is resolved (J-2, G-2) and J-1 is not new (${JSON.stringify(P3.front.counts)})`)
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('partial sources: --sources marks a source capped (≥ N) or failed (Not checked)')
+  {
+    const items = [item('L-1'), item('G-1', { sourceId: 'github' }), item('G-2', { sourceId: 'github' })]
+    const sources = [
+      { id: 'linear', status: 'ok' },
+      { id: 'github', status: 'capped', count: 200 },
+      { id: 'jira', status: 'failed', reason: 'auth expired', fix: 'authorize the Atlassian connector' },
+    ]
+    const r = brief(items, { sources })
+    ok(r.status === 0, `brief with --sources exits 0 (${r.stderr.trim()})`)
+    const md = latest(r), P = parse(md)
+    ok(/github \(≥ 200\)/.test(md) && /linear \(1\)/.test(md), 'a capped source shows its count as "≥ 200"; a complete one as its count')
+    ok(/^## Not checked$/m.test(md) && md.includes('- Not checked: jira (auth expired), fix: authorize the Atlassian connector'),
+      'a failed source goes under "Not checked": "Not checked: jira (auth expired), fix: authorize the Atlassian connector"')
+    ok(md.indexOf('## Not checked') < md.indexOf('## Decide'), 'before the groups')
+    ok(P.front.partial === true && JSON.stringify(P.front.sources) === JSON.stringify(['github', 'jira', 'linear']), 'the front matter says partial: true and names every source')
+    ok(JSON.stringify(P.order) === JSON.stringify(['Decide', 'Do', 'Hand to AI', 'Waiting on others', 'Not now']), 'the groups are unchanged')
+    const V = mod.view(items, {}, null, NOW, sources)
+    const s = (id) => V.sources.find((x) => x.id === id)
+    ok(V.partial === true && s('github').status === 'capped' && s('github').count === 200 && s('github').items === 2 && s('jira').status === 'failed' && s('jira').fix === 'authorize the Atlassian connector',
+      'the view model carries partial and each source\'s status, count, reason and fix')
+    ok(mod.view(items, {}, null, NOW).partial === false && mod.view(items, {}, null, NOW).sources.every((x) => x.status === 'ok'), 'without --sources, the sources are inferred from the items, all read')
+
+    const capped = brief([item('G-1', { sourceId: 'github' })], { sources: [{ id: 'github', status: 'capped' }] })
+    const C = parse(latest(capped))
+    ok(capped.status === 0 && /github \(≥ 1\)/.test(latest(capped)) && C.front.partial === false && !/Not checked/.test(latest(capped)),
+      'a capped source with no count shows "≥" its items; capped alone is checked, so not partial')
+    const bare = brief([item('L-1')], { sources: [{ id: 'linear', status: 'ok' }, { id: 'jira', status: 'failed' }, { id: 'empty', status: 'ok' }] })
+    ok(latest(bare).includes('- Not checked: jira (no reason given)') && /empty \(0\)/.test(latest(bare)), 'a failed source with no reason says so; a source read with nothing open shows (0)')
+    const hostile = brief([], { sources: [{ id: 'jira', status: 'failed', reason: '<script>x</script> [a](javascript:1)', fix: 'run https://evil.example\n## owned' }] })
+    const hm = latest(hostile)
+    ok(hostile.status === 0 && !/<script>/.test(hm) && !/\]\(javascript:/.test(hm) && !/https:\/\//.test(hm) && !hm.split('\n').includes('## owned'), 'the reason and the fix are escaped like ticket text')
+
+    const refuse = (srcs, re, what) => {
+      const x = brief([item('L-1')], { sources: srcs })
+      ok(x.status === 1 && re.test(x.stderr) && !/SHOULD_NOT_LEAK/.test(x.stderr) && !existsSync(join(x.mdir, 'latest.md')), `${what} (${x.stderr.trim().split('\n').slice(-1)[0]})`)
+    }
+    refuse('{"id": "linear"}', /sources.*JSON array/, 'a --sources file that is not an array is refused, exit 1, nothing written')
+    refuse('[{"id": "linear", "reason": "sk_live_SHOULD_NOT_LEAK"', /sources .*invalid JSON/, 'invalid JSON is refused without quoting it')
+    refuse([{ id: 'linear', status: 'broken' }], /sources\[0\]\.status/, 'a status outside ok, failed, capped names sources[0].status')
+    refuse([{ id: 'linear', status: 'ok', token: 'sk_live_SHOULD_NOT_LEAK' }], /sources\[0\]\.token: unknown field/, 'an unknown field is refused by name, never by value')
+    refuse([{ id: 'linear', status: 'ok' }, { id: 'linear', status: 'failed' }], /sources\[1\].*duplicate/, 'a duplicate id is refused')
+    refuse([{ id: 'linear', status: 'capped', count: -1 }], /sources\[0\]\.count/, 'a negative count is refused')
+    refuse([{ id: 'bad id/..', status: 'ok' }], /sources\[0\]\.id/, 'an id outside [A-Za-z0-9._-] is refused')
+    refuse([{ id: 'linear', status: 'ok', reason: 3 }], /sources\[0\]\.reason/, 'a reason that is not a string is refused')
+    refuse([{ id: 'github', status: 'ok' }], /items\[0\]\.sourceId: not in --sources/, 'an item from a source the file does not list is refused')
+    refuse([{ id: 'linear', status: 'failed' }], /sources\[0\].*failed.*items\[0\]/, 'a failed source that has items is refused')
+    const noVal = brief([item('L-1')], { extra: ['--sources'] })
+    ok(noVal.status === 2 && /--sources/.test(noVal.stderr), '--sources without a file is a usage error (exit 2)')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('robustness: the ledger, calendar dates, --items=a=b.json, the stale lock, a .lock directory')
+  {
+    const root = join(TMP, 'robust')
+    const ledger = join(root, '.grimoire', 'manager', 'ledger.json')
+    mkdirSync(join(root, '.grimoire', 'manager'), { recursive: true })
+    const ledgerLines = (x) => x.stderr.split('\n').filter((l) => /ledger/.test(l))
+
+    writeFileSync(ledger, '{ not json')
+    const corrupt = brief([item('R-1')], { root })
+    ok(corrupt.status === 0, `a corrupt ledger is not a crash (exit ${corrupt.status})`)
+    ok(ledgerLines(corrupt).length === 1 && /not valid JSON/.test(ledgerLines(corrupt)[0]) && /starting over/.test(ledgerLines(corrupt)[0]),
+      `it is said once on stderr (${ledgerLines(corrupt).join(' | ')})`)
+    ok(/First briefing/.test(latest(corrupt)) && !/\*\*new\*\*/.test(latest(corrupt)), 'and the badges reset: a first briefing, nothing badged new')
+    ok(readJ(ledger).schemaVersion === 1 && readJ(ledger).items['linear:R-1'], 'the ledger is rebuilt')
+    ok(ledgerLines(brief([item('R-1')], { root, now: at(HOUR) })).length === 0, 'a good ledger says nothing on stderr')
+
+    writeFileSync(ledger, JSON.stringify({ schemaVersion: 0, sources: {}, items: { 'linear:R-1': { firstSeenAt: '2026-01-01T00:00:00Z', lastHash: 'x', lastBucket: 'notnow' } } }))
+    const old = brief([item('R-1'), item('R-2')], { root, now: at(2 * HOUR) })
+    ok(old.status === 0 && ledgerLines(old).length === 1 && /schemaVersion 0/.test(ledgerLines(old)[0]), `an old-schema ledger is said once on stderr, naming its version (${ledgerLines(old).join(' | ')})`)
+    ok(parse(latest(old)).front.firstBriefing === true && readJ(ledger).items['linear:R-1']?.firstSeenAt === at(2 * HOUR) && readJ(ledger).schemaVersion === 1,
+      'and starts over: a first briefing, firstSeenAt now, the current schema written')
+
+    writeFileSync(ledger, JSON.stringify({ schemaVersion: 1, sources: { linear: { lastRunAt: NOW, lastStatus: 'ok' } }, items: {
+      'linear:R-1': { firstSeenAt: 'not a date', lastHash: 'x', lastBucket: 'notnow' },
+      'linear:R-2': { firstSeenAt: '2026-02-30T10:00:00Z', lastHash: 'x', lastBucket: 'notnow' },
+      'linear:R-3': { firstSeenAt: 42, lastHash: 'x', lastBucket: 'notnow' },
+      'linear:R-4': { firstSeenAt: '2026-10-01T00:00:00Z', lastHash: 'x', lastBucket: 'notnow' },
+    } }))
+    const fs = brief([item('R-1'), item('R-2'), item('R-3'), item('R-4')], { root, now: at(3 * HOUR) })
+    const LF = readJ(ledger)
+    ok(fs.status === 0 && ['R-1', 'R-2', 'R-3'].every((k) => LF.items[`linear:${k}`]?.firstSeenAt === at(3 * HOUR)), 'a firstSeenAt that is not a real date (text, Feb 30, a number) is replaced by now')
+    ok(LF.items['linear:R-4']?.firstSeenAt === '2026-10-01T00:00:00Z', 'a valid one is kept')
+
+    const BAD = ['2026-02-30T10:00:00Z', '2026-04-31T00:00:00Z', '2026-02-29T10:00:00Z', '2026-10-16T24:00:00Z', '2026-10-16T12:60:00Z', '2026-10-16T12:00:61Z', '2026-10-16T12:00:00+24:00', '2026-02-30']
+    const dates = brief(BAD.map((d, i) => item(`DT-${i}`, { dueAt: d })))
+    ok(dates.status === 1 && BAD.every((_, i) => new RegExp(`items\\[${i}\\]\\.dueAt`).test(dates.stderr)), `an impossible calendar date-time is refused like an impossible date (${BAD.join(', ')})`)
+    ok(BAD.every((d) => Number.isNaN(mod.parseTime(d))), 'parseTime gives NaN for each')
+    const GOOD = ['2028-02-29T10:00:00Z', '2026-10-16T12:00:00+02:00', '2026-10-16T12:00:00+0200', '2026-10-16T12:00:00.123Z', '2026-10-16 12:00', '2026-12-31T23:59:59Z']
+    const fine = brief(GOOD.map((d, i) => item(`DG-${i}`, { dueAt: d })))
+    ok(fine.status === 0, `real date-times pass (${GOOD.join(', ')}${fine.stderr ? `: ${fine.stderr.trim()}` : ''})`)
+    ok(mod.parseTime('2026-10-16T12:00:00+02:00') === Date.parse('2026-10-16T10:00:00Z'), 'and read as the instant they name')
+
+    const eqDir = join(TMP, 'eq=dir')
+    mkdirSync(eqDir, { recursive: true })
+    writeFileSync(join(eqDir, 'a=b.json'), JSON.stringify([item('EQ-1')]))
+    const eq = cli(['brief', `--items=${join(eqDir, 'a=b.json')}`, `--root=${eqDir}`, `--now=${NOW}`], eqDir)
+    ok(eq.status === 0 && existsSync(join(eqDir, '.grimoire', 'manager', 'latest.md')), `--items=/dir/a=b.json is split at the first "=" (exit ${eq.status}${eq.stderr ? `: ${eq.stderr.trim()}` : ''})`)
+
+    // Two runs break the same stale lock. beforeBreak runs after a run judged the lock stale and
+    // before it moves it: the other run breaks it there, as a concurrent process would.
+    const ldir = join(TMP, 'lock-race')
+    mkdirSync(ldir, { recursive: true })
+    const lock = join(ldir, '.lock')
+    const stale = () => { writeFileSync(lock, JSON.stringify({ pid: 4242, at: '2026-01-01T00:00:00Z' })); const t = (Date.now() - 31 * 60000) / 1000; utimesSync(lock, t, t) }
+    stale()
+    let firstRun = null
+    const secondRun = mod.acquireLock(lock, { beforeBreak: () => { firstRun = mod.acquireLock(lock) } })
+    ok(typeof firstRun === 'string' && secondRun === null, 'two runs break one stale lock: the first takes it, the second finds a live lock and backs off')
+    ok(readJ(lock).token === firstRun, 'the first run\'s lock is in place, not broken by the second')
+    ok(readdirSync(ldir).join() === '.lock', `no moved-aside lock is left behind (${readdirSync(ldir).join(', ')})`)
+    mod.releaseLock(lock, 'someone-else')
+    ok(existsSync(lock), 'releasing with another run\'s token leaves the lock alone')
+    mod.releaseLock(lock, firstRun)
+    ok(!existsSync(lock), 'its own token releases it')
+    stale()
+    let quick = null
+    const late = mod.acquireLock(lock, { beforeBreak: () => { quick = mod.acquireLock(lock); mod.releaseLock(lock, quick) } })
+    ok(typeof quick === 'string' && typeof late === 'string' && late !== quick && readJ(lock).token === late, 'a run that finds the stale lock already gone takes a fresh one')
+    mod.releaseLock(lock, late)
+    writeFileSync(lock, '{}')
+    ok(mod.acquireLock(lock) === null && readFileSync(lock, 'utf8') === '{}', 'a fresh lock is never broken')
+    rmSync(lock)
+
+    const droot = join(TMP, 'lock-dir')
+    mkdirSync(join(droot, '.grimoire', 'manager', '.lock'), { recursive: true })
+    const d = brief([item('K-1')], { root: droot })
+    ok(d.status === 1 && /\.lock/.test(d.stderr) && /directory/.test(d.stderr) && d.stderr.trim().split('\n').length === 1 && !/\bat .+:\d+:\d+/.test(d.stderr),
+      `a .lock that is a directory is a one-line error, not a stack trace (exit ${d.status}: ${d.stderr.trim()})`)
+    ok(!existsSync(join(d.mdir, 'latest.md')), 'and nothing is written')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('priorityLabels: a nativePriority label maps to a priority when priority is absent')
+  {
+    const r = brief([
+      item('PL-high', { nativePriority: 'Priority: High' }), item('PL-urgent', { nativePriority: 'PRIORITY: URGENT' }),
+      item('PL-medium', { nativePriority: 'priority: medium' }), item('PL-low', { nativePriority: 'Priority: Low' }),
+      item('PL-p0', { nativePriority: 'p0' }), item('PL-p1', { nativePriority: 'P1' }), item('PL-p2', { nativePriority: 'P2' }), item('PL-p3', { nativePriority: 'p3' }),
+      item('PL-crit', { nativePriority: 'Critical' }), item('PL-unknown', { nativePriority: 'blocker' }),
+      item('PL-explicit', { priority: 3, nativePriority: 'P0' }), item('PL-null', { priority: null, nativePriority: ' P1 ' }),
+    ])
+    ok(r.status === 0, `brief exits 0 (${r.stderr.trim()})`)
+    const P = parse(latest(r))
+    const prio = (k) => (/ · (Urgent|High|Medium|Low|No priority) · /.exec(E(P, k).line) || [])[1]
+    const want = { 'PL-high': 'High', 'PL-urgent': 'Urgent', 'PL-medium': 'Medium', 'PL-low': 'Low', 'PL-p0': 'Urgent', 'PL-p1': 'High', 'PL-p2': 'Medium', 'PL-p3': 'Low', 'PL-crit': 'Urgent' }
+    const wrong = Object.keys(want).filter((k) => prio(k) !== want[k])
+    ok(!wrong.length, `the default labels map case-insensitively: priority: urgent/high/medium/low, P0–P3, critical (${wrong.map((k) => `${k}=${prio(k)}`).join(', ') || 'all'})`)
+    ok(urgent(P, 'PL-high') && /priority High/.test(E(P, 'PL-high').why) && urgent(P, 'PL-crit'), 'a mapped priority is urgent like a native one')
+    ok(prio('PL-unknown') === 'No priority' && !urgent(P, 'PL-unknown'), 'an unknown label is no priority')
+    const notNow = P.groups['Not now'].map((e) => e.key)
+    ok(notNow[notNow.length - 1] === 'PL-unknown', `and ranks last (${notNow.join(' ')})`)
+    ok(prio('PL-explicit') === 'Medium', 'a priority the scout gave is kept, whatever the label says')
+    ok(prio('PL-null') === 'High', 'a null priority is absent: the label maps (surrounding spaces ignored)')
+    const V = mod.view([item('X', { nativePriority: 'P1' })], {}, null, NOW).groups.flatMap((g) => g.items)[0]
+    ok(V.priority === 2 && V.priorityName === 'High', 'the view model carries the mapped priority, the same as the scout\'s mapping would give')
+
+    const over = parse(latest(brief([item('OV-1', { nativePriority: 'SEV 1' }), item('OV-3', { nativePriority: 'sev 3' }), item('OV-p0', { nativePriority: 'P0' })],
+      { config: { manager: { priorityLabels: { 'Sev 1': 1, 'sev 3': 3 } } } })))
+    const oprio = (k) => (/ · (Urgent|High|Medium|Low|No priority) · /.exec(E(over, k).line) || [])[1]
+    ok(oprio('OV-1') === 'Urgent' && oprio('OV-3') === 'Medium', 'manager.priorityLabels maps the config\'s own labels, case-insensitively')
+    ok(oprio('OV-p0') === 'No priority', 'and replaces the defaults: P0 is no longer mapped')
+    const badMap = brief([item('BM-1', { nativePriority: 'P0' }), item('BM-2', { nativePriority: 'ok' })], { config: { manager: { priorityLabels: { P0: 9, ok: 2 } } } })
+    const BM = parse(latest(badMap))
+    ok(badMap.status === 0 && /manager\.priorityLabels/.test(badMap.stderr) && urgent(BM, 'BM-2') && !urgent(BM, 'BM-1'), 'an entry outside 0–4 is named on stderr and skipped; the others apply')
+    const notObj = brief([item('NO-1', { nativePriority: 'P0' })], { config: { manager: { priorityLabels: 'P0' } } })
+    ok(notObj.status === 0 && /manager\.priorityLabels/.test(notObj.stderr) && urgent(parse(latest(notObj)), 'NO-1'), 'a priorityLabels that is not an object is named on stderr, and the defaults apply')
   }
 } finally {
   rmSync(TMP, { recursive: true, force: true })
