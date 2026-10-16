@@ -353,6 +353,19 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     name: the launched conversation reads the tickets itself. An unknown, ambiguous or ineligible
     id is refused with its reason. Checks: `scripts/manager.test.mjs` (384 in all, the repos
     check on real temp git repos), and the evals `manager-6` to `manager-8`.
+- **A visual briefing page.** Every briefing run, scheduled ones too, writes
+  `.grimoire/manager/briefing.html` (`manager.mjs render --html` writes it again, `--out` elsewhere),
+  and the skill prints its path to open (`open` on macOS, `xdg-open` elsewhere). One self-contained
+  file, as the run log's: inline CSS and JS, a CSP with no network, light and dark; the view is
+  embedded as JSON that ticket text can't break out of, every node is built with `textContent`, and
+  only http(s) urls become links. It shows the groups in the Markdown's order, the counts, Not
+  checked, the badges, filters (urgent, ready for AI, PRs, runs), checkboxes on the ready issues with
+  **Select all ready**, a disabled row with its fix for an issue held back by its repo, and **Copy
+  launch prompt** per project: the page runs launch-plan's own planner (`planLaunch`), so the copied
+  prompt is launch-plan's text, ids, routes and repo paths only, with a box to copy from when the
+  clipboard is unavailable. `manager.mjs view --json` prints the view model the Markdown and the page
+  both render from, now with each issue's launch pick, `heldBack`, and the launch plan for every
+  ready issue. Checks: `scripts/manager.test.mjs` (419 in all, the page run under a minimal DOM).
 
 ## 0.11.0 — trust and see
 
