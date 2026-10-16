@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)](#-setup)
-[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-13-success)](#-what-is-in-the-box)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-14-success)](#-what-is-in-the-box)
 [![Stack-agnostic](https://img.shields.io/badge/stack-agnostic-lightgrey)](#)
 
 Open-source [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) plus the pieces around them that make an agent workflow repeatable: an agent roster (`AGENTS.md`), curated memory (`memory/`), and an unattended build loop (`workflows/`) that ends every run by crystallizing what it learned back into the skills. Stack-agnostic, tracker-agnostic (Jira, Linear, GitHub Issues, or other).
@@ -68,7 +68,8 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 /crystallize         # after the PR: patch/create skills, add memory facts, sync docs, one reviewable PR
 /orchestrate {specPath, planPath, project, repos}   # or run the whole build half unattended
 /grimoire:logs       # what the loop decided, and why: a local HTML report of every run
-/grimoire:graph      # the code graph as a local HTML page: system map, file map, neighbourhoods, hotspots
+/grimoire:graph      # the code graph as a local HTML page: architecture, system map, file map, neighbourhoods, hotspots, docs
+/grimoire:architecture  # an architecture diagram the code backs: drafted from the graph, refined from the code, checked
 ```
 
 `/orchestrate` needs a fourth input besides the three design artifacts: `repos`, the list of repositories with their owning agent, tags (for review-lens selection) and gate command. It previews first, with a wall-clock estimate (a strict blocked-by chain runs one task at a time). Once it runs, every landed task is pushed to one draft PR per repo, and a halted or killed run picks up where it stopped when you invoke `/orchestrate` on the same project again. Leave the session alone while it runs: a message sent to it reaches the prompts of the agents the run dispatches, so give instructions after the run, or stop it first. `workflows/README.md` has the full reference.
@@ -82,6 +83,10 @@ roast → to-plan → to-issues → build ⇄ review → PR → crystallize → 
 The plugin ships a code graph (`tools/graph`): every repository of the project parsed with tree-sitter into a local SQLite graph of definitions and their relations (`CALLS`, `IMPORTS`, `EXTENDS` / `IMPLEMENTS`, tests, git co-change), for TypeScript/JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP and Swift. Scouts and the design skills reach it as MCP tools (`graph_search`, `graph_callers`, `graph_impact`, `graph_path`, `graph_hierarchy`, `graph_file`, `graph_sql`, …) to answer *where is it* and *what relates to what* in one call instead of a dozen greps: who calls this, what a change reaches and which tests cover it, how a request gets to a write.
 
 It is a map for research, never the source of truth: every answer is a `path:line` lead with the confidence of its edge, and what the code does or whether it is right is always read in the code. The reviewer does not get it at all. Incremental (only changed files re-parse, queries refresh themselves), no service to run, and its parser runtime installs itself on first index. Indexing is always the deterministic script, never a model: the plugin's `SubagentStop` hook re-runs it after every implementer and integrate step, and each worktree gets its own index, seeded from the main checkout's. `/grimoire:graph` renders all of it as one local page: a system map of modules that opens onto the file map, every file and symbol as a neighbourhood (what uses it, what it uses), and hotspots by size and churn, with test code and ambiguous links hidden until asked for and unique-name matches drawn dashed. `/grimoire:setup` proposes it; the reference is [`tools/graph/README.md`](tools/graph/README.md).
+
+**Architecture diagrams, backed by the code.** Grimoire's own, after the example of [archify](https://github.com/tt-a1i/archify) (no dependency on it): a diagram is typed JSON (components with a type, boundaries, labelled connections, cards) drawn as an interactive page and, unlike a free-hand diagram, checked by the code graph. `/grimoire:architecture` drafts one from the graph (modules as components, the services their imports name, file links as lines), has the agent refine it by reading the code, and checks it: every component's paths must match indexed files and its `path:line` sources must exist, each line between code components is counted against the index, and code links no line draws are reported. The page's **Architecture** tab draws every diagram in `docs/architecture/` (plus one drafted fresh on each render), with a passport per component, upstream and downstream reach, and route tracing.
+
+**The docs as a vault.** The page's **Docs** tab holds every Markdown note of the project, the Obsidian way: a folder tree, a reading view with callouts and front matter, `[[wikilinks]]`, backlinks, an outline, and the code each note mentions linked to its neighbourhood (and each file's notes listed on its page). `graph.mjs serve` serves the page on `127.0.0.1` behind a token, and then notes can be edited (source, reading or side by side), saved with Ctrl/⌘-S, and created; a save from a stale copy is refused and the disk version offered.
 
 ## 🔭 Seeing what the loop decided: `/grimoire:logs`
 
@@ -139,7 +144,8 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`skills/crystallize`](skills/crystallize/SKILL.md) | Post-PR learning into skills, memory and docs |
 | [`skills/orchestrate`](skills/orchestrate/SKILL.md) · [`skills/adaptive-replanning`](skills/adaptive-replanning/SKILL.md) | Front door and failure behaviour of the loop |
 | [`skills/logs`](skills/logs/SKILL.md) | Read, render and prune the loop's decision journal |
-| [`skills/graph`](skills/graph/SKILL.md) | Browse the code graph as a local page: system map, file map, neighbourhoods, hotspots |
+| [`skills/graph`](skills/graph/SKILL.md) | Browse the code graph as a local page: architecture, system map, file map, neighbourhoods, hotspots, and the docs as a vault (editable when served) |
+| [`skills/architecture`](skills/architecture/SKILL.md) | An architecture diagram the code backs: drafted from the graph, refined by reading the code, checked against the index |
 | [`agents/`](agents) | scouts (`codebase-scout`, `reference-scout`, `contract-checker`, `tracker-scout`, `design-scout`, `security-scout`, `perf-scout`), the `reviewer`, and the specialists `migration-engineer` and `test-engineer` the loop can route tasks to |
 | [`templates/`](templates) | the team-agent definition to copy per repository |
 | [`skills/implement`](skills/implement/SKILL.md) · [`skills/review`](skills/review/SKILL.md) | Build one issue through its team agent; gate it with the diverse-lens panel |
@@ -147,7 +153,8 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`AGENTS.md`](AGENTS.md) | The roster and the three learning stores |
 | [`workflows/`](workflows/README.md) | `orchestrate-loop.js` (engine, tested), `briefs/` and `personas/` (everything a dispatched agent reads) |
 | [`hooks/`](hooks/README.md) | the session-start hint and the `PreToolUse` guard |
-| [`tools/graph/`](tools/graph/README.md) | the code graph: indexer, MCP server (`.mcp.json`) and CLI, research-only |
+| [`tools/graph/`](tools/graph/README.md) | the code graph: indexer, MCP server (`.mcp.json`), CLI, the page and its local server, research-only |
+| [`docs/architecture/`](docs/architecture/grimoire.architecture.json) | grimoire's own architecture diagram, checked against its code graph |
 | [`.harness/`](.harness/README.md) | the MCP policy and a manifest of the files that decide what agents may do; checked in CI |
 | [`scripts/`](scripts) · [`evals/`](evals/README.md) | the log renderer, the drift check CI runs, and the skill evals (`skills/*/evals/evals.json`, generated into `evals/` for `claude plugin eval`) |
 

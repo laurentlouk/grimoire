@@ -169,6 +169,7 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   const tabs = ['overview', 'map', 'files', 'symbols', 'hotspots']
   ok(JSON.stringify([R.parseHash('#sym-12', tabs), R.parseHash('#file-3', tabs), R.parseHash('#mod-0', tabs), R.parseHash('#map', tabs), R.parseHash('#nope', tabs), R.parseHash('#sym-x', tabs), R.parseHash('', tabs), R.parseHash('#sym-12abc', tabs), R.parseHash('x#sym-12', tabs)])
     === '[{"kind":"sym","id":12},{"kind":"file","id":3},{"kind":"mod","id":0},{"kind":"tab","tab":"map"},null,null,null,null,null]', 'parseHash: plain anchors only, anything else ignored')
+  ok(JSON.stringify([R.parseHash('#arch-1', tabs), R.parseHash('#doc-7', tabs), R.parseHash('#doc-x', tabs)]) === '[{"kind":"arch","id":1},{"kind":"doc","id":7},null]', 'parseHash: a diagram and a note have anchors too')
   ok([R.pairConf([3, 1, 2, 0]), R.pairConf([2, 0, 1, 1]), R.pairConf([2, 0, 0, 2])].join(' ') === 'resolved unique-name ambiguous', 'a file link is as sure as its surest edge')
   ok([0, 1, 2, 3, 7, 20, 400].map((c) => R.heatOf(c, 400)).join(' ') === '0 1 1 1 2 2 4' && R.heatOf(1, 1) === 4, 'heatOf: log-scale churn bands')
   ok(JSON.stringify(R.heatBands(400)) === '[[1,1,4],[2,5,20],[3,21,89],[4,90,400]]' && JSON.stringify(R.heatBands(1)) === '[[4,1,1]]' && JSON.stringify(R.heatBands(0)) === '[]', `heatBands: the legend's real ranges (${JSON.stringify(R.heatBands(400))})`)
@@ -322,7 +323,7 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   const scriptSrc = (/script-src ([^;"]+)/.exec(pageP) || [])[1] || ''
   ok(csp === `sha256-${createHash('sha256').update(script, 'utf8').digest('base64')}` && !scriptSrc.includes('unsafe-inline'),
     'the CSP admits the page\'s own script by its hash, and no inline handler: an escaping slip cannot run code')
-  const helpers = ['esc', 'cut', 'cutL', 'plural', 'parseHash', 'pairConf', 'heatOf', 'heatBands', 'squarify', 'lanePick']
+  const helpers = ['esc', 'cut', 'cutL', 'plural', 'parseHash', 'pairConf', 'heatOf', 'heatBands', 'squarify', 'lanePick', 'mdSlug', 'mdFront', 'mdToHtml', 'archClient', 'docsClient']
   ok(helpers.every((n) => script.includes(`function ${n}(`)), `the page carries every helper its client calls (${helpers.filter((n) => !script.includes(`function ${n}(`)).join(', ') || 'all'})`)
 
   // Run the page's own script against a small stub DOM: every view renders, anchors open what they
@@ -358,6 +359,8 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   views.overview = /production files/.test(pg.text())
   pg.go('#map'); views.map = /data-mod="/.test(pg.text()) && /class="mlink"/.test(pg.text())
   pg.go('#hotspots'); views.hotspots = /class="tile"/.test(pg.text())
+  pg.go('#architecture'); views.architecture = /data-comp="/.test(pg.text()) && /Drafted from the graph on this render/.test(pg.text()) && pg.hash() === '#arch-0'
+  pg.go('#docs'); views.docs = /No Markdown notes/.test(pg.text())
   pg.go('#files'); views.files = /#file-\d+/.test(pg.text())
   const cart = DP.system.modules.findIndex((m) => m.repo === 'shop' && m.key === 'cart')
   pg.go(`#mod-${cart}`); views.module = /Files of/.test(pg.text()) && pg.hash() === `#mod-${cart}`

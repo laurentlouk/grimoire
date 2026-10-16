@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased — architecture diagrams the code backs, and the docs as a vault
+
+Two things the graph page could not show: what the system *is*, and what the team wrote about it.
+Taking [archify](https://github.com/tt-a1i/archify) as the example but building grimoire's own (no
+dependency, free to evolve), an architecture is now a typed diagram drawn as an interactive page,
+one the code graph checks; and the project's Markdown notes open in the
+page as an Obsidian-like vault, editable when the page is served
+(`tools/graph/tests/arch-docs.test.mjs`, no parser runtime needed).
+
+**Architecture (`/grimoire:architecture`, `lib/arch.mjs`, the Architecture tab)**
+- A diagram is `docs/architecture/<name>.architecture.json`: typed components (frontend, backend,
+  worker, database, messagebus, cloud, security, external, library, cli) with the `paths` of their
+  code, the `imports` that reach them and `path:line` sources; boundaries; connections with a label,
+  a variant and `via` for what the code graph cannot see; cards. `graph.architectureDir` moves it.
+- `graph.mjs architecture draft` drafts one deterministically: one component per module of the
+  system map, typed by folder names and the frameworks it imports; the external services its
+  imports name (PostgreSQL, Redis, Kafka, AWS, Stripe, an LLM API… 23 known); a line per module
+  link resolved by syntax. It never overwrites a refined diagram without `--force`.
+- `graph.mjs architecture check` checks one against the index: the schema, every glob matching
+  indexed production files, every source existing with its lines, each line between code
+  components counted in file pairs (or importing files), lines the code shows only the other way,
+  code links no line draws, files in two components, and the share of production files covered.
+- The skill drafts, has the agent refine the draft by reading the code (names by responsibility,
+  datastores and queues from config, trust boundaries, what flows on each line, sources), and
+  checks until it passes, answering each warning.
+- The tab draws every saved diagram and one drafted on each render, laid out by flow (boundaries
+  as bands, free components beside their neighbours), at natural size with Fit, zoom and drag to
+  pan. A line the graph confirms is solid; one it cannot see is dashed amber unless it names its
+  `via`. A component's passport lists the code it covers, its sources and each line with what the
+  graph saw; Upstream, Downstream and Route light up what the drawn lines reach (reachability, not
+  runtime impact); *Code links not drawn* shows what the diagram leaves out.
+- `docs/architecture/grimoire.architecture.json` is grimoire's own: 19 components, every
+  production file covered, all 13 lines between code components confirmed by the graph.
+
+**Docs (the Docs tab, `lib/docs.mjs`, `lib/md.mjs`)**
+- Every `.md` and `.markdown` note of the project's repositories, and of the project root in a
+  hub, in a folder tree; the header search filters by path and text, with the matching line.
+- A Markdown renderer with no dependency, shared by the page and the tests: headings with
+  GitHub's anchors, lists and task lists, GFM tables, fenced code, callouts (foldable), front
+  matter as properties, `[[wikilinks|alias]]`, `#tags`, `==highlights==`. Raw HTML passes only as
+  allowlisted tags rebuilt without attributes; links go out only to http(s) and mailto.
+- Beside each note: its outline, its backlinks with the line that links, the indexed files it
+  names (inline code such as `lib/render.mjs:42` opens that file's neighbourhood), and its
+  unresolved links. A file's page lists the notes that mention it.
+
+**Editing (`graph.mjs serve`, `lib/serve.mjs`)**
+- The same page on `127.0.0.1`, re-rendered on every load, whose Docs tab can save: Read, Edit
+  or Split views, Ctrl/⌘-E to switch, Ctrl/⌘-S to save, + New note, and an unresolved
+  `[[link]]` offers to create its note.
+- Local only, behind a random token: the host must be the loopback address (no DNS rebinding),
+  writes must be same-origin JSON carrying the token, and only Markdown notes inside the
+  project's repositories are written (no `..`, absolute path, skipped folder or symlink out),
+  atomically. A save from a copy that changed on disk since is refused with the disk text, and the
+  page offers to load it or overwrite; a served page reloads a note changed on disk when it gets
+  focus back.
+
 ## Unreleased — the run scorecard, and a journal that arrives whole
 
 The log page could replay one run's decisions, but not say whether the runs deliver. Reading the

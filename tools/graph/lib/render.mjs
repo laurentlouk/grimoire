@@ -10,20 +10,33 @@
 //              right, and what it extends / implements or is extended by
 //   hotspots   a size × churn map, most-called symbols and most-used files (links resolved by syntax
 //              only), strongest co-change
+//   architecture  the diagrams in docs/architecture (arch.mjs: checked against the index, laid out
+//              here) and one drafted from the graph on every render; drawn by arch-view.mjs
+//   docs       the project's Markdown notes (docs.mjs), rendered in the page (md.mjs) as an
+//              Obsidian-like vault: tree, reading view, outline, backlinks, code they mention;
+//              editable only when the page is served (serve.mjs), which adds connect-src 'self'
 // Test code and ambiguous links are hidden until asked for; unique-name matches are drawn dashed.
-// Views have plain anchors (#sym-12, #file-3, #mod-4): they hold for the index the page was rendered
-// from (a re-parsed file gets new ids; module numbers shift as modules change).
+// Views have plain anchors (#sym-12, #file-3, #mod-4, #arch-0, #doc-7): they hold for the index the
+// page was rendered from (a re-parsed file gets new ids; module, diagram and note numbers shift as
+// those change).
 // The helpers below the data section are pure, exported for the tests, and injected into the page.
 // Like every graph answer, the page is a map: read the code at the path:line it points to.
 import { createHash } from 'node:crypto'
+import path from 'node:path'
 import { openStore } from './store.mjs'
 import { layoutMap } from './layout.mjs'
 import { systemMap } from './modules.mjs'
+import { analyze, draftArch, loadIndex, readDiagrams } from './arch.mjs'
+import { scanDocs, docRoots } from './docs.mjs'
+import { mdSlug, mdFront, mdToHtml } from './md.mjs'
+import { archClient } from './arch-view.mjs'
+import { docsClient } from './docs-view.mjs'
 
 const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
 const MAP_MAX_FILES = 1500 // the file map keeps the most connected production files; the other tabs keep everything
 
-export async function renderGraph(project) {
+// opts.serve = { token }: the page is served by serve.mjs and may save notes back to it
+export async function renderGraph(project, opts = {}) {
   const db = await openStore(project.dbPath, { readOnly: true })
   try {
     const repos = db.prepare('SELECT name, root, head, indexed_at FROM repos ORDER BY name').all()
@@ -53,9 +66,37 @@ export async function renderGraph(project) {
       confs,
       edges: edges.map((e) => [e.src, e.dst, KINDS.indexOf(e.kind), confs.indexOf(e.confidence || '')]),
       cochange: cochange.map((c) => [c.repo, c.a, c.b, c.n]),
+      arch: archData(project, loadIndex(db)),
+      docs: project.root ? scanDocs(project).map((d) => [d.repo, d.root, d.path, d.text, d.hash, d.big ? 1 : 0]) : [],
+      ...(opts.serve ? { serve: { token: opts.serve.token } } : {}),
     }
-    return html(data)
+    return html(data, !!opts.serve)
   } finally { db.close() }
+}
+
+// The architecture tab: every saved diagram, checked against the index, then one drafted from the
+// graph on this render. A diagram that fails its check carries its errors and is not drawn.
+function archData(project, idx) {
+  const out = []
+  const roots = project.root ? docRoots(project) : null
+  for (const { file, doc, error } of project.root ? readDiagrams(project.architectureDir) : []) {
+    const rel = path.relative(project.root, path.join(project.architectureDir, file)).split(path.sep).join('/')
+    out.push(error ? { file: rel, title: file, errors: [error] } : packArch(doc, analyze(doc, idx, roots), { file: rel }))
+  }
+  if (idx.files.some((f) => !f.is_test)) { const d = draftArch(idx, { title: 'From the graph' }); out.push(packArch(d, analyze(d, idx, null), { auto: true })) }
+  return out
+}
+function packArch(doc, r, extra) {
+  if (!r.code) return { ...extra, title: (doc && doc.title) || extra.file, errors: r.errors }
+  const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o[k] !== undefined).map((k) => [k, o[k]]))
+  const { problems, ...layout } = r.layout
+  return {
+    ...extra, title: doc.title, summary: doc.summary, draft: !!doc.draft,
+    comps: doc.components.map((c) => pick(c, ['id', 'label', 'sublabel', 'type', 'tag', 'note', 'repo', 'paths', 'imports', 'sources'])),
+    conns: (doc.connections || []).map((e) => pick(e, ['from', 'to', 'label', 'variant', 'via', 'note'])),
+    cards: doc.cards || [], layout, members: r.code.members, evidence: r.code.evidence, checkable: r.checkable, ghosts: r.code.ghosts,
+    errors: r.errors, warnings: r.warnings, info: r.info, checked: r.checked,
+  }
 }
 
 // The file-level graph for the file map: most connected files, weighted links, positions, groups.
@@ -100,7 +141,8 @@ export function mapData(files, nodes, edges) {
 }
 
 // ── pure helpers: exported for the tests, injected into the page as they are ──
-export const INITIAL = { tab: 'overview', repo: '', q: '', tests: false, guesses: false, mapMode: 'modules', module: null }
+export const INITIAL = { tab: 'overview', repo: '', q: '', tests: false, guesses: false, mapMode: 'modules', module: null,
+  arch: 0, archSel: null, archTrace: null, archTo: null, archGhosts: false, archZoom: null, archScroll: null, doc: null, docMode: 'read', docAnchor: null, focusEditor: false, editorCaret: null }
 export const LANE_MAX = 14 // modules drawn per lane on the system map, the largest
 export const MAXCOL = 12 // items per column of a neighbourhood
 
@@ -111,8 +153,9 @@ export function cutL(s, n) { return s.length > n ? '…' + s.slice(-(n - 1)) : s
 export function plural(n, word) { return `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}` }
 
 // '#sym-12' → { kind: 'sym', id: 12 }, '#map' → { kind: 'tab', tab: 'map' }, anything else → null
+// (#arch-N opens a diagram, #doc-N a note)
 export function parseHash(hash, tabs) {
-  const m = /^#(sym|file|mod)-(\d+)$/.exec(hash || '')
+  const m = /^#(sym|file|mod|arch|doc)-(\d+)$/.exec(hash || '')
   if (m) return { kind: m[1], id: Number(m[2]) }
   const t = (hash || '').slice(1)
   return tabs.includes(t) ? { kind: 'tab', tab: t } : null
@@ -156,16 +199,16 @@ export function lanePick(mods, max) {
   return { shown: mods.filter((m) => keep.has(m)), rest: mods.length - keep.size }
 }
 
-const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands, squarify, lanePick]
+const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands, squarify, lanePick, mdSlug, mdFront, mdToHtml, archClient, docsClient]
 
-function html(data) {
+function html(data, served) {
   // Every "<" becomes \\u003c, so no data string can close the <script> element.
   const blob = JSON.stringify(data).replace(/</g, '\\u003c').split(String.fromCharCode(0x2028)).join('\\u2028').split(String.fromCharCode(0x2029)).join('\\u2029')
   const js = `${HELPERS.map((f) => f.toString()).join('\n')}\nconst INITIAL = ${JSON.stringify(INITIAL)}, LANE_MAX = ${LANE_MAX}, MAXCOL = ${MAXCOL};\n(${client.toString()})()`.replace(/<\//g, '<\\/').replace(/\r\n?/g, '\n') // LF only: a browser normalises line ends before it hashes
   const hash = createHash('sha256').update(js, 'utf8').digest('base64')
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; img-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; img-src 'none'${served ? "; connect-src 'self'" : ''}"><meta name="referrer" content="no-referrer">
 <title>grimoire code graph</title><style>${CSS}</style></head>
 <body><noscript>This page needs JavaScript to render the code graph.</noscript>
 <script type="application/json" id="graph-data">${blob}</script>
@@ -176,9 +219,11 @@ function html(data) {
 
 const CSS = `
 :root{--bg:#fbfaf8;--panel:#fff;--ink:#1d1d1f;--muted:#6b6b72;--line:#e6e4df;--accent:#6d4aff;--on-accent:#fff;--accent-soft:#eeeaff;--hover:#f2f0ec;--edge:rgba(60,60,70,.16);--link:rgba(60,60,70,.32);
---heat0:#e9e8e4;--heat1:#f6dcb2;--heat2:#efb46b;--heat3:#d97a33;--heat4:#a8461b;--tl3:#1d1d1f;--tl4:#fff}
+--heat0:#e9e8e4;--heat1:#f6dcb2;--heat2:#efb46b;--heat3:#d97a33;--heat4:#a8461b;--tl3:#1d1d1f;--tl4:#fff;
+--t-frontend:#2563eb;--t-backend:#7c3aed;--t-worker:#c026d3;--t-database:#059669;--t-messagebus:#d97706;--t-cloud:#0891b2;--t-security:#e11d48;--t-external:#64748b;--t-library:#65a30d;--t-cli:#ea580c;--ok:#15803d;--warn:#b45309;--err:#b91c1c}
 @media (prefers-color-scheme: dark){:root{--bg:#141417;--panel:#1c1c21;--ink:#ececf1;--muted:#9a9aa6;--line:#2c2c33;--accent:#a08bff;--on-accent:#141417;--accent-soft:#2a2540;--hover:#24242b;--edge:rgba(220,220,235,.13);--link:rgba(220,220,235,.28);
---heat0:#28292e;--heat1:#4d3b25;--heat2:#85592a;--heat3:#c87430;--heat4:#f59a4a;--tl3:#1d1d1f;--tl4:#1d1d1f}}
+--heat0:#28292e;--heat1:#4d3b25;--heat2:#85592a;--heat3:#c87430;--heat4:#f59a4a;--tl3:#1d1d1f;--tl4:#1d1d1f;
+--t-frontend:#60a5fa;--t-backend:#a78bfa;--t-worker:#e879f9;--t-database:#34d399;--t-messagebus:#fbbf24;--t-cloud:#22d3ee;--t-security:#fb7185;--t-external:#94a3b8;--t-library:#a3e635;--t-cli:#fb923c;--ok:#4ade80;--warn:#fbbf24;--err:#f87171}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}
 header{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:3}
 header h1{font-size:16px;margin:0 8px 0 0}nav,.seg{display:flex;gap:4px}nav button,.seg button,select,input[type=search]{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
@@ -217,6 +262,70 @@ svg.hot .mlink{opacity:.12}svg.hot .mlink.on{opacity:1;stroke:var(--accent)}svg.
 svg .tile{stroke:var(--panel);stroke-width:1}svg .tile:hover{stroke:var(--ink)}svg .tlabel{font-size:10.5px;fill:var(--ink);pointer-events:none}svg .tlabel.h3{fill:var(--tl3)}svg .tlabel.h4{fill:var(--tl4)}
 .swatch{display:inline-block;width:18px;height:10px;vertical-align:-1px}
 @media (prefers-reduced-motion:reduce){svg .mlink{transition:none}}
+.t-frontend{--c:var(--t-frontend)}.t-backend{--c:var(--t-backend)}.t-worker{--c:var(--t-worker)}.t-database{--c:var(--t-database)}.t-messagebus{--c:var(--t-messagebus)}
+.t-cloud{--c:var(--t-cloud)}.t-security{--c:var(--t-security)}.t-external{--c:var(--t-external)}.t-library{--c:var(--t-library)}.t-cli{--c:var(--t-cli)}
+.tdot{display:inline-block;width:10px;height:10px;border-radius:3px;background:var(--c);margin-right:6px;vertical-align:-1px}
+.split.rev{grid-template-columns:minmax(0,1.6fr) minmax(0,.75fr)}@media (max-width:1100px){.split.rev{grid-template-columns:1fr}.split.rev>.side{order:0}}
+.summary{font-size:15px;max-width:900px;margin:0 0 12px}.pill.ok{color:var(--ok);border-color:currentColor}.pill.warn{color:var(--warn);border-color:currentColor}
+details.problems{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 14px;margin:0 0 12px}details.problems ul{margin:8px 0 2px;padding-left:20px;font-size:13px}li.err{color:var(--err)}
+.detail.problems ul{padding-left:20px}.passport h2{font-size:13px;margin:16px 0 6px}.seg.trace{flex-wrap:wrap;margin:12px 0 4px}
+.archbox{padding:6px;overflow:auto;max-height:78vh;cursor:grab}.archbox:active{cursor:grabbing}.archbox svg{width:auto;min-width:0;max-width:none;height:auto;margin:0 auto}
+svg.arch text{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
+svg.arch .bound rect{fill:color-mix(in srgb,var(--hover) 60%,transparent);stroke:var(--line);stroke-width:1.3;stroke-dasharray:7 5}
+svg.arch .bound.k-trust rect{stroke:var(--t-security)}svg.arch .bound.k-region rect{stroke:var(--t-cloud)}svg.arch .bound.k-deploy rect{stroke:var(--t-backend)}svg.arch .bound.k-network rect{stroke:var(--t-messagebus)}svg.arch .bound.k-repo rect{stroke-dasharray:none}
+svg.arch .blabel{font-size:10.5px;font-weight:600;fill:var(--muted);letter-spacing:.08em}
+svg.arch .conn{fill:none;stroke:var(--link);stroke-width:1.7;transition:opacity .15s}svg.arch .conn.v-emphasis{stroke:var(--accent);stroke-width:2.6}
+svg.arch .conn.v-security{stroke:var(--t-security);stroke-dasharray:8 4}svg.arch .conn.v-async{stroke-dasharray:2 5;stroke-linecap:round}svg.arch .conn.v-dashed{stroke-dasharray:7 5}svg.arch .conn.unseen{stroke:var(--warn);stroke-dasharray:5 4}
+svg.arch .conn.on,svg.arch .conn.hov{stroke:var(--accent);stroke-width:2.6;opacity:1}svg.arch .conn.on{stroke-dasharray:9 6;animation:archflow .9s linear infinite}
+@keyframes archflow{to{stroke-dashoffset:-15}}
+svg.arch .ahead{fill:var(--link)}svg.arch .ahead.on{fill:var(--accent)}
+svg.arch .clab rect{fill:var(--panel);stroke:var(--line)}svg.arch .clab text{font-size:11px;fill:var(--muted)}svg.arch .clab.on text{fill:var(--accent);font-weight:600}svg.arch .clab.on rect{stroke:var(--accent)}
+svg.arch .ghost{fill:none;stroke:var(--warn);stroke-width:1.4;stroke-dasharray:2 5;stroke-linecap:round}
+svg.arch .comp{cursor:pointer;transition:opacity .15s}svg.arch .cbox{fill:color-mix(in srgb,var(--c) 7%,var(--panel));stroke:color-mix(in srgb,var(--c) 45%,var(--line));stroke-width:1.3}
+svg.arch .cico{fill:color-mix(in srgb,var(--c) 16%,var(--panel))}svg.arch .cglyph{fill:none;stroke:var(--c);stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+svg.arch .clabel{font-size:13px;font-weight:600;fill:var(--ink)}svg.arch .comp .sub{font:11px ui-sans-serif,system-ui,sans-serif;fill:var(--muted)}
+svg.arch .ctag rect{fill:var(--panel);stroke:color-mix(in srgb,var(--c) 55%,var(--line))}svg.arch .ctag text{font-size:10px;fill:var(--c);font-weight:600}
+svg.arch .comp:hover .cbox,svg.arch .comp.sel .cbox,svg.arch [tabindex]:focus-visible .cbox{stroke:var(--c);stroke-width:2.4}svg.arch .comp.sel .cbox{fill:color-mix(in srgb,var(--c) 14%,var(--panel))}
+svg.arch .dim{opacity:.22}svg.arch.hover .comp:not(.hov){opacity:.35}svg.arch.hover .conn:not(.hov),svg.arch.hover .clab{opacity:.25}
+@media (prefers-reduced-motion:reduce){svg.arch .conn.on{animation:none}svg.arch .conn,svg.arch .comp{transition:none}}
+.arch-cards{grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:14px}.acard{--c:var(--t-external)}.acard.c-cyan{--c:var(--t-cloud)}.acard.c-emerald{--c:var(--t-database)}.acard.c-violet{--c:var(--t-backend)}.acard.c-amber{--c:var(--t-messagebus)}.acard.c-rose{--c:var(--t-security)}.acard.c-orange{--c:var(--t-cli)}
+.acard-title{font-weight:600;display:flex;gap:8px;align-items:center}.acard-title i{width:9px;height:9px;border-radius:50%;background:var(--c)}.acard ul{margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted)}
+.callout{border:1px solid color-mix(in srgb,var(--c,var(--accent)) 35%,var(--line));background:color-mix(in srgb,var(--c,var(--accent)) 7%,var(--panel));border-radius:10px;padding:8px 14px;margin:.8em 0}
+.callout-title{font-weight:600;color:var(--c,var(--accent))}summary.callout-title{cursor:pointer;font-size:inherit}.callout p{margin:.4em 0}.banner{margin:0 0 12px}
+.callout-warning,.callout-caution,.callout-attention{--c:var(--t-messagebus)}.callout-danger,.callout-error,.callout-bug,.callout-failure,.callout-fail,.callout-missing{--c:var(--t-security)}
+.callout-tip,.callout-hint,.callout-success,.callout-check,.callout-done{--c:var(--t-database)}.callout-info,.callout-todo{--c:var(--t-frontend)}.callout-question,.callout-help,.callout-faq{--c:var(--t-cli)}.callout-example{--c:var(--t-worker)}.callout-quote,.callout-cite{--c:var(--t-external)}
+.docs{display:grid;grid-template-columns:270px minmax(0,1fr) 230px;gap:18px;align-items:start}.docs.nodoc{grid-template-columns:270px minmax(0,1fr)}nav.explorer{display:block}
+.explorer,.rail{position:sticky;top:var(--hdr,76px);max-height:calc(100vh - var(--hdr,76px) - 20px);overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px}
+.rail{font-size:13px}@media (max-width:1100px){.docs,.docs.nodoc{grid-template-columns:1fr}.explorer,.rail{position:static;max-height:42vh}}
+.xhead{display:flex;align-items:baseline;gap:6px;margin:2px 4px 8px}.xhead .linkbtn{margin-left:auto;font-size:13px}
+ul.tree{list-style:none;margin:0;padding:0 0 0 12px}.explorer>ul.tree,.explorer>div>ul.tree{padding-left:0}
+.xdir,.xfile{display:block;width:100%;text-align:left;font:13px/1.35 ui-sans-serif,system-ui,sans-serif;color:var(--ink);background:none;border:0;border-radius:6px;padding:3px 6px;cursor:pointer;text-decoration:none;overflow-wrap:anywhere}
+.xdir{color:var(--muted)}.xdir:hover,.xfile:hover{background:var(--hover)}.xfile.on{background:var(--accent-soft);color:var(--accent);font-weight:600}.caret{display:inline-block;width:14px}
+.xrepo{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:12px 6px 4px}
+.tree.flat .xfile{padding:5px 6px}.xpath{display:block;font-size:11px;font-weight:400}.snip{display:block;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400}.dirty{color:var(--accent)}
+.note-pane{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:0 28px 28px;min-width:0}
+.notehead{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:12px 0 10px;margin-bottom:6px;border-bottom:1px solid var(--line);position:sticky;top:var(--hdr,76px);background:var(--panel);z-index:2}
+.grow{flex:1}.crumbs{font-size:12.5px}
+button.primary{font:inherit;background:var(--accent);color:var(--on-accent);border:1px solid var(--accent);border-radius:8px;padding:6px 12px;cursor:pointer}button.primary:disabled{opacity:.4;cursor:default}.seg button:disabled{opacity:.45;cursor:not-allowed}
+textarea.editor{display:block;width:100%;min-height:72vh;resize:vertical;font:13.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:14px 16px;tab-size:2;margin-top:10px}
+.splitedit{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}.splitedit .pv{max-height:76vh;overflow:auto;margin-top:10px}@media (max-width:900px){.splitedit{grid-template-columns:1fr}}
+.md{font-size:15px;line-height:1.65;max-width:820px;overflow-wrap:break-word}
+.md h1{font-size:1.75em;margin:.6em 0 .4em;line-height:1.25}.md h2{font-size:1.35em;margin:1.4em 0 .5em;padding-bottom:.25em;border-bottom:1px solid var(--line);line-height:1.3}.md h3{font-size:1.12em;margin:1.2em 0 .4em}.md h4,.md h5,.md h6{font-size:1em;margin:1em 0 .3em}
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{scroll-margin-top:calc(var(--hdr,76px) + 64px);border-radius:6px;transition:background .4s}.md .flash{background:var(--accent-soft)}
+.md p,.md ul,.md ol,.md pre,.md blockquote,.md .table,.md details{margin:.65em 0}.md li>ul,.md li>ol{margin:.2em 0}
+.md code{font:.86em ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--hover);border-radius:5px;padding:.1em .35em}
+.md pre{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow:auto}.md pre code{background:none;padding:0;font-size:12.5px;line-height:1.55}
+.md blockquote{border-left:3px solid var(--line);margin-left:0;padding:.05em 1em;color:var(--muted)}
+.md .table{overflow-x:auto}.md table{width:auto;min-width:50%;margin:0;border-radius:8px;font-size:14px}.md th,.md td{padding:6px 10px}
+.md hr{border:0;border-top:1px solid var(--line);margin:1.6em 0}.md li.task{list-style:none}.md li.task input{margin:0 .45em 0 -1.35em}
+.md mark{background:color-mix(in srgb,var(--t-messagebus) 30%,transparent);color:inherit;border-radius:3px;padding:0 .15em}
+.md .tag{color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:.05em .5em;font-size:.86em}
+.md a{color:var(--accent);text-decoration:none}.md a:hover{text-decoration:underline}.md a.missing{opacity:.65;text-decoration:underline dotted}.md a.external:not(.img)::after{content:"\\2197";font-size:.72em;margin-left:2px;opacity:.7}
+.md .unresolved{border-bottom:1px dotted var(--muted)}.md .img{color:var(--muted);font-style:italic}.md .img::before{content:"\\1F5BC  ";font-style:normal}.md a.code-link code{color:var(--accent)}
+.md summary{cursor:pointer;color:var(--muted)}
+table.props{width:auto;margin:10px 0 14px;font-size:13px;border-radius:8px}table.props th{width:1%;white-space:nowrap}
+.rail h4{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:16px 4px 6px}.rail>:first-child h4,.rail>h4:first-child{margin-top:4px}
+ul.outline{list-style:none;margin:0;padding:0}ul.outline li{padding:2px 4px}ul.outline .linkbtn{color:var(--ink);text-align:left;font-size:13px}.rail .snip{white-space:normal}
 `
 
 // Runs in the browser. Self-contained: no imports; the helpers above are injected beside it.
@@ -275,30 +384,35 @@ function client() {
   for (const m of modules) if (perRepo.has(m.repo)) perRepo.get(m.repo).modules++
 
   // ── state ──
-  const TABS = [['overview', 'Overview'], ['map', 'Map'], ['files', 'Files'], ['symbols', 'Symbols'], ['hotspots', 'Hotspots']]
-  const st = { ...INITIAL, sel: null }
+  const TABS = [['overview', 'Overview'], ['architecture', 'Architecture'], ['map', 'Map'], ['files', 'Files'], ['symbols', 'Symbols'], ['hotspots', 'Hotspots'], ['docs', 'Docs']]
+  const st = { ...INITIAL, sel: null, docOpen: new Set() }
+  let ARCH = null, DOCS = null // the Architecture and Docs tabs (arch-view.mjs, docs-view.mjs), made once the shell exists
   const inRepo = (f) => !st.repo || (f && f.repo === st.repo)
   const showFile = (f) => !!f && inRepo(f) && (st.tests || !f.test)
   const showSym = (n) => !!n.file && showFile(n.file) && (st.tests || !n.test)
   const resolvedOf = (m) => [...m].filter(([g, v]) => showFile(g) && v[1] > 0)
   const openModule = (i) => { if (!modules[i]) return; if (st.repo && modules[i].repo !== st.repo) st.repo = ''; st.tab = 'map'; st.mapMode = 'files'; st.module = i }
 
-  // Plain anchors only: #overview, #map, #sym-12, #file-3, #mod-4.
+  // Plain anchors only: #overview, #map, #sym-12, #file-3, #mod-4, #arch-0, #doc-7.
   function readHash() {
     const p = parseHash(location.hash, TABS.map(([id]) => id))
     if (!p) return
     if (p.kind === 'sym' && nodes.has(p.id)) { st.sel = { sym: nodes.get(p.id) }; st.tab = 'symbols' }
     else if (p.kind === 'file' && files.has(p.id)) { st.sel = { file: files.get(p.id) }; st.tab = 'files' }
     else if (p.kind === 'mod') openModule(p.id)
-    else if (p.kind === 'tab') { st.tab = p.tab; if (p.tab === 'map') { st.mapMode = 'modules'; st.module = null } }
+    else if (p.kind === 'arch' && (D.arch || [])[p.id]) { if (st.arch !== p.id) { st.archSel = null; st.archTrace = null } st.arch = p.id; st.tab = 'architecture' }
+    else if (p.kind === 'doc' && DOCS && DOCS.has(p.id)) { st.doc = p.id; st.tab = 'docs' }
+    else if (p.kind === 'tab') { st.tab = p.tab; if (p.tab === 'map') { st.mapMode = 'modules'; st.module = null } if (p.tab === 'docs') st.doc = null }
   }
   function writeHash() {
     const want = st.tab === 'map' && st.mapMode === 'files' && st.module !== null ? `#mod-${st.module}`
       : st.tab === 'symbols' && st.sel && st.sel.sym ? `#sym-${st.sel.sym.id}`
-        : st.tab === 'files' && st.sel && st.sel.file ? `#file-${st.sel.file.id}` : `#${st.tab}`
+        : st.tab === 'files' && st.sel && st.sel.file ? `#file-${st.sel.file.id}`
+          : st.tab === 'architecture' && (D.arch || []).length ? `#arch-${Math.min(st.arch, D.arch.length - 1)}`
+            : st.tab === 'docs' && st.doc !== null ? `#doc-${st.doc}` : `#${st.tab}`
     if (location.hash !== want) { try { history.replaceState(null, '', want) } catch {} }
   }
-  window.addEventListener('hashchange', () => { readHash(); st.focusMain = true; render(); if (window.innerWidth <= 1100) window.scrollTo({ top: 0 }) })
+  window.addEventListener('hashchange', () => { const before = st.tab === 'docs' ? st.doc : -1; readHash(); st.focusMain = true; render(); if (window.innerWidth <= 1100 || (st.tab === 'docs' && st.doc !== before && !st.docAnchor)) window.scrollTo({ top: 0 }) })
 
   // ── overview ──
   function overview() {
@@ -396,11 +510,13 @@ function client() {
     const it = ([g, v]) => ({ file: g.id, label: short(g.path), sub: g.shown, repo: g.repo, n: v[0], conf: pairConf(v), test: g.test })
     const byCount = (m) => [...m.entries()].sort((a, b) => b[1][0] - a[1][0])
     const mod = f.module >= 0 ? modules[f.module] : null
+    const notes = DOCS ? DOCS.mentionsOf(f) : []
     return h('div', { class: 'detail' },
       h('h3', { class: 'mono' }, f.shown), h('div', { class: 'muted' }, `${f.repo} · ${f.lang}${f.test ? ' · test code' : ''} · ${plural(f.defs.length, 'definition')}${f.churn ? ` · in ${plural(f.churn, 'recent commit')}` : ''}`,
         mod ? h('span', null, ' · module ', h('a', { class: 'jump mono', href: `#mod-${mod.i}` }, mod.key)) : null),
       neighbourhood({ label: short(f.path), sub: f.shown, kind: `${plural(f.in.size, 'file')} use${f.in.size === 1 ? 's' : ''} it · it uses ${f.out.size}`, repo: f.repo }, 'Used by', [...f.in].map(it), 'Uses', [...f.out].map(it)),
       h('p', { class: 'note' }, 'Solid: at least one link resolved by syntax · dashed: unique-name matches only · dotted: ambiguous matches only. Arrows point from the file that uses to the file it uses.'),
+      notes.length ? h('div', null, h('h2', null, `Mentioned in ${plural(notes.length, 'note')}`), h('ul', { class: 'links' }, notes.slice(0, 30).map((d) => h('li', null, h('a', { class: 'jump mono', href: `#doc-${d.i}` }, d.shown))))) : null,
       h('details', null, h('summary', null, `Every file it uses (${f.out.size}), every file using it (${f.in.size}), its ${plural(f.defs.length, 'definition')}`),
         h('div', { class: 'grid2' },
           h('div', null, h('h2', null, `Uses${f.out.size > 200 ? ' (the first 200 listed)' : ''}`), h('ul', { class: 'links' }, byCount(f.out).slice(0, 200).map(([g, v]) => h('li', null, jumpFile(g), h('span', { class: 'pill' }, v[0]))))),
@@ -709,7 +825,9 @@ function client() {
   // ── shell ──
   let search = null
   function header() {
-    search = search || h('input', { type: 'search', 'data-ctl': 'search', placeholder: 'Search files or symbols…', 'aria-label': 'Search files or symbols', oninput: (e) => { st.q = e.target.value; if (st.tab !== 'files' && st.tab !== 'symbols') st.tab = 'symbols'; render(true) } })
+    search = search || h('input', { type: 'search', 'data-ctl': 'search', oninput: (e) => { st.q = e.target.value; if (st.tab !== 'files' && st.tab !== 'symbols' && st.tab !== 'docs') st.tab = 'symbols'; render(true) } })
+    const what = st.tab === 'docs' ? 'Search notes…' : 'Search files or symbols…'
+    search.setAttribute('placeholder', what); search.setAttribute('aria-label', what.slice(0, -1))
     const repoSel = h('select', { 'data-ctl': 'repo', 'aria-label': 'Repository', onchange: (e) => { st.repo = e.target.value; st.sel = null; st.module = null; render() } }, h('option', { value: '' }, 'all repositories'), D.repos.map((r) => h('option', { value: r.name }, r.name)))
     repoSel.value = st.repo
     const tog = (key, label) => h('label', { class: 'tog' }, h('input', { type: 'checkbox', 'data-ctl': `tog-${key}`, checked: st[key] ? 'checked' : null, onchange: (e) => { st[key] = e.target.checked; render() } }), label)
@@ -722,7 +840,7 @@ function client() {
     // the header is rebuilt: hand keyboard focus back to the control that had it, the caret where it was
     const ctl = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.ctl : null
     const caret = search ? [search.selectionStart, search.selectionEnd] : null
-    const view = { overview, map: mapView, files: filesView, symbols, hotspots }[st.tab]()
+    const view = { overview, architecture: ARCH.view, map: mapView, files: filesView, symbols, hotspots, docs: DOCS.view }[st.tab]()
     const hd = header()
     document.body.replaceChildren(hd, h('main', null, view))
     document.documentElement.style.setProperty('--hdr', `${hd.offsetHeight + 12}px`)
@@ -735,6 +853,9 @@ function client() {
     }
     st.focusMain = false
   }
+  const ctx = { D, h, st, files, render, jumpFile, activate, plural }
+  ARCH = archClient(ctx)
+  DOCS = docsClient(ctx)
   readHash()
   render()
 }
