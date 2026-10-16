@@ -1149,8 +1149,8 @@ try {
     const w = byName(res, 'webapp')
     ok(w.available === true && w.reason === null && w.fix === null && w.submodule === false, 'a nested clone is available')
     const m = byName(res, 'odyyy-app')
-    ok(m.available === false && m.reason === 'not checked out' && m.fix === 'clone it: git clone git@github.com:acme/odyyy-app.git repositories/odyyy-app' && m.command === 'git clone git@github.com:acme/odyyy-app.git repositories/odyyy-app',
-      `a missing nested clone: "clone it: git clone <remote> <path>", the command to run on a yes (${m.fix})`)
+    ok(m.available === false && m.reason === 'not checked out' && m.fix === 'clone it: git clone -- git@github.com:acme/odyyy-app.git repositories/odyyy-app' && m.command === 'git clone -- git@github.com:acme/odyyy-app.git repositories/odyyy-app',
+      `a missing nested clone: "clone it: git clone -- <remote> <path>", the command to run on a yes (${m.fix})`)
     const c = byName(res, 'cloud')
     ok(c.path === 'repositories/cloud' && c.available === false && c.fix === 'clone the repo into repositories/cloud' && c.command === null, 'no path: repositories/<name>, as the loop reads it; no remote: "clone the repo into <path>", no command')
     const ng = byName(res, 'notgit')
@@ -1158,8 +1158,8 @@ try {
       'a directory under the hub\'s ignored repositories/ that is no clone is not a work tree, though git finds the hub above it')
     ok(byName(res, 'afile').available === false && byName(res, 'afile').reason === 'not a git work tree', 'a file at the path is not a work tree')
     const s = byName(res, 'sub')
-    ok(s.available === false && s.submodule === true && s.reason === 'submodule not initialised' && s.fix === 'git submodule update --init libs/sub' && s.command === s.fix,
-      `an uninitialised submodule: "git submodule update --init <path>" (${s.reason}, ${s.fix})`)
+    ok(s.available === false && s.submodule === true && s.reason === 'submodule not initialised' && s.fix === 'git submodule update --init -- libs/sub' && s.command === s.fix,
+      `an uninitialised submodule: "git submodule update --init -- <path>" (${s.reason}, ${s.fix})`)
     const lk = byName(res, 'leaky')
     ok(lk.command === null && !JSON.stringify(lk).includes(PW), 'a remote that carries a password is never printed nor offered as a command')
 
@@ -1171,7 +1171,26 @@ try {
     const loose = join(R, 'loose'); mkdirSync(join(loose, 'x'), { recursive: true })
     ok(mod.checkRepos({ repos: [{ name: 'x', path: 'x' }] }, loose).repos[0].reason === 'not a git work tree', 'a directory outside any git repo is not a work tree')
     const sp = mod.checkRepos({ repos: [{ name: 'gone', path: 'repositories/my repo', remote: 'git@h:a/b.git' }] }, loose).repos[0]
-    ok(sp.command === "git clone git@h:a/b.git 'repositories/my repo'", `a path with a space is quoted in the command (${sp.command})`)
+    ok(sp.command === "git clone -- git@h:a/b.git 'repositories/my repo'", `a path with a space is quoted in the command (${sp.command})`)
+    const dash = mod.checkRepos({ repos: [{ name: 'd', path: '-upload-pack=x', remote: 'git@h:a/b.git' }] }, loose).repos[0]
+    ok(dash.command === 'git clone -- git@h:a/b.git -upload-pack=x', `a path that starts with "-" comes after "--", never read as an option (${dash.command})`)
+    const kept = mod.checkRepos({ repos: [{ name: 'a', path: 'a', remote: 'ssh://git@github.com/acme/a.git' }, { name: 'b', path: 'b', remote: 'git@github.com:acme/b.git' }] }, loose).repos
+    ok(kept.every((x) => x.command && x.command.startsWith('git clone -- ')), 'an ssh:// remote with the git user, and an scp-style git@host:path, are kept')
+
+    // A bare token as an http(s) remote's user name (no ":") is a credential too: built at runtime
+    // from pieces, it never reaches the repos JSON, launch-plan, the briefing or any state file.
+    const TOK = ['bare', 'token', 'value', '0042'].join('')
+    const leakRoot = join(R, 'leak')
+    const leakCfg = { repos: [{ name: 'app', path: 'repositories/app', remote: `https://${TOK}@github.com/acme/app.git` }] }
+    const lb = brief([item('T-9', { assignee: null, hasAcceptanceCriteria: true, repo: 'app' })], { root: leakRoot, config: leakCfg, extra: ['--check-repos'] })
+    const cfgArg = ['--config', join(leakRoot, 'grimoire.config.json'), '--root', leakRoot]
+    const lr = cli(['repos', ...cfgArg], leakRoot)
+    const ll = cli(['launch-plan', '--ids', 'T-9', '--items', join(leakRoot, 'items.json'), ...cfgArg], leakRoot)
+    const state = readdirSync(lb.mdir, { recursive: true }).map((f) => join(lb.mdir, f)).filter((f) => { try { return readFileSync(f) && true } catch { return false } }).map((f) => readFileSync(f, 'utf8'))
+    const outputs = [lb.stdout, lb.stderr, lr.stdout, lr.stderr, ll.stdout, ll.stderr, ...state]
+    ok(lb.status === 0 && lr.status === 0 && ll.status === 0 && state.length >= 3 && /repo not checked out: repositories\/app/.test(latest(lb)) && JSON.parse(lr.stdout).repos[0].command === null,
+      `a bare-token remote: the repo still reads "not checked out", with no command (${lb.status}/${lr.status}/${ll.status}, ${state.length} state files)`)
+    ok(!outputs.some((t) => t.includes(TOK)), 'and the token appears in no output and no file')
     ok(cli(['repos', '--root', loose]).status === 1, 'no grimoire.config.json in the cwd or the root: exit 1')
   }
 
@@ -1209,6 +1228,8 @@ try {
     const down = { repos: [{ name: 'odyyy-app', available: false, reason: 'not checked out', fix: 'clone it: git clone git@github.com:acme/odyyy-app.git repositories/odyyy-app' }] }
     not({}, /^not ready for AI: repo not checked out: repositories\/odyyy-app, fix: clone it: git clone git@github\.com:acme\/odyyy-app\.git repositories\/odyyy-app$/, 'its repo not checked out: "repo not checked out: <path>, fix: …"', { repos: down })
     ok(placed({}, { repos: null }).group === 'ai' && placed({}, { repos: null }).repo.note === 'availability not checked', 'without a repos check, the repo shows as not checked and holds nothing back')
+    const one = mod.view([item('S-1', { ...eligible, labels: [], repo: null })], { repos: [{ name: 'site', path: '.' }] }, null, NOW).groups.flatMap((g) => g.items)[0]
+    ok(one.group === 'ai' && one.repo.name === 'site' && one.repo.via === 'the only repo', `a single-repo project: an issue with no label and no repo maps to its one repos[] entry (${JSON.stringify(one.repo)})`)
     // Only an issue is handed to AI: a PR or a run that would pass every check has its own rules, no repo check.
     const lookalike = { assignee: null, hasAcceptanceCriteria: true, stateType: 'unstarted', labels: ['webapp'] }
     const others = mod.view([item('P-1', { ...lookalike, kind: 'pr' }), item('R-1', { ...lookalike, kind: 'run' })], config, null, NOW, undefined, up).groups.flatMap((g) => g.items)
@@ -1269,6 +1290,9 @@ try {
     ok(/matches 2 items \(sources linear, github\): name it as <sourceId>:<id>/.test(why('X-1')), 'an id in two sources is refused as ambiguous')
     ok(plan.refused.some((x) => x.id === null && x.reason === 'not a plain tracker id'), 'an id that is not plain is refused without being echoed')
     ok(mod.launchPlan(['github:X-1'], items, config, { repos: up }).groups[0]?.sourceId === 'github', '<sourceId>:<id> picks one')
+    const slashed = mod.launchPlan(['S-1', 'S-2'], [item('S-1', { ...ok1, project: { id: 'p1' }, repo: 'web' }), item('S-2', { ...ok1, project: { id: 'p2' }, repo: 'web-too' })],
+      { repos: [{ name: 'web', path: 'repositories/web' }, { name: 'web-too', path: 'repositories/web/' }] }, { root: join(TMP, 'no-such-root') })
+    ok(JSON.stringify(slashed.groups.map((g) => g.waitsFor)) === '[[],["g1"]]', `repositories/web and repositories/web/ are one checkout: the second group waits (${JSON.stringify(slashed.groups.map((g) => g.waitsFor))})`)
     const downPlan = mod.launchPlan(['C-1'], items, config, { repos: { repos: [{ name: 'cloud', available: false, reason: 'not checked out', fix: 'clone the repo into repositories/cloud' }] } })
     ok(downPlan.groups.length === 0 && /repo not checked out: repositories\/cloud, fix: clone the repo into repositories\/cloud/.test(downPlan.refused[0]?.reason), 'an issue whose repo is not checked out is not launched, and its fix is given')
 

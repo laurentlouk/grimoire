@@ -117,8 +117,9 @@
 //        own); a registered submodule of the root must be initialised (`git submodule status`
 //        without a leading "-"). Each failure has its reason and fix, and
 //        command when the fix is one command to run from the root, on the user's yes only:
-//          not checked out           git clone <repos[].remote> <path> (no usable remote: prose)
-//          submodule not initialised git submodule update --init <path>
+//          not checked out           git clone -- <repos[].remote> <path> (no usable remote, one
+//                                    with credentials included: prose)
+//          submodule not initialised git submodule update --init -- <path>
 //          not a git work tree       prose: the path exists, but is no clone
 //        Clones under the root that repos[] does not name are never looked at. Exit 0 checked ·
 //        1 no config or an unreadable one · 2 usage.
@@ -127,7 +128,7 @@
 //  criteria · not started (backlog or unstarted) · nothing open blocking it · no assignee, or the
 //  assignee is claim.identity · no linked PR · not a parent · it maps to a repos[] entry, first
 //  through manager.repoLabels (a label → a repos[] name, case-insensitive), then through its
-//  `repo` · and that repo is available. brief --check-repos runs the repos check; without it a
+//  `repo`, else to the only repos[] entry of a single-repo project · and that repo is available. brief --check-repos runs the repos check; without it a
 //  repo shows as "availability not checked" and is not held back on it. Only an issue is read
 //  this way: a PR or a run is placed by its own rules (placePr, placeRun) and has no repo check.
 //
@@ -558,7 +559,8 @@ const repoPath = (r) => (typeof r.path === 'string' && r.path ? r.path : `reposi
 // The repos[] entry an issue maps to (spec D8, D13): through manager.repoLabels first, so a label
 // that names a repo outright wins over a reading (Odyyy's `frontend` is the mobile app, not the
 // web app), then through the item's `repo` (the scout's match against the repos[] names, as the
-// loop's index does). → { name, path, via } or { problem }. A problem names config text only,
+// loop's index does), and with neither, to the only repos[] entry when there is one. → { name,
+// path, via } or { problem }. A problem names config text only,
 // never the ticket's: a label is printed as the config's key it matched.
 export function mapRepo(it, ctx) {
   if (!ctx.repoIndex.size) return { problem: 'no repo mapped: no repos[] in grimoire.config.json' }
@@ -573,6 +575,8 @@ export function mapRepo(it, ctx) {
     return ctx.repoIndex.has(name) ? { ...ctx.repoIndex.get(name), via: `label ${label}` } : { problem: `no repo mapped: repoLabels maps ${label} to ${name}, which is not in repos[]` }
   }
   if (it.repo) return ctx.repoIndex.has(it.repo) ? { ...ctx.repoIndex.get(it.repo), via: 'repo' } : { problem: 'no repo mapped: no label in repoLabels, and its repo is not a repos[] name' }
+  // a single-repo project (one repos[] entry): every issue is that repo's
+  if (ctx.repoIndex.size === 1) return { ...[...ctx.repoIndex.values()][0], via: 'the only repo' }
   return { problem: 'no repo mapped: no label in repoLabels' }
 }
 
@@ -1054,8 +1058,11 @@ function git(args) {
 }
 // A shell word: as is when it is plain, else single-quoted.
 const shq = (s) => (/^[A-Za-z0-9_./:@%+=,-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`)
-// A remote the fix may name: no option-like start, no space or control character, no password.
-const usableRemote = (r) => typeof r === 'string' && /^[^-\s]\S*$/.test(r) && !UNSAFE.test(r) && !/^[a-z][a-z0-9+.-]*:\/\/[^/@]*:[^/@]*@/i.test(r)
+// A remote the fix may name: no option-like start, no space or control character, no credential.
+// On http(s), ftp(s) and git URLs any userinfo is one (a bare token as the user name has no ":"),
+// so only ssh://git@host/… and scp-style git@host:path keep a user; no URL keeps a password.
+const usableRemote = (r) => typeof r === 'string' && /^[^-\s]\S*$/.test(r) && !UNSAFE.test(r)
+  && !/^(?:[a-z0-9.-]+\+)?(?:https?|ftps?|git):\/\/[^/]*@/i.test(r) && !/^[a-z][a-z0-9+.-]*:\/\/[^/@]*:[^/@]*@/i.test(r)
 const toPosix = (p) => p.split(sep).join('/')
 
 // The submodule state of rel under root: 'initialised', 'uninitialised', or null when root
@@ -1082,14 +1089,14 @@ export function checkRepo(entry, root, i = 0) {
   const sub = submoduleState(root, relative(root, abs))
   if (sub) out.submodule = true
   if (sub === 'uninitialised') {
-    const command = `git submodule update --init ${shq(path)}`
+    const command = `git submodule update --init -- ${shq(path)}`
     return { ...out, reason: 'submodule not initialised', fix: command, command }
   }
   let st = null
   try { st = statSync(abs) } catch { /* missing */ }
   if (!st) {
     if (usableRemote(entry.remote)) {
-      const command = `git clone ${shq(entry.remote)} ${shq(path)}`
+      const command = `git clone -- ${shq(entry.remote)} ${shq(path)}`
       return { ...out, reason: 'not checked out', fix: `clone it: ${command}`, command }
     }
     const why = entry.remote === undefined || entry.remote === null ? '' : ' (repos[].remote is left out: it is not a plain URL without credentials)'
@@ -1123,12 +1130,18 @@ const projectKey = (it) => {
   const id = p && typeof p.id === 'string' && p.id ? `id:${p.id}` : p && typeof p.name === 'string' && p.name ? `name:${p.name}` : ''
   return `${it.sourceId}\u0000${id}`
 }
-const checkout = (r) => posix.normalize(toPosix(r.path))
+// A repo's checkout on disk, so repositories/webapp and repositories/webapp/ (or a symlink to it)
+// are one: its real path when it exists, else the path resolved from the root.
+const checkoutOf = (root) => (r) => {
+  const abs = resolve(root ?? '.', r.path)
+  try { return realpathSync(abs) } catch { return abs }
+}
 
 // The ticked ids → one launch group per tracker project (spec D8). Pure: the repos check is passed
 // in (checkRepos' result; null reads as not checked, so nothing is held back on it). root goes
 // into the prompts when given.
 export function launchPlan(ids, items, config, { repos = null, root = null } = {}) {
+  const checkout = checkoutOf(root)
   const errors = validate(items)
   if (errors.length) throw new Error(`invalid WorkItems:\n${errors.slice(0, MAX_ERRORS).join('\n')}`)
   const { urgent, priorityLabels, repoLabels } = managerConfig(config)
@@ -1182,6 +1195,7 @@ export function launchPlan(ids, items, config, { repos = null, root = null } = {
       g.label = g.project ? `project ${g.project}` : g.inProject ? `the project of ${g.picks[0].shown}` : `issues with no project (${g.sourceId})`
       g.repos = [...names].sort().map((n) => ctx.repoIndex.get(n))
       g.waitsFor = groups.slice(0, i).filter((h) => h.repos.some((r) => g.repos.some((s) => checkout(s) === checkout(r))))
+      g.checkout = checkout
       return {
         id: g.id, sourceId: g.sourceId, project: g.project, label: g.label,
         issues: g.picks.map((p) => ({ id: p.shown, route: p.route, repo: p.repo.name })),
@@ -1203,7 +1217,7 @@ function launchPrompt(g, root) {
   ]
   if (root) L.push('', `Project root: ${oneLine(root)}`)
   if (g.waitsFor.length) {
-    const shared = [...new Set(g.waitsFor.flatMap((h) => h.repos.filter((r) => g.repos.some((s) => checkout(s) === checkout(r))).map((r) => oneLine(r.path))))]
+    const shared = [...new Set(g.waitsFor.flatMap((h) => h.repos.filter((r) => g.repos.some((s) => g.checkout(s) === g.checkout(r))).map((r) => oneLine(r.path))))]
     L.push('', `Start only after the launch for ${g.waitsFor.map((h) => `${h.label} (${h.id})`).join(', ')} has finished: it uses the same checkout (${shared.join(', ')}), and two agents never share one. If you can't tell that it has, ask the user before starting.`)
   }
   L.push('', 'Repos:', ...g.repos.map((r) => `- ${oneLine(r.name)}: ${oneLine(r.path)}`), '', 'Steps, in order:')

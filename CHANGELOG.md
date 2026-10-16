@@ -322,31 +322,36 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   `nativePriority`, the most urgent label in `labels[]` maps. Checks: `scripts/manager.test.mjs`
   (326 in all).
 - **Launch from the briefing.** After the briefing, the skill offers the ready issues as
-  multi-select checkboxes, one question per project (at most 4 options each, plus **All ready**),
+  multi-select checkboxes, one question per project, and one per source for the issues with no
+  project (GitHub Issues), at most 4 options each, plus **All ready**,
   and starts what the user ticks: one new conversation per tracker project, through the host's
   session tool when ToolSearch finds one (the desktop app has one), else a prompt per project to
   paste. Headless runs skip the step.
   - **Hand to AI applies every D8 condition.** On top of the earlier ones: not started (an In
     Progress issue is not handed to AI), the assignee may be `claim.identity`, the issue maps to a
     `repos[]` entry (first through `manager.repoLabels`, so `frontend` reaches the mobile repo,
-    then through its `repo`), and that repo is available. Each failure is a reason: "no repo
+    then through its `repo`, else to a single-repo project's one entry), and that repo is
+    available. Each failure is a reason: "no repo
     mapped: no label in repoLabels", "repo not checked out: repositories/webapp, fix: …".
     Only issues: a PR or a run keeps its own rules and has no repo check. `brief --check-repos`
     runs the check; without it a repo shows as "availability not checked".
   - **`manager.mjs repos`** reports each `repos[]` entry as JSON: available when its path is a git
     work tree (a directory a hub ignores must be a clone of its own), a registered submodule
-    initialised. A failure carries its fix, and the command when it is one: `git clone <remote>
-    <path>` for a missing nested clone (prose without a usable `remote`), `git submodule update
-    --init <path>` for an uninitialised submodule. The skill runs a fix only on the user's yes.
-    Clones `repos[]` doesn't name are ignored.
+    initialised. A failure carries its fix, and the command when it is one: `git clone --
+    <remote> <path>` for a missing nested clone, `git submodule update --init -- <path>` for an
+    uninitialised submodule (the `--` keeps a path that starts with `-` from reading as an
+    option). A remote with any credential (on http(s), ftp or git URLs, any user name, a bare
+    token included; a password anywhere) is never printed: the fix is prose, with no command.
+    The skill runs a fix only on the user's yes. Clones `repos[]` doesn't name are ignored.
   - **`manager.mjs launch-plan --ids …`** re-checks the ticked ids against the WorkItems and a
     fresh repos check, and groups them per tracker project: a sliced project goes to
     `/grimoire:orchestrate`, a loose ready issue to `/grimoire:implement` then `/grimoire:review`,
     an issue without acceptance criteria to `/grimoire:roast` first. Groups that share a checkout
-    run one after the other (`waitsFor`), never in parallel. Each prompt is self-contained and
+    run one after the other (`waitsFor`), never in parallel: a checkout is compared by its real
+    path, so `repositories/webapp` and `repositories/webapp/` are one. Each prompt is self-contained and
     carries ids, routes and repo paths only, never a ticket's title, body, labels or project
     name: the launched conversation reads the tickets itself. An unknown, ambiguous or ineligible
-    id is refused with its reason. Checks: `scripts/manager.test.mjs` (378 in all, the repos
+    id is refused with its reason. Checks: `scripts/manager.test.mjs` (384 in all, the repos
     check on real temp git repos), and the evals `manager-6` to `manager-8`.
 
 ## 0.11.0 — trust and see
