@@ -45,16 +45,23 @@
 //  source can hold a token); nothing written. An --approve that names no CHANGED path warns on
 //  stderr and is ignored.
 //
-//  Secrets never reach the output, text or --json (the written file is unaffected):
+//  Secrets of known shapes are masked in the output, text and --json (the written file is
+//  unaffected). A secret of a shape not listed here can still print, so the setup skill also
+//  keeps secret files out of context:
 //    • every string under an `env` key, at any depth, whatever its name;
 //    • every string under a key named like a secret: token, secret, passw, pwd, api key,
 //      private or access key, auth, credential, bearer, cookie, session id/key/token, dsn,
 //      signature, a `key`/`pat` suffix (STRIPE_KEY, GITHUB_PAT, sshKey). Numbers and booleans
 //      are not secrets, so maxOutputTokens stays visible;
-//    • inside any other string, with the rest kept: `token=`/`api-key:`/`Authorization:`-style
-//      pairs, `Bearer …`, URL credentials (`://user:pass@`), known token formats (sk_, pk_,
-//      ghp_, github_pat_, xoxb-, AKIA…).
-//  They print as «redacted».
+//    • inside any other value, with the rest of the string kept: an `Authorization:` header
+//      with any scheme word, `token=`/`api-key:`-style pairs, `Bearer …`, flags such as
+//      `--token X`, `--password X`, `--api-key=X`, `--with-token X` (a `$VAR` stays: it names
+//      the secret), `mysql -pX`, `curl -u user:pass`, `Cookie:` headers, URL credentials
+//      (`://user:pass@`), secret query parameters (`?key=`, `&token=`), JWTs, Slack webhook
+//      paths, token formats with a digit in a 20+ character run (sk_live_…, sk-ant-…, ghp_…,
+//      github_pat_…, xoxb-…), and AKIA/ASIA keys.
+//  They print as «redacted». Keys and paths are never masked: a repo named sk-frontend prints
+//  as itself, and its --approve hint works.
 //
 //  Plain Node ≥ 20, no dependencies. The guard hook closes .claude/settings.json to agents'
 //  Write and Edit calls, and setup does not route around it: for that file the setup skill
@@ -125,22 +132,35 @@ const ENV = /^env$/i
 export const isSecretKey = (k) => SECRET_KEY.test(k) || CAMEL_KEY.test(k)
 const hides = (k) => ENV.test(k) || isSecretKey(k)
 const VALUE = `[^\\s"'\`,;&)]+`
+const SECRET_WORD = 'token|secret|passw(?:or)?d|pwd|api[-_]?key|auth|credential'
 const MASKS = [
-  // a name=value or name: value pair, a scheme word included: token=…, "x-api-key: …", Authorization: Bearer …
-  [new RegExp(`((?:authorization|token|secret|api[-_]?key|passw(?:or)?d|pwd)["']?\\s*[=:]\\s*["']?)(?:(?:bearer|basic)\\s+)?${VALUE}`, 'gi'), `$1${REDACTED}`],
+  // Authorization: <any scheme word> <value> (Bearer, Basic, token…), the scheme masked with it
+  [new RegExp(`(authorization["']?\\s*[=:]\\s*["']?)(?:[A-Za-z][\\w.-]*\\s+)?${VALUE}`, 'gi'), `$1${REDACTED}`],
+  // --token X, --password X, --api-key=X, --with-token X; a $VAR or <file names it, so it stays
+  [new RegExp(`(?<![\\w-])(--?[\\w-]*(?:${SECRET_WORD})[\\w-]*)(\\s+|=)(["']?)(?![-$<])${VALUE}`, 'gi'), `$1$2$3${REDACTED}`],
+  // a name=value or name: value pair: token=…, "x-api-key: …", password: …
+  [new RegExp(`((?:token|secret|api[-_]?key|passw(?:or)?d|pwd)["']?\\s*[=:]\\s*["']?)(?:(?:bearer|basic)\\s+)?${VALUE}`, 'gi'), `$1${REDACTED}`],
   [new RegExp(`\\b(bearer)\\s+${VALUE}`, 'gi'), `$1 ${REDACTED}`],
+  [/(\b(?:set-)?cookie["']?\s*[=:]\s*["']?)[^"'`\n]+/gi, `$1${REDACTED}`], // a cookie header, up to its closing quote
+  // the scans between the command and its flag are bounded, so no input makes them quadratic
+  [new RegExp(`(\\bcurl\\b(?:[^;&|\\n]{0,300}?\\s)?(?:-u|--user)(?:\\s+|=)["']?)(?![-$<])${VALUE}`, 'g'), `$1${REDACTED}`],
+  [/(\bmysql(?:dump|admin|import|sh)?\b(?:[^;&|\n]{0,300}?\s)?-p)([^\s"'`;&|)]+)/g, `$1${REDACTED}`], // -p glued to the password
   [/(:\/\/)[^\s/@"'`]+@/g, `$1${REDACTED}@`], // URL credentials
-  [/\b(?:sk|pk|rk|ghp|gho|ghs|ghu|ghr|github_pat|xox[abpr])[-_][\w-]{8,}/g, REDACTED],
-  [/\bAKIA[0-9A-Z]{16}\b/g, REDACTED],
+  [new RegExp(`([?&](?:[\\w-]*(?:key|token|secret|passw(?:or)?d|signature|auth|credential)[\\w-]*|sig)=)[^&#\\s"'\`)]+`, 'gi'), `$1${REDACTED}`],
+  [/\beyJ[\w-]{5,}\.[\w-]{5,}\.[\w-]*/g, REDACTED], // a JWT
+  [/(hooks\.slack\.com\/services\/)[\w/-]+/gi, `$1${REDACTED}`],
+  // token formats: a known prefix, a run of 20+ characters with a digit in it (not sk-frontend)
+  [/\b(?=[\w-]{20})(?:sk|pk|rk|ghp|gho|ghs|ghu|ghr|github_pat|xox[abpr])[-_](?=[\w-]{0,250}?\d)[\w-]+/g, REDACTED],
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, REDACTED],
 ]
-// Masks the secrets a string carries, keeping the rest of it.
+// Masks the secrets of known shapes a value carries, keeping the rest of it.
 export const mask = (s) => MASKS.reduce((t, [re, to]) => t.replace(re, to), s)
 
 // The printable form of a value: every string under an env or secret-looking key becomes
-// «redacted», any other string is masked; keys are masked too.
+// «redacted», any other string is masked. Keys are printed as they are.
 export function redact(v, hidden = false) {
   if (Array.isArray(v)) return v.map((x) => redact(x, hidden))
-  if (isObj(v)) { const o = {}; for (const k of Object.keys(v)) put(o, mask(k), redact(v[k], hidden || hides(k))); return o }
+  if (isObj(v)) { const o = {}; for (const k of Object.keys(v)) put(o, k, redact(v[k], hidden || hides(k))); return o }
   if (typeof v === 'string') return hidden ? REDACTED : mask(v)
   return v
 }
@@ -211,7 +231,7 @@ function repoPathWarnings(ctx, merged) {
     if (!p) continue
     for (const other of merged.repos) {
       if (!isObj(other) || addedIds.has(other.name) || norm(other.path) !== p) continue
-      out.push(`${formatPath(a.segs)} (added) has the same path as ${formatPath([{ k: 'repos' }, { id: other.name }])} (${p}): a renamed repo? Both entries would be kept`)
+      out.push({ added: formatPath(a.segs), other: formatPath([{ k: 'repos' }, { id: other.name }]), path: p })
     }
   }
   return out
@@ -239,16 +259,16 @@ export function planMerge(current, proposed, approve = []) {
 // The printable view of a plan: secrets redacted and masked, no internal fields.
 export function view(plan) {
   return {
-    added: plan.added.map((e) => ({ path: mask(e.path), value: shown(e.segs, e.value) })),
-    changed: plan.changed.map((e) => ({ path: mask(e.path), current: shown(e.segs, e.current), proposed: shown(e.segs, e.proposed), approved: e.approved })),
-    kept: plan.kept.map((e) => ({ path: mask(e.path), value: shown(e.segs, e.value) })),
-    unchanged: plan.unchanged.map(mask),
-    ignoredApprovals: plan.ignoredApprovals.map((e) => mask(e.path)),
-    warnings: plan.warnings.map(mask),
+    added: plan.added.map((e) => ({ path: e.path, value: shown(e.segs, e.value) })),
+    changed: plan.changed.map((e) => ({ path: e.path, current: shown(e.segs, e.current), proposed: shown(e.segs, e.proposed), approved: e.approved })),
+    kept: plan.kept.map((e) => ({ path: e.path, value: shown(e.segs, e.value) })),
+    unchanged: plan.unchanged,
+    ignoredApprovals: plan.ignoredApprovals.map((e) => e.path),
+    warnings: plan.warnings.map((w) => `${w.added} (added) has the same path as ${w.other} (${mask(w.path)}): a renamed repo? Both entries would be kept`),
   }
 }
 
-const named = (abs, linksTo) => mask(abs) + (linksTo ? ` (symlink → ${mask(linksTo)})` : '')
+const named = (abs, linksTo) => abs + (linksTo ? ` (symlink → ${linksTo})` : '')
 
 export function renderText(plan, { current, currentLinksTo = null, proposed, proposedLinksTo = null, currentExists = true, write = false, written = null, writtenLinksTo = null } = {}) {
   const v = view(plan)
@@ -374,14 +394,14 @@ function load(abs, { optional }) {
   let raw
   try { raw = readFileSync(abs, 'utf8') } catch (e) {
     if (e.code === 'ENOENT' && optional) return { exists: false, value: {} }
-    die(`${mask(abs)}: ${e.code === 'ENOENT' ? 'not found' : `cannot read (${e.code || 'error'})`}`)
+    die(`${abs}: ${e.code === 'ENOENT' ? 'not found' : `cannot read (${e.code || 'error'})`}`)
   }
   let value
   try { value = JSON.parse(raw) } catch {
     const at = jsonErrorAt(raw)
-    die(`${mask(abs)}: invalid JSON${at === null ? '' : ` at line ${lineCol(raw, at).join(', column ')}`}`)
+    die(`${abs}: invalid JSON${at === null ? '' : ` at line ${lineCol(raw, at).join(', column ')}`}`)
   }
-  if (!isObj(value)) die(`${mask(abs)}: the top level must be a JSON object`)
+  if (!isObj(value)) die(`${abs}: the top level must be a JSON object`)
   return { exists: true, value }
 }
 
@@ -400,7 +420,7 @@ function writeAtomic(abs, text) {
     renameSync(tmp, target)
   } catch (e) {
     if (tmp) rmSync(tmp, { force: true })
-    die(`${mask(abs)}: cannot write (${e.code || 'error'})`)
+    die(`${abs}: cannot write (${e.code || 'error'})`)
   }
 }
 
@@ -424,8 +444,8 @@ function main() {
   }
   if (args.json) {
     process.stdout.write(JSON.stringify({
-      current: mask(cur.abs), proposed: mask(prop.abs), currentExists: current.exists, currentLinksTo: cur.linksTo && mask(cur.linksTo),
-      ...shownPlan, written: written && mask(written.abs),
+      current: cur.abs, proposed: prop.abs, currentExists: current.exists, currentLinksTo: cur.linksTo,
+      ...shownPlan, written: written && written.abs,
     }, null, 2) + '\n')
   } else {
     process.stdout.write(renderText(plan, {
