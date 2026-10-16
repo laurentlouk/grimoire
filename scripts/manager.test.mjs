@@ -849,9 +849,9 @@ try {
   // ──────────────────────────────────────────────────────────────────────────
   // ODY-877, the shared post: share-body renders the view model without what is one person's (the
   // badges, the since-last line), with its footer and marker, ticket text escaped and mentions
-  // broken, byte-identical for the same input; --format slack escapes as mrkdwn and is cut to
-  // Slack's limit with "… N more"; share-status records the outcome once in the local briefing.
-  section('share-body (ODY-877): the shared post, Markdown and Slack, and share-status')
+  // broken, byte-identical for the same input, and cut to the destination's limit with "… N
+  // more"; share-status records the outcome once in the local briefing.
+  section('share-body (ODY-877): the shared post, cut to its limit, and share-status')
   {
     const hostile = '<b>x</b> *y* & @team https://evil.example <https://evil.example|click>'
     const first = [item('S-1', { priority: 1, url: 'https://linear.app/s/1', title: hostile }), item('S-2'), item('S-3', { sourceId: 'gh', title: 'capped one' })]
@@ -880,25 +880,21 @@ try {
     const a = share([]), b = share([])
     ok(r.status === 0 && existsSync(join(r.mdir, 'latest.json')) && a.status === 0 && a.stdout === b.stdout && a.stdout.startsWith(`${mod.SHARE_MARKER}\n`),
       `brief saves latest.json; share-body --root --now renders it, byte-identical on a second run (${a.stderr.trim() || 'ok'})`)
-    ok(cli(['share-body', '--root', join(TMP, 'no-briefing')]).status === 1 && share(['--format', 'html']).status === 2, 'no latest.json: exit 1; an unknown --format: exit 2')
+    ok(cli(['share-body', '--root', join(TMP, 'no-briefing')]).status === 1 && share(['--max', '10']).status === 2, 'no latest.json: exit 1; a --max under 2,000: exit 2')
 
-    const sl = mod.shareBody(V, { format: 'slack', by })
-    const sline = sl.split('\n').find((l) => l.startsWith('• *S-1*')) ?? ''
-    ok(sline.includes('&lt;b&gt;x&lt;/b&gt; *y* &amp; [@]team https[:]//evil.example &lt;https[:]//evil.example|click&gt; <https://linear.app/s/1>'),
-      `slack: &, < and > as entities, the link a bare <url>, the @mention broken (${sline})`)
-    ok((sl.match(/</g) || []).length === 1, 'and no other < in the post: no <url|text>, <@user> or <!channel> made of ticket text')
-    ok(sl.startsWith('*Grimoire briefing*\n') && sl.endsWith(`covering gh, linear · ${mod.SHARE_MARKER_TEXT}\n`) && !/\*(new|changed)\*/.test(sl), 'slack: titled, no badge, the marker ending the footer (Slack has no hidden text)')
-    const many = Array.from({ length: 300 }, (_, i) => item(`M-${i}`, { title: `a long title number ${i} `.repeat(6), nextStep: 'read the ticket and decide '.repeat(4) }))
-    const cut = mod.shareBody(mod.view(many, {}, null, NOW), { format: 'slack', by })
-    const kept = cut.split('\n').filter((l) => l.startsWith('• *M-')).length
-    const more = /\n… (\d+) more\n/.exec(cut)
-    ok(cut.length <= mod.SLACK_MAX && cut.length > mod.SLACK_MAX - 1000, `slack: cut to fit Slack's 40,000 characters (${cut.length})`)
-    ok(more && kept > 0 && kept + Number(more[1]) === 300 && cut.endsWith(`${mod.SHARE_MARKER_TEXT}\n`) && !/… \d+ more/.test(sl),
-      `with "… N more" counting what was cut (${kept} shown, ${more && more[1]} more), the footer kept; a post under the limit is not cut`)
     const gh = mod.shareConfig({ manager: { share: { kind: 'github-issue', target: 'acme/api' } } })
-    ok(mod.shareMax('markdown', gh.share) === 65536 && mod.shareMax('slack', null) === 40000 && mod.shareMax('markdown', null) === Infinity && !gh.warnings.length,
-      'the default limit: Slack\'s 40,000 for slack; for markdown none, or GitHub\'s 65,536 for a github-issue')
-    ok(mod.shareConfig({ manager: { share: null } }).share === null && mod.shareConfig({ manager: { share: { kind: 'email', target: 'x' } } }).warnings.length === 1, 'manager.share null shares nothing; an unknown kind is warned about and shares nothing')
+    const canvas = mod.shareConfig({ manager: { share: { kind: 'slack-canvas', target: 'F0123ABC' } } })
+    ok(mod.shareMax(gh.share) === 65536 && mod.shareMax(canvas.share) === Infinity && mod.shareMax(null) === Infinity && !gh.warnings.length && !canvas.warnings.length,
+      'the default limit: GitHub\'s 65,536 for a github-issue, none for a Linear document or a Slack canvas')
+    ok(mod.shareConfig({ manager: { share: null } }).share === null && mod.shareConfig({ manager: { share: { kind: 'slack', target: '#team' } } }).warnings.length === 1,
+      'manager.share null shares nothing; an unknown kind (a Slack message) is warned about and shares nothing')
+    const many = Array.from({ length: 300 }, (_, i) => item(`M-${i}`, { title: `a long title number ${i} `.repeat(6), nextStep: 'read the ticket and decide '.repeat(6) }))
+    const cut = mod.shareBody(mod.view(many, {}, null, NOW), { by, max: mod.shareMax(gh.share) })
+    const kept = cut.split('\n').filter((l) => l.startsWith('- **M-')).length
+    const more = /\n… (\d+) more\n/.exec(cut)
+    ok(cut.length <= 65536 && cut.length > 65536 - 1000, `cut to fit a GitHub issue's 65,536 characters (${cut.length})`)
+    ok(more && kept > 0 && kept + Number(more[1]) === 300 && cut.endsWith(`covering linear_\n`) && !/… \d+ more/.test(body),
+      `with "… N more" counting what was cut (${kept} shown, ${more && more[1]} more), the footer kept; a post under the limit is not cut`)
 
     const status = (args) => cli(['share-status', '--root', r.root, ...args], r.root)
     const failed = status(['--status', 'failed', '--reason', 'gh: <HTTP 403> on https://api.github.com'])
