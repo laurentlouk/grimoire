@@ -18,7 +18,10 @@ const ALL = [...tests('workflows/tests'), ...['hooks/scripts/guard.test.mjs'].fi
 
 // Lock and concurrency trials that count overlaps between real processes: they run alone, after the
 // rest, so a busy machine cannot make them flaky.
-const SERIAL = new Set(['run-durability-final', 'run-durability-concurrency', 'run-durability-journal'].map((n) => `workflows/tests/${n}.test.mjs`))
+const SERIAL = new Set([
+  ...['run-durability-final', 'run-durability-concurrency', 'run-durability-journal'].map((n) => `workflows/tests/${n}.test.mjs`),
+  'tools/graph/tests/arch-docs.test.mjs', // bounds rendering time in milliseconds: a loaded machine overruns it
+])
 // The loop-durability files that drive real git sandboxes and shells for most of the suite's time.
 // `--fast` leaves them out for quick local iteration; CI and `npm test` always run them.
 const SLOW = new Set(['hardening', 'followups', 'delivery-fix', 'final', 'statewrite', 'resume'].map((n) => `workflows/tests/run-durability-${n}.test.mjs`))
@@ -56,7 +59,8 @@ async function pool(files, width) {
 
 const t0 = Date.now()
 const results = [
-  ...await pool(picked.filter((f) => !SERIAL.has(f)), JOBS),
+  // the slow files start first, so the longest one does not begin last and set the wall time
+  ...await pool(picked.filter((f) => !SERIAL.has(f)).sort((a, b) => SLOW.has(b) - SLOW.has(a)), JOBS),
   ...await pool(picked.filter((f) => SERIAL.has(f)), 1),
 ]
 const failed = results.filter((r) => !r.ok)
