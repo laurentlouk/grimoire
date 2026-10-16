@@ -11,8 +11,8 @@
 //   NotebookEdit            .claude/hooks/ and guard.protectedPaths (override: GRIMOIRE_GUARD_ALLOW=1)
 //                         · <memoryDir>/ when a named roster agent (not crystallize) writes it
 //                         · the same paths in every linked git worktree of the project's repository
-//   mcp__<server>__<tool> · a write verb leading <tool> when a read-only agent (a scout, the reviewer)
-//                           calls it (override: GRIMOIRE_GUARD_ALLOW=1)
+//   mcp__<server>__<tool> · a <tool> whose first known verb is a write, when a read-only agent (a
+//                           scout, the reviewer) calls it (override: GRIMOIRE_GUARD_ALLOW=1)
 //
 // Deny = exit 2 with one line on stderr (Claude Code shows it to the agent and skips the call).
 // Everything else, including malformed input or config and any internal error, exits 0
@@ -37,8 +37,20 @@ const READ_ONLY_AGENTS = [
 // owning agent from grimoire.config.json. crystallize runs as a generic subagent (or in the
 // main session), so an allow-list by agent_type is impossible; a deny-list of known names is.
 const ROSTER_AGENTS = [...READ_ONLY_AGENTS, 'migration-engineer', 'test-engineer']
-// Connector tool names are opaque per account; this is a heuristic over the usual write verbs.
-const WRITE_VERB = /^(?:save_|create_|update_|delete_|send_|reply|forward|merge_|set_|add_|remove_|mark_)/i
+// Connector tool names are opaque per account, so the MCP rule reads the tool's words: the first
+// known verb decides, a read allows and a write denies, and a name with no known verb passes.
+const READ_VERBS = new Set([
+  'get', 'list', 'search', 'read', 'fetch', 'find', 'query', 'view', 'show', 'describe', 'count', 'aggregate',
+  'lookup', 'check', 'status', 'inspect', 'analyze', 'explain', 'export', 'download',
+])
+const WRITE_VERBS = new Set([
+  'save', 'create', 'update', 'delete', 'send', 'reply', 'forward', 'merge', 'set', 'add', 'remove', 'mark',
+  'share', 'unshare', 'submit', 'resolve', 'retire', 'restore', 'trash', 'untrash', 'label', 'unlabel', 'respond',
+  'archive', 'unarchive', 'assign', 'move', 'upload', 'publish', 'post', 'edit', 'write', 'patch', 'put', 'insert',
+  'upsert', 'apply', 'approve', 'decline', 'cancel', 'close', 'reopen', 'comment', 'schedule', 'invite', 'transfer',
+  'buy', 'purchase', 'pay', 'deploy', 'rollback', 'promote', 'revoke', 'rename', 'change', 'modify', 'toggle',
+  'enable', 'disable', 'exec', 'execute', 'run', 'invoke',
+])
 const FOLD = process.platform === 'darwin' || process.platform === 'win32'
 
 class Deny extends Error {}
@@ -389,13 +401,24 @@ function checkRules(relPath, ctx, input) {
 // ─────────────────────────────── mcp rule ───────────────────────────────
 // `mcp__<server>__<tool>`. A server id can hold `_`, `-` and digits (`plugin_grimoire_graph`,
 // `055f8362-1877-…`), so the tool is what follows the LAST `__`.
+// The tool's words: split on `_`, `-` (anything not a letter or digit) and camelCase boundaries
+// (`createJiraIssue`, `getHTTPStatus`), lowercased. Whole words only: `saved` is not `save`.
+const words = (tool) => tool.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w.toLowerCase())
+function writeVerb(tool) { // the first known verb decides: a write verb, or null for a read or no verb
+  for (const w of words(tool)) {
+    if (READ_VERBS.has(w)) return null
+    if (WRITE_VERBS.has(w)) return w
+  }
+  return null
+}
+
 function checkMcp(name, input) {
   const agentType = typeof input.agent_type === 'string' ? input.agent_type.replace(/^.*:/, '') : ''
   if (!agentType || !READ_ONLY_AGENTS.includes(agentType) || process.env.GRIMOIRE_GUARD_ALLOW === '1') return
   const rest = name.slice('mcp__'.length), cut = rest.lastIndexOf('__')
   if (cut < 0) return
-  const verb = WRITE_VERB.exec(rest.slice(cut + 2))
-  if (verb) deny(`agent '${agentType}' may not call ${name}: the plugin's scouts and reviewer are read-only and '${verb[0]}' names a write; report the proposed write in your result (the main session applies writes), or set GRIMOIRE_GUARD_ALLOW=1.`)
+  const verb = writeVerb(rest.slice(cut + 2))
+  if (verb) deny(`agent '${agentType}' may not call ${name}: the plugin's scouts and reviewer are read-only and '${verb}' names a write; report the proposed write in your result (the main session applies writes), or set GRIMOIRE_GUARD_ALLOW=1.`)
 }
 
 // ─────────────────────────────── main ───────────────────────────────
