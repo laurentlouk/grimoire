@@ -207,7 +207,7 @@ function normalize(it) {
     dueAt: it.dueAt ?? null, createdAt: it.createdAt ?? null, updatedAt: it.updatedAt ?? null, lastActivityAt: it.lastActivityAt ?? null,
     blockedBy: [...(it.blockedBy ?? [])], blocks: [...(it.blocks ?? [])], parentOf: [...(it.parentOf ?? [])],
     project: it.project ? { ...it.project } : null, repo: it.repo ?? null, slaAt: it.slaAt ?? null,
-    hasAcceptanceCriteria: it.hasAcceptanceCriteria === true, linkedPr: it.linkedPr || null, labels: [...(it.labels ?? [])],
+    hasAcceptanceCriteria: it.hasAcceptanceCriteria ?? null, linkedPr: it.linkedPr || null, labels: [...(it.labels ?? [])],
     bucketHint: it.bucketHint ?? null, nextStep: it.nextStep ?? null,
   }
 }
@@ -260,7 +260,8 @@ const openRefs = (refs, ctx) => refs.filter((r) => !['completed', 'canceled'].in
 // Ready for AI (spec D8, v0): each check returns why the issue is not ready, or null.
 export const AI_CHECKS = [
   function anIssue(it) { return it.kind === 'issue' ? null : `a ${it.kind}, not an issue` },
-  function criteria(it) { return it.hasAcceptanceCriteria ? null : 'no acceptance criteria' },
+  // absent: the scout did not read the description, which is not the same as none
+  function criteria(it) { return it.hasAcceptanceCriteria === true ? null : it.hasAcceptanceCriteria === false ? 'no acceptance criteria' : 'acceptance criteria not checked' },
   function unblocked(it, ctx) { const open = openRefs(it.blockedBy, ctx); return open.length ? `blocked by ${open.join(', ')}` : null },
   function unassigned(it) { return it.assignee ? `assigned to ${it.assignee}` : null },
   function noPr(it) { return it.linkedPr ? 'has a linked PR' : null },

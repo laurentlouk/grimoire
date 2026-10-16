@@ -50,7 +50,7 @@
         },
         "repo": { "description": "The repos[].name in grimoire.config.json the item maps to, or null when unsure.", "type": ["string", "null"] },
         "slaAt": { "description": "When the tracker's SLA breaches.", "$ref": "#/$defs/date" },
-        "hasAcceptanceCriteria": { "description": "The description states verifiable acceptance criteria (an Acceptance criteria / Done when section or a checklist of outcomes). Default false.", "type": "boolean" },
+        "hasAcceptanceCriteria": { "description": "The description states verifiable acceptance criteria (an Acceptance criteria / Done when section or a checklist of outcomes). Absent: the description was not read, shown as \"not checked\"; only true makes an issue ready for AI.", "type": "boolean" },
         "linkedPr": { "description": "The URL or id of a pull request linked to the item, or null.", "type": ["string", "null"] },
         "labels": { "type": "array", "items": { "type": "string" } },
         "bucketHint": { "description": "The model's reading, for what needs reading (waiting on someone outside the team, explicitly parked). It moves an item only between the non-urgent groups (ai, waiting, notnow), and into ai only when the item is eligible; it never makes an item urgent and never moves one out of Decide or Do.", "enum": ["decide", "do", "ai", "waiting", "notnow", null] },
