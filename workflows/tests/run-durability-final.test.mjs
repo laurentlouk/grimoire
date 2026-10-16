@@ -72,25 +72,31 @@ const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL
   const c1 = X.commit('c1')
   const land = scriptOf((await getScripts(X, c1)).land)
   const prefix = land.slice(0, land.indexOf('if shiplock ship; then LK=1'))
-  const LK = join(X.W, '.git', 'grimoire-ship-api.lock')
-  const OCC = join(X.T0, 'occ')
+  const P = (/^T0=\$\(now\); P='([^']+)'/m.exec(prefix) || [])[1]
   console.log('\n── F-3 · six waiters on a dead holder\'s lock: one inside at a time')
-  for (const SHELL of SHELLS) {
-    let violations = 0
-    for (let trial = 0; trial < 4; trial++) {
-      rmSync(LK, { recursive: true, force: true }); rmSync(`${LK}.brk`, { recursive: true, force: true }); rmSync(OCC, { recursive: true, force: true })
-      mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `999999 ${Math.floor(Date.now() / 1000)} ship\n`)
-      const body = `${prefix}\nif shiplock ship; then if mkdir "${OCC}" 2>/dev/null; then sleep 0.3; rmdir "${OCC}"; echo OK; else echo VIOLATION; fi; shipunlock; else echo BUSY; fi\n`
-      const outs = await Promise.all(Array.from({ length: 6 }, () => new Promise((res) => {
-        const p = spawn(SHELL, ['-c', body], { cwd: X.T0, env: { ...process.env, GRIMOIRE_SHIP_LOCK_WAIT: '30', PATH: `${X.BIN}:${process.env.PATH}` } })
-        let o = ''
-        p.stdout.on('data', (d) => (o += d))
-        p.on('close', () => res(o))
-      })))
-      if (outs.join('').split('\n').includes('VIOLATION')) violations++
-    }
-    ok(violations === 0, `${SHELL}: 0 of 4 trials with two holders at once`)
+  // Each trial gets its own repo, so its own lock, and every trial of every shell runs at once: a
+  // trial's waiters spend it asleep in the lock's 1-s retry, so all of them take about as long as one.
+  const trial = async (SHELL, n) => {
+    const R = join(X.T0, `trial-${SHELL}-${n}`) // the script's P: its lock is R/.git/grimoire-ship-api.lock
+    mkdirSync(R); X.sh('git init -q', R)
+    const LK = join(R, '.git', 'grimoire-ship-api.lock')
+    const OCC = join(R, 'occ')
+    mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `999999 ${Math.floor(Date.now() / 1000)} ship\n`)
+    const body = `${prefix.split(`P='${P}'`).join(`P='${R}'`)}\nif shiplock ship; then if mkdir "${OCC}" 2>/dev/null; then sleep 0.3; rmdir "${OCC}"; echo OK; else echo VIOLATION; fi; shipunlock; else echo BUSY; fi\n`
+    const outs = await Promise.all(Array.from({ length: 6 }, () => new Promise((res) => {
+      const p = spawn(SHELL, ['-c', body], { cwd: X.T0, env: { ...process.env, GRIMOIRE_SHIP_LOCK_WAIT: '30', PATH: `${X.BIN}:${process.env.PATH}` } })
+      let o = ''
+      p.stdout.on('data', (d) => (o += d))
+      p.on('close', () => res(o))
+    })))
+    return outs.join('').split('\n').includes('VIOLATION')
   }
+  ok(!!P && prefix.includes(`P='${P}'`), 'captured the lock prefix of the land ship script')
+  const trials = await Promise.all(SHELLS.map((SHELL) => Promise.all([0, 1, 2, 3].map((n) => trial(SHELL, n)))))
+  SHELLS.forEach((SHELL, i) => {
+    const violations = trials[i].filter(Boolean).length
+    ok(violations === 0, `${SHELL}: 0 of 4 trials with two holders at once${violations ? ` (got ${violations})` : ''}`)
+  })
   X.done()
 }
 
@@ -107,11 +113,16 @@ const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL
   writeFileSync(join(X.T0, 'ship.sh'), land)
   console.log('\n── F-4 · SIGTERM to the ship script\'s process group mid-push')
   const p = spawn('perl', ['-e', 'setpgrp(0,0); exec @ARGV', 'bash', join(X.T0, 'ship.sh')], { cwd: X.T0, env: { ...process.env, PATH: `${X.BIN}:${process.env.PATH}` }, stdio: 'ignore' })
+  let exited = false
+  p.once('exit', () => (exited = true))
   const lk = join(X.W, '.git', 'grimoire-ship-api.lock')
-  for (let i = 0; i < 40 && !existsSync(join(X.T0, 'hook.log')); i++) await tick(250)
+  for (let i = 0; i < 400 && !existsSync(join(X.T0, 'hook.log')); i++) await tick(25)
   ok(existsSync(join(X.T0, 'hook.log')) && existsSync(lk), 'the push is in its pre-push hook, under the lock')
   process.kill(-p.pid, 'SIGTERM')
-  await tick(3000)
+  // the group kill has run its course once the script has exited, its lock is gone and no hook (nor its
+  // sleep) is left; wait for that, never longer than the 3 s this step always waited, then check
+  const left = () => spawnSync('bash', ['-c', `ps -A -o command | grep -v grep | grep -F -e "sleep 27" -e "${join(X.T0, 'hooks', 'pre-push')}"`], { encoding: 'utf8' }).stdout.trim()
+  for (const end = Date.now() + 3000; Date.now() < end && !(exited && !existsSync(lk) && left() === '');) await tick(50)
   const survivors = spawnSync('bash', ['-c', 'ps -A -o command | grep -E "sleep 27" | grep -v grep'], { encoding: 'utf8' }).stdout.trim()
   ok(survivors === '', 'no hook or push survives the group kill')
   ok(!existsSync(lk), 'the lock is released by the script\'s trap')
