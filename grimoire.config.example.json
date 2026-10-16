@@ -23,7 +23,7 @@
   "manager": {
     "sources": [
       { "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, the claude.ai connector)", "readOnly": "guard", "scope": { "teams": ["ENG"] }, "verifiedAt": "2026-10-16T09:30:00Z" },
-      { "id": "prs", "category": "prs", "kind": "github", "hint": "gh CLI, authenticated", "readOnly": "permission-rule", "scope": { "repos": ["acme/api", "acme/mobile"] }, "verifiedAt": "2026-10-16T09:30:00Z" },
+      { "id": "prs", "category": "prs", "kind": "github", "hint": "gh CLI, authenticated", "readOnly": "guard", "scope": { "repos": ["acme/api", "acme/mobile"] }, "verifiedAt": "2026-10-16T09:30:00Z" },
       { "id": "runs", "category": "runs", "kind": "grimoire" }
     ],
     "urgent": { "priorityAtMost": 2, "dueWithinDays": 2, "blocksAtLeast": 2, "stalledDays": 5 },

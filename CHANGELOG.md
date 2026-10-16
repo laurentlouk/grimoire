@@ -165,32 +165,42 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   the re-run diff, so a hand-edited source or threshold is kept.
   - It detects the trackers from the docs, `.mcp.json`, the session's connectors, PR templates,
     git remotes and `toolHints.tracker`, and proposes `manager.sources`: one per tracker, a `prs`
-    source over the GitHub remotes, and `runs`. Each has a `hint`, a `scope`, and `readOnly`:
-    `endpoint` (Linear's `/mcp/readonly`, GitHub's `/x/issues/readonly`), `flag` (`--read-only`),
-    `admin-group` (a read-only account), `permission-rule` (`gh`), or `guard` for a claude.ai
-    connector, which only the guard's MCP rule holds read-only. Only the vendors' own tools and
-    claude.ai connectors, never a community server.
-  - Each source is read once before the diff and gets `verifiedAt`; a failing one is shown with
-    its fix and not written. `config-merge.mjs` matches `manager.sources[]` by `id`.
+    source over the GitHub remotes, and `runs`. Each has a `hint`, a `scope`, and `readOnly`, what
+    holds it today: `endpoint` (Linear's `/mcp/readonly`, GitHub's `/x/issues/readonly`) or `flag`
+    (`--read-only`) only when the route already uses it, `admin-group` (a read-only account),
+    `permission-rule` (`gh` for issues), or `guard` for a claude.ai connector and for the `gh` PR
+    source, which only the guard's MCP rule and the scout's instructions hold. A stronger route is
+    proposed apart, for the user to apply. Only the vendors' own tools and claude.ai connectors,
+    never a community server.
+  - Secrets stay out of context: `.mcp.json` joins the files read only through `config-merge.mjs`
+    (its `headers` and `env` print as `«redacted»`), and a remote URL is read with its credentials
+    stripped by `sed` as it is read.
+  - Each source is read once before the diff and gets `verifiedAt`, again after the user corrects
+    its scope or hint; a failing one is shown with its fix and not written. `config-merge.mjs`
+    matches `manager.sources[]` by `id`, and a re-run reuses the id of a current source with the
+    same kind and scope.
   - `manager.repoLabels` (new) maps tracker labels to `repos[]` names from the labels'
     descriptions, the description winning over the name: a `frontend` label described as the
     mobile app maps to the mobile repo, not the web app. A label the descriptions don't tie to one
     repo is left out and named.
   - For a GitHub tracker, the default `priorityLabels` (`priority: urgent` … `low`, `P0`–`P3`,
     `critical`); when the repo has no priority label, an offer to create the four `priority:`
-    labels with `gh label create`, listed as a tracker write and run only on a yes.
+    labels with `gh label create`, listed as a tracker write and run only when the user's answer
+    names them. Labels are listed with `--limit 200`, so a long list can't hide them.
   - The `gh` permission rules: deny what the pipeline never runs (`gh issue close`, `delete`,
-    `transfer`), ask for what `to-issues` and claims do. The urgency defaults and
-    `maxItemsPerSource: 200`. An optional `repos[].remote` for a hub of nested clones, which the
-    loop ignores.
+    `transfer`, `gh pr merge`, `close`), ask for what `to-issues` and claims do. The urgency
+    defaults and `maxItemsPerSource: 200`; a re-run builds them and `priorityLabels` from the
+    current block, so a hand-set value never shows as changed back to a default. An optional
+    `repos[].remote` for a hub of nested clones, which the loop ignores.
   - `grimoire.config.example.json`'s `manager` block follows the spec: a `guard` Linear source,
     the default priority labels, `repoLabels`, and a repo `remote`.
-- Checks: `scripts/config-merge.test.mjs` (127), and the setup evals `setup-6` (a configured
-  project re-run changes nothing before the yes, and never writes the settings itself),
-  `setup-7` (a hand-edited gate is kept), `setup-8` (a Linear hub gets a `guard` source, `prs`,
-  `runs` and `frontend` mapped to the mobile repo), `setup-9` (a GitHub repo without priority
-  labels is offered them, on a yes only), `setup-10` (a hand-set `stalledDays` is kept) and
-  `setup-11` (the briefing itself is the manager's).
+- Checks: `scripts/config-merge.test.mjs` (135, a `.mcp.json` read against `{}` included), and
+  the setup evals `setup-6` (a configured project re-run changes nothing before the yes, and
+  never writes the settings itself), `setup-7` (a hand-edited gate is kept), `setup-8` (a Linear
+  hub gets a `guard` source, `prs`, `runs` and `frontend` mapped to the mobile repo, with no
+  secret read raw), `setup-9` (a GitHub repo without priority labels is offered them, created
+  only when named), `setup-10` (a hand-set `stalledDays` shows no change) and `setup-11` (the
+  briefing itself is the manager's).
 
 **Guard (`hooks/scripts/guard.mjs`)**
 - **Scouts can't write through MCP tools.** The manager's scouts read trackers through whatever

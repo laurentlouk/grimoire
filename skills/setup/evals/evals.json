@@ -194,7 +194,7 @@
     "id": 8,
     "query": "Re-run the grimoire setup and add the manager briefing. We track everything in Linear, team ODY, through the claude.ai Linear connector. The hub has repositories/app (Expo / React Native), repositories/web (Next.js) and repositories/api (Rust), each a GitHub clone under acme/. Our Linear labels are `frontend` (\"Expo / React Native mobile app\"), `webapp` (\"Next.js web frontend\"), `backend` (\"Rust backend\") and `Research` (no description).",
     "should_trigger": true,
-    "expected_output": "Runs the manager section through the re-run diff. Proposes manager.sources with a Linear tracker source (kind linear, scope teams [\"ODY\"], a hint in the toolHints format naming the claude.ai connector, readOnly \"guard\" because a connector has no read-only variant), one prs source over the acme/ GitHub remotes through gh (readOnly permission-rule), and the runs source; the GitHub remotes alone add no GitHub Issues tracker source, and no community MCP server is proposed. Proposes manager.repoLabels from the label descriptions and shows it for confirmation: frontend → app (the Expo repo, not web), webapp → web, backend → api; Research has no description that ties it to one repo, so it is left out and listed as unmapped. Proposes the urgency defaults and maxItemsPerSource 200. Reads each source once (a list call with a limit of 1) before showing the diff, records verifiedAt only for a source whose probe passed, and shows a failing source with its fix instead of writing it. Shows the manager block as config-merge.mjs dry-run output and writes nothing before the user's yes.",
+    "expected_output": "Runs the manager section through the re-run diff. It reads .mcp.json only through config-merge.mjs against {}, and each repo's remote URL only with its credentials stripped as it is read (sed on the get-url output), never raw. Proposes manager.sources with a Linear tracker source (kind linear, scope teams [\"ODY\"], a hint in the toolHints format naming the claude.ai connector, readOnly \"guard\" because a connector has no read-only variant), one prs source over the acme/ GitHub remotes through gh (readOnly guard: gh pr create and edit stay open for the loop, so only the scout's instructions and the guard hold it), and the runs source; the GitHub remotes alone add no GitHub Issues tracker source, and no community MCP server is proposed. Proposes manager.repoLabels from the label descriptions and shows it for confirmation: frontend → app (the Expo repo, not web), webapp → web, backend → api; Research has no description that ties it to one repo, so it is left out and listed as unmapped. Proposes the urgency defaults and maxItemsPerSource 200. Reads each source once (a list call with a limit of 1) before showing the diff, records verifiedAt only for a source whose probe passed, and shows a failing source with its fix instead of writing it. Shows the manager block as config-merge.mjs dry-run output and writes nothing before the user's yes.",
     "expectations": [
       {
         "text": "Proposes a Linear tracker source scoped to team ODY, with a hint in the toolHints format and readOnly \"guard\" because it is reached through the claude.ai connector",
@@ -222,6 +222,11 @@
         "evidence": ""
       },
       {
+        "text": "Reads .mcp.json only through config-merge.mjs against an empty proposal, and each remote URL only with its credentials stripped as it is read, never raw",
+        "passed": null,
+        "evidence": ""
+      },
+      {
         "text": "Shows the manager block through config-merge.mjs without --write, and writes nothing before the user's yes",
         "passed": null,
         "evidence": ""
@@ -232,7 +237,7 @@
     "id": 9,
     "query": "Set up the grimoire manager briefing for this repo. We track our work in GitHub Issues on acme/site, through the gh CLI, which is logged in. The repo only has GitHub's default labels (bug, enhancement, question and so on).",
     "should_trigger": true,
-    "expected_output": "Proposes a GitHub tracker source (kind github, scope repos [\"acme/site\"], read through gh, readOnly permission-rule), the prs and runs sources, and the gh permission rules for .claude/settings.json (deny for what the pipeline never runs, ask for what to-issues and claims do), which the user applies with the printed command. Proposes priorityLabels with the defaults: priority: urgent/high/medium/low, P0 to P3 and critical. None of the repo's labels is a priority label, so every issue would read as unknown priority: it offers to create priority: urgent, priority: high, priority: medium and priority: low with gh label create, listed in the one diff as a tracker write and its own decision, and runs those commands only when the user's yes takes that item. No repoLabels for a single repo. Before the yes it makes read calls only (the probe, gh label list) and writes nothing.",
+    "expected_output": "Proposes a GitHub tracker source (kind github, scope repos [\"acme/site\"], read through gh, readOnly permission-rule), the prs and runs sources, and the gh permission rules for .claude/settings.json (deny for what the pipeline never runs, ask for what to-issues and claims do), which the user applies with the printed command. Proposes priorityLabels with the defaults: priority: urgent/high/medium/low, P0 to P3 and critical. None of the repo's labels is a priority label, so every issue would read as unknown priority: it offers to create priority: urgent, priority: high, priority: medium and priority: low with gh label create, listed in the one diff as a tracker write and its own decision, and runs those commands only when the user's answer names the labels: a general yes to the diff does not take them. No repoLabels for a single repo. Before that it makes read calls only (the probe, gh label list --limit 200) and writes nothing.",
     "expectations": [
       {
         "text": "Offers to create the four labels priority: urgent, priority: high, priority: medium and priority: low with gh label create, listed in the diff as a write to the tracker",
@@ -240,7 +245,7 @@
         "evidence": ""
       },
       {
-        "text": "Runs no gh label create, and no other write to the tracker, before the user's yes takes that item",
+        "text": "Runs no gh label create, and no other write to the tracker, unless the user's answer names the labels; a general yes to the diff does not take them",
         "passed": null,
         "evidence": ""
       },
@@ -260,20 +265,20 @@
     "id": 10,
     "query": "Re-run the grimoire setup to pick up the latest plugin. The manager block is already in grimoire.config.json. I changed manager.urgent.stalledDays to 10 by hand, because our sprints are two weeks long.",
     "should_trigger": true,
-    "expected_output": "Treats it as a re-run: reads grimoire.config.json through config-merge.mjs and diffs the full proposal without --write. The hand-set stalledDays is the user's choice: it is either left alone or listed as one CHANGED key (manager.urgent.stalledDays, 10 → 5) that stays at 10 unless the user explicitly approves the default. Every other manager key the user has is kept. Nothing is written before the yes, and the write passes --approve 'manager.urgent.stalledDays' only if the user accepted that change.",
+    "expected_output": "Treats it as a re-run: reads grimoire.config.json through config-merge.mjs and diffs the proposal without --write. It builds manager.urgent, priorityLabels and maxItemsPerSource from the current block, taking a default only for a key the block lacks, so the proposal carries stalledDays 10 and the diff shows no CHANGED key for manager.urgent: no 10 → 5 for the user to decline. Every other manager key the user has is kept. When the diff lists nothing added or changed, it says the setup is current and writes nothing; otherwise nothing is written before the yes, and no --approve names manager.urgent.stalledDays.",
     "expectations": [
       {
-        "text": "Keeps manager.urgent.stalledDays at 10: it is left alone or listed as one changed key that is kept unless the user explicitly approves the default",
+        "text": "Builds manager.urgent from the current block, so the proposal carries stalledDays 10 and the diff shows no CHANGED key for manager.urgent.stalledDays",
         "passed": null,
         "evidence": ""
       },
       {
-        "text": "Does not pass --approve 'manager.urgent.stalledDays' to the write unless the user accepted the default",
+        "text": "Takes a default only for a manager key the current block lacks, and never proposes a user's value back to its default",
         "passed": null,
         "evidence": ""
       },
       {
-        "text": "Diffs the configuration with config-merge.mjs without --write, and writes nothing before the user's yes",
+        "text": "Diffs the configuration with config-merge.mjs without --write, writes nothing before the user's yes, and says the setup is current when nothing is added or changed",
         "passed": null,
         "evidence": ""
       }

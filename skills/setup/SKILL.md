@@ -13,13 +13,16 @@ Everything the harness needs is derivable from the project except the decisions 
 
 **Re-run.** When the project already has a `grimoire.config.json`, `.claude/settings.json`, `memory/`, `.claude/agents/`, `AGENTS.md` or `CLAUDE.md`, the run updates what is there. Read them first (the two JSON files only through the script), before exploring. What they hold is the user's choice, including what they edited by hand: re-derive a value only when the code shows it is stale, and say so.
 
-- **Secrets are referenced, never read.** Do not open `.env*`, credential or key files. Never read `.claude/settings.json`, `.claude/settings.local.json` or `~/.claude/settings.json` raw: they can hold tokens in `env`, in permission rules and in hook commands. Name the variable or the file that holds a secret, never its value. The script's output masks them: every `env` value, every value under a key named like a token, key, password, credential or auth, and bearer tokens, URL credentials and known token formats inside any string. To see a JSON file before you propose anything, diff it against an empty proposal (`{}`); every key is then listed as KEPT.
+- **Secrets are referenced, never read.** Do not open `.env*`, credential or key files. Never read `.claude/settings.json`, `.claude/settings.local.json`, `~/.claude/settings.json` or `.mcp.json` raw: they can hold tokens in `env`, in permission rules, in hook commands and in a server's `headers` (`Authorization: Bearer …`). Name the variable or the file that holds a secret, never its value. The script's output masks them: every `env` value, every value under a key named like a token, key, password, credential or auth, and bearer tokens, URL credentials and known token formats inside any string. To see a JSON file before you propose anything, diff it against an empty proposal (`{}`); every key is then listed as KEPT. A git remote can carry a token too (`https://<token>@github.com/…`): read one only with the credentials stripped as it is read, `git -C <path> remote get-url origin | sed -E 's#(https?://)[^/@]*@#\1#'`, never bare.
 - **The JSON files go through `config-merge.mjs`.** Write the full file you would propose on a first run to a temp file in the session scratchpad, never in the project. Then run the script on it, with absolute paths for the plugin root (the directory two levels above this `SKILL.md`), the project file and the proposal:
 
   ```sh
   node <plugin root>/scripts/config-merge.mjs --current <project>/grimoire.config.json --proposed <scratchpad>/grimoire.config.json
   node <plugin root>/scripts/config-merge.mjs --current <project>/.claude/settings.json --proposed <scratchpad>/settings.json
+  node <plugin root>/scripts/config-merge.mjs --current <project>/.mcp.json --proposed <scratchpad>/empty.json
   ```
+
+  The last one only reads: `<scratchpad>/empty.json` holds `{}`, and setup never writes `.mcp.json`.
 
   Without `--write` it writes nothing. It lists each key as one of these:
   - **ADDED**: the current file lacks it.
@@ -75,7 +78,7 @@ State what you could not determine and what you assumed. Do not ask a question y
 
 ## 3 · Write
 
-On approval, run the tracker writes the user took (the priority labels below), one at a time, and report each result. Then write the files. Do not overwrite an existing `CLAUDE.md`, `AGENTS.md`, agent definition, `grimoire.config.json`, `.claude/settings.json` or memory file. The Markdown ones get an append, or a diff the user applies. `grimoire.config.json` is written by `config-merge.mjs --write`, with an `--approve` for each change the user accepted. `.claude/settings.json` is applied by the user, with the command from step 0. On a first run the current files are missing, so everything in them is added, and the same two routes apply. Verify each agent file has valid frontmatter (`name`, `description`) and that every memory file starts with its header comment and stays within its cap. Finish by listing what was created and the two commands that come next: `/roast <idea>` to start the design pipeline, and `/orchestrate` once a project has been sliced. When a `manager` block was written, add `/grimoire:manager` for the first briefing.
+On approval, run the tracker writes the user named (the priority labels below), one at a time, and report each result. Then write the files. Do not overwrite an existing `CLAUDE.md`, `AGENTS.md`, agent definition, `grimoire.config.json`, `.claude/settings.json` or memory file. The Markdown ones get an append, or a diff the user applies. `grimoire.config.json` is written by `config-merge.mjs --write`, with an `--approve` for each change the user accepted. `.claude/settings.json` is applied by the user, with the command from step 0. On a first run the current files are missing, so everything in them is added, and the same two routes apply. Verify each agent file has valid frontmatter (`name`, `description`) and that every memory file starts with its header comment and stays within its cap. Finish by listing what was created and the two commands that come next: `/roast <idea>` to start the design pipeline, and `/orchestrate` once a project has been sliced. When a `manager` block was written, add `/grimoire:manager` for the first briefing.
 
 ## The manager section
 
@@ -83,8 +86,8 @@ On approval, run the tracker writes the user took (the priority labels below), o
 
 **Detect** which trackers the project uses, from:
 - the docs, `CLAUDE.md`, `AGENTS.md` and PR templates (ticket keys such as `ENG-123`, tracker links);
-- `.mcp.json` and the session's connectors (ToolSearch: "linear", "jira", "atlassian", "github");
-- each repo's `git remote get-url origin`, and whether its GitHub Issues are in use (`gh issue list --repo <owner/repo> --limit 1`);
+- `.mcp.json`, only through `config-merge.mjs` against `{}` (step 0), and the session's connectors (ToolSearch: "linear", "jira", "atlassian", "github");
+- each repo's remote, read stripped as step 0 says (`git -C <path> remote get-url origin | sed -E 's#(https?://)[^/@]*@#\1#'`), and whether its GitHub Issues are in use (`gh issue list --repo <owner/repo> --limit 1`);
 - the config's `toolHints.tracker` and `claim`.
 
 A GitHub remote alone makes a `prs` source, not a tracker. GitHub Issues is a tracker source only when the project tracks its work there.
@@ -97,27 +100,27 @@ A GitHub remote alone makes a `prs` source, not a tracker. GitHub Issues is a tr
 { "id": "linear", "category": "tracker", "kind": "linear", "hint": "mcp__<server-id>__* (Linear, the claude.ai connector)", "readOnly": "guard", "scope": { "teams": ["ENG"] }, "verifiedAt": "2026-10-16T09:30:00Z" }
 ```
 
-- `id` is unique: it becomes the WorkItems' `sourceId`. `category` is `tracker`, `prs` or `runs`. `kind` is `linear`, `jira` or `github` (`grimoire` for runs).
+- `id` is unique: it becomes the WorkItems' `sourceId`. `category` is `tracker`, `prs` or `runs`. `kind` is `linear`, `jira` or `github` (`grimoire` for runs). On a re-run, a detected source whose kind and scope match a current one takes that one's id, so a hand-renamed id is not proposed again as a second source.
 - `hint` uses the `toolHints` format: the route and what it reaches. A connector's server id belongs to this account; a teammate's session finds its own through the scouts' fallback (another connector via ToolSearch, then a CLI). Name a secret by its variable, never its value.
 - `scope`: Linear `teams` (keys), Jira `projects` (keys), GitHub `repos` (`owner/repo`). Take it from the docs, the ticket keys and the remotes. Ask only when several teams or projects fit and nothing says which.
-- `readOnly`: the strongest the route allows.
-  - `endpoint`: the vendor's read-only endpoint, for a server the project configures itself (Linear `https://mcp.linear.app/mcp/readonly`, GitHub `https://api.githubcopilot.com/mcp/x/issues/readonly`).
-  - `flag`: GitHub's local server started with `--read-only`.
+- `readOnly`: what holds the source read-only **now**, through the route the hint names.
+  - `endpoint`: the route already is the vendor's read-only endpoint (Linear `https://mcp.linear.app/mcp/readonly`, GitHub `https://api.githubcopilot.com/mcp/x/issues/readonly`).
+  - `flag`: the route already is GitHub's local server started with `--read-only`.
   - `admin-group`: the account it connects as can only read, such as an Atlassian service account in a read-only group, or a read-only API key.
-  - `permission-rule`: `gh`, held by the rules below.
+  - `permission-rule`: `gh` for issues, held by the rules below.
   - `guard`: a claude.ai connector, which has no read-only variant. Only the guard's MCP rule holds the scouts read-only.
 
-  A route change (a server entry at the read-only URL, a flag) is proposed for the user to apply, like the settings.
-- `prs`: one source for every GitHub remote in `repos[]` (`kind: github`, through `gh`, `scope.repos` with one `owner/repo` per remote, `readOnly: permission-rule`).
+  Record `endpoint` or `flag` only when the current route already uses it. Where a stronger route exists, propose it separately, as a change the user applies to their server entry (like the settings): the source keeps the value that holds today until the route has changed and been probed.
+- `prs`: one source for every GitHub remote in `repos[]` (`kind: github`, through `gh`, `scope.repos` with one `owner/repo` per remote). Its `readOnly` is `guard`: `gh pr create` and `gh pr edit` stay open for the loop, so what holds it is the scout's instructions, plus the guard when it reads through GitHub's MCP.
 - `runs`: always `{ "id": "runs", "category": "runs", "kind": "grimoire" }`, the run journals under `telemetry.dir`.
 
 **The rules for `gh`**, proposed in `.claude/settings.json` (the user applies it, step 0). They bind every session in the project, the main one, `to-issues` and the loop's claims included, not only the scouts:
-- `permissions.deny`: `Bash(gh issue close:*)`, `Bash(gh issue delete:*)`, `Bash(gh issue transfer:*)`. Nothing in the pipeline runs these: an issue closes through its PR's `Closes #N`.
+- `permissions.deny`: `Bash(gh issue close:*)`, `Bash(gh issue delete:*)`, `Bash(gh issue transfer:*)`, `Bash(gh pr merge:*)`, `Bash(gh pr close:*)`. Nothing in the pipeline runs these: an issue closes through its PR's `Closes #N`, merging stays a person's, and nothing closes a PR.
 - `permissions.ask`: `Bash(gh issue create:*)`, `Bash(gh issue edit:*)`, `Bash(gh issue comment:*)`, `Bash(gh api -X:*)`, `Bash(gh api --method:*)`. `to-issues` creates and links issues, and claims assign and comment, so these prompt instead of refusing. With `claim.identity` set on a GitHub tracker, an unattended run cannot answer those prompts for its claims: say so, and let the user choose.
 
-A rule matches how a command starts, so it is a backstop (`gh api … -f` posts without `-X`). The scout's instructions come first. `gh pr` writes stay open, because the loop ships through them.
+A rule matches how a command starts, so it is a backstop: `gh api <path> --method POST` and `gh api <path> -X POST` (the flag after the path) slip past the `-X` rules, and `gh api … -f` posts without any flag. The scout's instructions come first. `gh pr create`, `edit`, `comment` and `ready` stay open, because the loop ships through them.
 
-**Repo labels** (`manager.repoLabels`, a tracker label → a `repos[].name`). When the tracker's labels name repos, the briefing routes an issue by its label before any judgment. List the labels with their descriptions (Linear `list_issue_labels` for the team, Jira's labels or components, `gh label list --json name,description`).
+**Repo labels** (`manager.repoLabels`, a tracker label → a `repos[].name`). When the tracker's labels name repos, the briefing routes an issue by its label before any judgment. List the labels with their descriptions (Linear `list_issue_labels` for the team, Jira's labels or components, `gh label list --limit 200 --json name,description`: the default of 30 can hide a repo's priority labels).
 - A label maps to a repo when its description names that repo's stack or role as step 1 found it, or its name is the repo's name and its description doesn't point elsewhere.
 - The description wins over the name. A `frontend` label that reads "React Native mobile app" maps to the mobile repo, not the web app.
 - A label the descriptions don't tie to one repo (no description, or two candidates) is left out, and the proposal lists it as unmapped. Never guess one.
@@ -132,11 +135,13 @@ When a repo has none of them, every issue reads as unknown priority, so offer to
 gh label create "priority: urgent" --repo <owner/repo> --color B60205 --description "Manager briefing: priority 1"
 ```
 
-High is `D93F0B`, medium `FBCA04`, low `0E8A16`. This is a write to the tracker. List it in the one diff under "Tracker writes", as its own decision, and run it only when the user's yes takes it. Never create, rename or apply a label otherwise.
+High is `D93F0B`, medium `FBCA04`, low `0E8A16`. This is a write to the tracker. List it in the one diff under "Tracker writes", as its own decision. A general yes to the diff does not take it: run it only when the user's answer names the labels. Never create, rename or apply a label otherwise.
 
-**Defaults:** `urgent: { "priorityAtMost": 2, "dueWithinDays": 2, "blocksAtLeast": 2, "stalledDays": 5 }` and `maxItemsPerSource: 200`. On a re-run, a value the user set shows as CHANGED against the default, and it stays unless they approve the default. The schedule, the shared post and the budget come with their own steps: leave them out.
+**Defaults:** `urgent: { "priorityAtMost": 2, "dueWithinDays": 2, "blocksAtLeast": 2, "stalledDays": 5 }` and `maxItemsPerSource: 200`. The schedule, the shared post and the budget come with their own steps: leave them out.
 
-**Hub remotes** (`repos[].remote`, optional). In a hub whose repos are nested clones, record each repo's `git -C <path> remote get-url origin`, without credentials (`https://<token>@github.com/…` becomes `https://github.com/…`). The fix for a missing clone can then name its URL. The loop ignores the key.
+On a re-run, build `urgent`, `priorityLabels` and `maxItemsPerSource` from the current block, not from step 0's first-run proposal. `urgent` and `maxItemsPerSource` take a default only for a key the block lacks. `priorityLabels` takes the defaults only when the block has none, and otherwise gains only the repo's new priority labels. A value the user set then never shows as CHANGED back to a default.
+
+**Hub remotes** (`repos[].remote`, optional). In a hub whose repos are nested clones, record each repo's remote, read stripped as step 0 says (`git -C <path> remote get-url origin | sed -E 's#(https?://)[^/@]*@#\1#'`), so a token never enters the context. The fix for a missing clone can then name its URL. The loop ignores the key.
 
 **Probe before proposing.** Read each source once through its own route, read calls only:
 - Linear: `list_issues` for the team, limit 1.
@@ -144,6 +149,6 @@ High is `D93F0B`, medium `FBCA04`, low `0E8A16`. This is a write to the tracker.
 - GitHub: `gh issue list --repo <owner/repo> --limit 1 --json number`, and for `prs`, `gh pr list` the same way, for each repo in scope.
 - `runs`: `node <plugin root>/scripts/render-logs.mjs summary --dir <telemetry.dir> --json`.
 
-A source that **passes** gets `verifiedAt`, the probe's time in ISO 8601 UTC, when it is added or its `kind`, `hint` or `scope` changes. One that passes again unchanged keeps its current `verifiedAt`, so a re-run that changes nothing stays current.
+A source that **passes** gets `verifiedAt`, the probe's time in ISO 8601 UTC, when it is added or its `kind`, `hint` or `scope` changes. One that passes again unchanged keeps its current `verifiedAt`, so a re-run that changes nothing stays current. When the user corrects a source's scope or hint during the proposal, probe it again before it gets a `verifiedAt`.
 
 A source that **fails** is shown in the diff with the error in one line and its fix (authorize the connector in claude.ai's settings, `gh auth login`, `gh auth refresh -s repo`, the right team key). It is not written. A new one is left out, and an existing one stays as it is, unless the user says to write it anyway, then without a new `verifiedAt`.
