@@ -198,7 +198,13 @@ try {
   for (const [tool, verb] of [['slack_send_message', 'send'], ['slack_schedule_message', 'schedule'], ['slack_update_canvas', 'update'], ['slack_add_reaction', 'add'],
     ['share_issue', 'share'], ['submit_diff_review', 'submit'], ['resolve_diff_thread', 'resolve'], ['retire_issue_label', 'retire'], ['createJiraIssue', 'create'],
     ['trash_message', 'trash'], ['label_message', 'label'], ['respond_to_event', 'respond'], ['exec', 'exec'], ['execute_sentry_tool', 'execute'],
-    ['run_scheduled_task', 'run'], ['issue_upsert', 'upsert'], ['SAVE_ISSUE', 'save']]) {
+    ['run_scheduled_task', 'run'], ['issue_upsert', 'upsert'], ['SAVE_ISSUE', 'save'],
+    // lifecycle and state verbs: a session, a deployment, a cache, a key
+    ['pause_project', 'pause'], ['unpause_project', 'unpause'], ['stop_session', 'stop'], ['kill_session_command', 'kill'],
+    ['activate_kms_signing_key', 'activate'], ['invalidate_by_tags', 'invalidate'], ['record_events', 'record'], ['stage_redirects', 'stage'],
+    ['generate_route', 'generate'], ['start_session', 'start'], ['sync_with_base_branch', 'sync'],
+    // `verify` is no verb on purpose, so the first known one is `upload`: a check of an upload reads as a write
+    ['verify_upload', 'upload']]) {
     expectReadOnly(mcp(`mcp__srv-1__${tool}`, 'tracker-scout'), 'tracker-scout', `mcp__srv-1__${tool}`, `tracker-scout · ${tool} ('${verb}' decides)`, verb)
   }
   expectAllow(mcp('mcp__abc__list_issues', 'grimoire:tracker-scout'), 'tracker-scout · list_issues')
@@ -211,7 +217,8 @@ try {
   expectAllow(mcp('mcp__abc__address_lookup', 'tracker-scout'), "'address' is not 'add', and 'lookup' reads (trap)")
   for (const [tool, why] of [['get_label', "'get' comes before 'label'"], ['list_issue_labels', "'labels' is not 'label'"], ['forwarding_rules_list', "'forwarding' is not 'forward'"],
     ['slack_read_channel', "'read' after a vendor prefix"], ['slack_search_public', "'search' after a vendor prefix"], ['getJiraIssue', 'camelCase read'],
-    ['graph_search', "'search' reads"], ['graph_index', 'no known verb: fails open'], ['list_task_runs', "'list' comes first, and 'runs' is not 'run'"]]) {
+    ['graph_search', "'search' reads"], ['graph_index', 'no known verb: fails open'], ['list_task_runs', "'list' comes first, and 'runs' is not 'run'"],
+    ['get_link', "'get' comes before 'link'"], ['issue_cert', "'issue' is no verb on purpose: fails open"]]) {
     expectAllow(mcp(`mcp__srv-1__${tool}`, 'tracker-scout'), `tracker-scout · ${tool} (${why})`)
   }
   expectAllow(mcp('mcp__abc__save_issue'), 'the main session (no agent_type) · save_issue')
