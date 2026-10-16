@@ -78,12 +78,25 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   - A CHANGED key is applied only when an `--approve` names its path, such as `repos[api].gate`.
   - `repos[]` are matched by `name` and `specialists[]` by `agent`; a gate is compared whole.
   - Permission lists and a hook group's commands are sets: the user's entries stay, and the
-    proposed ones are added once.
-  - Without `--write` it writes nothing. With it, the write is atomic, and skipped when nothing
-    changes. Values under a token, secret, password or API-key name print as `«redacted»`.
-  - Through it, setup can write `.claude/settings.json`, which the guard closes to `Write` and `Edit`.
-- Checks: `scripts/config-merge.test.mjs` (72), and the setup evals `setup-6` (a configured project
-  re-run changes nothing before the yes) and `setup-7` (a hand-edited gate is kept).
+    proposed ones are added once. A hook is the same hook when its type and command are.
+  - Without `--write` it writes nothing. With it, the write is atomic and keeps the file's mode,
+    a symlink is written through, and nothing is touched when nothing changes.
+  - It names each file by absolute path, and a symlink's target, and warns when an added repo
+    sits on another repo's path.
+- **Secrets stay out of context.** The two JSON files are read only through the script, and its
+  output prints `«redacted»` for:
+  - every `env` value;
+  - every value under a key named like a token, key, password, credential or auth;
+  - bearer tokens, URL credentials, `token=`-style pairs and known token formats inside any
+    string, the rest of the string kept.
+
+  An invalid file's error gives its line and column only. The written file keeps the real values.
+- **The user applies `.claude/settings.json`.** The guard closes that file to agents, so setup
+  writes `grimoire.config.json` itself, but for the settings it prints the exact `--write`
+  command and the user runs it. A dry run then confirms what is left.
+- Checks: `scripts/config-merge.test.mjs` (101), and the setup evals `setup-6` (a configured
+  project re-run changes nothing before the yes, and never writes the settings itself) and
+  `setup-7` (a hand-edited gate is kept).
 
 ## 0.11.0 — trust and see
 
