@@ -89,6 +89,14 @@ try {
     ok(r.status === 0, `a valid minimal item passes (exit ${r.status}${r.stderr ? `: ${r.stderr.trim()}` : ''})`)
     const min = brief([{ sourceId: 'linear', id: 'M-1', title: 'only the required fields', kind: 'issue', stateType: 'backlog' }])
     ok(min.status === 0, 'an item with only sourceId, id, title, kind and stateType passes')
+    // A scout told to leave an unreadable field "out (or null)" may send null: it reads as absent.
+    const nulls = brief([{ sourceId: 'linear', id: 'A-1', key: null, title: 't', kind: 'issue', stateType: 'backlog', priority: null, hasAcceptanceCriteria: null, blockedBy: null, blocks: null, parentOf: null, labels: null }])
+    ok(nulls.status === 0, `null for key, priority, hasAcceptanceCriteria, blockedBy, blocks, parentOf and labels reads as absent (exit ${nulls.status}${nulls.stderr ? `: ${nulls.stderr.trim()}` : ''})`)
+    const NP = parse(latest(nulls))
+    ok(/acceptance criteria not checked/.test(E(NP, 'A-1').why) && /· No priority ·/.test(E(NP, 'A-1').line) && groupOf(NP, 'A-1') === 'Not now',
+      'the all-null item reads as acceptance criteria not checked, no priority, under its id')
+    const nullReq = brief([item('T-1', { title: null })])
+    ok(nullReq.status === 1 && /items\[0\]\.title/.test(nullReq.stderr), 'a required field is never null')
 
     const notArray = brief(null, { raw: '{"items": []}' })
     ok(notArray.status === 1 && /JSON array/.test(notArray.stderr), 'a file that is not a JSON array is refused with exit 1')
@@ -304,6 +312,20 @@ try {
 
     const empty = brief([])
     ok(empty.status === 0 && /Nothing needs you right now/.test(latest(empty)), 'no items: an explicit "nothing needs you right now"')
+
+    // GFM turns scheme:// and www. into links on its own, and bidi controls reorder what a reader sees.
+    const BIDI = [0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069].map((c) => String.fromCharCode(c))
+    const auto = brief([
+      item('AL-1', { title: 'see https://evil.example/x and ftp://files.example and www.evil.example', nextStep: 'open HTTP://evil.example or WWW.evil.example' }),
+      item('BD-1', { title: `pay ${BIDI.join('x')} now`, nextStep: `${BIDI[4]}gnp.exe` }),
+    ])
+    const A = parse(latest(auto))
+    const al = E(A, 'AL-1')
+    ok(!/:\/\//.test(al.line) && !/www\./i.test(al.line) && !/:\/\//.test(al.next) && !/www\./i.test(al.next), 'a scheme:// or www. in ticket text cannot become a GFM autolink, in the title or the next step')
+    ok(/https\\\[:\\\]\/\/evil\.example/.test(al.line) && /www\\\[\.\\\]evil\.example/.test(al.line), 'it stays readable: https[:]// and www[.]')
+    const md2 = latest(auto)
+    ok(BIDI.every((c) => !md2.includes(c)), 'bidi controls U+202A–202E and U+2066–2069 are stripped')
+    ok(/pay xxxxxxxx now/.test(E(A, 'BD-1').line) && E(A, 'BD-1').next === 'gnp.exe', 'and the text around them is kept')
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -383,6 +405,12 @@ try {
     const again = mod.view(items, config, null, NOW)
     ok(JSON.stringify(again) === JSON.stringify(V), 'view() is deterministic')
     ok(JSON.stringify(items[0]) === JSON.stringify(item('V-1', { stateType: 'triage' })), 'view() does not mutate its input')
+    // The model carries only safe urls, so no later rendering (the page, the panel) can get a javascript: href.
+    const U = mod.view([item('U-js', { url: 'javascript:alert(1)' }), item('U-data', { url: 'data:text/html,<b>x</b>' }), item('U-ok', { url: 'https://example.com/a(b)<c>' }), item('U-none')], {}, null, NOW)
+    const urlOf = (id) => U.groups.flatMap((g) => g.items).find((i) => i.id === id)?.url
+    ok(urlOf('U-js') === null && urlOf('U-data') === null, 'view() gives a javascript: or data: url as null')
+    ok(urlOf('U-ok') === 'https://example.com/a%28b%29%3Cc%3E', 'and an http(s) url percent-encoded')
+    ok(urlOf('U-none') === null, 'and no url as null')
   }
 } finally {
   rmSync(TMP, { recursive: true, force: true })
