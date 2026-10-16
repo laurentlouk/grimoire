@@ -1,6 +1,6 @@
 # Manager briefing: plan
 
-**Spec:** [docs/specs/2026-10-16-manager-briefing-design.md](../specs/2026-10-16-manager-briefing-design.md) (approved 2026-10-16) · **Research:** [docs/research/2026-10-16-manager-po-landscape.md](../research/2026-10-16-manager-po-landscape.md) · **Issues:** Linear project [grimoire · manager briefing](https://linear.app/odyyy/project/grimoire-manager-briefing-1da8f07b905f) (P-ODY-46), ODY-869 to ODY-878
+**Spec:** [docs/specs/2026-10-16-manager-briefing-design.md](../specs/2026-10-16-manager-briefing-design.md) (approved 2026-10-16) · **Research:** [docs/research/2026-10-16-manager-po-landscape.md](../research/2026-10-16-manager-po-landscape.md) · **Issues:** Linear project [grimoire · manager briefing](https://linear.app/odyyy/project/grimoire-manager-briefing-1da8f07b905f) (P-ODY-46), ODY-869 to ODY-878, plus ODY-879 (page) and ODY-880 (panel)
 
 ## Problem, in the user's words
 
@@ -23,6 +23,8 @@
 9. As a team member, I want the briefing to run daily on my machine under my own Claude login, with no API key, so that it is ready before I start.
 10. As a team, we want an optional shared post, replaced on each run, so that everyone sees the same briefing.
 11. As the owner of the harness, I want the manager's scouts to be unable to write to the tracker, whatever connector is installed, so that a read-only briefing stays read-only.
+12. As a team member, I want a visual page of the briefing that I can open anywhere, filter, and copy a launch prompt from, so that I can review what needs us at a glance.
+13. As a team member using the Claude desktop app, I want the briefing as an interactive panel in the conversation, where I tick issues and press Launch, so that reviewing and executing happen in one place without copy-paste.
 
 ## Seams
 
@@ -172,10 +174,41 @@
 
 **Done when** the tests pass and a real post is replaced (not duplicated) across two runs.
 
+### Slice 7 · The HTML briefing page (story 12, spec D12)
+
+**The user sees:** `.grimoire/manager/briefing.html`, written by every briefing run, scheduled ones included. It is one self-contained page: the same groups as the Markdown briefing, with filters (urgent, ready for AI, PRs, runs), checkboxes on the ready-for-AI issues, a disabled row with the fix for an unavailable repo, and **"Copy launch prompt"** for each project. The skill prints its path to open, and the session headline points to it.
+
+- **`scripts/manager.mjs view --json`:** the view model, built by one function that the Markdown, the page and the panel all render from.
+- **`scripts/manager.mjs render --html`:** the page, with inline CSS and JS, no external URL, light and dark, and the data embedded so that it can't break out of its script tag.
+- **Tests (`scripts/manager.test.mjs`, in the style of `render-logs.test.mjs`, executed against a minimal DOM):**
+  - the page is self-contained (no `<script src>` or external URL);
+  - a ticket title with `</script>` or HTML is escaped and can't break out;
+  - the copied prompt holds ids, routes and repo paths, never ticket bodies;
+  - the counts equal `view --json`'s.
+
+**Done when** the tests pass and a real briefing opens as a page in the browser.
+
+### Slice 8 · The inline panel with Launch (story 13, spec D12)
+
+**The user sees:** in the Claude desktop app, the briefing as an interactive panel in the conversation. You tick issues and press **Launch**, and one conversation per project starts. In a terminal, the checkbox fallback and the page's path.
+
+- **`skills/manager/SKILL.md`:**
+  - when ToolSearch finds an interactive widget tool, render the panel from `view --json`;
+  - the panel's Launch sends `/grimoire:manager launch <ids…>` into the session;
+  - on that message, re-check every id against the latest briefing and `manager.mjs repos`, then run slice 4's launch step;
+  - unknown or stale ids are refused, with the reason given.
+- **`scripts/manager.mjs launch-check <ids…>`:** validates ids against `latest` and returns the launch plan. Tests cover an unknown id, a stale briefing, and an id whose repo became unavailable.
+- **Evals:**
+  - a launch message with valid ids → conversations started;
+  - with an id not in the briefing → refused;
+  - with no widget tool → checkbox fallback and the page path.
+
+**Done when** the tests pass and, in the desktop app, ticking and pressing Launch starts one conversation per project.
+
 ### Later (own roasts)
 
-- **Slice 7: signals into the tracker** (App Store, Google Play, Shopify, crash reports).
-- **Slice 8: the mail organiser with draft replies.**
+- **Signals into the tracker** (App Store, Google Play, Shopify, crash reports).
+- **The mail organiser with draft replies.**
 
 Their open questions are in the spec under "Questions still owned by the user".
 
@@ -184,4 +217,5 @@ Their open questions are in the spec under "Questions still owned by the user".
 - Slice 0 comes first. Slice 1's setup section rides on its diff.
 - Slices 2, 3 and 6 each depend only on slice 1.
 - Slice 4 depends on 1. Slice 5 depends on 1 and 4, because the scheduled briefing carries the launch prompts.
+- Slice 7 depends on 1 and 4, because the page carries the launch prompts. Slice 8 depends on 4 and 7, because it shares the view model and launches through slice 4.
 - Files that several slices touch: `skills/manager/SKILL.md`, `scripts/manager.mjs` and `skills/setup/SKILL.md`. Slices that run in parallel must coordinate on these, so build them one per repo checkout at a time (`AGENTS.md`).
