@@ -128,5 +128,66 @@
       }
     ],
     "id": 5
+  },
+  {
+    "id": 6,
+    "query": "We set grimoire up here a few months ago: grimoire.config.json, .claude/settings.json, memory/, AGENTS.md and CLAUDE.md are all in place. Since then we added an infra repo under repositories/infra. Re-run the setup to bring it up to date.",
+    "should_trigger": true,
+    "expected_output": "Treats this as a re-run: reads the existing grimoire.config.json, .claude/settings.json, memory/, .claude/agents/, AGENTS.md and CLAUDE.md before proposing anything, and never opens secret files. Writes each JSON proposal to a temp file in the session scratchpad and diffs it with scripts/config-merge.mjs without --write. Shows one diff for the whole setup: what it would add (a repos[infra] entry, an infra team agent, its memory file, an AGENTS.md row), any changed keys as separate decisions, and what it leaves alone. Changes no project file before the user's yes. On the yes, writes grimoire.config.json with config-merge.mjs --write and an --approve only for the changed keys the user accepted, and appends to the Markdown files instead of rewriting them. It never writes .claude/settings.json itself: it prints the exact --write command, with absolute paths and a quoted --approve per accepted change, for the user to run, then re-runs the dry run to confirm.",
+    "expectations": [
+      {
+        "text": "Reads the existing grimoire.config.json, .claude/settings.json, memory, agents, AGENTS.md and CLAUDE.md before proposing, and treats their values as the user's choices",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Uses scripts/config-merge.mjs without --write, on a proposal kept outside the project (the session scratchpad), to produce the diff of the JSON files instead of rewriting them",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Shows one diff for the whole setup that separates what it would add, what it would change and what it leaves alone, including the new repos[infra] entry",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Changes no file in the project before the user says yes",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Proposes appends or diffs for AGENTS.md, CLAUDE.md and memory files instead of overwriting them, and does not open or quote any secret file",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not run --write on .claude/settings.json itself; it prints the command for the user to run",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
+  },
+  {
+    "id": 7,
+    "query": "Update our grimoire setup. Heads-up: after the first run I edited the api repo's gate in grimoire.config.json by hand, to `make e2e-test E2E_LOCK_WAIT=3600`, because the e2e lock queue is long. The Makefile's e2e target itself has not changed.",
+    "should_trigger": true,
+    "expected_output": "Keeps the hand-edited repos[api].gate: it is the user's choice, so the proposal either leaves it alone or shows it as one CHANGED key (repos[api].gate, current value against proposed) that needs the user's explicit approval, never a silent overwrite and never a mix of the two gates. Other hand-written keys show as kept. Nothing is written before the yes, and the write uses config-merge.mjs --write with --approve 'repos[api].gate' only if the user accepted that change.",
+    "expectations": [
+      {
+        "text": "Treats the hand-edited repos[api].gate as the user's choice: it is either left alone or listed as one changed key that needs explicit approval, never replaced silently",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not merge fields of the proposed gate into the hand-edited one; the gate is kept or replaced whole",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Writes nothing before the user approves, and approves repos[api].gate in the write only if the user accepted that change",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
   }
 ]
