@@ -292,6 +292,35 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   prints ids and counts, never ticket text: one line under 10,000 characters. No briefing, a
   corrupt one, an unreadable root or no `node` prints nothing, exit 0. Checks:
   `scripts/manager.test.mjs` (287 in all).
+- **Open pull requests.** A `prs` source (`category: prs`, `scope.repos`) is dispatched with the
+  tracker sources: `tracker-scout` reads `gh pr list --state open --json …` per repo (behind
+  `requireHook.raw` when set, or GitHub's MCP) and maps each PR onto four new optional,
+  null-tolerant WorkItem fields: `reviewDecision`, `checks` (`passing` / `failing` / `pending`, from
+  the status rollup), `reviewRequested` and `isDraft`. The script places a PR by its own rules,
+  first match wins: a draft → Not now, a pending review request (anyone asked) → Decide, failing
+  CI or an approval not merged → Do, the rest → Waiting on others. A PR is never counted urgent,
+  and its review and checks are part of its hash, so a change badges it **changed**.
+- **Grimoire runs that need us.** With a `runs` source in `manager.sources`, `brief` reads the run
+  journals itself (no scout), through render-logs' `loadRuns` and `runOutcome`, under
+  `telemetry.dir` (default `.grimoire/runs`) in the project's main checkout, also when `--root` is
+  a linked worktree. Each project's latest run is listed
+  under Do when it halted (with the halt's first line), is still "running" with no journal write
+  for 12 h, or drained with tasks that need attention; its next step names `/grimoire:orchestrate`
+  on the project. A drained run with nothing pending is left out, and no runs directory is
+  `runs (0)`, no error. Its status joins the sources like the others.
+- **The headline names what people forget.** PRs and runs are never counted urgent, so `brief` adds
+  `counts.runsNeedingUs` (the runs under Do) and `counts.prsFailing` (open PRs failing CI, drafts
+  left out) to the front matter, and `headline` appends `· 2 runs need you · 1 PR failing CI` after
+  the ready-for-AI part when either is above 0. An older `latest.md` without the keys gives the
+  same line as before.
+- **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
+  absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
+  reported by the skill", and makes the briefing partial; without `--sources`, a configured source
+  with no items reads the same way, since nothing said it was read. An `ok` source whose count is not its
+  number of items shows both, flagged "count mismatch", and is not trusted as complete. The
+  stalled rule reads the later of `lastActivityAt` and `updatedAt`. With neither `priority` nor
+  `nativePriority`, the most urgent label in `labels[]` maps. Checks: `scripts/manager.test.mjs`
+  (326 in all).
 - **Launch from the briefing.** After the briefing, the skill offers the ready issues as
   multi-select checkboxes, one question per project (at most 4 options each, plus **All ready**),
   and starts what the user ticks: one new conversation per tracker project, through the host's
@@ -302,7 +331,8 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     `repos[]` entry (first through `manager.repoLabels`, so `frontend` reaches the mobile repo,
     then through its `repo`), and that repo is available. Each failure is a reason: "no repo
     mapped: no label in repoLabels", "repo not checked out: repositories/webapp, fix: …".
-    `brief --check-repos` runs the check; without it a repo shows as "availability not checked".
+    Only issues: a PR or a run keeps its own rules and has no repo check. `brief --check-repos`
+    runs the check; without it a repo shows as "availability not checked".
   - **`manager.mjs repos`** reports each `repos[]` entry as JSON: available when its path is a git
     work tree (a directory a hub ignores must be a clone of its own), a registered submodule
     initialised. A failure carries its fix, and the command when it is one: `git clone <remote>
@@ -316,7 +346,7 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     run one after the other (`waitsFor`), never in parallel. Each prompt is self-contained and
     carries ids, routes and repo paths only, never a ticket's title, body, labels or project
     name: the launched conversation reads the tickets itself. An unknown, ambiguous or ineligible
-    id is refused with its reason. Checks: `scripts/manager.test.mjs` (337 in all, the repos
+    id is refused with its reason. Checks: `scripts/manager.test.mjs` (378 in all, the repos
     check on real temp git repos), and the evals `manager-6` to `manager-8`.
 
 ## 0.11.0 — trust and see
