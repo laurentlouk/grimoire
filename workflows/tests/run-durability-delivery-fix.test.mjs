@@ -396,12 +396,14 @@ for (const SHELL of SHELLS) {
     const gone = new Promise((res) => holder.once('exit', res))
     holder.kill()
     await gone // reaped: a killed child not yet waited for is a zombie, and `kill -0` still finds it
-    r = await Y.run(SHELL, at(take.replace(/^ {2}/gm, '')), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
+    // a takeover needs a wait of 2 s: the script checks its wait right after clearing a stale lock, so
+    // with 1 s a slow first pass (a second boundary crossed) clears it and then reports LOCK busy
+    r = await Y.run(SHELL, at(take.replace(/^ {2}/gm, '')), { GRIMOIRE_SHIP_LOCK_WAIT: '2' })
     ok(/^LOCK ok \//m.test(r.out) && / gate$/.test(readFileSync(join(LK, 'owner'), 'utf8').trim()), 'then LOCK ok: held as `gate`')
     r = await Y.run(SHELL, at(release))
     ok(/LOCK released/.test(r.out) && !existsSync(LK), 'the release removes it')
     mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `1 ${Math.floor(Date.now() / 1000)} gate\n`)
-    r = await Y.run(SHELL, at(take.replace(/^ {2}/gm, '')), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
+    r = await Y.run(SHELL, at(take.replace(/^ {2}/gm, '')), { GRIMOIRE_SHIP_LOCK_WAIT: '2' })
     ok(/^LOCK stale: gate /m.test(r.out) && /^LOCK ok \//m.test(r.out), 'a gate lock an earlier gate left (one repo never runs two gates at once) is taken over')
     await Y.run(SHELL, at(release))
     Y.done()
