@@ -128,6 +128,43 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
   - `scriptsDir` overrides where the file is; the default is next to `briefsDir`.
 - Each event is serialized once: the byte count and the chunk share its line.
 
+**Setup (`skills/setup`, `scripts/config-merge.mjs`)**
+
+Re-running `/grimoire:setup` on a project already set up was not handled: nothing checked for an
+existing `grimoire.config.json`, `.claude/settings.json` or memory before writing, and the
+no-overwrite rule named only the Markdown instructions, the roster and agent definitions.
+- **A re-run reads what is there, shows one diff, and writes only what is approved.** Step 0 gains a
+  "Re-run" part beside migration mode. Hand-edited values are the user's choice, and secrets are
+  referenced, never read. The no-overwrite rule now covers the config, the settings and memory.
+- **`scripts/config-merge.mjs` makes the JSON diff.** It takes the current file and a proposal kept
+  in the session scratchpad, and prints each key as ADDED, CHANGED or KEPT.
+  - A CHANGED key is applied only when an `--approve` names its path, such as `repos[api].gate`.
+  - `repos[]` are matched by `name` and `specialists[]` by `agent`; a gate is compared whole.
+  - Permission lists and a hook group's commands are sets: the user's entries stay, and the
+    proposed ones are added once. A hook is the same hook when its type and command are.
+  - Without `--write` it writes nothing. With it, the write is atomic and keeps the file's mode,
+    a symlink is written through, and nothing is touched when nothing changes.
+  - It names each file by absolute path, and a symlink's target, and warns when an added repo
+    sits on another repo's path.
+- **Secrets of known shapes are masked.** The two JSON files are read only through the script,
+  and its output prints `«redacted»` for:
+  - every `env` value;
+  - every value under a key named like a token, key, password, credential or auth;
+  - inside any value, with the rest of the string kept: `Authorization:` and bearer headers,
+    `token=`-style pairs, `--token X`-style flags, `mysql -pX`, `curl -u`, cookies, URL
+    credentials, secret query parameters, JWTs, Slack webhooks, and token formats such as
+    `ghp_…` and AKIA/ASIA keys.
+
+  Keys and paths are never masked, so a repo named like a token prefix keeps its `--approve`
+  hint. An invalid file's error gives its line and column only. The written file keeps the real
+  values.
+- **The user applies `.claude/settings.json`.** The guard closes that file to agents, so setup
+  writes `grimoire.config.json` itself, but for the settings it prints the exact `--write`
+  command and the user runs it. A dry run then confirms what is left.
+- Checks: `scripts/config-merge.test.mjs` (119), and the setup evals `setup-6` (a configured
+  project re-run changes nothing before the yes, and never writes the settings itself) and
+  `setup-7` (a hand-edited gate is kept).
+
 **Guard (`hooks/scripts/guard.mjs`)**
 - **Scouts can't write through MCP tools.** The manager's scouts read trackers through whatever
   connector the session has, and the guard did not see MCP calls at all. Now `hooks.json` routes

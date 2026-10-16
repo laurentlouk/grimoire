@@ -136,7 +136,7 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 
 | Path | What |
 | --- | --- |
-| [`skills/setup`](skills/setup/SKILL.md) | First run: explore the project, propose agents, memory, roster, loop config; write on approval |
+| [`skills/setup`](skills/setup/SKILL.md) | First run: explore the project, propose agents, memory, roster, loop config; write on approval. A re-run shows one diff and writes only what is approved |
 | [`skills/roast`](skills/roast/SKILL.md) | Stress-test a design: docs and code recon in parallel, self-answer ladder, open-source references, one question at a time |
 | [`skills/to-plan`](skills/to-plan/SKILL.md) · [`skills/to-issues`](skills/to-issues/SKILL.md) | Spec → plan → vertical-slice issues |
 | [`skills/tdd`](skills/tdd/SKILL.md) | Red, green, refactor, one behaviour at a time |
@@ -156,7 +156,7 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 | [`tools/graph/`](tools/graph/README.md) | the code graph: indexer, MCP server (`.mcp.json`), CLI, the page and its local server, research-only |
 | [`docs/architecture/`](docs/architecture/grimoire.architecture.json) | grimoire's own architecture diagram, checked against its code graph |
 | [`.harness/`](.harness/README.md) | the MCP policy and a manifest of the files that decide what agents may do; checked in CI |
-| [`scripts/`](scripts) · [`evals/`](evals/README.md) | the log renderer, the drift check CI runs, and the skill evals (`skills/*/evals/evals.json`, generated into `evals/` for `claude plugin eval`) |
+| [`scripts/`](scripts) · [`evals/`](evals/README.md) | the log renderer, the setup re-run's config merge, the drift check CI runs, and the skill evals (`skills/*/evals/evals.json`, generated into `evals/` for `claude plugin eval`) |
 
 ## 🧪 Developing grimoire
 
