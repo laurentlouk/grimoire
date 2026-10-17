@@ -26,6 +26,10 @@ what it printed. The script stops itself before that limit.
   yourself.
 - A `LOCK kept` line at the end means another holder has the lock now (it was taken over while the
   script ran): the script left it alone, and so do you. It is not a failure.
+- The script sources the lock's functions from the engine's `ship-lock.sh` once that file's cksum is
+  the engine's. A lone `LOCK missing` line means the file is missing or altered: the script did
+  nothing else, and the loop sends it again with the lock written out. Report it; never write, copy
+  or look for that file yourself.
 - The script tidies worktrees: `git worktree prune` drops the records of worktrees whose
   directory is gone. Only a halt's script also removes this run's reviewers' leftover `review-*`
   worktrees (exactly the `review-<repo>--<task>-…` ones: the run has stopped); mid-run, a review
@@ -38,6 +42,7 @@ what it printed. The script stops itself before that limit.
 - `hookBlocked`: `PUSH ok=0 hook=1` → true.
 - `ready`: a `READY` line → true (the PR is out of draft: nothing was pushed to it).
 - `lockBusy`: a `LOCK busy` line → true.
+- `lockMissing`: a `LOCK missing` line → true (the script did nothing).
 - `unknown`: an `UNKNOWN` line → true (the PR could not be read: nothing was pushed or rewritten).
 - `prUrl`: the `url=` value of the PR line ("" when it is empty or there is no PR line).
 - `draft`: the `DRAFT` line, `true` or `false`.
@@ -47,4 +52,5 @@ what it printed. The script stops itself before that limit.
 ## Mode seal (after the terminal slot)
 The script prints one `SEAL` line. Return `sealed`: `SEAL ok=1` → true, `SEAL ok=0` or no SEAL
 line → false; `already`: `already=1` on it → true; `prUrl`: its `url=`; `failedStep`: its
-`step=`; `detail`: the lines printed right under it, verbatim.
+`step=`; `lockMissing`: a `LOCK missing` line → true (the script did nothing); `detail`: the lines
+printed right under it, verbatim.

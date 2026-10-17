@@ -1,6 +1,8 @@
 // Shared by run-durability-final.test.mjs: drives the engine with stubbed agents (like every
 // workflows/tests file) and runs the ship, seal and gate scripts it generates for real against a
-// temp git sandbox with a fake gh that tracks isDraft, body, comments and its op log.
+// temp git sandbox with a fake gh that tracks isDraft, body, comments and its op log. Its lock helpers
+// (SCRIPTS, lockArgs, lockShim, lockPrefix) serve the other loop tests too: they point the scripts at
+// this checkout's ship-lock.sh or, under GRIMOIRE_TEST_SHIP_LOCK=inline, at the lock's fallback.
 import { readFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs'
 import { spawnSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -35,13 +37,44 @@ export const happy = (label, p) => {
   return V('PASS')
 }
 export const by = (map) => (label, p, o, calls) => (label in map ? (typeof map[label] === 'function' ? map[label](p, o, calls) : map[label]) : happy(label, p))
+// The ship, seal and gate scripts source the lock's functions from <scriptsDir>/ship-lock.sh (a cksum
+// guard), and run from a sandbox: they are pointed at this checkout's file by its absolute path.
+export const SCRIPTS = `${DIR}/scripts`
+// GRIMOIRE_TEST_SHIP_LOCK=inline runs a test file against the lock's FALLBACK: every lock script
+// carries the functions inline, as it does once a script found the file missing. The first lock
+// dispatch is answered "missing" here (never recorded, never handed to the responder), and its
+// `.inline` re-dispatch reaches the responder under its own label, so the scenarios read the same.
+export const LOCK_INLINE = process.env.GRIMOIRE_TEST_SHIP_LOCK === 'inline'
+// (the scripts directory then holds the journal writer's file only, so the journal still uses its own)
+const withoutLock = () => {
+  const d = mkdtempSync(join(tmpdir(), 'grim-nolock-'))
+  writeFileSync(join(d, 'journal-writer.sh'), readFileSync(join(SCRIPTS, 'journal-writer.sh')))
+  process.on('exit', () => rmSync(d, { recursive: true, force: true }))
+  return d
+}
+export const lockArgs = { scriptsDir: LOCK_INLINE ? withoutLock() : SCRIPTS }
+export function lockShim(agent) {
+  if (!LOCK_INLINE) return agent
+  return async (prompt, opts = {}) => { // the engine chains on what agent() returns: always a promise
+    const label = opts.label || '?'
+    if (/^(ship|seal|gate):/.test(label) && prompt.includes('LOCK missing: $LKF')) return /^gate:/.test(label) ? { status: 'BLOCKED', summary: 'LOCK missing', failedStep: 'lock' } : { pushed: false, sealed: false, lockMissing: true }
+    return agent(prompt, { ...opts, label: label.replace(/\.inline$/, '') })
+  }
+}
+// The ship script up to its take, and what a test appends after its own lines: a script that sources
+// the lock's file runs everything after the guard inside it (`if <cksum ok>; then . "$LKF"` … `fi`)
+export const lockPrefix = (land) => {
+  const prefix = land.slice(0, land.indexOf('if shiplock ship; then LK=1'))
+  return { prefix, close: prefix.includes('then . "$LKF"') ? '\nfi\n' : '\n' }
+}
 export const indexOf = (tasks, extra) => ({
   slices: [{ slice: 1, sliceLabel: 'v', issues: tasks.map((t) => ({ id: t.id, title: t.title || `Title of ${t.id}`, repo: t.repo, state: 'todo', assignee: '', dependsOn: t.dependsOn || [] })) }],
   hookProblems: [], ...extra,
 })
 export async function run(scenario, tasks, responder, { args = {}, index = {} } = {}) {
   const calls = []
-  const agent = async (prompt, opts = {}) => {
+  const shim = 'scriptsDir' in args ? (a) => a : lockShim // a scenario that names its own scriptsDir tests the file itself
+  const agent = shim(async (prompt, opts = {}) => {
     const label = opts.label || '?'
     calls.push({ label, prompt, opts })
     if (label === 'parse-index') return typeof index === 'function' ? index(prompt) : indexOf(tasks, index)
@@ -50,11 +83,11 @@ export async function run(scenario, tasks, responder, { args = {}, index = {} } 
     if (label === 'ledger') return { path: 'runs/x.json', branch: 'harness/run-x' }
     if (label === 'crystallize') return { reports: [], skillsCreated: [], skillsPatched: [], memoryEntriesAdded: 0, docsSynced: [], prUrl: '', summary: '' }
     return responder(label, prompt, opts, calls)
-  }
+  })
   const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
   const fn = new AsyncFunction('agent', 'parallel', 'pipeline', 'log', 'phase', 'args', 'budget', 'workflow', body)
   const logs = []
-  const result = await fn(agent, parallel, async () => {}, (m) => logs.push(m), () => {}, { ...INPUTS, execute: true, ...args },
+  const result = await fn(agent, parallel, async () => {}, (m) => logs.push(m), () => {}, { ...INPUTS, execute: true, ...lockArgs, ...args },
     { total: null, spent: () => 0, remaining: () => Infinity }, async () => {})
   console.log(`\n── ${scenario}`)
   const labels = calls.map((c) => c.label)
@@ -119,11 +152,14 @@ export const receipt = (out) => {
   const pr = /^PR ok=(\d)(?: url=(\S*))?/m.exec(out) || []
   const draft = /^DRAFT (\w+)/m.exec(out)
   const failedStep = push[1] === '0' ? 'push' : pr[1] === '0' ? 'pr' : /^COMMENT ok=0/m.test(out) ? 'comment' : undefined
-  return { pushed: push[1] === '1', remoteHead: (/^PUSH ok=1 remote=(\S+)/m.exec(out) || [])[1] || '', prUrl: pr[2] || (/^READY url=(\S+)/m.exec(out) || [])[1] || '', draft: draft ? draft[1] === 'true' : undefined, hookBlocked: push[2] === '1', ready: /^READY /m.test(out), lockBusy: /^LOCK busy/m.test(out), unknown: /^UNKNOWN /m.test(out), failedStep, detail: out.slice(-300) }
+  return { pushed: push[1] === '1', remoteHead: (/^PUSH ok=1 remote=(\S+)/m.exec(out) || [])[1] || '', prUrl: pr[2] || (/^READY url=(\S+)/m.exec(out) || [])[1] || '', draft: draft ? draft[1] === 'true' : undefined, hookBlocked: push[2] === '1', ready: /^READY /m.test(out), lockBusy: /^LOCK busy/m.test(out), lockMissing: /^LOCK missing/m.test(out), unknown: /^UNKNOWN /m.test(out), failedStep, detail: out.slice(-300) }
 }
-// the ship script of a landing, pointed at a sandbox
-export async function getScripts(X, c1, extra = {}) {
+// the ship script of a landing, pointed at a sandbox. `inline: true`: the scripts as the fallback writes
+// them (the first ship found the lock's file missing, and every lock script after it carries the lock
+// inline); `inline: false`: through the file whatever GRIMOIRE_TEST_SHIP_LOCK says; unset: as it says
+export async function getScripts(X, c1, extra = {}, { inline } = {}) {
   const got = {}
-  await run('(capture scripts)', [T('PROJ-1')], by({ 'impl:PROJ-1': impl(c1.slice(0, 7)), 'ship:api#1': (p) => { got.land = p; return { pushed: false, failedStep: 'push' } }, 'gate:api': (p) => { got.gate = p; return { status: 'DONE', summary: 'g', prUrl: PR_URL } }, 'seal:api': (p) => { got.seal = p; return { sealed: true } } }), { args: { ...QUIET, repos: realRepo(X.W), builtinEnvChecks: false, ...extra } })
+  const land = (p) => { got.land = p; return { pushed: false, failedStep: 'push' } }
+  await run('(capture scripts)', [T('PROJ-1')], by({ 'impl:PROJ-1': impl(c1.slice(0, 7)), 'ship:api#1': inline === true ? { pushed: false, lockMissing: true } : land, 'ship:api#1.inline': land, 'gate:api': (p) => { got.gate = p; return { status: 'DONE', summary: 'g', prUrl: PR_URL } }, 'seal:api': (p) => { got.seal = p; return { sealed: true } } }), { args: { ...QUIET, repos: realRepo(X.W), builtinEnvChecks: false, ...(inline === true ? { scriptsDir: join(X.T0, 'no-scripts') } : inline === false ? { scriptsDir: SCRIPTS } : {}), ...extra } })
   return got
 }

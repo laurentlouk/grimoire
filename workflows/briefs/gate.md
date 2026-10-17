@@ -32,9 +32,13 @@ command, and the stamp file it writes.
    never `--no-verify`): when the header gives the push as a script, run that script verbatim in
    one Bash call — it keeps the lock yours while a long pre-push hook runs — and read its
    `PUSH exit=<code>` line (0: pushed; a `LOCK kept` line before it: the lock was taken over
-   meanwhile, leave it). With incremental delivery the loop already pushed each landed head as
-   tasks landed, so this push adds only what the terminal sweep committed; otherwise nothing
-   earlier pushed it (lanes and integrations are local, and implementers never push).
+   meanwhile, leave it). Each of these lock scripts sources the engine's `ship-lock.sh` once its
+   cksum checks out: one that prints `LOCK missing` (the file is missing or altered) did nothing.
+   Push nothing, never write or fix that file, and return BLOCKED with `failedStep: lock` at
+   once; the loop sends the gate again with the lock written out. With incremental delivery the
+   loop already pushed each landed head as tasks landed, so this push adds only what the
+   terminal sweep committed; otherwise nothing earlier pushed it (lanes and integrations are
+   local, and implementers never push).
 4. The repo's ONE PR for the run branch:
    - **If a draft PR is open for the branch** (the loop opened it as tasks landed; the header
      names it), bring its title and body up to the rules below (`gh pr edit <url> --title …

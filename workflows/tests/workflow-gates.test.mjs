@@ -51,6 +51,7 @@
 //  the parse/hydrate stubs; the responder receives every OTHER dispatch's label
 //  and returns whatever that agent should have returned.
 import { readFileSync, existsSync } from 'node:fs'
+import { lockArgs, lockShim } from './support/script-harness.mjs'
 
 const DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -112,7 +113,7 @@ const indexOf = (tasks) => ({
 
 async function run(scenario, tasks, responder, { src = body, execute = true, indexExtra = {}, extraArgs = {} } = {}) {
   const calls = []
-  const agent = async (prompt, opts = {}) => {
+  const agent = lockShim(async (prompt, opts = {}) => {
     const label = opts.label || '?'
     calls.push({ label, prompt, opts })
     // The two parse phases are answered from the scenario's task list; everything
@@ -120,12 +121,12 @@ async function run(scenario, tasks, responder, { src = body, execute = true, ind
     if (label === 'parse-index') return { ...indexOf(tasks), ...indexExtra }
     if (label.startsWith('hydrate:')) return { tasks: tasks.filter((t) => prompt.includes(`- ${t.id} `)) }
     return responder(label, prompt, opts, calls)
-  }
+  })
   const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
   const pipeline = async () => { throw new Error('pipeline not used') }
   const fn = new AsyncFunction('agent', 'parallel', 'pipeline', 'log', 'phase', 'args', 'budget', 'workflow', src)
   const logs = []
-  const result = await fn(agent, parallel, pipeline, (m) => logs.push(m), () => {}, { ...INPUTS, execute, ...extraArgs },
+  const result = await fn(agent, parallel, pipeline, (m) => logs.push(m), () => {}, { ...INPUTS, execute, ...lockArgs, ...extraArgs },
     { total: null, spent: () => 0, remaining: () => Infinity }, async () => {})
   console.log(`\n── ${scenario}`)
   return { result, calls, logs }
