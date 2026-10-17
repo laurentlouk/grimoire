@@ -27,7 +27,8 @@ command, and the stamp file it writes.
    that started late must not push to the branch or rewrite the PR while you do. `LOCK busy` →
    run it again, up to five times in all; still busy → return BLOCKED with `failedStep: push`.
    Release it with the header's command once step 4 is done, or the moment you stop, pass or
-   fail. Then push the run branch exactly as the header gives it (fast-forward; never `--force`,
+   fail; it removes the lock only while it is still yours (`LOCK kept`: another holder has it,
+   leave it). Then push the run branch exactly as the header gives it (fast-forward; never `--force`,
    never `--no-verify`): when the header gives the push as a script, run that script verbatim in
    one Bash call — it keeps the lock yours while a long pre-push hook runs — and read its
    `PUSH exit=<code>` line (0: pushed). With incremental delivery the loop already pushed each landed head as

@@ -597,7 +597,11 @@ worktree and one PR. So:
   age every 60 s while the push runs (`GRIMOIRE_GATE_LOCK_BEAT` overrides that) and stops with
   it, so a pre-push hook longer than 20 minutes no longer loses the lock to a ship; a push the
   Bash tool kills leaves the lock to age out. The gate releases it when the PR is done, pass or
-  fail;
+  fail. Its take and its release are different shells, so the engine gives each gate dispatch a
+  holder id, written where a ship writes its pid; the release removes the lock only while the
+  owner line still names that id as `gate`, else prints `LOCK kept` and leaves it (a gate whose
+  take came back `LOCK busy` once removed the live ship's lock on its way out). A ship or the
+  seal likewise removes the lock only while it still names its own pid;
 - the script stops itself by 540 s (`GRIMOIRE_SHIP_DEADLINE` overrides that), inside the ship's
   hard limit and the Bash tool's 600-s maximum, and the push by 480 s; each network call runs in
   its own process group, killed whole at its limit, so a hung pre-push hook dies with its push.

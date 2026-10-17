@@ -1246,7 +1246,7 @@ function gatePrompt(task, gate, hits, landedHere = [], ship = {}) {
   \`\`\`bash
 ${ship.lock.take.split('\n').map((l) => `  ${l}`).join('\n')}
   \`\`\`
-  \`LOCK ok\` → go on. \`LOCK busy\` → run it again, up to five times in all; still busy → return BLOCKED with failedStep \`push\`, naming the holder it printed. Release it once the PR is done — or the moment you stop, pass or fail: \`${ship.lock.release}\``
+  \`LOCK ok\` → go on. \`LOCK busy\` → run it again, up to five times in all; still busy → return BLOCKED with failedStep \`push\`, naming the holder it printed. Release it once the PR is done — or the moment you stop, pass or fail: \`${ship.lock.release}\` (\`LOCK kept\`: another holder has it now — leave it, never remove it yourself)`
       : ''
   }
 - ${(() => {
@@ -1704,12 +1704,12 @@ const shipLockPath = (repo) => `G=$(git -C "$P" rev-parse --git-common-dir 2>/de
 const SHIP_LOCK_FN = `lkold() { [ -n "$(find "$1" -prune ! -newer "$2" 2>/dev/null)" ]; } # <dir> <stamp>: the dir has not changed since the stamp was made
 lknap() { if [ "$1" -lt 10 ] && sleep "0.$1" 2>/dev/null; then _i=$((_i + $1)); else sleep 1; _i=$((_i + 10)); fi; } # <tenths of a second>, counted for where date +%s does not work
 lkdone() { rm -f "$LKP.$$.l" "$LKP.$$.b"; }
-shiplock() { # <ship|gate>: take the repo's ship lock — one ship, or the gate, moves the run branch and the PR at a time
+shiplock() { # <ship|gate> [holder id, else this shell's pid]: take the repo's ship lock — one ship, or the gate, moves the run branch and the PR at a time
   _t0=$(now); _n=0; _p=; _k=; _a=0; _i=0; _o=; _ob=; _w=1; _y=0
   while :; do
     if [ "$_t0" = 0 ]; then _e=$((_i / 10)); else _e=$(( $(now) - _t0 )); fi # waited: by the clock, or the sleeps where date +%s does not work (the wait had no end there)
     if mkdir "$LKP" 2>/dev/null; then
-      if { echo "$$ $(now) $1" >"$LKP/owner"; } 2>/dev/null; then HELD=1; lkdone; return 0; fi
+      if { echo "\${2:-$$} $(now) $1" >"$LKP/owner"; } 2>/dev/null; then HELD=1; lkdone; return 0; fi
       rmdir "$LKP" 2>/dev/null || rm -rf "$LKP"; lkdone; echo "LOCK error: cannot write $LKP/owner — nothing moves"; return 1
     fi
     if [ ! -d "$LKP" ]; then # gone again: released this instant (tried again at once), or it cannot be made
@@ -1750,7 +1750,8 @@ shiplock() { # <ship|gate>: take the repo's ship lock — one ship, or the gate,
     if [ "$_x" = 1 ]; then lknap "$_w"; _w=$((_w * 2)); [ "$_w" -le 10 ] || _w=10; else lknap 10; fi # a takeover under way: 0.1 s, doubling up to 1 s
   done
 }
-shipunlock() { lkdone; _p=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null; [ "$HELD" = 1 ] && [ "$_p" = "$$" ] && rm -rf "$LKP"; HELD=0; }`
+shipunlock() { lkdone; _p=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null # removed only while the owner line still names this shell: a lock taken over meanwhile is the new holder's
+  if [ "$HELD" = 1 ]; then if [ "$_p" = "$$" ]; then rm -rf "$LKP"; elif [ -d "$LKP" ]; then echo "LOCK kept: held by \${_k:-?} \${_p:-?} now, not this script — left alone"; fi; fi; HELD=0; }`
 // now · cdir · `to` (a group kill, each step capped by what is left of the deadline DL from T0)
 const SHIP_HELPERS = `now() { _n=$(date +%s 2>/dev/null); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac; echo "$_n"; }
 cdir() { if command -v builtin >/dev/null 2>&1; then builtin cd "$1"; else cd "$1"; fi; }
@@ -1888,11 +1889,16 @@ ${L.join('\n')}
 // the lock's age is renewed (only while the gate still holds it), so a pre-push hook that runs longer than
 // GATE_LOCK_STALE_SEC no longer loses the lock to a ship. The heartbeat stops with that shell: a push the
 // Bash tool kills leaves the lock to age out as before.
-function gateLockScripts(repo) {
+// Its take and its release run in different shells, so no pid names the gate: `id` (one per gate
+// dispatch, made by the engine) goes where a ship writes its pid, and the release removes the lock only
+// while the owner line still reads `<id> <epoch> gate`. Otherwise it says LOCK kept and leaves it: a gate
+// whose take came back LOCK busy still releases "the moment it stops", and used to remove the live
+// ship's lock it had been waiting for.
+function gateLockScripts(repo, id) {
   const P = `P=${shq(repoPath(repo))}`
   return {
-    take: ['set -u', `LW=\${GRIMOIRE_SHIP_LOCK_WAIT:-${GATE_LOCK_WAIT_SEC}}; case "$LW" in ''|*[!0-9]*) LW=${GATE_LOCK_WAIT_SEC} ;; esac; GS=1`, SHIP_HELPERS.split('\n')[0], SHIP_LOCK_FN, P, shipLockPath(repo), 'if shiplock gate; then echo "LOCK ok $LKP"; else echo "LOCK busy"; fi'].join('\n'),
-    release: `${P}; ${shipLockPath(repo)}; rm -rf "$LKP"; echo "LOCK released"`,
+    take: ['set -u', `LW=\${GRIMOIRE_SHIP_LOCK_WAIT:-${GATE_LOCK_WAIT_SEC}}; case "$LW" in ''|*[!0-9]*) LW=${GATE_LOCK_WAIT_SEC} ;; esac; GS=1`, SHIP_HELPERS.split('\n')[0], SHIP_LOCK_FN, P, shipLockPath(repo), `if shiplock gate ${id}; then echo "LOCK ok $LKP"; else echo "LOCK busy"; fi`].join('\n'),
+    release: `${P}; ${shipLockPath(repo)}; _p=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null; if [ "$_p $_k" = "${id} gate" ] || [ ! -d "$LKP" ]; then rm -rf "$LKP"; echo "LOCK released"; else echo "LOCK kept: held by \${_k:-?} \${_p:-?}, not this gate — left alone"; fi`,
     push: (cmd) =>
       [
         `${P}; ${shipLockPath(repo)}; M=$$; BEAT=\${GRIMOIRE_GATE_LOCK_BEAT:-${GATE_LOCK_BEAT_SEC}}; case "$BEAT" in ''|*[!0-9]*|0) BEAT=${GATE_LOCK_BEAT_SEC} ;; esac`,
@@ -5589,7 +5595,7 @@ async function terminalSlot(repo) {
   const ship = shipState[repo]
   if (ship) await ship.chain
   const marker = stateMarker(repo, ++shipGen)
-  const gate = await agentT(gatePrompt(pseudo, gateCfg, hits, landedHere, { draftPrUrl: ship && ship.prUrl && ship.draft !== false ? ship.prUrl : '', readyPrUrl: ship && ship.prUrl && ship.draft === false ? ship.prUrl : '', marker, lock: gateLockScripts(repo) }), {
+  const gate = await agentT(gatePrompt(pseudo, gateCfg, hits, landedHere, { draftPrUrl: ship && ship.prUrl && ship.draft !== false ? ship.prUrl : '', readyPrUrl: ship && ship.prUrl && ship.draft === false ? ship.prUrl : '', marker, lock: gateLockScripts(repo, `g${fnv1a(`${journal.session}:${repo}:${shipGen}`)}`) }), {
     label: `gate:${repo}`,
     phase: 'Implement',
     model: 'sonnet', // run one command, push, write the PR body: no design judgement left to buy with opus
