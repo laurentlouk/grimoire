@@ -29,9 +29,12 @@
 //
 //  Same stubbed runtime as the other loop tests (agent / parallel / log / phase / args / budget). The
 //  generated scripts are RUN — under bash, zsh and dash — against temp dirs, temp git repositories and
-//  a fake `gh` that applies its --jq program with the real jq.
+//  a fake `gh` that applies its --jq program with the real jq. H-2 runs beside H-3 … H-9: its 260-task
+//  reconcile is ~1,500 git calls (~20 s on macOS), while the lock trials and the hung fetch mostly
+//  wait. Every guard's lines still print in file order.
 import { readFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, existsSync, symlinkSync, readdirSync } from 'node:fs'
 import { spawnSync, spawn } from 'node:child_process'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import net from 'node:net'
@@ -42,9 +45,12 @@ const body = readFileSync(`${DIR}/orchestrate-loop.js`, 'utf8').replace(/^export
 const { cksum, b64, parseStateMarker } = new Function(`${body.slice(body.indexOf('const B64_CHARS'), body.indexOf('// A heredoc that lands as a decoded file'))}\nreturn { cksum, b64, parseStateMarker }`)()
 
 let PASS = 0, FAIL = 0
-const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
+// a guard's lines (and those of each run inside `together`) are held, and printed in order when it ends
+const HELD = new AsyncLocalStorage()
+const say = (line) => { const held = HELD.getStore(); if (held) held.push(line); else console.log(line) }
+const ok = (c, m) => { if (c) { PASS++; say(`   ✓ ${m}`) } else { FAIL++; say(`   ✗ FAIL: ${m}`) } }
 const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.stringify(a) === JSON.stringify(b) ? '' : ` (got ${JSON.stringify(a)})`}`)
-const section = (t) => console.log(`\n── ${t}`)
+const section = (t) => say(`\n── ${t}`)
 const unb64 = (s) => Buffer.from(String(s).replace(/\s+/g, ''), 'base64').toString('utf8')
 const heredocs = (prompt) => [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/g)].map((m) => m[1])
 const bashOf = (p) => (/```bash\n([\s\S]*?)\n```/.exec(p) || [])[1] || ''
@@ -55,8 +61,24 @@ const TMP = mkdtempSync(join(tmpdir(), 'grimoire-hardening-'))
 let tmpN = 0
 const fresh = (tag = 'd') => { const d = join(TMP, `${tag}-${++tmpN}`); mkdirSync(d, { recursive: true }); return d }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-// one case's exception is its failure; the cases after it still run
-const guard = async (name, fn) => { try { await fn() } catch (e) { FAIL++; console.log(`   ✗ FAIL: ${name} threw — ${e && e.message}`) } }
+// one case's exception is its failure; the cases after it still run. A guard resolves when its case
+// ends; its lines print once every guard before it has printed (`printed`), so one not waited for
+// (H-2) runs beside the next ones and still prints in its place.
+let printed = Promise.resolve()
+const guard = (name, fn) => {
+  const held = []
+  const done = HELD.run(held, async () => { try { await fn() } catch (e) { FAIL++; say(`   ✗ FAIL: ${name} threw — ${e && e.message}`) } })
+  printed = printed.then(() => done).then(() => { for (const l of held) console.log(l) })
+  return done
+}
+// fn(x) for every x at once; the lines each one prints come out in the order of xs
+const together = async (xs, fn) => {
+  const held = xs.map(() => [])
+  const runs = await Promise.allSettled(xs.map((x, i) => HELD.run(held[i], () => fn(x))))
+  for (const lines of held) for (const l of lines) say(l)
+  const failed = runs.find((r) => r.status === 'rejected')
+  if (failed) throw failed.reason
+}
 
 const REPOS = [{ name: 'api', path: 'repositories/api', agent: 'backend-engineer', tags: ['backend'], gate: null }]
 const INPUTS = { specPath: 'docs/specs/x.md', planPath: 'docs/plans/x.md', project: 'PROJ-700', repos: REPOS }
@@ -123,7 +145,14 @@ async function reconcileScript(repos, landedTasks, extra = {}) {
   const { prompt } = await run('', [T('PROJ-1')], happy, { args: { ...QUIET, repos, resumeState: { version: 2, attempt: 1, lastSeq: 1, landedTasks }, ...extra }, index: { inputProblems: ['stop after the index'] }, quiet: true })
   return (/## Also RECONCILE[\s\S]*?```bash\n([\s\S]*?)\n```/.exec(prompt('parse-index')) || [])[1] || ''
 }
-const execRc = (shell, script, extra = {}, cwd = TMP) => spawnSync(shell, ['-c', script], { cwd, encoding: 'utf8', env: { ...env, PATH: `${BIN}:${process.env.PATH}`, GH_FAKE_JSON: '[]', ...extra }, timeout: 120000 }).stdout || ''
+// its stdout; asynchronous, so a guard waiting on one leaves the event loop to the guards beside it
+const execRc = (shell, script, extra = {}, cwd = TMP) => new Promise((res) => {
+  const c = spawn(shell, ['-c', script], { cwd, stdio: ['ignore', 'pipe', 'ignore'], env: { ...env, PATH: `${BIN}:${process.env.PATH}`, GH_FAKE_JSON: '[]', ...extra } })
+  let out = ''
+  const limit = setTimeout(() => c.kill('SIGTERM'), 120000)
+  c.stdout.setEncoding('utf8').on('data', (d) => (out += d))
+  c.on('close', () => { clearTimeout(limit); res(out) })
+})
 const original = ['original-awk', 'nawk', 'bwk-awk'].map((a) => spawnSync('sh', ['-c', `command -v ${a}`], { encoding: 'utf8' }).stdout.trim()).find((p) => p && !/mawk|gawk/.test(spawnSync('sh', ['-c', `readlink -f ${p}`], { encoding: 'utf8' }).stdout)) || null
 const linesOf = (out, kind) => out.split('\n').filter((l) => l.startsWith(`${kind} `))
 const prJson = (bodyText) => JSON.stringify([{ number: 7, url: PR_URL, state: 'OPEN', isDraft: true, isCrossRepository: false, body: bodyText }])
@@ -152,23 +181,24 @@ await guard('H-1', async () => {
   if (HAS_JQ) {
     const script = await reconcileScript(repoAt(WK), [])
     for (const shell of SHELLS) {
-      const out = execRc(shell, script, { GH_FAKE_JSON: prJson(bodyText) })
+      const out = await execRc(shell, script, { GH_FAKE_JSON: prJson(bodyText) })
       const tok = tokenOf(real)
       ok(linesOf(out, 'PR')[0] === `PR repo=api url=${PR_URL} state=OPEN isDraft=true len=${tok.length} sum=${cksum(tok)} marker=${tok}`, `${shell}: the PR line carries the real (last) marker`)
       ok(out.includes(`TASK id=PROJ-3 repo=api sha=${c2} local=yes origin=yes onBranch=yes inBase=no first=${c1} firstOk=yes`) && !out.includes('PROJ-66'), `${shell}: its task is checked; the forged marker's is not`)
     }
-  } else console.log('   (jq not installed — the reconcile half is skipped)')
+  } else say('   (jq not installed — the reconcile half is skipped)')
 })
 
 // ══════════════ H-2 · a marker too long to print, and a bounded reconcile output ══════════════
-await guard('H-2', async () => {
+// not waited for here: it runs beside H-3 … H-9, and is waited for (and printed in its place) before H-10
+guard('H-2', async () => {
   section('H-2a · a marker over 8000 characters prints as `marker=toolong len=N` and lists no task; the engine ignores it')
   const huge = stateOf({ landedTasks: Array.from({ length: 400 }, (_, k) => [`PROJ-${k + 1}`, c2, c1]) })
   const tok = tokenOf(huge)
   if (HAS_JQ) {
     const script = await reconcileScript(repoAt(WK), [])
     for (const shell of SHELLS) {
-      const out = execRc(shell, script, { GH_FAKE_JSON: prJson(`x\n<!-- grimoire:state v1 ${tok} -->\n`) })
+      const out = await execRc(shell, script, { GH_FAKE_JSON: prJson(`x\n<!-- grimoire:state v1 ${tok} -->\n`) })
       ok(linesOf(out, 'PR')[0] === `PR repo=api url=${PR_URL} state=OPEN isDraft=true len=${tok.length} sum=0 marker=toolong` && linesOf(out, 'TASK').length === 0 && out.length < 2000, `${shell}: one short PR line (${out.length} characters of output for a ${tok.length}-character marker), no TASK line`)
     }
   }
@@ -189,7 +219,7 @@ await guard('H-2', async () => {
   const count = { api: 250, web: 5, ios: 5 }
   const known = names.flatMap((name) => Array.from({ length: count[name] }, (_, k) => ({ ...CK(`${name.toUpperCase()}-${k + 1}`, c2, { firstSha: c1 }), repo: name, runBranch: RUN_BRANCH })))
   const script = await reconcileScript(repos, known)
-  const out = execRc('bash', script, { GH_FAKE_JSON: prJson('a PR without a marker') })
+  const out = await execRc('bash', script, { GH_FAKE_JSON: prJson('a PR without a marker') })
   ok(out.length <= 28000, `the whole output is ${out.length} characters (budget 28,000; 260 TASK lines would take ~27,000 plus the rest)`)
   const shown = {}
   for (const name of names) {
@@ -203,7 +233,7 @@ await guard('H-2', async () => {
   ok(new RegExp(`^WARN repo=api: ${250 - shown.api} landed task\\(s\\) not checked: the reconcile output budget is spent`, 'm').test(out) && !/^WARN repo=(web|ios):/m.test(out), `api: a WARN line counts the ${250 - shown.api} left unchecked; none for web or ios`)
   ok(linesOf(out, 'TASK').filter((l) => l.includes(' repo=api ')).every((l, k) => l.startsWith(`TASK id=API-${250 - k} `)), 'api: its newest tasks first')
   if (original) {
-    const oa = execRc('bash', script.replace('| awk -v B=', `| ${original} -v B=`), { GH_FAKE_JSON: prJson('a PR without a marker') })
+    const oa = await execRc('bash', script.replace('| awk -v B=', `| ${original} -v B=`), { GH_FAKE_JSON: prJson('a PR without a marker') })
     eq(oa, out, `the allotment reads the same under ${original} (the one-true-awk macOS ships)`)
   }
 
@@ -213,7 +243,7 @@ await guard('H-2', async () => {
     const marker = tokenOf(stateOf({ landedTasks: [['PROJ-1', c1], ['PROJ-2', c2, c1.slice(0, 12)], ['PROJ-3', c2]] }))
     const script2 = await reconcileScript(repoAt(WK), [CK('PROJ-1', c1), CK('PROJ-2', c2, { firstSha: c1 })])
     for (const shell of SHELLS) {
-      const o = execRc(shell, script2, { GH_FAKE_JSON: prJson(`x\n<!-- grimoire:state v1 ${marker} -->\n`) })
+      const o = await execRc(shell, script2, { GH_FAKE_JSON: prJson(`x\n<!-- grimoire:state v1 ${marker} -->\n`) })
       const ids = linesOf(o, 'TASK').map((l) => /^TASK id=(\S+)/.exec(l)[1])
       eq(ids, ['PROJ-2', 'PROJ-1', 'PROJ-3'], `${shell}: one line each — the checkpoint's (newest first), then the marker's own PROJ-3`)
       ok(linesOf(o, 'TASK')[1] === `TASK id=PROJ-1 repo=api sha=${c1.slice(0, 12)} local=yes origin=yes onBranch=yes inBase=no first=none firstOk=none`, `${shell}: a first commit that is the head is dropped (first=none)`)
@@ -347,13 +377,16 @@ await guard('H-6', async () => {
     const trials = waiters === 2 ? 8 : 4
     section(`H-6a · a lock left by a dead writer, ${waiters} waiters at once (a slow rm), ${trials} trials: never two inside`)
     let overlaps = 0, litter = 0
-    for (let i = 0; i < trials; i++) {
+    // the trials run side by side, each on its own dead lock in its own directory: a trial of 8 takes
+    // ~15 s either way (its waiters queue on the mutex), and the pre-mutex lock still overlaps as often
+    // (in 24 trials of 2 and 12 of 8: 16 and 12 one trial at a time, 21 and 12 side by side)
+    await Promise.all(Array.from({ length: trials }, async (_, i) => {
       const D = fresh('lk'), LOG = join(D, 'cs.log')
       mkdirSync(join(D, '.lock')); writeFileSync(join(D, '.lock', 'pid'), '99999\n')
       await Promise.all(Array.from({ length: waiters }, (_, k) => runAsync(which(SHELLS[(i + k) % SHELLS.length]), instr(D, LOG), { PATH: `${SLOW}:${process.env.PATH}` })))
       if (depth(LOG) > 1) overlaps++
       if (existsSync(join(D, '.lock')) || existsSync(join(D, '.lock.brk'))) litter++
-    }
+    }))
     eq({ overlaps, litter }, { overlaps: 0, litter: 0 }, `${trials} trials × ${waiters} writers (${SHELLS.join('/')}): no overlap, no lock or mutex left`)
   }
   section('H-6b · a lock held by a live pid, or by none, is broken at GRIMOIRE_LOCK_STALE (2 s here), timed by the clock — also where sleep takes whole seconds')
@@ -406,13 +439,13 @@ await guard('H-7', async () => {
   section('H-7c · a resent landed delta (its receipt was lost) appends nothing twice — the script, run twice per shell')
   const { prompts, dir } = await journalPrompts(3)
   const withLanded = prompts.filter((p) => heredocs(p).length > 2)
-  for (const shell of SHELLS) {
+  await together(SHELLS, async (shell) => { // the shells side by side, each one's runs in order
     const D = fresh('ld')
-    for (const p of [...withLanded, ...withLanded]) spawnSync(which(shell), ['-c', retarget(p, dir, D)], { encoding: 'utf8' })
+    for (const p of [...withLanded, ...withLanded]) await runAsync(which(shell), retarget(p, dir, D))
     const lines = readFileSync(join(D, 'landed.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
     const ids = lines.map((l) => l.id)
     ok(ids.length === new Set(ids).size && ids.length === 3 && lines.every((l) => /^[0-9a-f]{16}$/.test(l.k) && Number.isInteger(l.attempt)), `${shell}: ${ids.length} lines for 3 tasks, each once, keyed`)
-  }
+  })
 })
 
 // ══════════════ H-8 · no perl, no timeout: a hung fetch is killed, not orphaned ══════════════
@@ -437,7 +470,9 @@ await guard('H-8', async () => {
     const script = await reconcileScript(repoAt(HD), [])
     const t0 = Date.now()
     return new Promise((res) => {
-      const c = spawn(join(LIM, shell), ['-c', script], { cwd: TMP, env: { ...env, PATH: LIM, GH_FAKE_JSON: '[]', GRIMOIRE_RECONCILE_DEADLINE: '3' } })
+      // a 2-s deadline: the fetch gets 1–2 s before it is killed (it hangs within ms), and one tick of
+      // `date +%s` can never make the deadline pass before it starts (with 1 it could: no fetch at all)
+      const c = spawn(join(LIM, shell), ['-c', script], { cwd: TMP, env: { ...env, PATH: LIM, GH_FAKE_JSON: '[]', GRIMOIRE_RECONCILE_DEADLINE: '2' } })
       let out = ''
       const kill = setTimeout(() => c.kill('SIGKILL'), 60000)
       c.stdout.on('data', (d) => (out += d))
@@ -468,6 +503,7 @@ await guard('H-9', async () => {
   await run('', [T('PROJ-1')], (label, p) => { if (label.startsWith('journal#')) { prompts.push(p); return null } return happy(label) }, { args: { ...QUIET, runId: 'run.2026-10-04_a', telemetry: { dir: '/tmp/t', flushEvery: 1000 } }, quiet: true })
   ok(/^DIR='\/tmp\/t\/run\.2026-10-04_a'$/m.test(bashOf(prompts[0] || '')), 'a runId with dots inside is still accepted')
 })
+await printed // H-2 included: every guard has ended and printed
 
 // ══════════════ H-10 · the ship script's PR view reads the LAST marker, like the reconcile ══════════════
 if (spawnSync('jq', ['--version']).status === 0) {
