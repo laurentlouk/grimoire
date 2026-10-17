@@ -313,6 +313,21 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   left out) to the front matter, and `headline` appends `· 2 runs need you · 1 PR failing CI` after
   the ready-for-AI part when either is above 0. An older `latest.md` without the keys gives the
   same line as before.
+- **A shared briefing post, opt-in, replaced on every run.** `manager.share` (`null` by default,
+  chosen at setup: a Linear document, a GitHub issue labelled `grimoire-briefing`, or a Slack
+  canvas when the session has the Slack connector, replaced in place with no channel message)
+  gives the team one view. `brief` now saves its view model as `latest.json`; `manager.mjs
+  share-body` renders the post from it in Markdown: the groups, reasons, next steps, counts, Not
+  checked and "≥ N", without the new and changed badges or a repo's availability (one person's
+  ledger, one machine's checkouts), ending "generated
+  by <git user.name> · at <time> · covering <sources>", with a hidden `<!-- grimoire:manager-briefing
+  v1 -->` marker the skill finds its own post by (a canvas, by its id). Ticket text is escaped as
+  in the briefing, its @mentions broken so the post notifies no one, and the body cut to a GitHub
+  issue's 65,536 characters with "… N more". The skill's Share step finds the post through the
+  vendor's tool, replaces it or creates it, and records the outcome with `share-status`: a failure
+  is a "Share: failed (<reason>)" line in the local briefing, never filed anywhere. It is the
+  manager's only write. `config-merge.mjs` compares `manager.share` whole. Checks:
+  `scripts/manager.test.mjs` (401 in all, with launching), `scripts/config-merge.test.mjs`.
 - **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
   absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
   reported by the skill", and makes the briefing partial; without `--sources`, a configured source
