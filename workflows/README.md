@@ -579,7 +579,13 @@ worktree and one PR. So:
 - every ship script takes a per-repo lock before anything moves: a directory,
   `<git-common-dir>/grimoire-ship-<repo>.lock`, holding `<pid> <epoch> <ship|gate>`. It waits up
   to 150 s for it (`GRIMOIRE_SHIP_LOCK_WAIT` overrides that); a ship holder whose pid is gone, or
-  that is 15 minutes old, is taken over. A lock still busy then pushes nothing and leaves the
+  that is 15 minutes old, is taken over. A takeover happens only under a second `mkdir` mutex,
+  `<lock>.brk`, holding its breaker's pid, with the owner line read again there: two waiters that
+  saw the same dead holder once both removed the lock, the slower one a fresh holder's. The mutex
+  is broken once its pid is gone, or with no pid in it once 5 s old by its own age; a lock with no
+  owner line (its taker killed before writing it) is taken over once 10 s old by its own age (its
+  mtime), never by how long the waiter has waited; a taker that cannot write its owner line
+  removes the lock and fails (`LOCK error`). A lock still busy then pushes nothing and leaves the
   description alone (`LOCK busy`; a halt ship still posts its status comment); it is not a push
   failure, and the next ship retries;
 - the gate takes the same lock before it pushes, 90 s per attempt and up to five attempts; still

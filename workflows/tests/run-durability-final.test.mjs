@@ -10,6 +10,11 @@
 //   F-4  a SIGTERM to the ship script's process group left its push and pre-push hook running,
 //        outside the lock, and the next ship took the lock over beside them
 //   F-5  a halt ship whose lock was busy posted "the push … FAILED" although no push was tried
+//   F-6  the takeover's own mutex was broken while its breaker was still inside (its time stamp
+//        not written yet read as age 0), so two breakers removed the lock and two ships held it; a
+//        lock with no owner line was judged by how long the waiter had waited, not by its own age;
+//        a holder whose owner line was not written held the lock anyway; and five instant tries
+//        at a busy mutex gave up in a tenth of a second
 // The scripts run for real in bash, zsh and dash against a temp git sandbox with a fake gh.
 
 import { run, by, T, impl, BLOCKED, QUIET, envReport, sandbox, getScripts, scriptOf, realRepo, SHELLS, spawn, spawnSync, mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync, join, tick } from './support/script-harness.mjs'
@@ -143,6 +148,67 @@ const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL
   ok(!X.pr.comments().some((c) => /FAILED/.test(c)), 'no "push FAILED" comment is posted')
   ok(X.pr.body() === 'old body\n', 'the description is untouched')
   holder.kill()
+  X.done()
+}
+
+// ══════════════ F-6 · the takeover's mutex, an owner-less lock, a lost owner line ══════════════
+// On a simulated clock: `date +%s` reads it, and `sleep` moves it on at once, then plays the
+// scenario's steps that have come due. Every interleaving is replayed exactly, none left to timing.
+{
+  const X = sandbox()
+  const c1 = X.commit('c1')
+  const land = scriptOf((await getScripts(X, c1)).land)
+  const prefix = land.slice(0, land.indexOf('if shiplock ship; then LK=1'))
+  const LK = join(X.W, '.git', 'grimoire-ship-api.lock'), BRK = `${LK}.brk`
+  const SIM = join(X.T0, 'sim'), CLK = join(SIM, 'clock'), STEPS = join(SIM, 'steps')
+  mkdirSync(SIM)
+  const BASE = Math.floor(Date.now() / 1000)
+  const real = (c) => spawnSync('sh', ['-c', `command -v ${c}`], { encoding: 'utf8' }).stdout.trim()
+  writeFileSync(join(SIM, 'date'), `#!/bin/sh\nif [ "$1" = +%s ]; then echo $((${BASE} + $(cat '${CLK}') / 10)); else exec ${real('date')} "$@"; fi\n`)
+  writeFileSync(join(SIM, 'sleep'), `#!/bin/sh\nc=$(cat '${CLK}'); case "$1" in *.*) i=\${1%%.*}; d=\${1#*.}; d=\${d%"\${d#?}"}; c=$((c + \${i:-0} * 10 + \${d:-0})) ;; *) c=$((c + $1 * 10)) ;; esac; echo "$c" >'${CLK}'\n. '${STEPS}'\nexit 0\n`)
+  chmodSync(join(SIM, 'date'), 0o755); chmodSync(join(SIM, 'sleep'), 0o755)
+  // steps: [[second, shell]], each run once, by the first sleep that reaches its second
+  const sim = (SHELL, wait, steps = [], pre = '') => {
+    writeFileSync(CLK, '0')
+    steps.forEach((_, i) => rmSync(join(SIM, `done${i}`), { force: true }))
+    writeFileSync(STEPS, `${steps.map(([s, cmd], i) => `if [ "$c" -ge ${s * 10} ] && [ ! -e '${SIM}/done${i}' ]; then : >'${SIM}/done${i}'; ${cmd}; fi`).join('\n')}\n`)
+    const r = X.exec(SHELL, `${prefix}\n${pre}if shiplock ship; then echo GOT; shipunlock; fi\n`, { GRIMOIRE_SHIP_LOCK_WAIT: String(wait), PATH: `${SIM}:${X.BIN}:${process.env.PATH}` }, { timeout: 30000, killSignal: 'SIGKILL' })
+    return { ...r, at: Number(readFileSync(CLK, 'utf8')) / 10 }
+  }
+  const owner = () => (existsSync(join(LK, 'owner')) ? readFileSync(join(LK, 'owner'), 'utf8').trim() : '')
+  const reset = () => { try { chmodSync(LK, 0o755) } catch (e) { /* not there */ } rmSync(LK, { recursive: true, force: true }); rmSync(BRK, { recursive: true, force: true }) }
+  const plant = (line) => { reset(); mkdirSync(LK); if (line) writeFileSync(join(LK, 'owner'), `${line}\n`) }
+  const dead = spawnSync('true').pid, live = process.pid
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0
+  const got = (r) => /^GOT$/m.test(r.out)
+  console.log('\n── F-6 · on a simulated clock: the takeover\'s mutex, an owner-less lock, a lost owner line')
+  for (const SHELL of SHELLS) {
+    // a breaker that has made the mutex and not yet written into it: its mutex is not anyone's to break
+    plant(`${dead} ${BASE} ship`); mkdirSync(BRK)
+    let r = sim(SHELL, 3)
+    ok(/^LOCK busy/m.test(r.out) && !got(r) && !/LOCK stale/.test(r.out) && existsSync(BRK) && owner() === `${dead} ${BASE} ship`, `${SHELL}: a takeover mutex just made, no pid in it yet, is left to its breaker (LOCK busy after 3 s, nothing taken over)`)
+    r = sim(SHELL, 20)
+    ok(/^LOCK stale: ship /m.test(r.out) && got(r) && r.at >= 5 && r.at < 8, `${SHELL}: the same mutex, still with no pid (its breaker died), is broken once 5 s old by its own age (at ${r.at} s), then the dead lock`)
+    // a live breaker's mutex is waited for with a backoff, not given up on after 5 instant tries
+    plant(`${dead} ${BASE} ship`); mkdirSync(BRK); writeFileSync(join(BRK, 'pid'), `${live}\n`); writeFileSync(join(BRK, 't'), `${BASE}\n`)
+    rmSync(join(SIM, 'intact'), { force: true })
+    r = sim(SHELL, 10, [[2, `[ "$(cat '${BRK}/pid')" = ${live} ] && : >'${SIM}/intact'; rm -rf '${BRK}'`]])
+    ok(existsSync(join(SIM, 'intact')) && /^LOCK stale: ship /m.test(r.out) && got(r) && !/LOCK error/.test(r.out) && r.at >= 2 && r.at < 4, `${SHELL}: a live breaker's mutex is left alone and waited for (no LOCK error); once it is released, the dead lock is taken over (at ${r.at} s)`)
+    // a waiter that has already waited 12 s meets a lock made a moment ago, its owner line not yet written
+    plant(`${live} ${BASE} ship`)
+    r = sim(SHELL, 30, [[12, `rm -rf '${LK}'; mkdir '${LK}'`], [14, `echo '${live} ${BASE + 14} ship' >'${LK}/owner'`]])
+    ok(/^LOCK busy: held by ship \d+/m.test(r.out) && !got(r) && !/LOCK stale/.test(r.out) && owner() === `${live} ${BASE + 14} ship`, `${SHELL}: an owner-less lock is judged by its own age, not by the 12 s the waiter had waited (LOCK busy, the new holder's lock kept)`)
+    plant('')
+    r = sim(SHELL, 30)
+    ok(/^LOCK stale: no owner /m.test(r.out) && got(r) && r.at >= 10 && r.at < 13, `${SHELL}: a lock its taker never wrote an owner line into is taken over once 10 s old (at ${r.at} s)`)
+    // the owner line cannot be written (umask 777 makes the new lock unwritable): the lock is not held
+    reset()
+    if (!asRoot) {
+      r = sim(SHELL, 3, [], 'umask 777\n')
+      ok(/^LOCK error: /m.test(r.out) && !got(r) && !existsSync(LK), `${SHELL}: a lock whose owner line could not be written is not held (LOCK error, the lock removed)`)
+    }
+    reset()
+  }
   X.done()
 }
 
