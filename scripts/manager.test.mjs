@@ -912,15 +912,16 @@ try {
     const line = body.split('\n').find((l) => l.startsWith('- **S-1**')) ?? ''
     ok(line.includes('[&lt;b&gt;x&lt;/b&gt; \\*y\\* &amp; \\[@\\]team https\\[:\\]//evil.example &lt;https\\[:\\]//evil.example\\|click&gt;](https://linear.app/s/1)') && !/<b>|<https:\/\/evil/.test(body),
       `ticket text is escaped as in the briefing, its @mention broken (${line})`)
-    const mentions = mod.shareBody(mod.view([item('MN-1', { title: 'x-@octocat a.@here b+@channel @a-@b user@host.com' })], {}, null, NOW), { by })
+    const mentions = mod.shareBody(mod.view([item('MN-1', { priority: 2, title: 'x-@octocat a.@here b+@channel @a-@b user@host.com' })], {}, null, NOW), { by })
     ok(mentions.includes('x-\\[@\\]octocat a.\\[@\\]here b+\\[@\\]channel \\[@\\]a-\\[@\\]b user@host.com'),
       `a mention after -, . or + is broken too, and the second of @a-@b; an email is left alone (${mentions.split('\n').find((l) => l.startsWith('- **MN-1**'))})`)
-    // ODY-876's repo check is one machine's checkout state: its reason stays out of the post
+    // ODY-876's repo check is one machine's checkout state: its reason, a Not now reason, stays out
+    // of the post, which lists Not now by key
     const down = { repos: [{ name: 'webapp', available: false, reason: 'not checked out', fix: 'clone it: git clone git@github.com:acme/webapp.git repositories/webapp' }] }
     const R = mod.view([item('R-1', { assignee: null, hasAcceptanceCriteria: true, repo: 'webapp' }), item('R-2', { assignee: 'Cy', hasAcceptanceCriteria: true, repo: 'webapp' })], { repos: [{ name: 'webapp' }] }, null, NOW, undefined, down)
     const rb = mod.shareBody(R, { by })
-    ok(/repositories\/webapp/.test(mod.renderMarkdown(R)) && !/repositories\/webapp|git clone/.test(rb) && /\n {2}- why: not urgent\n/.test(rb) && /\n {2}- why: not urgent; not ready for AI: assigned to Cy\n/.test(rb),
-      'a repo\'s availability reason (path, fix) is left out of the post, the other reasons kept')
+    ok(/repositories\/webapp/.test(mod.renderMarkdown(R)) && !/repositories\/webapp|git clone|not checked out/.test(rb) && rb.includes('\n## Not now (2)\n\nR-1 · R-2\n'),
+      'a repo\'s availability reason (path, fix) is left out of the post: its items are listed in Not now by key')
     ok(mod.shareBody(V, { by }) === body, 'the same view and user: byte-identical')
     ok(mod.shareBody(V, { by, at: '2026-10-17T08:30:00Z' }).includes(' · at 2026-10-17T08:30:00.000Z · '), 'at (--now) replaces the time the footer names')
 
@@ -937,17 +938,43 @@ try {
 
     const gh = mod.shareConfig({ manager: { share: { kind: 'github-issue', target: 'acme/api' } } })
     const canvas = mod.shareConfig({ manager: { share: { kind: 'slack-canvas', target: 'F0123ABC' } } })
-    ok(mod.shareMax(gh.share) === 65536 && mod.shareMax(canvas.share) === Infinity && mod.shareMax(null) === Infinity && !gh.warnings.length && !canvas.warnings.length,
-      'the default limit: GitHub\'s 65,536 for a github-issue, none for a Linear document or a Slack canvas')
+    const doc = mod.shareConfig({ manager: { share: { kind: 'linear-document', target: 'ENG' } } })
+    ok(mod.shareMax(gh.share) === 65536 && mod.shareMax(canvas.share) === 20000 && mod.shareMax(doc.share) === 20000 && mod.shareMax(null) === Infinity && !gh.warnings.length && !canvas.warnings.length,
+      'the default limit: GitHub\'s 65,536 for a github-issue (its body goes through a file), 20,000 for a Linear document or a Slack canvas (retyped into one connector call), none without a share')
     ok(mod.shareConfig({ manager: { share: null } }).share === null && mod.shareConfig({ manager: { share: { kind: 'slack', target: '#team' } } }).warnings.length === 1,
       'manager.share null shares nothing; an unknown kind (a Slack message) is warned about and shares nothing')
-    const many = Array.from({ length: 300 }, (_, i) => item(`M-${i}`, { title: `a long title number ${i} `.repeat(6), nextStep: 'read the ticket and decide '.repeat(6) }))
+    // urgent and assigned: all 300 in Do, each listed in full
+    const many = Array.from({ length: 300 }, (_, i) => item(`M-${i}`, { priority: 2, title: `a long title number ${i} `.repeat(6), nextStep: 'read the ticket and decide '.repeat(6) }))
     const cut = mod.shareBody(mod.view(many, {}, null, NOW), { by, max: mod.shareMax(gh.share) })
     const kept = cut.split('\n').filter((l) => l.startsWith('- **M-')).length
     const more = /\n… (\d+) more\n/.exec(cut)
     ok(cut.length <= 65536 && cut.length > 65536 - 1000, `cut to fit a GitHub issue's 65,536 characters (${cut.length})`)
     ok(more && kept > 0 && kept + Number(more[1]) === 300 && cut.endsWith(`covering linear_\n`) && !/… \d+ more/.test(body),
       `with "… N more" counting what was cut (${kept} shown, ${more && more[1]} more), the footer kept; a post under the limit is not cut`)
+    const docCut = mod.shareBody(mod.view(many, {}, null, NOW), { by, max: mod.shareMax(doc.share) })
+    const docMore = /\n… (\d+) more\n/.exec(docCut)
+    const docKept = docCut.split('\n').filter((l) => l.startsWith('- **M-')).length
+    ok(docCut.length <= 20000 && docCut.length > 19000 && docMore && docKept + Number(docMore[1]) === 300,
+      `a Linear document's post is cut to 20,000 characters (${docCut.length}), "… N more" counting the rest (${docKept} shown, ${docMore && docMore[1]} more)`)
+
+    // The post drops what repeats and what nobody acts on: Hand to AI says its one reason once, and
+    // Waiting on others and Not now list their keys, no lines of their own.
+    const team = mod.view([
+      item('A-1', { assignee: null, hasAcceptanceCriteria: true, repo: 'webapp', nextStep: 'build the A-1 screen' }),
+      item('A-2', { assignee: null, hasAcceptanceCriteria: true, repo: 'webapp' }),
+      item('W-1', { bucketHint: 'waiting' }), item('N-2'), item('N-1'),
+    ], { repos: [{ name: 'webapp' }] }, null, NOW)
+    const tb = mod.shareBody(team, { by })
+    const aiPart = tb.split('## Hand to AI (2)\n\n')[1]?.split('\n## ')[0] ?? ''
+    ok(aiPart.startsWith('_Why, for each: ready for AI: acceptance criteria, not started, unassigned or claimed, not blocked, no linked PR, no sub-issues, repo mapped_\n- **A-1** ')
+      && !/ - why: /.test(aiPart) && (aiPart.match(/^- \*\*A-\d\*\* /gm) || []).length === 2 && aiPart.includes('\n  - next: build the A-1 screen\n'),
+      `Hand to AI: its reason once under the heading, no why line per item, each item and its next step kept (${JSON.stringify(aiPart.slice(0, 160))})`)
+    ok(tb.includes('\n## Waiting on others (1)\n\nW-1\n\n## Not now (2)\n\nN-1 · N-2\n\n---\n'),
+      `Waiting on others and Not now: their keys on one line each, in the briefing's order (${JSON.stringify(tb.slice(tb.indexOf('## Waiting')))})`)
+    const keysCut = mod.shareBody(team, { by, max: tb.length - 12 })
+    const keysMore = /\n… (\d+) more\n/.exec(keysCut)
+    ok(keysCut.length <= tb.length - 12 && keysMore && Number(keysMore[1]) === 2 && !keysCut.includes('N-1 · N-2'),
+      `a key line is cut whole, and "… N more" counts each of its keys (${keysMore && keysMore[1]})`)
 
     const status = (args) => cli(['share-status', '--root', r.root, ...args], r.root)
     const failed = status(['--status', 'failed', '--reason', 'gh: <HTTP 403> on https://api.github.com'])

@@ -150,7 +150,7 @@ On a re-run, build `urgent`, `priorityLabels` and `maxItemsPerSource` from the c
 "share": { "kind": "linear-document", "target": "ENG", "hint": "mcp__<server-id>__* (Linear, the claude.ai connector)" }
 ```
 
-The post holds ticket titles, names and links for everyone who can read the target: say so when you ask. It goes through the re-run diff like every key: `manager.share` shows as ADDED when the block lacks it, or CHANGED (from `null`, or from another destination), written only with `--approve 'manager.share'`. On a re-run, propose the current value as it is, `null` included, unless the user asks to change it.
+The post holds ticket titles, names and links for everyone who can read the target: say so when you ask. Say too what it lists: Decide, Do and Hand to AI in full, Waiting on others and Not now by key, cut from the end with "… N more" to 20,000 characters for a Linear document or a Slack canvas (each run retypes it into one connector call) and to 65,536 for a GitHub issue. It goes through the re-run diff like every key: `manager.share` shows as ADDED when the block lacks it, or CHANGED (from `null`, or from another destination), written only with `--approve 'manager.share'`. On a re-run, propose the current value as it is, `null` included, unless the user asks to change it.
 
 **Hub remotes** (`repos[].remote`, optional). In a hub whose repos are nested clones, record each repo's remote, read stripped as step 0 says (`git -C <path> remote get-url origin | sed -E 's#(https?://)[^/@]*@#\1#'`), so a token never enters the context. The fix for a missing clone can then name its URL. The loop ignores the key.
 
