@@ -1246,7 +1246,7 @@ function gatePrompt(task, gate, hits, landedHere = [], ship = {}) {
   \`\`\`bash
 ${ship.lock.take.split('\n').map((l) => `  ${l}`).join('\n')}
   \`\`\`
-  \`LOCK ok\` → go on. \`LOCK busy\` → run it again, up to five times in all; still busy → return BLOCKED with failedStep \`push\`, naming the holder it printed. Release it once the PR is done — or the moment you stop, pass or fail: \`${ship.lock.release}\``
+  \`LOCK ok\` → go on. \`LOCK busy\` → run it again, up to five times in all; still busy → return BLOCKED with failedStep \`push\`, naming the holder it printed. Release it once the PR is done — or the moment you stop, pass or fail: \`${ship.lock.release}\` (\`LOCK kept\`: another holder has it now — leave it, never remove it yourself)`
       : ''
   }
 - ${(() => {
@@ -1689,40 +1689,69 @@ if [ "$CK" = ${crc}/${n} ] || [ "$CK" = -/${n} ]; then OK=1; else OK=0; rm -f "$
 const PR_VIEW_JQ = String.raw`"\(.isDraft) " + ((([(.body // "") | match("<!-- grimoire:state v1 ([A-Za-z0-9+/=]+) -->"; "g") | .captures[0].string] | last) // "") | if . == "" then "-:0" else (try (@base64d | fromjson | "\(.session // "-"):\(.ship // 0)") catch "-:0") end)`
 // The repo's ship lock: its path (in the git dir: never a file the gate would see as uncommitted) and
 // the function that takes it. GS=1: a gate's lock is stale (a halt: no gate runs any more).
+// A takeover happens only under a second `mkdir` mutex, `<lock>.brk`, that holds its breaker's pid,
+// with the owner line read again there and compared whole: two waiters that saw the same dead holder
+// once both removed the lock, the slower one a fresh holder's (8 of 24 trials with `rm` slowed by
+// 0-40 ms), because a waiter broke a mutex whose time stamp was not written yet as 0 s old. The mutex
+// is broken once its pid is gone or, with no pid in it, once 5 s old by its own age. A lock with no
+// owner line is judged by its own age too (its mtime unchanged since a stamp the waiter made beside it
+// 10 s ago, `<lock>.<pid>.l`, removed on return), never by how long the waiter had waited: one that had
+// waited 10 s took over a lock made a moment ago. A taker whose owner line cannot be written removes
+// its lock and fails. After a takeover, `mkdir` is tried again at once, before the wait's budget is
+// checked; a busy mutex is waited for with a backoff (0.1 s doubling to 1 s), and five takeovers that
+// never got the lock fail (a lock that cannot be removed).
 const shipLockPath = (repo) => `G=$(git -C "$P" rev-parse --git-common-dir 2>/dev/null); case "$G" in '') G="$P/.git" ;; /*) ;; *) G="$P/$G" ;; esac; LKP="$G/grimoire-ship-${refToken(repo)}.lock"; HELD=0`
-const SHIP_LOCK_FN = `shiplock() { # <ship|gate>: take the repo's ship lock — one ship, or the gate, moves the run branch and the PR at a time
-  _t0=$(now); _n=0; _p=; _k=; _a=0; _i=0
+const SHIP_LOCK_FN = `lkold() { [ -n "$(find "$1" -prune ! -newer "$2" 2>/dev/null)" ]; } # <dir> <stamp>: the dir has not changed since the stamp was made
+lknap() { if [ "$1" -lt 10 ] && sleep "0.$1" 2>/dev/null; then _i=$((_i + $1)); else sleep 1; _i=$((_i + 10)); fi; } # <tenths of a second>, counted for where date +%s does not work
+lkdone() { rm -f "$LKP.$$.l" "$LKP.$$.b"; }
+shiplock() { # <ship|gate> [holder id, else this shell's pid]: take the repo's ship lock — one ship, or the gate, moves the run branch and the PR at a time
+  _t0=$(now); _n=0; _p=; _k=; _a=0; _i=0; _o=; _ob=; _w=1; _y=0
   while :; do
-    if [ "$_t0" = 0 ]; then _e=$_i; else _e=$(( $(now) - _t0 )); fi # waited: by the clock, or the 1-s sleeps where date +%s does not work (the wait had no end there)
-    if mkdir "$LKP" 2>/dev/null; then echo "$$ $(now) $1" >"$LKP/owner"; HELD=1; return 0; fi
-    [ -d "$LKP" ] || { echo "LOCK error: cannot create $LKP (not writable?) — nothing moves"; return 1; }
-    _p=; _t=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null
+    if [ "$_t0" = 0 ]; then _e=$((_i / 10)); else _e=$(( $(now) - _t0 )); fi # waited: by the clock, or the sleeps where date +%s does not work (the wait had no end there)
+    if mkdir "$LKP" 2>/dev/null; then
+      if { echo "\${2:-$$} $(now) $1" >"$LKP/owner"; } 2>/dev/null; then HELD=1; lkdone; return 0; fi
+      rmdir "$LKP" 2>/dev/null || rm -rf "$LKP"; lkdone; echo "LOCK error: cannot write $LKP/owner — nothing moves"; return 1
+    fi
+    if [ ! -d "$LKP" ]; then # gone again: released this instant (tried again at once), or it cannot be made
+      _y=$((_y + 1)); [ "$_y" -lt 3 ] && continue
+      lkdone; echo "LOCK error: cannot create $LKP (not writable?) — nothing moves"; return 1
+    fi
+    _y=0; _p=; _t=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null
     case "$_t" in ''|*[!0-9]*) _t=0 ;; esac
     _a=$(( $(now) - _t )); _x=0
-    if [ -z "$_p" ]; then [ "$_e" -ge 10 ] && _x=1
-    elif [ "$_k" = gate ]; then { [ "$GS" = 1 ] || [ "$_a" -ge ${GATE_LOCK_STALE_SEC} ]; } && _x=1
-    elif ! kill -0 "$_p" 2>/dev/null || [ "$_a" -ge ${SHIP_LOCK_STALE_SEC} ]; then _x=1
+    if [ -z "$_p" ]; then # no owner line (yet): judged by the lock's own age (unchanged since a stamp made 10 s ago), never by how long this waiter has waited
+      if [ -z "$_o" ] || ! lkold "$LKP" "$LKP.$$.l"; then touch "$LKP.$$.l" 2>/dev/null; _o=$_e; elif [ $((_e - _o)) -ge 10 ]; then _x=1; fi
+      _a=$((_e - _o))
+    else _o=
+      if [ "$_k" = gate ]; then { [ "$GS" = 1 ] || [ "$_a" -ge ${GATE_LOCK_STALE_SEC} ]; } && _x=1
+      elif ! kill -0 "$_p" 2>/dev/null || [ "$_a" -ge ${SHIP_LOCK_STALE_SEC} ]; then _x=1
+      fi
     fi
     if [ "$_x" = 1 ]; then
-      # break a stale lock only under a second mutex, re-reading the owner there: two waiters that
-      # both saw the same dead holder must not each remove the lock the other has just taken
+      if [ "$_n" -ge 5 ]; then lkdone; echo "LOCK error: could not take over $LKP after 5 tries — nothing moves"; return 1; fi
+      # broken only under a second mutex holding its breaker's pid, the owner read again there: two waiters
+      # that both saw the same dead holder must not each remove the lock the other has just taken
       if mkdir "$LKP.brk" 2>/dev/null; then
-        echo "$(now)" >"$LKP.brk/t"
-        _q=; { read -r _q _r _s <"$LKP/owner"; } 2>/dev/null
-        if [ "$_q" = "$_p" ]; then rm -rf "$LKP"; echo "LOCK stale: \${_k:-no owner} \${_p:-?} (\${_a} s) — taken over"; fi
+        { echo $$ >"$LKP.brk/pid"; } 2>/dev/null; _ob=
+        _q=; _r=; _s=; { read -r _q _r _s <"$LKP/owner"; } 2>/dev/null; case "$_r" in ''|*[!0-9]*) _r=0 ;; esac
+        if [ "$_q $_r $_s" = "$_p $_t $_k" ] && { [ -n "$_q" ] || lkold "$LKP" "$LKP.$$.l"; }; then
+          rm -rf "$LKP" "$LKP.brk"; _n=$((_n + 1)); echo "LOCK stale: \${_k:-no owner} \${_p:-?} (\${_a} s) — taken over"; continue # straight back to mkdir, before the wait's budget
+        fi
         rm -rf "$LKP.brk"
-      else
-        _b=; { read -r _b <"$LKP.brk/t"; } 2>/dev/null; case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
-        [ $(( $(now) - _b )) -ge 5 ] && rm -rf "$LKP.brk"
+      else # another breaker's mutex: broken once its pid is gone or, with no pid in it, once 5 s old by its own age
+        _q=; { read -r _q <"$LKP.brk/pid"; } 2>/dev/null
+        if [ -n "$_q" ]; then _ob=; kill -0 "$_q" 2>/dev/null || { _r=; { read -r _r <"$LKP.brk/pid"; } 2>/dev/null; [ "$_r" = "$_q" ] && rm -rf "$LKP.brk" && continue; }
+        elif [ -z "$_ob" ] || ! lkold "$LKP.brk" "$LKP.$$.b"; then touch "$LKP.$$.b" 2>/dev/null; _ob=$_e
+        elif [ $((_e - _ob)) -ge 5 ]; then _ob=; _r=; { read -r _r <"$LKP.brk/pid"; } 2>/dev/null; [ -z "$_r" ] && lkold "$LKP.brk" "$LKP.$$.b" && rm -rf "$LKP.brk" && continue
+        fi
       fi
-      _n=$((_n + 1))
-      if [ "$_n" -ge 5 ]; then echo "LOCK error: could not take over $LKP after 5 tries — nothing moves"; return 1; fi
     fi
-    if [ "$_e" -ge "$LW" ]; then echo "LOCK busy: held by \${_k:-?} \${_p:-?} for \${_a} s"; return 1; fi
-    [ "$_x" = 1 ] || { sleep 1; _i=$((_i + 1)); }
+    if [ "$_e" -ge "$LW" ]; then lkdone; echo "LOCK busy: held by \${_k:-?} \${_p:-?} for \${_a} s"; return 1; fi
+    if [ "$_x" = 1 ]; then lknap "$_w"; _w=$((_w * 2)); [ "$_w" -le 10 ] || _w=10; else lknap 10; fi # a takeover under way: 0.1 s, doubling up to 1 s
   done
 }
-shipunlock() { _p=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null; [ "$HELD" = 1 ] && [ "$_p" = "$$" ] && rm -rf "$LKP"; HELD=0; }`
+shipunlock() { lkdone; _p=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null # removed only while the owner line still names this shell: a lock taken over meanwhile is the new holder's
+  if [ "$HELD" = 1 ]; then if [ "$_p" = "$$" ]; then rm -rf "$LKP"; elif [ -d "$LKP" ]; then echo "LOCK kept: held by \${_k:-?} \${_p:-?} now, not this script — left alone"; fi; fi; HELD=0; }`
 // now · cdir · `to` (a group kill, each step capped by what is left of the deadline DL from T0)
 const SHIP_HELPERS = `now() { _n=$(date +%s 2>/dev/null); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac; echo "$_n"; }
 cdir() { if command -v builtin >/dev/null 2>&1; then builtin cd "$1"; else cd "$1"; fi; }
@@ -1860,11 +1889,16 @@ ${L.join('\n')}
 // the lock's age is renewed (only while the gate still holds it), so a pre-push hook that runs longer than
 // GATE_LOCK_STALE_SEC no longer loses the lock to a ship. The heartbeat stops with that shell: a push the
 // Bash tool kills leaves the lock to age out as before.
-function gateLockScripts(repo) {
+// Its take and its release run in different shells, so no pid names the gate: `id` (one per gate
+// dispatch, made by the engine) goes where a ship writes its pid, and the release removes the lock only
+// while the owner line still reads `<id> <epoch> gate`. Otherwise it says LOCK kept and leaves it: a gate
+// whose take came back LOCK busy still releases "the moment it stops", and used to remove the live
+// ship's lock it had been waiting for.
+function gateLockScripts(repo, id) {
   const P = `P=${shq(repoPath(repo))}`
   return {
-    take: ['set -u', `LW=\${GRIMOIRE_SHIP_LOCK_WAIT:-${GATE_LOCK_WAIT_SEC}}; case "$LW" in ''|*[!0-9]*) LW=${GATE_LOCK_WAIT_SEC} ;; esac; GS=1`, SHIP_HELPERS.split('\n')[0], SHIP_LOCK_FN, P, shipLockPath(repo), 'if shiplock gate; then echo "LOCK ok $LKP"; else echo "LOCK busy"; fi'].join('\n'),
-    release: `${P}; ${shipLockPath(repo)}; rm -rf "$LKP"; echo "LOCK released"`,
+    take: ['set -u', `LW=\${GRIMOIRE_SHIP_LOCK_WAIT:-${GATE_LOCK_WAIT_SEC}}; case "$LW" in ''|*[!0-9]*) LW=${GATE_LOCK_WAIT_SEC} ;; esac; GS=1`, SHIP_HELPERS.split('\n')[0], SHIP_LOCK_FN, P, shipLockPath(repo), `if shiplock gate ${id}; then echo "LOCK ok $LKP"; else echo "LOCK busy"; fi`].join('\n'),
+    release: `${P}; ${shipLockPath(repo)}; _p=; _k=; { read -r _p _t _k <"$LKP/owner"; } 2>/dev/null; if [ "$_p $_k" = "${id} gate" ] || [ ! -d "$LKP" ]; then rm -rf "$LKP"; echo "LOCK released"; else echo "LOCK kept: held by \${_k:-?} \${_p:-?}, not this gate — left alone"; fi`,
     push: (cmd) =>
       [
         `${P}; ${shipLockPath(repo)}; M=$$; BEAT=\${GRIMOIRE_GATE_LOCK_BEAT:-${GATE_LOCK_BEAT_SEC}}; case "$BEAT" in ''|*[!0-9]*|0) BEAT=${GATE_LOCK_BEAT_SEC} ;; esac`,
@@ -5561,7 +5595,7 @@ async function terminalSlot(repo) {
   const ship = shipState[repo]
   if (ship) await ship.chain
   const marker = stateMarker(repo, ++shipGen)
-  const gate = await agentT(gatePrompt(pseudo, gateCfg, hits, landedHere, { draftPrUrl: ship && ship.prUrl && ship.draft !== false ? ship.prUrl : '', readyPrUrl: ship && ship.prUrl && ship.draft === false ? ship.prUrl : '', marker, lock: gateLockScripts(repo) }), {
+  const gate = await agentT(gatePrompt(pseudo, gateCfg, hits, landedHere, { draftPrUrl: ship && ship.prUrl && ship.draft !== false ? ship.prUrl : '', readyPrUrl: ship && ship.prUrl && ship.draft === false ? ship.prUrl : '', marker, lock: gateLockScripts(repo, `g${fnv1a(`${journal.session}:${repo}:${shipGen}`)}`) }), {
     label: `gate:${repo}`,
     phase: 'Implement',
     model: 'sonnet', // run one command, push, write the PR body: no design judgement left to buy with opus

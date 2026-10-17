@@ -128,6 +128,49 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
   - `scriptsDir` overrides where the file is; the default is next to `briefsDir`.
 - Each event is serialized once: the byte count and the chunk share its line.
 
+**Loop (`workflows/orchestrate-loop.js`)**
+
+The ship lock no longer lets two ships in at once. Two waiters on a dead ship's lock could both
+remove it, the slower one after a third waiter had taken it fresh, and two ships then held the lock
+(`workflows/tests/run-durability-final.test.mjs` F-6 replays each case on a simulated clock in bash,
+zsh and dash; F-3 still runs six real waiters). Four bugs, all fixed:
+- **A breaker's mutex could be broken too soon.** A takeover runs under a second `mkdir` mutex,
+  `<lock>.brk`. A waiter read the mutex's time stamp before its breaker had written it, took it
+  for 0 s old (so stale), and removed it while its breaker was still inside. The mutex now holds
+  its breaker's pid, as the journal's lock does: it is broken once that pid is gone, or, with no
+  pid in it, once 5 s old by its own age. The owner line is read again under the mutex and
+  compared whole before the lock is removed.
+- **A lock with no owner line was judged by the waiter's age.** One that had waited 10 s took over
+  a lock made a moment ago, before its taker wrote its owner line. Such a lock is now taken over
+  once 10 s old by its own age (its mtime, against a stamp the waiter makes beside it).
+- **A holder ignored a failed owner write.** It held the lock with no owner line in it, open to
+  takeover. Now it removes the lock and fails with `LOCK error`.
+- **The gate's release removed whatever lock was there.** The gate releases "the moment it stops",
+  so one whose take came back `LOCK busy` removed the live ship's lock it had waited for. Its take
+  and release are different shells, so the engine now gives each gate dispatch a holder id,
+  written where a ship writes its pid. The release removes the lock only while the owner line
+  still names that id as `gate`; otherwise it prints `LOCK kept` and leaves it. A ship or the seal
+  already removed the lock only while it named its own pid, and now says `LOCK kept` too when it
+  was taken over meanwhile.
+
+Three liveness fixes:
+- After a takeover, `mkdir` is tried again at once, before the wait's budget is checked: a waiter
+  used to report `LOCK busy` just after clearing a stale lock.
+- A busy mutex is waited for with a backoff (0.1 s doubling to 1 s). Five instant tries used to
+  give up in about 0.1 s with `LOCK error`.
+- A lock released between a failed `mkdir` and the check that it exists is tried again; it used
+  to read as `cannot create (not writable?)`.
+
+Known follow-ups, not in this change:
+- Take, release and break do not all happen under `.brk`, as they do in the journal's lock. A
+  takeover judged on age (a ship still alive after 15 minutes, or a gate) can still race the
+  holder's own release, in a window of a few system calls.
+- The gate's heartbeat reads the owner line, then rewrites it. A ship that takes the lock over
+  in between can have its owner line overwritten with the gate's.
+- A waiter killed with SIGKILL while it times a lock with no owner line leaves its stamp
+  (`grimoire-ship-<repo>.lock.<pid>.l` or `.b`) in the git dir. The stamp is harmless and git
+  ignores it.
+
 **Setup (`skills/setup`, `scripts/config-merge.mjs`)**
 
 Re-running `/grimoire:setup` on a project already set up was not handled: nothing checked for an

@@ -579,7 +579,13 @@ worktree and one PR. So:
 - every ship script takes a per-repo lock before anything moves: a directory,
   `<git-common-dir>/grimoire-ship-<repo>.lock`, holding `<pid> <epoch> <ship|gate>`. It waits up
   to 150 s for it (`GRIMOIRE_SHIP_LOCK_WAIT` overrides that); a ship holder whose pid is gone, or
-  that is 15 minutes old, is taken over. A lock still busy then pushes nothing and leaves the
+  that is 15 minutes old, is taken over. A takeover happens only under a second `mkdir` mutex,
+  `<lock>.brk`, holding its breaker's pid, with the owner line read again there: two waiters that
+  saw the same dead holder once both removed the lock, the slower one a fresh holder's. The mutex
+  is broken once its pid is gone, or with no pid in it once 5 s old by its own age; a lock with no
+  owner line (its taker killed before writing it) is taken over once 10 s old by its own age (its
+  mtime), never by how long the waiter has waited; a taker that cannot write its owner line
+  removes the lock and fails (`LOCK error`). A lock still busy then pushes nothing and leaves the
   description alone (`LOCK busy`; a halt ship still posts its status comment); it is not a push
   failure, and the next ship retries;
 - the gate takes the same lock before it pushes, 90 s per attempt and up to five attempts; still
@@ -591,7 +597,11 @@ worktree and one PR. So:
   age every 60 s while the push runs (`GRIMOIRE_GATE_LOCK_BEAT` overrides that) and stops with
   it, so a pre-push hook longer than 20 minutes no longer loses the lock to a ship; a push the
   Bash tool kills leaves the lock to age out. The gate releases it when the PR is done, pass or
-  fail;
+  fail. Its take and its release are different shells, so the engine gives each gate dispatch a
+  holder id, written where a ship writes its pid; the release removes the lock only while the
+  owner line still names that id as `gate`, else prints `LOCK kept` and leaves it (a gate whose
+  take came back `LOCK busy` once removed the live ship's lock on its way out). A ship or the
+  seal likewise removes the lock only while it still names its own pid;
 - the script stops itself by 540 s (`GRIMOIRE_SHIP_DEADLINE` overrides that), inside the ship's
   hard limit and the Bash tool's 600-s maximum, and the push by 480 s; each network call runs in
   its own process group, killed whole at its limit, so a hung pre-push hook dies with its push.
