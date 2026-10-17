@@ -15,19 +15,43 @@
 //   U-8  a local checkpoint behind a newer marker kept its counters, with no way to take the marker's
 //   U-9  the final flush carried at most 8 landed details: the rest never reached landed.jsonl
 //   U-10 the ship lock's wait never ended without `date +%s`
-// The scripts run for real in bash, zsh and dash (those installed) against a temp git sandbox with a
-// fake gh. Integrate's re-ask and the dispatches after the run returns are in run-durability-delivery-fix.
+// The scripts run for real in bash, zsh and dash (those installed), side by side, each against a temp git
+// sandbox of its own with a fake gh. Integrate's re-ask and the dispatches after the run returns are in run-durability-delivery-fix.
 
-import { run, by, happy, T, impl, BLOCKED, QUIET, PR_URL, RUN_BRANCH, body, heredocs, unb64, sandbox, getScripts, scriptOf, realRepo, SHELLS, spawn, spawnSync, mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync, join, tick } from './support/script-harness.mjs'
+import { run, by, happy, T, impl, BLOCKED, QUIET, PR_URL, RUN_BRANCH, GITENV, body, heredocs, unb64, sandbox, getScripts, scriptOf, realRepo, SHELLS, spawn, spawnSync, mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync, join, tick } from './support/script-harness.mjs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 let PASS = 0
 let FAIL = 0
-const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
+const checks = (log) => ({
+  ok: (c, m) => { if (c) { PASS++; log(`   ✓ ${m}`) } else { FAIL++; log(`   ✗ FAIL: ${m}`) } },
+  section: (t) => log(`\n── ${t}`),
+})
+const { ok, section } = checks((l) => console.log(l))
 const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.stringify(a) === JSON.stringify(b) ? '' : ` (got ${JSON.stringify(a)})`}`)
-const section = (t) => console.log(`\n── ${t}`)
 const which = (t) => spawnSync('/bin/sh', ['-c', `command -v ${t}`], { encoding: 'utf8' }).stdout.trim()
+const SH = Object.fromEntries(SHELLS.map((s) => [s, which(s)]))
+// A case run in every shell at once: each shell's run has a sandbox of its own (they share nothing), and
+// gets its own ok/section, whose lines are printed in shell order once all have run, so the output reads
+// as it did one shell after another. Most of these cases wait on a deadline or a lock, not on the CPU.
+async function perShell(fn) {
+  const logs = SHELLS.map(() => [])
+  const runs = await Promise.allSettled(SHELLS.map((SHELL, k) => fn(SHELL, checks((l) => logs[k].push(l)), k)))
+  for (const l of logs.flat()) console.log(l)
+  const bad = runs.find((r) => r.status === 'rejected')
+  if (bad) throw bad.reason
+}
+// X.exec without blocking the event loop (the same cwd, env and PATH), so those runs overlap
+const execA = (X, shell, script, env = {}, opts = {}) => new Promise((resolve) => {
+  const t = Date.now()
+  const c = spawn(shell, ['-c', script], { cwd: X.T0, env: { ...GITENV, PATH: `${X.BIN}:${process.env.PATH}`, ...env }, ...opts })
+  let out = '', err = ''
+  c.stdout.setEncoding('utf8'); c.stderr.setEncoding('utf8')
+  c.stdout.on('data', (d) => (out += d))
+  c.stderr.on('data', (d) => (err += d))
+  c.on('close', (status, signal) => resolve({ out, err, ms: Date.now() - t, status, signal }))
+})
 const { cksum, b64 } = new Function(`${body.slice(body.indexOf('const B64_CHARS'), body.indexOf('// A heredoc that lands as a decoded file'))}\nreturn { cksum, b64 }`)()
 const TMP = mkdtempSync(join(tmpdir(), 'grim-fu-'))
 let tmpN = 0
@@ -39,13 +63,13 @@ writeFileSync(join(NODATE, 'date'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = +%s ]
 chmodSync(join(NODATE, 'date'), 0o755)
 
 // ══════════════ U-1 · an unreadable PR is UNKNOWN: nothing pushed, rewritten or claimed ══════════════
-for (const SHELL of SHELLS) {
+await perShell(async (SHELL, { ok, section }) => {
   section(`U-1a · [${SHELL}] gh pr view fails (HTTP 502) on a PR that is in fact ready`)
   const X = sandbox()
   const c1 = X.commit('c1')
   const land = scriptOf((await getScripts(X, c1)).land)
   X.pr.set('url', 'https://github.com/x/y/pull/9'); X.pr.set('draft', 'false'); X.pr.set('body', 'the gate\'s final description\n'); X.pr.set('failview', '1')
-  let out = X.exec(SHELL, land).out
+  let out = (await execA(X, SHELL, land)).out
   ok(/^UNKNOWN url=https:\/\/github\.com\/x\/y\/pull\/9: the PR could not be read/m.test(out) && /^PUSH skipped unknown=1$/m.test(out) && /^PR ok=1 url=\S+ action=unknown$/m.test(out), 'UNKNOWN; PUSH skipped; the PR step does nothing')
   ok(X.origin() === '' && !X.pr.ops().some((o) => o === 'edit' || o === 'create') && X.pr.body() === 'the gate\'s final description\n', 'nothing reached origin; the description is the gate\'s, untouched')
   X.done()
@@ -55,80 +79,83 @@ for (const SHELL of SHELLS) {
   const d1 = Y.commit('c1')
   const land2 = scriptOf((await getScripts(Y, d1)).land)
   Y.pr.set('url', 'https://github.com/x/y/pull/9'); Y.pr.set('draft', 'false'); Y.pr.set('faillist', '1')
-  out = Y.exec(SHELL, land2).out
+  out = (await execA(Y, SHELL, land2)).out
   ok(/^UNKNOWN url=: /m.test(out) && /^PUSH skipped unknown=1$/m.test(out) && Y.origin() === '' && !Y.pr.ops().includes('create'), 'unknown: no push, no `gh pr create` next to a PR that may be ready')
   Y.pr.set('faillist', '')
-  out = Y.exec(SHELL, land2).out
+  out = (await execA(Y, SHELL, land2)).out
   ok(/^READY url=/m.test(out) && !/^UNKNOWN/m.test(out) && Y.origin() === '', 'control: once gh answers, the ready PR is seen as ready (nothing pushed either)')
   rmSync(join(Y.GH, 'draft')); Y.pr.set('draft', 'true')
-  out = Y.exec(SHELL, land2).out
+  out = (await execA(Y, SHELL, land2)).out
   ok(/^PUSH ok=1 remote=/m.test(out) && /action=edited/m.test(out) && Y.origin() === d1, 'control: a readable draft is pushed and described as before')
   Y.done()
-}
+})
 {
   const r = await run('U-1c · the engine: an UNKNOWN receipt is a skip, not a failed push — the next ship retries, nothing is disabled', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })],
     by({ 'impl:PROJ-2': impl('bbbbbbb', 'aaaaaaa'), 'ship:api#1': { pushed: false, unknown: true, prUrl: PR_URL } }), { args: { ...QUIET, builtinEnvChecks: false } })
   ok(r.logs.some((l) => /ship:api#1: api's PR https:\/\/github\.com\/x\/y\/pull\/7 could not be read \(gh failed\) — it may be out of draft, so nothing was pushed or rewritten; the next ship retries/.test(l)), 'logged as unknown')
   ok(r.labels.includes('ship:api#2') && !r.result.shipped.api.disabled && r.result.shipped.api.pushedHead === 'bbbbbbb', 'the next landing ships; incremental delivery stays on')
 }
-for (const SHELL of SHELLS) {
+await perShell(async (SHELL, { ok, section }) => {
   section(`U-1d · [${SHELL}] a halt ship that cannot read its PR posts no status comment (each variant claims something)`)
   const X = sandbox()
   const c1 = X.commit('c1')
   let hp = ''
   await run('', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })], by({ 'impl:PROJ-1': impl(c1.slice(0, 7)), 'impl:PROJ-2': BLOCKED, 'replan#1': { decision: 'HALT', reason: 'stuck', learnings: [] }, 'ship:api#1': { pushed: false, failedStep: 'push' }, 'ship:api#halt': (p) => { hp = p; return { pushed: false } } }), { args: { ...QUIET, repos: realRepo(X.W), builtinEnvChecks: false } })
   X.pr.set('url', 'https://github.com/x/y/pull/9'); X.pr.set('draft', 'true'); X.pr.set('failview', '1')
-  const out = X.exec(SHELL, scriptOf(hp)).out
+  const out = (await execA(X, SHELL, scriptOf(hp))).out
   ok(/^UNKNOWN /m.test(out) && /^PUSH skipped unknown=1$/m.test(out) && !/^COMMENT/m.test(out) && X.pr.comments().length === 0 && X.origin() === '', 'no push, no comment, no COMMENT line (not a failed comment either)')
   X.done()
-}
+})
 
 // ══════════════ U-2 · the lane setup in the ship worktree is bounded ══════════════
 {
-  const X = sandbox()
-  const c1 = X.commit('c1')
-  const land = scriptOf((await getScripts(X, c1, { repos: realRepo(X.W, { laneSetup: 'sleep 3071; touch <lane>/never' }) })).land)
   section('U-2 · a laneSetup that hangs is cut with the rest of the script (to: its own group, never past the deadline)')
-  ok(land.includes(`to 180 sh -c 'sleep 3071; touch ${X.W}/.worktrees/ship-api/never'`), 'the setup runs under `to`, at most 180 s, with <lane> substituted')
-  for (const SHELL of SHELLS) {
-    rmSync(join(X.W, '.worktrees'), { recursive: true, force: true }); X.sh('git worktree prune', X.W)
-    const r = X.exec(SHELL, land, { GRIMOIRE_SHIP_DEADLINE: '2' }, { timeout: 30000, killSignal: 'SIGKILL' })
-    const left = spawnSync('sh', ['-c', 'pgrep -f "sleep 307[1]" || true'], { encoding: 'utf8' }).stdout.trim() // [1]: never this shell's own command line
+  // the shells at once, each in a sandbox of its own whose setup sleeps a number of its own (3071, 3072,
+  // 3073): what is left running is told apart per shell
+  await perShell(async (SHELL, { ok }, k) => {
+    const n = String(3071 + k)
+    const X = sandbox()
+    const c1 = X.commit('c1')
+    const land = scriptOf((await getScripts(X, c1, { repos: realRepo(X.W, { laneSetup: `sleep ${n}; touch <lane>/never` }) })).land)
+    if (!k) ok(land.includes(`to 180 sh -c 'sleep ${n}; touch ${X.W}/.worktrees/ship-api/never'`), 'the setup runs under `to`, at most 180 s, with <lane> substituted')
+    const r = await execA(X, SHELL, land, { GRIMOIRE_SHIP_DEADLINE: '2' }, { timeout: 30000, killSignal: 'SIGKILL' })
+    const left = spawnSync('sh', ['-c', `pgrep -f "sleep ${n.slice(0, -1)}[${n.slice(-1)}]" || true`], { encoding: 'utf8' }).stdout.trim() // the last digit in brackets: never this shell's own command line
     ok(r.signal === null && r.ms < 10000 && left === '' && !existsSync(join(X.W, '.worktrees', 'ship-api', 'never')), `${SHELL}: returned in ${r.ms} ms with a 2-s deadline; the setup was killed, nothing of it left running`)
-  }
-  spawnSync('pkill', ['-f', 'sleep 307[1]'])
-  X.done()
+    X.done()
+  })
+  spawnSync('pkill', ['-f', 'sleep 307[1-3]'])
 }
 
 // ══════════════ U-3 · the gate's push keeps its lock alive while its pre-push hook runs ══════════════
 {
-  const X = sandbox()
-  const c1 = X.commit('c1')
-  const got = await getScripts(X, c1)
-  const take = ((/Before you push, take this repo's SHIP LOCK[\s\S]*?```bash\n([\s\S]*?)\n {2}```/.exec(got.gate) || [])[1] || '').replace(/^ {2}/gm, '')
-  const push = ((/Push the final head[\s\S]*?```bash\n([\s\S]*?)\n {2}```/.exec(got.gate) || [])[1] || '').replace(/^ {2}/gm, '')
   section('U-3 · the gate pushes under a heartbeat that renews its lock, and stops with the push')
-  ok(!!take && push.includes(`git -C ${X.W} push -u origin ${RUN_BRANCH}; RC=$?`) && push.includes('echo "PUSH exit=$RC"'), 'the gate prompt hands the push over as one script, ending in PUSH exit=<code>')
-  mkdirSync(join(X.T0, 'hooks'))
-  writeFileSync(join(X.T0, 'hooks', 'pre-push'), '#!/bin/sh\nsleep 2\nexit 0\n')
-  chmodSync(join(X.T0, 'hooks', 'pre-push'), 0o755)
-  X.sh(`git config core.hooksPath ${join(X.T0, 'hooks')}`, X.W)
-  const OWN = join(X.W, '.git', 'grimoire-ship-api.lock', 'owner')
-  const epoch = () => Number((readFileSync(OWN, 'utf8').trim().split(' ') || [])[1])
-  for (const SHELL of SHELLS) {
-    ok(/^LOCK ok \//m.test(X.exec(SHELL, take, { GRIMOIRE_SHIP_LOCK_WAIT: '1' }).out), `${SHELL}: the gate takes the lock`)
+  await perShell(async (SHELL, { ok }, k) => {
+    const X = sandbox()
+    const c1 = X.commit('c1')
+    const got = await getScripts(X, c1)
+    const take = ((/Before you push, take this repo's SHIP LOCK[\s\S]*?```bash\n([\s\S]*?)\n {2}```/.exec(got.gate) || [])[1] || '').replace(/^ {2}/gm, '')
+    const push = ((/Push the final head[\s\S]*?```bash\n([\s\S]*?)\n {2}```/.exec(got.gate) || [])[1] || '').replace(/^ {2}/gm, '')
+    if (!k) ok(!!take && push.includes(`git -C ${X.W} push -u origin ${RUN_BRANCH}; RC=$?`) && push.includes('echo "PUSH exit=$RC"'), 'the gate prompt hands the push over as one script, ending in PUSH exit=<code>')
+    const OWN = join(X.W, '.git', 'grimoire-ship-api.lock', 'owner')
+    const epoch = () => Number((readFileSync(OWN, 'utf8').trim().split(' ') || [])[1])
+    ok(/^LOCK ok \//m.test((await execA(X, SHELL, take, { GRIMOIRE_SHIP_LOCK_WAIT: '1' })).out), `${SHELL}: the gate takes the lock`)
     const old = Math.floor(Date.now() / 1000) - 1100 // 1100 s old: a ship would take it over 100 s from now
     writeFileSync(OWN, `1 ${old} gate\n`)
-    X.sh(`git push -q origin ${c1}:refs/heads/x-${SHELL} 2>/dev/null; git commit -q --allow-empty -m more-${SHELL}`, X.W)
-    const r = X.exec(SHELL, push, { GRIMOIRE_GATE_LOCK_BEAT: '1' })
-    ok(/^PUSH exit=0$/m.test(r.out) && X.origin() === X.sh('git rev-parse HEAD', X.W), `${SHELL}: pushed (exit 0) through a 2-s pre-push hook`)
+    // a pre-push hook that outlasts a beat: it returns once the lock's age has been renewed (at most
+    // 10 s), not after a fixed sleep — the renewal is checked below
+    mkdirSync(join(X.T0, 'hooks'))
+    writeFileSync(join(X.T0, 'hooks', 'pre-push'), `#!/bin/sh\ni=0\nwhile [ "$i" -lt 200 ]; do\n  t=$(cut -d ' ' -f 2 '${OWN}' 2>/dev/null)\n  [ "\${t:-0}" -gt ${old} ] 2>/dev/null && exit 0\n  sleep 0.05 2>/dev/null || sleep 1; i=$((i + 1))\ndone\nexit 0\n`)
+    chmodSync(join(X.T0, 'hooks', 'pre-push'), 0o755)
+    X.sh(`git config core.hooksPath ${join(X.T0, 'hooks')}`, X.W)
+    X.sh(`git push -q --no-verify origin ${c1}:refs/heads/x-${SHELL} 2>/dev/null; git commit -q --allow-empty -m more-${SHELL}`, X.W) // setup: the hook is for the gate's push
+    const r = await execA(X, SHELL, push, { GRIMOIRE_GATE_LOCK_BEAT: '1' })
+    ok(/^PUSH exit=0$/m.test(r.out) && X.origin() === X.sh('git rev-parse HEAD', X.W), `${SHELL}: pushed (exit 0) through a pre-push hook that outlasts a beat`)
     ok(epoch() > old + 1000 && / gate$/.test(readFileSync(OWN, 'utf8').trim()), `${SHELL}: its lock's age was renewed while the hook ran (still the gate's)`)
     writeFileSync(OWN, `1 ${old} gate\n`)
     await tick(1600)
     ok(epoch() === old, `${SHELL}: the heartbeat stopped with the push (nothing renews it afterwards)`)
-    rmSync(join(X.W, '.git', 'grimoire-ship-api.lock'), { recursive: true, force: true })
-  }
-  X.done()
+    X.done()
+  })
 }
 
 // ══════════════ U-4 · free text never closes an issue ══════════════
@@ -217,59 +244,75 @@ const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
   const WRITER = readFileSync(new URL('../scripts/journal-writer.sh', import.meta.url), 'utf8')
   const instr = (D, LOG) => retarget(script, D).replace('\n. "$W"\n', () => `\n${WRITER}`).replace('PREV=$(sed', `echo "in $$" >> '${LOG}'; sleep 0.05; echo "out $$" >> '${LOG}'\nPREV=$(sed`)
   const depth = (LOG) => { let d = 0, max = 0; for (const l of (existsSync(LOG) ? readFileSync(LOG, 'utf8') : '').trim().split('\n').filter(Boolean)) { d += l.startsWith('in') ? 1 : -1; max = Math.max(max, d) } return max }
-  for (const [what, plant, trials] of [['a dead pid', '99999\n', 6], ['no pid (its writer killed between mkdir and writing it)', null, 2]]) {
-    section(`U-6a · 16 writers at once, a stale .lock.brk with ${what} planted, ${trials} trials: never two inside, nothing left`)
+  // U-6b and U-6e have no time bound to keep (U-6b waits out 7 s and then looks, U-6e counts lines),
+  // and directories and holders of their own: they start here and run while U-6a's trials load the CPU,
+  // each printing its lines in its own section below. U-6c and U-6d, timed against an upper bound, run
+  // after U-6a, side by side.
+  const u6b = (async () => {
+    const D = fresh('mx')
+    const holder = spawn('sleep', ['30'])
+    mkdirSync(join(D, '.lock.brk')); writeFileSync(join(D, '.lock.brk', 'pid'), `${holder.pid}\n`)
+    const w = runAsync(SH[SHELLS[0]], retarget(script, D), { GRIMOIRE_LOCK_STALE: '2' })
+    await tick(7000)
+    const held = existsSync(join(D, '.lock.brk')) && readFileSync(join(D, '.lock.brk', 'pid'), 'utf8').trim() === String(holder.pid)
+    const gone = new Promise((res) => holder.once('exit', res))
+    holder.kill(); await gone
+    return { held, out: (await w).out }
+  })()
+  const withLanded = journals.filter((p) => heredocs(p).length > 2)
+  const u6e = Promise.all(SHELLS.map(async (shell) => {
+    const D = fresh('back\\slash')
+    for (const p of [...withLanded, ...withLanded]) await runAsync(SH[shell], retarget(p, D)) // in order: the second pass is the one deduped
+    return [shell, readFileSync(join(D, 'landed.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).id)]
+  }))
+  // The two kinds of trial run side by side, each kind one trial after another, each trial in a directory
+  // of its own: never more than two trials at once, and never the two no-pid trials together (all 16 of
+  // their writers poll the mutex through the writer's 5-s age, which loads the CPU)
+  const kinds = [['a dead pid', '99999\n', 6], ['no pid (its writer killed between mkdir and writing it)', null, 2]]
+  const tallies = await Promise.all(kinds.map(async ([, plant, trials]) => {
     let overlaps = 0, litter = 0, entered = 0
     for (let i = 0; i < trials; i++) {
       const D = fresh('mx'), LOG = join(D, 'cs.log')
       mkdirSync(join(D, '.lock.brk')); if (plant) writeFileSync(join(D, '.lock.brk', 'pid'), plant)
-      await Promise.all(Array.from({ length: 16 }, (_, k) => runAsync(which(SHELLS[(i + k) % SHELLS.length]), instr(D, LOG))))
+      await Promise.all(Array.from({ length: 16 }, (_, k) => runAsync(SH[SHELLS[(i + k) % SHELLS.length]], instr(D, LOG))))
       if (depth(LOG) > 1) overlaps++
       if (existsSync(join(D, '.lock')) || existsSync(join(D, '.lock.brk'))) litter++
       entered += (existsSync(LOG) ? readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l.startsWith('in')).length
     }
+    return { overlaps, litter, entered }
+  }))
+  kinds.forEach(([what, , trials], j) => {
+    const { overlaps, litter, entered } = tallies[j]
+    section(`U-6a · 16 writers at once, a stale .lock.brk with ${what} planted, ${trials} trials: never two inside, nothing left`)
     eq({ overlaps, litter }, { overlaps: 0, litter: 0 }, `${trials} trials × 16 writers (${SHELLS.join('/')}): no overlap, no lock or mutex left`)
     ok(entered === trials * 16, `every writer got in (${entered}/${trials * 16})`)
-  }
+  })
   section('U-6b · a mutex held by a live writer is never broken, however long it is held')
-  {
-    const D = fresh('mx')
-    const holder = spawn('sleep', ['30'])
-    mkdirSync(join(D, '.lock.brk')); writeFileSync(join(D, '.lock.brk', 'pid'), `${holder.pid}\n`)
-    const w = runAsync(which(SHELLS[0]), retarget(script, D), { GRIMOIRE_LOCK_STALE: '2' })
-    await tick(7000)
-    ok(existsSync(join(D, '.lock.brk')) && readFileSync(join(D, '.lock.brk', 'pid'), 'utf8').trim() === String(holder.pid), 'after 7 s (past the old 5-s timer) the live holder still has it')
-    const gone = new Promise((res) => holder.once('exit', res))
-    holder.kill(); await gone
-    const { out } = await w
-    ok(/^RUNJSON ok$/m.test(out), 'its holder gone, the writer breaks it at once and writes')
-  }
-  section('U-6c · GRIMOIRE_LOCK_STALE=0 is 1: a lock held by a live pid is not broken at once (timed in counted naps: whole-second clocks blur 0 and 1)')
-  for (const shell of SHELLS) {
+  const { held, out } = await u6b
+  ok(held, 'after 7 s (past the old 5-s timer) the live holder still has it')
+  ok(/^RUNJSON ok$/m.test(out), 'its holder gone, the writer breaks it at once and writes')
+  const u6c = Promise.all(SHELLS.map(async (shell) => {
     const D = fresh('lk')
     const holder = spawn('sleep', ['30'])
     mkdirSync(join(D, '.lock')); writeFileSync(join(D, '.lock', 'pid'), `${holder.pid}\n`)
-    const { out, s } = await runAsync(which(shell), retarget(script, D), { GRIMOIRE_LOCK_STALE: '0', PATH: `${NODATE}:${process.env.PATH}` })
+    const r = await runAsync(SH[shell], retarget(script, D), { GRIMOIRE_LOCK_STALE: '0', PATH: `${NODATE}:${process.env.PATH}` })
     holder.kill()
-    ok(/^RUNJSON ok$/m.test(out) && s >= 0.9 && s < 5, `${shell}: broken after ${s.toFixed(1)} s (20 naps: the 1-s floor), written`)
-  }
-  section('U-6d · without `date +%s` the wait still ends: the naps are counted')
-  for (const shell of SHELLS) {
+    return [shell, r]
+  }))
+  const u6d = Promise.all(SHELLS.map(async (shell) => {
     const D = fresh('lk')
     const holder = spawn('sleep', ['60'])
     mkdirSync(join(D, '.lock')); writeFileSync(join(D, '.lock', 'pid'), `${holder.pid}\n`)
-    const { out, s } = await runAsync(which(shell), retarget(script, D), { GRIMOIRE_LOCK_STALE: '1', PATH: `${NODATE}:${process.env.PATH}` })
+    const r = await runAsync(SH[shell], retarget(script, D), { GRIMOIRE_LOCK_STALE: '1', PATH: `${NODATE}:${process.env.PATH}` })
     holder.kill()
-    ok(/^RUNJSON ok$/m.test(out) && s < 15, `${shell}: the live holder's lock broken by counted naps, written in ${s.toFixed(1)} s (it waited forever)`)
-  }
+    return [shell, r]
+  }))
+  section('U-6c · GRIMOIRE_LOCK_STALE=0 is 1: a lock held by a live pid is not broken at once (timed in counted naps: whole-second clocks blur 0 and 1)')
+  for (const [shell, { out, s }] of await u6c) ok(/^RUNJSON ok$/m.test(out) && s >= 0.9 && s < 5, `${shell}: broken after ${s.toFixed(1)} s (20 naps: the 1-s floor), written`)
+  section('U-6d · without `date +%s` the wait still ends: the naps are counted')
+  for (const [shell, { out, s }] of await u6d) ok(/^RUNJSON ok$/m.test(out) && s < 15, `${shell}: the live holder's lock broken by counted naps, written in ${s.toFixed(1)} s (it waited forever)`)
   section('U-6e · a run directory with a backslash in its path: landed.jsonl still holds each task once')
-  const withLanded = journals.filter((p) => heredocs(p).length > 2)
-  for (const shell of SHELLS) {
-    const D = fresh('back\\slash')
-    for (const p of [...withLanded, ...withLanded]) spawnSync(which(shell), ['-c', retarget(p, D)], { encoding: 'utf8' })
-    const ids = readFileSync(join(D, 'landed.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).id)
-    ok(ids.length === 3 && new Set(ids).size === 3, `${shell}: ${ids.length} lines for 3 tasks, each once (awk reads the path from ENVIRON, not -v)`)
-  }
+  for (const [shell, ids] of await u6e) ok(ids.length === 3 && new Set(ids).size === 3, `${shell}: ${ids.length} lines for 3 tasks, each once (awk reads the path from ENVIRON, not -v)`)
 }
 
 // ══════════════ U-7 · a task a replan invented, from the marker ══════════════
@@ -322,20 +365,20 @@ const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
 
 // ══════════════ U-10 · the ship lock's wait ends without `date +%s` ══════════════
 {
-  const X = sandbox()
-  const c1 = X.commit('c1')
-  const land = scriptOf((await getScripts(X, c1)).land)
-  const prefix = land.slice(0, land.indexOf('if shiplock ship; then LK=1'))
   section('U-10 · a ship lock held by a live ship, and no `date +%s`: LOCK busy after the wait, counted in 1-s sleeps')
-  for (const SHELL of SHELLS) {
+  await perShell(async (SHELL, { ok }) => {
+    const X = sandbox()
+    const c1 = X.commit('c1')
+    const land = scriptOf((await getScripts(X, c1)).land)
+    const prefix = land.slice(0, land.indexOf('if shiplock ship; then LK=1'))
     const holder = spawn('sleep', ['60'])
     const LK = join(X.W, '.git', 'grimoire-ship-api.lock')
     rmSync(LK, { recursive: true, force: true }); mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `${holder.pid} ${Math.floor(Date.now() / 1000)} ship\n`)
-    const r = X.exec(SHELL, `${prefix}\nif shiplock ship; then echo GOT; shipunlock; fi`, { GRIMOIRE_SHIP_LOCK_WAIT: '2', PATH: `${NODATE}:${X.BIN}:${process.env.PATH}` }, { timeout: 20000, killSignal: 'SIGKILL' })
+    const r = await execA(X, SHELL, `${prefix}\nif shiplock ship; then echo GOT; shipunlock; fi`, { GRIMOIRE_SHIP_LOCK_WAIT: '2', PATH: `${NODATE}:${X.BIN}:${process.env.PATH}` }, { timeout: 20000, killSignal: 'SIGKILL' })
     holder.kill()
     ok(r.signal === null && /^LOCK busy: held by ship /m.test(r.out) && r.ms < 8000, `${SHELL}: LOCK busy in ${r.ms} ms (it waited forever)`)
-  }
-  X.done()
+    X.done()
+  })
 }
 
 rmSync(TMP, { recursive: true, force: true })

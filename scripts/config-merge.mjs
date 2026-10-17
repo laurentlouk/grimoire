@@ -37,8 +37,8 @@
 //              command are, so a user's entry with a timeout is KEPT, not duplicated). Nothing
 //              in them is ever CHANGED, so a re-run never drops a rule the user added and
 //              never adds one twice.
-//    atomic    repos[].gate, requireHook and extraKnownMarketplaces.<name>.source compare
-//              whole like a value: their fields only make sense together.
+//    atomic    repos[].gate, requireHook, extraKnownMarketplaces.<name>.source and
+//              manager.share compare whole like a value: their fields only make sense together.
 //
 //  A missing current file means everything is ADDED (first-time setup). Invalid JSON, or a
 //  top level that is not an object, in either file: exit 1 with one line naming the file and,
@@ -88,7 +88,7 @@ export const RULES = {
     ...['permissions.allow', 'permissions.deny', 'permissions.ask', 'permissions.additionalDirectories'].map((p) => ({ pattern: tokens(p), key: null })),
     { pattern: tokens('hooks.*[].hooks'), key: (e) => (isObj(e) && typeof e.type === 'string' && typeof e.command === 'string' ? JSON.stringify([e.type, e.command]) : null) },
   ],
-  atomic: ['repos[].gate', 'requireHook', 'extraKnownMarketplaces.*.source'].map(tokens),
+  atomic: ['repos[].gate', 'requireHook', 'extraKnownMarketplaces.*.source', 'manager.share'].map(tokens),
 }
 
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k)

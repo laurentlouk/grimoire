@@ -313,6 +313,21 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   left out) to the front matter, and `headline` appends `· 2 runs need you · 1 PR failing CI` after
   the ready-for-AI part when either is above 0. An older `latest.md` without the keys gives the
   same line as before.
+- **A shared briefing post, opt-in, replaced on every run.** `manager.share` (`null` by default,
+  chosen at setup: a Linear document, a GitHub issue labelled `grimoire-briefing`, or a Slack
+  canvas when the session has the Slack connector, replaced in place with no channel message)
+  gives the team one view. `brief` now saves its view model as `latest.json`; `manager.mjs
+  share-body` renders the post from it in Markdown: the groups, reasons, next steps, counts, Not
+  checked and "≥ N", without the new and changed badges or a repo's availability (one person's
+  ledger, one machine's checkouts), ending "generated
+  by <git user.name> · at <time> · covering <sources>", with a hidden `<!-- grimoire:manager-briefing
+  v1 -->` marker the skill finds its own post by (a canvas, by its id). Ticket text is escaped as
+  in the briefing, its @mentions broken so the post notifies no one, and the body cut to a GitHub
+  issue's 65,536 characters with "… N more". The skill's Share step finds the post through the
+  vendor's tool, replaces it or creates it, and records the outcome with `share-status`: a failure
+  is a "Share: failed (<reason>)" line in the local briefing, never filed anywhere. It is the
+  manager's only write. `config-merge.mjs` compares `manager.share` whole. Checks:
+  `scripts/manager.test.mjs` (401 in all, with launching), `scripts/config-merge.test.mjs`.
 - **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
   absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
   reported by the skill", and makes the briefing partial; without `--sources`, a configured source
@@ -365,7 +380,29 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   prompt is launch-plan's text, ids, routes and repo paths only, with a box to copy from when the
   clipboard is unavailable. `manager.mjs view --json` prints the view model the Markdown and the page
   both render from, now with each issue's launch pick, `heldBack`, and the launch plan for every
-  ready issue. Checks: `scripts/manager.test.mjs` (419 in all, the page run under a minimal DOM).
+  ready issue. Checks: `scripts/manager.test.mjs` (438 in all with the shared post's, the page run
+  under a minimal DOM).
+
+**Tests (`scripts/run-tests.mjs`, the loop-durability files)**
+
+The suite took about 9½ minutes, one file after another, and six loop-durability files spent
+most of that waiting, not computing.
+- **The files run in parallel** (the CPU count by default; `--jobs N` or `GRIMOIRE_TEST_JOBS`),
+  slowest first. The lock and concurrency trials, and the graph's millisecond-bounded rendering
+  check, run alone afterwards, so a busy machine cannot make them flaky. Each file's output is
+  printed whole when it ends, and every failure is listed at the end, not only the first.
+- **`npm run test:fast`** leaves out the six slow loop-durability files: the other 22 files in
+  about 25 s, for iterating. `npm test` and CI still run everything.
+- **The six slow files wait less and assert the same.** Their shells (bash, zsh, dash) now run
+  side by side on sandboxes of their own, setups are copied from one template instead of rebuilt,
+  fixed sleeps became waits for the condition the test then checks, and timeouts sit at the
+  smallest value that still proves the behaviour. No assertion was removed or loosened; mutated
+  copies (a slow heartbeat, a long lock wait, a late deadline) still fail.
+  - `hardening` 105 → 28 s, `followups` 105 → 41 s, `delivery-fix` 85 → 43 s, `final` 72 → 12 s,
+    `statewrite` 58 → 18 s, `resume` 46 → 11 s, each run alone.
+- **`run-durability-final`'s lock trial was flaky for a reason:** it catches a real race in the
+  ship lock, where two breakers can both take a stale lock and two ships end up inside at once.
+  The engine fix is its own change.
 
 ## 0.11.0 — trust and see
 

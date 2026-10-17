@@ -29,7 +29,7 @@
 //  Same stubbed runtime as the other loop tests. The ship, seal, gate-lock and environment scripts
 //  are RUN in bash, zsh and dash against temporary git repositories, with a fake `gh` that keeps the
 //  PR's draft state, body and comments (its `--jq` goes through the real jq when there is one).
-import { readFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, existsSync, readdirSync, cpSync, realpathSync } from 'node:fs'
 import { spawnSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -80,7 +80,7 @@ const indexOf = (tasks, extra) => ({
   hookProblems: [],
   ...extra,
 })
-async function run(scenario, tasks, responder, { args = {}, index = {}, linger = 0, ledgerMs = 0 } = {}) {
+async function run(scenario, tasks, responder, { args = {}, index = {}, linger = 0, ledgerMs = 0, header = true } = {}) {
   const calls = []
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || '?'
@@ -99,7 +99,7 @@ async function run(scenario, tasks, responder, { args = {}, index = {}, linger =
     { total: null, spent: () => 0, remaining: () => Infinity }, async () => {})
   const returnedAt = calls.length // what was dispatched by the time the body returned
   if (linger) await tick(linger)
-  console.log(`\n── ${scenario}`)
+  if (header) console.log(`\n── ${scenario}`) // header: false — eachShellAtOnce prints it, with its checks
   const labels = calls.map((c) => c.label)
   return { result, calls, logs, labels, returnedAt, prompt: (l) => (calls.find((c) => c.label === l) || {}).prompt || '' }
 }
@@ -138,6 +138,19 @@ if (op === 'pr view') {
 }
 process.exit(0)
 `
+// Every sandbox starts from the same two repos — a bare origin with `main` at one empty commit, and a
+// clone of it on the run branch — so they are made once and copied: those git commands were most of a
+// sandbox's setup, and the suite makes about thirty sandboxes.
+let TEMPLATE = null
+function template() {
+  if (TEMPLATE) return TEMPLATE
+  TEMPLATE = mkdtempSync(join(tmpdir(), 'grimoire-fix-tpl-'))
+  process.on('exit', () => rmSync(TEMPLATE, { recursive: true, force: true }))
+  const sh = (cmd, cwd = TEMPLATE) => spawnSync('bash', ['-c', cmd], { cwd, encoding: 'utf8', env: GITENV })
+  sh('git init -q --bare -b main origin.git && git clone -q origin.git work 2>/dev/null')
+  sh(`git commit -q --allow-empty -m base && git push -q origin main && git checkout -q -b ${RUN_BRANCH}`, join(TEMPLATE, 'work'))
+  return TEMPLATE
+}
 function sandbox() {
   const T0 = mkdtempSync(join(tmpdir(), 'grimoire-fix-'))
   const sh = (cmd, cwd = T0) => spawnSync('bash', ['-c', cmd], { cwd, encoding: 'utf8', env: GITENV }).stdout.trim()
@@ -145,9 +158,10 @@ function sandbox() {
   mkdirSync(GH); mkdirSync(BIN)
   writeFileSync(join(BIN, 'gh'), fakeGh(GH))
   chmodSync(join(BIN, 'gh'), 0o755)
-  sh('git init -q --bare -b main origin.git && git clone -q origin.git work 2>/dev/null')
+  for (const repo of ['origin.git', 'work']) cpSync(join(template(), repo), join(T0, repo), { recursive: true })
   const W = join(T0, 'work')
-  sh(`git commit -q --allow-empty -m base && git push -q origin main && git checkout -q -b ${RUN_BRANCH}`, W)
+  const config = join(W, '.git', 'config') // the clone's origin is this sandbox's, as `git clone` would have written it
+  writeFileSync(config, readFileSync(config, 'utf8').replace(/^(\s*url = ).*$/m, (_, key) => `${key}${join(realpathSync(T0), 'origin.git')}`))
   const file = (f, d = '') => { try { return readFileSync(join(GH, f), 'utf8') } catch (e) { return d } }
   return {
     T0, W, sh, GH,
@@ -159,6 +173,15 @@ function sandbox() {
       const r = spawnSync(shell, ['-c', script], { cwd: T0, encoding: 'utf8', env: { ...GITENV, PATH: `${BIN}:${process.env.PATH}`, ...env } })
       return { out: r.stdout || '', err: r.stderr || '', ms: Date.now() - t }
     },
+    // the same, without blocking: for the scenarios that run their shells at once
+    run: (shell, script, env = {}) => new Promise((resolve) => {
+      const t = Date.now()
+      const p = spawn(shell, ['-c', script], { cwd: T0, env: { ...GITENV, PATH: `${BIN}:${process.env.PATH}`, ...env } })
+      let out = '', err = ''
+      p.stdout.setEncoding('utf8'); p.stderr.setEncoding('utf8')
+      p.stdout.on('data', (d) => (out += d)); p.stderr.on('data', (d) => (err += d))
+      p.on('close', () => resolve({ out, err, ms: Date.now() - t }))
+    }),
     done: () => rmSync(T0, { recursive: true, force: true }),
   }
 }
@@ -172,6 +195,21 @@ const receipt = (out) => {
   return { pushed: push[1] === '1', remoteHead: (/^PUSH ok=1 remote=(\S+)/m.exec(out) || [])[1] || '', prUrl: pr[2] || (/^READY url=(\S+)/m.exec(out) || [])[1] || '', draft: draft ? draft[1] === 'true' : undefined, hookBlocked: push[2] === '1', ready: /^READY /m.test(out), lockBusy: /^LOCK busy/m.test(out), failedStep, detail: out.slice(-300) }
 }
 const realRepo = (W, extra = {}) => [{ name: 'api', path: W, agent: 'backend-engineer', tags: ['backend'], gate: null, ...extra }]
+// The scenarios whose time is spent waiting (a lock's 1-s retry, a deadline, a hook that hangs) run
+// their shells at once, each on its own sandbox. A block gets its own ok/eq; each shell's checks are
+// printed under its header, in shell order, once every shell is done.
+async function eachShellAtOnce(header, block) {
+  const recs = await Promise.all(SHELLS.map(async (SHELL) => {
+    const rec = []
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+    await block(SHELL, { ok: (c, m) => rec.push([c, m]), eq: (a, b, m) => rec.push([same(a, b), `${m}${same(a, b) ? '' : ` (got ${JSON.stringify(a)})`}`]) })
+    return rec
+  }))
+  SHELLS.forEach((SHELL, i) => {
+    console.log(`\n── ${header(SHELL)}`)
+    for (const [c, m] of recs[i]) ok(c, m)
+  })
+}
 
 // ══════════════ R · a PR out of draft belongs to the gate ══════════════
 {
@@ -312,8 +350,7 @@ for (const SHELL of SHELLS) {
   const land = scriptOf(got.land)
   ok(/to 480 git -C "\$W" push origin/.test(land) && !/to 900\b/.test(land) && /GRIMOIRE_SHIP_DEADLINE:-540/.test(land), 'L0 · the push is bounded at 480 s, the script at 540 s — both under the ship\'s 12-min hard limit and the Bash tool\'s 600 s')
   ok(got.land.includes("with the Bash tool's timeout at its maximum (600000 ms)"), 'the ship agent is told to give the Bash call its maximum timeout')
-  for (const SHELL of SHELLS) {
-    console.log(`\n── L1 · [${SHELL}] the ship lock`)
+  await eachShellAtOnce((SHELL) => `L1 · [${SHELL}] the ship lock`, async (SHELL, { ok, eq }) => {
     const X = sandbox()
     X.commit('c0')
     const s = land.split(land.match(/P='([^']+)'/)[1]).join(X.W) // the same script, pointed at this sandbox's checkout…
@@ -323,21 +360,22 @@ for (const SHELL of SHELLS) {
     const LK = join(X.W, '.git', 'grimoire-ship-api.lock')
     const holder = spawn('sleep', ['30'])
     mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `${holder.pid} ${Math.floor(Date.now() / 1000)} ship\n`)
-    let r = X.exec(SHELL, script, { GRIMOIRE_SHIP_LOCK_WAIT: '2' })
+    let r = await X.run(SHELL, script, { GRIMOIRE_SHIP_LOCK_WAIT: '1' }) // waits, finds the holder still alive, gives up
     ok(/^LOCK busy: held by ship \d+/m.test(r.out) && /^PUSH ok=0 hook=0 step=lock$/m.test(r.out) && /^PR ok=1 url= action=kept$/m.test(r.out), 'a live ship holds the lock: LOCK busy, nothing pushed, no description')
     eq([X.origin(), X.pr.ops(), existsSync(LK)], ['', [], true], 'origin untouched, no PR opened, the holder\'s lock left in place')
     ok(receipt(r.out).lockBusy === true && receipt(r.out).pushed === false, 'the receipt says lockBusy')
+    const gone = new Promise((res) => holder.once('exit', res))
     holder.kill()
-    await tick(100)
-    r = X.exec(SHELL, script, { GRIMOIRE_SHIP_LOCK_WAIT: '2' })
+    await gone // reaped: a killed child not yet waited for is a zombie, and `kill -0` still finds it
+    r = await X.run(SHELL, script, { GRIMOIRE_SHIP_LOCK_WAIT: '2' })
     ok(/^LOCK stale: ship \d+ /m.test(r.out) && /^LOCK ok$/m.test(r.out) && /^PUSH ok=1 /m.test(r.out) && /^PR ok=1 url=\S+ action=created$/m.test(r.out), 'its pid gone: the lock is taken over, the push and the PR go through')
     eq([X.origin(), existsSync(LK)], [mine, false], 'origin at the head; the lock released')
     mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `1 ${Math.floor(Date.now() / 1000)} gate\n`)
-    r = X.exec(SHELL, script, { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
+    r = await X.run(SHELL, script, { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
     ok(/^LOCK busy: held by gate /m.test(r.out), 'a fresh gate lock: a land ship waits, then moves nothing')
     rmSync(LK, { recursive: true, force: true })
     X.done()
-  }
+  })
 }
 {
   const X = sandbox()
@@ -347,25 +385,29 @@ for (const SHELL of SHELLS) {
   const take = (/Before you push, take this repo's SHIP LOCK[\s\S]*?```bash\n([\s\S]*?)\n {2}```/.exec(got.gate) || [])[1] || ''
   const release = (/Release it once the PR is done — or the moment you stop, pass or fail: `([^`]+)`/.exec(got.gate) || [])[1] || ''
   ok(!!take && !!release, 'L2 · the gate prompt carries the lock script and its release')
-  for (const SHELL of SHELLS) {
-    console.log(`\n── L2 · [${SHELL}] the gate takes the same lock`)
-    const LK = join(X.W, '.git', 'grimoire-ship-api.lock')
+  await eachShellAtOnce((SHELL) => `L2 · [${SHELL}] the gate takes the same lock`, async (SHELL, { ok }) => {
+    const Y = sandbox() // the same scripts, pointed at this shell's own checkout
+    const at = (s) => s.split(X.W).join(Y.W)
+    const LK = join(Y.W, '.git', 'grimoire-ship-api.lock')
     const holder = spawn('sleep', ['30'])
     mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `${holder.pid} ${Math.floor(Date.now() / 1000)} ship\n`)
-    let r = X.exec(SHELL, take.replace(/^ {2}/gm, ''), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
+    let r = await Y.run(SHELL, at(take.replace(/^ {2}/gm, '')), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
     ok(/^LOCK busy/m.test(r.out), 'a live ship holds it: LOCK busy')
     const gone = new Promise((res) => holder.once('exit', res))
     holder.kill()
     await gone // reaped: a killed child not yet waited for is a zombie, and `kill -0` still finds it
-    r = X.exec(SHELL, take.replace(/^ {2}/gm, ''), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
+    // a takeover needs a wait of 2 s: the script checks its wait right after clearing a stale lock, so
+    // with 1 s a slow first pass (a second boundary crossed) clears it and then reports LOCK busy
+    r = await Y.run(SHELL, at(take.replace(/^ {2}/gm, '')), { GRIMOIRE_SHIP_LOCK_WAIT: '2' })
     ok(/^LOCK ok \//m.test(r.out) && / gate$/.test(readFileSync(join(LK, 'owner'), 'utf8').trim()), 'then LOCK ok: held as `gate`')
-    r = X.exec(SHELL, release)
+    r = await Y.run(SHELL, at(release))
     ok(/LOCK released/.test(r.out) && !existsSync(LK), 'the release removes it')
     mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `1 ${Math.floor(Date.now() / 1000)} gate\n`)
-    r = X.exec(SHELL, take.replace(/^ {2}/gm, ''), { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
+    r = await Y.run(SHELL, at(take.replace(/^ {2}/gm, '')), { GRIMOIRE_SHIP_LOCK_WAIT: '2' })
     ok(/^LOCK stale: gate /m.test(r.out) && /^LOCK ok \//m.test(r.out), 'a gate lock an earlier gate left (one repo never runs two gates at once) is taken over')
-    X.exec(SHELL, release)
-  }
+    await Y.run(SHELL, at(release))
+    Y.done()
+  })
   X.done()
 }
 for (const SHELL of SHELLS) {
@@ -385,19 +427,23 @@ for (const SHELL of SHELLS) {
   eq([X.pr.body(), X.origin()], [newer, c2], 'the newer description kept; origin at c2')
   X.done()
 }
-for (const SHELL of SHELLS) {
-  const X = sandbox()
-  const c1 = X.commit('c1')
-  mkdirSync(join(X.T0, 'hooks'))
-  writeFileSync(join(X.T0, 'hooks', 'pre-push'), '#!/bin/sh\nsleep 30\nexit 0\n')
-  chmodSync(join(X.T0, 'hooks', 'pre-push'), 0o755)
-  X.sh(`git config core.hooksPath ${JSON.stringify(join(X.T0, 'hooks'))}`, X.W)
-  let out = '', ms = 0
-  await run(`L4 · [${SHELL}] a pre-push hook that hangs: the script stops at its own deadline, the hook killed with the push`, [T('PROJ-1')],
-    by({ 'impl:PROJ-1': impl(c1.slice(0, 7)), 'ship:api#1': (p) => { const r = X.exec(SHELL, scriptOf(p), { GRIMOIRE_SHIP_DEADLINE: '4' }); out = r.out; ms = r.ms; return receipt(out) } }), { args: { ...QUIET, repos: realRepo(X.W), builtinEnvChecks: false } })
-  ok(ms < 15000 && /^PUSH ok=0 hook=0 exit=142$/m.test(out), `returned in ${ms} ms with PUSH ok=0 exit=142`)
-  ok(/^PR ok=1 url= action=kept$/m.test(out), 'and opened no PR for what it could not push')
-  X.done()
+{
+  const L4 = (SHELL) => `L4 · [${SHELL}] a pre-push hook that hangs: the script stops at its own deadline, the hook killed with the push`
+  await eachShellAtOnce(L4, async (SHELL, { ok }) => {
+    const X = sandbox()
+    const c1 = X.commit('c1')
+    mkdirSync(join(X.T0, 'hooks'))
+    writeFileSync(join(X.T0, 'hooks', 'pre-push'), '#!/bin/sh\nsleep 30\nexit 0\n')
+    chmodSync(join(X.T0, 'hooks', 'pre-push'), 0o755)
+    X.sh(`git config core.hooksPath ${JSON.stringify(join(X.T0, 'hooks'))}`, X.W)
+    let out = '', ms = 0, shipped = null
+    await run(L4(SHELL), [T('PROJ-1')],
+      by({ 'impl:PROJ-1': impl(c1.slice(0, 7)), 'ship:api#1': (p) => (shipped = X.run(SHELL, scriptOf(p), { GRIMOIRE_SHIP_DEADLINE: '4' }).then((r) => { out = r.out; ms = r.ms; return receipt(out) })) }), { args: { ...QUIET, repos: realRepo(X.W), builtinEnvChecks: false }, header: false })
+    await shipped
+    ok(ms < 15000 && /^PUSH ok=0 hook=0 exit=142$/m.test(out), `returned in ${ms} ms with PUSH ok=0 exit=142`)
+    ok(/^PR ok=1 url= action=kept$/m.test(out), 'and opened no PR for what it could not push')
+    X.done()
+  })
 }
 
 // ══════════════ W · the ship worktree is reset and cleaned before each ship ══════════════
@@ -461,19 +507,23 @@ for (const SHELL of SHELLS) {
 {
   const X = sandbox()
   X.sh('git push -q origin HEAD 2>/dev/null', X.W)
-  const checks = [{ name: 'slow1', run: 'sleep 2', timeoutSec: 5 }, { name: 'slow2', run: 'sleep 2', timeoutSec: 5 }, { name: 'slow3', run: 'sleep 2', timeoutSec: 5 }, { name: 'hangs', run: 'sleep 20', timeoutSec: 30 }]
+  // three 1-s checks under a 3-s deadline: in parallel they pass with 3× margin; one after the other
+  // (the bug) the third would meet the deadline, and the hanging one would run its full 20 s
+  const checks = [{ name: 'slow1', run: 'sleep 1', timeoutSec: 3 }, { name: 'slow2', run: 'sleep 1', timeoutSec: 3 }, { name: 'slow3', run: 'sleep 1', timeoutSec: 3 }, { name: 'hangs', run: 'sleep 20', timeoutSec: 30 }]
   const { prompt } = await run('  (the index prompt for the environment script)', [T('PROJ-1')], happy,
     { args: { ...QUIET, repos: realRepo(X.W), environmentChecks: checks }, index: { inputProblems: ['stop after the index'] } })
   const s = (/## Also CHECK the environment[\s\S]*?```bash\n([\s\S]*?)\n```/.exec(prompt('parse-index')) || [])[1] || ''
   ok(s.includes('worktree add --detach --no-checkout -q "$T" HEAD'), 'E1 · the commit probe adds its scratch worktree without a checkout')
-  for (const SHELL of SHELLS) {
-    console.log(`\n── E1 · [${SHELL}] the checks run in parallel, under one deadline`)
-    const r = X.exec(SHELL, s, { GRIMOIRE_ENV_DEADLINE: '6' })
+  await eachShellAtOnce((SHELL) => `E1 · [${SHELL}] the checks run in parallel, under one deadline`, async (SHELL, { ok, eq }) => {
+    const Y = sandbox() // the same script, pointed at this shell's own checkout (the worktree count is per repo)
+    Y.sh('git push -q origin HEAD 2>/dev/null', Y.W)
+    const r = await Y.run(SHELL, s.split(X.W).join(Y.W), { GRIMOIRE_ENV_DEADLINE: '3' })
     const exits = Object.fromEntries([...r.out.matchAll(/^CHECK (\S+) EXIT (\d+)$/gm)].map((m) => [m[1], Number(m[2])]))
-    eq([exits['commit:api'], exits['remote:api'], exits.slow1, exits.slow2, exits.slow3, exits.hangs], [0, 0, 0, 0, 0, 142], 'commit and remote answer, three 2-s checks pass, the hanging one is stopped at the deadline (142)')
+    eq([exits['commit:api'], exits['remote:api'], exits.slow1, exits.slow2, exits.slow3, exits.hangs], [0, 0, 0, 0, 0, 142], 'commit and remote answer, three 1-s checks pass, the hanging one is stopped at the deadline (142)')
     ok(r.ms < 12000, `in ${r.ms} ms: about the deadline, not the sum of the checks`)
-    eq(X.sh(`git worktree list --porcelain | grep -c '^worktree '`, X.W), '1', 'the probe\'s scratch worktree is gone')
-  }
+    eq(Y.sh(`git worktree list --porcelain | grep -c '^worktree '`, Y.W), '1', 'the probe\'s scratch worktree is gone')
+    Y.done()
+  })
   X.done()
 }
 {
