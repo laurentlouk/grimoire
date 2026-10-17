@@ -5,10 +5,18 @@
 //
 //  node scripts/manager.mjs brief --items <file> [--sources <file>] [--config grimoire.config.json]
 //                                 [--ledger <path>] [--now <iso>] [--root <dir>] [--check-repos]
+//                                 [--headless]
 //      → validates the WorkItems, ranks and groups them, writes
 //        <root>/.grimoire/manager/briefings/<YYYYMMDD-HHMMSS>.md (UTC), the same text to
 //        latest.md, its view model to latest.json (what share-body renders), the page
 //        briefing.html (`render --html`, below) and ledger.json, then prints the briefing's path.
+//      --headless (a scheduled or `claude -p` run, which can't ask anyone to tick): the briefing
+//        ends with a "Launch prompts" section, launch-plan's prompt for every issue in Hand to AI,
+//        one per project, in a fence nothing in it can close (headlessSection). The prompts are
+//        the view's launch.allReady, the plan the page copies from: one source. Ids, routes and
+//        repo paths only, never ticket text, as launch-plan's. It implies --check-repos, as
+//        launch-plan always checks (for view --json and render --html too). Without the flag
+//        there is no such section.
 //
 //  Input: a JSON array of WorkItems (skills/manager/workitem.schema.json), the scouts'
 //  output. The file is refused whole, exit 1, on any invalid item: one line per problem,
@@ -124,8 +132,11 @@
 //        "first briefing" in place of the new count on the first; the age in min under 1 h, h
 //        under 48 h, days after; then "· page <path>" when briefing.html exists, "· partial: <ids>
 //        not checked" (front matter notChecked; the first ten, then how many more), and last
-//        "· stale, run /grimoire:manager" past manager.schedule's interval (scheduleInterval:
-//        24 h with no schedule, or one it can't read). In a linked worktree the main checkout's
+//        "· stale, run /grimoire:manager" once the next briefing is overdue by more than
+//        STALE_GRACE_MIN (15) min: one manager.schedule interval after this one (readSchedule:
+//        24 h with no schedule, or one it can't read; a week for a cron restricted to some days of
+//        the week or of the month), a weekdays schedule skipping the weekend, so Friday's
+//        briefing is fresh until Monday's run (staleAt). In a linked worktree the main checkout's
 //        briefing is read too, where brief writes it, and the newer one wins.
 //      It reads files and spawns nothing, and prints ids and counts only, never ticket text: one
 //      line, under 10,000 characters, no control characters. No briefing, a corrupt front
@@ -1489,26 +1500,61 @@ export function frontMatter(text) {
   return null
 }
 
-// How often a briefing is due, in ms, from manager.schedule (or its `when` given alone), read
-// leniently: a cron line (`0 * * * *` and any fixed minute hourly, `*/15 * * * *` every 15 min,
-// `0 */6 * * *` every 6 h, a fixed hour daily), "hourly", "every N minutes | hours | days",
-// "weekly". Anything else is 24 h: "daily", "weekdays 08:30" (a weekend reads as stale), no
-// schedule, and text it can't read.
-export function scheduleInterval(schedule) {
+// How often a briefing is due, from manager.schedule (or its `when` given alone), read leniently:
+// { interval: ms, weekdays: true when it skips Saturday and Sunday }.
+//   a cron line   `0 * * * *` and any fixed minute: hourly · `*/15 * * * *` every 15 min ·
+//                 `0 */6 * * *` every 6 h · a fixed hour: daily · day of the week `1-5`: the same,
+//                 on weekdays (names read as cron's numbers, so `mon-fri` is `1-5`; a day of the
+//                 month of `*` or `1-31` is every day) · any other restricted day of the week
+//                 (`30 8 * * 1`, `0 9 * * mon,thu`)
+//                 or a restricted day of the month (`0 9 1 * *`): a week (7 days), a weekly
+//                 schedule's gap (so a monthly one reads as stale after a week, not after a day)
+//   text          "hourly", "every N minutes | hours | days", "weekly", a day's name ("every
+//                 monday 09:00"): a week · "weekdays" with any of them, or alone ("weekdays
+//                 08:30"): on weekdays
+// Anything else is 24 h, every day: "daily", no schedule, and text it can't read.
+const WEEK = 7 * DAY
+const EVERY_DAY = new Set(['*', '0-6', '0-7', '1-7'])
+const EVERY_DATE = new Set(['*', '1-31'])
+// cron's names, as numbers: the day of the week (sun 0 … sat 6; mon-fri is 1-5) and the month
+const DOW_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const cronNames = (f, names, first) => f.replace(/[a-z]+/g, (w) => (names.includes(w) ? String(names.indexOf(w) + first) : w))
+export function readSchedule(schedule) {
   const when = typeof schedule === 'string' ? schedule : isObj(schedule) && typeof schedule.when === 'string' ? schedule.when : ''
   const s = when.trim().toLowerCase()
   const cron = s.split(/\s+/)
+  if (cron.length === 5) { cron[3] = cronNames(cron[3], MONTH_NAMES, 1); cron[4] = cronNames(cron[4], DOW_NAMES, 0) }
   if (cron.length === 5 && cron.every((f) => /^[\d*,/-]+$/.test(f))) {
     const step = (f) => { const m = /^\*\/(\d+)$/.exec(f); return m && +m[1] > 0 ? +m[1] : null }
-    const [min, hour] = cron
-    if (hour === '*') return min === '*' ? MINUTE : step(min) ? step(min) * MINUTE : HOUR
-    return step(hour) ? step(hour) * HOUR : DAY
+    const [min, hour, dom, , dow] = cron
+    if (!EVERY_DATE.has(dom) || (dow !== '1-5' && !EVERY_DAY.has(dow))) return { interval: WEEK, weekdays: false }
+    const interval = hour === '*' ? (min === '*' ? MINUTE : step(min) ? step(min) * MINUTE : HOUR) : step(hour) ? step(hour) * HOUR : DAY
+    return { interval, weekdays: dow === '1-5' }
   }
-  if (/\b(hourly|every hour)\b/.test(s)) return HOUR
+  const weekdays = /\bweekdays?\b/.test(s)
+  if (/\b(hourly|every hour)\b/.test(s)) return { interval: HOUR, weekdays }
   const every = /\bevery (\d+) ?(minutes?|mins?|hours?|hrs?|h|days?|d)\b/.exec(s)
-  if (every && +every[1] > 0) return +every[1] * (every[2][0] === 'm' ? MINUTE : every[2][0] === 'd' ? DAY : HOUR)
-  if (/\b(weekly|every week)\b/.test(s)) return 7 * DAY
-  return DAY
+  if (every && +every[1] > 0) return { interval: +every[1] * (every[2][0] === 'm' ? MINUTE : every[2][0] === 'd' ? DAY : HOUR), weekdays }
+  if (!weekdays && /\b(weekly|every week|(mon|tues|wednes|thurs|fri|satur|sun)days?)\b/.test(s)) return { interval: WEEK, weekdays: false }
+  return { interval: DAY, weekdays }
+}
+export const scheduleInterval = (schedule) => readSchedule(schedule).interval
+
+// The margin past the due time before a briefing reads as stale: a desktop task starts a few
+// minutes late on purpose, and a briefing takes a few minutes to run.
+export const STALE_GRACE_MIN = 15
+// A whole number of days is added on the calendar (the machine's time zone), so a DST change
+// never moves the due time an hour off the schedule's.
+const addDays = (ms, n) => { const d = new Date(ms); d.setDate(d.getDate() + n); return d.getTime() }
+// When a briefing generated at `generated` (ms) turns stale: the next one is due one interval
+// later, and a weekdays schedule skips Saturday and Sunday (Friday's briefing stays fresh until
+// Monday's run), then STALE_GRACE_MIN more. Pure, but for the machine's time zone.
+export function staleAt(schedule, generated) {
+  const { interval, weekdays } = readSchedule(schedule)
+  let due = interval % DAY === 0 ? addDays(generated, interval / DAY) : generated + interval
+  if (weekdays) while ([0, 6].includes(new Date(due).getDay())) due = addDays(due, 1)
+  return due + STALE_GRACE_MIN * MINUTE
 }
 
 // minutes under 1 h, hours under 48 h, days after
@@ -1517,8 +1563,9 @@ const isCount = (v) => Number.isSafeInteger(v) && v >= 0
 
 // The headline from a parsed front matter, or null when it is not one brief writes (generatedAt
 // a real time; counts.urgent, .ai and .new whole numbers; partial and firstBriefing booleans;
-// notChecked source ids). Pure. interval: scheduleInterval's; page: briefing.html's path, or null.
-export function headline(front, { now, interval = DAY, page = null } = {}) {
+// notChecked source ids). Pure. schedule: manager.schedule (null: none), read by staleAt; without
+// it, interval (ms, 24 h by default) plus the same grace; page: briefing.html's path, or null.
+export function headline(front, { now, schedule, interval = DAY, page = null } = {}) {
   if (!isObj(front) || !isObj(front.counts)) return null
   const c = front.counts
   const generated = parseTime(front.generatedAt)
@@ -1539,7 +1586,8 @@ export function headline(front, { now, interval = DAY, page = null } = {}) {
     const more = ids.length > IDS_SHOWN ? ` and ${ids.length - IDS_SHOWN} more` : ''
     parts.push(`partial: ${ids.length ? `${ids.slice(0, IDS_SHOWN).join(', ')}${more}` : 'some sources'} not checked`)
   }
-  if (age > interval) parts.push('stale, run /grimoire:manager')
+  const stale = schedule === undefined ? age > interval + STALE_GRACE_MIN * MINUTE : toMs(now) > staleAt(schedule, generated)
+  if (stale) parts.push('stale, run /grimoire:manager')
   const line = parts.join(' · ')
   return line.length < HEADLINE_MAX && !UNSAFE.test(line) ? line : null
 }
@@ -1587,13 +1635,13 @@ function headlineMain(args) {
     // A config that is missing, unreadable or not JSON is no schedule: 24 h.
     const configFile = typeof args.config === 'string' ? resolve(args.config) : roots.map((r) => join(r, 'grimoire.config.json')).find(isFile)
     const config = configFile && isFile(configFile) ? readJson(configFile) : null
-    const interval = scheduleInterval(isObj(config) && isObj(config.manager) ? config.manager.schedule : null)
+    const schedule = isObj(config) && isObj(config.manager) ? config.manager.schedule ?? null : null
     let best = null
     for (const r of roots) {
       const dir = join(r, '.grimoire', 'manager')
       const front = frontMatter(readHead(join(dir, 'latest.md'), FRONT_MAX))
       const page = join(dir, 'briefing.html')
-      const line = front && headline(front, { now, interval, page: isFile(page) ? page : null })
+      const line = front && headline(front, { now, schedule, page: isFile(page) ? page : null })
       if (line && (!best || parseTime(front.generatedAt) > best.at)) best = { line, at: parseTime(front.generatedAt) }
     }
     if (best) process.stdout.write(`${best.line}\n`)
@@ -1817,6 +1865,29 @@ export function launchPlan(ids, items, config, { repos = null, root = null } = {
   return { root, groups: planLaunch(keyed, projects, launchRepos(ctx.repoIndex, root), root), refused }
 }
 
+// ── a headless briefing's launch prompts (brief --headless; spec D8: a scheduled run can't ask) ──
+// The briefing's "Launch prompts" section: the view's launch.allReady, launch-plan's groups for every
+// issue in Hand to AI, one per project, in briefing order: the plan the page copies from, so the
+// two never disagree. An issue in Hand to AI whose id no prompt can carry is listed as not launched,
+// its id left out. Each prompt sits in a fence longer than any run of backticks in it, so nothing in
+// it can close the fence; the headings carry ids only, escaped. → the section's Markdown, from its
+// blank line on.
+export function headlessSection(v) {
+  const ai = v.groups.find((g) => g.id === 'ai')
+  const groups = isObj(v.launch) && Array.isArray(v.launch.allReady) ? v.launch.allReady : []
+  const unplain = (ai ? ai.items : []).filter((it) => !it.launch || !it.launch.shown).length
+  const L = ['', '## Launch prompts', '']
+  if (!groups.length && !unplain) return `${[...L, '_Nothing is ready for AI, so there is no prompt to paste._'].join('\n')}\n`
+  L.push('A headless briefing can\'t ask anyone to tick, so here is one prompt per project for the issues in Hand to AI. Paste each into a new conversation, in this order. One that waits starts only once the one it waits for has finished: two agents never share a checkout.')
+  for (const g of groups) {
+    const waits = g.waitsFor.length ? ` · waits for ${g.waitsFor.join(', ')}` : ''
+    const fence = '`'.repeat(Math.max(3, ...(g.prompt.match(/`+/g) ?? []).map((run) => run.length + 1)))
+    L.push('', `### ${md(g.id, 16)} · ${md(g.label, 160)} · ${g.issues.map((i) => md(i.id, 128)).join(', ')}${waits}`, '', `${fence}text`, g.prompt, fence)
+  }
+  if (unplain) L.push('', `- Not launched: ${plural(unplain, 'issue')} whose tracker id is not a plain id, so no prompt carries it: launch ${unplain === 1 ? 'it' : 'them'} from a session`)
+  return `${L.join('\n')}\n`
+}
+
 // ── files, lock ──
 function writeAtomic(file, text) {
   mkdirSync(dirname(file), { recursive: true })
@@ -1901,7 +1972,7 @@ function parseArgs(argv) {
 }
 
 const USAGE = [
-  'usage: node scripts/manager.mjs brief --items <file> [--sources <file>] [--config grimoire.config.json] [--ledger <path>] [--now <iso>] [--root <dir>] [--check-repos]',
+  'usage: node scripts/manager.mjs brief --items <file> [--sources <file>] [--config grimoire.config.json] [--ledger <path>] [--now <iso>] [--root <dir>] [--check-repos] [--headless]',
   '       node scripts/manager.mjs headline [--root <dir>] [--now <iso>] [--config <file>]',
   '       node scripts/manager.mjs repos [--root <dir>] [--config <file>]',
   '       node scripts/manager.mjs launch-plan --ids <a,b,…> --items <file> [--config <file>] [--root <dir>]',
@@ -1981,12 +2052,16 @@ function launchPlanMain(args) {
   return 0
 }
 
+// The repos check a briefing's view reads: with --check-repos, or --headless (its prompts must be
+// launch-plan's, which always checks); else none, and nothing is held back on a repo.
+const briefRepos = (args, config, root) => (args['check-repos'] === undefined && args.headless === undefined ? null : checkRepos(config, root))
+
 // `view --json` and `render --html`: brief's view, from brief's inputs (main reads them), without
 // brief's writes: the ledger is read and never written, and no lock is taken (render writes one
 // file, atomically, and a briefing's own page is brief's).
 function viewMain(cmd, args, { items, config, sources, now, root, dir, ledgerFile }) {
   if (args.out !== undefined && (cmd !== 'render' || typeof args.out !== 'string')) { console.error(`--out: ${cmd === 'render' ? 'expected a file' : 'render only'}\n${USAGE}`); return 2 }
-  const v = view(items, config, readLedger(ledgerFile), now, sources, args['check-repos'] === undefined ? null : checkRepos(config, root), { root })
+  const v = view(items, config, readLedger(ledgerFile), now, sources, briefRepos(args, config, root), { root })
   if (cmd === 'view') { console.log(JSON.stringify(v, null, 2)); return 0 }
   const out = resolve(typeof args.out === 'string' ? args.out : join(dir, 'briefing.html'))
   writeAtomic(out, renderHtml(v))
@@ -2068,8 +2143,8 @@ function main(argv) {
   }
   try {
     const ledger = readLedger(ledgerFile)
-    const v = view(items, config, ledger, now, sources, args['check-repos'] === undefined ? null : checkRepos(config, root), { root })
-    const text = renderMarkdown(v)
+    const v = view(items, config, ledger, now, sources, briefRepos(args, config, root), { root })
+    const text = `${renderMarkdown(v)}${args.headless !== undefined ? headlessSection(v) : ''}`
     const file = join(dir, 'briefings', `${stamp(now)}.md`)
     writeAtomic(file, text)
     writeAtomic(join(dir, 'latest.md'), text)
