@@ -160,7 +160,8 @@
 //      → writes the briefing page, default <root>/.grimoire/manager/briefing.html, and prints its
 //        path; brief writes the same page on every run. Reads the ledger, never writes it. One
 //        self-contained file, as render-logs' page: inline CSS and JS, no external URL, a CSP that
-//        allows no network, light and dark (prefers-color-scheme). The view is embedded as JSON
+//        allows no network and only the page's own script (by its sha256, never 'unsafe-inline'),
+//        light and dark (prefers-color-scheme). The view is embedded as JSON
 //        in <script type="application/json">, every "<" and U+2028/2029 escaped, so no ticket
 //        text can close the element or open a comment; the page builds every node with
 //        textContent, never innerHTML, and a link only from an http(s) url (safeUrl, again in the
@@ -1204,16 +1205,22 @@ function pageClient(planLaunch, safeUrl) {
   update()
 }
 
-// The page: one self-contained file (render-logs' approach). The view is embedded as JSON with
-// every "<" written as its JSON escape, so no data string can close the <script> element or open an
-// HTML comment, and U+2028/2029 escaped too; the script is the client and the two functions it runs.
+// Data as JSON to embed in a <script type="application/json"> element: every "<" written as its
+// JSON escape, so no data string can close the element or open an HTML comment, and U+2028/2029
+// escaped too. The page and the panel embed their data this way.
+export const embedJson = (data) => JSON.stringify(data).replace(/</g, '\\u003c').replace(/\u{2028}/gu, '\\u2028').replace(/\u{2029}/gu, '\\u2029')
+
+// The page: one self-contained file (render-logs' approach). The view is embedded by embedJson; the
+// script is the client and the two functions it runs. The CSP allows that one script by its sha256,
+// not every inline script: markup that got in some other way would not run (the data block is not
+// a script, so the policy has nothing to say about it).
 export function renderHtml(v) {
-  const data = { view: v, heading: `Briefing · ${localIso(Date.parse(v.generatedAt))}` }
-  const blob = JSON.stringify(data).replace(/</g, '\\u003c').replace(/\u{2028}/gu, '\\u2028').replace(/\u{2029}/gu, '\\u2029')
+  const blob = embedJson({ view: v, heading: `Briefing · ${localIso(Date.parse(v.generatedAt))}` })
   const js = `(${pageClient.toString()})(${planLaunch.toString()}, ${safeUrl.toString()})`.replace(/<\//g, '<\\/')
+  const hash = createHash('sha256').update(js, 'utf8').digest('base64')
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="color-scheme" content="light dark">
 <title>grimoire briefing</title><style>${PAGE_CSS}</style></head>
 <body><noscript>This page needs JavaScript to show the briefing; latest.md beside it holds the same briefing as text.</noscript>
