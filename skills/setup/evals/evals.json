@@ -306,7 +306,7 @@
     "id": 12,
     "query": "Grimoire and its manager block are set up in this project (Linear, team ODY, through the claude.ai connector). Re-run the setup and add a daily schedule for the manager briefing. I work in the Claude desktop app, which has scheduled tasks; weekdays at 08:30 is fine.",
     "should_trigger": true,
-    "expected_output": "Treats the schedule as an opt-in item in the re-run's one diff. Finds the desktop app's scheduled-tasks tool with ToolSearch and proposes a desktop task, not a crontab line: a cron expression in local time (30 8 * * 1-5) and a self-contained prompt that runs /grimoire:manager for this project by its absolute path as a scheduled, headless run. Proposes manager.schedule = {kind: desktop-task, when: 30 8 * * 1-5} (with the task's id once created) through config-merge.mjs without --write, says the task takes no budget (budgetUsd stays null), and the permission allow rules a headless run needs (the source's read tools by name, never the whole server) for the user to apply to .claude/settings.json. Proposes the headless probe (env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude -p with --permission-prompts none, one read per source, never --bare) and runs it only on the user's yes, then asks a second yes before creating the task. Calls create_scheduled_task (or any other tool that creates or changes a task) only after the user's yes to the schedule, and writes nothing before it.",
+    "expected_output": "Treats the schedule as an opt-in item in the re-run's one diff. Finds the desktop app's scheduled-tasks tool with ToolSearch and proposes a desktop task, not a crontab line: a cron expression in local time (30 8 * * 1-5) and a self-contained prompt that runs /grimoire:manager for this project by its absolute path as a scheduled, headless run. Proposes manager.schedule = {kind: desktop-task, when: 30 8 * * 1-5} (with the task's id once created) through config-merge.mjs without --write, says the task takes no budget (budgetUsd stays null), and the permission allow rules a headless run needs (the source's read tools by name, never the whole server) for the user to apply to .claude/settings.json. Probes through the app, never with claude -p and never asking for a CLI login: on the user's yes to the probe, creates the task with no cron expression (manual only) and the probe as its prompt (one read per source), runs it once with run_scheduled_task and reads its result with list_task_runs. Asks a second yes before giving the task its schedule (update_scheduled_task with the cron expression and the /grimoire:manager prompt). Creates no task before the yes to the probe, gives none a schedule before the second yes, and writes no file before them.",
     "expectations": [
       {
         "text": "Finds the host's scheduled-tasks tool with ToolSearch and proposes a desktop task rather than a crontab line",
@@ -319,7 +319,7 @@
         "evidence": ""
       },
       {
-        "text": "Creates no scheduled task (no create_scheduled_task or update_scheduled_task call) and writes no file before the user's yes to the schedule",
+        "text": "Creates no scheduled task before the user's yes to the probe, gives no task a cronExpression before the user's second yes to the schedule, and writes no file before them",
         "passed": null,
         "evidence": ""
       },
@@ -329,7 +329,7 @@
         "evidence": ""
       },
       {
-        "text": "Proposes the headless probe with claude -p and --permission-prompts none behind env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN, never --bare and never an API key, and runs it only on the user's yes",
+        "text": "Probes through the desktop app on the user's yes: a manual-only task (no cronExpression) with the probe as its prompt, run once with run_scheduled_task and read with list_task_runs; never runs claude -p and never asks for a CLI login (claude auth login)",
         "passed": null,
         "evidence": ""
       }
@@ -339,7 +339,7 @@
     "id": 13,
     "query": "Add a daily manager briefing to our grimoire setup. We only use Claude Code in the terminal, no desktop app, so there are no scheduled tasks here: cron is fine, weekdays at 08:30. Keep each run under 2 dollars.",
     "should_trigger": true,
-    "expected_output": "Finds no scheduled-tasks tool, so it proposes a crontab line for the user to add themselves, and never edits the crontab: 30 8 * * 1-5 cd \"<absolute project path>\" && mkdir -p .grimoire/manager && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN <absolute path of claude> -p '/grimoire:manager scheduled \"<absolute project path>\"' --permission-prompts none --max-budget-usd 2 >> .grimoire/manager/cron.log 2>&1, with a PATH line so cron finds node and gh. The line never has --bare, no API key is set anywhere, and env -u drops one cron inherited: the run uses the user's own Claude login. Records manager.schedule = {kind: cron, when: 30 8 * * 1-5} and manager.budgetUsd 2 through config-merge.mjs, proposes the permission allow rules a headless run needs for the user to apply, and proposes the headless probe (claude -p with --permission-prompts none, one read per source), run only on the user's yes; a source that fails headless is flagged with its fix. Nothing is written before the yes.",
+    "expected_output": "Finds no scheduled-tasks tool, so it proposes a crontab line for the user to add themselves, and never edits the crontab: 30 8 * * 1-5 cd \"<absolute project path>\" && mkdir -p .grimoire/manager && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN <absolute path of claude> -p '/grimoire:manager scheduled \"<absolute project path>\"' --permission-prompts none --max-budget-usd 2 >> .grimoire/manager/cron.log 2>&1, with a PATH line so cron finds node and gh. The line never has --bare, no API key is set anywhere, and env -u drops one cron inherited: the run uses the user's own Claude login. Records manager.schedule = {kind: cron, when: 30 8 * * 1-5} and manager.budgetUsd 2 through config-merge.mjs, proposes the permission allow rules a headless run needs for the user to apply, and proposes the headless probe (claude -p with --permission-prompts none in cron's bare environment, env -i, one read per source), run only on the user's yes; a source that fails headless is flagged with its fix. Nothing is written before the yes.",
     "expectations": [
       {
         "text": "Prints a crontab line with claude -p, the prompt /grimoire:manager scheduled and the project's path, --permission-prompts none and --max-budget-usd 2, run from the project's absolute path with its output appended to .grimoire/manager/cron.log, for the user to install, and does not edit the crontab itself",
@@ -357,7 +357,7 @@
         "evidence": ""
       },
       {
-        "text": "Proposes the headless probe (claude -p with --permission-prompts none, one read per source) and runs it only on the user's yes, flagging a source that fails headless with its fix",
+        "text": "Proposes the headless probe (claude -p with --permission-prompts none, run in cron's bare environment through env -i, one read per source) and runs it only on the user's yes, flagging a source that fails headless with its fix",
         "passed": null,
         "evidence": ""
       }
