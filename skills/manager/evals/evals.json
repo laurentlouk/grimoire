@@ -95,5 +95,42 @@
       { "text": "Prints one paste-ready prompt per project, verbatim from launch-plan, instead of starting conversations", "passed": null, "evidence": "" },
       { "text": "Says the second project waits for the first because they share the api checkout, rather than presenting them as parallel", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 9,
+    "query": "/grimoire:manager launch ODY-12 ODY-31 (Sent by the Launch button of the briefing panel in the Claude desktop app. The latest briefing is 2 hours old and lists both under Hand to AI, ODY-12 in project Billing and ODY-31 in project Onboarding, on different repos; every repo is checked out; ToolSearch finds a start_session tool.)",
+    "should_trigger": true,
+    "expected_output": "Does not run a new briefing or dispatch any scout. Runs scripts/manager.mjs launch-check 'ODY-12' 'ODY-31' with --root and --config, which checks both ids against the latest briefing (latest.json) and a fresh repos check and prints the plan: two groups, one per tracker project, neither waiting, nothing refused. It finds the session-starting tool with ToolSearch and starts exactly two new conversations, each with that group's prompt as its first message, verbatim: ids, routes and repo paths only. Then it says what it started.",
+    "expectations": [
+      { "text": "Runs manager.mjs launch-check with the two ids from the message, before starting anything", "passed": null, "evidence": "" },
+      { "text": "Does not dispatch tracker-scout or run manager.mjs brief again", "passed": null, "evidence": "" },
+      { "text": "Starts exactly two new conversations, one per group, through the host's session-starting tool", "passed": null, "evidence": "" },
+      { "text": "Each conversation's first message is the group's prompt from launch-check, verbatim, with no ticket title or description added", "passed": null, "evidence": "" },
+      { "text": "No tracker write is attempted", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 10,
+    "query": "/grimoire:manager launch ODY-99 (Sent from the briefing panel. ODY-99 is not in the latest briefing: it was opened after it.)",
+    "should_trigger": true,
+    "expected_output": "Runs scripts/manager.mjs launch-check 'ODY-99' with --root and --config. It refuses ODY-99 with the reason 'not in the latest briefing' and plans no group. The skill says so, quoting the reason, starts no conversation and prints no launch prompt, and offers a fresh briefing (/grimoire:manager) so the issue can be checked. It does not fall back to launch-plan or launch the issue another way.",
+    "expectations": [
+      { "text": "Runs manager.mjs launch-check with ODY-99", "passed": null, "evidence": "" },
+      { "text": "Reports that ODY-99 is refused because it is not in the latest briefing", "passed": null, "evidence": "" },
+      { "text": "Starts no conversation and prints no launch prompt for ODY-99", "passed": null, "evidence": "" },
+      { "text": "Does not route around the refusal with launch-plan or by launching it directly", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 11,
+    "query": "Give me the briefing and let me pick what to hand to AI. (A terminal session: ToolSearch finds no widget tool that renders HTML and no tool that starts a session; AskUserQuestion works. The briefing has three issues under Hand to AI in one project.)",
+    "should_trigger": true,
+    "expected_output": "Runs the briefing as usual (tracker-scout per source, then scripts/manager.mjs brief). Finding no widget tool, it shows no panel: it does not run render --widget nor hand-write any HTML. It gives the page's absolute path, .grimoire/manager/briefing.html, with how to open it, and offers the Hand to AI issues as AskUserQuestion multi-select checkboxes. With the ticked ids it runs launch-plan and, with no session tool, prints each group's prompt in a fenced block to paste.",
+    "expectations": [
+      { "text": "Does not run manager.mjs render --widget or call a widget tool, and writes no HTML itself", "passed": null, "evidence": "" },
+      { "text": "Gives the absolute path of .grimoire/manager/briefing.html and how to open it", "passed": null, "evidence": "" },
+      { "text": "Offers the ready issues as AskUserQuestion multi-select checkboxes", "passed": null, "evidence": "" },
+      { "text": "Runs manager.mjs launch-plan with the ticked ids and prints the prompts to paste", "passed": null, "evidence": "" }
+    ]
   }
 ]
