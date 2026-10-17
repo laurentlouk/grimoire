@@ -10,12 +10,13 @@
 //   SL-2  no lock script carries the functions; the gate's prompt and its lock scripts are bounded
 //   SL-3  a missing file: the first ship prints LOCK missing and moves nothing; it is sent again inline
 //   SL-4  an altered file of the same size (only its cksum differs): the same
-//   SL-5  the gate finds the file missing: BLOCKED (lock), sent again inline, takes, pushes, releases
+//   SL-5  the gate finds the file missing: BLOCKED (lock), sent again inline, takes, pushes, releases;
+//         gates (and ships) built with the file that answer after another switched the run: the same
 //   SL-6  the seal finds the file missing: sent again inline, the marker sealed
 // The scripts run for real against a temp git sandbox with a fake gh (the lock windows themselves, in
 // both modes and every shell, are run-durability-final's F-6).
 
-import { run, by, T, impl, QUIET, PR_URL, RUN_BRANCH, SCRIPTS, sandbox, getScripts, scriptOf, realRepo, receipt, SHELLS, spawnSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, join } from './support/script-harness.mjs'
+import { run, by, happy, later, headOf, API, T, impl, QUIET, PR_URL, RUN_BRANCH, SCRIPTS, sandbox, getScripts, scriptOf, realRepo, receipt, SHELLS, spawnSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, join } from './support/script-harness.mjs'
 import { mkdtempSync, cpSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -142,6 +143,34 @@ for (const [id, shell, what, setup] of [
   ok(r.result.prs.some((p) => p.repo === 'api') && !(r.result.ungatedRepos || []).includes('api'), 'the repo gated: its PR is reported, not an ungated repo')
   ok(!!outs.seal && carriesLock(outs.seal) && missingLog(r.logs) === 1 && r.result.telemetry.inlineShipLock === true, 'the seal after it carries the lock inline; logged once')
   X.done()
+}
+
+// ══════════════ SL-5b · dispatches built with the file, answered after another switched the run ══════════════
+// The terminal slots run in parallel, and so do ships of different repos: a dispatch built while the run
+// still used the file can answer LOCK missing after another dispatch already switched it to inline. It is
+// sent again all the same (its prompt was the file's), never booked as a failure or a busy lock.
+{
+  const WEB = { name: 'web', path: 'repositories/web', agent: 'web-engineer', tags: ['frontend'], gate: null }
+  const repos = [{ ...API, path: 'repositories/api' }, WEB]
+  const tasks = [T('PROJ-1'), T('PROJ-2', { repo: 'web', agent: 'web-engineer', files: ['web/proj2.ts — add it'] })]
+  const viaFile = (p) => p.includes('LOCK missing: $LKF')
+  const delay = { api: 10, web: 120 } // web's answer comes back after api's switched the run to inline
+  const repoOf = (label) => (/^\w+:(\w+)/.exec(label) || [])[1]
+  const answers = (label, p) => {
+    if (/^gate:/.test(label)) return later(viaFile(p) ? { status: 'BLOCKED', summary: 'LOCK missing', failedStep: 'lock' } : { status: 'DONE', summary: 'green', prUrl: `${PR_URL}${repoOf(label)}` }, viaFile(p) ? delay[repoOf(label)] : 0)
+    if (/^ship:/.test(label)) return later(viaFile(p) ? { pushed: false, lockMissing: true } : { pushed: true, remoteHead: headOf(p), prUrl: `${PR_URL}${repoOf(label)}`, draft: true }, viaFile(p) ? delay[repoOf(label)] : 0)
+    if (/^impl:/.test(label)) return impl(label.endsWith('PROJ-1') ? 'aaaaaaa' : 'bbbbbbb')
+    return happy(label, p)
+  }
+  const gates = await run('SL-5b · deliver: end — two gates built with the file, api\'s LOCK missing first, web\'s after the switch', tasks, answers,
+    { args: { ...QUIET, repos, builtinEnvChecks: false, deliver: 'end', scriptsDir: fresh('scripts') } })
+  ok(['gate:api', 'gate:web', 'gate:api.inline', 'gate:web.inline'].every((l) => gates.labels.filter((x) => x === l).length === 1), `both gates are sent again inline, once each (${gates.labels.filter((l) => /^gate:/.test(l)).join(' ')})`)
+  ok((gates.result.ungatedRepos || []).length === 0 && ['api', 'web'].every((r) => gates.result.prs.some((p) => p.repo === r)), `no repo is left ungated (ungated: ${JSON.stringify(gates.result.ungatedRepos || [])})`)
+  ok(missingLog(gates.logs) === 1, 'the switch is logged once')
+  const ships = await run('SL-5c · two land ships built with the file, api\'s LOCK missing first, web\'s after the switch', tasks, answers,
+    { args: { ...QUIET, repos, builtinEnvChecks: false, scriptsDir: fresh('scripts') } })
+  ok(['ship:api#1.inline', 'ship:web#1.inline'].every((l) => ships.labels.includes(l)), `both ships are sent again inline (${ships.labels.filter((l) => /^ship:/.test(l)).join(' ')})`)
+  ok(ships.result.shipped.web.pushedHead === 'bbbbbbb' && !ships.logs.some((l) => /ship:web#1: .*nothing pushed or rewritten/.test(l)), 'web\'s landing is pushed by its inline ship, not booked as a skipped lock')
 }
 
 // ══════════════ SL-6 · the seal finds the file missing ══════════════

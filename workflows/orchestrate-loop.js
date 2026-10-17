@@ -1856,8 +1856,10 @@ ${body}
 else echo "LOCK missing: $LKF"; fi`
 }
 // A lock script found the file missing (or not this engine's) and did nothing: from here on every lock
-// script carries the functions inline, the one that found it first (its caller sends it again).
+// script carries the functions inline, the one that found it first (its caller sends it again), and so
+// does any dispatch built with the file before the switch that answers after it. Logged once.
 function shipLockMissing(label) {
+  if (shipLock.inline) return // logged by the dispatch that switched the run
   shipLock.inline = true
   log(`⚠ ${label}: the ship lock's file ${SCRIPTS_DIR}/ship-lock.sh is missing or differs from this engine's — it moved nothing and is sent again; every lock script now carries the lock inline (copy the engine's workflows/ again to restore it)`)
 }
@@ -5264,10 +5266,12 @@ async function shipOnce(repo, mode, stop) {
       kind: 'ship', // 5/12 min; the script stops itself by SHIP_DEADLINE_SEC
       repo,
     })
+  const viaFile = !shipLock.inline // this script sources the file (another dispatch may switch the run meanwhile)
   let r = await ship(label)
   // The ship lock's file is missing or not this engine's: the script moved nothing. It runs again with
-  // the lock inline, as every lock script after it does.
-  if (r && r.lockMissing === true && !shipLock.inline && !bodyReturned) {
+  // the lock inline, as every lock script after it does: whatever switched the run (this ship, or a gate
+  // or a ship of another repo that answered first), a script built with the file is sent again.
+  if (r && r.lockMissing === true && viaFile && !bodyReturned) {
     shipLockMissing(label)
     r = await ship(`${label}.inline`)
   }
@@ -5681,9 +5685,11 @@ async function sealMarker(repo, marker) {
         kind: 'ship',
         repo,
       })
+    const viaFile = !shipLock.inline
     let r = await seal(label)
     // the ship lock's file is missing or not this engine's: nothing was read or edited — again, inline
-    if (r && r.lockMissing === true && !shipLock.inline && !bodyReturned) {
+    // (a script built with the file, whoever switched the run since)
+    if (r && r.lockMissing === true && viaFile && !bodyReturned) {
       shipLockMissing(label)
       r = await seal(`${label}.inline`)
     }
@@ -5745,12 +5751,14 @@ async function terminalSlot(repo) {
       repo,
       last: true, // a result returning after the loop ended is still the slot's (bookLateSlot)
     })
+  const viaFile = !shipLock.inline // its lock scripts source the file: the gates of other repos run alongside, and may switch the run first
   let gate = await dispatchGate(`gate:${repo}`)
   // A lock script found the ship lock's file missing (or not this engine's) and did nothing, so the gate
   // pushed nothing: it is sent again with the lock inline. Its gate command runs once more, a cost paid
   // only where the engine copy lost its file before any ship of the run found it (deliver: 'end'). A gate
-  // that returns after the run stopped dispatching is not sent again: it could not ship (SHIP_FAILED).
-  if (gate && gate.failedStep === 'lock' && !shipLock.inline && !dispatchClosed && !bodyReturned) {
+  // that returns after the run stopped dispatching is not sent again: it could not ship (SHIP_FAILED). A
+  // gate built with the file is sent again even when another repo's gate switched the run meanwhile.
+  if (gate && gate.failedStep === 'lock' && viaFile && !dispatchClosed && !bodyReturned) {
     shipLockMissing(`gate:${repo}`)
     gate = await dispatchGate(`gate:${repo}.inline`)
   }

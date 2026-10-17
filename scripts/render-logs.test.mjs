@@ -334,7 +334,7 @@ try {
   has(/stall re-check \(#6 → BLOCKED\) → ok: the failure was transient, the run goes on/, 'env: a re-check that passes reads as a transient failure')
   has(/stall re-check \(late writer\) → FAILED again on the re-check: commit:site/, 'env: a re-check that fails again')
   has(/stall \(#7 → DIED\) → ok: commit:site answered again, the environment halt is lifted/, 'env: a later green check lifts the halt (cleared)')
-  has(/site · land → skipped: another ship or the gate held the ship lock — nothing pushed or rewritten, not a failed push: LOCK busy: held by ship 4242 for 150 s · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship skipped on a held lock: nothing moved, with the holder')
+  has(/site · land → skipped: the ship lock was held by another ship or the gate, or its file was missing — nothing pushed or rewritten, not a failed push: LOCK busy: held by ship 4242 for 150 s · https:\/\/example\.invalid\/pr\/7 \(draft\)/, 'ship skipped on a held lock: nothing moved, with the holder')
   ok(!/site · land → failed at push/.test(text), 'ship skipped on a held lock: never read as a failed push (its pushed is false)')
   has(/app · land → skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone · the new work waits for the next terminal slot · https:\/\/example\.invalid\/pr\/8 \(ready\)/, 'ship skipped on a ready PR: the new work waits for the gate')
   has(/app · halt → skipped: its PR is out of draft and only the gate pushes to it — nothing pushed, its description left alone · status comment only · https:\/\/example\.invalid\/pr\/8 \(ready\)/, 'halt ship on a ready PR: the status comment only')

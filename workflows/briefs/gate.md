@@ -96,8 +96,9 @@ after its PR merged. Write a body file and pass it with `--body-file`.
   file the hook reported, so the condition can be fixed.
 - Never poll-loop or babysit a command: run it in the foreground and wait.
 - When you return BLOCKED, set `failedStep`: `gate` (the gate command failed or could not
-  run), `push` (the run branch would not push: auth, a protected branch, the network) or `pr`
-  (the PR could not be opened or updated). A push or PR failure is not replanned — no code
-  change fixes it — so name the cause in `summary` for the human who will ship it.
+  run), `push` (the run branch would not push: auth, a protected branch, the network), `pr`
+  (the PR could not be opened or updated) or `lock` (a lock script printed `LOCK missing`). A
+  push or PR failure is not replanned — no code change fixes it — so name the cause in
+  `summary` for the human who will ship it.
 - Return the structured status, and put the PR URL in `prUrl`. Never DONE_PENDING_GATE: you
   are the gate, and that status from you counts as a failed gate.
