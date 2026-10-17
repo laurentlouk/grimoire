@@ -544,6 +544,13 @@ most of that waiting, not computing.
   `GRIMOIRE_TEST_SHIP_LOCK=inline` runs any loop test file against the fallback, and
   `run-durability-shiplock` covers the file's drift check, a missing file, an altered one, and a
   gate and a seal sent again.
+- **Its size bounds no longer depend on the machine.** The scripts SL-2 measures name the sandbox
+  and the checkout's scripts directory by absolute path, so a Mac's long `TMPDIR`
+  (`/var/folders/…/T/`) and a deep worktree failed it (2,642 bytes against 2,600) where CI passed.
+  Each script is now measured besides those paths, against the earlier bound less the paths it
+  held on CI, rounded down: the gate's three lock scripts under 2,300 bytes (1,981 today), its
+  prompt under 7,700, the ship script under 9,350 and 6,100 fewer than inline, the seal under
+  4,400. A 351-byte addition to the lock scripts, which the old bound let through on CI, fails it.
 
 ## 0.11.0 — trust and see
 
