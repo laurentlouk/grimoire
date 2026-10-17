@@ -1,206 +1,21 @@
 # Changelog
 
-## Unreleased — architecture diagrams the code backs, and the docs as a vault
+## 0.12.0 — know where things stand
 
-Two things the graph page could not show: what the system *is*, and what the team wrote about it.
-Taking [archify](https://github.com/tt-a1i/archify) as the example but building grimoire's own (no
-dependency, free to evolve), an architecture is now a typed diagram drawn as an interactive page,
-one the code graph checks; and the project's Markdown notes open in the
-page as an Obsidian-like vault, editable when the page is served
-(`tools/graph/tests/arch-docs.test.mjs`, no parser runtime needed).
+Three views of where things stand: what the team owes (`/grimoire:manager`, a briefing read from
+the tracker by scouts that cannot write, ranked by a tested script), what the system is
+(`/grimoire:architecture`, diagrams the code graph checks, and the project's notes as a vault in
+the graph page), and whether the runs deliver (a scorecard on `/grimoire:logs`). Underneath, the
+loop's journal no longer loses chunks, the ship lock no longer lets two ships in at once, and
+`/grimoire:setup` can be re-run on a project already set up.
 
-**Architecture (`/grimoire:architecture`, `lib/arch.mjs`, the Architecture tab)**
-- A diagram is `docs/architecture/<name>.architecture.json`: typed components (frontend, backend,
-  worker, database, messagebus, cloud, security, external, library, cli) with the `paths` of their
-  code, the `imports` that reach them and `path:line` sources; boundaries; connections with a label,
-  a variant and `via` for what the code graph cannot see; cards. `graph.architectureDir` moves it.
-- `graph.mjs architecture draft` drafts one deterministically: one component per module of the
-  system map, typed by folder names and the frameworks it imports; the external services its
-  imports name (PostgreSQL, Redis, Kafka, AWS, Stripe, an LLM API… 23 known); a line per module
-  link resolved by syntax. It never overwrites a refined diagram without `--force`.
-- `graph.mjs architecture check` checks one against the index: the schema, every glob matching
-  indexed production files, every source existing with its lines, each line between code
-  components counted in file pairs (or importing files), lines the code shows only the other way,
-  code links no line draws, files in two components, and the share of production files covered.
-- The skill drafts, has the agent refine the draft by reading the code (names by responsibility,
-  datastores and queues from config, trust boundaries, what flows on each line, sources), and
-  checks until it passes, answering each warning.
-- The tab draws every saved diagram and one drafted on each render, laid out by flow (boundaries
-  as bands, free components beside their neighbours), at natural size with Fit, zoom and drag to
-  pan. A line the graph confirms is solid; one it cannot see is dashed amber unless it names its
-  `via`. A component's passport lists the code it covers, its sources and each line with what the
-  graph saw; Upstream, Downstream and Route light up what the drawn lines reach (reachability, not
-  runtime impact); *Code links not drawn* shows what the diagram leaves out.
-- `docs/architecture/grimoire.architecture.json` is grimoire's own: 19 components, every
-  production file covered, all 13 lines between code components confirmed by the graph.
+### The briefing: `/grimoire:manager`, and a setup you can re-run
 
-**Docs (the Docs tab, `lib/docs.mjs`, `lib/md.mjs`)**
-- Every `.md` and `.markdown` note of the project's repositories, and of the project root in a
-  hub, in a folder tree; the header search filters by path and text, with the matching line.
-- A Markdown renderer with no dependency, shared by the page and the tests: headings with
-  GitHub's anchors, lists and task lists, GFM tables, fenced code, callouts (foldable), front
-  matter as properties, `[[wikilinks|alias]]`, `#tags`, `==highlights==`. Raw HTML passes only as
-  allowlisted tags rebuilt without attributes; links go out only to http(s) and mailto.
-- Beside each note: its outline, its backlinks with the line that links, the indexed files it
-  names (inline code such as `lib/render.mjs:42` opens that file's neighbourhood), and its
-  unresolved links. A file's page lists the notes that mention it.
-
-**Editing (`graph.mjs serve`, `lib/serve.mjs`)**
-- The same page on `127.0.0.1`, re-rendered on every load, whose Docs tab can save: Read, Edit
-  or Split views, Ctrl/⌘-E to switch, Ctrl/⌘-S to save, + New note, and an unresolved
-  `[[link]]` offers to create its note.
-- Local only, behind a random token: the host must be the loopback address (no DNS rebinding),
-  writes must be same-origin JSON carrying the token, and only Markdown notes inside the
-  project's repositories are written (no `..`, absolute path, skipped folder or symlink out),
-  atomically. A save from a copy that changed on disk since is refused with the disk text, and the
-  page offers to load it or overwrite; a served page reloads a note changed on disk when it gets
-  focus back.
-- Symlinks follow one rule, listing and saving alike: a note whose real file is outside its
-  repository, or is not itself a Markdown note outside skipped and excluded folders, is never read
-  into the page nor written, and a note symlinked to another note is saved through to its real
-  file, so the link stays. Read-only notes
-  are refused, a CRLF note is saved back with CRLF, and Markdown renders in linear time on any
-  input (a note past 200 KB shows as plain text). One malformed diagram is reported in its place
-  and never takes the page down.
-
-## Unreleased — the run scorecard, and a journal that arrives whole
-
-The log page could replay one run's decisions, but not say whether the runs deliver. Reading the
-journals of seven real runs also showed that two drained runs were displayed as `running`, and that
-three had lost a whole chunk of events (the first one, in two of them) without the page noticing. The page now reports both, and the
-loop's writer no longer loses them (`workflows/tests/run-durability-journal.test.mjs`, the writer's
-scripts run for real in bash, zsh and dash).
-
-**Logs (`scripts/render-logs.mjs`)**
-- **A scorecard opens the page**, over the runs the version, briefs and new project filters keep.
-  It shows:
-  - runs by outcome (drained, halted, running, stale) and the run success rate (drained over finished)
-  - the task landing rate (landed over settled), first-round review pass, PRs opened
-  - halts by kind, with how many a resume carried to a drain
-  - median active time per run and median output tokens per landed task
-  - implementers past their soft limit
-  - per-persona FAIL and overturn rates, gates per repository
-  - the journal's own completeness
-
-  One row per run links to its overview. `summary` prints the same numbers first; `summary --json`
-  adds `scorecard` and one `outcomes` row per run. Both use one function, so the CLI and the page
-  never disagree.
-- **A run whose final run.json write was lost no longer reads as `running`.** When the newest
-  session wrote a `run.end`, its status wins over a `running` run.json, or one an earlier session
-  wrote, and the overview says where the status came from. A run still `running` with no journal write for 12 h is marked stale.
-- **A lost chunk is counted.** These are shown as an incomplete journal, so numbers that undercount
-  say so:
-  - gaps in `seq` within a session, and before the first session's first event
-  - the writer's unfinished temp files (`<file>.<pid>`, `.chunk.<pid>`, `.runjson.<pid>`,
-    `.landed.<pid>`, with `.b64`, `.s` or `.d`)
-- **A halt the run resumed from is not its verdict.** The overview shows it as "halted in session N,
-  then resumed" instead of in red on a drained run.
-
-**Journal (`workflows/orchestrate-loop.js`)**
-
-The haiku writer retypes every payload as base64, and the chunks that did not arrive were among
-the biggest (12 to 24 events). One writer's leftover temp file decoded to a first chunk copied
-wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
-- **The first flush goes before the first dispatch.** It carries `run.start`, the startup checks and
-  what was absorbed. The run is on disk from its start, and its first chunk is small. It used to wait
-  for the first landing, hours in, with as many as 24 events by then.
-- **A chunk also goes once the buffered events hold `flushBytes` bytes of JSON.** The default is
-  3000; set it in `telemetry.flushBytes`. `flushEvery` still applies.
-- **A chunk the writer did not confirm is sent again once,** in two pieces that carry its events
-  only, with no run.json and no landed delta:
-  - Each piece goes to `<firstSeq>.r1.jsonl`, never over a chunk on disk.
-  - A piece still unconfirmed is lost, and counted.
-  - A resend that writes nothing turns resends off for the run.
-  - `telemetry.journal.resent` counts the chunks sent again.
-- **The final run.json is sent again alone, up to twice, when it was not confirmed.** Nothing after
-  the run's end rewrites it. `telemetry.journal.runJsonResent` counts these resends.
-- **A flush's landed delta is capped at 4,000 bytes as well as 8 tasks;** one task always goes.
-- A writer returning nothing still marks the writer dead after two in a row, resends included, and
-  nothing is resent once it is dead.
-- **The writer is a file now, not text the haiku retypes.** `workflows/scripts/journal-writer.sh`
-  holds the lock, the attempt registry, the decoding and the checks, and ships with the engine
-  copy, next to the briefs. It is the engine's `JOURNAL_WRITER` byte for byte:
-  `npm run journal:writer` writes it, and a test and `npm run check` compare it.
-  - A flush now retypes under 1 kB of shell besides its payloads, against about 5 kB before.
-  - Each flush checks the file's cksum before it sources it. A missing or altered file prints
-    `WRITER missing` and writes nothing; that flush and every later one then carry the writer
-    inline. `telemetry.journal.inlineWriter` says so.
-  - `scriptsDir` overrides where the file is; the default is next to `briefsDir`.
-- Each event is serialized once: the byte count and the chunk share its line.
-
-**Loop (`workflows/orchestrate-loop.js`)**
-
-The ship lock no longer lets two ships in at once. Two waiters on a dead ship's lock could both
-remove it, the slower one after a third waiter had taken it fresh, and two ships then held the lock
-(`workflows/tests/run-durability-final.test.mjs` F-6 replays each case on a simulated clock in bash,
-zsh and dash; F-3 still runs six real waiters). Four bugs, all fixed:
-- **A breaker's mutex could be broken too soon.** A takeover runs under a second `mkdir` mutex,
-  `<lock>.brk`. A waiter read the mutex's time stamp before its breaker had written it, took it
-  for 0 s old (so stale), and removed it while its breaker was still inside. The mutex now holds
-  its breaker's pid, as the journal's lock does: it is broken once that pid is gone, or, with no
-  pid in it, once 5 s old by its own age. The owner line is read again under the mutex and
-  compared whole before the lock is removed.
-- **A lock with no owner line was judged by the waiter's age.** One that had waited 10 s took over
-  a lock made a moment ago, before its taker wrote its owner line. Such a lock is now taken over
-  once 10 s old by its own age (its mtime, against a stamp the waiter makes beside it).
-- **A holder ignored a failed owner write.** It held the lock with no owner line in it, open to
-  takeover. Now it removes the lock and fails with `LOCK error`.
-- **The gate's release removed whatever lock was there.** The gate releases "the moment it stops",
-  so one whose take came back `LOCK busy` removed the live ship's lock it had waited for. Its take
-  and release are different shells, so the engine now gives each gate dispatch a holder id,
-  written where a ship writes its pid. The release removes the lock only while the owner line
-  still names that id as `gate`; otherwise it prints `LOCK kept` and leaves it. A ship or the seal
-  already removed the lock only while it named its own pid, and now says `LOCK kept` too when it
-  was taken over meanwhile.
-
-Three liveness fixes:
-- After a takeover, `mkdir` is tried again at once, before the wait's budget is checked: a waiter
-  used to report `LOCK busy` just after clearing a stale lock.
-- A busy mutex is waited for with a backoff (0.1 s doubling to 1 s). Five instant tries used to
-  give up in about 0.1 s with `LOCK error`.
-- A lock released between a failed `mkdir` and the check that it exists is tried again; it used
-  to read as `cannot create (not writable?)`.
-
-Every change of hands now happens under one mutex, as in the journal's lock: take, takeover,
-release, and the gate heartbeat's rewrite all run under `<lock>.brk`
-(F-6 replays each window below, red first). The fixes:
-- **A release could race a takeover.** The gate's release, finding no lock, still ran `rm`, so a
-  ship that took the lock in between lost it. A ship's release could remove a lock taken over
-  after it read its owner line. A release now reads and compares the owner line in the mutex, and
-  removes nothing when there is no lock. A takeover takes the lock in the same section, so no one
-  sees the gap.
-- **The heartbeat could overwrite a new holder.** It read the owner line, then wrote the gate's
-  over a halt ship or seal that had taken the lock over. It now renews the line in the mutex, only
-  while the line names this gate (its id survives), and otherwise stops with a `LOCK kept` line.
-- **A mutex could stick forever.** If its holder was SIGKILLed inside and its pid then reused,
-  every ship and gate reported `LOCK busy`. A mutex unchanged for 30 s is now broken, even when its
-  pid looks alive. That is thousands of times the section it guards, and under the gate's 90-s wait.
-- **A breaker acted on a mutex that was not its own.** Its pid write was unchecked, and nothing
-  re-read the pid before the `rm`. The pid is now written and read back before anything is done,
-  and read again right before the lock is removed or rewritten. A holder that finds another's pid
-  there backs off and touches nothing.
-- **Stamps were left behind.** A waiter killed with SIGKILL left its `<lock>.<pid>.l` or `.b` in
-  the git dir. A take now removes the stamps whose pid is gone, never a live waiter's.
-
-The gate's release is a script now (a code block in the gate prompt, no longer an inline
-command), and the ship brief says what a `LOCK kept` line means: another holder has the lock, and
-the ship leaves it alone. The messages and exit codes are unchanged.
-
-**The ship lock is a file now, not text the agents retype.** `workflows/scripts/ship-lock.sh`
-holds the lock's functions (the mutex, the take, the release, the gate's heartbeat, the ship's
-unlock) and ships with the engine copy, next to the briefs. It is the engine's `SHIP_LOCK` byte
-for byte: `npm run ship:lock` writes it, and a test and `npm run check` compare it.
-- The gate's prompt is back to about 7 kB, from 18 kB: its take, release and push carry about
-  2.5 kB of shell between them, against 13.4 kB. A ship retypes about 9 kB of its script, against
-  15.7 kB, and the seal 4 kB, against 10.6 kB.
-- Each lock script checks the file's cksum before it sources it, so the functions run in the
-  script's own shell as before. The windows the one mutex closed stay closed, and the `LOCK`
-  messages and exit codes are unchanged.
-- A missing or altered file prints `LOCK missing` and moves nothing (`lockMissing` in a ship's or
-  the seal's receipt, `failedStep: 'lock'` from the gate). That dispatch is sent again, and every
-  later lock script carries the functions inline; `telemetry.inlineShipLock` says so. A gate sent
-  again runs its gate command once more.
-- `scriptsDir` locates it, as it does the journal writer's.
+What the team owes, grouped Decide / Do / Hand to AI / Waiting on others / Not now, from the
+tracker, the open pull requests and the loop's own runs. The scouts that read them cannot write,
+`scripts/manager.mjs` does the ranking (507 checks), and the issues ready for AI launch from the
+briefing. Setup proposes the sources and now re-runs on a configured project, keeping what the
+user set by hand.
 
 **Setup (`skills/setup`, `scripts/config-merge.mjs`)**
 
@@ -518,6 +333,208 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     `sendPrompt`), and the evals `manager-9` to `manager-11`. The panel shows in a session only:
     a headless briefing keeps its **Launch prompts**.
 
+### Architecture diagrams the code backs, and the docs as a vault
+
+Two things the graph page could not show: what the system *is*, and what the team wrote about it.
+Taking [archify](https://github.com/tt-a1i/archify) as the example but building grimoire's own (no
+dependency, free to evolve), an architecture is now a typed diagram drawn as an interactive page,
+one the code graph checks; and the project's Markdown notes open in the
+page as an Obsidian-like vault, editable when the page is served
+(`tools/graph/tests/arch-docs.test.mjs`, no parser runtime needed).
+
+**Architecture (`/grimoire:architecture`, `lib/arch.mjs`, the Architecture tab)**
+- A diagram is `docs/architecture/<name>.architecture.json`: typed components (frontend, backend,
+  worker, database, messagebus, cloud, security, external, library, cli) with the `paths` of their
+  code, the `imports` that reach them and `path:line` sources; boundaries; connections with a label,
+  a variant and `via` for what the code graph cannot see; cards. `graph.architectureDir` moves it.
+- `graph.mjs architecture draft` drafts one deterministically: one component per module of the
+  system map, typed by folder names and the frameworks it imports; the external services its
+  imports name (PostgreSQL, Redis, Kafka, AWS, Stripe, an LLM API… 23 known); a line per module
+  link resolved by syntax. It never overwrites a refined diagram without `--force`.
+- `graph.mjs architecture check` checks one against the index: the schema, every glob matching
+  indexed production files, every source existing with its lines, each line between code
+  components counted in file pairs (or importing files), lines the code shows only the other way,
+  code links no line draws, files in two components, and the share of production files covered.
+- The skill drafts, has the agent refine the draft by reading the code (names by responsibility,
+  datastores and queues from config, trust boundaries, what flows on each line, sources), and
+  checks until it passes, answering each warning.
+- The tab draws every saved diagram and one drafted on each render, laid out by flow (boundaries
+  as bands, free components beside their neighbours), at natural size with Fit, zoom and drag to
+  pan. A line the graph confirms is solid; one it cannot see is dashed amber unless it names its
+  `via`. A component's passport lists the code it covers, its sources and each line with what the
+  graph saw; Upstream, Downstream and Route light up what the drawn lines reach (reachability, not
+  runtime impact); *Code links not drawn* shows what the diagram leaves out.
+- `docs/architecture/grimoire.architecture.json` is grimoire's own: 19 components, every
+  production file covered, all 13 lines between code components confirmed by the graph.
+
+**Docs (the Docs tab, `lib/docs.mjs`, `lib/md.mjs`)**
+- Every `.md` and `.markdown` note of the project's repositories, and of the project root in a
+  hub, in a folder tree; the header search filters by path and text, with the matching line.
+- A Markdown renderer with no dependency, shared by the page and the tests: headings with
+  GitHub's anchors, lists and task lists, GFM tables, fenced code, callouts (foldable), front
+  matter as properties, `[[wikilinks|alias]]`, `#tags`, `==highlights==`. Raw HTML passes only as
+  allowlisted tags rebuilt without attributes; links go out only to http(s) and mailto.
+- Beside each note: its outline, its backlinks with the line that links, the indexed files it
+  names (inline code such as `lib/render.mjs:42` opens that file's neighbourhood), and its
+  unresolved links. A file's page lists the notes that mention it.
+
+**Editing (`graph.mjs serve`, `lib/serve.mjs`)**
+- The same page on `127.0.0.1`, re-rendered on every load, whose Docs tab can save: Read, Edit
+  or Split views, Ctrl/⌘-E to switch, Ctrl/⌘-S to save, + New note, and an unresolved
+  `[[link]]` offers to create its note.
+- Local only, behind a random token: the host must be the loopback address (no DNS rebinding),
+  writes must be same-origin JSON carrying the token, and only Markdown notes inside the
+  project's repositories are written (no `..`, absolute path, skipped folder or symlink out),
+  atomically. A save from a copy that changed on disk since is refused with the disk text, and the
+  page offers to load it or overwrite; a served page reloads a note changed on disk when it gets
+  focus back.
+- Symlinks follow one rule, listing and saving alike: a note whose real file is outside its
+  repository, or is not itself a Markdown note outside skipped and excluded folders, is never read
+  into the page nor written, and a note symlinked to another note is saved through to its real
+  file, so the link stays. Read-only notes
+  are refused, a CRLF note is saved back with CRLF, and Markdown renders in linear time on any
+  input (a note past 200 KB shows as plain text). One malformed diagram is reported in its place
+  and never takes the page down.
+
+### The run scorecard, and a journal that arrives whole
+
+The log page could replay one run's decisions, but not say whether the runs deliver. Reading the
+journals of seven real runs also showed that two drained runs were displayed as `running`, and that
+three had lost a whole chunk of events (the first one, in two of them) without the page noticing. The page now reports both, and the
+loop's writer no longer loses them (`workflows/tests/run-durability-journal.test.mjs`, the writer's
+scripts run for real in bash, zsh and dash).
+
+**Logs (`scripts/render-logs.mjs`)**
+- **A scorecard opens the page**, over the runs the version, briefs and new project filters keep.
+  It shows:
+  - runs by outcome (drained, halted, running, stale) and the run success rate (drained over finished)
+  - the task landing rate (landed over settled), first-round review pass, PRs opened
+  - halts by kind, with how many a resume carried to a drain
+  - median active time per run and median output tokens per landed task
+  - implementers past their soft limit
+  - per-persona FAIL and overturn rates, gates per repository
+  - the journal's own completeness
+
+  One row per run links to its overview. `summary` prints the same numbers first; `summary --json`
+  adds `scorecard` and one `outcomes` row per run. Both use one function, so the CLI and the page
+  never disagree.
+- **A run whose final run.json write was lost no longer reads as `running`.** When the newest
+  session wrote a `run.end`, its status wins over a `running` run.json, or one an earlier session
+  wrote, and the overview says where the status came from. A run still `running` with no journal write for 12 h is marked stale.
+- **A lost chunk is counted.** These are shown as an incomplete journal, so numbers that undercount
+  say so:
+  - gaps in `seq` within a session, and before the first session's first event
+  - the writer's unfinished temp files (`<file>.<pid>`, `.chunk.<pid>`, `.runjson.<pid>`,
+    `.landed.<pid>`, with `.b64`, `.s` or `.d`)
+- **A halt the run resumed from is not its verdict.** The overview shows it as "halted in session N,
+  then resumed" instead of in red on a drained run.
+
+**Journal (`workflows/orchestrate-loop.js`)**
+
+The haiku writer retypes every payload as base64, and the chunks that did not arrive were among
+the biggest (12 to 24 events). One writer's leftover temp file decoded to a first chunk copied
+wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
+- **The first flush goes before the first dispatch.** It carries `run.start`, the startup checks and
+  what was absorbed. The run is on disk from its start, and its first chunk is small. It used to wait
+  for the first landing, hours in, with as many as 24 events by then.
+- **A chunk also goes once the buffered events hold `flushBytes` bytes of JSON.** The default is
+  3000; set it in `telemetry.flushBytes`. `flushEvery` still applies.
+- **A chunk the writer did not confirm is sent again once,** in two pieces that carry its events
+  only, with no run.json and no landed delta:
+  - Each piece goes to `<firstSeq>.r1.jsonl`, never over a chunk on disk.
+  - A piece still unconfirmed is lost, and counted.
+  - A resend that writes nothing turns resends off for the run.
+  - `telemetry.journal.resent` counts the chunks sent again.
+- **The final run.json is sent again alone, up to twice, when it was not confirmed.** Nothing after
+  the run's end rewrites it. `telemetry.journal.runJsonResent` counts these resends.
+- **A flush's landed delta is capped at 4,000 bytes as well as 8 tasks;** one task always goes.
+- A writer returning nothing still marks the writer dead after two in a row, resends included, and
+  nothing is resent once it is dead.
+- **The writer is a file now, not text the haiku retypes.** `workflows/scripts/journal-writer.sh`
+  holds the lock, the attempt registry, the decoding and the checks, and ships with the engine
+  copy, next to the briefs. It is the engine's `JOURNAL_WRITER` byte for byte:
+  `npm run journal:writer` writes it, and a test and `npm run check` compare it.
+  - A flush now retypes under 1 kB of shell besides its payloads, against about 5 kB before.
+  - Each flush checks the file's cksum before it sources it. A missing or altered file prints
+    `WRITER missing` and writes nothing; that flush and every later one then carry the writer
+    inline. `telemetry.journal.inlineWriter` says so.
+  - `scriptsDir` overrides where the file is; the default is next to `briefsDir`.
+- Each event is serialized once: the byte count and the chunk share its line.
+
+**Loop (`workflows/orchestrate-loop.js`)**
+
+The ship lock no longer lets two ships in at once. Two waiters on a dead ship's lock could both
+remove it, the slower one after a third waiter had taken it fresh, and two ships then held the lock
+(`workflows/tests/run-durability-final.test.mjs` F-6 replays each case on a simulated clock in bash,
+zsh and dash; F-3 still runs six real waiters). Four bugs, all fixed:
+- **A breaker's mutex could be broken too soon.** A takeover runs under a second `mkdir` mutex,
+  `<lock>.brk`. A waiter read the mutex's time stamp before its breaker had written it, took it
+  for 0 s old (so stale), and removed it while its breaker was still inside. The mutex now holds
+  its breaker's pid, as the journal's lock does: it is broken once that pid is gone, or, with no
+  pid in it, once 5 s old by its own age. The owner line is read again under the mutex and
+  compared whole before the lock is removed.
+- **A lock with no owner line was judged by the waiter's age.** One that had waited 10 s took over
+  a lock made a moment ago, before its taker wrote its owner line. Such a lock is now taken over
+  once 10 s old by its own age (its mtime, against a stamp the waiter makes beside it).
+- **A holder ignored a failed owner write.** It held the lock with no owner line in it, open to
+  takeover. Now it removes the lock and fails with `LOCK error`.
+- **The gate's release removed whatever lock was there.** The gate releases "the moment it stops",
+  so one whose take came back `LOCK busy` removed the live ship's lock it had waited for. Its take
+  and release are different shells, so the engine now gives each gate dispatch a holder id,
+  written where a ship writes its pid. The release removes the lock only while the owner line
+  still names that id as `gate`; otherwise it prints `LOCK kept` and leaves it. A ship or the seal
+  already removed the lock only while it named its own pid, and now says `LOCK kept` too when it
+  was taken over meanwhile.
+
+Three liveness fixes:
+- After a takeover, `mkdir` is tried again at once, before the wait's budget is checked: a waiter
+  used to report `LOCK busy` just after clearing a stale lock.
+- A busy mutex is waited for with a backoff (0.1 s doubling to 1 s). Five instant tries used to
+  give up in about 0.1 s with `LOCK error`.
+- A lock released between a failed `mkdir` and the check that it exists is tried again; it used
+  to read as `cannot create (not writable?)`.
+
+Every change of hands now happens under one mutex, as in the journal's lock: take, takeover,
+release, and the gate heartbeat's rewrite all run under `<lock>.brk`
+(F-6 replays each window below, red first). The fixes:
+- **A release could race a takeover.** The gate's release, finding no lock, still ran `rm`, so a
+  ship that took the lock in between lost it. A ship's release could remove a lock taken over
+  after it read its owner line. A release now reads and compares the owner line in the mutex, and
+  removes nothing when there is no lock. A takeover takes the lock in the same section, so no one
+  sees the gap.
+- **The heartbeat could overwrite a new holder.** It read the owner line, then wrote the gate's
+  over a halt ship or seal that had taken the lock over. It now renews the line in the mutex, only
+  while the line names this gate (its id survives), and otherwise stops with a `LOCK kept` line.
+- **A mutex could stick forever.** If its holder was SIGKILLed inside and its pid then reused,
+  every ship and gate reported `LOCK busy`. A mutex unchanged for 30 s is now broken, even when its
+  pid looks alive. That is thousands of times the section it guards, and under the gate's 90-s wait.
+- **A breaker acted on a mutex that was not its own.** Its pid write was unchecked, and nothing
+  re-read the pid before the `rm`. The pid is now written and read back before anything is done,
+  and read again right before the lock is removed or rewritten. A holder that finds another's pid
+  there backs off and touches nothing.
+- **Stamps were left behind.** A waiter killed with SIGKILL left its `<lock>.<pid>.l` or `.b` in
+  the git dir. A take now removes the stamps whose pid is gone, never a live waiter's.
+
+The gate's release is a script now (a code block in the gate prompt, no longer an inline
+command), and the ship brief says what a `LOCK kept` line means: another holder has the lock, and
+the ship leaves it alone. The messages and exit codes are unchanged.
+
+**The ship lock is a file now, not text the agents retype.** `workflows/scripts/ship-lock.sh`
+holds the lock's functions (the mutex, the take, the release, the gate's heartbeat, the ship's
+unlock) and ships with the engine copy, next to the briefs. It is the engine's `SHIP_LOCK` byte
+for byte: `npm run ship:lock` writes it, and a test and `npm run check` compare it.
+- The gate's prompt is back to about 7 kB, from 18 kB: its take, release and push carry about
+  2.5 kB of shell between them, against 13.4 kB. A ship retypes about 9 kB of its script, against
+  15.7 kB, and the seal 4 kB, against 10.6 kB.
+- Each lock script checks the file's cksum before it sources it, so the functions run in the
+  script's own shell as before. The windows the one mutex closed stay closed, and the `LOCK`
+  messages and exit codes are unchanged.
+- A missing or altered file prints `LOCK missing` and moves nothing (`lockMissing` in a ship's or
+  the seal's receipt, `failedStep: 'lock'` from the gate). That dispatch is sent again, and every
+  later lock script carries the functions inline; `telemetry.inlineShipLock` says so. A gate sent
+  again runs its gate command once more.
+- `scriptsDir` locates it, as it does the journal writer's.
+
 **Tests (`scripts/run-tests.mjs`, the loop-durability files)**
 
 The suite took about 9½ minutes, one file after another, and six loop-durability files spent
@@ -551,6 +568,27 @@ most of that waiting, not computing.
   held on CI, rounded down: the gate's three lock scripts under 2,300 bytes (1,981 today), its
   prompt under 7,700, the ship script under 9,350 and 6,100 fewer than inline, the seal under
   4,400. A 351-byte addition to the lock scripts, which the old bound let through on CI, fails it.
+
+### Upgrading from 0.11.0
+Nothing to change in `grimoire.config.json`: every new key is optional, and the loop reads none of
+the `manager` block.
+- Update the installed plugin (`/plugin update grimoire@grimoire`) and restart Claude Code. The
+  engine copy (`.grimoire/engine-0.12.0/`) now holds `scripts/`, the journal writer and the ship
+  lock, beside the briefs.
+- Re-run `/grimoire:setup` to opt into the briefing. It shows one diff (the `manager` block, a
+  `repos[].remote` per nested clone, the `gh` permission rules) and writes only what you
+  approve; `.claude/settings.json` you apply yourself, with the command it prints. Once a
+  schedule is set, re-run it after every `/plugin update`: the headless allow rules name the
+  version-pinned plugin root.
+- The guard now sees MCP calls. The plugin's scouts and `reviewer` are refused an MCP write and
+  report it in their result for the main session to apply; the project's own agents, named in
+  `repos` or `specialists`, are never blocked.
+- `tracker-scout` inherits the session's tools, the claude.ai connectors included, minus Write,
+  Edit, MultiEdit and NotebookEdit.
+- A new `SessionStart` hook prints the briefing's headline. It prints nothing until the first
+  `/grimoire:manager` run.
+- `/grimoire:logs` reads 0.11.0 journals as they are: a chunk they lost is now counted, and a
+  drained run whose last run.json write was lost no longer reads as `running`.
 
 ## 0.11.0 — trust and see
 
