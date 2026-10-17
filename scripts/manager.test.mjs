@@ -980,6 +980,12 @@ try {
     const wd = [['weekdays 08:30', true], ['30 8 * * 1-5', true], ['15 * * * 1-5', true], ['daily', false], ['30 8 * * *', false], ['30 8 * * 1', false], [null, false]]
       .filter(([when, want]) => mod.readSchedule(when).weekdays !== want).map(([when]) => JSON.stringify(when))
     ok(!wd.length, `readSchedule says which schedules skip the weekend: "weekdays" and a cron on 1-5 (${wd.join(', ') || 'all'})`)
+    // cron's names read as its numbers; a day of the month of 1-31 is every day
+    const WEEK_MS = 7 * DAY
+    const names = [['30 8 * * mon-fri', DAY, true], ['30 8 * * MON-FRI', DAY, true], ['30 8 * * mon', WEEK_MS, false], ['0 9 * * sat,sun', WEEK_MS, false], ['30 8 1-31 * 1-5', DAY, true],
+      ['30 8 1-31 * *', DAY, false], ['0 9 * jan-dec mon-fri', DAY, true], ['0 9 * * funday', DAY, false]]
+      .filter(([when, ms, weekdays]) => { const r = mod.readSchedule(when); return r.interval !== ms || r.weekdays !== weekdays }).map(([when]) => when)
+    ok(!names.length, `day and month names in a cron (mon-fri is 1-5, mon a week), and 1-31 as every day of the month (${names.join(', ') || 'all'})`)
   }
 
   section('headline: partial, the page, a linked worktree')

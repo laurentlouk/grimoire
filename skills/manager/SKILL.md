@@ -11,7 +11,7 @@ The briefing answers "what needs us, and what can AI take?" from the tracker, th
 
 **Explore before asking; don't guess.** Read `grimoire.config.json` before asking which tracker, team or project to read. Ask only what the config and the code can't settle: which scope to read when no source has one, or whether to go ahead when a source fails.
 
-**Headless runs.** A run is headless when it can't ask the user: there is no AskUserQuestion tool (a `claude -p` run; `--permission-prompts none` removes it), or the prompt says it is a scheduled run (the desktop task `/grimoire:setup` creates sends `/grimoire:manager scheduled <project path>`). A path given that way is the project root: work there, with absolute paths. Headless:
+**Headless runs.** A run is headless when it can't ask the user: there is no AskUserQuestion tool (a `claude -p` run; `--permission-prompts none` removes it), or the prompt says it is a scheduled run (the desktop task and the crontab line `/grimoire:setup` proposes both send `/grimoire:manager scheduled "<project path>"`). A path given that way is the project root: work there, with absolute paths. Headless:
 - **Ask nothing.** A source with no scope is not read: it is `failed` with the reason `no scope set` and the fix `/grimoire:setup`. A source that fails is listed as not checked, and the briefing goes ahead.
 - **A call refused** because nobody can answer its permission prompt is not retried. The source it was for is `failed`, reason `denied in a headless run`, fix `allow its read tools: /grimoire:setup's schedule step`.
 - **The scratch files** (step 3) go in `<project>/.grimoire/manager/input/`, gitignored, instead of a scratchpad: the schedule's permission rules let the run write there and nowhere else.

@@ -359,14 +359,19 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     app's `create_scheduled_task`): a local cron expression (weekdays 08:30 proposed, the time is
     the user's) and the prompt `/grimoire:manager scheduled <project path>`, created only on the
     user's yes to the schedule, and updated, never duplicated, on a re-run;
-  - **otherwise a crontab line** the user installs: `cd <project> && <claude> -p
-    "/grimoire:manager" --permission-prompts none [--max-budget-usd <budgetUsd>] >>
+  - **otherwise a crontab line** the user installs: `cd "<project>" && mkdir -p .grimoire/manager
+    && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN <claude> -p '/grimoire:manager scheduled
+    "<project>"' --permission-prompts none [--max-budget-usd <budgetUsd>] >>
     .grimoire/manager/cron.log 2>&1`, with a `PATH=` line for `node` and `gh`. Never `--bare`
-    (it needs `ANTHROPIC_API_KEY`), and no key anywhere;
+    (it needs `ANTHROPIC_API_KEY`), and no key anywhere: `env -u` drops one the shell or cron
+    inherited, which `claude -p` would otherwise use instead of the login;
   - the `permissions.allow` rules a headless run needs (each source's read tools by name, the
-    briefing's script and its input folder), for the user to apply; then a headless probe,
-    `claude -p "<one read per source>" --permission-prompts none`, run only on a yes. A source that
-    fails headless is flagged with its fix, and a schedule whose probe passed gets `verifiedAt`;
+    briefing's script and its input folder), for the user to apply. They name the version-pinned
+    plugin root, so re-run `/grimoire:setup` after `/plugin update`. Then a headless probe,
+    `env -u … claude -p "<one read per source>" --permission-prompts none`, run only on a yes; the
+    `runs` source is read through the `manager.mjs` call, as a scheduled briefing reads it. A
+    source that fails headless is flagged with its fix, and a schedule whose probe passed gets
+    `verifiedAt`. Creating the schedule is a second yes;
   - `manager.schedule` is `{kind: 'desktop-task' | 'cron', when, taskId?, verifiedAt?}`, and
     `budgetUsd` is the user's call, proposed and said so.
 - **Headless briefings carry the launch prompts.** A run that can't ask (no AskUserQuestion, a
@@ -376,9 +381,10 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   repos, as `launch-plan` does; without it there is no such section.
 - **"Stale" reads the schedule better** (ODY-873's review): a cron restricted to some days of the
   week other than `1-5`, or to a day of the month, reads as a week, not 24 h; "weekdays" and a
-  `1-5` cron skip the weekend, so Friday's briefing is fresh until Monday's run; and a 15 minute
+  `1-5` cron skip the weekend, so Friday's briefing is fresh until Monday's run (cron's day names
+  read as its numbers, `mon-fri` as `1-5`, and a day of the month of `1-31` is every day); and a 15 minute
   grace comes before "stale" (a desktop task starts a few minutes late). Whole days are added on
-  the calendar, so a DST change keeps the run's hour. Checks: `scripts/manager.test.mjs` (406 in
+  the calendar, so a DST change keeps the run's hour. Checks: `scripts/manager.test.mjs` (407 in
   all), and the evals `setup-12` (a desktop task proposed, nothing created before a yes) and
   `setup-13` (a crontab line, no `--bare`).
 

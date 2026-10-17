@@ -948,7 +948,9 @@ export function frontMatter(text) {
 // { interval: ms, weekdays: true when it skips Saturday and Sunday }.
 //   a cron line   `0 * * * *` and any fixed minute: hourly · `*/15 * * * *` every 15 min ·
 //                 `0 */6 * * *` every 6 h · a fixed hour: daily · day of the week `1-5`: the same,
-//                 on weekdays · any other restricted day of the week (`30 8 * * 1`, `0 9 * * 1,4`)
+//                 on weekdays (names read as cron's numbers, so `mon-fri` is `1-5`; a day of the
+//                 month of `*` or `1-31` is every day) · any other restricted day of the week
+//                 (`30 8 * * 1`, `0 9 * * mon,thu`)
 //                 or a restricted day of the month (`0 9 1 * *`): a week (7 days), a weekly
 //                 schedule's gap (so a monthly one reads as stale after a week, not after a day)
 //   text          "hourly", "every N minutes | hours | days", "weekly", a day's name ("every
@@ -957,14 +959,20 @@ export function frontMatter(text) {
 // Anything else is 24 h, every day: "daily", no schedule, and text it can't read.
 const WEEK = 7 * DAY
 const EVERY_DAY = new Set(['*', '0-6', '0-7', '1-7'])
+const EVERY_DATE = new Set(['*', '1-31'])
+// cron's names, as numbers: the day of the week (sun 0 … sat 6; mon-fri is 1-5) and the month
+const DOW_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const cronNames = (f, names, first) => f.replace(/[a-z]+/g, (w) => (names.includes(w) ? String(names.indexOf(w) + first) : w))
 export function readSchedule(schedule) {
   const when = typeof schedule === 'string' ? schedule : isObj(schedule) && typeof schedule.when === 'string' ? schedule.when : ''
   const s = when.trim().toLowerCase()
   const cron = s.split(/\s+/)
+  if (cron.length === 5) { cron[3] = cronNames(cron[3], MONTH_NAMES, 1); cron[4] = cronNames(cron[4], DOW_NAMES, 0) }
   if (cron.length === 5 && cron.every((f) => /^[\d*,/-]+$/.test(f))) {
     const step = (f) => { const m = /^\*\/(\d+)$/.exec(f); return m && +m[1] > 0 ? +m[1] : null }
     const [min, hour, dom, , dow] = cron
-    if (dom !== '*' || (dow !== '1-5' && !EVERY_DAY.has(dow))) return { interval: WEEK, weekdays: false }
+    if (!EVERY_DATE.has(dom) || (dow !== '1-5' && !EVERY_DAY.has(dow))) return { interval: WEEK, weekdays: false }
     const interval = hour === '*' ? (min === '*' ? MINUTE : step(min) ? step(min) * MINUTE : HOUR) : step(hour) ? step(hour) * HOUR : DAY
     return { interval, weekdays: dow === '1-5' }
   }

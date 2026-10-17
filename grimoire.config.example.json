@@ -32,7 +32,7 @@
     "maxItemsPerSource": 200,
     "schedule": { "kind": "desktop-task", "when": "30 8 * * 1-5", "taskId": "grimoire-manager-acme", "verifiedAt": "2026-10-16T09:45:00Z" },
     "share": null,
-    "budgetUsd": 1
+    "budgetUsd": null
   },
   "repos": [
     {
