@@ -120,7 +120,7 @@ wrong and cut short, and the engine counted an unconfirmed chunk and dropped it.
 - **The writer is a file now, not text the haiku retypes.** `workflows/scripts/journal-writer.sh`
   holds the lock, the attempt registry, the decoding and the checks, and ships with the engine
   copy, next to the briefs. It is the engine's `JOURNAL_WRITER` byte for byte:
-  `npm run journal:writer` writes it, and a test checks it.
+  `npm run journal:writer` writes it, and a test and `npm run check` compare it.
   - A flush now retypes under 1 kB of shell besides its payloads, against about 5 kB before.
   - Each flush checks the file's cksum before it sources it. A missing or altered file prints
     `WRITER missing` and writes nothing; that flush and every later one then carry the writer
@@ -185,6 +185,22 @@ release, and the gate heartbeat's rewrite all run under `<lock>.brk`
 The gate's release is a script now (a code block in the gate prompt, no longer an inline
 command), and the ship brief says what a `LOCK kept` line means: another holder has the lock, and
 the ship leaves it alone. The messages and exit codes are unchanged.
+
+**The ship lock is a file now, not text the agents retype.** `workflows/scripts/ship-lock.sh`
+holds the lock's functions (the mutex, the take, the release, the gate's heartbeat, the ship's
+unlock) and ships with the engine copy, next to the briefs. It is the engine's `SHIP_LOCK` byte
+for byte: `npm run ship:lock` writes it, and a test and `npm run check` compare it.
+- The gate's prompt is back to about 7 kB, from 18 kB: its take, release and push carry about
+  2.5 kB of shell between them, against 13.4 kB. A ship retypes about 9 kB of its script, against
+  15.7 kB, and the seal 4 kB, against 10.6 kB.
+- Each lock script checks the file's cksum before it sources it, so the functions run in the
+  script's own shell as before. The windows the one mutex closed stay closed, and the `LOCK`
+  messages and exit codes are unchanged.
+- A missing or altered file prints `LOCK missing` and moves nothing (`lockMissing` in a ship's or
+  the seal's receipt, `failedStep: 'lock'` from the gate). That dispatch is sent again, and every
+  later lock script carries the functions inline; `telemetry.inlineShipLock` says so. A gate sent
+  again runs its gate command once more.
+- `scriptsDir` locates it, as it does the journal writer's.
 
 **Setup (`skills/setup`, `scripts/config-merge.mjs`)**
 
@@ -522,6 +538,12 @@ most of that waiting, not computing.
 - **`run-durability-final`'s lock trial was flaky for a reason:** it catches a real race in the
   ship lock, where two breakers can both take a stale lock and two ships end up inside at once.
   The engine fix is its own change.
+- **The ship lock's fallback is tested too.** F-6 runs every case through `ship-lock.sh` and
+  through the inline fallback, in each shell. It starts first and runs while F-1 … F-5 wait on
+  real locks, so `run-durability-final` takes about 14 s instead of 20.
+  `GRIMOIRE_TEST_SHIP_LOCK=inline` runs any loop test file against the fallback, and
+  `run-durability-shiplock` covers the file's drift check, a missing file, an altered one, and a
+  gate and a seal sent again.
 
 ## 0.11.0 — trust and see
 

@@ -18,7 +18,7 @@
 // The scripts run for real in bash, zsh and dash (those installed), side by side, each against a temp git
 // sandbox of its own with a fake gh. Integrate's re-ask and the dispatches after the run returns are in run-durability-delivery-fix.
 
-import { run, by, happy, T, impl, BLOCKED, QUIET, PR_URL, RUN_BRANCH, GITENV, body, heredocs, unb64, sandbox, getScripts, scriptOf, realRepo, SHELLS, spawn, spawnSync, mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync, join, tick } from './support/script-harness.mjs'
+import { run, by, happy, T, impl, BLOCKED, QUIET, PR_URL, RUN_BRANCH, GITENV, body, heredocs, unb64, sandbox, getScripts, scriptOf, lockPrefix, realRepo, SHELLS, spawn, spawnSync, mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync, join, tick } from './support/script-harness.mjs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -371,11 +371,11 @@ const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
     const X = sandbox()
     const c1 = X.commit('c1')
     const land = scriptOf((await getScripts(X, c1)).land)
-    const prefix = land.slice(0, land.indexOf('if shiplock ship; then LK=1'))
+    const { prefix, close } = lockPrefix(land)
     const holder = spawn('sleep', ['60'])
     const LK = join(X.W, '.git', 'grimoire-ship-api.lock')
     rmSync(LK, { recursive: true, force: true }); mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `${holder.pid} ${Math.floor(Date.now() / 1000)} ship\n`)
-    const r = await execA(X, SHELL, `${prefix}\nif shiplock ship; then echo GOT; shipunlock; fi`, { GRIMOIRE_SHIP_LOCK_WAIT: '2', PATH: `${NODATE}:${X.BIN}:${process.env.PATH}` }, { timeout: 20000, killSignal: 'SIGKILL' })
+    const r = await execA(X, SHELL, `${prefix}\nif shiplock ship; then echo GOT; shipunlock; fi${close}`, { GRIMOIRE_SHIP_LOCK_WAIT: '2', PATH: `${NODATE}:${X.BIN}:${process.env.PATH}` }, { timeout: 20000, killSignal: 'SIGKILL' })
     holder.kill()
     ok(r.signal === null && /^LOCK busy: held by ship /m.test(r.out) && r.ms < 8000, `${SHELL}: LOCK busy in ${r.ms} ms (it waited forever)`)
     X.done()

@@ -25,6 +25,7 @@ import { readFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync,
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { lockArgs, lockShim } from './support/script-harness.mjs'
 
 const DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -84,7 +85,7 @@ const indexOf = (tasks, extra) => ({
 
 async function run(scenario, tasks, responder, { args = {}, index = {} } = {}) {
   const calls = []
-  const agent = async (prompt, opts = {}) => {
+  const agent = lockShim(async (prompt, opts = {}) => {
     const label = opts.label || '?'
     calls.push({ label, prompt, opts })
     if (label === 'parse-index') return typeof index === 'function' ? index(prompt) : indexOf(tasks, index)
@@ -93,11 +94,11 @@ async function run(scenario, tasks, responder, { args = {}, index = {} } = {}) {
     if (label === 'ledger') return { path: 'runs/x.json', branch: 'harness/run-x' }
     if (label === 'crystallize') return { reports: [], skillsCreated: [], skillsPatched: [], memoryEntriesAdded: 0, docsSynced: [], prUrl: '', summary: '' }
     return responder(label, prompt, opts, calls)
-  }
+  })
   const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
   const fn = new AsyncFunction('agent', 'parallel', 'pipeline', 'log', 'phase', 'args', 'budget', 'workflow', body)
   const logs = []
-  const result = await fn(agent, parallel, async () => {}, (m) => logs.push(m), () => {}, { ...INPUTS, execute: true, ...args },
+  const result = await fn(agent, parallel, async () => {}, (m) => logs.push(m), () => {}, { ...INPUTS, execute: true, ...lockArgs, ...args },
     { total: null, spent: () => 0, remaining: () => Infinity }, async () => {})
   console.log(`\n── ${scenario}`)
   const labels = calls.map((c) => c.label)
@@ -434,7 +435,7 @@ esac
     const pr = /^PR ok=(\d)(?: url=(\S*))?/m.exec(out) || []
     const draft = /^DRAFT (\w+)/m.exec(out)
     const failedStep = push[1] === '0' ? 'push' : pr[1] === '0' ? 'pr' : /^COMMENT ok=0/m.test(out) ? 'comment' : undefined
-    return { pushed: push[1] === '1', remoteHead: (/remote=(\S+)/.exec(out) || [])[1] || '', prUrl: pr[2] || '', draft: draft ? draft[1] === 'true' : undefined, hookBlocked: push[2] === '1', failedStep, detail: out.slice(-300), _out: out }
+    return { pushed: push[1] === '1', remoteHead: (/remote=(\S+)/.exec(out) || [])[1] || '', prUrl: pr[2] || '', draft: draft ? draft[1] === 'true' : undefined, hookBlocked: push[2] === '1', lockMissing: /^LOCK missing/m.test(out), failedStep, detail: out.slice(-300), _out: out }
   }
   const outs = {}
   const REAL = [{ name: 'api', path: W, agent: 'backend-engineer', tags: ['backend'], gate: null }]

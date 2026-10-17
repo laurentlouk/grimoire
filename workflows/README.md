@@ -148,7 +148,7 @@ ignored, with a warning.)
 | `runsDir` | `runs` | where run ledgers are written |
 | `briefsDir` | `workflows/briefs` | where the dispatch briefs live |
 | `personasDir` | `workflows/personas` | where the review lenses live |
-| `scriptsDir` | next to `briefsDir` (`…/scripts`) | where the journal writer's file lives (`journal-writer.sh`); a missing or altered file makes the run carry the writer inline |
+| `scriptsDir` | next to `briefsDir` (`…/scripts`) | where the journal writer's and the ship lock's files live (`journal-writer.sh`, `ship-lock.sh`); a missing or altered file makes the run carry that text inline |
 | `worktreeDir` | `.worktrees` | where parallel lanes are checked out |
 | `baseBranch` | `origin/main` | the integration branch lanes branch from and reviews/sweeps diff against (`origin/master`, `origin/trunk`, …) |
 | `requireHook` | `null` | `{name, check, fix?, raw?}` — refuse to execute unless a tool hook is installed and registered in this session. `raw` (e.g. `'rtk proxy'`) is the prefix that runs a command with its output uncompressed: implement and gate prompts tell the agent to re-run a command as `<raw> <cmd>` when its output is empty, garbled or contradicts its exit code (without `raw`, the same rule without a command) |
@@ -625,7 +625,20 @@ worktree and one PR. So:
   and the generation of the body it closes (`ship`, one more for every ship and gate of the
   session), and a ship that finds a later generation of its own session on the PR leaves the
   description alone;
-- the scripts are POSIX sh and run as they are under bash, zsh and dash (a guarded `cd`).
+- the scripts are POSIX sh and run as they are under bash, zsh and dash (a guarded `cd`);
+- the lock's functions (the mutex, the take, the release, the gate's heartbeat, the ship's unlock)
+  are a file that ships with the engine copy, next to the briefs: `<scriptsDir>/ship-lock.sh`,
+  `SHIP_LOCK` in the engine byte for byte (`npm run ship:lock` writes it; a test and the drift
+  check compare it). Every ship, seal and gate lock script sets what the functions read (the
+  checkout, the lock's path, the wait), checks the file's cksum and sources it, so they run in the
+  script's own shell, as they did inline. The agents used to retype them: about 13 kB per repo for
+  the gate (its prompt grew from about 10 kB to 18 kB; it is about 7 kB now) and 7 kB per ship, and
+  a mistyped line is a broken lock. A script that finds the file missing or altered prints
+  `LOCK missing` and does nothing (`lockMissing` in a ship's or the seal's receipt,
+  `failedStep: 'lock'` from the gate): the engine sends it again with the functions inline, and
+  every later lock script too, each with only the parts it calls (`telemetry.inlineShipLock`). A
+  gate sent again runs its gate command once more, a cost only a run whose engine copy lost the
+  file before any ship found it pays (`deliver: 'end'`).
 
 **No forged marker.** Text from outside the engine (tracker titles, implementer summaries, a halt
 reason, the project text) could carry `<!--` and `-->` into a PR body: an issue titled
@@ -819,8 +832,8 @@ writer per chunk (`briefs/journal.md`) runs a short script: it sets the run dire
 the chunk's name and each payload's cksum, writes the payloads, checks that
 `<scriptsDir>/journal-writer.sh` is this engine's writer (its cksum) and sources it. The writer is
 `JOURNAL_WRITER` in the engine, byte for byte (`node scripts/build-journal-writer.mjs` writes the
-file, and a test checks it); it ships with the engine copy `/orchestrate` makes, next to the
-briefs. The haiku once retyped all of it, about 5 kB of shell, on every flush, with the payloads;
+file; a test and the drift check compare it); it ships with the engine copy `/orchestrate` makes,
+next to the briefs. The haiku once retyped all of it, about 5 kB of shell, on every flush, with the payloads;
 it now retypes under 1 kB and the payloads. A flush that finds the file missing or different
 prints `WRITER missing` and writes nothing (`writer: 'missing'` in its receipt): the engine sends
 it again with the writer inline, and every later script too (`telemetry.journal.inlineWriter`).

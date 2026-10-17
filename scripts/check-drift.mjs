@@ -28,10 +28,15 @@
 //                engine reads timeoutMin at repo level).
 //   8 harness    .harness/mcp-policy.json keeps defaultDeny, auditLog, requireApprovalForDangerous;
 //                approvedServers == the .mcp.json servers; .harness/manifest.json is current.
+//   9 scripts    workflows/scripts/journal-writer.sh and ship-lock.sh are the engine's text, byte for
+//                byte (what build-journal-writer --check and build-ship-lock --check say): a run whose
+//                file differs carries that text inline in every script.
 // Plain Node, no dependencies.
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { SURFACE, sha256 } from './harness-manifest.mjs'
+import { writerText, WRITER_FILE } from './build-journal-writer.mjs'
+import { lockText, LOCK_FILE } from './build-ship-lock.mjs'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const rel = (...p) => path.join(ROOT, ...p)
@@ -237,6 +242,15 @@ group('harness · .harness/ policy and manifest', (bad) => {
   const stale = SURFACE.filter((f) => manifest.files?.[f] !== sha256(f))
   if (manifest.version !== plugin.version) stale.push('version')
   if (stale.length) bad(`.harness/manifest.json is stale (${stale.join(', ')}): npm run harness:manifest`)
+})
+
+// ─────────────────────────── 9 · scripts ───────────────────────────
+group('scripts · workflows/scripts/ generated from the engine', (bad) => {
+  for (const [file, text, cmd] of [[WRITER_FILE, writerText, 'build-journal-writer'], [LOCK_FILE, lockText, 'build-ship-lock']]) {
+    let current = null
+    try { current = readFileSync(file, 'utf8') } catch {}
+    if (current !== text()) bad(`${path.relative(ROOT, file)} differs from the engine's text: node scripts/${cmd}.mjs`)
+  }
 })
 
 // ─────────────────────────── report ───────────────────────────
