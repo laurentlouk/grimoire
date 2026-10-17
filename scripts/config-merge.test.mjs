@@ -743,6 +743,13 @@ try {
     writeFileSync(join(a, 'proposal.json'), pretty({ manager: { sources: [LINEAR] } }))
     const v = json(cli(a, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
     same(v && v.changed.map((c) => c.path), ['manager.sources'], 'two sources with one id are not keyable: the array is one value, CHANGED whole')
+
+    // manager.share (ODY-877): kind, target and hint only make sense together
+    const s = project()
+    writeFileSync(join(s, 'grimoire.config.json'), pretty({ manager: { share: { kind: 'github-issue', target: 'acme/app', hint: 'gh CLI, authenticated' } } }))
+    writeFileSync(join(s, 'proposal.json'), pretty({ manager: { share: { kind: 'linear-document', target: 'ODY', hint: 'mcp__abc__* (Linear)' } } }))
+    const sh = json(cli(s, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
+    same(sh && sh.changed.map((c) => c.path), ['manager.share'], 'manager.share is one CHANGED key, never its kind without its target')
   }
 
   // ══════ 22 · .mcp.json read through the script ══════

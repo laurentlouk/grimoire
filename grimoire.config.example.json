@@ -31,6 +31,7 @@
     "repoLabels": { "backend": "api", "frontend": "mobile", "infra": "infra" },
     "maxItemsPerSource": 200,
     "schedule": { "kind": "desktop-task", "when": "30 8 * * 1-5", "taskId": "grimoire-manager-acme", "verifiedAt": "2026-10-16T09:45:00Z" },
+    "$comment": "share: null (the default) shares nothing. Opt in at /grimoire:setup with {kind: linear-document | github-issue | slack-canvas, target, hint}: one rolling post the team reads, replaced by every briefing (workflows/README.md).",
     "share": null,
     "budgetUsd": null
   },

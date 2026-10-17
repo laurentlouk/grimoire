@@ -313,6 +313,21 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   left out) to the front matter, and `headline` appends `· 2 runs need you · 1 PR failing CI` after
   the ready-for-AI part when either is above 0. An older `latest.md` without the keys gives the
   same line as before.
+- **A shared briefing post, opt-in, replaced on every run.** `manager.share` (`null` by default,
+  chosen at setup: a Linear document, a GitHub issue labelled `grimoire-briefing`, or a Slack
+  canvas when the session has the Slack connector, replaced in place with no channel message)
+  gives the team one view. `brief` now saves its view model as `latest.json`; `manager.mjs
+  share-body` renders the post from it in Markdown: the groups, reasons, next steps, counts, Not
+  checked and "≥ N", without the new and changed badges or a repo's availability (one person's
+  ledger, one machine's checkouts), ending "generated
+  by <git user.name> · at <time> · covering <sources>", with a hidden `<!-- grimoire:manager-briefing
+  v1 -->` marker the skill finds its own post by (a canvas, by its id). Ticket text is escaped as
+  in the briefing, its @mentions broken so the post notifies no one, and the body cut to a GitHub
+  issue's 65,536 characters with "… N more". The skill's Share step finds the post through the
+  vendor's tool, replaces it or creates it, and records the outcome with `share-status`: a failure
+  is a "Share: failed (<reason>)" line in the local briefing, never filed anywhere. It is the
+  manager's only write. `config-merge.mjs` compares `manager.share` whole. Checks:
+  `scripts/manager.test.mjs` (401 in all, with launching), `scripts/config-merge.test.mjs`.
 - **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
   absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
   reported by the skill", and makes the briefing partial; without `--sources`, a configured source
@@ -377,15 +392,17 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
 - **Headless briefings carry the launch prompts.** A run that can't ask (no AskUserQuestion, a
   `-p` run, a scheduled prompt) skips the checkboxes and runs `brief --headless`: the briefing ends
   with **Launch prompts**, `launch-plan`'s prompt for every issue in Hand to AI, one per project,
-  each in a fence nothing in it can close, ids, routes and repo paths only. `--headless` checks the
+  each in a fence nothing in it can close, ids, routes and repo paths only. The opt-in shared post
+  still goes out (the user's standing ask); its write needs its own allow rule, else the share is
+  recorded as failed. `--headless` checks the
   repos, as `launch-plan` does; without it there is no such section.
 - **"Stale" reads the schedule better** (ODY-873's review): a cron restricted to some days of the
   week other than `1-5`, or to a day of the month, reads as a week, not 24 h; "weekdays" and a
   `1-5` cron skip the weekend, so Friday's briefing is fresh until Monday's run (cron's day names
   read as its numbers, `mon-fri` as `1-5`, and a day of the month of `1-31` is every day); and a 15 minute
   grace comes before "stale" (a desktop task starts a few minutes late). Whole days are added on
-  the calendar, so a DST change keeps the run's hour. Checks: `scripts/manager.test.mjs` (407 in
-  all), and the evals `setup-12` (a desktop task proposed, nothing created before a yes) and
+  the calendar, so a DST change keeps the run's hour. Checks: `scripts/manager.test.mjs` (426 in
+  all, with the shared post), and the evals `setup-12` (a desktop task proposed, nothing created before a yes) and
   `setup-13` (a crontab line, no `--bare`).
 
 **Tests (`scripts/run-tests.mjs`, the loop-durability files)**
