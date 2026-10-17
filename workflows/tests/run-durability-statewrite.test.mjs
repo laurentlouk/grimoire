@@ -24,9 +24,11 @@
 //    • THE HALT KIND WAS NOT JOURNALED — the halt event and run.json's summary carry it now.
 //
 //  Same stubbed runtime as the other loop tests. Every writer script here is RUN, in bash, zsh and
-//  dash (whichever exist), against temp directories.
-import { readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, symlinkSync } from 'node:fs'
+//  dash (whichever exist), against temp directories. The shells' cases run side by side (`together`),
+//  each shell's in order, and print in shell order.
+import { readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, symlinkSync, cpSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -36,9 +38,20 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const body = readFileSync(`${DIR}/orchestrate-loop.js`, 'utf8').replace(/^export const meta/m, 'const meta')
 
 let PASS = 0, FAIL = 0
-const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
+// what runs inside `together` is held, and printed once every one of its runs has ended
+const HELD = new AsyncLocalStorage()
+const say = (line) => { const held = HELD.getStore(); if (held) held.push(line); else console.log(line) }
+const ok = (c, m) => { if (c) { PASS++; say(`   ✓ ${m}`) } else { FAIL++; say(`   ✗ FAIL: ${m}`) } }
 const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.stringify(a) === JSON.stringify(b) ? '' : ` (got ${JSON.stringify(a)})`}`)
-const section = (t) => console.log(`\n── ${t}`)
+const section = (t) => say(`\n── ${t}`)
+// fn(x) for every x at once; the lines each one prints come out in the order of xs
+const together = async (xs, fn) => {
+  const held = xs.map(() => [])
+  const runs = await Promise.allSettled(xs.map((x, i) => HELD.run(held[i], () => fn(x))))
+  for (const lines of held) for (const l of lines) say(l)
+  const failed = runs.find((r) => r.status === 'rejected')
+  if (failed) throw failed.reason
+}
 const unb64 = (s) => Buffer.from(String(s).replace(/\s+/g, ''), 'base64').toString('utf8')
 const heredocs = (prompt) => [...prompt.matchAll(/<<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/g)].map((m) => m[1])
 const bashOf = (p) => (/```bash\n([\s\S]*?)\n```/.exec(p) || [])[1] || ''
@@ -103,7 +116,7 @@ const confirming = (p) => {
 }
 const flushOnly = (x) => /^journal#\d+$/.test(x.label) // the flushes, not the resends of a chunk or of the final run.json
 const sh = (shell, script, env) => spawnSync(shell.path, ['-c', script], { encoding: 'utf8', env: env || process.env })
-const shAsync = (shell, script) => new Promise((res) => { const c = spawn(shell.path, ['-c', script]); let out = ''; c.stdout.on('data', (d) => (out += d)); c.on('close', (code) => res({ code, out })) })
+const shAsync = (shell, script, env) => new Promise((res) => { const c = spawn(shell.path, ['-c', script], { env: env || process.env }); let out = ''; c.stdout.on('data', (d) => (out += d)); c.on('close', (code) => res({ code, out })) })
 const retarget = (p, from, to) => bashOf(p).replaceAll(`DIR='${from}'`, `DIR='${to}'`)
 const seqOf = (p) => JSON.parse(unb64(heredocs(p)[1])).checkpoint.lastSeq
 const readRun = (d) => { try { return JSON.parse(readFileSync(join(d, 'run.json'), 'utf8')) } catch { return null } }
@@ -140,6 +153,14 @@ async function capture(name, tasks, { runId = 'run-w', tel, args = {}, index = {
 // ══════════════ W-1 · a corrupt, truncated or undecodable payload never replaces run.json ══════════════
 const TEL1 = fresh('tel')
 const S1 = await capture('W-1 · (capture) three tasks, flushes of 4 events', [T(1), T(2), T(3)], { runId: 'run-w1', tel: TEL1 })
+// S1's first flush, written once per shell by that shell: every W-1 and W-2 case that starts after it
+// starts from a copy (a writer run takes 0.2–0.5 s; a copy, a few ms)
+const FIRST = Object.fromEntries(await Promise.all(SHELLS.map(async (shell) => {
+  const D = join(fresh(`${shell.name}-first`), 'run-w1')
+  await shAsync(shell, retarget(S1.prompts[0].p, S1.dir, D))
+  return [shell.name, D]
+})))
+const afterFirst = (shell) => { const D = join(fresh(shell.name), 'run-w1'); cpSync(FIRST[shell.name], D, { recursive: true }); return D }
 {
   const ps = S1.prompts.map((x) => x.p)
   const first = ps[0], last = ps[ps.length - 1]
@@ -152,35 +173,33 @@ const S1 = await capture('W-1 · (capture) three tasks, flushes of 4 events', [T
     'a stray character inserted': rjBlock.replace(/^(.{20})/m, '$1!'),
   }
   ok(seqOf(last) > seqOf(first), `the late flush (seq ${seqOf(last)}) is newer than the baseline (seq ${seqOf(first)}): only the check can stop it`)
-  for (const shell of SHELLS) {
+  await together(SHELLS, async (shell) => {
     for (const [name, bad] of Object.entries(variants)) {
-      const D = join(fresh(shell.name), 'run-w1')
-      sh(shell, retarget(first, S1.dir, D))
+      const D = afterFirst(shell)
       const before = readFileSync(join(D, 'run.json'), 'utf8')
-      const r = sh(shell, retarget(last, S1.dir, D).replace(rjBlock, bad))
-      const rc = receiptOf(r.stdout)
+      const r = await shAsync(shell, retarget(last, S1.dir, D).replace(rjBlock, bad))
+      const rc = receiptOf(r.out)
       ok(readFileSync(join(D, 'run.json'), 'utf8') === before && rc.runJson === 'bad' && leftovers(D).length === 0,
         `${shell.name} · ${name}: run.json is byte for byte the previous one, the receipt says RUNJSON bad (decoded ${rc.runJsonBytes} of ${expected} bytes${rc.runJsonBytes === expected ? ': the same count, refused on the checksum' : ''}), no temp left`)
     }
     // no decoder at all: neither base64 nor openssl
-    const D = join(fresh(shell.name), 'run-w1')
-    sh(shell, retarget(first, S1.dir, D))
+    const D = afterFirst(shell)
     const before = readFileSync(join(D, 'run.json'), 'utf8')
     const chunksBefore = readdirSync(join(D, 'events'))
-    const none = sh(shell, retarget(last, S1.dir, D), { ...process.env, PATH: binWith([...BASE_TOOLS, 'cksum']) })
-    const rc = receiptOf(none.stdout)
-    ok(readFileSync(join(D, 'run.json'), 'utf8') === before && rc.runJson === 'bad' && rc.lines === 0 && /^CHUNK bad/m.test(none.stdout) && readdirSync(join(D, 'events')).join() === chunksBefore.join() && leftovers(D).length === 0,
+    const none = await shAsync(shell, retarget(last, S1.dir, D), { ...process.env, PATH: binWith([...BASE_TOOLS, 'cksum']) })
+    const rc = receiptOf(none.out)
+    ok(readFileSync(join(D, 'run.json'), 'utf8') === before && rc.runJson === 'bad' && rc.lines === 0 && /^CHUNK bad/m.test(none.out) && readdirSync(join(D, 'events')).join() === chunksBefore.join() && leftovers(D).length === 0,
       `${shell.name} · no base64, no openssl: run.json unchanged, no chunk written, LINES 0, no temp left`)
     // openssl alone decodes; without cksum the byte count alone decides (a truncated payload is still refused)
     const O = join(fresh(shell.name), 'run-w1')
-    const viaOpenssl = receiptOf(sh(shell, retarget(last, S1.dir, O), { ...process.env, PATH: binWith([...BASE_TOOLS, 'cksum', 'openssl']) }).stdout)
+    const viaOpenssl = receiptOf((await shAsync(shell, retarget(last, S1.dir, O), { ...process.env, PATH: binWith([...BASE_TOOLS, 'cksum', 'openssl']) })).out)
     ok(viaOpenssl.runJson === 'ok' && viaOpenssl.runJsonBytes === expected && readRun(O).checkpoint.lastSeq === seqOf(last), `${shell.name} · openssl without base64: decoded, checked, written`)
     const N = join(fresh(shell.name), 'run-w1')
     const noCk = binWith([...BASE_TOOLS, 'base64'])
-    ok(receiptOf(sh(shell, retarget(last, S1.dir, N), { ...process.env, PATH: noCk }).stdout).runJson === 'ok' && readRun(N).checkpoint.lastSeq === seqOf(last), `${shell.name} · no cksum: written on the byte count`)
-    const cut = receiptOf(sh(shell, retarget(last, S1.dir, N).replace(rjBlock, variants['the payload cut off at 60 %']), { ...process.env, PATH: noCk }).stdout)
+    ok(receiptOf((await shAsync(shell, retarget(last, S1.dir, N), { ...process.env, PATH: noCk })).out).runJson === 'ok' && readRun(N).checkpoint.lastSeq === seqOf(last), `${shell.name} · no cksum: written on the byte count`)
+    const cut = receiptOf((await shAsync(shell, retarget(last, S1.dir, N).replace(rjBlock, variants['the payload cut off at 60 %']), { ...process.env, PATH: noCk })).out)
     ok(cut.runJson === 'bad' && readRun(N).checkpoint.lastSeq === seqOf(last), `${shell.name} · no cksum: a truncated payload is still refused`)
-  }
+  })
 }
 {
   // the engine counts a refused or unconfirmed run.json write as lost, like a chunk
@@ -198,12 +217,13 @@ const S1 = await capture('W-1 · (capture) three tasks, flushes of 4 events', [T
 {
   const ps = S1.prompts.map((x) => x.p)
   const older = ps[1], newer = ps[ps.length - 1]
-  for (const shell of SHELLS) {
+  // each shell's 20 races run one after the other, beside the other shells' races: a writer with no
+  // lock and one shared temp name still loses as many (47 of 60 one shell at a time, 51 this way)
+  await together(SHELLS, async (shell) => {
     section(`W-2 · ${shell.name}: 20 races of a late flush (seq ${seqOf(older)}) against the current one (seq ${seqOf(newer)})`)
     let good = 0, rolled = 0, corrupt = 0, litter = 0
     for (let i = 0; i < 20; i++) {
-      const D = join(fresh(shell.name), 'run-w1')
-      sh(shell, retarget(ps[0], S1.dir, D))
+      const D = afterFirst(shell) // after ps[0], the first flush
       const a = shAsync(shell, retarget(older, S1.dir, D))
       await new Promise((r) => setTimeout(r, i % 4))
       const b = shAsync(shell, retarget(newer, S1.dir, D))
@@ -221,7 +241,7 @@ const S1 = await capture('W-1 · (capture) three tasks, flushes of 4 events', [T
     const o = readRun(D)
     ok(o && o.checkpoint.lastSeq === Math.max(...ps.map(seqOf)) && o.attempt === 1 && outs.every((x) => x.code === 0) && leftovers(D).length === 0, `all ${ps.length} flushes at once: run.json holds the newest (seq ${o && o.checkpoint.lastSeq}), attempt 1, nothing left behind`)
     ok(readdirSync(join(D, 'events')).length === ps.length && readOr(join(D, 'sessions')).trim().split('\n').filter(Boolean).length === 1, 'every chunk written once, one session registered')
-  }
+  })
 }
 
 // ══════════════ W-3 · the zombie first flush (s10) and the attempt across sessions ══════════════
@@ -234,16 +254,18 @@ const LEGACY = '{"runId":"run-s","attempt":1,"project":"PROJ-700","status":"halt
   const two = rest[0], last = rest[rest.length - 1]
   ok(seqOf(zombie) < seqOf(two) && seqOf(two) < seqOf(last), `seqs: zombie #1 ${seqOf(zombie)} < #2 ${seqOf(two)} < last ${seqOf(last)}`)
   ok(!/firstOfSession|PREV:-0\} \+ 1/.test(zombie) && (/SESSION=([0-9a-f]+)/.exec(zombie) || [])[1] === (/SESSION=([0-9a-f]+)/.exec(last) || [])[1], 'every flush carries the same session token, none a "first of session" bump')
-  for (const shell of SHELLS) {
+  await together(SHELLS, async (shell) => {
     const D = join(fresh(shell.name), 'run-s')
     mkdirSync(join(D, 'events'), { recursive: true })
     writeFileSync(join(D, 'run.json'), LEGACY) // attempt 1, written by an earlier session (0.9.0 format)
-    sh(shell, retarget(two, S2.dir, D))
+    await shAsync(shell, retarget(two, S2.dir, D))
     const afterTwo = readRun(D)
-    sh(shell, retarget(last, S2.dir, D))
-    const z = sh(shell, retarget(zombie, S2.dir, D))
+    const atTwo = join(fresh(shell.name), 'run-s') // D as #2 left it: where each race below starts
+    cpSync(D, atTwo, { recursive: true })
+    await shAsync(shell, retarget(last, S2.dir, D))
+    const z = await shAsync(shell, retarget(zombie, S2.dir, D))
     const o = readRun(D)
-    ok(afterTwo.attempt === 2 && o.attempt === 2 && o.gen === 2 && o.checkpoint.lastSeq === seqOf(last) && receiptOf(z.stdout).runJson === 'kept',
+    ok(afterTwo.attempt === 2 && o.attempt === 2 && o.gen === 2 && o.checkpoint.lastSeq === seqOf(last) && receiptOf(z.out).runJson === 'kept',
       `${shell.name} · #2, the newest, then the zombie #1: attempt stays 2, lastSeq stays ${seqOf(last)}, the zombie says RUNJSON kept`)
     const zchunk = `${String(JSON.parse(unb64(heredocs(zombie)[0]).split('\n')[0]).seq).padStart(8, '0')}.a2.jsonl`
     ok(readdirSync(join(D, 'events')).includes(zchunk) && !readdirSync(join(D, 'events')).some((f) => /\.a3\./.test(f)), `${shell.name} · the zombie's events land in its own session's ${zchunk}, no phantom attempt 3`)
@@ -252,9 +274,7 @@ const LEGACY = '{"runId":"run-s","attempt":1,"project":"PROJ-700","status":"halt
     let rolled = 0
     for (let i = 0; i < 10; i++) {
       const R = join(fresh(shell.name), 'run-s')
-      mkdirSync(join(R, 'events'), { recursive: true })
-      writeFileSync(join(R, 'run.json'), LEGACY)
-      sh(shell, retarget(two, S2.dir, R))
+      cpSync(atTwo, R, { recursive: true }) // LEGACY, then #2
       await Promise.all([shAsync(shell, retarget(zombie, S2.dir, R)), shAsync(shell, retarget(last, S2.dir, R))])
       const x = readRun(R)
       if (!x || x.checkpoint.lastSeq !== seqOf(last) || x.attempt !== 2) rolled++
@@ -263,9 +283,9 @@ const LEGACY = '{"runId":"run-s","attempt":1,"project":"PROJ-700","status":"halt
     const F = join(fresh(shell.name), 'run-s')
     mkdirSync(join(F, 'events'), { recursive: true })
     writeFileSync(join(F, 'run.json'), LEGACY)
-    for (const p of [zombie, two, last]) sh(shell, retarget(p, S2.dir, F))
+    for (const p of [zombie, two, last]) await shAsync(shell, retarget(p, S2.dir, F))
     ok(readRun(F).attempt === 2 && readRun(F).checkpoint.lastSeq === seqOf(last), `${shell.name} · a zombie that lands first is just the session's first write: attempt 2, then the newer flushes win`)
-  }
+  })
 }
 {
   // across sessions, in bash: the resumed session beats every writer of the one it resumed; the

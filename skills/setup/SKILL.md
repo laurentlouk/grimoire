@@ -1,6 +1,6 @@
 ---
 name: setup
-description: First-run setup of the grimoire harness in an existing project, and its re-run as an update. Use right after installing the plugin, or when the user says "set up grimoire", "create the agents for this project", "bootstrap the harness", "re-run setup", "update the grimoire setup". Explores the repositories, proposes a team agent per repo, the memory stores, the roster (AGENTS.md), the loop's repos configuration with its gates, the manager briefing's tracker sources bound to read-only official tools, and the CLAUDE.md lines, then writes them on the user's approval. On a project already set up, it shows one diff of what it would add, change or keep, and writes only what the user approves.
+description: First-run setup of the grimoire harness in an existing project, and its re-run as an update. Use right after installing the plugin, or when the user says "set up grimoire", "create the agents for this project", "bootstrap the harness", "re-run setup", "update the grimoire setup". Explores the repositories, proposes a team agent per repo, the memory stores, the roster (AGENTS.md), the loop's repos configuration with its gates, the manager briefing's tracker sources bound to read-only official tools and its opt-in daily schedule (a desktop task, or a crontab line under the user's own login, never an API key), and the CLAUDE.md lines, then writes them on the user's approval. On a project already set up, it shows one diff of what it would add, change or keep, and writes only what the user approves.
 ---
 
 # Set up the harness in this project
@@ -63,7 +63,7 @@ Show the user a single proposal and ask for one yes, or corrections. On a re-run
   - `claim.identity`: only when the tracker has an account the loop can act as. The loop writes to the tracker, so it is off unless the user says yes.
   - `telemetry`: the defaults (`.grimoire/runs`, 183 days of retention), and `.grimoire/` added to `.gitignore`.
   - `guard`: the protected branches, when they are not `main`/`master`/`trunk`/`develop`/`release/*`. The plugin's guard hook reads this.
-  - `manager`: the briefing's sources, repo labels, priority labels and thresholds, built and probed as "The manager section" below says, with the permission rules and the tracker writes it needs listed in the same diff.
+  - `manager`: the briefing's sources, repo labels, priority labels, thresholds and the opt-in shared post, built and probed as "The manager section" below says, with the permission rules and the tracker writes it needs listed in the same diff. Then the schedule, opt-in, as "The schedule" below says.
 - **Team pinning** in `.claude/settings.json`: `extraKnownMarketplaces.grimoire` (github `laurentlouk/grimoire`) and `enabledPlugins["grimoire@grimoire"] = true`, so every teammate who trusts the folder gets the plugin without prompts, and `/plugin update grimoire@grimoire` is the whole upgrade path.
 - **Memory stores**: `memory/harness.md` and `memory/agents/<agent>.md` per team agent, per enabled specialist, plus the reviewer, seeded only with facts you actually found in the docs (dated, declarative, within the caps), never with guesses.
 - **Roster**: `AGENTS.md` with the rows filled in.
@@ -78,7 +78,7 @@ State what you could not determine and what you assumed. Do not ask a question y
 
 ## 3 · Write
 
-On approval, run the tracker writes the user named (the priority labels below), one at a time, and report each result. Then write the files. Do not overwrite an existing `CLAUDE.md`, `AGENTS.md`, agent definition, `grimoire.config.json`, `.claude/settings.json` or memory file. The Markdown ones get an append, or a diff the user applies. `grimoire.config.json` is written by `config-merge.mjs --write`, with an `--approve` for each change the user accepted. `.claude/settings.json` is applied by the user, with the command from step 0. On a first run the current files are missing, so everything in them is added, and the same two routes apply. Verify each agent file has valid frontmatter (`name`, `description`) and that every memory file starts with its header comment and stays within its cap. Finish by listing what was created and the two commands that come next: `/roast <idea>` to start the design pipeline, and `/orchestrate` once a project has been sliced. When a `manager` block was written, add `/grimoire:manager` for the first briefing.
+On approval, run the tracker writes the user named (the priority labels and the shared post's label below), one at a time, and report each result. The schedule follows its own steps below: its probe, its task or its crontab line, each on the user's yes to it. Then write the files. Do not overwrite an existing `CLAUDE.md`, `AGENTS.md`, agent definition, `grimoire.config.json`, `.claude/settings.json` or memory file. The Markdown ones get an append, or a diff the user applies. `grimoire.config.json` is written by `config-merge.mjs --write`, with an `--approve` for each change the user accepted. `.claude/settings.json` is applied by the user, with the command from step 0. On a first run the current files are missing, so everything in them is added, and the same two routes apply. Verify each agent file has valid frontmatter (`name`, `description`) and that every memory file starts with its header comment and stays within its cap. Finish by listing what was created and the two commands that come next: `/roast <idea>` to start the design pipeline, and `/orchestrate` once a project has been sliced. When a `manager` block was written, add `/grimoire:manager` for the first briefing. When a crontab line was proposed, print it last, for the user to install.
 
 ## The manager section
 
@@ -137,9 +137,20 @@ gh label create "priority: urgent" --repo <owner/repo> --color B60205 --descript
 
 High is `D93F0B`, medium `FBCA04`, low `0E8A16`. This is a write to the tracker. List it in the one diff under "Tracker writes", as its own decision. A general yes to the diff does not take it: run it only when the user's answer names the labels. Never create, rename or apply a label otherwise.
 
-**Defaults:** `urgent: { "priorityAtMost": 2, "dueWithinDays": 2, "blocksAtLeast": 2, "stalledDays": 5 }` and `maxItemsPerSource: 200`. The schedule, the shared post and the budget come with their own steps: leave them out.
+**Defaults:** `urgent: { "priorityAtMost": 2, "dueWithinDays": 2, "blocksAtLeast": 2, "stalledDays": 5 }` and `maxItemsPerSource: 200`. The schedule and the budget come with "The schedule" below: leave them out here. The shared post is the step below.
 
 On a re-run, build `urgent`, `priorityLabels` and `maxItemsPerSource` from the current block, not from step 0's first-run proposal. `urgent` and `maxItemsPerSource` take a default only for a key the block lacks. `priorityLabels` takes the defaults only when the block has none, and otherwise gains only the repo's new priority labels. A value the user set then never shows as CHANGED back to a default.
+
+**Shared post** (`manager.share`, opt-in, `null` by default). One rolling post the team reads, which every briefing replaces (the manager skill's "Share the briefing"); the local briefing stays per person. Ask whether the user wants one. Without a yes it stays `null`, and `null` is a full answer. Offer only the destinations the project already has, each reached through the vendor's official tool:
+- **A Linear document** (`"kind": "linear-document"`) when a tracker source is Linear (Odyyy's hub is): `target` the project, or the team key, the document lives in; `hint` the Linear connector's route, as for the source.
+- **A GitHub issue** (`"kind": "github-issue"`) when `gh` is authenticated: `target` one `owner/repo` from the sources' scope; `hint` `gh CLI, authenticated`. The post is labelled `grimoire-briefing`, so offer `gh label create grimoire-briefing --repo <owner/repo> --color 5319E7 --description "Manager briefing: the shared post"` as a tracker write, listed under "Tracker writes" and run only on an answer that names it, like the priority labels. Say that GitHub links back from every issue and PR the post lists (its cross-references), so each one's timeline shows the briefing mentioned it. Say too that a scheduled run can't answer the `permissions.ask` prompts for `gh issue create` and `gh issue edit` (the rules for `gh` above), so an unattended share to GitHub fails and is recorded "Share: failed": with a schedule, recommend the Linear document or the Slack canvas.
+- **A Slack canvas** (`"kind": "slack-canvas"`) only when the session has the Slack connector with its canvas tools (ToolSearch "slack canvas"; canvases are not on Slack's free plan): `target` the canvas's id (`F…`) when the team has one already, else the channel it is for, `hint` the connector's route. A canvas is replaced in place each run, with no message in the channel. The first share creates it and shows its id and link: on the re-run that follows, propose that id as `target` (a CHANGED `manager.share`), and leave sharing or pinning it in the channel to the user.
+
+```json
+"share": { "kind": "linear-document", "target": "ENG", "hint": "mcp__<server-id>__* (Linear, the claude.ai connector)" }
+```
+
+The post holds ticket titles, names and links for everyone who can read the target: say so when you ask. It goes through the re-run diff like every key: `manager.share` shows as ADDED when the block lacks it, or CHANGED (from `null`, or from another destination), written only with `--approve 'manager.share'`. On a re-run, propose the current value as it is, `null` included, unless the user asks to change it.
 
 **Hub remotes** (`repos[].remote`, optional). In a hub whose repos are nested clones, record each repo's remote, read stripped as step 0 says (`git -C <path> remote get-url origin | sed -E 's#(https?://)[^/@]*@#\1#'`), so a token never enters the context. The fix for a missing clone can then name its URL. The loop ignores the key.
 
@@ -148,7 +159,44 @@ On a re-run, build `urgent`, `priorityLabels` and `maxItemsPerSource` from the c
 - Jira: one issue by JQL in the project.
 - GitHub: `gh issue list --repo <owner/repo> --limit 1 --json number`, and for `prs`, `gh pr list` the same way, for each repo in scope.
 - `runs`: `node <plugin root>/scripts/render-logs.mjs summary --dir <telemetry.dir> --json`.
+- The shared post's target, never a write: Linear, `list_documents` in the project (or team), limit 1; GitHub, `gh issue list --repo <target> --limit 1 --json number`; Slack, the canvas read by its id, or the channel by name through the connector's channel search. One that fails is not written, like a source.
 
 A source that **passes** gets `verifiedAt`, the probe's time in ISO 8601 UTC, when it is added or its `kind`, `hint` or `scope` changes. One that passes again unchanged keeps its current `verifiedAt`, so a re-run that changes nothing stays current. When the user corrects a source's scope or hint during the proposal, probe it again before it gets a `verifiedAt`.
 
 A source that **fails** is shown in the diff with the error in one line and its fix (authorize the connector in claude.ai's settings, `gh auth login`, `gh auth refresh -s repo`, the right team key). It is not written. A new one is left out, and an existing one stays as it is, unless the user says to write it anyway, then without a new `verifiedAt`.
+
+## The schedule
+
+A briefing on this machine at a fixed time, under the user's own Claude login. **No API key, ever:** never `--bare` (it reads no login, so it needs `ANTHROPIC_API_KEY`), no key in a command or a crontab, and every `claude -p` setup proposes starts with `env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN`: with a key inherited from the shell or cron, `claude -p` would use it instead of the login, billing the API and leaving the claude.ai connectors unloaded. The schedule is opt-in: offer it once the sources are bound, as its own item in the one diff. It takes two yeses, asked one at a time: one to apply its permission rules and run the headless probe (steps 4 and 5), then one to create the schedule (step 6). A yes to the rest of the diff takes neither, and nothing is created before the second. On a re-run, the current `manager.schedule` is the user's: propose a change only when they ask for one or the probe shows it no longer works.
+
+1. **When, and the budget.** The time is the user's: propose weekdays at 08:30, `30 8 * * 1-5` in the machine's local time. For a crontab line, propose a budget per run (`manager.budgetUsd`, for example `1`, in USD) and say it is the user's call; `null` is no cap. It becomes `--max-budget-usd`, a cap on the run's estimated spend: on a subscription it bounds usage, it is not a bill. A desktop task takes no budget, so its `budgetUsd` stays `null`.
+2. **A desktop task first.** Look with ToolSearch for the host's scheduled-tasks tool (the Claude desktop app has `create_scheduled_task`, `update_scheduled_task` and `list_scheduled_tasks`). When it is there, propose a task:
+   - `taskId` `grimoire-manager-<project folder name>`, `cronExpression` the time above, and the `prompt` `/grimoire:manager scheduled "<absolute project path>"`. Each run starts fresh and the tool takes no folder, so the prompt names the project; `scheduled` makes the run headless (the manager skill's "Headless runs"): it asks nothing, starts no conversation, and writes the launch prompts into the briefing.
+   - Say that it runs while the app is open, that a run missed while the app was closed runs at the next launch, that runs start a few minutes late (the session headline allows 15 minutes before "stale"), and that the task takes no budget.
+   - On a re-run whose schedule has a `taskId`, call `list_scheduled_tasks` first and change that task with `update_scheduled_task`, never a second one.
+3. **Otherwise, a crontab line**, for the user to add with `crontab -e`. Setup never edits the crontab.
+
+   ```sh
+   PATH=<the directories of node and gh, from command -v>:/usr/bin:/bin
+   30 8 * * 1-5 cd "<absolute project path>" && mkdir -p .grimoire/manager && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN <absolute path of claude> -p '/grimoire:manager scheduled "<absolute project path>"' --permission-prompts none --max-budget-usd <budgetUsd> >> .grimoire/manager/cron.log 2>&1
+   ```
+
+   - Leave out `--max-budget-usd` when `budgetUsd` is null. The prompt carries `scheduled`, the desktop task's marker, so the run is headless whatever tools it has.
+   - cron's PATH is minimal: `claude` is named by its absolute path (`command -v claude`), and the `PATH=` line lets the briefing find `node` and `gh`. In a crontab a `%` ends the command: a path that holds one is written `\%`.
+   - `env -u` drops a key cron inherited (above), and the crontab sets none. `mkdir -p` makes the log's folder on the first run, before any briefing has.
+   - Cron runs outside the desktop login session, so a login that fails there (the macOS keychain) shows only in `cron.log`, never in the probe: say to check it after the first run.
+4. **What a headless run may do.** `--permission-prompts none` refuses every call that would prompt, so propose these `permissions.allow` rules in `.claude/settings.json`'s diff, which the user applies (step 0):
+   - each source's read tools, by name as ToolSearch shows them (`mcp__<server>__list_issues`, `mcp__<server>__get_issue`, …), never the server-wide `mcp__<server>`, which allows its writes too. For `gh`: `Bash(gh issue list:*)`, `Bash(gh issue view:*)`, `Bash(gh pr list:*)` and `Bash(gh pr view:*)`, and the same behind `requireHook.raw` when it is set (`Bash(rtk proxy gh pr list:*)`);
+   - the briefing itself: `Read(/<plugin root>/**)` for the WorkItem schema (the plugin root starts with `/`, so the rule starts with `//`, an absolute path), `Bash(node "<plugin root>/scripts/manager.mjs" *)`, and `Edit(/.grimoire/manager/input/**)`, where a headless run writes its WorkItems. With `manager.share` set, the post's write (its connector's update and create tools, or `gh issue edit` and `gh issue create`, which are otherwise `ask`) needs a rule too. It is its own decision, since it lets an unattended run write: without it, every scheduled briefing records the share as failed. These rules name the plugin root, which is pinned to the plugin's version: say to re-run `/grimoire:setup` after `/plugin update`, whose probe shows the old path refused and whose diff proposes the new one.
+5. **Probe headless: the first yes.** Once the rules are applied, propose running this from the project root, under the user's login:
+
+   ```sh
+   env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude -p "<the probe>" --permission-prompts none
+   ```
+
+   The probe asks for the reads of "Probe before proposing", one per tracker and `prs` source and nothing else, then `node "<plugin root>/scripts/manager.mjs" headline --root "<project>"` and a one-line write to `.grimoire/manager/input/probe.txt`, and for one reply line each: `<id>: ok`, or `<id>: failed: <the error in a few words>`. The `runs` source has no read of its own here: a scheduled briefing never calls `render-logs.mjs`, since `manager.mjs brief` reads the journals itself, so its line is the `manager.mjs` call's. Run the probe only on the user's yes to it: it is a model run on their usage.
+   - Every line ok: the schedule gets `verifiedAt`, the probe's time in ISO 8601 UTC.
+   - A line that failed is flagged in the diff with its fix: a refused call needs the allow rule for it; a connector that loads only in an interactive session can't be read on this schedule, so the source would show as not checked in every scheduled briefing; an auth error gets its fix as in "Probe before proposing". The schedule is then written only if the user says so, without `verifiedAt`.
+6. **Create the schedule: the second yes.** Ask for it after the probe has run, and act only on it:
+   - desktop task: create it with `create_scheduled_task` (or update it), then record `manager.schedule = { "kind": "desktop-task", "when": "30 8 * * 1-5", "taskId": "<the id it created>", "verifiedAt": "…" }`. A create that fails records nothing. Offer one run now (`run_scheduled_task`) to check it, run only on a yes.
+   - cron: record `manager.schedule = { "kind": "cron", "when": "30 8 * * 1-5", "verifiedAt": "…" }`, then print the two lines for the user to install.

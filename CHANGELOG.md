@@ -313,6 +313,21 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   left out) to the front matter, and `headline` appends `· 2 runs need you · 1 PR failing CI` after
   the ready-for-AI part when either is above 0. An older `latest.md` without the keys gives the
   same line as before.
+- **A shared briefing post, opt-in, replaced on every run.** `manager.share` (`null` by default,
+  chosen at setup: a Linear document, a GitHub issue labelled `grimoire-briefing`, or a Slack
+  canvas when the session has the Slack connector, replaced in place with no channel message)
+  gives the team one view. `brief` now saves its view model as `latest.json`; `manager.mjs
+  share-body` renders the post from it in Markdown: the groups, reasons, next steps, counts, Not
+  checked and "≥ N", without the new and changed badges or a repo's availability (one person's
+  ledger, one machine's checkouts), ending "generated
+  by <git user.name> · at <time> · covering <sources>", with a hidden `<!-- grimoire:manager-briefing
+  v1 -->` marker the skill finds its own post by (a canvas, by its id). Ticket text is escaped as
+  in the briefing, its @mentions broken so the post notifies no one, and the body cut to a GitHub
+  issue's 65,536 characters with "… N more". The skill's Share step finds the post through the
+  vendor's tool, replaces it or creates it, and records the outcome with `share-status`: a failure
+  is a "Share: failed (<reason>)" line in the local briefing, never filed anywhere. It is the
+  manager's only write. `config-merge.mjs` compares `manager.share` whole. Checks:
+  `scripts/manager.test.mjs` (401 in all, with launching), `scripts/config-merge.test.mjs`.
 - **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
   absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
   reported by the skill", and makes the briefing partial; without `--sources`, a configured source
@@ -353,6 +368,42 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
     name: the launched conversation reads the tickets itself. An unknown, ambiguous or ineligible
     id is refused with its reason. Checks: `scripts/manager.test.mjs` (384 in all, the repos
     check on real temp git repos), and the evals `manager-6` to `manager-8`.
+- **A local daily schedule, under the user's own login, no API key.** `/grimoire:setup` gains an
+  opt-in schedule step, through the re-run diff:
+  - **a desktop task first,** when ToolSearch finds the host's scheduled-tasks tool (the desktop
+    app's `create_scheduled_task`): a local cron expression (weekdays 08:30 proposed, the time is
+    the user's) and the prompt `/grimoire:manager scheduled <project path>`, created only on the
+    user's yes to the schedule, and updated, never duplicated, on a re-run;
+  - **otherwise a crontab line** the user installs: `cd "<project>" && mkdir -p .grimoire/manager
+    && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN <claude> -p '/grimoire:manager scheduled
+    "<project>"' --permission-prompts none [--max-budget-usd <budgetUsd>] >>
+    .grimoire/manager/cron.log 2>&1`, with a `PATH=` line for `node` and `gh`. Never `--bare`
+    (it needs `ANTHROPIC_API_KEY`), and no key anywhere: `env -u` drops one the shell or cron
+    inherited, which `claude -p` would otherwise use instead of the login;
+  - the `permissions.allow` rules a headless run needs (each source's read tools by name, the
+    briefing's script and its input folder), for the user to apply. They name the version-pinned
+    plugin root, so re-run `/grimoire:setup` after `/plugin update`. Then a headless probe,
+    `env -u … claude -p "<one read per source>" --permission-prompts none`, run only on a yes; the
+    `runs` source is read through the `manager.mjs` call, as a scheduled briefing reads it. A
+    source that fails headless is flagged with its fix, and a schedule whose probe passed gets
+    `verifiedAt`. Creating the schedule is a second yes;
+  - `manager.schedule` is `{kind: 'desktop-task' | 'cron', when, taskId?, verifiedAt?}`, and
+    `budgetUsd` is the user's call, proposed and said so.
+- **Headless briefings carry the launch prompts.** A run that can't ask (no AskUserQuestion, a
+  `-p` run, a scheduled prompt) skips the checkboxes and runs `brief --headless`: the briefing ends
+  with **Launch prompts**, `launch-plan`'s prompt for every issue in Hand to AI, one per project,
+  each in a fence nothing in it can close, ids, routes and repo paths only. The opt-in shared post
+  still goes out (the user's standing ask); its write needs its own allow rule, else the share is
+  recorded as failed. `--headless` checks the
+  repos, as `launch-plan` does; without it there is no such section.
+- **"Stale" reads the schedule better** (ODY-873's review): a cron restricted to some days of the
+  week other than `1-5`, or to a day of the month, reads as a week, not 24 h; "weekdays" and a
+  `1-5` cron skip the weekend, so Friday's briefing is fresh until Monday's run (cron's day names
+  read as its numbers, `mon-fri` as `1-5`, and a day of the month of `1-31` is every day); and a 15 minute
+  grace comes before "stale" (a desktop task starts a few minutes late). Whole days are added on
+  the calendar, so a DST change keeps the run's hour. Checks: `scripts/manager.test.mjs` (426 in
+  all, with the shared post), and the evals `setup-12` (a desktop task proposed, nothing created before a yes) and
+  `setup-13` (a crontab line, no `--bare`).
 - **A visual briefing page.** Every briefing run, scheduled ones too, writes
   `.grimoire/manager/briefing.html` (`manager.mjs render --html` writes it again, `--out` elsewhere),
   and the skill prints its path to open (`open` on macOS, `xdg-open` elsewhere). One self-contained
@@ -365,7 +416,9 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   prompt is launch-plan's text, ids, routes and repo paths only, with a box to copy from when the
   clipboard is unavailable. `manager.mjs view --json` prints the view model the Markdown and the page
   both render from, now with each issue's launch pick, `heldBack`, and the launch plan for every
-  ready issue. Checks: `scripts/manager.test.mjs` (419 in all, the page run under a minimal DOM).
+  ready issue (`launch.allReady`), which a headless briefing's **Launch prompts** now print: one
+  source for the page's prompts and the scheduled briefing's. Checks: `scripts/manager.test.mjs`
+  (463 in all with the shared post's and the schedule's, the page run under a minimal DOM).
 - **The briefing as a panel in the desktop app, with Launch.** When ToolSearch finds a widget
   tool that renders HTML in the conversation (the desktop app's `show_widget`), the skill runs
   `manager.mjs render --widget` and passes its output to the tool verbatim: the model writes no
@@ -382,12 +435,35 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   - **`manager.mjs launch-check <ids…>`** checks a launch message's ids against `latest.json` and a
     fresh repos check, then prints `launch-plan`'s plan. It refuses, with the reason, an id that is
     not plain, not in the latest briefing, not under Hand to AI there, or whose repo became
-    unavailable since (with the fix), and every id of a briefing older than the headline's stale
-    rule. A held-back issue carries its launch pick now, so it launches once its repo is fixed.
+    unavailable since (with the fix), and every id of a briefing stale by the headline's rule
+    (`staleAt`). A held-back issue carries its launch pick now, so it launches once its repo is
+    fixed.
   - **The page's CSP** allows its one script by the `sha256` of its exact body, no longer
     `script-src 'unsafe-inline'`.
-  - Checks: `scripts/manager.test.mjs` (462 in all, the panel run under the minimal DOM with a stub
-    `sendPrompt`), and the evals `manager-9` to `manager-11`.
+  - Checks: `scripts/manager.test.mjs` (507 in all, the panel run under the minimal DOM with a stub
+    `sendPrompt`), and the evals `manager-9` to `manager-11`. The panel shows in a session only:
+    a headless briefing keeps its **Launch prompts**.
+
+**Tests (`scripts/run-tests.mjs`, the loop-durability files)**
+
+The suite took about 9½ minutes, one file after another, and six loop-durability files spent
+most of that waiting, not computing.
+- **The files run in parallel** (the CPU count by default; `--jobs N` or `GRIMOIRE_TEST_JOBS`),
+  slowest first. The lock and concurrency trials, and the graph's millisecond-bounded rendering
+  check, run alone afterwards, so a busy machine cannot make them flaky. Each file's output is
+  printed whole when it ends, and every failure is listed at the end, not only the first.
+- **`npm run test:fast`** leaves out the six slow loop-durability files: the other 22 files in
+  about 25 s, for iterating. `npm test` and CI still run everything.
+- **The six slow files wait less and assert the same.** Their shells (bash, zsh, dash) now run
+  side by side on sandboxes of their own, setups are copied from one template instead of rebuilt,
+  fixed sleeps became waits for the condition the test then checks, and timeouts sit at the
+  smallest value that still proves the behaviour. No assertion was removed or loosened; mutated
+  copies (a slow heartbeat, a long lock wait, a late deadline) still fail.
+  - `hardening` 105 → 28 s, `followups` 105 → 41 s, `delivery-fix` 85 → 43 s, `final` 72 → 12 s,
+    `statewrite` 58 → 18 s, `resume` 46 → 11 s, each run alone.
+- **`run-durability-final`'s lock trial was flaky for a reason:** it catches a real race in the
+  ship lock, where two breakers can both take a stale lock and two ships end up inside at once.
+  The engine fix is its own change.
 
 ## 0.11.0 — trust and see
 
