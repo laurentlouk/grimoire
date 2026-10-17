@@ -75,13 +75,18 @@ const LAST = SHELLS[SHELLS.length - 1] || 'sh' // dash where it is installed (CI
   const f = scripts(file), i = scripts(inline)
   ok(Object.values(f).every((s) => s.includes('. "$LKF"') && !carriesLock(s)), 'the ship, the seal and the gate\'s take, release and push each source the file and carry none of its functions')
   ok(Object.values(i).every((s) => carriesLock(s) && !s.includes('$LKF')), 'their fallback (the file missing) carries the lock inline')
-  const locks = bytes(f.take) + bytes(f.release) + bytes(f.push)
-  const was = bytes(i.take) + bytes(i.release) + bytes(i.push)
-  console.log(`   gate prompt: ${bytes(file.gate)} bytes (${bytes(inline.gate)} with the lock inline) · its three lock scripts: ${locks} bytes (${was} inline) · ship script: ${bytes(f.land)} (${bytes(i.land)}) · seal script: ${bytes(f.seal)} (${bytes(i.seal)})`)
-  ok(bytes(file.gate) < 8000, `the gate's prompt is under 8,000 bytes (${bytes(file.gate)})`)
-  ok(locks < 2600, `the gate's three lock scripts together are under 2,600 bytes (${locks}, against ${was} inline)`)
-  ok(bytes(f.land) < 9500 && bytes(i.land) - bytes(f.land) > 6000, `the ship script retypes ${bytes(i.land) - bytes(f.land)} bytes fewer (${bytes(f.land)} against ${bytes(i.land)})`)
-  ok(bytes(f.seal) < 4500, `the seal script is under 4,500 bytes (${bytes(f.seal)})`)
+  // The scripts name the sandbox and this checkout's scripts directory by absolute path, whose length
+  // is the machine's (macOS's TMPDIR, a deep worktree), not the engine's: the bounds measure the shell
+  // besides those paths. Each one is the earlier bound less the paths it held on CI's runner (about
+  // 263 bytes for the three lock scripts), rounded down.
+  const shell = (s) => bytes((s || '').replaceAll(X.W, '').replaceAll(X.T0, '').replaceAll(SCRIPTS, ''))
+  const locks = shell(f.take) + shell(f.release) + shell(f.push)
+  const was = shell(i.take) + shell(i.release) + shell(i.push)
+  console.log(`   besides their paths · gate prompt: ${shell(file.gate)} bytes (${shell(inline.gate)} with the lock inline) · its three lock scripts: ${locks} bytes (${was} inline) · ship script: ${shell(f.land)} (${shell(i.land)}) · seal script: ${shell(f.seal)} (${shell(i.seal)})`)
+  ok(shell(file.gate) < 7700, `the gate's prompt is under 7,700 bytes besides its paths (${shell(file.gate)})`)
+  ok(locks < 2300, `the gate's three lock scripts together are under 2,300 bytes besides their paths (${locks}, against ${was} inline)`)
+  ok(shell(f.land) < 9350 && shell(i.land) - shell(f.land) > 6100, `the ship script retypes ${shell(i.land) - shell(f.land)} bytes fewer (${shell(f.land)} against ${shell(i.land)}, besides their paths)`)
+  ok(shell(f.seal) < 4400, `the seal script is under 4,400 bytes besides its paths (${shell(f.seal)})`)
   ok(/`LOCK missing`[^\n]*failedStep `lock`/.test(file.gate) && !/`LOCK missing`/.test(inline.gate), 'the gate is told what LOCK missing means (only while its scripts use the file)')
   const ship = read(join(ROOT, 'workflows', 'briefs', 'ship.md')) || '', gate = read(join(ROOT, 'workflows', 'briefs', 'gate.md')) || ''
   ok(/`lockMissing`: a `LOCK missing` line/.test(ship) && /never write, copy\s+or look for/i.test(ship), 'ship.md maps LOCK missing to lockMissing, and forbids fixing the file by hand')
