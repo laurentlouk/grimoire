@@ -419,6 +419,30 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   ready issue (`launch.allReady`), which a headless briefing's **Launch prompts** now print: one
   source for the page's prompts and the scheduled briefing's. Checks: `scripts/manager.test.mjs`
   (463 in all with the shared post's and the schedule's, the page run under a minimal DOM).
+- **The briefing as a panel in the desktop app, with Launch.** When ToolSearch finds a widget
+  tool that renders HTML in the conversation (the desktop app's `show_widget`), the skill runs
+  `manager.mjs render --widget` and passes its output to the tool verbatim: the model writes no
+  HTML around ticket text. The fragment shows the counts, the groups with their urgent, new and
+  changed badges (Decide and Do capped, Waiting on others and Not now as counts), a checkbox on
+  each ready issue with **All ready**, a disabled row with its fix for an issue held back by its
+  repo, and **Launch**, which sends `/grimoire:manager launch <ids…>` into the session: plain ids
+  taken from the panel's data and checked again, never a title. It is built like the page (data
+  escaped against `</script>`, `<!--` and U+2028/2029, `textContent` only, http(s) links only),
+  styled with the host's CSS variables, and stays compact (13 KB for a 200-item briefing). Without
+  a widget tool, the AskUserQuestion checkboxes and the page's path stay.
+  - **`brief` writes `latest.json`**, the view itself. `render --widget` reads it (its badges are
+    the briefing's), or builds a fresh view from `--items` and brief's other flags.
+  - **`manager.mjs launch-check <ids…>`** checks a launch message's ids against `latest.json` and a
+    fresh repos check, then prints `launch-plan`'s plan. It refuses, with the reason, an id that is
+    not plain, not in the latest briefing, not under Hand to AI there, or whose repo became
+    unavailable since (with the fix), and every id of a briefing stale by the headline's rule
+    (`staleAt`). A held-back issue carries its launch pick now, so it launches once its repo is
+    fixed.
+  - **The page's CSP** allows its one script by the `sha256` of its exact body, no longer
+    `script-src 'unsafe-inline'`.
+  - Checks: `scripts/manager.test.mjs` (507 in all, the panel run under the minimal DOM with a stub
+    `sendPrompt`), and the evals `manager-9` to `manager-11`. The panel shows in a session only:
+    a headless briefing keeps its **Launch prompts**.
 
 **Tests (`scripts/run-tests.mjs`, the loop-durability files)**
 

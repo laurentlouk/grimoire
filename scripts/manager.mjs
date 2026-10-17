@@ -8,8 +8,9 @@
 //                                 [--headless]
 //      → validates the WorkItems, ranks and groups them, writes
 //        <root>/.grimoire/manager/briefings/<YYYYMMDD-HHMMSS>.md (UTC), the same text to
-//        latest.md, its view model to latest.json (what share-body renders), the page
-//        briefing.html (`render --html`, below) and ledger.json, then prints the briefing's path.
+//        latest.md, its view model to latest.json (what share-body renders, `render --widget`
+//        shows and `launch-check` checks ids against), the page briefing.html (`render --html`,
+//        below) and ledger.json, then prints the briefing's path.
 //      --headless (a scheduled or `claude -p` run, which can't ask anyone to tick): the briefing
 //        ends with a "Launch prompts" section, launch-plan's prompt for every issue in Hand to AI,
 //        one per project, in a fence nothing in it can close (headlessSection). The prompts are
@@ -77,8 +78,8 @@
 //                moves one out of Decide or Do, and never makes an issue ready for AI.
 //    order       within a group: urgent, priority (no priority last), due date (none last),
 //                oldest created (none last), id.
-//  view() builds the one view model every rendering reads (the Markdown, the page, and the panel
-//  in a later slice), so they never disagree.
+//  view() builds the one view model every rendering reads (the Markdown, the page and the panel),
+//  so they never disagree.
 //
 //  The ledger (`schemaVersion` 1) keeps per source `lastRunAt`/`lastStatus` and per item
 //  (`<sourceId>:<id>`) `firstSeenAt`, `lastHash` (state, priority, assignee, due date,
@@ -183,8 +184,8 @@
 //        (--items, --sources, --config, --ledger, --now, --root, --check-repos, the runs source).
 //        It reads the ledger and never writes it, takes no lock and writes no file. Besides the
 //        groups, counts and sources: each item's heldBack (only its repo's availability keeps it
-//        out of Hand to AI) and, on a Hand to AI issue, its launch pick; and `launch`, what the
-//        page's "Copy launch prompt" plans with: root, projects (p1, p2… in briefing order) and
+//        out of Hand to AI) and, on a Hand to AI or held-back issue, its launch pick; and `launch`,
+//        what the page's "Copy launch prompt" plans with: root, projects (p1, p2… in briefing order) and
 //        repos (each repos[] entry with its checkout, c1, c2…: one per real path), plus allReady,
 //        launch-plan's groups and prompts for every Hand to AI issue. Exit as brief's.
 //
@@ -192,7 +193,8 @@
 //      → writes the briefing page, default <root>/.grimoire/manager/briefing.html, and prints its
 //        path; brief writes the same page on every run. Reads the ledger, never writes it. One
 //        self-contained file, as render-logs' page: inline CSS and JS, no external URL, a CSP that
-//        allows no network, light and dark (prefers-color-scheme). The view is embedded as JSON
+//        allows no network and only the page's own script (by its sha256, never 'unsafe-inline'),
+//        light and dark (prefers-color-scheme). The view is embedded as JSON
 //        in <script type="application/json">, every "<" and U+2028/2029 escaped, so no ticket
 //        text can close the element or open a comment; the page builds every node with
 //        textContent, never innerHTML, and a link only from an http(s) url (safeUrl, again in the
@@ -202,6 +204,37 @@
 //        project "Copy launch prompt": the prompt launch-plan gives for the ticked issues (the
 //        page runs planLaunch itself), with a text box to copy from when the clipboard is
 //        unavailable. A static page can't start Claude: launching from it is a paste.
+//
+//  node scripts/manager.mjs render --widget [--root <dir>]
+//  node scripts/manager.mjs render --widget --items <file> [the other flags of brief]
+//      → prints the inline panel: an HTML fragment for the host's widget tool (the desktop app's
+//        show_widget), which the skill passes to it verbatim. With no --items, the latest briefing's
+//        (latest.json: the view brief wrote, its badges included); with them, a fresh view, as
+//        `view --json` builds it. Built by the script from view(), so the model writes no HTML
+//        around ticket text: the data embedded as the page embeds it (embedJson), every node built
+//        with textContent, a link only from an http(s) url, the host's CSS variables, no comment.
+//        On it: the counts, the groups (Decide and Do: their first PANEL_ROWS items, Waiting on
+//        others and Not now: counts), the urgent, new and changed badges, a checkbox per Hand to AI
+//        issue (the first PANEL_READY) and "All ready" (all of them), a disabled row with its fix
+//        for an issue held back by its repo, and Launch: sendPrompt('/grimoire:manager launch ' +
+//        the ticked ids, space-separated), ids taken from the panel's data and checked against
+//        PLAIN_ID again, never a title. Exit 0 printed · 1 no latest.json, or one this script
+//        did not write · 2 usage.
+//
+//  node scripts/manager.mjs launch-check <id> [<id>…] [--root <dir>] [--config <file>] [--now <iso>]
+//      → JSON {root, briefing: {generatedAt, age, stale}, groups, refused}: the ids of a
+//        `/grimoire:manager launch <ids…>` message (space- or comma-separated: an id, a key or
+//        <sourceId>:<id>), checked against the latest briefing (<root>/.grimoire/manager/latest.json)
+//        and a fresh repos check, then planned as launch-plan plans them (launchCheck). Refused, each
+//        with its reason: an id that is not plain (not echoed), not in the latest briefing, naming
+//        two of its items, not under Hand to AI there (nor held back only by its repo), or whose repo
+//        is not available now ("became unavailable since the briefing", or "is still not
+//        available", with the fix; or no longer in repos[]). A briefing older than the headline's
+//        stale rule (staleAt: manager.schedule's interval, 24 h without one, plus STALE_GRACE_MIN)
+//        refuses every id. A held-back
+//        issue whose repo is fixed since is planned. --config as `repos` reads it. Exit 0 checked
+//        (refusals included) · 1 no config, no latest.json or one this script did not write · 2
+//        usage (no id).
 //  Plain Node ≥ 20, no dependencies.
 import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, readSync, writeSync, closeSync, lstatSync, statSync, linkSync, rmSync, realpathSync, existsSync } from 'node:fs'
 import { resolve, join, dirname, basename, sep, relative, isAbsolute, posix } from 'node:path'
@@ -770,6 +803,7 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
     const prev = entryOf(seen, ledgerKey(it))
     const hash = itemHash(it)
     const repo = repoCheck(it, ctx)
+    const held = heldBack(it, p, repo, ctx)
     return {
       // only a safe http(s) url, or null: no rendering of the model can get a javascript: href
       sourceId: it.sourceId, id: it.id, key: it.key, title: it.title, url: safeUrl(it.url), kind: it.kind,
@@ -777,9 +811,10 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
       assignee: it.assignee, dueAt: it.dueAt, createdAt: it.createdAt, project: it.project, labels: it.labels, linkedPr: it.linkedPr,
       checks: it.checks, reviewDecision: it.reviewDecision, reviewRequested: it.reviewRequested, isDraft: it.isDraft, needsAttention: it.needsAttention,
       repo, urgent: p.urgent, group: p.group, reasons: p.reasons, nextStep: it.nextStep,
-      heldBack: heldBack(it, p, repo, ctx),
-      // a Hand to AI issue's launch pick (launchPick); its project is renamed p1, p2… below
-      launch: p.group === 'ai' ? launchPick(it, ctx) : null,
+      heldBack: held,
+      // a Hand to AI issue's launch pick (launchPick), and a held-back one's (launch-check takes it
+      // once its repo is fixed); its project is renamed p1, p2… below
+      launch: p.group === 'ai' || held ? launchPick(it, ctx) : null,
       badge: badgeOf(seen, prev, hash),
       firstSeenAt: prev && Number.isFinite(parseTime(prev.firstSeenAt)) ? prev.firstSeenAt : generatedAt, hash,
     }
@@ -812,7 +847,7 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
     // A source that could not be read makes the briefing partial; a capped one was read, as "≥ N".
     partial: srcs.some((s) => s.status === 'failed'),
     sources: srcs, counts, groups, nextStep: overallNext(counts),
-    launch: launchView(groups.find((g) => g.id === 'ai').items, all, ctx, root),
+    launch: launchView(groups.find((g) => g.id === 'ai').items, groups.flatMap((g) => g.items).filter((it) => it.heldBack), all, ctx, root),
   }
 }
 
@@ -828,14 +863,14 @@ function launchPick(it, ctx) {
   return { shown: [it.key, it.id].find((s) => PLAIN_ID.test(s)) ?? null, route: routeOf(it), project: projectKey(it), repo: mapRepo(it, ctx).name }
 }
 
-// The launch section of the view: the projects of the Hand to AI issues, keyed p1, p2… in briefing
-// order (the key planLaunch groups by, renamed so no project name is in it), every repos[] entry
-// with its checkout, and allReady, the launch groups for every Hand to AI issue a prompt can carry
-// (what "All ready" launches: launch-plan's groups for those ids, in briefing order). Renames each
-// pick's project to its key, in place: the items are the view's own.
-function launchView(ready, all, ctx, root) {
+// The launch section of the view: the projects of the Hand to AI issues, then of the held-back ones,
+// keyed p1, p2… in briefing order (the key planLaunch groups by, renamed so no project name is in
+// it), every repos[] entry with its checkout, and allReady, the launch groups for every Hand to AI
+// issue a prompt can carry (what "All ready" launches: launch-plan's groups for those ids, in
+// briefing order). Renames each pick's project to its key, in place: the items are the view's own.
+function launchView(ready, held, all, ctx, root) {
   const keys = new Map(), projects = Object.create(null)
-  for (const it of ready) {
+  for (const it of [...ready, ...held]) {
     const raw = it.launch.project
     if (!keys.has(raw)) {
       keys.set(raw, `p${keys.size + 1}`)
@@ -1236,22 +1271,193 @@ function pageClient(planLaunch, safeUrl) {
   update()
 }
 
-// The page: one self-contained file (render-logs' approach). The view is embedded as JSON with
-// every "<" written as its JSON escape, so no data string can close the <script> element or open an
-// HTML comment, and U+2028/2029 escaped too; the script is the client and the two functions it runs.
+// Data as JSON to embed in a <script type="application/json"> element: every "<" written as its
+// JSON escape, so no data string can close the element or open an HTML comment, and U+2028/2029
+// escaped too. The page and the panel embed their data this way.
+export const embedJson = (data) => JSON.stringify(data).replace(/</g, '\\u003c').replace(/\u{2028}/gu, '\\u2028').replace(/\u{2029}/gu, '\\u2029')
+
+// The page: one self-contained file (render-logs' approach). The view is embedded by embedJson; the
+// script is the client and the two functions it runs. The CSP allows that one script by its sha256,
+// not every inline script: markup that got in some other way would not run (the data block is not
+// a script, so the policy has nothing to say about it).
 export function renderHtml(v) {
-  const data = { view: v, heading: `Briefing · ${localIso(Date.parse(v.generatedAt))}` }
-  const blob = JSON.stringify(data).replace(/</g, '\\u003c').replace(/\u{2028}/gu, '\\u2028').replace(/\u{2029}/gu, '\\u2029')
+  const blob = embedJson({ view: v, heading: `Briefing · ${localIso(Date.parse(v.generatedAt))}` })
   const js = `(${pageClient.toString()})(${planLaunch.toString()}, ${safeUrl.toString()})`.replace(/<\//g, '<\\/')
+  const hash = createHash('sha256').update(js, 'utf8').digest('base64')
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="color-scheme" content="light dark">
 <title>grimoire briefing</title><style>${PAGE_CSS}</style></head>
 <body><noscript>This page needs JavaScript to show the briefing; latest.md beside it holds the same briefing as text.</noscript>
 <script type="application/json" id="grimoire-data">${blob}</script>
 <script>${js}</script>
 </body></html>
+`
+}
+
+// ── the inline panel (`render --widget`, for the desktop app's widget tool; spec D12) ──
+// A fragment the skill passes to the host's widget tool verbatim (show_widget: no doctype, html,
+// head or body; the host's CSS variables, a transparent background, no top-level padding, no HTML
+// or CSS comments). Compact, since the model hands it over whole: Decide and Do show their first
+// PANEL_ROWS items, Hand to AI its first PANEL_READY ready issues (All ready covers the rest too) and
+// PANEL_HELD held back by their repo, titles cut to PANEL_TITLE characters; Waiting on others and
+// Not now are counts.
+export const PANEL_ROWS = 6
+export const PANEL_READY = 20
+export const PANEL_HELD = 5
+export const PANEL_TITLE = 100
+// Ticket text on one line, as the page shows it: no bidi control, control character or line separator.
+const plain = (s, max) => {
+  const t = String(s ?? '').replace(BIDI, '').replace(/[\u{0}-\u{1f}\u{7f}-\u{9f}\u{2028}\u{2029}\s]+/gu, ' ').trim()
+  const chars = Array.from(t)
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : t
+}
+
+// The panel's data, from the view (a fresh one, or latest.json): what the fragment embeds. A ready
+// issue's pick is the id its Launch sends, its launch pick's plain id, or <sourceId>:<id> when that
+// id names two of the briefing's items (launch-check would refuse it as ambiguous); null when
+// neither is plain. Nothing else of the view is in it: no reason, next step, assignee or label.
+export function panelModel(v) {
+  const listed = v.groups.flatMap((g) => g.items)
+  const named = new Map()
+  for (const it of listed) for (const k of new Set([it.id, it.key, ledgerKey(it)])) named.set(k, (named.get(k) ?? 0) + 1)
+  const pickOf = (it) => {
+    const shown = isObj(it.launch) && typeof it.launch.shown === 'string' && PLAIN_ID.test(it.launch.shown) ? it.launch.shown : null
+    if (!shown) return null
+    return named.get(shown) === 1 ? shown : PLAIN_ID.test(ledgerKey(it)) ? ledgerKey(it) : null
+  }
+  const row = (it) => ({ key: plain(it.key, 60), title: plain(it.title, PANEL_TITLE), url: safeUrl(it.url), urgent: it.urgent === true, badge: it.badge === 'new' || it.badge === 'changed' ? it.badge : null })
+  const held = listed.filter((it) => it.heldBack === true && isObj(it.repo))
+  const groups = v.groups.map((g) => {
+    const out = { id: g.id, title: plain(g.title, 40), count: g.items.length, list: ['decide', 'do', 'ai'].includes(g.id), rows: [], more: 0 }
+    if (g.id === 'decide' || g.id === 'do') Object.assign(out, { rows: g.items.slice(0, PANEL_ROWS).map(row), more: Math.max(0, g.items.length - PANEL_ROWS) })
+    if (g.id === 'ai') {
+      out.rows = [
+        ...g.items.slice(0, PANEL_READY).map((it) => ({ ...row(it), pick: pickOf(it) })),
+        ...held.slice(0, PANEL_HELD).map((it) => ({ ...row(it), pick: null, fix: plain(`Held back by its repo (${it.repo.reason}: ${it.repo.path}). Fix it first: ${it.repo.fix}`, 300) })),
+      ]
+      out.more = Math.max(0, g.items.length - PANEL_READY)
+    }
+    return out
+  })
+  const ai = v.groups.find((g) => g.id === 'ai')
+  const c = v.counts
+  return {
+    heading: `Briefing · ${localIso(Date.parse(v.generatedAt))}`,
+    counts: Object.fromEntries(['urgent', 'decide', 'do', 'ai', 'waiting', 'notnow'].map((k) => [k, isCount(c[k]) ? c[k] : 0])),
+    partial: v.partial === true, notChecked: v.sources.filter((s) => s.status === 'failed').map((s) => plain(s.id, 64)),
+    groups,
+    // the ready issues past PANEL_READY: not shown, but All ready launches them too
+    extra: ai ? ai.items.slice(PANEL_READY).map(pickOf).filter(Boolean) : [],
+    heldMore: Math.max(0, held.length - PANEL_HELD),
+  }
+}
+
+const PANEL_CSS = `#grimoire-panel{font-size:14px;line-height:1.5}#grimoire-panel ul{list-style:none;margin:0;padding:0}
+.gp-sum,.gp-m{font-size:13px;color:var(--text-secondary);margin:0}.gp-g{margin:12px 0 0}.gp-g h3{margin:0 0 4px}
+.gp-r{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;padding:4px 0;border-bottom:0.5px solid var(--border);overflow-wrap:anywhere}.gp-r input{margin:0;align-self:center}
+.gp-k{font-family:var(--font-mono);font-size:12px;color:var(--text-secondary)}.gp-b{font-size:11px;font-weight:500;padding:0 6px;border-radius:var(--radius)}
+.gp-urgent{background:var(--bg-danger);color:var(--text-danger)}.gp-new{background:var(--bg-accent);color:var(--text-accent)}.gp-changed{background:var(--bg-warning);color:var(--text-warning)}
+.gp-held{color:var(--text-secondary)}.gp-fix{flex-basis:100%;margin:0;font-size:13px;color:var(--text-warning)}
+.gp-bar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:10px 0 0}.gp-err{font-size:13px;color:var(--text-danger);margin:4px 0 0}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}`
+
+// Runs in the widget. Every node is built with createElement, textContent and append, never
+// innerHTML; a link only from an http(s) url (safeUrl, embedded). Launch sends the host's
+// sendPrompt('/grimoire:manager launch ' + the ticked ids): the ids are the data's picks, each
+// checked against PLAIN_ID again, never text read back from the page, so no ticket text can reach
+// the message. No comment inside it: the host's rules keep comments out of a widget.
+function panelClient(safeUrl, plainId) {
+  const D = JSON.parse(document.getElementById('grimoire-panel-data').textContent)
+  const root = document.getElementById('grimoire-panel')
+  const h = (tag, attrs, ...kids) => {
+    const el = document.createElement(tag)
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v == null || v === false) continue
+      if (k === 'class') el.className = v
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
+      else if (k === 'checked' || k === 'disabled') el[k] = v
+      else el.setAttribute(k, String(v))
+    }
+    for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(typeof c === 'object' ? c : String(c))
+    return el
+  }
+  const ticked = new Set(), boxes = [], every = []
+  let sent = null, n = 0
+  const err = h('p', { class: 'gp-err', role: 'alert' })
+  const status = h('p', { class: 'gp-m', role: 'status' })
+  const count = h('span', { class: 'gp-m' }, 'none ticked')
+  const badges = (r) => [r.urgent && h('span', { class: 'gp-b gp-urgent' }, 'urgent'), (r.badge === 'new' || r.badge === 'changed') && h('span', { class: `gp-b gp-${r.badge}` }, r.badge)]
+  const title = (r, id) => { const u = safeUrl(r.url); return u ? h('a', { href: u, id, rel: 'noopener noreferrer' }, r.title) : h('span', { id }, r.title) }
+  const line = (r) => h('li', { class: 'gp-r' }, h('span', { class: 'gp-k' }, r.key), title(r, null), badges(r))
+  function ready(r) {
+    const id = `gp-${++n}`
+    const pickable = typeof r.pick === 'string' && plainId.test(r.pick)
+    const box = h('input', { type: 'checkbox', id, disabled: !pickable, 'data-pick': pickable ? r.pick : null, 'aria-describedby': `${id}-t${r.fix ? ` ${id}-f` : ''}`,
+      onchange: () => { if (box.checked) ticked.add(r.pick); else ticked.delete(r.pick); update() } })
+    if (pickable) { boxes.push({ box, pick: r.pick }); every.push(r.pick) }
+    return h('li', { class: r.fix ? 'gp-r gp-held' : 'gp-r', 'aria-disabled': pickable ? null : 'true' },
+      box, h('label', { for: id, class: 'gp-k' }, r.key), title(r, `${id}-t`), badges(r),
+      r.fix ? h('p', { class: 'gp-fix', id: `${id}-f` }, r.fix) : null,
+      !pickable && !r.fix ? h('p', { class: 'gp-fix' }, 'Its tracker id is not a plain id: launch it from a session.') : null)
+  }
+  const all = h('input', { type: 'checkbox', id: 'gp-all',
+    onchange: () => { for (const p of every) { if (all.checked) ticked.add(p); else ticked.delete(p) } update() } })
+  function update() {
+    for (const b of boxes) b.box.checked = ticked.has(b.pick)
+    const k = every.filter((p) => ticked.has(p)).length
+    all.checked = every.length > 0 && k === every.length
+    all.indeterminate = k > 0 && k < every.length
+    count.textContent = k ? `${k} ticked` : 'none ticked'
+    err.textContent = ''
+  }
+  function launch() {
+    const ids = every.filter((p) => ticked.has(p) && plainId.test(p))
+    if (!ids.length) { err.textContent = 'Tick at least one ready issue first.'; return }
+    const text = `/grimoire:manager launch ${ids.join(' ')}`
+    if (text === sent) { status.textContent = `Already sent: ${text}`; return }
+    if (typeof sendPrompt !== 'function') { status.textContent = `Send this message to launch them: ${text}`; return }
+    sendPrompt(text)
+    sent = text
+    status.textContent = `Sent: ${text}. Each id is checked against the latest briefing before anything starts.`
+  }
+  const parts = [h('p', { class: 'gp-m' }, D.heading, D.partial ? ` · partial: ${D.notChecked.length ? D.notChecked.join(', ') : 'some sources'} not checked` : '')]
+  for (const g of D.groups) {
+    const kids = [h('h3', null, `${g.title} (${g.count})`)]
+    if (g.id === 'ai') {
+      const rows = g.rows.map(ready)
+      for (const p of D.extra || []) if (typeof p === 'string' && plainId.test(p) && !every.includes(p)) every.push(p)
+      kids.push(rows.length ? h('ul', null, rows) : h('p', { class: 'gp-m' }, 'Nothing ready for AI.'))
+      if (g.more) kids.push(h('p', { class: 'gp-m' }, `${g.more} more ready, not shown: All ready includes them.`))
+      if (D.heldMore) kids.push(h('p', { class: 'gp-m' }, `${D.heldMore} more held back by their repo: see the briefing page.`))
+      if (every.length) {
+        all.disabled = false
+        kids.push(h('div', { class: 'gp-bar' }, all, h('label', { for: 'gp-all' }, `All ready (${every.length})`), count,
+          h('button', { type: 'button', 'data-launch': 'true', onclick: launch }, 'Launch ↗')), err, status)
+      }
+    } else if (g.list) {
+      kids.push(g.rows.length ? h('ul', null, g.rows.map(line)) : h('p', { class: 'gp-m' }, 'Nothing here.'))
+      if (g.more) kids.push(h('p', { class: 'gp-m' }, `${g.more} more in the briefing.`))
+    }
+    parts.push(h('section', { class: 'gp-g', 'data-group': g.id }, kids))
+  }
+  root.append(...parts)
+  update()
+}
+
+// The fragment: a summary line in plain HTML (counts only, so the panel shows something while it
+// streams), then the data, embedded by embedJson, and the client that builds the rest from it.
+export function renderWidget(v) {
+  const P = panelModel(v)
+  const c = P.counts
+  const summary = [`${c.urgent} urgent`, `${c.decide} to decide`, `${c.do} to do`, `${c.ai} ready for AI`, `${c.waiting} waiting on others`, `${c.notnow} not now`].join(' · ')
+  const js = `(${panelClient.toString()})(${safeUrl.toString()}, ${PLAIN_ID.toString()})`.replace(/<\//g, '<\\/')
+  return `<h2 class="sr-only">grimoire briefing: ${summary}. Tick ready issues, then press Launch.</h2>
+<style>${PANEL_CSS}</style>
+<div id="grimoire-panel"><p class="gp-sum">${summary}</p></div>
+<script type="application/json" id="grimoire-panel-data">${embedJson(P)}</script>
+<script>${js}</script>
 `
 }
 
@@ -1865,6 +2071,94 @@ export function launchPlan(ids, items, config, { repos = null, root = null } = {
   return { root, groups: planLaunch(keyed, projects, launchRepos(ctx.repoIndex, root), root), refused }
 }
 
+// ── launch-check: the panel's Launch, checked again before anything starts (spec D12) ──
+const ROUTES = ['roast', 'orchestrate', 'implement']
+const isStr = (v) => typeof v === 'string'
+// Why a parsed latest.json is not a briefing view brief writes, or null: the fields launch-check and
+// the panel read, so a hand-edited or truncated file is refused whole instead of planned from.
+export function briefingProblem(b) {
+  if (!isObj(b)) return 'not a JSON object'
+  if (b.schemaVersion !== SCHEMA_VERSION) return `schemaVersion ${Number.isInteger(b.schemaVersion) ? b.schemaVersion : '(missing)'}, this script reads ${SCHEMA_VERSION}`
+  if (!Number.isFinite(parseTime(b.generatedAt))) return 'no generatedAt'
+  if (!isObj(b.counts) || !Array.isArray(b.sources) || !b.sources.every((s) => isObj(s) && isStr(s.id))) return 'no counts or sources'
+  const L = b.launch
+  if (!isObj(L) || !isObj(L.projects) || !isObj(L.repos)) return 'no launch section'
+  for (const p of Object.values(L.projects)) {
+    if (!isObj(p) || !isStr(p.sourceId) || !(p.project === null || isStr(p.project)) || typeof p.inProject !== 'boolean' || !Array.isArray(p.repos) || !p.repos.every(isStr)) return 'a launch project is malformed'
+  }
+  if (!Array.isArray(b.groups)) return 'no groups'
+  for (const g of b.groups) {
+    if (!isObj(g) || !isStr(g.id) || !isStr(g.title) || !Array.isArray(g.items)) return 'a group is malformed'
+    for (const it of g.items) {
+      if (!isObj(it) || ![it.sourceId, it.id, it.key, it.title, it.group].every(isStr)) return 'an item is malformed'
+      const k = it.launch
+      if (k !== null && k !== undefined && (!isObj(k) || !(k.shown === null || isStr(k.shown)) || !ROUTES.includes(k.route) || !isStr(k.project) || !Object.hasOwn(L.projects, k.project) || !isStr(k.repo))) return 'a launch pick is malformed'
+    }
+  }
+  return null
+}
+
+// The ids of a `/grimoire:manager launch <ids…>` message (the panel's Launch), checked against the
+// latest briefing (latest.json: the view brief wrote) and a fresh repos check, then planned as
+// launch-plan plans them. Each id must name one issue that briefing listed under Hand to AI, or held
+// back only by its repo, whose repo is available now; and the briefing must not be stale by the
+// headline's rule (staleAt: past manager.schedule's next run, 24 h without one, plus the grace), else every id is
+// refused. Refused, each with its reason: an id that is not plain, not in the briefing, names two of
+// its items, is not ready for AI there, or whose repo is unavailable now (or no longer in repos[]).
+// → { root, briefing: { generatedAt, age, stale }, groups: planLaunch's, refused: [{ id, reason }] }.
+// Pure but for the repos' real paths (launchRepos). repos: checkRepos' result, required: a launch is
+// never planned on a repo check from before the briefing.
+export function launchCheck(ids, briefing, config, { repos, root = null, now = Date.now() } = {}) {
+  const problem = briefingProblem(briefing)
+  if (problem) throw new Error(`the latest briefing is not one this script writes (${problem}): run /grimoire:manager again`)
+  const ctx = aiContext(config, repos)
+  if (!ctx.availability) throw new Error('launchCheck needs a fresh repos check (checkRepos)')
+  const generated = parseTime(briefing.generatedAt)
+  const age = Math.max(0, toMs(now) - generated) // a briefing from the future (clock skew) is 0 min old
+  // the headline's rule: due again one manager.schedule interval on (a weekdays schedule skips the
+  // weekend), then STALE_GRACE_MIN more
+  const schedule = isObj(config) && isObj(config.manager) && config.manager.schedule != null ? config.manager.schedule : null
+  const stale = toMs(now) > staleAt(schedule, generated)
+  const { interval, weekdays } = readSchedule(schedule)
+  const rule = schedule === null ? '24 h with no manager.schedule' : `manager.schedule's ${ageText(interval)}${weekdays ? ' on weekdays' : ''}`
+  const staleWhy = `the latest briefing is ${ageText(age)} old, stale by the headline's rule (${rule}, plus ${STALE_GRACE_MIN} min): run /grimoire:manager for a fresh one, then launch from it`
+  const items = briefing.groups.flatMap((g) => g.items)
+  const index = new Map()
+  for (const it of items) for (const k of new Set([it.id, it.key, ledgerKey(it)])) { if (!index.has(k)) index.set(k, []); index.get(k).push(it) }
+  const title = (id) => briefing.groups.find((g) => g.id === id)?.title ?? id
+  const plannable = launchRepos(ctx.repoIndex, root) // the repos[] entries now, with their checkouts
+
+  const refused = [], picks = [], taken = new Set()
+  for (const id of Array.isArray(ids) ? ids : []) {
+    if (typeof id !== 'string' || !PLAIN_ID.test(id)) { refused.push({ id: null, reason: 'not a plain tracker id' }); continue }
+    if (stale) { refused.push({ id, reason: staleWhy }); continue }
+    const found = index.get(id) ?? []
+    if (!found.length) { refused.push({ id, reason: 'not in the latest briefing' }); continue }
+    if (found.length > 1) { refused.push({ id, reason: `matches ${found.length} items of the latest briefing (sources ${[...new Set(found.map((f) => f.sourceId))].join(', ')}): name it as <sourceId>:<id>` }); continue }
+    const it = found[0]
+    if (taken.has(ledgerKey(it))) continue // named twice, by its id and its key
+    if (it.group !== 'ai' && it.heldBack !== true) { refused.push({ id, reason: `not ready for AI in the latest briefing: it is under ${title(it.group)}` }); continue }
+    const pick = it.launch
+    if (!isObj(pick) || !pick.shown) { refused.push({ id, reason: 'its tracker id is not a plain id, so it is kept out of a prompt' }); continue }
+    const a = ctx.availability.get(pick.repo)
+    if (!a || !plannable[pick.repo]) { refused.push({ id, reason: `its repo ${pick.repo} is no longer in repos[]` }); continue }
+    if (a.available !== true) {
+      const when = it.heldBack === true ? 'is still not available' : 'became unavailable since the briefing'
+      refused.push({ id, reason: `its repo ${pick.repo} ${when}: ${a.reason ?? 'not available'}: ${a.path}, fix: ${a.fix ?? 'run manager.mjs repos'}` })
+      continue
+    }
+    taken.add(ledgerKey(it))
+    picks.push({ shown: pick.shown, route: pick.route, project: pick.project, repo: pick.repo })
+  }
+  // the briefing's projects, each with the repos still in repos[] (an orchestrated project uses them all)
+  const projects = Object.create(null)
+  for (const [k, p] of Object.entries(briefing.launch.projects)) projects[k] = { ...p, repos: p.repos.filter((n) => Object.hasOwn(plannable, n)) }
+  return {
+    root, briefing: { generatedAt: briefing.generatedAt, age: ageText(age), stale },
+    groups: picks.length ? planLaunch(picks, projects, plannable, root) : [], refused,
+  }
+}
+
 // ── a headless briefing's launch prompts (brief --headless; spec D8: a scheduled run can't ask) ──
 // The briefing's "Launch prompts" section: the view's launch.allReady, launch-plan's groups for every
 // issue in Hand to AI, one per project, in briefing order: the plan the page copies from, so the
@@ -1978,6 +2272,8 @@ const USAGE = [
   '       node scripts/manager.mjs launch-plan --ids <a,b,…> --items <file> [--config <file>] [--root <dir>]',
   '       node scripts/manager.mjs view --json --items <file> [the other flags of brief]',
   '       node scripts/manager.mjs render --html --items <file> [the other flags of brief] [--out <file>]',
+  '       node scripts/manager.mjs render --widget [--items <file> and the other flags of brief | --root <dir>]',
+  '       node scripts/manager.mjs launch-check <id> [<id>…] [--root <dir>] [--config <file>] [--now <iso>]',
   '       node scripts/manager.mjs share-body [--max <chars>] [--root <dir>] [--config <file>] [--now <iso>]',
   '       node scripts/manager.mjs share-status --status created|updated|failed [--url <url>] [--reason <text>] [--root <dir>]',
 ].join('\n')
@@ -2052,6 +2348,44 @@ function launchPlanMain(args) {
   return 0
 }
 
+// The latest briefing's view, <root>/.grimoire/manager/latest.json (brief writes it), or { error }:
+// missing, unreadable, not JSON, or not a view this script writes.
+function readBriefing(root) {
+  const file = join(root, '.grimoire', 'manager', 'latest.json')
+  if (!isFile(file)) return { error: `no briefing at ${file}: run /grimoire:manager first` }
+  const r = readInput(file, 'briefing')
+  if (r.error) return { error: `${r.error}: run /grimoire:manager again` }
+  const problem = briefingProblem(r.value)
+  return problem ? { error: `briefing ${file}: not one this script writes (${problem}): run /grimoire:manager again` } : { value: r.value }
+}
+
+// `launch-check <ids…>`: the ids of a /grimoire:manager launch message, checked against the latest
+// briefing and a fresh repos check, then the launch plan, as JSON.
+function launchCheckMain(args) {
+  const ids = [...new Set(args._.slice(1).flatMap((s) => s.split(/[\s,]+/)).filter(Boolean))]
+  if (!ids.length) { console.error(`launch-check needs at least one id\n${USAGE}`); return 2 }
+  const now = args.now === undefined ? Date.now() : typeof args.now === 'string' ? Date.parse(args.now) : NaN
+  if (!Number.isFinite(now)) { console.error(`--now: expected an ISO date-time\n${USAGE}`); return 2 }
+  const root = resolve(typeof args.root === 'string' ? args.root : stateRoot())
+  const c = projectConfig(args, root)
+  if (c.error) { console.error(c.error); return 1 }
+  for (const w of managerConfig(c.config).warnings) console.error(w)
+  const b = readBriefing(root)
+  if (b.error) { console.error(b.error); return 1 }
+  console.log(JSON.stringify(launchCheck(ids, b.value, c.config, { repos: checkRepos(c.config, root), root, now }), null, 2))
+  return 0
+}
+
+// `render --widget` with no --items: the panel of the latest briefing, as brief wrote it (its badges
+// are that briefing's: brief has moved the ledger on since, so a fresh view would badge nothing).
+function latestWidgetMain(args) {
+  if (args.out !== undefined) { console.error(`--out: render --html only (the panel is printed)\n${USAGE}`); return 2 }
+  const b = readBriefing(resolve(typeof args.root === 'string' ? args.root : stateRoot()))
+  if (b.error) { console.error(b.error); return 1 }
+  process.stdout.write(renderWidget(b.value))
+  return 0
+}
+
 // The repos check a briefing's view reads: with --check-repos, or --headless (its prompts must be
 // launch-plan's, which always checks); else none, and nothing is held back on a repo.
 const briefRepos = (args, config, root) => (args['check-repos'] === undefined && args.headless === undefined ? null : checkRepos(config, root))
@@ -2059,10 +2393,11 @@ const briefRepos = (args, config, root) => (args['check-repos'] === undefined &&
 // `view --json` and `render --html`: brief's view, from brief's inputs (main reads them), without
 // brief's writes: the ledger is read and never written, and no lock is taken (render writes one
 // file, atomically, and a briefing's own page is brief's).
-function viewMain(cmd, args, { items, config, sources, now, root, dir, ledgerFile }) {
-  if (args.out !== undefined && (cmd !== 'render' || typeof args.out !== 'string')) { console.error(`--out: ${cmd === 'render' ? 'expected a file' : 'render only'}\n${USAGE}`); return 2 }
+function viewMain(cmd, format, args, { items, config, sources, now, root, dir, ledgerFile }) {
+  if (args.out !== undefined && (format !== 'html' || typeof args.out !== 'string')) { console.error(`--out: ${format === 'html' ? 'expected a file' : 'render --html only'}\n${USAGE}`); return 2 }
   const v = view(items, config, readLedger(ledgerFile), now, sources, briefRepos(args, config, root), { root })
   if (cmd === 'view') { console.log(JSON.stringify(v, null, 2)); return 0 }
+  if (format === 'widget') { process.stdout.write(renderWidget(v)); return 0 }
   const out = resolve(typeof args.out === 'string' ? args.out : join(dir, 'briefing.html'))
   writeAtomic(out, renderHtml(v))
   console.log(out)
@@ -2075,11 +2410,18 @@ function main(argv) {
   if (cmd === 'headline') return headlineMain(args)
   if (cmd === 'repos') return reposMain(args)
   if (cmd === 'launch-plan') return launchPlanMain(args)
+  if (cmd === 'launch-check') return launchCheckMain(args)
   if (cmd === 'share-body') return shareBodyMain(args)
   if (cmd === 'share-status') return shareStatusMain(args)
-  if (!['brief', 'view', 'render'].includes(cmd)) { console.error(cmd ? `unknown command: ${cmd} (expected brief, view, render, headline, repos, launch-plan, share-body or share-status)\n${USAGE}` : USAGE); return 2 }
-  const format = { view: 'json', render: 'html' }[cmd]
-  if (format && args[format] !== true) { console.error(`${cmd} needs --${format}, its one format\n${USAGE}`); return 2 }
+  if (!['brief', 'view', 'render'].includes(cmd)) { console.error(cmd ? `unknown command: ${cmd} (expected brief, view, render, headline, repos, launch-plan, launch-check, share-body or share-status)\n${USAGE}` : USAGE); return 2 }
+  let format = null
+  if (cmd === 'view' && args.json !== true) { console.error(`view needs --json, its one format\n${USAGE}`); return 2 }
+  if (cmd === 'render') {
+    const asked = ['html', 'widget'].filter((f) => args[f] !== undefined)
+    if (asked.length !== 1 || args[asked[0]] !== true) { console.error(`render needs one of --html or --widget\n${USAGE}`); return 2 }
+    format = asked[0]
+    if (format === 'widget' && args.items === undefined) return latestWidgetMain(args)
+  }
   if (typeof args.items !== 'string') { console.error(`${cmd} needs --items <file>\n${USAGE}`); return 2 }
   if (args.sources !== undefined && typeof args.sources !== 'string') { console.error(`--sources needs a file\n${USAGE}`); return 2 }
   const now = args.now === undefined ? Date.now() : typeof args.now === 'string' ? Date.parse(args.now) : NaN
@@ -2128,7 +2470,7 @@ function main(argv) {
 
   const dir = join(root, '.grimoire', 'manager')
   const ledgerFile = resolve(typeof args.ledger === 'string' ? args.ledger : join(dir, 'ledger.json'))
-  if (cmd !== 'brief') return viewMain(cmd, args, { items, config, sources, now, root, dir, ledgerFile })
+  if (cmd !== 'brief') return viewMain(cmd, format, args, { items, config, sources, now, root, dir, ledgerFile })
   const lock = join(dir, '.lock')
   let token
   try { token = acquireLock(lock) } catch (e) {
@@ -2148,7 +2490,9 @@ function main(argv) {
     const file = join(dir, 'briefings', `${stamp(now)}.md`)
     writeAtomic(file, text)
     writeAtomic(join(dir, 'latest.md'), text)
-    writeAtomic(join(dir, 'latest.json'), `${JSON.stringify(v)}\n`) // the view model share-body renders
+    // the view itself: what share-body renders, the panel (render --widget) shows and launch-check
+    // checks ids against
+    writeAtomic(join(dir, 'latest.json'), `${JSON.stringify(v)}\n`)
     writeAtomic(join(dir, 'briefing.html'), renderHtml(v))
     writeAtomic(ledgerFile, `${JSON.stringify(nextLedger(v, ledger, items), null, 2)}\n`)
     console.log(file)
