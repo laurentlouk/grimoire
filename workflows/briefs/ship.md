@@ -24,6 +24,8 @@ what it printed. The script stops itself before that limit.
   description alone when the push failed, or when a newer one is already there.
 - Run no other command: no git, no gh, no build, no test. Fix nothing, and never remove the lock
   yourself.
+- A `LOCK kept` line at the end means another holder has the lock now (it was taken over while the
+  script ran): the script left it alone, and so do you. It is not a failure.
 - The script tidies worktrees: `git worktree prune` drops the records of worktrees whose
   directory is gone. Only a halt's script also removes this run's reviewers' leftover `review-*`
   worktrees (exactly the `review-<repo>--<task>-…` ones: the run has stopped); mid-run, a review

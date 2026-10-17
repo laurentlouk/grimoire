@@ -383,7 +383,7 @@ for (const SHELL of SHELLS) {
   const got = {}
   await run('  (the gate prompt, for its lock)', [T('PROJ-1')], by({ 'impl:PROJ-1': impl(c1.slice(0, 7)), 'gate:api': (p) => { got.gate = p; return { status: 'DONE', summary: 'green', prUrl: PR_URL } } }), { args: { ...QUIET, repos: realRepo(X.W), builtinEnvChecks: false, deliver: 'end' } })
   const take = (/Before you push, take this repo's SHIP LOCK[\s\S]*?```bash\n([\s\S]*?)\n {2}```/.exec(got.gate) || [])[1] || ''
-  const release = (/Release it once the PR is done — or the moment you stop, pass or fail: `([^`]+)`/.exec(got.gate) || [])[1] || ''
+  const release = ((/Release it once the PR is done[^\n]*\n {2}```bash\n([\s\S]*?)\n {2}```/.exec(got.gate) || [])[1] || '').replace(/^ {2}/gm, '')
   ok(!!take && !!release, 'L2 · the gate prompt carries the lock script and its release')
   await eachShellAtOnce((SHELL) => `L2 · [${SHELL}] the gate takes the same lock`, async (SHELL, { ok }) => {
     const Y = sandbox() // the same scripts, pointed at this shell's own checkout

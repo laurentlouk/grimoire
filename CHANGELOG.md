@@ -161,15 +161,30 @@ Three liveness fixes:
 - A lock released between a failed `mkdir` and the check that it exists is tried again; it used
   to read as `cannot create (not writable?)`.
 
-Known follow-ups, not in this change:
-- Take, release and break do not all happen under `.brk`, as they do in the journal's lock. A
-  takeover judged on age (a ship still alive after 15 minutes, or a gate) can still race the
-  holder's own release, in a window of a few system calls.
-- The gate's heartbeat reads the owner line, then rewrites it. A ship that takes the lock over
-  in between can have its owner line overwritten with the gate's.
-- A waiter killed with SIGKILL while it times a lock with no owner line leaves its stamp
-  (`grimoire-ship-<repo>.lock.<pid>.l` or `.b`) in the git dir. The stamp is harmless and git
-  ignores it.
+Every change of hands now happens under one mutex, as in the journal's lock: take, takeover,
+release, and the gate heartbeat's rewrite all run under `<lock>.brk`
+(F-6 replays each window below, red first). The fixes:
+- **A release could race a takeover.** The gate's release, finding no lock, still ran `rm`, so a
+  ship that took the lock in between lost it. A ship's release could remove a lock taken over
+  after it read its owner line. A release now reads and compares the owner line in the mutex, and
+  removes nothing when there is no lock. A takeover takes the lock in the same section, so no one
+  sees the gap.
+- **The heartbeat could overwrite a new holder.** It read the owner line, then wrote the gate's
+  over a halt ship or seal that had taken the lock over. It now renews the line in the mutex, only
+  while the line names this gate (its id survives), and otherwise stops with a `LOCK kept` line.
+- **A mutex could stick forever.** If its holder was SIGKILLed inside and its pid then reused,
+  every ship and gate reported `LOCK busy`. A mutex unchanged for 30 s is now broken, even when its
+  pid looks alive. That is thousands of times the section it guards, and under the gate's 90-s wait.
+- **A breaker acted on a mutex that was not its own.** Its pid write was unchecked, and nothing
+  re-read the pid before the `rm`. The pid is now written and read back before anything is done,
+  and read again right before the lock is removed or rewritten. A holder that finds another's pid
+  there backs off and touches nothing.
+- **Stamps were left behind.** A waiter killed with SIGKILL left its `<lock>.<pid>.l` or `.b` in
+  the git dir. A take now removes the stamps whose pid is gone, never a live waiter's.
+
+The gate's release is a script now (a code block in the gate prompt, no longer an inline
+command), and the ship brief says what a `LOCK kept` line means: another holder has the lock, and
+the ship leaves it alone. The messages and exit codes are unchanged.
 
 **Setup (`skills/setup`, `scripts/config-merge.mjs`)**
 
