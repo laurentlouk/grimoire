@@ -140,7 +140,8 @@ await perShell(async (SHELL, { ok, section }) => {
     const epoch = () => Number((readFileSync(OWN, 'utf8').trim().split(' ') || [])[1])
     ok(/^LOCK ok \//m.test((await execA(X, SHELL, take, { GRIMOIRE_SHIP_LOCK_WAIT: '1' })).out), `${SHELL}: the gate takes the lock`)
     const old = Math.floor(Date.now() / 1000) - 1100 // 1100 s old: a ship would take it over 100 s from now
-    writeFileSync(OWN, `1 ${old} gate\n`)
+    const id = readFileSync(OWN, 'utf8').trim().split(' ')[0] // this gate's holder id: the heartbeat renews only a line that names it
+    writeFileSync(OWN, `${id} ${old} gate\n`)
     // a pre-push hook that outlasts a beat: it returns once the lock's age has been renewed (at most
     // 10 s), not after a fixed sleep — the renewal is checked below
     mkdirSync(join(X.T0, 'hooks'))
@@ -150,8 +151,8 @@ await perShell(async (SHELL, { ok, section }) => {
     X.sh(`git push -q --no-verify origin ${c1}:refs/heads/x-${SHELL} 2>/dev/null; git commit -q --allow-empty -m more-${SHELL}`, X.W) // setup: the hook is for the gate's push
     const r = await execA(X, SHELL, push, { GRIMOIRE_GATE_LOCK_BEAT: '1' })
     ok(/^PUSH exit=0$/m.test(r.out) && X.origin() === X.sh('git rev-parse HEAD', X.W), `${SHELL}: pushed (exit 0) through a pre-push hook that outlasts a beat`)
-    ok(epoch() > old + 1000 && / gate$/.test(readFileSync(OWN, 'utf8').trim()), `${SHELL}: its lock's age was renewed while the hook ran (still the gate's)`)
-    writeFileSync(OWN, `1 ${old} gate\n`)
+    ok(epoch() > old + 1000 && readFileSync(OWN, 'utf8').trim().startsWith(`${id} `) && / gate$/.test(readFileSync(OWN, 'utf8').trim()), `${SHELL}: its lock's age was renewed while the hook ran (still the gate's, its id kept)`)
+    writeFileSync(OWN, `${id} ${old} gate\n`)
     await tick(1600)
     ok(epoch() === old, `${SHELL}: the heartbeat stopped with the push (nothing renews it afterwards)`)
     X.done()
