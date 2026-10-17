@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- **The schedule's probe goes through the route the schedule takes (`skills/setup`).** In 0.12.0,
+  the probe was always `claude -p`, also for a desktop task. Launched from a desktop session, it
+  inherits that session's `ANTHROPIC_BASE_URL` and `CLAUDE_CODE_*` variables and fails before any
+  read (`401 OAuth access token is invalid`). Cleared of them, it needs a CLI login of its own,
+  and even when it passes, it says nothing about the task.
+  - **A desktop task is probed through the app, never the CLI.** On the yes to the probe, setup
+    creates the task with no schedule (manual only) and the probe as its prompt, runs it once
+    (`run_scheduled_task`) and reads the result (`list_task_runs`). The second yes gives that same
+    task its prompt and cron (`update_scheduled_task`), so an approval given in the probe's run
+    stays on it. Setup never asks for `claude auth login` on this route.
+  - **The cron probe runs in cron's bare environment:** `env -i HOME USER PATH <claude> -p …`.
+    A 401 there is the CLI's own login, which is the user's to fix.
+  - Setup says where a desktop task runs: the project's main checkout, also when the task was
+    created from a linked worktree. It also says whether the task kept the session's permission
+    mode.
+  - Evals `setup-12` and `setup-13` follow.
+
 ## 0.12.0 — know where things stand
 
 Three views of where things stand: what the team owes (`/grimoire:manager`, a briefing read from
