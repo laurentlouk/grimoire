@@ -20,6 +20,23 @@
     created from a linked worktree. It also says whether the task kept the session's permission
     mode.
   - Evals `setup-12` and `setup-13` follow.
+- **The shared post stays small enough to retype (`scripts/manager.mjs` share-body,
+  `skills/manager`, `skills/setup`).** A Linear document or a Slack canvas gets its body through
+  one connector call, so the model retypes `share-body`'s output verbatim. A 148-item briefing
+  made a 65 KB body, which was slow to send, could not be checked, and was split across three
+  writes.
+  - **Default limit by destination.** 20,000 characters for a `linear-document` or a
+    `slack-canvas`. A `github-issue` keeps GitHub's 65,536, and its body is now redirected into
+    the file (`share-body … > <file>`), never retyped. The cut is unchanged: from the end, with
+    "… N more".
+  - **What repeats is said once, what nobody acts on is listed by key.** Hand to AI's one reason
+    (every item there has the same) sits under the heading instead of on 49 lines. Waiting on
+    others and Not now list their keys, `A-1 · A-2`, and each item's lines stay in the local
+    briefing.
+  - The repo check's reason, one machine's checkout state, is only ever a Not now reason, so it
+    can't reach the post any more. Its stripping code is gone.
+  - On the 148-item briefing: 65,276 characters down to 20,000. Decide and Do come first, and
+    the rest is counted.
 
 ## 0.12.0 — know where things stand
 
