@@ -2276,8 +2276,6 @@ const USAGE = [
   '       node scripts/manager.mjs share-status --status created|updated|failed [--url <url>] [--reason <text>] [--root <dir>]',
 ].join('\n')
 
-// Reads a JSON file the user or a scout wrote. Node's parse error can quote the source, so the
-// message names the file only.
 // A config file as the project sees it. One named grimoire.config.json is read with the layers
 // project-config.mjs resolves at its directory, so in a linked worktree it reads through to the
 // main checkout's: the skill's `--config <project>/grimoire.config.json` works in a worktree that
@@ -2292,6 +2290,8 @@ function readProjectConfig(file) {
   return { value: r.config }
 }
 
+// Reads a JSON file the user or a scout wrote. Node's parse error can quote the source, so the
+// message names the file only.
 function readInput(file, what) {
   let raw
   try { raw = readFileSync(file, 'utf8') } catch (e) { return { error: `${what} ${file}: ${e.code === 'ENOENT' ? 'not found' : `cannot read (${e.code || 'error'})`}` } }

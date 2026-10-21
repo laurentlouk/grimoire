@@ -70,7 +70,11 @@ export function loadConfig(root) {
   let config = {}
   for (const file of [...files].reverse()) {
     let value
-    try { value = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { return { config: null, files, error: `${file} does not parse: ${e.message}` } }
+    // Node's parse error can quote the source (a token, a webhook URL): only its position is said.
+    try { value = JSON.parse(readFileSync(file, 'utf8')) } catch (e) {
+      const at = /line \d+ column \d+|position \d+/.exec(String(e.message))
+      return { config: null, files, error: `${file} does not parse${at ? ` (at ${at[0]})` : ''}` }
+    }
     if (!isObj(value)) return { config: null, files, error: `${file}: the top level must be a JSON object` }
     config = mergeConfig(config, value)
   }

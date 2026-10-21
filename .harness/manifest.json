@@ -10,6 +10,6 @@
     "hooks/scripts/guard.sh": "62b809b6738af5b06654b6855f1f73cab62e67c0a6048afe35962ce025850d3c",
     "hooks/scripts/guard.mjs": "9c7c1976101f1a3a202ab38410ed82622f91f1d31132502b117833defd5cdf70",
     "hooks/scripts/graph-refresh.sh": "1c6d2a808e4998a35eb0c2a2d02c20e00ddd3e2820df05796d17fe62959fd0ea",
-    "scripts/project-config.mjs": "2c840e024c33afb254833d46477ffe1b90604e18fa59bca0cca1e34e6dfda750"
+    "scripts/project-config.mjs": "b828299a5cb0f1012d654edfda65917959879ce114146c492cfe9d4c1f6529af"
   }
 }

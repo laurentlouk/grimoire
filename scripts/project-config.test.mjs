@@ -61,8 +61,9 @@ section('C-3 · the worktree file is layered over the main one')
 
 section('C-4 · broken layers')
 {
-  write(WT, '{ nope')
+  write(WT, '{ "token": "SECRET-VALUE", }')
   const r = loadConfig(WT)
+  ok(!String(r.error).includes('SECRET-VALUE'), `the error never quotes the file's contents (${r.error})`)
   ok(r.config === null && /grimoire\.config\.json does not parse/.test(r.error), `a layer that does not parse is an error naming it (${r.error})`)
   eq(readConfig(WT), {}, 'readConfig fails open to {}')
   write(WT, '[1]')
