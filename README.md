@@ -1,3 +1,5 @@
+![Grimoire — Orchestrate agents. Build. Learn.](docs/assets/grimoire-banner.png)
+
 # 🔮 grimoire
 
 *A spellbook for coding agents: portable skills, a roster, a memory, and a build loop that learns.*
