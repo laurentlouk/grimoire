@@ -4,8 +4,9 @@
 // Freshness: before answering, a query re-indexes incrementally when files moved since the last
 // index (throttled to once per FRESH_MS per process). A project never indexed is not indexed
 // implicitly: that is graph_index's job (or the SubagentStop hook's `refresh`), since the first run
-// can take a while on a large tree. A linked git worktree with no index is seeded from the main
-// checkout's first (freshness.mjs), so it only re-parses what its branch changed.
+// can take a while on a large tree. A checkout with no index is seeded from its base checkout's
+// (the branch it is based on, else the main checkout: freshness.mjs), and every index run re-bases
+// onto it when that saves parsing, so a worktree only re-parses what its branch changed.
 import { existsSync } from 'node:fs'
 import { loadProject, scanRepo } from './project.mjs'
 import { openStore, SCHEMA_VERSION } from './store.mjs'
@@ -120,7 +121,7 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
   if (!tool) throw new Error(`unknown tool ${name}`)
   const project = loadProject(root)
   if (!project.enabled) return 'The code graph is disabled for this project (grimoire.config.json: graph.enabled = false). Use Grep/Glob/Read.'
-  await seed(project).catch((e) => log(`could not seed from the main checkout: ${e.message}`))
+  await seed(project).catch((e) => log(`could not seed from the base checkout: ${e.message}`))
 
   if (tool.index) {
     const r = await runIndex(project.root, { full: !!args.full, repo: args.repo || null, onLog: log })

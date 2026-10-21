@@ -172,6 +172,16 @@ try {
   expectAllow(bash('git push origin main', e), 'guard.enabled: false turns it off')
   writeFileSync(path.join(EMPTY, 'grimoire.config.json'), '{ not json')
   expectDeny(bash('git push origin main', e), 'a malformed config falls back to defaults')
+  { // an untracked config on the main checkout still binds a linked worktree that has none
+    const WT = path.join(PROJ, '.worktrees', 'feat-x')
+    writeFileSync(path.join(PROJ, 'grimoire.config.json'), JSON.stringify({ guard: { protectedBranches: ['prod'] } }))
+    const w = { cwd: WT }
+    expectDeny(bash('git push origin prod', w), "a worktree with no config reads the main checkout's guard.protectedBranches")
+    writeFileSync(path.join(WT, 'grimoire.config.json'), JSON.stringify({ guard: { protectedBranches: ['qa'] } }))
+    expectDeny(bash('git push origin qa', w), "the worktree's own file layers over the main one")
+    expectAllow(bash('git push origin prod', w), 'an array the worktree sets replaces the main one whole')
+    rmSync(path.join(WT, 'grimoire.config.json')); rmSync(path.join(PROJ, 'grimoire.config.json'))
+  }
 
   console.log('\n── mcp tools (read-only agents)')
   // Connector tool names are opaque per account (`mcp__<server>__<tool>`, the server id holding

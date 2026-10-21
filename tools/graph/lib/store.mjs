@@ -26,6 +26,9 @@ async function driver() {
   return sqlite
 }
 
+// Every table of the index, in DDL order.
+export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn']
+
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS repos(name TEXT PRIMARY KEY, root TEXT, head TEXT, indexed_at TEXT, cochange_head TEXT);
@@ -55,7 +58,7 @@ export async function openStore(dbPath, { readOnly = false } = {}) {
   db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;')
   const v = (() => { try { return db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value } catch { return null } })()
   if (v && v !== SCHEMA_VERSION) {
-    for (const t of ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn']) db.exec(`DROP TABLE IF EXISTS ${t}`)
+    for (const t of TABLES) db.exec(`DROP TABLE IF EXISTS ${t}`)
   }
   db.exec(DDL)
   db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('schema', ?)").run(SCHEMA_VERSION)

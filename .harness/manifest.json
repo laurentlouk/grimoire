@@ -1,14 +1,15 @@
 {
   "schema": 1,
   "name": "grimoire",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "host": "claude-code",
   "files": {
     ".harness/mcp-policy.json": "6ed274eb105556410a08835aff94971f678bdc86d6541aea83ac42209f75f010",
     ".mcp.json": "f6667436ee59516743f79390597bd9509f3c5983e6f121c18c72b3b86ed18ba4",
     "hooks/hooks.json": "6b09108f0ecf451034b8f6ec0980cb2393805bb23a3862f820d5a4fb09d6985f",
     "hooks/scripts/guard.sh": "62b809b6738af5b06654b6855f1f73cab62e67c0a6048afe35962ce025850d3c",
-    "hooks/scripts/guard.mjs": "6678b8d000c5810183f42ddb9bc2732c734f6d18b370ecac867c81f211e14e94",
-    "hooks/scripts/graph-refresh.sh": "1c6d2a808e4998a35eb0c2a2d02c20e00ddd3e2820df05796d17fe62959fd0ea"
+    "hooks/scripts/guard.mjs": "9c7c1976101f1a3a202ab38410ed82622f91f1d31132502b117833defd5cdf70",
+    "hooks/scripts/graph-refresh.sh": "1c6d2a808e4998a35eb0c2a2d02c20e00ddd3e2820df05796d17fe62959fd0ea",
+    "scripts/project-config.mjs": "2c840e024c33afb254833d46477ffe1b90604e18fa59bca0cca1e34e6dfda750"
   }
 }

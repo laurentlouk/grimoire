@@ -100,7 +100,14 @@ Indexing is always this script, never a model. Three things run it:
 
 One indexer runs per index at a time (a lock next to it). A second one does not wait: it marks the index pending and the running one goes again before it finishes, so no change is lost.
 
-**Worktrees.** Each checkout has its own index, since each branch has its own code. A linked git worktree with no index yet starts from a snapshot of the main checkout's, then re-parses only what its branch changed. The build loop's lanes live under `.worktrees/`, which is not indexed; the run branch they merge into is.
+**Worktrees.** Each checkout has its own index, since each branch has its own code (`lib/freshness.mjs`).
+
+- *Its base.* The first of these branches that another checkout of the repository has checked out with an index: `baseBranch` in the config (`origin/dev` → `dev`), the branch's upstream when it names another branch, `origin/HEAD`, then `main`, then `master`. Otherwise the main checkout, whatever it holds. A branch stacked on `dev` is based on the checkout holding `dev`.
+- *Seed.* A checkout with no index yet starts from a snapshot of its base's (`VACUUM INTO`), then re-parses only what its branch changed. Without `repos[]`, the one repository is named after the main checkout in every worktree, so the copied rows match.
+- *Re-base.* Each index run, under its lock, first checks whether HEAD moved since the last index (a pull, a rebase, a merge of the base). If it did, it counts the files to re-parse from its own index (`git diff --name-only <indexed commit> HEAD`) and from the base's, and copies the base's index in one transaction when that saves at least 20 files (`GRIMOIRE_GRAPH_REBASE_MIN`). So once work is merged into main and main's index has it, a worktree that picks it up copies instead of parsing. The incremental index that follows makes the result match the working tree either way: re-basing changes the cost, never the answers. `graph_status` names the base, in `meta('base')`.
+- The base's index is refreshed by its own checkout (its sessions, its hook, `refresh --root`), never from a worktree.
+
+The build loop's lanes live under `.worktrees/`, which is not indexed; the run branch they merge into is.
 
 Measured on this machine: ripgrep (114 Rust files) 0.7 s, FastAPI (1,147 Python files) 1.4 s, Vite (1,576 JS/TS files) 1.5 s, full index.
 
@@ -110,7 +117,7 @@ Measured on this machine: ripgrep (114 Rust files) 0.7 s, FastAPI (1,147 Python 
 "graph": { "enabled": true, "repos": ["api", "web"], "dir": ".grimoire/graph", "exclude": ["generated/**", "fixtures"], "maxFileKB": 512, "architectureDir": "docs/architecture" }
 ```
 
-All optional. Without a config the project root is one repository. `repos` defaults to every entry of the top-level `repos[]`; `exclude` adds to the built-in skips (dependencies, build output, caches, minified and generated files, `.d.ts`). `enabled: false` turns every tool into a pointer back to grep.
+All optional, and read as every checkout sees it: a linked worktree without its own `grimoire.config.json` uses the main checkout's (`scripts/project-config.mjs`). Without a config the project root is one repository. `repos` defaults to every entry of the top-level `repos[]`; `exclude` adds to the built-in skips (dependencies, build output, caches, minified and generated files, `.d.ts`). `enabled: false` turns every tool into a pointer back to grep.
 
 ## The parser runtime
 

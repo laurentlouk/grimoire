@@ -1,5 +1,6 @@
 // grimoire graph · the project being indexed: its root, its repositories, where the index lives,
-// and which files count. Everything comes from grimoire.config.json when there is one:
+// and which files count. Everything comes from grimoire.config.json when there is one (in a linked
+// worktree without its own, the main checkout's: scripts/project-config.mjs):
 //   repos[]        { name, path }: each is indexed as its own repository (a hub of several repos
 //                  gets one graph with a `repo` column); no repos → the root is one repository
 //   graph.enabled  false turns every tool into a pointer back to grep/read
@@ -7,10 +8,12 @@
 //   graph.dir      index location (default .grimoire/graph, next to the loop's telemetry)
 //   graph.exclude  extra path globs to skip; graph.maxFileKB (default 512)
 //   graph.architectureDir  where the architecture diagrams live (default docs/architecture)
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
+//   baseBranch     the branch a worktree's index is based on first (freshness.mjs)
+import { readdirSync, statSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { langOf } from './langs.mjs'
+import { loadConfig, mainCheckout } from '../../../scripts/project-config.mjs'
 
 export function projectRoot(explicit) {
   return path.resolve(explicit || process.env.GRIMOIRE_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR || process.cwd())
@@ -18,19 +21,22 @@ export function projectRoot(explicit) {
 
 export function loadProject(rootArg) {
   const root = projectRoot(rootArg)
-  let config = {}
-  const cfgPath = path.join(root, 'grimoire.config.json')
-  if (existsSync(cfgPath)) {
-    try { config = JSON.parse(readFileSync(cfgPath, 'utf8')) } catch (e) { throw new Error(`grimoire.config.json does not parse: ${e.message}`) }
-  }
+  // A linked worktree with no config of its own reads the main checkout's, layered (project-config.mjs).
+  const loaded = loadConfig(root)
+  if (loaded.error) throw new Error(loaded.error)
+  const config = loaded.config
   const g = config.graph || {}
   let repos = (config.repos || []).filter((r) => r && r.name && r.path).map((r) => ({ name: r.name, path: r.path }))
   if (Array.isArray(g.repos) && g.repos.length) repos = repos.filter((r) => g.repos.includes(r.name))
-  if (!repos.length) repos = [{ name: path.basename(root), path: '.' }]
+  // No repos[]: the root is one repository, named after the main checkout in every linked worktree,
+  // so a worktree's rows match the index it was seeded from (a name per folder re-parsed it all).
+  if (!repos.length) repos = [{ name: path.basename(mainCheckout(root) || root), path: '.' }]
   repos = repos.map((r) => ({ ...r, abs: path.resolve(root, r.path) })).filter((r) => existsSync(r.abs))
   return {
     root,
     enabled: g.enabled !== false,
+    configured: !!config.graph, // a `graph` block: refresh may build the first index
+    baseBranch: typeof config.baseBranch === 'string' && config.baseBranch.trim() ? config.baseBranch.trim() : null,
     repos,
     dbPath: path.join(root, g.dir || '.grimoire/graph', 'graph.db'),
     exclude: compileGlobs(g.exclude || []),

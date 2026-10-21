@@ -9,7 +9,7 @@ The code graph (`tools/graph`) is a local index of every repository in the proje
 
 ## Where it lives
 
-- The index: `.grimoire/graph/graph.db` in the checkout (`graph.dir` in `grimoire.config.json` moves it), gitignored. Each checkout has its own, since each branch has its own code; a linked git worktree starts from the main checkout's.
+- The index: `.grimoire/graph/graph.db` in the checkout (`graph.dir` in `grimoire.config.json` moves it), gitignored. Each checkout has its own, since each branch has its own code; a worktree starts from the index of the branch it is based on (`baseBranch`, its upstream, `origin/HEAD`, `main`) and re-bases onto it after a merge when that saves parsing.
 - Indexing is always the script, never a model: `node <plugin root>/tools/graph/graph.mjs index` (incremental; `--full` rebuilds). The plugin's `SubagentStop` hook and every query refresh it on their own.
 - The plugin root is the directory two levels above this `SKILL.md`.
 

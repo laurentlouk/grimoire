@@ -58,7 +58,8 @@ export function archClient(ctx) {
 
   let pan = null, moved = false // a drag on the background pans the diagram; one listener ends it
   window.addEventListener('mouseup', () => { pan = null })
-  // natural size by default (readable, scroll or drag to pan); Fit shows it all
+  // natural size by default (readable; drag or the scrollbars pan, the wheel zooms); Fit shows it all
+  const ZMIN = 0.2, ZMAX = 3
   const zoomOf = (L) => st.archZoom === 'fit' ? Math.min(1, Math.max(0.2, ((document.getElementById('arch-box') || {}).clientWidth || 1100) / (L.W + 8))) : st.archZoom || 1
   function rerender() {
     const b = document.getElementById('arch-box')
@@ -118,6 +119,24 @@ export function archClient(ctx) {
     if (st.archScroll) { const [x, y] = st.archScroll; st.archScroll = null; requestAnimationFrame(() => { box.scrollLeft = x; box.scrollTop = y }) }
     box.addEventListener('mousedown', (e) => { if (e.button !== 0 || e.target.closest('[data-comp]')) return; pan = [e.clientX, e.clientY, box.scrollLeft, box.scrollTop]; moved = false })
     box.addEventListener('mousemove', (e) => { if (!pan) return; const dx = e.clientX - pan[0], dy = e.clientY - pan[1]; if (Math.abs(dx) + Math.abs(dy) > 3) moved = true; box.scrollLeft = pan[2] - dx; box.scrollTop = pan[3] - dy })
+    // the wheel (or a trackpad pinch, which arrives as a wheel with ctrlKey) zooms around the
+    // pointer, as d3-zoom and React Flow do: the point under it stays put. Resized in place, no
+    // re-render, so it keeps up with a trackpad's stream of small deltas.
+    box.addEventListener('wheel', (e) => {
+      e.preventDefault()
+      const z = zoomOf(L), r = svg.getBoundingClientRect()
+      const ux = (e.clientX - r.left) / z, uy = (e.clientY - r.top) / z
+      const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1)
+      const nz = Math.min(ZMAX, Math.max(ZMIN, z * Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.002))))
+      if (Math.abs(nz - z) < 1e-4) return
+      st.archZoom = nz
+      svg.setAttribute('width', String(Math.round(L.W * nz))); svg.setAttribute('height', String(Math.round(L.H * nz)))
+      const n = svg.getBoundingClientRect()
+      box.scrollLeft += n.left + ux * nz - e.clientX; box.scrollTop += n.top + uy * nz - e.clientY
+      const pct = document.querySelector('[data-ctl="arch-100"]'), fit = document.querySelector('[data-ctl="arch-fit"]')
+      if (pct) { pct.textContent = `${Math.round(nz * 100)}%`; pct.setAttribute('aria-pressed', String(Math.abs(nz - 1) < 0.005)) }
+      if (fit) fit.setAttribute('aria-pressed', 'false')
+    }, { passive: false })
 
     const hot = (id) => {
       if (lit || sel) return
@@ -200,9 +219,9 @@ export function archClient(ctx) {
     const cur = st.archZoom === 'fit' ? 'fit' : st.archZoom || 1
     const zoomSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Zoom' },
       h('button', { 'data-ctl': 'arch-fit', 'aria-pressed': String(cur === 'fit'), title: 'Fit the diagram to the page', onclick: () => zoom('fit') }, 'Fit'),
-      h('button', { 'data-ctl': 'arch-out', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => zoom(Math.max(0.3, Math.round(((cur === 'fit' ? zoomOf(a.layout) : cur) - 0.15) * 100) / 100)) }, '−'),
+      h('button', { 'data-ctl': 'arch-out', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => zoom(Math.max(ZMIN, Math.round(((cur === 'fit' ? zoomOf(a.layout) : cur) - 0.15) * 100) / 100)) }, '−'),
       h('button', { 'data-ctl': 'arch-100', 'aria-pressed': String(cur === 1), title: 'Natural size', onclick: () => zoom(1) }, cur === 'fit' ? `${Math.round(zoomOf(a.layout) * 100)}%` : `${Math.round(cur * 100)}%`),
-      h('button', { 'data-ctl': 'arch-in', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => zoom(Math.min(2, Math.round(((cur === 'fit' ? zoomOf(a.layout) : cur) + 0.15) * 100) / 100)) }, '+'))
+      h('button', { 'data-ctl': 'arch-in', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => zoom(Math.min(ZMAX, Math.round(((cur === 'fit' ? zoomOf(a.layout) : cur) + 0.15) * 100) / 100)) }, '+'))
     const head = h('div', { class: 'toolbar' }, seg, zoomSeg, h('span', { class: 'muted' }, `${plural(a.comps.length, 'component')} · ${plural(a.conns.length, 'connection')}${a.checked ? ` · ${a.checked}` : ''}`))
     const banner = a.auto || a.draft ? h('div', { class: 'callout callout-warning banner' }, h('div', { class: 'callout-title' }, a.auto ? 'Drafted from the graph on this render' : 'A draft from the graph, not refined yet'),
       h('p', null, 'One component per module, typed by folder names and imports; every name, type and grouping is a guess. ', h('code', null, '/grimoire:architecture'), a.auto ? ' writes it to docs/architecture and has an agent refine it from the code.' : ' has an agent refine it from the code.')) : null
@@ -211,7 +230,7 @@ export function archClient(ctx) {
     const sel = st.archSel && a.comps.some((c) => c.id === st.archSel) ? passport(a, st.archSel) : null
     const draw = diagram(a)
     const cards = Array.isArray(a.cards) && a.cards.length ? h('div', { class: 'cards arch-cards' }, a.cards.map((c) => h('div', { class: `card acard c-${c.color || 'slate'}` }, h('div', { class: 'acard-title' }, h('i', null), c.title), h('ul', null, c.items.map((x) => h('li', null, x)))))) : null
-    const note = h('p', { class: 'note' }, `${a.file ? `${a.file} · ` : ''}Click a component for its passport; Upstream, Downstream and Route follow the drawn lines. A line the graph confirms is solid; one it cannot see between two code components is dashed amber, unless it says what carries it (via). The graph is a map: read the code at the sources.`)
+    const note = h('p', { class: 'note' }, `${a.file ? `${a.file} · ` : ''}Scroll to zoom, drag to pan. Click a component for its passport; Upstream, Downstream and Route follow the drawn lines. A line the graph confirms is solid; one it cannot see between two code components is dashed amber, unless it says what carries it (via). The graph is a map: read the code at the sources.`)
     return h('section', null, head, a.summary ? h('p', { class: 'summary' }, a.summary) : null, banner, problems, legend,
       sel ? h('section', { class: 'split rev' }, h('div', null, draw), h('aside', { class: 'side' }, sel)) : draw, note, cards)
   }
