@@ -1,6 +1,67 @@
 # Changelog
 
-## Unreleased
+## 0.12.1 — every worktree sees the project
+
+A linked worktree now sees the same grimoire as the main checkout: the same config, an index that
+starts from the branch it is based on and re-bases onto it after a merge, and a guard that keeps
+main's protections. The model came from how other tools solve it: Claude Code reads its project
+settings from the main checkout instead of copying them, worktrunk layers config and detects the
+default branch in a fixed order, and zoekt and Glean share one base index with a per-branch layer
+on top. Only the ideas were borrowed: no dependency, no schema change. Also: the Architecture tab
+zooms on scroll, the README covers what 0.12.0 shipped, and two fixes left over from 0.12.0.
+
+### Worktrees
+
+- **One config for every checkout (`scripts/project-config.mjs`, new).** `grimoire.config.json`
+  is often untracked or gitignored, so a new worktree had none. The guard and the graph then ran
+  on defaults: a `guard.protectedBranches` set on main no longer protected a worktree, and a
+  worktree's graph ignored `graph.exclude`. Every reader now resolves the config the same way.
+  - A linked worktree with no file of its own reads the main checkout's. Nothing is copied, so
+    an edit on main shows up everywhere at once.
+  - A worktree's own file is layered over the main one. Objects merge key by key, and any other
+    value the worktree sets, an array included, replaces the main one whole.
+  - The main checkout is found from files only (`.git` → `commondir`), with no git process, so
+    the guard stays within its 5 s budget.
+  - `node scripts/project-config.mjs --root <dir>` prints what a checkout sees; `--sources` lists
+    the files. `skills/orchestrate` reads the config through it.
+  - Readers: the guard (`hooks/scripts/guard.mjs`), the graph (`tools/graph/lib/project.mjs`),
+    the manager (`scripts/manager.mjs`: a `--config <dir>/grimoire.config.json` is resolved in
+    layers at `<dir>`, any other file is read as is) and the log renderer. The manager's own
+    `mainCheckout` is now the shared one.
+  - `scripts/project-config.mjs` joins the harness manifest, since the guard's verdicts depend
+    on it.
+- **The graph starts from the branch a worktree is based on (`tools/graph/lib/freshness.mjs`).**
+  The base is the first of these branches that another checkout has checked out with an index:
+  `baseBranch` in the config, the branch's upstream when it names another branch, `origin/HEAD`,
+  `main`, then `master`. Otherwise it is the main checkout, as before. A branch stacked on `dev`
+  is seeded from dev's index, not main's.
+- **…and re-bases onto it after a merge.** Every index run, under its lock, checks whether HEAD
+  moved since the last index. If it did, it counts the files left to re-parse from its own index
+  and from the base's (`git diff --name-only`). When the base's saves at least 20
+  (`GRIMOIRE_GRAPH_REBASE_MIN`), it copies the base's index in one transaction (WAL-safe, so
+  readers see the old index or the new one), then indexes incrementally. Once work merged into
+  main is indexed there, a worktree that pulls it copies the result instead of parsing it again.
+  The answers stay the same; only the parsing cost changes. `graph_status` names the base.
+- **Fix: seeding a worktree saved nothing in a project without `repos[]`.** The one repository
+  was named after the checkout's folder, so the rows copied from the main checkout (`grimoire`)
+  never matched the worktree's (`feat-x`): the first index dropped them and parsed everything.
+  The default repository is now named after the main checkout in every worktree. An existing
+  worktree index is rebuilt once, on its next refresh.
+
+### The graph page
+
+- **The Architecture tab zooms on scroll (`tools/graph/lib/arch-view.mjs`).** The wheel, or a
+  trackpad pinch, zooms around the pointer, as d3-zoom and React Flow do: the point under the
+  pointer stays put. Drag or the scrollbars pan. Fit, −, + and the percentage stay in the
+  toolbar, which now ranges 20–300 %. The diagram is resized in place, with no re-render, so it
+  keeps up with a trackpad.
+
+### Docs
+
+- **The README covers what 0.12.0 shipped:** a section on `/grimoire:manager` (sources,
+  read-only scouts, the ranking, launching, the headline, the schedule and the shared post), one
+  on worktrees, and the Architecture tab's zoom and pan. The graph README, the graph skill and
+  the hooks README describe the worktree base and the config read-through.
 
 ### Fixes
 

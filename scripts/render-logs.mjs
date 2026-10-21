@@ -10,7 +10,8 @@
 //      → deletes run dirs older than N days (default: telemetry.retentionDays in
 //        grimoire.config.json, else 183 ≈ 6 months). Never touches anything outside --dir.
 //
-//  Defaults come from grimoire.config.json at the cwd when a flag is absent:
+//  Defaults come from grimoire.config.json at the cwd (in a linked worktree, layered over the main
+//  checkout's: project-config.mjs) when a flag is absent:
 //  --dir ← telemetry.dir (.grimoire/runs) · --days ← telemetry.retentionDays (183) ·
 //  --ledgers ← runsDir (runs).
 //  node scripts/render-logs.mjs summary [--dir .grimoire/runs] [--version <v>] [--json]
@@ -29,6 +30,7 @@ import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { readConfig } from './project-config.mjs'
 
 const DAY = 86400000
 
@@ -51,9 +53,9 @@ const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf8')) } cat
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
+// The cwd's config, layered over the main checkout's in a linked worktree (project-config.mjs).
 function config() {
-  const c = readJson(resolve('grimoire.config.json'))
-  return isObj(c) ? c : {}
+  return readConfig(process.cwd())
 }
 
 // ── load ──

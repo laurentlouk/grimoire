@@ -123,6 +123,8 @@ export class Graph {
       const n = byConf.reduce((a, e) => a + e.c, 0), guessed = byConf.filter((e) => e.confidence === 'ambiguous' || e.confidence === 'unique-name').reduce((a, e) => a + e.c, 0)
       if (n) lines.push(`  name guesses: ${Math.round((100 * guessed) / n)}% of ${n} call links (ambiguous + unique-name)`)
     }
+    const base = (() => { try { return JSON.parse(this.one("SELECT value FROM meta WHERE key = 'base'")?.value || 'null') } catch { return null } })()
+    if (base) lines.push(`based on ${base.branch || 'the main checkout'} (${base.checkout})${base.rebasedAt ? `, last re-based ${base.rebasedAt}` : ''}`)
     return lines.join('\n')
   }
 

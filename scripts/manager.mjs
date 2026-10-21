@@ -244,6 +244,7 @@ import { spawnSync, execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { loadRuns, runOutcome, STALE_HOURS } from './render-logs.mjs'
+import { CONFIG_FILE, configLayers, loadConfig, mainCheckout } from './project-config.mjs'
 
 const HOUR = 3600000
 const DAY = 86400000
@@ -1627,10 +1628,10 @@ function shareBodyMain(args) {
   const root = resolve(typeof args.root === 'string' ? args.root : stateRoot())
   // manager.share's kind sets the default limit: --config, else grimoire.config.json in the cwd,
   // else in the root.
-  const configFile = typeof args.config === 'string' ? resolve(args.config) : [resolve('grimoire.config.json'), join(root, 'grimoire.config.json')].find(isFile)
+  const configFile = typeof args.config === 'string' ? resolve(args.config) : [resolve(CONFIG_FILE), join(root, CONFIG_FILE)].find(hasConfig)
   let config = {}
-  if (configFile && existsSync(configFile)) {
-    const c = readInput(configFile, 'config')
+  if (configFile && hasConfig(configFile)) {
+    const c = readProjectConfig(configFile)
     if (c.error) { console.error(c.error); return 1 }
     if (!isObj(c.value)) { console.error(`config ${configFile}: the top level must be a JSON object`); return 1 }
     config = c.value
@@ -1808,20 +1809,8 @@ export function headline(front, { now, schedule, interval = DAY, page = null } =
   return line.length < HEADLINE_MAX && !UNSAFE.test(line) ? line : null
 }
 
-// The main checkout of the linked worktree at dir, from files only: its .git is a file naming the
-// worktree's git dir, whose commondir names the shared .git. null for a plain checkout, a
-// submodule (no commondir) or no git: the same answer stateRoot gets from git.
-export function mainCheckout(dir) {
-  try {
-    const dotgit = join(dir, '.git')
-    if (!statSync(dotgit).isFile()) return null
-    const m = /^gitdir: *(.+?)\s*$/m.exec(readFileSync(dotgit, 'utf8'))
-    if (!m) return null
-    const gitdir = resolve(dir, m[1])
-    const common = resolve(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim())
-    return basename(common) === '.git' ? dirname(common) : null
-  } catch { return null }
-}
+// The main checkout of a linked worktree, from files only (project-config.mjs).
+export { mainCheckout }
 
 const isFile = (p) => { try { return statSync(p).isFile() } catch { return false } }
 // A regular file's first max bytes, or null. Checked before it is opened: a FIFO would block.
@@ -1847,10 +1836,9 @@ function headlineMain(args) {
     // brief writes to the main checkout; a session in a linked worktree reads it, and its own too
     // (a brief run with --root there): the newer briefing wins.
     const roots = [...new Set([root, mainCheckout(root)].filter(Boolean))]
-    // The schedule: --config, else the project's grimoire.config.json, else the main checkout's.
+    // The schedule: --config, else the project's config, layered over the main checkout's.
     // A config that is missing, unreadable or not JSON is no schedule: 24 h.
-    const configFile = typeof args.config === 'string' ? resolve(args.config) : roots.map((r) => join(r, 'grimoire.config.json')).find(isFile)
-    const config = configFile && isFile(configFile) ? readJson(configFile) : null
+    const config = readProjectConfig(typeof args.config === 'string' ? resolve(args.config) : join(root, CONFIG_FILE)).value ?? null
     const schedule = isObj(config) && isObj(config.manager) ? config.manager.schedule ?? null : null
     let best = null
     for (const r of roots) {
@@ -2288,6 +2276,20 @@ const USAGE = [
   '       node scripts/manager.mjs share-status --status created|updated|failed [--url <url>] [--reason <text>] [--root <dir>]',
 ].join('\n')
 
+// A config file as the project sees it. One named grimoire.config.json is read with the layers
+// project-config.mjs resolves at its directory, so in a linked worktree it reads through to the
+// main checkout's: the skill's `--config <project>/grimoire.config.json` works in a worktree that
+// has no file of its own. Any other file is read as is.
+const isProjectConfig = (file) => basename(file) === CONFIG_FILE
+const hasConfig = (file) => (isProjectConfig(file) ? configLayers(dirname(file)).length > 0 : isFile(file))
+function readProjectConfig(file) {
+  if (!isProjectConfig(file)) return readInput(file, 'config')
+  const r = loadConfig(dirname(file))
+  if (r.error) return { error: `config ${r.error}` }
+  if (!r.files.length) return { error: `config ${file}: not found` }
+  return { value: r.config }
+}
+
 // Reads a JSON file the user or a scout wrote. Node's parse error can quote the source, so the
 // message names the file only.
 function readInput(file, what) {
@@ -2319,9 +2321,9 @@ function readLedger(file) {
 // The config `repos` and `launch-plan` read: --config, else grimoire.config.json in the cwd, else
 // in the root. They need its repos[], so a missing or unreadable one is an error.
 function projectConfig(args, root) {
-  const file = typeof args.config === 'string' ? resolve(args.config) : [resolve('grimoire.config.json'), join(root, 'grimoire.config.json')].find(isFile)
+  const file = typeof args.config === 'string' ? resolve(args.config) : [resolve(CONFIG_FILE), join(root, CONFIG_FILE)].find(hasConfig)
   if (!file) return { error: `no grimoire.config.json in ${process.cwd()} or ${root}: its repos[] lists the repos (pass --config <file>)` }
-  const c = readInput(file, 'config')
+  const c = readProjectConfig(file)
   if (c.error) return c
   if (!isObj(c.value)) return { error: `config ${file}: the top level must be a JSON object` }
   return { config: c.value }
@@ -2438,10 +2440,10 @@ function main(argv) {
   if (!Number.isFinite(now)) { console.error(`--now: expected an ISO date-time\n${USAGE}`); return 2 }
   const root = resolve(typeof args.root === 'string' ? args.root : stateRoot())
 
-  const configFile = resolve(typeof args.config === 'string' ? args.config : 'grimoire.config.json')
+  const configFile = resolve(typeof args.config === 'string' ? args.config : CONFIG_FILE)
   let config = {}
-  if (existsSync(configFile)) {
-    const c = readInput(configFile, 'config')
+  if (hasConfig(configFile)) {
+    const c = readProjectConfig(configFile)
     if (c.error) { console.error(c.error); return 1 }
     if (!isObj(c.value)) { console.error(`config ${configFile}: the top level must be a JSON object`); return 1 }
     config = c.value

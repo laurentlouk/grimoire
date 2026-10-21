@@ -39,7 +39,7 @@ Commands are split the way the shell would (`;`, `&&`, `||`, `|`, newlines, `$(â
 
 ## Configuration
 
-Optional `guard` object in `grimoire.config.json` at the project root (`$CLAUDE_PROJECT_DIR`, else the hook input's `cwd`):
+Optional `guard` object in `grimoire.config.json` at the project root (`$CLAUDE_PROJECT_DIR`, else the hook input's `cwd`). In a linked worktree with no config of its own it is the main checkout's, and a worktree's own file is layered over it (`scripts/project-config.mjs`), so protections set on main hold in every worktree:
 
 ```json
 "guard": {

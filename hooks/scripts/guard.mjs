@@ -21,6 +21,7 @@ import { readFileSync, realpathSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
+import { readConfig } from '../../scripts/project-config.mjs'
 
 const DEFAULT_BRANCHES = ['main', 'master', 'trunk', 'develop', 'release/*']
 const PROTECTED_FILES = ['.claude/settings.json', '.claude/settings.local.json']
@@ -62,13 +63,10 @@ const deny = (msg) => { throw new Deny(`grimoire guard: ${msg}`) }
 // The subagent's bare name (`grimoire:reviewer` → `reviewer`); '' in the main session.
 const agentOf = (input) => (typeof input.agent_type === 'string' ? input.agent_type.replace(/^.*:/, '') : '')
 
-function readJSON(file) {
-  try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return null }
-}
-
+// The project's config as every checkout sees it: a linked worktree without its own file reads
+// the main checkout's (project-config.mjs), so protectedBranches set on main still protect there.
 function loadConfig(projectDir) {
-  const raw = readJSON(path.join(projectDir, 'grimoire.config.json'))
-  const cfg = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const cfg = readConfig(projectDir)
   const g = cfg.guard && typeof cfg.guard === 'object' && !Array.isArray(cfg.guard) ? cfg.guard : {}
   const strs = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim()) : null)
   const branches = strs(g.protectedBranches) || [...DEFAULT_BRANCHES]
