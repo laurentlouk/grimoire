@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.15.0 — full size for the diagrams, their controls inside them
+
+- **Full size** (`⛶`) for the Architecture diagram, the system map and the file map
+  (`tools/graph`): the diagram fills the window, and the browser's own fullscreen where it allows
+  it. Esc, `✕` or another tab leaves it. It is a page state, so a click on a component (which
+  re-renders the page) keeps it. At full size, Architecture's Fit fits the whole window both
+  ways, and a selected component's passport opens beside the diagram.
+- **The zoom controls sit inside the diagram**, in its top-right corner, in and out of full size:
+  Fit, −, the size and +. Architecture's moved there from the toolbar above it. The system map
+  gains them (it only scaled to the page width before), and the file map gains buttons next to
+  its wheel zoom; its size reads as a share of the fitted view.
+- Tests: `tools/graph/tests/arch-docs.test.mjs` and `graph.test.mjs` press the controls through
+  the page's own script. The arch test's fake `window` now keeps every listener of a type, as a
+  browser does.
+
 ## 0.14.0 — what a run really costs, cache included
 
 The first slice of the token economy ([#46](https://github.com/laurentlouk/grimoire/issues/46),

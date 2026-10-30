@@ -358,6 +358,28 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   const pg = run('#overview')
   views.overview = /production files/.test(pg.text())
   pg.go('#map'); views.map = /data-mod="/.test(pg.text()) && /class="mlink"/.test(pg.text())
+  {
+    const within = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = within(k, pred); if (f) return f } return null }
+    const stageOf = (w) => pg.find((n) => n.attrs && n.attrs['data-stage'] === w)
+    const ctlsIn = (w, list) => !!stageOf(w) && list.every((c) => within(stageOf(w), (n) => n.attrs && n.attrs['data-ctl'] === c))
+    const press = (c) => (pg.find((n) => n.attrs && n.attrs['data-ctl'] === c).on.click || []).forEach((f) => f({}))
+    ok(ctlsIn('sys', ['sys-fit', 'sys-out', 'sys-100', 'sys-in', 'sys-full']), 'the system map: Fit, −, 100%, + and full size inside the map')
+    press('sys-in')
+    ok(/"width":"\d+"/.test(stageOf('sys').kids[0].kids[0].firstChild ? JSON.stringify(stageOf('sys').kids[0].kids[0].firstChild.attrs) : '') && /\bzoomed\b/.test(stageOf('sys').kids[0].kids[0].attrs.class), 'zooming the system map sizes its drawing and lets the box scroll')
+    press('sys-fit')
+    ok(!/\bzoomed\b/.test(stageOf('sys').kids[0].kids[0].attrs.class), 'Fit gives the map back its box width')
+    press('sys-full')
+    ok(/\bstage full\b/.test(stageOf('sys').attrs.class), 'full size for the system map')
+    pg.go('#overview'); pg.go('#map')
+    ok(!/\bfull\b/.test(stageOf('sys').attrs.class), 'leaving the tab leaves full size')
+    press('mode-files')
+    ok(ctlsIn('files', ['files-fit', 'files-out', 'files-100', 'files-in', 'files-full']) && within(stageOf('files'), (n) => n.attrs && n.attrs.id === 'map'), 'the file map: its canvas and the zoom and full-size controls in one stage')
+    press('files-full')
+    ok(/\bstage full\b/.test(stageOf('files').attrs.class), 'full size for the file map')
+    press('files-full')
+    ok(!/\bfull\b/.test(stageOf('files').attrs.class), 'the same button leaves full size')
+    press('mode-modules')
+  }
   pg.go('#hotspots'); views.hotspots = /class="tile"/.test(pg.text())
   pg.go('#architecture'); views.architecture = /data-comp="/.test(pg.text()) && /Drafted from the graph on this render/.test(pg.text()) && pg.hash() === '#arch-0'
   pg.go('#docs'); views.docs = /No Markdown notes/.test(pg.text())
