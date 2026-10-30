@@ -328,7 +328,7 @@ else {
   }
   const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null, querySelector: () => null }
   const loc = { hash: '#architecture' }
-  vm.runInNewContext(script, { document: doc, window: { addEventListener: (t, f) => { listeners[t] = f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
+  vm.runInNewContext(script, { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
   const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
   const text = () => (doc.body.kids || []).map(dump).join(' ')
   const go = (h) => { loc.hash = h; listeners.hashchange() }
@@ -338,6 +338,22 @@ else {
   go('#arch-2')
   ok(/data-comp="users"/.test(text()) && /HTTPS/.test(text()) && /The hub\./.test(text()) && /acard c-rose/.test(text()), 'a diagram: its components, labelled lines, summary and cards')
   ok(D.arch.length === 3, 'an index with no production code offers no drafted diagram')
+  // the zoom controls and the full-size button sit inside the diagram's own box, in and out of full size
+  const findIn = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = findIn(k, pred); if (f) return f } return null }
+  const body = () => ({ kids: doc.body.kids || [] })
+  const byCtl = (n, c) => findIn(n, (x) => x.attrs && x.attrs['data-ctl'] === c)
+  const stageA = () => findIn(body(), (x) => x.attrs && x.attrs['data-stage'] === 'arch')
+  const ARCH_CTL = ['arch-fit', 'arch-out', 'arch-100', 'arch-in', 'arch-full']
+  ok(stageA() && ARCH_CTL.every((c) => byCtl(stageA(), c)) && !byCtl(findIn(body(), (x) => x.attrs && /\btoolbar\b/.test(x.attrs.class || '')), 'arch-fit'),
+    'Fit, −, 100%, + and full size sit inside the diagram, not in the toolbar above it')
+  const press = (c) => (byCtl(body(), c).on.click || []).forEach((f) => f({}))
+  press('arch-full')
+  ok(/\bstage full\b/.test(stageA().attrs.class) && byCtl(body(), 'arch-full').attrs['aria-pressed'] === 'true' && ARCH_CTL.every((c) => byCtl(stageA(), c)),
+    'full size: the diagram fills the window and keeps its zoom controls')
+  press('arch-in')
+  ok(/\bstage full\b/.test(stageA().attrs.class), 'a zoom inside full size stays full size (the page re-renders)')
+  listeners.keydown({ key: 'Escape' })
+  ok(!/\bfull\b/.test(stageA().attrs.class) && byCtl(body(), 'arch-full').attrs['aria-pressed'] === 'false', 'Escape leaves full size')
   const at = (repo, p2) => D.docs.findIndex((d) => d[0] === repo && d[2] === p2)
   const hubName = path.basename(HUB), guide = at(hubName, 'docs/guide.md'), agents = at(hubName, 'AGENTS.md'), apiGuide = at('api', 'docs/guide.md'), apiReadme = at('api', 'README.md')
   go(`#doc-${agents}`)

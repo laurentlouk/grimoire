@@ -166,6 +166,11 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   ok(R.esc('a"b>c<d&e') === 'a&quot;b&gt;c&lt;d&amp;e', `esc: quotes, angle brackets and ampersands (${R.esc('a"b>c<d&e')})`)
   ok(R.cut('abcdefgh', 5) === 'abcd…' && R.cutL('src/geo/circle.ts', 9) === '…ircle.ts' && R.cut('ab', 5) === 'ab', 'cut keeps the start of a name, cutL the end of a path')
   ok(R.plural(1, 'file') === '1 file' && R.plural(0, 'file') === '0 files' && R.plural(1500, 'link') === '1,500 links', 'plural')
+  // a fitted drawing's scale, as drawn (the system map's measurements from the review of #58: 340×310)
+  const r2 = (x) => Math.round(x * 100) / 100
+  ok(r2(R.fitOf(1374, 874, 340, 310, true)) === 2.74, `fitOf at full size: the height limits it, not the width (${r2(R.fitOf(1374, 874, 340, 310, true))})`)
+  ok(r2(R.fitOf(1358, 600, 340, 310, false)) === 3.92 && r2(R.fitOf(500, 600, 340, 310, false)) === 2.12, 'fitOf in the page: the box width less its padding, never under the 720 px floor')
+  ok(r2(R.fitOf(1374, 874, 1100, 1500, true)) === 0.57, 'fitOf at full size for a tall map')
   const tabs = ['overview', 'map', 'files', 'symbols', 'hotspots']
   ok(JSON.stringify([R.parseHash('#sym-12', tabs), R.parseHash('#file-3', tabs), R.parseHash('#mod-0', tabs), R.parseHash('#map', tabs), R.parseHash('#nope', tabs), R.parseHash('#sym-x', tabs), R.parseHash('', tabs), R.parseHash('#sym-12abc', tabs), R.parseHash('x#sym-12', tabs)])
     === '[{"kind":"sym","id":12},{"kind":"file","id":3},{"kind":"mod","id":0},{"kind":"tab","tab":"map"},null,null,null,null,null]', 'parseHash: plain anchors only, anything else ignored')
@@ -358,6 +363,29 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   const pg = run('#overview')
   views.overview = /production files/.test(pg.text())
   pg.go('#map'); views.map = /data-mod="/.test(pg.text()) && /class="mlink"/.test(pg.text())
+  {
+    const within = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = within(k, pred); if (f) return f } return null }
+    const stageOf = (w) => pg.find((n) => n.attrs && n.attrs['data-stage'] === w)
+    const ctlsIn = (w, list) => !!stageOf(w) && list.every((c) => within(stageOf(w), (n) => n.attrs && n.attrs['data-ctl'] === c))
+    const press = (c) => (pg.find((n) => n.attrs && n.attrs['data-ctl'] === c).on.click || []).forEach((f) => f({}))
+    ok(ctlsIn('sys', ['sys-fit', 'sys-out', 'sys-100', 'sys-in', 'sys-full']), 'the system map: Fit, −, 100%, + and full size inside the map')
+    press('sys-in')
+    ok(/"width":"\d+"/.test(stageOf('sys').kids[0].kids[0].firstChild ? JSON.stringify(stageOf('sys').kids[0].kids[0].firstChild.attrs) : '') && /\bzoomed\b/.test(stageOf('sys').kids[0].kids[0].attrs.class), 'zooming the system map sizes its drawing and lets the box scroll')
+    press('sys-fit')
+    ok(!/\bzoomed\b/.test(stageOf('sys').kids[0].kids[0].attrs.class), 'Fit gives the map back its box width')
+    press('sys-full')
+    ok(/\bstage full\b/.test(stageOf('sys').attrs.class), 'full size for the system map')
+    ok(/\.stage\.full \.archbox svg\{[^}]*flex:none/.test(pageP), 'at full size the architecture svg keeps its zoomed width (a flex item that does not shrink to the box)')
+    pg.go('#overview'); pg.go('#map')
+    ok(!/\bfull\b/.test(stageOf('sys').attrs.class), 'leaving the tab leaves full size')
+    press('mode-files')
+    ok(ctlsIn('files', ['files-fit', 'files-out', 'files-100', 'files-in', 'files-full']) && within(stageOf('files'), (n) => n.attrs && n.attrs.id === 'map'), 'the file map: its canvas and the zoom and full-size controls in one stage')
+    press('files-full')
+    ok(/\bstage full\b/.test(stageOf('files').attrs.class), 'full size for the file map')
+    press('files-full')
+    ok(!/\bfull\b/.test(stageOf('files').attrs.class), 'the same button leaves full size')
+    press('mode-modules')
+  }
   pg.go('#hotspots'); views.hotspots = /class="tile"/.test(pg.text())
   pg.go('#architecture'); views.architecture = /data-comp="/.test(pg.text()) && /Drafted from the graph on this render/.test(pg.text()) && pg.hash() === '#arch-0'
   pg.go('#docs'); views.docs = /No Markdown notes/.test(pg.text())
