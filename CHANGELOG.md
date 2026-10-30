@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — the loop stops redoing what it already did
+## 0.13.0 — the loop stops redoing what it already did, and the tracker follows it
 
 From an audit of one week of real runs (0.12.1, four projects, 1.93M loop output tokens). No
 agent was found repeating the same command with no progress. The waste came from the loop
@@ -74,6 +74,15 @@ throwing away each agent's prompt cache. New tests: `workflows/tests/loop-redo-a
 - **`implement`: the 4-minute wait rule, and a resume budget.** After about five resumes, or a
   compaction, the next round starts a fresh implementer from a short handoff. One implementer
   resumed thirteen times reached a context of about a million tokens. With an eval case.
+
+### Releases
+
+- **Every change that ships bumps the version.** The drift check now fails when the CHANGELOG's top
+  entry is not the version in `plugin.json` (no more "Unreleased"). Given a base (CI on a pull
+  request; the pre-push hook, against `origin/main`), it also fails a change outside `docs/` and
+  `.github/` whose version is not higher than the base's (`scripts/version-check.mjs`, with
+  tests). Projects install releases only, so this audit's own fixes once sat on main under
+  "Unreleased", out of every project's reach.
 
 ### Logs (`scripts/render-logs.mjs`)
 

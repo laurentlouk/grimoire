@@ -10,6 +10,8 @@
 say() { echo "grimoire pre-push: $*" >&2; }
 command -v node >/dev/null 2>&1 || { say "node is not on PATH, checks skipped"; exit 0; }
 status=0
+# the version check compares with origin/main when this clone has it (a change that ships bumps)
+if git rev-parse --verify -q origin/main >/dev/null 2>&1; then GRIMOIRE_VERSION_BASE=origin/main; export GRIMOIRE_VERSION_BASE; fi
 seen=" "
 while read -r local_ref local_sha remote_ref remote_sha; do
   case $local_sha in *[!0]*) ;; *) continue ;; esac # a branch deletion pushes nothing
