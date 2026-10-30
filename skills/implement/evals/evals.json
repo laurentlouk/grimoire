@@ -123,5 +123,16 @@
         "evidence": ""
       }
     ]
+  },
+  {
+    "id": 6,
+    "query": "The webapp implementer for ODY-948 has been resumed six times this afternoon with Laurent's feedback, and it was compacted an hour ago. Send it the next round of feedback.",
+    "should_trigger": true,
+    "expected_output": "Does not resume the same implementer a seventh time: writes a short handoff (branch, head, what is done, the open feedback) and starts a fresh implementer from it, which still waits on long commands in chunks of at most 4 minutes.",
+    "expectations": [
+      { "text": "Starts a fresh implementer from a short handoff instead of resuming the compacted one", "passed": null, "evidence": "" },
+      { "text": "The handoff names the branch, the head, what is done and the open feedback", "passed": null, "evidence": "" },
+      { "text": "The new brief keeps the 4-minute wait rule", "passed": null, "evidence": "" }
+    ]
   }
 ]

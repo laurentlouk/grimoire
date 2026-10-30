@@ -9,11 +9,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the version check diffs the change against its base branch
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
       # The repo has no dependencies; only the code graph's parser runtime is installed, for its tests.
       - run: npm ci --prefix tools/graph --no-audit --no-fund --ignore-scripts
       - run: npm test
+      # every change that ships bumps the plugin version: compared with the PR's base, else main
       - run: npm run check
+        env:
+          GRIMOIRE_VERSION_BASE: origin/${{ github.base_ref || 'main' }}
       - run: npm run evals:check

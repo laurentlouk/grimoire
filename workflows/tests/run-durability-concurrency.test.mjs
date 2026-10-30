@@ -205,7 +205,7 @@ function journalEvents(calls) {
     if (label === 'impl:PROJ-1') return later(500, IMPL_OK)
     if (label.startsWith('journal#')) return later(600, { runDir: '/tmp/x', lines: 0, bytes: 0 })
     return happy(label, p)
-  }, { args: { ...QUIET, ...FAST, telemetry: { enabled: true, flushEvery: 1000 } } })
+  }, { args: { ...QUIET, ...FAST, wedgeGraceMin: 0, telemetry: { enabled: true, flushEvery: 1000 } } }) // no grace: the run stops dispatching before it returns
   ok(logs.some((l) => /◎ \[late\] impl:PROJ-1 returned past its hard limit — after the run had stopped dispatching/.test(l)), 'its late result is logged as arriving after the run stopped dispatching')
   ok(!logs.some((l) => /PROJ-1: spec ∥ quality review|PROJ-1 \(api\): (spec|quality) review|reviewer\(s\) returned nothing/.test(l)), 'the task does not flow into reviews')
   eq(result && result.reviewStats.stages, 0, 'reviewStats untouched')

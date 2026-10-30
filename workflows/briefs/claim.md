@@ -14,7 +14,8 @@ with RELEASE mode).
 Mode **RELEASE** (the header says so), for each issue listed:
 1. Check it is still assigned to the run's identity. If someone else has taken it since, leave
    it alone and report it under `failed` with "reassigned to <who>".
-2. Unassign it and move it back to the tracker's to-do (unstarted) state.
+2. Unassign it and move it back to the tracker's to-do (unstarted) state, except an issue the
+   header marks `leave its state (blocked)`: the run moved it to blocked, so unassign it only.
 3. Add one comment: that the automated run stopped short of it, and the reason in the header.
 
 Use your tracker's tool or MCP. Change nothing else — not the description, labels, links,

@@ -22,7 +22,10 @@
 //   5 personas   every REVIEW_PANEL id in orchestrate-loop.js has workflows/personas/<id>.md and
 //                every persona file is in the panel.
 //   6 versions   .claude-plugin/plugin.json version == the marketplace entry's version (when the
-//                entry has one); the README skills badge count == the number of skills.
+//                entry has one); the README skills badge count == the number of skills; the
+//                CHANGELOG's top entry is that version; with GRIMOIRE_VERSION_BASE=<ref> (CI on a
+//                pull request, the pre-push hook), a change outside docs/ and .github/ needs a
+//                version higher than the base's (scripts/version-check.mjs).
 //   7 config     grimoire.config.example.json parses; every top-level key and repos[] key is
 //                documented as `key` in workflows/README.md; gate.timeoutMin is flagged (the
 //                engine reads timeoutMin at repo level).
@@ -37,6 +40,7 @@ import path from 'node:path'
 import { SURFACE, sha256 } from './harness-manifest.mjs'
 import { writerText, WRITER_FILE } from './build-journal-writer.mjs'
 import { lockText, LOCK_FILE } from './build-ship-lock.mjs'
+import { versionVerdict, againstBase } from './version-check.mjs'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const rel = (...p) => path.join(ROOT, ...p)
@@ -213,6 +217,13 @@ group('versions · plugin, marketplace, README badge', (bad) => {
   const readme = read('README.md') || ''
   const badge = /img\.shields\.io\/badge\/[^)\s]*?skills-(\d+)-/i.exec(readme)
   if (badge && Number(badge[1]) !== skillDirs.length) bad(`README.md: skills badge says ${badge[1]}, skills/ has ${skillDirs.length}`)
+  if (plugin) {
+    const changelogTop = ((read('CHANGELOG.md') || '').split('\n').find((l) => l.startsWith('## ')) || null)
+    const base = (process.env.GRIMOIRE_VERSION_BASE || '').trim()
+    const against = base ? againstBase(ROOT, base) : null
+    if (base && !against) bad(`GRIMOIRE_VERSION_BASE=${base} does not resolve to a commit with a plugin.json (fetch it first)`)
+    for (const p of versionVerdict({ version: plugin.version, changelogTop, ...(against || {}) })) bad(p)
+  }
 })
 
 // ─────────────────────────── 7 · config ───────────────────────────

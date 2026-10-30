@@ -58,8 +58,13 @@ already settled there.
   integration task, the branch head before you merged), `commits` (the SHAs you created,
   oldest first — SHAs, not messages), and `headSha` (`git rev-parse HEAD`). The review panel
   is handed exactly `startSha..headSha`, so a merge brings in only what it adds to the branch.
-- **Never poll-loop or babysit a long command.** No watch loops, and never background a job
-  then poll for it — run it in the FOREGROUND and wait. Wrap anything that could hang (a browser
+- **Never one shell wait past 4 minutes.** A Bash call is capped at 10 minutes, and your
+  prompt cache expires after 5: the turn after a longer wait re-writes your whole context (in one week of
+  runs, 60% of the loop's cache writes came from turns after such waits). A command that fits in a
+  few minutes runs in the foreground. A longer one (a browser matrix, a long suite) runs in the
+  background, logging to a file, and you wait in chunks: `until grep -q '^EXIT=' <log> || [ $SECONDS -ge 240 ]; do sleep 15; done`,
+  then read only the log's new lines. Never a watch loop with no end, and never a re-run "to see":
+  two runs with the same failures are a finding to report. Wrap anything that could hang (a browser
   engine, a device, a network call) in a time limit: `perl -e 'alarm shift; exec @ARGV' <s> …`
   (exit 142 = timed out; perl is on stock macOS, which has no `timeout`), or `timeout <s> …` /
   `gtimeout <s> …` where one of those exists. Check that the one you use exists before relying
@@ -83,8 +88,9 @@ with `commits: []`, `startSha = headSha = HEAD`, and `landedBefore` = the SHAs t
 oldest first (`git log --reverse --format=%H <baseSha>..HEAD -- <declared files>`, keeping only
 this task's commits). The loop absorbs those SHAs if a panel already passed them, and otherwise
 reviews them as they stand: an empty diff is never a defect when you name them. If only part of
-the task is there, finish the rest as a normal change (its commits in `commits`) and leave
-`landedBefore` out.
+the task is there, finish the rest as a normal change (its commits in `commits`), and if an
+earlier attempt's commits for this task sit under yours, also list them in `landedBefore`: the
+loop then reviews them with your own, instead of only your commits.
 
 ## Parallel lane (only when the header says PARALLEL LANE)
 Other implementers are working in the shared checkout RIGHT NOW: do not touch that checkout,

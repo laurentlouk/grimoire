@@ -497,10 +497,13 @@ try {
     'scorecard: halts by kind, with the environment halt a resume carried to a drain')
   ok(sc7 && sc7.personas['Spec Hawk'].reviews === 2 && sc7.personas['Spec Hawk'].fails === 1, 'scorecard: Spec Hawk 1 FAIL of 2 reviews')
   ok(sc7 && sc7.repos.api.gatesFailed === 1 && sc7.repos.web.gatesPassed === 1, 'scorecard: gates passed and failed per repository')
+  ok(sc7 && sc7.repos.web.lateWriters === 1 && sc7.repos.web.wedged === 0 && (sc7.repos.api.lateWriters || 0) === 0,
+    "scorecard: late writers per repository (web's implementer; the late guard is a reader and does not count) — the evidence crystallize cites for a repo's limits or gate")
   ok(sc7 && sc7.journal.runsIncomplete === 1 && sc7.journal.statusRepaired === 1, 'scorecard: one run with an incomplete journal, one status taken from run.end')
   const t7 = spawnSync(process.execPath, [SCRIPT, 'summary'], { cwd: ROOT7, encoding: 'utf8' })
   ok(t7.status === 0 && /outcomes: 4 runs · drained 1 · halted 1 · running 1 · stale 1/.test(t7.stdout) && /landing rate 80%/.test(t7.stdout)
     && t7.stdout.indexOf('outcomes:') < t7.stdout.indexOf('version 0.9.1'), 'text summary leads with the outcomes, then the per-version detail')
+  ok(/repos with writers past the soft limit: web 1 late · 0 wedged \(2 landed, 1 gate\(s\) passed\)/.test(t7.stdout), 'the text summary names each repo whose writers ran late')
   const r7 = spawnSync(process.execPath, [SCRIPT, '--out', 'logs.html', '--run', 'run-epsilon'], { cwd: ROOT7, encoding: 'utf8' })
   const html7 = r7.status === 0 ? readFileSync(join(ROOT7, 'logs.html'), 'utf8') : ''
   const blob7 = (html7.match(/<script type="application\/json" id="grimoire-data">([\s\S]*?)<\/script>/) || [])[1] || '{}'

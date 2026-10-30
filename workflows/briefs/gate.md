@@ -18,8 +18,11 @@ command, and the stamp file it writes.
    any other worktree: a lane of another repo can also start with `review-`.
 2. **If the gate command APPLIES**: run it ONCE, in the FOREGROUND, exactly as the header
    gives it, including any flags (a lock wait, a timeout, an environment variable) — those
-   flags are not optional, they are what makes the command safe to run unattended. Do NOT
-   background it and do NOT poll for it in a shell loop. If the header names a preparation
+   flags are not optional, they are what makes the command safe to run unattended. A gate
+   longer than the shell's 10-minute cap (a browser matrix runs for hours) starts in the
+   background, logging to a file, and you wait in chunks of at most 4 minutes, `until grep -q '^EXIT=' <log> || [ $SECONDS -ge 240 ]; do sleep 15; done`,
+   reading only the log's new lines: a longer wait lets your prompt cache expire and re-writes your
+   whole context. Never start it twice, and never a loop with no end. If the header names a preparation
    step (rebuilding a vendored artifact, say), do that first and commit the result — the gate
    certifies what is committed, not your sources.
    **If it does NOT apply**, do not run it — there is nothing for it to certify. Go to step 3.
@@ -94,7 +97,7 @@ after its PR merged. Write a body file and pass it with `--body-file`.
 - If the gate was judged NOT to apply but the PR is blocked by the repo's own pre-PR hook, the
   branch DOES touch a path the gate condition did not account for: return BLOCKED naming the
   file the hook reported, so the condition can be fixed.
-- Never poll-loop or babysit a command: run it in the foreground and wait.
+- Never babysit a command: a short one runs in the foreground; a long one is waited on in chunks of at most 4 minutes (step 2), never with a loop that has no end.
 - When you return BLOCKED, set `failedStep`: `gate` (the gate command failed or could not
   run), `push` (the run branch would not push: auth, a protected branch, the network), `pr`
   (the PR could not be opened or updated) or `lock` (a lock script printed `LOCK missing`). A

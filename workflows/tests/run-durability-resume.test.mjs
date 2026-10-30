@@ -241,7 +241,10 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
       'impl:PROJ-2': () => (n2++ ? impl('bbbbbbb', 'aaaaaaa') : { status: 'BLOCKED', summary: 'stuck' }),
       'replan#1': { decision: 'REVISE', reason: 'retry both', cause: 'code', learnings: [], tasks: [{ ...A }, { ...B }] },
     }), { args: QUIET })
-  ok(r.labels.filter((l) => l.startsWith('spec-hawk:PROJ-1')).length === 2 && r.logs.some((l) => /PROJ-1: already on the branch but not reviewed for PROJ-1 \(d00d000\)/.test(l)), 'd00d000 is reviewed when it is cited')
+  // Since the loop-redo audit (2026-10-30) a landedBefore cited WITH new commits widens the range,
+  // so the first panel judges d00d000 too, marks it, and the re-dispatch citing it alone is absorbed.
+  ok(r.logs.some((l) => /PROJ-1: an earlier attempt's commits \(d00d000\) sit under this dispatch's and were never reviewed — reviewing d00d000\^\.\.aaaaaaa/.test(l)), 'the first panel judges d00d000 with the new commit')
+  ok(r.labels.filter((l) => l.startsWith('spec-hawk:PROJ-1')).length === 1 && r.logs.some((l) => /PROJ-1: already on the branch and reviewed earlier \(d00d000\)/.test(l)), 'd00d000 is marked because the panel judged it, so the re-dispatch citing it is absorbed')
 }
 {
   // An absorbed record's verified head is reviewed for ITS task only

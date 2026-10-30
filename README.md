@@ -195,6 +195,8 @@ The pre-push check runs CI's fast checks (`npm run check`, `npm run evals:check`
 
 What changed in each release: [CHANGELOG.md](CHANGELOG.md).
 
+Every change that ships bumps the version in `.claude-plugin/plugin.json` and opens its `CHANGELOG.md` entry under that version (no "Unreleased" section): projects install releases only, so a change merged without a bump never reaches them. The drift check enforces it (`scripts/version-check.mjs`): CI compares each pull request with its base branch, and the pre-push hook with `origin/main`. Only changes under `docs/` and `.github/` ship without one.
+
 ## 📄 License
 
 [MIT](LICENSE)

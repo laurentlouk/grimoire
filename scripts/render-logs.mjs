@@ -396,13 +396,18 @@ export function runOutcome(run, now = Date.now()) {
   }
   for (const [p, o] of Object.entries(f.overturned)) Object.assign((personas[p] ||= { reviews: 0, fails: 0, overturned: 0, checked: 0 }), { overturned: o.overturned, checked: o.checked })
   const repos = {}
-  const repoOf = (r) => (repos[s(r)] ||= { landed: 0, notLanded: 0, gatesPassed: 0, gatesFailed: 0, gatesNA: 0, terminal: null })
+  const repoOf = (r) => (repos[s(r)] ||= { landed: 0, notLanded: 0, gatesPassed: 0, gatesFailed: 0, gatesNA: 0, lateWriters: 0, wedged: 0, terminal: null })
   const taskRepo = {}
   for (const e of ev) if (e.task != null && e.repo != null) taskRepo[s(e.task)] = e.repo
   for (const [t, st] of lastSettle) if (taskRepo[t] != null) repoOf(taskRepo[t])[LANDED.includes(st) ? 'landed' : 'notLanded']++
   for (const e of ev) {
     if (e.type === 'gate' && e.repo != null) repoOf(e.repo)[e.applies === false ? 'gatesNA' : LANDED.includes(e.status) ? 'gatesPassed' : 'gatesFailed']++
     if (e.type === 'terminal' && e.repo != null) repoOf(e.repo).terminal = s(e.verdict)
+    // writers past their soft limit, and past their hard one: a repo whose tasks keep running late
+    // needs a longer limit (timeoutMin) or a long check moved out of its tasks into its gate
+    const wRepo = e.repo ?? taskRepo[s(e.task)]
+    if (e.type === 'late' && e.kind === 'writer' && wRepo != null) repoOf(wRepo).lateWriters++
+    if (e.type === 'wedged' && wRepo != null) repoOf(wRepo).wedged++
   }
   const updated = Date.parse(run.updatedAt ?? '')
   return {
@@ -475,8 +480,17 @@ function scorecardText(sc) {
     `  tasks landed ${sc.tasks.landed} · failed ${sc.tasks.failed} · blocked ${sc.tasks.blocked} → landing rate ${pct(sc.landingRate)}`,
     `  halts ${sc.halts}: ${kinds}`,
     `  median active time/run ${sc.medianActiveMin ?? 'n/a'} min · median output tokens/landed task ${sc.medianTokensPerLanded ?? 'n/a'} · implementers past the soft limit ${sc.lateImpl}/${sc.dispatches} (${sc.late} agents in all)`,
+    ...lateRepoLines(sc.repos),
     `  journal: ${sc.journal.runsIncomplete} run(s) incomplete (${sc.journal.missingEvents} event(s) missing, ${sc.journal.leftovers} unfinished write(s)) · ${sc.journal.statusRepaired} status(es) taken from run.end`,
   ].join('\n')
+}
+
+// The repos whose writers ran past their soft limit, worst first: crystallize reads this line to
+// propose a repo's `timeoutMin` or a `gate` that takes a long check out of every task.
+function lateRepoLines(repos) {
+  const late = Object.entries(repos).filter(([, r]) => r.lateWriters || r.wedged).sort((a, b) => b[1].lateWriters - a[1].lateWriters || a[0].localeCompare(b[0]))
+  if (!late.length) return []
+  return [`  repos with writers past the soft limit: ${late.map(([name, r]) => `${name} ${r.lateWriters} late · ${r.wedged} wedged (${r.landed} landed, ${r.gatesPassed ? `${r.gatesPassed} gate(s) passed` : 'no gate passed'})`).join('; ')}`]
 }
 
 function summaryText(groups, runs, dir) {
@@ -743,6 +757,7 @@ function client(score) {
       table([
         ['repo', (x) => x[0]], ['tasks landed', (x) => String(x[1].landed || 0), 'num'], ['not landed', (x) => String(x[1].notLanded || 0), 'num'],
         ['gates passed', (x) => String(x[1].gatesPassed || 0), 'num'], ['gates failed', (x) => String(x[1].gatesFailed || 0), 'num'], ['no gate', (x) => String(x[1].gatesNA || 0), 'num'],
+        ['late writers', (x) => String(x[1].lateWriters || 0), 'num'], ['wedged', (x) => String(x[1].wedged || 0), 'num'],
       ], Object.entries(sc.repos).sort((a, b) => a[0].localeCompare(b[0])), 'no repositories'))
   }
   function overview(r) {
