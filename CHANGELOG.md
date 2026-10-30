@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.14.0 — what a run really costs, cache included
+
+The first slice of the token economy ([#46](https://github.com/laurentlouk/grimoire/issues/46),
+[spec](docs/specs/2026-10-30-token-economy-design.md)). The loop's only usage counter is the
+output-token count, and on 3,357 recorded dispatches output tokens were 5.9 % of the cache-aware
+cost: input, cache reads and cache writes are the rest. `/grimoire:logs` now reads each run's real
+bill from Claude Code's own transcripts, for runs that already happened too, with no engine change.
+
+- **Cost per dispatch, per task, per tier, per lens, per repo.** `scripts/economy/` reads every
+  agent a run dispatched: the workflow files whose `args.runId` is the run (one per session, so a
+  resumed run counts whole), then each `agent-<id>.jsonl` with its `.meta.json` (the dispatch
+  label). Usage is counted once per message id (a transcript repeats it per content block),
+  request blobs are skipped, and cache writes are priced by TTL. Cost is in **effective tokens**:
+  input 1, cache read 0.1, cache write 1.25 (5 min) or 2 (1 h), output 5. A model that is not
+  Claude's is priced on the same curve and labelled `fallback`.
+- **`/grimoire:logs`**: a cost tile and a cost column on the scorecard, **Where the cost went**
+  (by dispatch kind, with the tiers), and **Cost by dispatch** in each run's view.
+  `summary` prints the cost lines (by tier, kind, lens and repo, largest first), and `--json`
+  carries them per run, in the scorecard and per version group (`costByTier`, `costByLens`).
+  **Cost coverage** is the share of implementer dispatches whose transcript was found: a run
+  launched on another machine has no cost, and says so. `--claude-dir` reads another Claude
+  config dir (default `$CLAUDE_CONFIG_DIR`, else `~/.claude`).
+- **`crystallize`** weighs spend on the cost lines, never on output tokens alone: its
+  routing-rubric row cites the cost by model tier. One eval case each for `crystallize` and
+  `logs`.
+- Measured on this machine's runs (15 runs, 3 projects): cost coverage 100 % (113/113
+  implementer dispatches), output 4–7 % of the cost, implementer dispatches 48–59 % of it.
+
+Adapted from microsoft/TokenEconomizer (`trace/claude.py`, `pricing.py`, commit `1deb887`,
+Apache-2.0): the deduplication rules and the cache-aware weights. Nothing of it is installed or
+called.
+
 ## 0.13.0 — the loop stops redoing what it already did, and the tracker follows it
 
 From an audit of one week of real runs (0.12.1, four projects, 1.93M loop output tokens). No

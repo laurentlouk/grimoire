@@ -57,5 +57,17 @@
       { "text": "Mentions runs with an incomplete journal or a stale running status instead of silently counting them", "passed": null, "evidence": "" },
       { "text": "Does not publish, upload or share the page", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 6,
+    "query": "What did last night's loop run actually cost, and where did the money go?",
+    "should_trigger": true,
+    "expected_output": "Runs node <root>/scripts/render-logs.mjs summary (or summary --json) from the project root and answers from the cost lines: the run's effective tokens (cache reads, cache writes and output priced as billed), how much of it was output tokens, and where it went by dispatch kind, model tier, review lens and repo, largest first. Quotes the cost coverage, and says a run whose transcripts are not on this machine has no cost. Offers the page's Cost by dispatch view for the per-agent bill, without publishing it.",
+    "expectations": [
+      { "text": "Runs render-logs.mjs summary and answers from its cost lines, not from output tokens", "passed": null, "evidence": "" },
+      { "text": "Breaks the cost down by dispatch kind or model tier, largest first", "passed": null, "evidence": "" },
+      { "text": "Mentions the cost coverage, or that runs without transcripts on this machine have no cost", "passed": null, "evidence": "" },
+      { "text": "Does not publish, upload or share the page", "passed": null, "evidence": "" }
+    ]
   }
 ]

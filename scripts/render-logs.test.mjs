@@ -32,10 +32,11 @@
 //      as drained (from the newest session's run.end), a silent "running" run is stale,
 //      lost seqs and the writer's temp files make an incomplete journal, and the page and
 //      `summary` sum the same rows
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
+import { writeClaudeRun, IMPL_EFFECTIVE, JOURNAL_EFFECTIVE, REVIEW_EFFECTIVE } from './economy/fixtures.mjs'
 
 const SCRIPT = new URL('./render-logs.mjs', import.meta.url).pathname
 let PASS = 0, FAIL = 0
@@ -545,6 +546,72 @@ try {
   ok(o8('run-kept') && o8('run-kept').journal.leftovers === 1, "the writer file's temp names (.runjson.<pid>.b64) count as an unfinished write")
   ok(o8('run-kept') && o8('run-kept').status === 'drained' && /run\.json still says halted \(written by session 1\); run\.end #10 of session 2 says drained/.test(o8('run-kept').journal.statusNote),
     "session 1's halted run.json loses to session 2's run.end, and says so")
+
+  section('cost: each dispatch billed from its Claude Code transcript (--claude-dir)')
+  const ROOT9 = realpathSync(mkdtempSync(join(tmpdir(), 'grimoire-cost-')))
+  const RUNS9 = join(ROOT9, '.grimoire', 'runs')
+  const CLAUDE9 = join(ROOT9, 'claude-home')
+  const write9 = (runId, events) => {
+    mkdirSync(join(RUNS9, runId, 'events'), { recursive: true })
+    writeFileSync(join(RUNS9, runId, 'run.json'), JSON.stringify({ runId, project: 'P9', status: 'drained', startedAt: iso(1), meta: { grimoireVersion: '0.14.0', briefsHash: 'b9' } }))
+    writeFileSync(join(RUNS9, runId, 'events', '00000001.jsonl'), events.map((e, i) => JSON.stringify({ seq: i + 1, attempt: 1, at: iso(1), tok: 10 * (i + 1), ...e })).join('\n') + '\n')
+  }
+  write9('R1', [
+    { type: 'run.start', project: 'P9', mode: 'execute', repos: ['api'] },
+    { type: 'route', task: 'T1', repo: 'api', agent: 'backend-engineer', model: 'sonnet' },
+    { type: 'dispatch', task: 'T1', repo: 'api', agent: 'backend-engineer', model: 'sonnet', lane: 'direct', cycle: 1 },
+    { type: 'review', task: 'T1', stage: 'spec', persona: 'spec-hawk', verdict: 'PASS', round: 0 },
+    { type: 'settle', task: 'T1', repo: 'api', status: 'DONE' },
+    { type: 'run.end', status: 'drained', done: 1, failed: 0, blocked: 0, prs: 1, tokens: 60 },
+  ])
+  write9('R0', [
+    { type: 'run.start', project: 'P9', mode: 'execute', repos: ['api'] },
+    { type: 'dispatch', task: 'T7', repo: 'api', agent: 'backend-engineer', model: 'opus', lane: 'direct', cycle: 1 },
+    { type: 'settle', task: 'T7', repo: 'api', status: 'DONE' },
+  ])
+  writeClaudeRun(CLAUDE9, ROOT9, 'R1')
+  const s9 = spawnSync(process.execPath, [SCRIPT, 'summary', '--json', '--claude-dir', CLAUDE9], { cwd: ROOT9, encoding: 'utf8' })
+  let S9 = null
+  try { S9 = JSON.parse(s9.stdout) } catch {}
+  const o9 = (id) => (S9 ? S9.outcomes.find((o) => o.runId === id) : null)
+  const c1 = o9('R1') && o9('R1').cost
+  const J = JOURNAL_EFFECTIVE, Rv = REVIEW_EFFECTIVE, I = IMPL_EFFECTIVE
+  ok(c1 && c1.effective === I + 2 * J + 2 * Rv, `a run's cost sums its dispatches across both sessions (${c1 && c1.effective} = ${I + 2 * J + 2 * Rv})`)
+  ok(c1 && JSON.stringify(c1.byKind) === JSON.stringify({ impl: I, journal: J, 'spec-hawk': Rv, fix: Rv, unknown: J }), `cost by dispatch kind; an agent with no meta has no label, so no kind (${c1 && JSON.stringify(c1.byKind)})`)
+  ok(c1 && JSON.stringify(c1.byTier) === JSON.stringify({ sonnet: I, haiku: 2 * J, opus: 2 * Rv }), `cost by model tier, read from the transcript's messages (${c1 && JSON.stringify(c1.byTier)})`)
+  ok(c1 && JSON.stringify(c1.byLens) === JSON.stringify({ 'spec-hawk': Rv }), 'cost by review lens')
+  ok(c1 && JSON.stringify(c1.byRepo) === JSON.stringify({ api: I + 2 * Rv }) && JSON.stringify(c1.byTask) === JSON.stringify({ T1: I + 2 * Rv }), 'cost by repo and by task; mechanical dispatches belong to neither')
+  ok(c1 && c1.output === (84 + 2 * 10 + 2 * 100) * 5 && c1.dispatches === 5, `the output tokens' share of it, and the dispatches billed (${c1 && c1.output}, ${c1 && c1.dispatches})`)
+  ok(o9('R1') && JSON.stringify(o9('R1').costCoverage) === JSON.stringify({ dispatched: 1, matched: 1 }), 'coverage: the implementer dispatch has a transcript')
+  ok(o9('R0') && o9('R0').cost === null && JSON.stringify(o9('R0').costCoverage) === JSON.stringify({ dispatched: 1, matched: 0 }), 'a run with no transcripts: no cost, and coverage says so')
+  const sc9 = S9 && S9.scorecard
+  ok(sc9 && sc9.cost.effective === I + 2 * J + 2 * Rv && sc9.costCoverage === 0.5 && JSON.stringify(sc9.cost.byKind) === JSON.stringify(c1.byKind), 'the scorecard sums the cost and the coverage over the runs')
+  ok(sc9 && sc9.medianCostPerLanded === I + 2 * J + 2 * Rv, 'median cost per landed task, over the runs that have a cost')
+  const grp9 = S9 && S9.groups.find((g) => g.version === '0.14.0')
+  ok(grp9 && JSON.stringify(grp9.costByTier) === JSON.stringify(c1.byTier) && JSON.stringify(grp9.costByLens) === JSON.stringify(c1.byLens), 'the per-version group carries cost by tier and by lens, for crystallize')
+  const t9 = spawnSync(process.execPath, [SCRIPT, 'summary', '--claude-dir', CLAUDE9], { cwd: ROOT9, encoding: 'utf8' }).stdout
+  ok(/cost: 12[,.]?921 effective tokens · output 1[,.]?520 \(12%\) · cost coverage 50% \(1\/2 implementer dispatches with a transcript\)/.test(t9), `summary text: the cost line (${(t9.match(/cost: .*/) || [''])[0]})`)
+  ok(/cost by tier: haiku 10[,.]?104, sonnet 1[,.]?711, opus 1[,.]?106/.test(t9), 'summary text: cost by tier, largest first')
+  const r9 = spawnSync(process.execPath, [SCRIPT, '--out', 'logs.html', '--claude-dir', CLAUDE9, '--run', 'R1'], { cwd: ROOT9, encoding: 'utf8' })
+  ok(r9.status === 0, `render with --claude-dir exits 0 (stderr: ${r9.stderr.trim() || 'none'})`)
+  const html9 = r9.status === 0 ? readFileSync(join(ROOT9, 'logs.html'), 'utf8') : ''
+  const blob9 = (html9.match(/<script type="application\/json" id="grimoire-data">([\s\S]*?)<\/script>/) || [])[1] || '{}'
+  const js9 = (html9.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || ''
+  class El9 {
+    constructor(tag) { this.tag = tag; this.children = []; this.className = '' }
+    setAttribute() {}
+    addEventListener() {}
+    append(...kids) { this.children.push(...kids) }
+    replaceChildren(...kids) { this.children = kids }
+    get textContent() { return this.children.map((c) => (c instanceof El9 ? c.textContent : String(c))).join(' ') }
+  }
+  const doc9 = { body: new El9('body'), createElement: (t) => new El9(t), getElementById: (id) => (id === 'grimoire-data' ? { textContent: blob9 } : null) }
+  let text9 = ''
+  try { new Function('document', 'Node', js9)(doc9, El9); text9 = doc9.body.textContent } catch (e) { ok(false, `the renderer ran (${e.message})`) }
+  ok(/Cost by dispatch/.test(text9) && /impl:T1/.test(text9) && /spec-hawk:T1#1/.test(text9), 'the run view lists each dispatch with its cost')
+  ok(/Where the cost went/.test(text9) && /journal/.test(text9), 'the scorecard shows the cost by dispatch kind')
+  ok(/cost \(effective tokens\)/.test(text9), 'a scorecard tile for the cost')
+  rmSync(ROOT9, { recursive: true, force: true })
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

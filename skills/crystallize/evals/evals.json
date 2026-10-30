@@ -88,5 +88,16 @@
       { "text": "Does not edit the engine, the project's engine copy, or a hook", "passed": null, "evidence": "" },
       { "text": "The report has Config and Upstream sections", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 7,
+    "query": "Crystallize the BILLING run. The logs summary says opus did 70% of the fix rounds on the api repo, and the cost lines show opus at 58% of the run's effective tokens while output tokens make up 5% of the cost. Should the routing rubric change?",
+    "should_trigger": true,
+    "expected_output": "Runs render-logs.mjs summary --json and reads the cost lines (cost by model tier, dispatch kind and lens, with the cost coverage) next to the fix rounds per tier. Proposes a routing-rubric patch to the hydrate brief only if the counts across runs support it, and cites the effective-token cost per tier, not output tokens, with how many runs had a cost. Treats one run as an anecdote. Lists the patch and its numbers in the crystallize report.",
+    "expectations": [
+      { "text": "Reads the summary's cost lines (by tier, kind or lens) rather than judging spend on output tokens", "passed": null, "evidence": "" },
+      { "text": "Cites the cost coverage, or how many runs had a cost, next to the numbers it quotes", "passed": null, "evidence": "" },
+      { "text": "Proposes a routing-rubric patch only with counts across runs, and lists it with its evidence in the report", "passed": null, "evidence": "" }
+    ]
   }
 ]
