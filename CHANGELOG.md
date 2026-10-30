@@ -34,6 +34,20 @@ throwing away each agent's prompt cache. New tests: `workflows/tests/loop-redo-a
   back to the first of them. A rebuilt task once added a one-line comment commit, and the panel
   reviewed only that line while the whole feature under it went unreviewed.
 
+- **Tracker statuses follow the run, on any tracker (`trackerStatus`, on by default).** A run used
+  to move an issue only with claims on (in progress at hydration, back to to-do at the end), so
+  the tracker could not say what was being built, what was built and waiting for its PR, or what
+  was stuck. Each issue now moves:
+  - to in progress when its implementer starts, and again when a replan retries it;
+  - to in review once it has landed;
+  - to blocked, with a comment saying why, when it fails or blocks, and at the end of a run for
+    an issue it started and did not land.
+
+  Done is left to the PR merge. Moves are batched into one haiku dispatch at a time
+  (`briefs/status.md`, kind `status`, 4/8 min) and never hold the loop up. `{trackerStatus: false}`
+  turns it off; `{trackerStatus: {names: {…}}}` names the project's own states. With `claim`, the
+  release leaves a blocked issue blocked. Tests: `workflows/tests/tracker-status.test.mjs`.
+
 ### Briefs and skills
 
 - **`implement` and `gate`: never one shell wait past 4 minutes.** A Bash call is capped at 10

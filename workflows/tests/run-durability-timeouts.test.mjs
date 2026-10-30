@@ -361,7 +361,7 @@ function journalEvents(calls) {
   const on = await run('H-4b · (the same chain with the default prefetch)', chain, happy, { args: QUIET })
   eq(off.labels.filter((l) => l.startsWith('hydrate:')), ['hydrate:w1', 'hydrate:w2'], 'hydrateAhead:0 — one just-in-time hydration per cycle, no prefetch')
   eq(on.labels.filter((l) => l.startsWith('hydrate:')), ['hydrate:w1', 'hydrate:p1'], 'default — PROJ-2 prefetched, no just-in-time hydration for it')
-  eq(off.labels.filter((l) => !l.startsWith('hydrate:')), on.labels.filter((l) => !l.startsWith('hydrate:')), 'every other dispatch is the same, in the same order')
+  eq(off.labels.filter((l) => !/^(hydrate:|status#)/.test(l)), on.labels.filter((l) => !/^(hydrate:|status#)/.test(l)), 'every other dispatch is the same, in the same order (tracker status moves are asynchronous)')
 }
 
 // ══════════════ C · the replan names its cause; only code spends the budget ══════════════

@@ -28,6 +28,7 @@ skills in all but name and evolve the same way. Personas (review lenses) live in
 | `replan.md` | adaptive re-planner | opus |
 | `journal.md` | one chunk of the decision log (runs a fixed script) | haiku |
 | `claim.md` | hands back tracker issues the run claimed and did not land | haiku |
+| `status.md` | moves tracker issues as the run goes: in progress, in review, blocked (never done) | haiku |
 | `ledger.md` | run ledger writer | cheap |
 | `crystallize.md` | post-PR learning (runs the `crystallize` skill) | opus |
 

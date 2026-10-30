@@ -619,6 +619,14 @@ const ENV_SCHEMA = {
 }
 
 // The tracker CLAIM release: issues this run claimed but did not land, handed back.
+const STATUS_SCHEMA = {
+  type: 'object',
+  required: ['moved'],
+  properties: {
+    moved: { type: 'array', items: { type: 'string' }, description: 'issue ids now in the state the header asked for' },
+    failed: { type: 'array', items: { type: 'string' }, description: 'issue ids that could not be moved, with the reason' },
+  },
+}
 const RELEASE_SCHEMA = {
   type: 'object',
   required: ['released'],
@@ -2278,7 +2286,7 @@ function releasePrompt(issues, identity, reason) {
   return `${brief('claim')}Mode: **RELEASE**. Tracker identity of this run: \`${identity}\`.
 
 ## Hand these issues back — they were claimed by this run and did not land
-${issues.map((i) => `- ${i.id} (${i.repo}) — ${i.status}`).join('\n')}
+${issues.map((i) => `- ${i.id} (${i.repo}) — ${i.status}${trackerState.get(i.id) === 'blocked' ? ' · leave its state (blocked)' : ''}`).join('\n')}
 
 Why the run stopped short of them: ${reason}`
 }
@@ -2818,7 +2826,7 @@ const WEDGE_GRACE_MIN =
 if (AGENT_TIMEOUT_MIN > 0 && AGENT_HARD_TIMEOUT_MIN > 0 && AGENT_HARD_TIMEOUT_MIN < AGENT_TIMEOUT_MIN)
   log(`⚠ agentHardTimeoutMin ${AGENT_HARD_TIMEOUT_MIN} is under agentTimeoutMin ${AGENT_TIMEOUT_MIN} — a hard limit is never shorter than its soft limit, so writers wedge at ${AGENT_TIMEOUT_MIN} min`)
 // {timeouts:{<kind>:{soft, hard, hedgeAfter}}} — minutes, per dispatch kind (KIND_LIMITS below).
-const TIMEOUT_KINDS = ['writer', 'reader', 'hydrate', 'preflight', 'precheck', 'journal', 'ship', 'env', 'crystallize']
+const TIMEOUT_KINDS = ['writer', 'reader', 'hydrate', 'preflight', 'precheck', 'journal', 'ship', 'env', 'status', 'crystallize']
 const timeoutOverrides = {}
 for (const [k, v] of Object.entries(opts.timeouts && typeof opts.timeouts === 'object' ? opts.timeouts : {})) {
   if (!TIMEOUT_KINDS.includes(k) || !v || typeof v !== 'object') {
@@ -2900,6 +2908,16 @@ const resumeOpt = !FRESH_START && opts.resumeState && typeof opts.resumeState ==
 // Tracker claims: {claim:{identity}} — claim issues at hydration, skip issues someone else
 // has started, hand back what this run claimed and did not land. OFF unless configured.
 const claim = opts.claim && typeof opts.claim === 'object' && str(opts.claim.identity) ? { identity: opts.claim.identity.trim() } : null
+// Tracker statuses that follow the run (briefs/status.md): in progress at dispatch, in review once
+// landed, blocked with the reason. On unless {trackerStatus: false}; {trackerStatus: {names:
+// {inProgress, inReview, blocked}}} names the project's own states.
+const trackerStatusOpt = opts.trackerStatus
+const TRACKER_STATUS = trackerStatusOpt !== false && !(trackerStatusOpt && typeof trackerStatusOpt === 'object' && trackerStatusOpt.enabled === false)
+const STATUS_NAMES = Object.fromEntries(
+  ['inProgress', 'inReview', 'blocked']
+    .map((k) => [k, trackerStatusOpt && typeof trackerStatusOpt === 'object' && trackerStatusOpt.names && typeof trackerStatusOpt.names === 'object' ? str(trackerStatusOpt.names[k]) : ''])
+    .filter(([, v]) => v && !/[\n\r"]/.test(v)),
+)
 // Tool hints: {toolHints:{capability: hint}}, free-form strings, all optional. The older
 // {tracker:{kind?, tools, note?}} still works and becomes toolHints.tracker (unless set).
 toolHints = Object.fromEntries(
@@ -3086,6 +3104,7 @@ const KIND_LIMITS = {
   journal: () => ({ soft: 4, hard: 8, onHard: 'null' }),
   ship: () => ({ soft: 5, hard: 12, onHard: 'null' }),
   env: () => ({ soft: 2, hard: 4, onHard: 'null' }),
+  status: () => ({ soft: 4, hard: 8, onHard: 'null' }), // one batch of tracker moves (briefs/status.md)
   crystallize: () => ({ soft: Math.max(CRYSTALLIZE_TIMEOUT_MIN, AGENT_TIMEOUT_MIN), hard: 180, onHard: 'null' }),
 }
 // A hedge runs the same prompt twice, so only a kind without side effects may hedge — hydration
@@ -4898,7 +4917,7 @@ emit('run.start', {
   mode: 'execute',
   meta: runMeta,
   resumed: !!resumeBase || resumedLanded.length > 0,
-  knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, wedgeGraceMin: WEDGE_GRACE_MIN, hydrateAhead: HYDRATE_AHEAD, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, budgetFloor: BUDGET_FLOOR, claims: !!claim },
+  knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, wedgeGraceMin: WEDGE_GRACE_MIN, hydrateAhead: HYDRATE_AHEAD, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, budgetFloor: BUDGET_FLOOR, claims: !!claim, trackerStatus: TRACKER_STATUS },
   repos: repoList.map((r) => r.name),
 })
 for (const c of claimedElsewhere) emit('claim', { task: c.id, action: 'skip', by: c.by })
@@ -5001,6 +5020,57 @@ let replanNo = replans // every replan dispatched (its label number); a code-cau
 let freeReplans = 0 // harness-cause replans not charged to MAX_REPLANS (at most MAX_REPLANS of them, then they are charged)
 let halt = null // {reason} once we stop early
 const claimedByRun = new Map() // id → repo: issues this run claimed at hydration (released at the end if they did not land)
+
+// ── tracker statuses: where each issue stands, as the run moves it (briefs/status.md) ──
+// Moves are queued and sent in batches, one cheap dispatch at a time, never awaited by the
+// scheduler: a slow or dead tracker never holds the build up. Done is left to the PR merge.
+const STATUS_LABEL = { inProgress: 'in progress', inReview: 'in review', blocked: 'blocked' }
+// Settled statuses that are the harness's, not the issue's: retried or reported as such, never
+// shown on the tracker as a blocked issue mid-run (the end-of-run pass covers what stays open).
+const HARNESS_SETTLE = new Set(['DIED', 'ERROR', 'FENCED', 'REVIEWERS_UNAVAILABLE', 'STILL_RUNNING', 'SHIP_FAILED'])
+const trackerState = new Map() // tracker id → the state the run last set (or hydration's claim did)
+const statusQueue = new Map() // tracker id → {to, comment}: moves not sent yet (the last one per issue wins)
+const statusCounts = { moved: 0, failed: 0, dispatches: 0 }
+let statusFlush = null
+const trackerIdOf = (t) => {
+  const id = t && (t.ticket || t.id)
+  return id && id !== 'NO_TICKET' && /^[A-Za-z0-9._#/-]{1,64}$/.test(id) ? id : null
+}
+function queueStatus(t, to, comment = '') {
+  if (!TRACKER_STATUS || !execute) return
+  const id = trackerIdOf(t)
+  if (!id) return
+  // a claim at hydration already moved it in progress
+  if (to === 'inProgress' && !trackerState.has(id) && claim && claimedByRun.has(t.id)) {
+    trackerState.set(id, 'inProgress')
+    return
+  }
+  if (trackerState.get(id) === to && !statusQueue.has(id)) return
+  trackerState.set(id, to)
+  statusQueue.set(id, { to, comment: trim(String(comment || '').replace(/\s+/g, ' '), 300) })
+  if (!statusFlush) statusFlush = flushStatus()
+}
+async function flushStatus() {
+  await Promise.resolve() // moves queued in the same tick go in one batch
+  while (statusQueue.size) {
+    const batch = [...statusQueue.entries()]
+    statusQueue.clear()
+    statusCounts.dispatches++
+    const r = await agentT(statusPrompt(batch), { label: `status#${statusCounts.dispatches}`, phase: 'Tracker', model: 'haiku', effort: 'low', schema: STATUS_SCHEMA, kind: 'status' })
+    const ok = new Set(r && Array.isArray(r.moved) ? r.moved.filter((x) => typeof x === 'string') : [])
+    for (const [id, m] of batch) {
+      const done = ok.has(id)
+      statusCounts[done ? 'moved' : 'failed']++
+      emit('status', { task: id, to: STATUS_LABEL[m.to], ok: done })
+    }
+    if (!r) log(`⚠ tracker status: ${batch.map(([id, m]) => `${id} → ${STATUS_LABEL[m.to]}`).join(', ')} not confirmed — the issues may show an older state`)
+  }
+  statusFlush = null
+}
+function statusPrompt(batch) {
+  return `${brief('status')}## Move these issues
+${batch.map(([id, m]) => `- ${id} → ${STATUS_LABEL[m.to]}${STATUS_NAMES[m.to] ? ` (the state named "${STATUS_NAMES[m.to]}")` : ''}${m.comment ? ` — comment: ${m.comment}` : ''}`).join('\n')}`
+}
 let waves = 0 // dispatch cycles (historical name — reported in the summary)
 
 // Stop CLEANLY when the turn's token target runs low — or this run's own cap is reached —
@@ -5638,6 +5708,7 @@ function startTask(t) {
   inFlight.set(t.id, entry)
   if (entry.direct) directDone[t.repo] = entry.promise.then(() => null, () => null)
   emit('dispatch', { task: t.id, repo: t.repo, agent: t.agent, model: modelFor(t), lane: t.lane === 'worktree' ? 'worktree' : 'direct', cycle: waves })
+  queueStatus(hydratedById.get(t.id) || t, 'inProgress')
 }
 
 // Book one settled result — task or terminal slot — into the run state.
@@ -5687,6 +5758,11 @@ function settle(r) {
   }
   pendingById.delete(r.id)
   emit('settle', { task: r.id, repo: r.repo, status: r.status })
+  {
+    const st = hydratedById.get(r.id) || { id: r.id }
+    if (landed(r)) queueStatus(st, 'inReview')
+    else if (!HARNESS_SETTLE.has(r.status)) queueStatus(st, 'blocked', `the run's implementer returned ${r.status}${str(r.impl && r.impl.summary) || str(r.summary) ? `: ${str(r.impl && r.impl.summary) || str(r.summary)}` : ''}`)
+  }
   if (landed(r)) {
     consecutiveDied = 0
     landedIds.add(r.id)
@@ -6424,6 +6500,17 @@ if (execute && SHIP_ON_HALT) {
   }
 }
 
+// ── tracker statuses at the end: what the run started and did not land is blocked, with why ──
+if (TRACKER_STATUS && execute) {
+  for (const [id, state] of trackerState) {
+    const t = hydratedById.get(id)
+    const taskId = (t && t.id) || id
+    if (state !== 'inProgress' || landedIds.has(taskId) || landedIds.has(id) || stillRunningIds.has(taskId)) continue
+    queueStatus(t || { id }, 'blocked', `the run stopped before it landed: ${halt ? halt.reason : 'it did not finish'}`)
+  }
+  if (statusFlush) await step('tracker statuses', () => statusFlush)
+}
+
 // ── claims: hand back what this run claimed and did not land ──
 // A claimed ticket left "in progress" under the run's identity would read as someone working
 // on it. One cheap dispatch returns every such ticket to the queue, with the reason.
@@ -6566,6 +6653,7 @@ if (execute) {
     overturnedFindings: overturned,
     claimedElsewhere,
     claimsReleased,
+    trackerStatus: TRACKER_STATUS ? { ...statusCounts } : null,
     replans,
     waves,
     advisoryNotes: advisoryForLedger,
@@ -6687,6 +6775,7 @@ return {
   // Issues someone else had started (claims on) — never dispatched, their dependents waited.
   claimedElsewhere,
   claimsReleased,
+  trackerStatus: TRACKER_STATUS ? { ...statusCounts } : null,
   // The resolve rung, made auditable: every NEEDS_CONTEXT question, who answered it, and
   // which ones the codebase could not settle. A high `asked` count is a signal the spec was
   // underspecified — take it back to roast, not to maxContextResolves.
