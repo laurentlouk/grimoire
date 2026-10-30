@@ -166,6 +166,11 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   ok(R.esc('a"b>c<d&e') === 'a&quot;b&gt;c&lt;d&amp;e', `esc: quotes, angle brackets and ampersands (${R.esc('a"b>c<d&e')})`)
   ok(R.cut('abcdefgh', 5) === 'abcd…' && R.cutL('src/geo/circle.ts', 9) === '…ircle.ts' && R.cut('ab', 5) === 'ab', 'cut keeps the start of a name, cutL the end of a path')
   ok(R.plural(1, 'file') === '1 file' && R.plural(0, 'file') === '0 files' && R.plural(1500, 'link') === '1,500 links', 'plural')
+  // a fitted drawing's scale, as drawn (the system map's measurements from the review of #58: 340×310)
+  const r2 = (x) => Math.round(x * 100) / 100
+  ok(r2(R.fitOf(1374, 874, 340, 310, true)) === 2.74, `fitOf at full size: the height limits it, not the width (${r2(R.fitOf(1374, 874, 340, 310, true))})`)
+  ok(r2(R.fitOf(1358, 600, 340, 310, false)) === 3.92 && r2(R.fitOf(500, 600, 340, 310, false)) === 2.12, 'fitOf in the page: the box width less its padding, never under the 720 px floor')
+  ok(r2(R.fitOf(1374, 874, 1100, 1500, true)) === 0.57, 'fitOf at full size for a tall map')
   const tabs = ['overview', 'map', 'files', 'symbols', 'hotspots']
   ok(JSON.stringify([R.parseHash('#sym-12', tabs), R.parseHash('#file-3', tabs), R.parseHash('#mod-0', tabs), R.parseHash('#map', tabs), R.parseHash('#nope', tabs), R.parseHash('#sym-x', tabs), R.parseHash('', tabs), R.parseHash('#sym-12abc', tabs), R.parseHash('x#sym-12', tabs)])
     === '[{"kind":"sym","id":12},{"kind":"file","id":3},{"kind":"mod","id":0},{"kind":"tab","tab":"map"},null,null,null,null,null]', 'parseHash: plain anchors only, anything else ignored')
@@ -370,6 +375,7 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
     ok(!/\bzoomed\b/.test(stageOf('sys').kids[0].kids[0].attrs.class), 'Fit gives the map back its box width')
     press('sys-full')
     ok(/\bstage full\b/.test(stageOf('sys').attrs.class), 'full size for the system map')
+    ok(/\.stage\.full \.archbox svg\{[^}]*flex:none/.test(pageP), 'at full size the architecture svg keeps its zoomed width (a flex item that does not shrink to the box)')
     pg.go('#overview'); pg.go('#map')
     ok(!/\bfull\b/.test(stageOf('sys').attrs.class), 'leaving the tab leaves full size')
     press('mode-files')

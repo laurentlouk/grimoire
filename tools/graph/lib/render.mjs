@@ -195,12 +195,19 @@ export function squarify(values, x, y, w, h) {
 }
 
 // a lane keeps its `max` largest modules, in their flow order; the rest are counted
+// The scale a W×H drawing is shown at when fitted to its box: the box's width less its padding (at
+// least 720 px, the system map's floor, except at full size), and at full size its height too, as
+// the svg's own `meet` does. The zoom buttons step from this, so − never enlarges a fitted map.
+export function fitOf(boxW, boxH, W, H, full) {
+  const w = Math.max(full ? 1 : 720, boxW - 24) / W
+  return full && boxH > 24 ? Math.min(w, (boxH - 24) / H) : w
+}
 export function lanePick(mods, max) {
   const keep = new Set(mods.slice().sort((a, b) => b.files - a.files || a.i - b.i).slice(0, max))
   return { shown: mods.filter((m) => keep.has(m)), rest: mods.length - keep.size }
 }
 
-const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands, squarify, lanePick, mdSlug, mdFront, mdToHtml, archClient, docsClient]
+const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands, squarify, fitOf, lanePick, mdSlug, mdFront, mdToHtml, archClient, docsClient]
 
 function html(data, served) {
   // Every "<" becomes \\u003c, so no data string can close the <script> element.
@@ -278,7 +285,7 @@ details.problems{background:var(--panel);border:1px solid var(--line);border-rad
 .stagectl .seg button{padding:4px 9px;min-width:32px;line-height:1.2}
 .stage.full{position:fixed;inset:0;z-index:50;background:var(--bg);padding:12px;overscroll-behavior:contain}.stage.full .stagebody>:first-child{height:100%;max-height:none;margin:0}
 .stage.full>.stageside{width:min(420px,38vw);flex:none;overflow:auto;max-height:100%}.stage.full>.stageside>.detail{margin:0}
-.stage.full .sysbox:not(.zoomed) svg{width:100%;height:100%;min-width:0}.stage.full #map{height:100%}.stage.full .archbox{display:flex}.stage.full .archbox svg{margin:auto}.svgbox.zoomed{overflow:auto}.svgbox.zoomed svg{width:auto;min-width:0;max-width:none}
+.stage.full .sysbox:not(.zoomed) svg{width:100%;height:100%;min-width:0}.stage.full #map{height:100%}.stage.full .archbox{display:flex}.stage.full .archbox svg{margin:auto;flex:none}.svgbox.zoomed{overflow:auto}.svgbox.zoomed svg{width:auto;min-width:0;max-width:none}
 .archbox{padding:6px;overflow:auto;max-height:78vh;cursor:grab}.archbox:active{cursor:grabbing}.archbox svg{width:auto;min-width:0;max-width:none;height:auto;margin:0 auto}
 svg.arch text{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
 svg.arch .bound rect{fill:color-mix(in srgb,var(--hover) 60%,transparent);stroke:var(--line);stroke-width:1.3;stroke-dasharray:7 5}
@@ -702,14 +709,17 @@ function client() {
     box.innerHTML = parts.join('')
     const svg = box.firstChild
     if (sz) { svg.setAttribute('width', String(Math.round(W * sz))); svg.setAttribute('height', String(Math.round(H * sz))) }
-    const fitScale = () => { const b = document.getElementById('sys-box'); return b && b.clientWidth ? Math.max(0.2, (b.clientWidth - 24) / W) : 1 }
+    const fitScale = () => { const b = document.getElementById('sys-box'); return b && b.clientWidth ? fitOf(b.clientWidth, b.clientHeight, W, H, st.full === 'sys') : 1 }
     const setZ = (z) => { st.sysZoom = z; render() }
-    const step = (d) => setZ(Math.min(3, Math.max(0.2, Math.round(((sz || fitScale()) + d) * 100) / 100)))
+    const step = (f) => setZ(Math.min(8, Math.max(0.1, Math.round((sz || fitScale()) * f * 100) / 100)))
     const zoomSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Zoom' },
       h('button', { 'data-ctl': 'sys-fit', 'aria-pressed': String(!sz), title: 'Fit the map to its box', onclick: () => setZ(null) }, 'Fit'),
-      h('button', { 'data-ctl': 'sys-out', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => step(-0.15) }, '−'),
-      h('button', { 'data-ctl': 'sys-100', 'aria-pressed': String(sz === 1), title: 'Natural size', onclick: () => setZ(1) }, sz ? `${Math.round(sz * 100)}%` : '100%'),
-      h('button', { 'data-ctl': 'sys-in', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => step(0.15) }, '+'))
+      h('button', { 'data-ctl': 'sys-out', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => step(1 / 1.25) }, '−'),
+      h('button', { 'data-ctl': 'sys-100', 'aria-pressed': String(sz === 1), title: 'Natural size (100%)', onclick: () => setZ(1) }, sz ? `${Math.round(sz * 100)}%` : '100%'),
+      h('button', { 'data-ctl': 'sys-in', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => step(1.25) }, '+'))
+    // fitted, the size reads what is drawn: measured right after this render puts the box in the
+    // page (a promise, not a frame: a background tab paints no frames)
+    if (!sz) Promise.resolve().then(() => { const b = document.querySelector('[data-ctl="sys-100"]'); if (b && document.getElementById('sys-box')) b.textContent = `${Math.round(fitScale() * 100)}%` })
     const light = (i) => {
       svg.classList.toggle('hot', i !== null)
       for (const el of svg.querySelectorAll('.on')) el.classList.remove('on')
@@ -768,7 +778,7 @@ function client() {
     return h('section', null, head, legend, stage('files', 'File map', wrap, zoomSeg), note)
   }
   let resizeTimer = null
-  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (st.tab === 'map' && st.mapMode === 'files') render() }, 150) })
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (st.full || (st.tab === 'map' && st.mapMode === 'files')) render() }, 150) })
   function drawMap(canvas, tip, vis, fitTo, mz = {}) {
     if (!canvas.isConnected) return
     if (canvas.clientWidth < 50 || canvas.clientHeight < 50) return requestAnimationFrame(() => drawMap(canvas, tip, vis, fitTo, mz)) // not laid out yet
