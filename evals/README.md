@@ -21,7 +21,7 @@ and no key. Running the cases is manual and paid, and needs the command-line `cl
 | --- | --- | --- | --- | --- |
 | adaptive-replanning | 4 | 1 | 1 | 2 |
 | architecture | 5 | 1 | 2 | 2 |
-| crystallize | 7 | 1 | 1 | 5 |
+| crystallize | 8 | 1 | 1 | 6 |
 | graph | 7 | 1 | 3 | 3 |
 | implement | 6 | 1 | 1 | 4 |
 | launch-agent | 5 | 1 | 1 | 3 |

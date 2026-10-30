@@ -50,7 +50,7 @@ Nothing in grimoire watches *inside* a dispatch. An implementer that reruns the 
   - `<session>/subagents/workflows/<wfRunId>/agent-<id>.jsonl` with `.meta.json`, which holds `agentType`, `description` (the loop's `label`), `model` and `workflowPhase`;
   - `.prefix.json`, whose `state.toolNames` lists the loaded tools.
 - Usage is deduplicated by `message.id`, keeping the last entry. `api-request-blob` entries are skipped. Cache writes are priced by TTL: 5 minutes at 1.25, 1 hour at 2.0. Loop dispatches write 5-minute entries only; interactive sessions write 1-hour ones.
-- A dispatch's bill is joined to its run by the workflow file's `args.runId`, then to its journal event by label.
+- A dispatch's bill is joined to its run by the workflow file's `args.runId`. Journal events carry no `agent()` label, so each dispatch is attributed to its task, repo and lens by parsing its label against the journal's task ids and repo names (`scripts/economy/runs.mjs` `attribute`); some labels stay ambiguous (#56).
 - **Rejected: a cost probe through the CLI.** It was unnecessary, and it is excluded by D9.
 
 **D2. `maxCost` is added, and `maxOutputTokens` is kept.**

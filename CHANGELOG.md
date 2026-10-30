@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.15.1 — crystallize: what PR #55 taught
+
+The crystallize pass on the token economy's first slice ([#55](https://github.com/laurentlouk/grimoire/pull/55)). Report: `docs/crystallize/2026-10-30-grimoire-pr55.md`.
+
+- **`crystallize`: append eval cases in the file's own format.** Never re-serialise an
+  `evals.json`, which rewrites every existing case. Then regenerate the eval suite and run its
+  check. In #55, two one-case additions came out as a ~260-line rewrite and had to be restored.
+  New eval case `crystallize-8`.
+- **Docs synced to the code:**
+  - `workflows/README.md` "Token economy (built in)": the real cost is in `/grimoire:logs`;
+    `maxOutputTokens` sees output tokens only, 4–7 % of the cost on recorded runs.
+  - The token-economy spec, D1: journal events carry no `agent()` label, so cost is attributed
+    by parsing labels.
+  - The plan: the `economy.prices` USD table moves to slice 4 (#50).
+- **Follow-ups** from the #55 review, filed as #56 under #46: attribution edge cases, scan
+  speed, grouping review personas, and labels on journal events as the root fix.
+
 ## 0.15.0 — full size for the diagrams, their controls inside them
 
 - **Full size** (`⛶`) for the Architecture diagram, the system map and the file map

@@ -85,7 +85,7 @@ Every slice ends with `npm test`, `npm run check` and a CHANGELOG entry. Files t
 - **New: `scripts/economy/pricing.mjs`.**
   - Effective tokens = `in·1 + read·0.10 + write5m·1.25 + write1h·2.0 + out·5`.
   - An unknown model is priced at the Claude weights and labelled `priced_by: fallback`. It never throws.
-  - There is an optional USD table in config, `economy.prices`, which the spec leaves at its default of none.
+  - The optional USD table in config, `economy.prices`, was not built in slice 1, which needs none. It moves to slice 4 (#50), the first slice that reads it.
 - **New: `scripts/economy/runs.mjs`.**
   - Finds the `wf_*.json` files whose `args.runId` matches.
   - Returns one bill per dispatch, keyed by label, and the run total.
