@@ -6,7 +6,7 @@
 // route between two components, and show the code links no line draws. Reach and route follow the
 // diagram's own lines: authored reachability, not runtime impact.
 export function archClient(ctx) {
-  const { D, h, st, files, render, jumpFile, activate } = ctx
+  const { D, h, st, files, render, jumpFile, activate, stage } = ctx
   const ICONS = {
     frontend: 'M3 4h14v10H3z M7 17h6 M10 14v3',
     backend: 'M3 3h14v5H3z M3 12h14v5H3z M6 5.5h.01 M6 14.5h.01',
@@ -58,9 +58,17 @@ export function archClient(ctx) {
 
   let pan = null, moved = false // a drag on the background pans the diagram; one listener ends it
   window.addEventListener('mouseup', () => { pan = null })
-  // natural size by default (readable; drag or the scrollbars pan, the wheel zooms); Fit shows it all
+  // natural size by default (readable; drag or the scrollbars pan, the wheel zooms); Fit shows it all.
+  // At full size Fit uses the window (less the passport beside it), both ways, and may enlarge.
   const ZMIN = 0.2, ZMAX = 3
-  const zoomOf = (L) => st.archZoom === 'fit' ? Math.min(1, Math.max(0.2, ((document.getElementById('arch-box') || {}).clientWidth || 1100) / (L.W + 8))) : st.archZoom || 1
+  const zoomOf = (L) => {
+    if (st.archZoom !== 'fit') return st.archZoom || 1
+    if (st.full === 'arch') {
+      const vw = window.innerWidth || 1400, w = vw - 48 - (st.archSel ? Math.min(420, vw * 0.38) + 12 : 0), hgt = (window.innerHeight || 900) - 48
+      return Math.min(2, Math.max(ZMIN, Math.min(w / (L.W + 8), hgt / (L.H + 8))))
+    }
+    return Math.min(1, Math.max(ZMIN, ((document.getElementById('arch-box') || {}).clientWidth || 1100) / (L.W + 8)))
+  }
   function rerender() {
     const b = document.getElementById('arch-box')
     if (b) st.archScroll = [b.scrollLeft, b.scrollTop]
@@ -222,17 +230,17 @@ export function archClient(ctx) {
       h('button', { 'data-ctl': 'arch-out', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => zoom(Math.max(ZMIN, Math.round(((cur === 'fit' ? zoomOf(a.layout) : cur) - 0.15) * 100) / 100)) }, '−'),
       h('button', { 'data-ctl': 'arch-100', 'aria-pressed': String(cur === 1), title: 'Natural size', onclick: () => zoom(1) }, cur === 'fit' ? `${Math.round(zoomOf(a.layout) * 100)}%` : `${Math.round(cur * 100)}%`),
       h('button', { 'data-ctl': 'arch-in', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => zoom(Math.min(ZMAX, Math.round(((cur === 'fit' ? zoomOf(a.layout) : cur) + 0.15) * 100) / 100)) }, '+'))
-    const head = h('div', { class: 'toolbar' }, seg, zoomSeg, h('span', { class: 'muted' }, `${plural(a.comps.length, 'component')} · ${plural(a.conns.length, 'connection')}${a.checked ? ` · ${a.checked}` : ''}`))
+    const head = h('div', { class: 'toolbar' }, seg, h('span', { class: 'muted' }, `${plural(a.comps.length, 'component')} · ${plural(a.conns.length, 'connection')}${a.checked ? ` · ${a.checked}` : ''}`))
     const banner = a.auto || a.draft ? h('div', { class: 'callout callout-warning banner' }, h('div', { class: 'callout-title' }, a.auto ? 'Drafted from the graph on this render' : 'A draft from the graph, not refined yet'),
       h('p', null, 'One component per module, typed by folder names and imports; every name, type and grouping is a guess. ', h('code', null, '/grimoire:architecture'), a.auto ? ' writes it to docs/architecture and has an agent refine it from the code.' : ' has an agent refine it from the code.')) : null
     const problems = (a.errors || []).length || (a.warnings || []).length ? h('details', { class: 'problems' }, h('summary', null, `The check: ${plural((a.errors || []).length, 'error')}, ${plural((a.warnings || []).length, 'warning')}`),
       h('ul', null, (a.errors || []).map((e) => h('li', { class: 'err' }, e)), (a.warnings || []).map((w) => h('li', null, w)), (a.info || []).map((w) => h('li', { class: 'muted' }, w)))) : (a.info || []).length ? h('p', { class: 'note' }, a.info.join(' · ')) : null
     const sel = st.archSel && a.comps.some((c) => c.id === st.archSel) ? passport(a, st.archSel) : null
-    const draw = diagram(a)
+    const draw = stage('arch', 'Diagram', diagram(a), zoomSeg, sel)
     const cards = Array.isArray(a.cards) && a.cards.length ? h('div', { class: 'cards arch-cards' }, a.cards.map((c) => h('div', { class: `card acard c-${c.color || 'slate'}` }, h('div', { class: 'acard-title' }, h('i', null), c.title), h('ul', null, c.items.map((x) => h('li', null, x)))))) : null
     const note = h('p', { class: 'note' }, `${a.file ? `${a.file} · ` : ''}Scroll to zoom, drag to pan. Click a component for its passport; Upstream, Downstream and Route follow the drawn lines. A line the graph confirms is solid; one it cannot see between two code components is dashed amber, unless it says what carries it (via). The graph is a map: read the code at the sources.`)
     return h('section', null, head, a.summary ? h('p', { class: 'summary' }, a.summary) : null, banner, problems, legend,
-      sel ? h('section', { class: 'split rev' }, h('div', null, draw), h('aside', { class: 'side' }, sel)) : draw, note, cards)
+      sel && st.full !== 'arch' ? h('section', { class: 'split rev' }, h('div', null, draw), h('aside', { class: 'side' }, sel)) : draw, note, cards)
   }
   return { view }
 }

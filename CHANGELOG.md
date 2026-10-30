@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.14.1 — crystallize: what PR #55 taught
+## 0.15.1 — crystallize: what PR #55 taught
 
 The crystallize pass on the token economy's first slice ([#55](https://github.com/laurentlouk/grimoire/pull/55)). Report: `docs/crystallize/2026-10-30-grimoire-pr55.md`.
 
@@ -16,6 +16,21 @@ The crystallize pass on the token economy's first slice ([#55](https://github.co
   - The plan: the `economy.prices` USD table moves to slice 4 (#50).
 - **Follow-ups** from the #55 review, filed as #56 under #46: attribution edge cases, scan
   speed, grouping review personas, and labels on journal events as the root fix.
+
+## 0.15.0 — full size for the diagrams, their controls inside them
+
+- **Full size** (`⛶`) for the Architecture diagram, the system map and the file map
+  (`tools/graph`): the diagram fills the window, and the browser's own fullscreen where it allows
+  it. Esc, `✕` or another tab leaves it. It is a page state, so a click on a component (which
+  re-renders the page) keeps it. At full size, Architecture's Fit fits the whole window both
+  ways, and a selected component's passport opens beside the diagram.
+- **The zoom controls sit inside the diagram**, in its top-right corner, in and out of full size:
+  Fit, −, the size and +. Architecture's moved there from the toolbar above it. The system map
+  gains them (it only scaled to the page width before), and the file map gains buttons next to
+  its wheel zoom; its size reads as a share of the fitted view.
+- Tests: `tools/graph/tests/arch-docs.test.mjs` and `graph.test.mjs` press the controls through
+  the page's own script. The arch test's fake `window` now keeps every listener of a type, as a
+  browser does.
 
 ## 0.14.0 — what a run really costs, cache included
 
