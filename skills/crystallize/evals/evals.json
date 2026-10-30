@@ -5,11 +5,31 @@
     "should_trigger": true,
     "expected_output": "Reads the PR diff and every review thread with its resolution; patches the closest umbrella skill with the ordering gotcha and adds an eval case; adds a dated declarative fact to the API role's memory store if it applies to every future task; records both questions as roast misses; writes docs/crystallize/<date>-api-pr212.md and opens a crystallize PR; summarises created/patched items in one screen.",
     "expectations": [
-      { "text": "Fetches the PR's review threads and uses their resolutions as signals", "passed": null, "evidence": "" },
-      { "text": "Patches an existing skill rather than creating a narrow new one, and adds an eval case for it", "passed": null, "evidence": "" },
-      { "text": "Any memory entry is a dated declarative fact within the cap, not a narrative", "passed": null, "evidence": "" },
-      { "text": "A report is written under docs/crystallize/ and a PR opened", "passed": null, "evidence": "" },
-      { "text": "Does not modify hooks, settings, engine code, or agent invariants", "passed": null, "evidence": "" }
+      {
+        "text": "Fetches the PR's review threads and uses their resolutions as signals",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Patches an existing skill rather than creating a narrow new one, and adds an eval case for it",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Any memory entry is a dated declarative fact within the cap, not a narrative",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "A report is written under docs/crystallize/ and a PR opened",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not modify hooks, settings, engine code, or agent invariants",
+        "passed": null,
+        "evidence": ""
+      }
     ]
   },
   {
@@ -18,8 +38,16 @@
     "should_trigger": false,
     "expected_output": "Crystallize runs after the PR exists and its threads are settled (or after merge), because the review threads are its main input. Proceed to review and PR first; crystallize afterwards.",
     "expectations": [
-      { "text": "Declines to crystallize before the PR exists and explains that review threads are the input", "passed": null, "evidence": "" },
-      { "text": "No skill or memory file is written", "passed": null, "evidence": "" }
+      {
+        "text": "Declines to crystallize before the PR exists and explains that review threads are the input",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "No skill or memory file is written",
+        "passed": null,
+        "evidence": ""
+      }
     ]
   },
   {
@@ -28,9 +56,21 @@
     "should_trigger": true,
     "expected_output": "Identifies a docs-drift signal: updates the retention document to match the code and records it under 'Docs synced'; judges that no new procedure or fact warrants a skill or memory change and says so under 'Declined, and why'; still writes the report and opens the PR.",
     "expectations": [
-      { "text": "Fixes the drifted doc to match the code, treating code as the source of truth", "passed": null, "evidence": "" },
-      { "text": "Explicitly reports that no skill or memory change was warranted instead of inventing one", "passed": null, "evidence": "" },
-      { "text": "Report and PR are still produced", "passed": null, "evidence": "" }
+      {
+        "text": "Fixes the drifted doc to match the code, treating code as the source of truth",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Explicitly reports that no skill or memory change was warranted instead of inventing one",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Report and PR are still produced",
+        "passed": null,
+        "evidence": ""
+      }
     ]
   },
   {
@@ -72,9 +112,21 @@
     "should_trigger": true,
     "expected_output": "Crystallizes the PR as usual, but does not merge the crystallize PR and does not hand the merge to another agent: a human merges every crystallize PR, because the agent that wrote a lesson must not approve it. Says so plainly, and states which of the clean conditions (threads resolved, diff confined to skills/briefs/personas/memory/docs/ledgers, nothing in hooks/settings/engine/invariants, touched skills' evals green, memory within caps, report present) it can vouch for and which a human still has to check, so the merge is quick.",
     "expectations": [
-      { "text": "Does not merge the crystallize PR and does not ask another agent or the orchestrator to merge it", "passed": null, "evidence": "" },
-      { "text": "Explains that a human must merge the crystallize PR because the agent that wrote the lesson must not approve it", "passed": null, "evidence": "" },
-      { "text": "Says which of the clean conditions it can vouch for and which still have to be checked (for example that the touched skills' evals have not been run here)", "passed": null, "evidence": "" }
+      {
+        "text": "Does not merge the crystallize PR and does not ask another agent or the orchestrator to merge it",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Explains that a human must merge the crystallize PR because the agent that wrote the lesson must not approve it",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Says which of the clean conditions it can vouch for and which still have to be checked (for example that the touched skills' evals have not been run here)",
+        "passed": null,
+        "evidence": ""
+      }
     ]
   },
   {
@@ -83,10 +135,49 @@
     "should_trigger": true,
     "expected_output": "Treats the webapp late/wedged counts as a config signal: proposes or patches webapp's gate in grimoire.config.json (the long story:shots matrix run once at the end, with when.pathsMatching) or its timeoutMin, citing the counts, and leaves any pre-PR hook to a human. Treats the misattributed halt as a grimoire defect true for every project: writes it in the report's Upstream section with run, seq and version, searches the plugin repository's open issues and files or comments there; does not edit the engine or its copy.",
     "expectations": [
-      { "text": "Patches or proposes webapp's gate or timeoutMin in grimoire.config.json, citing the late/wedged counts", "passed": null, "evidence": "" },
-      { "text": "Files the misattributed halt upstream on the plugin's repository (after searching its open issues), with run, seq and version as evidence", "passed": null, "evidence": "" },
-      { "text": "Does not edit the engine, the project's engine copy, or a hook", "passed": null, "evidence": "" },
-      { "text": "The report has Config and Upstream sections", "passed": null, "evidence": "" }
+      {
+        "text": "Patches or proposes webapp's gate or timeoutMin in grimoire.config.json, citing the late/wedged counts",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Files the misattributed halt upstream on the plugin's repository (after searching its open issues), with run, seq and version as evidence",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Does not edit the engine, the project's engine copy, or a hook",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "The report has Config and Upstream sections",
+        "passed": null,
+        "evidence": ""
+      }
     ]
+  },
+  {
+    "query": "Crystallize the BILLING run. The logs summary says opus did 70% of the fix rounds on the api repo, and the cost lines show opus at 58% of the run's effective tokens while output tokens make up 5% of the cost. Should the routing rubric change?",
+    "should_trigger": true,
+    "expected_output": "Runs render-logs.mjs summary --json and reads the cost lines (cost by model tier, dispatch kind and lens, with the cost coverage) next to the fix rounds per tier. Proposes a routing-rubric patch to the hydrate brief only if the counts across runs support it, and cites the effective-token cost per tier, not output tokens, with how many runs had a cost. Treats one run as an anecdote. Lists the patch and its numbers in the crystallize report.",
+    "expectations": [
+      {
+        "text": "Reads the summary's cost lines (by tier, kind or lens) rather than judging spend on output tokens",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Cites the cost coverage, or how many runs had a cost, next to the numbers it quotes",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Proposes a routing-rubric patch only with counts across runs, and lists it with its evidence in the report",
+        "passed": null,
+        "evidence": ""
+      }
+    ],
+    "id": 7
   }
 ]

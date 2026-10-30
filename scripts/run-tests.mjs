@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// grimoire · test runner. Runs every workflows/tests/*.test.mjs, hooks/scripts/guard.test.mjs,
+// grimoire · test runner. Runs every workflows/tests/*.test.mjs, hooks/scripts/guard.test.mjs, scripts/economy/*.test.mjs,
 // scripts/*.test.mjs and tools/graph/tests/*.test.mjs, in parallel, then the timing-sensitive files
 // one at a time. Each file's output is printed whole when it ends, and every failure is listed at the
 // end. The graph tests skip locally without the parser runtime (npm ci --prefix tools/graph).
@@ -14,7 +14,7 @@ import path from 'node:path'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const tests = (dir) => { try { return readdirSync(path.join(ROOT, dir)).filter((f) => f.endsWith('.test.mjs')).sort().map((f) => path.join(dir, f)) } catch { return [] } }
-const ALL = [...tests('workflows/tests'), ...['hooks/scripts/guard.test.mjs'].filter((f) => existsSync(path.join(ROOT, f))), ...tests('scripts'), ...tests('tools/graph/tests')]
+const ALL = [...tests('workflows/tests'), ...['hooks/scripts/guard.test.mjs'].filter((f) => existsSync(path.join(ROOT, f))), ...tests('scripts'), ...tests('scripts/economy'), ...tests('tools/graph/tests')]
 
 // Lock and concurrency trials that count overlaps between real processes: they run alone, after the
 // rest, so a busy machine cannot make them flaky.

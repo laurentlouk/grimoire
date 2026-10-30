@@ -95,7 +95,7 @@ It is a map for research, never the source of truth: every answer is a `path:lin
 
 Every execute run writes a **decision journal**: which agent and model each task was routed to and why, each precheck and reviewer verdict, the findings the verifier overturned, every fix, escalation, guard decision, replan, claim, gate and halt, with the output tokens at each step. It lives locally in `.grimoire/runs/<runId>/` (gitignored), tagged with the grimoire version and a hash of the briefs, personas and config, so runs can be compared across harness changes. The committed run ledger in `runs/` keeps the summary.
 
-`/grimoire:logs` answers questions straight from the journal ("why did PROJ-12 run on opus?"), renders one self-contained HTML report you open locally, prints the cross-run summary `crystallize` learns from (first-round pass rate, fix rounds per model tier, findings overturned per lens, guard passes a later sweep re-flagged), and prunes runs older than six months (`telemetry.retentionDays`).
+`/grimoire:logs` answers questions straight from the journal ("why did PROJ-12 run on opus?"), renders one self-contained HTML report you open locally, shows what each run really cost (read from Claude Code's transcripts, cache included: output tokens are only a few percent of it), per dispatch, task, model tier, review lens and repo, prints the cross-run summary `crystallize` learns from (first-round pass rate, fix rounds per model tier, findings overturned per lens, guard passes a later sweep re-flagged, cost per tier and lens), and prunes runs older than six months (`telemetry.retentionDays`).
 
 ## 🧭 The team's briefing: `/grimoire:manager`
 

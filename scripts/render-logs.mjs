@@ -16,6 +16,10 @@
 //  --ledgers ← runsDir (runs).
 //  node scripts/render-logs.mjs summary [--dir .grimoire/runs] [--version <v>] [--json]
 //      → cross-run aggregate per grimoire version / briefsHash, for crystallize
+//  Both read each run's real cost from Claude Code's transcripts (scripts/economy/runs.mjs): the
+//  workflow files whose args.runId is the run, under the project dirs of the main checkout and
+//  its worktrees. --claude-dir <dir> overrides $CLAUDE_CONFIG_DIR, else ~/.claude. A run whose
+//  transcripts are not on this machine has no cost, and the cost coverage says so.
 //
 //  Input contract: <dir>/<runId>/run.json + events/<8-digit firstSeq>.jsonl chunks (from the
 //  second attempt under one runId: <firstSeq>.a<N>.jsonl), and/or a legacy single events.jsonl,
@@ -31,6 +35,7 @@ import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readConfig } from './project-config.mjs'
+import { runBill, indexWorkflows, attribute } from './economy/runs.mjs'
 
 const DAY = 86400000
 
@@ -284,10 +289,48 @@ function runFacts(run) {
     replans: ev.filter((e) => e.type === 'replan').length,
     halted: run.status === 'halted' || ev.some((e) => e.type === 'halt'),
     tokens: finalTokens(run),
+    cost: run.cost || null,
   }
 }
 
 const addInto = (dst, src) => { for (const [k, v] of Object.entries(src)) dst[k] = (dst[k] || 0) + v }
+const round2 = (n) => Math.round(n * 100) / 100
+
+// ── cost: the run's bill, from its transcripts, joined to its journal ──
+// Each dispatch is attributed by its label (scripts/economy/runs.mjs `attribute`) to a kind, a task,
+// a repo and a review lens; a task's repo comes from the journal. Coverage counts the tasks the
+// journal says were dispatched whose implementer has a transcript: what the join could see.
+export function costOf(run, bill) {
+  const ev = run.events
+  const tasks = new Set(), repos = new Set(), taskRepo = {}
+  const start = ev.find((e) => e.type === 'run.start') || {}
+  for (const r of Array.isArray(start.repos) ? start.repos : []) repos.add(s(isObj(r) && r.name != null ? r.name : r))
+  for (const e of ev) {
+    if (e.task != null) tasks.add(s(e.task))
+    if (e.repo != null) repos.add(s(e.repo))
+    if (e.task != null && e.repo != null) taskRepo[s(e.task)] = s(e.repo)
+  }
+  const list = (bill ? bill.dispatches : []).map((d) => {
+    const a = attribute(d.label, { tasks, repos })
+    const repo = a.repo ?? (a.task != null ? taskRepo[a.task] ?? null : null)
+    return { label: d.label, kind: a.kind, task: a.task, repo, lens: a.lens, tier: d.tier, agentType: d.agentType, usage: d.usage, effective: d.effective, pricedBy: d.pricedBy }
+  })
+  const dispatched = new Set(ev.filter((e) => e.type === 'dispatch' && e.task != null).map((e) => s(e.task)))
+  const costCoverage = { dispatched: dispatched.size, matched: [...dispatched].filter((t) => list.some((d) => d.kind === 'impl' && d.task === t)).length }
+  if (!list.length) return { cost: null, costCoverage }
+  const by = (key) => {
+    const o = {}
+    for (const d of list) if (d[key] != null) o[d[key]] = round2((o[d[key]] || 0) + d.effective)
+    return o
+  }
+  const effective = round2(list.reduce((a, d) => a + d.effective, 0))
+  const output = list.reduce((a, d) => a + (d.usage.output || 0), 0) * 5
+  return {
+    cost: { effective, output, dispatches: list.length, fallbackPriced: list.filter((d) => d.pricedBy === 'fallback').length,
+      byKind: by('kind'), byTier: by('tier'), byLens: by('lens'), byRepo: by('repo'), byTask: by('task'), list },
+    costCoverage,
+  }
+}
 
 export function aggregate(runs) {
   const groups = new Map()
@@ -301,6 +344,7 @@ export function aggregate(runs) {
       fixRoundsByModel: {}, guardPass: 0, guardPassReflagged: 0, overturnedByPersona: {},
       escalations: 0, escalationsByPath: {}, replans: 0, halts: 0,
       tokensPerRun: { avg: null, max: null, values: [] }, skippedLines: 0,
+      costRuns: 0, costPerRun: { avg: null, max: null, values: [] }, costByTier: {}, costByLens: {}, costByKind: {},
     })
     const g = groups.get(key)
     const f = runFacts(run)
@@ -322,6 +366,12 @@ export function aggregate(runs) {
     g.replans += f.replans
     g.halts += f.halted ? 1 : 0
     if (f.tokens !== null) g.tokensPerRun.values.push(f.tokens)
+    if (f.cost) {
+      g.costRuns++
+      g.costPerRun.values.push(f.cost.effective)
+      for (const [dst, src] of [[g.costByTier, f.cost.byTier], [g.costByLens, f.cost.byLens], [g.costByKind, f.cost.byKind]])
+        for (const [k, v] of Object.entries(src)) dst[k] = round2((dst[k] || 0) + v)
+    }
     g.skippedLines += run.badLines
   }
   const out = [...groups.values()]
@@ -329,6 +379,8 @@ export function aggregate(runs) {
     g.firstRoundPassRate = g.firstRound.total ? g.firstRound.passed / g.firstRound.total : null
     const v = g.tokensPerRun.values
     if (v.length) { g.tokensPerRun.avg = Math.round(v.reduce((a, b) => a + b, 0) / v.length); g.tokensPerRun.max = Math.max(...v) }
+    const c = g.costPerRun.values
+    if (c.length) { g.costPerRun.avg = Math.round(c.reduce((a, b) => a + b, 0) / c.length); g.costPerRun.max = Math.max(...c) }
   }
   const unk = (v) => (v === 'unknown' ? 1 : 0) // runs without meta sort last
   out.sort((a, b) => unk(a.version) - unk(b.version) || b.version.localeCompare(a.version, undefined, { numeric: true }) || a.briefsHash.localeCompare(b.briefsHash))
@@ -419,6 +471,11 @@ export function runOutcome(run, now = Date.now()) {
     // late: every agent past its soft limit (readers, fixes and ships too); lateImpl: implementer dispatches only
     dispatches: count('dispatch'), late: count('late'), lateImpl: ev.filter((e) => e.type === 'late' && /^impl:/.test(s(e.label))).length, wedged: count('wedged'),
     tokens: f.tokens, tokensPerLanded: f.tokens !== null && tasks.landed ? Math.round(f.tokens / tasks.landed) : null,
+    // the real bill (cache included), from the transcripts; null when they are not on this machine
+    cost: f.cost ? { effective: f.cost.effective, output: f.cost.output, dispatches: f.cost.dispatches, fallbackPriced: f.cost.fallbackPriced,
+      perLanded: tasks.landed ? Math.round(f.cost.effective / tasks.landed) : null,
+      byKind: f.cost.byKind, byTier: f.cost.byTier, byLens: f.cost.byLens, byRepo: f.cost.byRepo, byTask: f.cost.byTask } : null,
+    costCoverage: run.costCoverage || { dispatched: 0, matched: 0 },
     halts, personas, repos,
     journal: { missingEvents, leftovers: run.leftovers?.length ?? 0, badLines: run.badLines ?? 0, statusNote: run.statusNote ?? null },
   }
@@ -454,6 +511,14 @@ export function scorecard(rows) {
     return out
   }
   const dispatches = sum((r) => r.dispatches)
+  // the real bill over the rows that have one; maps summed key by key
+  const costed = rows.filter((r) => r.cost)
+  const sumMap = (key) => {
+    const out = {}
+    for (const r of costed) for (const [k, v] of Object.entries(r.cost[key] || {})) out[k] = Math.round(((out[k] || 0) + v) * 100) / 100
+    return out
+  }
+  const cov = { dispatched: sum((r) => r.costCoverage && r.costCoverage.dispatched), matched: sum((r) => r.costCoverage && r.costCoverage.matched) }
   return {
     runs: rows.length, drained, halted, running: rows.filter((r) => r.status === 'running' && !r.stale).length, stale: rows.filter((r) => r.stale).length,
     runSuccess: rate(drained, drained + halted),
@@ -465,6 +530,11 @@ export function scorecard(rows) {
     halts: sum((r) => r.halts.length), haltKinds,
     medianActiveMin: median(rows.map((r) => r.activeMin)), medianTokensPerLanded: median(rows.map((r) => r.tokensPerLanded)),
     tokens: sum((r) => r.tokens),
+    cost: { runs: costed.length, effective: Math.round(costed.reduce((a, r) => a + r.cost.effective, 0) * 100) / 100, output: costed.reduce((a, r) => a + r.cost.output, 0),
+      dispatches: costed.reduce((a, r) => a + r.cost.dispatches, 0), fallbackPriced: costed.reduce((a, r) => a + (r.cost.fallbackPriced || 0), 0),
+      byKind: sumMap('byKind'), byTier: sumMap('byTier'), byLens: sumMap('byLens'), byRepo: sumMap('byRepo') },
+    costCoverage: rate(cov.matched, cov.dispatched), costCoverageCounts: cov,
+    medianCostPerLanded: median(costed.map((r) => r.cost.perLanded)),
     personas: merge('personas'), repos: merge('repos'),
     journal: { runsIncomplete: rows.filter((r) => r.journal.missingEvents || r.journal.leftovers || r.journal.badLines).length,
       missingEvents: sum((r) => r.journal.missingEvents), leftovers: sum((r) => r.journal.leftovers), statusRepaired: rows.filter((r) => r.journal.statusNote).length },
@@ -481,8 +551,27 @@ function scorecardText(sc) {
     `  halts ${sc.halts}: ${kinds}`,
     `  median active time/run ${sc.medianActiveMin ?? 'n/a'} min · median output tokens/landed task ${sc.medianTokensPerLanded ?? 'n/a'} · implementers past the soft limit ${sc.lateImpl}/${sc.dispatches} (${sc.late} agents in all)`,
     ...lateRepoLines(sc.repos),
+    ...costLines(sc),
     `  journal: ${sc.journal.runsIncomplete} run(s) incomplete (${sc.journal.missingEvents} event(s) missing, ${sc.journal.leftovers} unfinished write(s)) · ${sc.journal.statusRepaired} status(es) taken from run.end`,
   ].join('\n')
+}
+
+// The real bill (cache included) from the transcripts, largest first: crystallize cites these lines
+// for routing and lens patches instead of output tokens, which are a small part of it.
+const tokN = (x) => Math.round(x).toLocaleString('en-US')
+const topOf = (o, k = 8) => Object.entries(o || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, k).map(([name, v]) => `${name} ${tokN(v)}`).join(', ') || 'none'
+function costLines(sc) {
+  const pct = (x) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`)
+  const c = sc.cost, cov = sc.costCoverageCounts
+  const coverage = `cost coverage ${pct(sc.costCoverage)} (${cov.matched}/${cov.dispatched} implementer dispatches with a transcript)`
+  if (!c.runs) return [`  cost: no transcripts on this machine · ${coverage}`]
+  return [
+    `  cost: ${tokN(c.effective)} effective tokens · output ${tokN(c.output)} (${pct(c.effective ? c.output / c.effective : null)}) · ${coverage} · median ${sc.medianCostPerLanded === null ? 'n/a' : tokN(sc.medianCostPerLanded)}/landed task${c.fallbackPriced ? ` · ${c.fallbackPriced} dispatch(es) on a model priced by fallback` : ''}`,
+    `  cost by tier: ${topOf(c.byTier)}`,
+    `  cost by kind: ${topOf(c.byKind)}`,
+    ...(Object.keys(c.byLens).length ? [`  cost by lens: ${topOf(c.byLens)}`] : []),
+    ...(Object.keys(c.byRepo).length ? [`  cost by repo: ${topOf(c.byRepo)}`] : []),
+  ]
 }
 
 // The repos whose writers ran past their soft limit, worst first: crystallize reads this line to
@@ -507,6 +596,9 @@ function summaryText(groups, runs, dir) {
     lines.push(`  overturned by verify: ${Object.entries(g.overturnedByPersona).map(([p, o]) => `${p} ${o.overturned}/${o.checked}`).join(', ') || 'none'}`)
     lines.push(`  escalations ${g.escalations}${g.escalations ? ` (${kv(g.escalationsByPath)})` : ''} · replans ${g.replans} · halts ${g.halts}`)
     lines.push(`  tokens/run: avg ${g.tokensPerRun.avg ?? 'n/a'} · max ${g.tokensPerRun.max ?? 'n/a'}`)
+    lines.push(g.costRuns
+      ? `  cost/run (effective): avg ${tokN(g.costPerRun.avg)} · max ${tokN(g.costPerRun.max)} over ${g.costRuns} run(s) · by tier: ${topOf(g.costByTier)}${Object.keys(g.costByLens).length ? ` · by lens: ${topOf(g.costByLens)}` : ''}`
+      : '  cost/run: no transcripts on this machine')
   }
   return lines.join('\n')
 }
@@ -725,6 +817,9 @@ function client(score) {
         tile('halts', String(sc.halts), kinds.map(([k, v]) => `${k} ${v.count}`).join(' · ') || 'none'),
         tile('active time / run', mins(sc.medianActiveMin), 'median, first to last write of each session'),
         tile('output tokens / landed task', fmt(sc.medianTokensPerLanded), `median · ${fmt(sc.tokens)} in all`),
+        tile('cost (effective tokens)', sc.cost.runs ? fmt(Math.round(sc.cost.effective)) : '—', sc.cost.runs
+          ? `${pct(sc.cost.effective ? sc.cost.output / sc.cost.effective : null)} of it output · median ${fmt(sc.medianCostPerLanded)} / landed task · coverage ${pct(sc.costCoverage)}`
+          : `no transcripts on this machine · coverage ${pct(sc.costCoverage)}`),
         tile('implementers past the soft limit', `${sc.lateImpl}/${sc.dispatches}`, `${pct(sc.lateShare)} of dispatches · ${sc.late} agents late in all · ${sc.wedged} wedged`),
         tile('runs with an incomplete journal', sc.journal.runsIncomplete ? `⚠ ${sc.journal.runsIncomplete} of ${sc.runs}` : '0',
           `${sc.journal.missingEvents} event(s) missing · ${sc.journal.leftovers} unfinished write(s) · ${sc.journal.statusRepaired} status(es) from run.end`, sc.journal.runsIncomplete ? 'warnc' : null)),
@@ -739,6 +834,7 @@ function client(score) {
         ['1st-round', (o) => (o.firstRound.total ? `${o.firstRound.passed}/${o.firstRound.total}` : '—'), 'num'],
         ['fix · esc · replan', (o) => `${o.fixes} · ${o.escalations} · ${o.replans}`, 'num'], ['late impl.', (o) => h('span', { title: `${o.late} agent(s) past their soft limit in all` }, `${o.lateImpl}/${o.dispatches}`), 'num'],
         ['halt', haltCell, 'txt'], ['tokens · per landed', (o) => `${fmt(o.tokens)} · ${fmt(o.tokensPerLanded)}`, 'num'],
+        ['cost · per landed', (o) => (o.cost ? `${fmt(Math.round(o.cost.effective))} · ${fmt(o.cost.perLanded)}` : '—'), 'num'],
         ['journal', (o) => { const n = journalNotes(o); return n.length ? h('span', { class: 'warnc', title: o.journal.statusNote || null }, '⚠ ' + n.join(', ')) : h('span', { class: 'muted' }, 'complete') }, 'txt'],
       ], rows, 'no runs match the filters'),
       h('h3', { style: 'margin-top:14px' }, 'Why runs stopped'),
@@ -758,7 +854,30 @@ function client(score) {
         ['repo', (x) => x[0]], ['tasks landed', (x) => String(x[1].landed || 0), 'num'], ['not landed', (x) => String(x[1].notLanded || 0), 'num'],
         ['gates passed', (x) => String(x[1].gatesPassed || 0), 'num'], ['gates failed', (x) => String(x[1].gatesFailed || 0), 'num'], ['no gate', (x) => String(x[1].gatesNA || 0), 'num'],
         ['late writers', (x) => String(x[1].lateWriters || 0), 'num'], ['wedged', (x) => String(x[1].wedged || 0), 'num'],
-      ], Object.entries(sc.repos).sort((a, b) => a[0].localeCompare(b[0])), 'no repositories'))
+      ], Object.entries(sc.repos).sort((a, b) => a[0].localeCompare(b[0])), 'no repositories'),
+      h('h3', { style: 'margin-top:14px' }, 'Where the cost went'),
+      h('p', { class: 'muted' }, 'Effective tokens: input, cache reads at 0.1, cache writes at 1.25 (5 min) or 2 (1 h), output at 5, read from the transcripts on this machine.'),
+      h('div', { class: 'tags' }, Object.entries(sc.cost.byTier).sort((a, b) => b[1] - a[1]).map(([k, v]) => h('span', { class: 'tag' }, `${k} ${fmt(Math.round(v))}`))),
+      table([
+        ['dispatch kind', (x) => h('span', { class: 'mono' }, x[0])], ['effective tokens', (x) => fmt(Math.round(x[1])), 'num'],
+        ['share', (x) => pct(sc.cost.effective ? x[1] / sc.cost.effective : null), 'num'],
+      ], Object.entries(sc.cost.byKind).sort((a, b) => b[1] - a[1]), 'no transcripts on this machine'))
+  }
+  // The run's bill, one row per dispatched agent, largest first.
+  function costSection(r) {
+    if (!r.cost) return h('section', null, h('h2', null, 'Cost by dispatch'),
+      h('p', { class: 'empty' }, `no transcripts for this run on this machine (implementer dispatches with a transcript: ${r.costCoverage ? `${r.costCoverage.matched}/${r.costCoverage.dispatched}` : '—'})`))
+    const c = r.cost
+    const rows = [...c.list].sort((a, b) => b.effective - a.effective)
+    return h('section', null,
+      h('h2', null, `Cost by dispatch (${fmt(Math.round(c.effective))} effective tokens, ${c.dispatches} agents)`),
+      table([
+        ['dispatch', (d) => h('span', { class: 'mono' }, s(d.label) || '(no label)')], ['kind', (d) => s(d.kind)], ['task', (d) => s(d.task) || '—'], ['repo', (d) => s(d.repo) || '—'],
+        ['tier', (d) => `${s(d.tier)}${d.pricedBy === 'fallback' ? ' (fallback price)' : ''}`],
+        ['cache read', (d) => fmt(d.usage.cacheRead), 'num'], ['cache write', (d) => fmt(d.usage.cacheWrite5m + d.usage.cacheWrite1h), 'num'],
+        ['output', (d) => fmt(d.usage.output), 'num'], ['effective', (d) => fmt(Math.round(d.effective)), 'num'],
+        ['share', (d) => pct(c.effective ? d.effective / c.effective : null), 'num'],
+      ], rows, 'no dispatches'))
   }
   function overview(r) {
     const ev = r.events
@@ -948,7 +1067,7 @@ function client(score) {
     if (r) {
       st.run = r.runId
       const tasks = taskIndex(r)
-      main.append(overview(r), timeline(r), drill(r, tasks), lanes(r, tasks))
+      main.append(overview(r), costSection(r), timeline(r), drill(r, tasks), lanes(r, tasks))
     } else main.append(h('section', null, h('h2', null, 'No runs'), h('p', { class: 'empty' }, 'no telemetry runs match the filters')))
     main.append(aggregatePanel())
     const lg = ledgers()
@@ -985,6 +1104,14 @@ function stateRoot() {
   return common.endsWith(`${sep}.git`) ? dirname(common) : process.cwd()
 }
 
+// Where the loop's sessions ran: the main checkout, the cwd, and every worktree of the checkout.
+function costRoots() {
+  const roots = new Set([stateRoot(), process.cwd()])
+  const r = spawnSync('git', ['worktree', 'list', '--porcelain'], { encoding: 'utf8' })
+  if (r.status === 0) for (const l of r.stdout.split('\n')) if (l.startsWith('worktree ')) roots.add(l.slice('worktree '.length))
+  return [...roots]
+}
+
 // ── main ──
 function main() {
   const args = parseArgs(process.argv.slice(2))
@@ -1004,6 +1131,9 @@ function main() {
 
   let runs = loadRuns(resolve(dir))
   if (version) runs = runs.filter((r) => (r.meta.grimoireVersion ?? 'unknown') === version)
+  const claudeDir = typeof args['claude-dir'] === 'string' ? args['claude-dir'] : undefined
+  const index = indexWorkflows({ claudeDir, roots: costRoots() })
+  for (const r of runs) Object.assign(r, costOf(r, runBill(r.runId, { claudeDir, index })))
   const groups = aggregate(runs)
   const outcomes = runs.map((r) => runOutcome(r))
 
