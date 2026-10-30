@@ -1,5 +1,70 @@
 # Changelog
 
+## Unreleased — the loop stops redoing what it already did
+
+From an audit of one week of real runs (0.12.1, four projects, 1.93M loop output tokens). No
+agent was found repeating the same command with no progress. The waste came from the loop
+rebuilding work it had already done, halts that gave the wrong cause, and waits that kept
+throwing away each agent's prompt cache. New tests: `workflows/tests/loop-redo-audit.test.mjs`.
+
+### Engine (`workflows/orchestrate-loop.js`)
+
+- **`root`: the run no longer depends on the launching session's folder.** An agent starts in
+  whatever folder the launching session is in when it is dispatched. One session `cd`'d into a
+  webapp worktree mid-run, and three things broke: the journal resolved its relative run dir
+  against the webapp repository and wrote a second run dir there, the commit check failed, and
+  the next launch rebuilt a task already landed and pushed. With `root` (an absolute path, which
+  `/grimoire:orchestrate` now passes), every brief names it and reads its file by absolute path,
+  and every verbatim script (journal, ship, seal, environment check, reconcile) changes to it
+  first. Without `root`, prompts are unchanged.
+- **A run dir the writer resolved stays absolute.** A resumed run kept the relative
+  `.grimoire/runs/<runId>` for every flush and re-resolved it each time; it now uses the absolute
+  dir from the first receipt.
+- **Environment halts quote the error.** A failed check's reason now quotes its first output
+  line. A repo path the check could not enter (`cannot change to`, `not a git repository`) is
+  named as that, with "run from the workspace root, or pass `root`". An exit 128 from a path
+  failure used to be reported as a signing failure with "unlock the commit-signing agent".
+- **A wedged writer keeps a grace window: `wedgeGraceMin`.** It defaults to the hard limit, at
+  most 60 min. When the only open work was a wedged writer, the run halted at once, and the halt
+  ended that writer: one was minutes from done, and the resume rebuilt its task for three hours.
+  The run now keeps waiting for it through the window, and a result inside it is used as usual.
+  Other repos keep running meanwhile. `0` keeps the old behaviour.
+- **An earlier attempt's commits are reviewed with the new ones.** When an implementer names
+  `landedBefore` SHAs and also commits on top, the unreviewed SHAs now widen the reviewed range
+  back to the first of them. A rebuilt task once added a one-line comment commit, and the panel
+  reviewed only that line while the whole feature under it went unreviewed.
+
+### Briefs and skills
+
+- **`implement` and `gate`: never one shell wait past 4 minutes.** A Bash call is capped at 10
+  minutes and an agent's prompt cache expires after 5, so the turn after a 10-minute poll
+  re-wrote the agent's whole context. That was 71 turns and 60% of the week's loop cache writes.
+  Long commands now run in the background, waited on in chunks:
+  `until grep -q '^EXIT=' <log> || [ $SECONDS -ge 240 ]; do sleep 15; done`. The old "run it in
+  the FOREGROUND and wait" could not hold past the shell cap anyway. `implement` also says to list
+  an earlier attempt's commits in `landedBefore` even when committing on top.
+- **`crystallize`: config fixes and upstream findings get a route.**
+  - A repo whose writers keep running late or wedging gets its config fixed in the crystallize PR:
+    a `gate` for the long check every task runs, or a `timeoutMin`.
+  - A defect in grimoire itself is filed on the plugin's repository, after a search of its open
+    issues, and never patched into the engine or its project copy.
+  - The report gains Config and Upstream sections. The skill and the loop's brief both say so,
+    with an eval case.
+- **`review`: the three-round cap applies in a session too,** counted across every source of
+  findings on the PR (re-review, bots, PR reviews, later panels). At the cap the remaining
+  findings go to the user. "Fix everything" never turns minors into a round of their own. Only
+  the failed lens is re-reviewed. The gate never starts on a head still under review. One
+  session spent eight review-driven rounds on one PR. With an eval case.
+- **`orchestrate`** passes `root`, and says not to `cd` the launching session while a run is in
+  flight.
+
+### Logs (`scripts/render-logs.mjs`)
+
+- **Late and wedged writers per repository:** `lateWriters` and `wedged` in the scorecard's
+  `repos`, two columns in the page's Repositories table, and a summary line
+  (`repos with writers past the soft limit: web 11 late · 1 wedged (16 landed, no gate passed)`).
+  This is the evidence crystallize cites for a repo's `timeoutMin` or `gate`.
+
 ## 0.12.1 — every worktree sees the project
 
 A linked worktree now sees the same grimoire as the main checkout: the same config, an index that

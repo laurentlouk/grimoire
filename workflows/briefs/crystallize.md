@@ -21,6 +21,15 @@ halted.
   the decision journal (timestamps, the session probe's tool latency, `timedOut`). Drop or
   correct one that does not — a learning once blamed slow tests for a timeout that a hanging
   hook had caused, and proposed a config value that had no effect.
+- Read the journal summary's `repos with writers past the soft limit` line. A repo whose writers
+  keep running late or wedging needs its config fixed here: move the long check its tasks each run
+  into that repo's `gate` (once, on the final tree, with `when.pathsMatching`), or raise its
+  `timeoutMin`, citing the counts. A pre-PR hook for a new gate is proposed, never written.
+- A defect in grimoire itself (an engine bug, a brief rule wrong for every project, a halt whose
+  stated cause the journal contradicts, landed work rebuilt) goes UPSTREAM, never into the engine
+  or its project copy: the report's Upstream section with runs, `seq` numbers and version, and an
+  issue on the plugin's repository (`repository` in its `.claude-plugin/plugin.json`), after
+  searching its open issues (comment on a match).
 - Read EVERY review thread on each PR (bots and humans) and its disposition; untriaged threads
   are still signal — list them as such in the report.
 - Patch existing umbrella skills before creating new ones. This includes the loop's own briefs
