@@ -99,5 +99,16 @@
       { "text": "Cites the cost coverage, or how many runs had a cost, next to the numbers it quotes", "passed": null, "evidence": "" },
       { "text": "Proposes a routing-rubric patch only with counts across runs, and lists it with its evidence in the report", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 8,
+    "query": "Crystallize web PR #140. The only lesson: the implementer forgot the empty-state check, so patch the ui-states skill and add an eval case for it. Its evals.json uses two-space indents with each expectation on one line.",
+    "should_trigger": true,
+    "expected_output": "Patches the ui-states skill with the empty-state check and appends one eval case to skills/ui-states/evals/evals.json in the file's existing format (two-space indent, one-line expectation objects), leaving every other case byte-for-byte unchanged, so the diff shows only the new case. Regenerates the eval suite if the repository builds one from these files, runs its check, and lists the patch and the eval result in the crystallize report.",
+    "expectations": [
+      { "text": "Appends exactly one eval case to the skill's evals.json", "passed": null, "evidence": "" },
+      { "text": "Leaves the existing cases unchanged: the diff of evals.json shows only the added case, not a re-serialised file", "passed": null, "evidence": "" },
+      { "text": "Regenerates the eval suite when the repository generates one, and reports the check's result", "passed": null, "evidence": "" }
+    ]
   }
 ]

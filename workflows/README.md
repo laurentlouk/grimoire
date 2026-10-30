@@ -1087,6 +1087,7 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
 
 ## Token economy (built in)
 
+- What a run really costs is in `/grimoire:logs`, read after the fact from Claude Code's transcripts (cache reads and writes included). `maxOutputTokens` and the journal's `tok` count output tokens only, which were 4–7 % of the real cost on recorded runs; quote the cost lines, not `tok`, when judging spend.
 - The terminal sweep reads **by lens**: each persona takes the branch `--stat` and reads only the files its Scope section names, never the whole branch.
 - Mechanical dispatches (index, harness-context, agent preflight, integrate, precheck, journal, ship, seal, environment checks, claim release, ledger) run with `effort: 'low'`; ship, seal and environment checks run on haiku, index and hydration on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
 - A precheck stops an unreviewable diff before the panel; a verifier stops a false-positive finding before it buys a fix.
