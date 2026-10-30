@@ -23,7 +23,7 @@ and no key. Running the cases is manual and paid, and needs the command-line `cl
 | architecture | 5 | 1 | 2 | 2 |
 | crystallize | 6 | 1 | 1 | 4 |
 | graph | 7 | 1 | 3 | 3 |
-| implement | 5 | 1 | 1 | 3 |
+| implement | 6 | 1 | 1 | 4 |
 | launch-agent | 5 | 1 | 1 | 3 |
 | logs | 5 | 1 | 1 | 3 |
 | manager | 11 | 1 | 1 | 9 |

@@ -57,6 +57,9 @@ throwing away each agent's prompt cache. New tests: `workflows/tests/loop-redo-a
   session spent eight review-driven rounds on one PR. With an eval case.
 - **`orchestrate`** passes `root`, and says not to `cd` the launching session while a run is in
   flight.
+- **`implement`: the 4-minute wait rule, and a resume budget.** After about five resumes, or a
+  compaction, the next round starts a fresh implementer from a short handoff. One implementer
+  resumed thirteen times reached a context of about a million tokens. With an eval case.
 
 ### Logs (`scripts/render-logs.mjs`)
 
