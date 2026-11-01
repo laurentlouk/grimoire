@@ -261,6 +261,13 @@ const FIX = (head = 'bbbbbbb') => ({ status: 'DONE', summary: 'fixed', commits: 
   }), { args: ARGS({ policy: 'auto' }) })
   eq(result.policies.tasks['PROJ-1'].raisedAtPrecheck, ['src/server.ts'], 'the code file is named')
   ok(labels.includes('data-integrity:PROJ-1'), "it draws the repo's full quality core")
+
+  const all = await run("reviewParallel 'all': the early FAST-panel rounds are discarded on the raise", [S('PROJ-1', ['README.md'])], by({
+    'impl:PROJ-1': { ...impl('aaaaaaa'), filesChanged: ['README.md', 'src/server.ts'] },
+    'precheck:PROJ-1': { verdict: 'PASS', problems: [], summary: 'ok' },
+  }), { args: ARGS({ policy: 'auto', precheck: true, reviewParallel: 'all' }) })
+  ok(all.labels.some((l) => /^data-integrity:PROJ-1~h\d$/.test(l)), 'the balanced panel reviews round 0 again, data-integrity included')
+  eq(all.result.done.length, 1, 'and it lands')
 }
 
 // ── 15. resume mid-escalation: the checkpoint keeps the task STRICT ──

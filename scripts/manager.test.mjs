@@ -1762,6 +1762,8 @@ try {
       `a briefing older than the headline's stale rule refuses every id (${why(stale, 'A-1')})`)
     const graced = mod.launchCheck(['A-1'], V, config, { repos: mod.checkRepos(config, root), root, now: at(24 * HOUR + 10 * 60000) })
     ok(graced.briefing.stale === false && graced.groups.length === 1, 'within the headline\'s 15 min grace past 24 h, the briefing is not stale yet')
+    const held = mod.launchCheck(['A-1'], V, config, { repos: mod.checkRepos(config, root), root, now: at(HOUR), live: [{ runId: 'run-9', repos: graced.groups[0].repos.map((r) => r.name) }] })
+    ok(JSON.stringify(held.groups[0]?.waitsForRuns) === '["run-9"]' && /Start only after the grimoire run run-9 has finished/.test(held.groups[0]?.prompt ?? ''), 'launch-check: a live run on its repo holds the launch, as launch-plan does')
     const hourly = mod.launchCheck(['A-1'], V, { ...config, manager: { ...config.manager, schedule: { when: 'hourly' } } }, { repos: mod.checkRepos(config, root), root, now: at(2 * HOUR) })
     ok(hourly.groups.length === 0 && /\(manager\.schedule's 1 h, plus 15 min\)/.test(hourly.refused[0]?.reason ?? ''), `with an hourly schedule, 2 h is stale already (${hourly.refused[0]?.reason})`)
     renameSync(join(root, 'repositories', 'webapp'), join(root, 'repositories', 'webapp.off'))

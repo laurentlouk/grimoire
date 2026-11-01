@@ -2135,7 +2135,7 @@ export function briefingProblem(b) {
 // → { root, briefing: { generatedAt, age, stale }, groups: planLaunch's, refused: [{ id, reason }] }.
 // Pure but for the repos' real paths (launchRepos). repos: checkRepos' result, required: a launch is
 // never planned on a repo check from before the briefing.
-export function launchCheck(ids, briefing, config, { repos, root = null, now = Date.now() } = {}) {
+export function launchCheck(ids, briefing, config, { repos, root = null, now = Date.now(), live = [] } = {}) {
   const problem = briefingProblem(briefing)
   if (problem) throw new Error(`the latest briefing is not one this script writes (${problem}): run /grimoire:manager again`)
   const ctx = aiContext(config, repos)
@@ -2153,7 +2153,7 @@ export function launchCheck(ids, briefing, config, { repos, root = null, now = D
   const index = new Map()
   for (const it of items) for (const k of new Set([it.id, it.key, ledgerKey(it)])) { if (!index.has(k)) index.set(k, []); index.get(k).push(it) }
   const title = (id) => briefing.groups.find((g) => g.id === id)?.title ?? id
-  const plannable = launchRepos(ctx.repoIndex, root) // the repos[] entries now, with their checkouts
+  const plannable = launchRepos(ctx.repoIndex, root, live) // the repos[] entries now, with their checkouts and the live runs holding them
 
   const refused = [], picks = [], taken = new Set()
   for (const id of Array.isArray(ids) ? ids : []) {
@@ -2413,7 +2413,7 @@ function launchCheckMain(args) {
   for (const w of managerConfig(c.config).warnings) console.error(w)
   const b = readBriefing(root)
   if (b.error) { console.error(b.error); return 1 }
-  console.log(JSON.stringify(launchCheck(ids, b.value, c.config, { repos: checkRepos(c.config, root), root, now }), null, 2))
+  console.log(JSON.stringify(launchCheck(ids, b.value, c.config, { repos: checkRepos(c.config, root), root, now, live: liveRunsAt(c.config, root) }), null, 2))
   return 0
 }
 

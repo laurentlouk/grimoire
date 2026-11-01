@@ -1127,7 +1127,8 @@ changed code runs balanced (`policies.tasks[id].raisedAtPrecheck`).
 
 **Resume.** An escalated task that has not landed is kept in the checkpoint (`checkpoint.policies`,
 id → `strict`); a resume runs it strict, never FAST again. Only the local `run.json` carries it,
-never a PR marker, and it can only raise a task. A replan keeps the issue's `labels` and an
+never a PR marker (a resume from a PR marker alone may run such a task FAST again), and it can only
+raise a task. A replan keeps the issue's `labels` and an
 escalation.
 
 **History (D6).** The harness-context loader returns, per repo, the FAST tasks of earlier ledgers

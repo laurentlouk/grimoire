@@ -4807,11 +4807,10 @@ async function runFast(task, resolved, range, early) {
   const panels = { spec: panelForTask(task, 'spec'), quality: panelForTask(task, 'quality') }
   log(`   · ${task.id}: FAST review — ${[...panels.spec, ...panels.quality].map((p) => p.name).join(' ∥ ')}, one round…`)
   const fromEarly = early && !early.discarded
-  const rounds = {
-    spec: await (fromEarly ? early.spec : reviewRound(task, 'spec', panels.spec, 'Spec review', { ...range }, 0)),
-    quality: null,
-  }
-  rounds.quality = await (fromEarly ? early.quality : reviewRound(task, 'quality', panels.quality, 'Quality review', { ...range }, 0))
+  // both lenses at once, on the same head
+  const specRound = fromEarly ? early.spec : reviewRound(task, 'spec', panels.spec, 'Spec review', { ...range }, 0)
+  const qualityRound = ahead(fromEarly ? early.quality : reviewRound(task, 'quality', panels.quality, 'Quality review', { ...range }, 0))
+  const rounds = { spec: await specRound, quality: await qualityRound }
   const stages = {}
   for (const mode of ['spec', 'quality']) {
     reviewStats.stages++
@@ -5023,6 +5022,7 @@ async function runTask(task) {
     const code = (impl.filesChanged || []).map(policyPath).filter((f) => f && !globHit(POLICY_CFG.docsPaths, f))
     if (code.length) {
       task.policy = 'balanced'
+      if (early) early.discard('FAST raised to balanced: the panel changed') // its rounds drew the FAST panel
       if (policyStats.tasks[task.id]) policyStats.tasks[task.id].raisedAtPrecheck = code.slice(0, 3)
       log(`   · ${task.id}: FAST was picked for a docs-only footprint, but the implementer changed ${code.slice(0, 3).join(', ')} — runs balanced`)
     }

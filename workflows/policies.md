@@ -20,7 +20,7 @@ policies, the per-task panels, the router's defaults. Design and rationale:
 | **On failure** | escalates to `strict` on the same head (`policies.fast.onFail: 'fail'` stops instead) | the replanner | the replanner |
 | **Terminal sweep, gate** | unchanged, per repo | unchanged | unchanged |
 
-A FAST failure is never silent: it is journaled (`fast` event, `then: 'escalate'`) and counted
+An implementer that blocks (or needs context it cannot get) during the FAST fix fails the task as any blocked fix does: escalation only follows a review outcome (a guard RE_REVIEW, a dead guard, a failing check). A FAST failure is never silent: it is journaled (`fast` event, `then: 'escalate'`) and counted
 in `result.policies.fast`. Escalation keeps the commits: the strict panel judges the task's whole
 range, the fix round already spent counts against its budget, and nothing is re-implemented.
 
