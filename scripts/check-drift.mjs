@@ -34,6 +34,9 @@
 //   9 scripts    workflows/scripts/journal-writer.sh and ship-lock.sh are the engine's text, byte for
 //                byte (what build-journal-writer --check and build-ship-lock --check say): a run whose
 //                file differs carries that text inline in every script.
+//  10 policies   workflows/policies.md names every policy, FAST's per-task panel, and each router
+//                default of orchestrate-loop.js (DEFAULT_POLICY_RULES, as `key` | `JSON value`), read
+//                from the engine's own policy block (scripts/policy-counterfactual.mjs loadRouter).
 // Plain Node, no dependencies.
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import path from 'node:path'
@@ -41,6 +44,7 @@ import { SURFACE, sha256 } from './harness-manifest.mjs'
 import { writerText, WRITER_FILE } from './build-journal-writer.mjs'
 import { lockText, LOCK_FILE } from './build-ship-lock.mjs'
 import { versionVerdict, againstBase } from './version-check.mjs'
+import { loadRouter } from './policy-counterfactual.mjs'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const rel = (...p) => path.join(ROOT, ...p)
@@ -261,6 +265,29 @@ group('scripts · workflows/scripts/ generated from the engine', (bad) => {
     let current = null
     try { current = readFileSync(file, 'utf8') } catch {}
     if (current !== text()) bad(`${path.relative(ROOT, file)} differs from the engine's text: node scripts/${cmd}.mjs`)
+  }
+})
+
+// ─────────────────────────── 10 · policies ───────────────────────────
+group('policies · workflows/policies.md and the engine\'s router', (bad) => {
+  const doc = read('workflows', 'policies.md')
+  if (doc === null) { bad('workflows/policies.md is missing'); return }
+  let router
+  try { router = loadRouter(rel('workflows', 'orchestrate-loop.js')) } catch (e) { bad(e.message); return }
+  const src = read('workflows', 'orchestrate-loop.js') || ''
+  for (const p of router.POLICIES) if (!doc.includes('`' + p + '`')) bad(`policy \`${p}\` is not named in workflows/policies.md`)
+  const fast = /const FAST_PANEL = (\{[^\n]*\})/.exec(src)
+  if (!fast) bad('orchestrate-loop.js: no FAST_PANEL')
+  else for (const id of fast[1].match(/'[a-z-]+'/g).map((x) => x.slice(1, -1)).filter((x) => x !== 'spec' && x !== 'quality'))
+    if (!doc.includes('`' + id + '`')) bad(`FAST's per-task lens \`${id}\` is not in workflows/policies.md`)
+  const rows = []
+  for (const [k, v] of Object.entries(router.DEFAULT_POLICY_RULES)) {
+    if (v && typeof v === 'object' && !Array.isArray(v)) for (const [k2, v2] of Object.entries(v)) rows.push([`${k}.${k2}`, v2])
+    else rows.push([k, v])
+  }
+  for (const [k, v] of rows) {
+    const want = '| `' + k + '` | `' + JSON.stringify(v) + '` |'
+    if (!doc.includes(want)) bad(`workflows/policies.md: the defaults table must read ${want} (the engine's DEFAULT_POLICY_RULES)`)
   }
 })
 

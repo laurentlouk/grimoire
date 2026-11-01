@@ -29,6 +29,9 @@ split that keeps the check is not a weakening. An unjustified one is RE_REVIEW, 
 starting `test weakened:` and naming its `path:line` (a removed line keeps its line before the
 fix).
 
+## Under the FAST policy
+The header says so with a "The repo's check" section. You are then the only check after the task's one fix round: no panel re-runs on PASS, and RE_REVIEW sends the task to the strict panel on the same head. Run the check command exactly as given; a non-zero exit, or a command that cannot run, is RE_REVIEW, with the exit status in your reason.
+
 ## Running commands
 Read the fix through git: the diff in the header, and `git show <head>:<file>` for a whole
 file. When only a command can settle whether a finding is fixed (a test, a build), run it ONLY

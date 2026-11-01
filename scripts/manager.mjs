@@ -789,7 +789,7 @@ function overallNext(c) {
 // (left out) to infer it from the items; null is refused like anything else that is not a list.
 // repos is checkRepos()'s result, or null when the repos were not checked (nothing held back on
 // them). root: the project root the launch prompts name, or null.
-export function view(items, config, ledger, now, sources, repos = null, { root = null } = {}) {
+export function view(items, config, ledger, now, sources, repos = null, { root = null, live = [] } = {}) {
   const errors = [...validate(items), ...(sources === undefined ? [] : validateSources(sources, items))]
   if (errors.length) throw new Error(`invalid WorkItems or sources:\n${errors.slice(0, MAX_ERRORS).join('\n')}`)
   const t = toMs(now)
@@ -797,7 +797,7 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
   const all = items.map((it) => normalize(it, priorityLabels))
   const states = new Map()
   for (const it of all) for (const ref of new Set([it.id, it.key])) if (!states.has(ref)) states.set(ref, it.stateType)
-  const ctx = { now: t, urgent, states, repoLabels, ...aiContext(config, repos) }
+  const ctx = { now: t, urgent, states, repoLabels, live, ...aiContext(config, repos) }
   // null: no ledger to compare with, the first briefing (or one that starts over)
   const seen = usableLedger(ledger) ? ledger.items : null
   const generatedAt = new Date(t).toISOString()
@@ -881,7 +881,7 @@ function launchView(ready, held, all, ctx, root) {
     }
     it.launch.project = keys.get(raw)
   }
-  const repos = launchRepos(ctx.repoIndex, root)
+  const repos = launchRepos(ctx.repoIndex, root, ctx.live)
   return { root, projects, repos, allReady: planLaunch(ready.map((it) => it.launch).filter((p) => p.shown), projects, repos, root) }
 }
 
@@ -913,13 +913,30 @@ export function nextLedger(v, ledger, items = []) {
 // limit). A drained run with nothing pending, or one still writing its journal, is left out. No dir:
 // read, nothing there (ok, 0). A dir that can't be read: failed, with the reason.
 export function readRuns(dir, { sourceId = 'runs', now = Date.now() } = {}) {
-  if (!existsSync(dir)) return { source: { id: sourceId, status: 'ok', count: 0 }, items: [] }
-  let rows
-  try { rows = loadRuns(dir).map((r) => runOutcome(r, toMs(now))) } catch (e) {
-    return { source: { id: sourceId, status: 'failed', reason: `the run journals could not be read (${e.code || 'error'})`, fix: `check that ${dir} is a readable directory` }, items: [] }
+  if (!existsSync(dir)) return { source: { id: sourceId, status: 'ok', count: 0 }, items: [], live: [] }
+  let runs, rows
+  try { runs = loadRuns(dir); rows = runs.map((r) => runOutcome(r, toMs(now))) } catch (e) {
+    return { source: { id: sourceId, status: 'failed', reason: `the run journals could not be read (${e.code || 'error'})`, fix: `check that ${dir} is a readable directory` }, items: [], live: [] }
   }
   const items = runItems(rows, sourceId)
-  return { source: { id: sourceId, status: 'ok', count: items.length }, items }
+  return { source: { id: sourceId, status: 'ok', count: items.length }, items, live: liveRuns(runs, rows) }
+}
+// The live runs of the project's journal (telemetry.dir, resolved against the main checkout), or [].
+function liveRunsAt(config, root) {
+  const t = isObj(config.telemetry) && typeof config.telemetry.dir === 'string' && config.telemetry.dir ? config.telemetry.dir : '.grimoire/runs'
+  return readRuns(resolve(mainCheckout(root) ?? root, t)).live
+}
+// The runs still writing their journal (running, not stale), with the repos each named at start: a
+// launch into one of those checkouts waits for it (never two agents on one checkout). Pure.
+export function liveRuns(runs, rows) {
+  const out = []
+  rows.forEach((o, i) => {
+    if (!isObj(o) || o.status !== 'running' || o.stale === true || typeof o.runId !== 'string') return
+    const start = ((runs[i] && runs[i].events) || []).find((e) => isObj(e) && e.type === 'run.start') || {}
+    const repos = (Array.isArray(start.repos) ? start.repos : []).filter((r) => typeof r === 'string' && r)
+    if (repos.length) out.push({ runId: o.runId, repos })
+  })
+  return out
 }
 
 const MAX_HALT = 160
@@ -1944,13 +1961,19 @@ const checkoutOf = (root) => (r) => {
 }
 // Every repos[] entry by name, as planLaunch reads it: { name, path, checkout }, the checkout c1,
 // c2… one per real path (so no absolute path of the machine is in the view).
-function launchRepos(repoIndex, root) {
+function launchRepos(repoIndex, root, live = []) {
   const at = checkoutOf(root), ids = new Map(), out = Object.create(null)
   for (const r of repoIndex.values()) {
     const real = at(r)
     if (!ids.has(real)) ids.set(real, `c${ids.size + 1}`)
     out[r.name] = { name: r.name, path: r.path, checkout: ids.get(real) }
   }
+  // a live grimoire run holds every checkout it named: each repo on one carries the run's id
+  for (const run of Array.isArray(live) ? live : [])
+    for (const name of run.repos) {
+      const held = out[name] && out[name].checkout
+      if (held) for (const r of Object.values(out)) if (r.checkout === held && !(r.loops || []).includes(run.runId)) r.loops = [...(r.loops || []), run.runId]
+    }
   return out
 }
 // An issue's project, as planLaunch reads it: its source, its id when plain (else null), whether it
@@ -1989,6 +2012,7 @@ export function planLaunch(picks, projects, repos, root) {
     g.label = g.at.project ? `project ${g.at.project}` : g.at.inProject ? `the project of ${g.picks[0].shown}` : `issues with no project (${g.at.sourceId})`
     g.repos = [...names].sort().map((n) => repos[n])
     g.waitsFor = groups.slice(0, i).filter((o) => shares(o, g))
+    g.runs = [...new Set(g.repos.flatMap((r) => r.loops || []))]
   })
   const prompt = (g) => {
     const L = [
@@ -1999,6 +2023,10 @@ export function planLaunch(picks, projects, repos, root) {
     if (g.waitsFor.length) {
       const shared = [...new Set(g.waitsFor.flatMap((o) => o.repos.filter((r) => g.repos.some((x) => x.checkout === r.checkout)).map((r) => oneLine(r.path))))]
       L.push('', `Start only after the launch for ${g.waitsFor.map((o) => `${o.label} (${o.id})`).join(', ')} has finished: it uses the same checkout (${shared.join(', ')}), and two agents never share one. If you can't tell that it has, ask the user before starting.`)
+    }
+    if (g.runs.length) {
+      const held = [...new Set(g.repos.filter((r) => (r.loops || []).length).map((r) => oneLine(r.path)))]
+      L.push('', `Start only after the grimoire run ${g.runs.map(oneLine).join(', ')} has finished: it is working in ${held.join(', ')} (/grimoire:logs shows it), and two agents never share one checkout. If you can't tell that it has, ask the user before starting.`)
     }
     L.push('', 'Repos:', ...g.repos.map((r) => `- ${oneLine(r.name)}: ${oneLine(r.path)}`), '', 'Steps, in order:')
     let n = 0, orchestrated = false
@@ -2011,7 +2039,7 @@ export function planLaunch(picks, projects, repos, root) {
       } else if (p.route === 'roast') {
         L.push(`${++n}. /grimoire:roast ${p.shown} (${at(repos[p.repo])}): it has no acceptance criteria, so settle them before anything is built.`)
       } else {
-        L.push(`${++n}. /grimoire:implement ${p.shown} (${at(repos[p.repo])}), then /grimoire:review on it.`)
+        L.push(`${++n}. /grimoire:implement ${p.shown} (${at(repos[p.repo])}), then /grimoire:review on it, under the issue's execution policy (workflows/policies.md: its grimoire:policy label, else the config's; with none, fast unless a floor or raise applies).`)
       }
     }
     L.push('', 'Stop and ask the user when a step fails or needs their decision.')
@@ -2022,6 +2050,7 @@ export function planLaunch(picks, projects, repos, root) {
     issues: g.picks.map((p) => ({ id: p.shown, route: p.route, repo: p.repo })),
     repos: g.repos.map((r) => ({ name: r.name, path: r.path })),
     waitsFor: g.waitsFor.map((o) => o.id),
+    ...(g.runs.length ? { waitsForRuns: g.runs } : {}),
     prompt: prompt(g),
   }))
 }
@@ -2029,7 +2058,7 @@ export function planLaunch(picks, projects, repos, root) {
 // The ticked ids → one launch group per tracker project (spec D8). Pure: the repos check is passed
 // in (checkRepos' result; null reads as not checked, so nothing is held back on it). root goes
 // into the prompts when given.
-export function launchPlan(ids, items, config, { repos = null, root = null } = {}) {
+export function launchPlan(ids, items, config, { repos = null, root = null, live = [] } = {}) {
   const errors = validate(items)
   if (errors.length) throw new Error(`invalid WorkItems:\n${errors.slice(0, MAX_ERRORS).join('\n')}`)
   const { urgent, priorityLabels, repoLabels } = managerConfig(config)
@@ -2066,7 +2095,7 @@ export function launchPlan(ids, items, config, { repos = null, root = null } = {
     if (!(key in projects)) projects[key] = launchProject(p.it, all, ctx)
     return { shown: p.shown, route: p.route, project: key, repo: p.repo.name }
   })
-  return { root, groups: planLaunch(keyed, projects, launchRepos(ctx.repoIndex, root), root), refused }
+  return { root, groups: planLaunch(keyed, projects, launchRepos(ctx.repoIndex, root, live), root), refused }
 }
 
 // ── launch-check: the panel's Launch, checked again before anything starts (spec D12) ──
@@ -2356,7 +2385,7 @@ function launchPlanMain(args) {
     if (errors.length > MAX_ERRORS) console.error(`  … and ${errors.length - MAX_ERRORS} more`)
     return 1
   }
-  console.log(JSON.stringify(launchPlan(ids, input.value, c.config, { repos: checkRepos(c.config, root), root }), null, 2))
+  console.log(JSON.stringify(launchPlan(ids, input.value, c.config, { repos: checkRepos(c.config, root), root, live: liveRunsAt(c.config, root) }), null, 2))
   return 0
 }
 
@@ -2405,9 +2434,9 @@ const briefRepos = (args, config, root) => (args['check-repos'] === undefined &&
 // `view --json` and `render --html`: brief's view, from brief's inputs (main reads them), without
 // brief's writes: the ledger is read and never written, and no lock is taken (render writes one
 // file, atomically, and a briefing's own page is brief's).
-function viewMain(cmd, format, args, { items, config, sources, now, root, dir, ledgerFile }) {
+function viewMain(cmd, format, args, { items, config, sources, now, root, dir, ledgerFile, live = [] }) {
   if (args.out !== undefined && (format !== 'html' || typeof args.out !== 'string')) { console.error(`--out: ${format === 'html' ? 'expected a file' : 'render --html only'}\n${USAGE}`); return 2 }
-  const v = view(items, config, readLedger(ledgerFile), now, sources, briefRepos(args, config, root), { root })
+  const v = view(items, config, readLedger(ledgerFile), now, sources, briefRepos(args, config, root), { root, live })
   if (cmd === 'view') { console.log(JSON.stringify(v, null, 2)); return 0 }
   if (format === 'widget') { process.stdout.write(renderWidget(v)); return 0 }
   const out = resolve(typeof args.out === 'string' ? args.out : join(dir, 'briefing.html'))
@@ -2472,17 +2501,19 @@ function main(argv) {
   // telemetry.dir resolves against the main checkout when --root is a linked worktree, where the
   // loop's writer and render-logs keep the journal.
   let items = input.value
+  let live = []
   const runsSource = mc.sources.find((s) => s.category === 'runs')
   if (runsSource) {
     const t = isObj(config.telemetry) && typeof config.telemetry.dir === 'string' && config.telemetry.dir ? config.telemetry.dir : '.grimoire/runs'
     const runs = readRuns(resolve(mainCheckout(root) ?? root, t), { sourceId: runsSource.id, now })
     items = [...items, ...runs.items]
+    live = runs.live
     sources = [...(sources ?? inferSources(input.value)).filter((s) => !(isObj(s) && s.id === runsSource.id)), runs.source]
   }
 
   const dir = join(root, '.grimoire', 'manager')
   const ledgerFile = resolve(typeof args.ledger === 'string' ? args.ledger : join(dir, 'ledger.json'))
-  if (cmd !== 'brief') return viewMain(cmd, format, args, { items, config, sources, now, root, dir, ledgerFile })
+  if (cmd !== 'brief') return viewMain(cmd, format, args, { items, config, sources, now, root, dir, ledgerFile, live })
   const lock = join(dir, '.lock')
   let token
   try { token = acquireLock(lock) } catch (e) {
@@ -2497,7 +2528,7 @@ function main(argv) {
   }
   try {
     const ledger = readLedger(ledgerFile)
-    const v = view(items, config, ledger, now, sources, briefRepos(args, config, root), { root })
+    const v = view(items, config, ledger, now, sources, briefRepos(args, config, root), { root, live })
     const text = `${renderMarkdown(v)}${args.headless !== undefined ? headlessSection(v) : ''}`
     const file = join(dir, 'briefings', `${stamp(now)}.md`)
     writeAtomic(file, text)

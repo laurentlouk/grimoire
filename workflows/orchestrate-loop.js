@@ -156,6 +156,7 @@ const MODELS = ['haiku', 'sonnet', 'opus']
 let agentMemory = {} // agent name → verbatim entries of <memoryDir>/agents/<agent>.md
 let harnessMemory = '' // verbatim entries of <memoryDir>/harness.md
 let priorLearnings = [] // [{text, repos}] from earlier ledgers of this project / these repos
+const policyHistory = new Map() // repo → {fast, escalated}: FAST tasks of earlier runs and how many escalated (the D6 raise)
 
 // Learnings are tagged with the repos they came from, so a hydration only carries the ones
 // that concern its own repos (plus untagged, pipeline-wide ones) instead of the last N of
@@ -228,6 +229,15 @@ const HARNESS_CONTEXT_SCHEMA = {
       description: 'deduplicated `learnings` from earlier run ledgers for the same project or touching the same repos — newest first, at most 30',
     },
     priorLedgers: { type: 'array', items: { type: 'string' }, description: 'paths of the ledgers read' },
+    policyHistory: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['repo', 'fast', 'escalated'],
+        properties: { repo: { type: 'string' }, fast: { type: 'integer' }, escalated: { type: 'integer' } },
+      },
+      description: "per repo, summed over the ledgers read: tasks that ran FAST and how many of them escalated (from each ledger's policies.tasks); [] when none carry it",
+    },
   },
   required: ['harnessMemory', 'agentMemory', 'priorLearnings', 'priorLedgers'],
 }
@@ -680,6 +690,7 @@ function harnessContextPrompt(project, repos, agents) {
   return `Load the harness context for an automated build run of tracker project ${project} touching repos: ${repos.join(', ') || '(unknown yet)'}. Read-only; return the structured object.
 1. Read \`${MEMORY_DIR}/harness.md\` and, for each of ${agents.join(', ')}, \`${MEMORY_DIR}/agents/<agent>.md\`. Return each file's ENTRIES verbatim (drop the leading HTML comment header and a literal "(no entries yet)" placeholder — return "" for those). Do not summarize or reword entries.
 2. List \`${RUNS_DIR}/*.json\` (if the directory exists). Read, newest first, the ledgers whose \`project\` equals ${project} OR whose \`repos\` intersect the list above — at most 8 files. Collect their \`learnings\` arrays. An entry is either an object \`{text, repos}\` (return it as is) or a bare string (older ledgers: return \`{text: <the string>, repos: <that ledger's repos array>}\`). Deduplicate on text (case-insensitive, trimmed), keep newest first, cap at 30, return as priorLearnings and the paths read as priorLedgers.
+3. From the same ledgers, where one has a \`policies.tasks\` object (id → {repo, policy, escalated?}), count per repo the entries whose \`policy\` is "fast" and, of those, the ones with \`escalated: true\`. Return the sums over all ledgers read as \`policyHistory: [{repo, fast, escalated}]\` (copy the numbers; do not estimate).
 Missing files/dirs are normal on a fresh harness — return empty values, never an error.`
 }
 // The "## Your memory" block pasted at the top of every brief, per agent.
@@ -1337,7 +1348,7 @@ git -C ${path} log --oneline ${BASE_BRANCH}..${branch}
 
 // The review GUARD — verifies a fix against the exact findings that gated.
 // `fixed`: {from, head}, the fix's own range (see runReviewStage).
-function guardPrompt(task, gate, fix, fixed, range, round) {
+function guardPrompt(task, gate, fix, fixed, range, round, check = null) {
   const r = range || {}
   const { from: fixFrom, head: fixHead } = fixed || {}
   const path = repoPath(task.repo)
@@ -1360,7 +1371,17 @@ ${rangeFrom(r) && r.headSha ? `Whole-task context when you need it: \`git -C ${p
 \`\`\`bash
 git -C ${path} log --oneline ${BASE_BRANCH}..HEAD
 \`\`\``
-  }${testIntegrityBlock(task, fixFrom, fixHead)}${runBlock(task, `guard-r${round || 1}`, reviewedHead(task, range))}`
+  }${testIntegrityBlock(task, fixFrom, fixHead)}${check ? fastCheckBlock(check) : ''}${runBlock(task, `guard-r${round || 1}`, reviewedHead(task, range))}`
+}
+// FAST: the guard is the only check after the one fix, so the repo's own `check` command runs too.
+function fastCheckBlock(check) {
+  return `
+
+## The repo's check (FAST: no panel re-runs after this fix)
+Run this ONCE, in your own worktree at the reviewed head (the "Running commands" block below), and report its exit status in your reason. A non-zero exit, or a command that cannot run, is RE_REVIEW:
+\`\`\`bash
+${check}
+\`\`\``
 }
 
 // ── did the FIX weaken a test? ──
@@ -2384,7 +2405,10 @@ const DEFAULT_POLICY_RULES = {
     privacy: ['**/auth/**', '**/*auth*.*', '**/session*/**', '**/*session*.*', '**/*secret*', '**/payment*/**', '**/billing/**', '**/*pii*'],
     'data-integrity': ['**/migrations/**', '**/migration/**', '**/*.sql', '**/*.prisma', '**/*.proto', '**/openapi*.{yml,yaml,json}', '**/schema.graphql'],
   },
+  fast: { onFail: 'escalate' }, // a FAST failure: 'escalate' to STRICT on the same head, or 'fail' (booked failed, left to the replanner)
 }
+// FAST's per-task panel: the spec lens and the adversarial core, nothing promoted or drawn by tag
+const FAST_PANEL = { spec: ['spec-hawk'], quality: ['break-it'] }
 // A glob as a RegExp over a lower-cased, repo-relative path: `**/` is zero or more directories,
 // `**` anything, `*` and `?` stay inside one segment, `{a,b}` is a choice.
 function policyGlob(glob) {
@@ -2403,14 +2427,21 @@ function policyGlob(glob) {
     else if (c === '?') re += '[^/]'
     else if (c === '{' && g.indexOf('}', i) > i) {
       const end = g.indexOf('}', i)
-      re += `(?:${g.slice(i + 1, end).split(',').map(esc).join('|')})`
+      re += `(?:${g.slice(i + 1, end).split(',').map((a) => esc(a).replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]')).join('|')})`
       i = end
     } else re += esc(c)
   }
   return new RegExp(`^${re}$`)
 }
 // A declared `files` entry ("path — what to change", sometimes "path - what") as the path a glob matches.
-const policyPath = (s) => String(s || '').split(/ [—-] /)[0].trim().toLowerCase().replace(/^\.\//, '')
+const policyPath = (s) =>
+  String(s || '')
+    .replace(/[`*]/g, '')
+    .trim()
+    .replace(/^-\s+/, '')
+    .split(/ [—-] |: | \(|\s/)[0]
+    .toLowerCase()
+    .replace(/^\.\//, '')
 const globHit = (globs, path) => (globs || []).find((g) => policyGlob(g).test(path))
 // The router, pure: what `auto` picks for a task from facts the engine already holds — no model call.
 // facts: {files, tags, migration, crossRepo, downstream, model, replannedAfterCode, history, proposed, proposedReason}
@@ -2460,12 +2491,12 @@ function labelPolicy(labels) {
   return null
 }
 // policy:end
-const FAST_LIVE = false // the FAST profile (one round, one consolidated fix, escalation) ships in the next slice; until then a FAST pick runs balanced
 
 // A task's per-task panel: its repo's, plus — under STRICT — the lenses its declared files promote
 // into the quality stage (privacy for auth/session/secret paths, data-integrity for migration,
 // schema and contract paths), each persona reused as it is, only its stage moved for this task.
 function panelForTask(task, stage) {
+  if (task.policy === 'fast' && FAST_PANEL[stage]) return REVIEW_PANEL.filter((p) => FAST_PANEL[stage].includes(p.id))
   const panel = panelFor(task.repo, stage)
   if (stage !== 'quality' || task.policy !== 'strict') return panel
   const extra = REVIEW_PANEL.filter((p) => (task.promote || []).includes(p.id) && !panel.includes(p))
@@ -2483,7 +2514,7 @@ function policyOpt(v, what) {
 }
 // {policies:{…}} over DEFAULT_POLICY_RULES, key by key; a malformed value keeps the default, logged.
 function policyConfig(o) {
-  const cfg = { ...DEFAULT_POLICY_RULES, promote: { ...DEFAULT_POLICY_RULES.promote } }
+  const cfg = { ...DEFAULT_POLICY_RULES, promote: { ...DEFAULT_POLICY_RULES.promote }, fast: { ...DEFAULT_POLICY_RULES.fast } }
   if (o === undefined || o === null) return cfg
   if (typeof o !== 'object' || Array.isArray(o)) {
     log(`⚠ policies ${JSON.stringify(o)} ignored — expected an object; the default routing rules apply`)
@@ -2505,6 +2536,11 @@ function policyConfig(o) {
     else log(`⚠ policies.historyMaxEscalation ${JSON.stringify(o.historyMaxEscalation)} ignored — expected a rate between 0 and 1`)
   }
   if ('allowBelowFloor' in o) cfg.allowBelowFloor = o.allowBelowFloor === true
+  if (o.fast !== undefined) {
+    const f = o.fast && typeof o.fast === 'object' ? o.fast : {}
+    if (['escalate', 'fail'].includes(f.onFail)) cfg.fast.onFail = f.onFail
+    else log(`⚠ policies.fast ${JSON.stringify(o.fast)} ignored — expected {onFail: 'escalate' | 'fail'}; FAST failures escalate to STRICT`)
+  }
   if (o.promote && typeof o.promote === 'object' && !Array.isArray(o.promote))
     for (const [lens, v] of Object.entries(o.promote)) {
       if (!REVIEW_PANEL.some((p) => p.id === lens)) log(`⚠ policies.promote.${lens} ignored — no review persona has that id`)
@@ -3150,7 +3186,7 @@ const refName = (v, where) => {
 const RUN_BRANCH_OPT = refName(opts.runBranch, 'runBranch')
 
 // ── repo configuration: the ONLY place a stack enters this workflow ──
-// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup?, deliver?, runBranch?, policy? }]
+// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup?, deliver?, runBranch?, policy?, check? }]
 const repoList = Array.isArray(opts.repos)
   ? opts.repos
       .filter((r) => r && typeof r.name === 'string' && r.name.trim() && typeof r.agent === 'string' && r.agent.trim())
@@ -3165,6 +3201,7 @@ const repoList = Array.isArray(opts.repos)
         deliver: deliverOpt(r.deliver, `repos[${r.name.trim()}].deliver`, undefined),
         runBranch: refName(r.runBranch, `repos[${r.name.trim()}].runBranch`) || undefined,
         policy: policyOpt(r.policy, `repos[${r.name.trim()}].policy`) || undefined,
+        check: str(r.check) ? r.check.trim() : undefined,
       }))
   : []
 repoConfig = new Map(repoList.map((r) => [r.name, r]))
@@ -4022,7 +4059,12 @@ const newerState = (a, b) => {
 // verified but planted marker once set every counter to its ceiling). Without it, the newest verified
 // marker — by attempt, then lastSeq — carries them (another machine has nothing else).
 const resumeShapedLikeMarker = !!resumeOpt && ['repo', 'runBranch', 'base'].some((k) => k in resumeOpt) // a PR marker passed as resumeState: its spend is not this run's own
+const escalatedPolicies = new Map() // id → 'strict': FAST tasks escalated and not landed yet; the checkpoint keeps them across a resume
 const resumeSafe = resumeOpt ? { ...stateCounters(resumeOpt, 'the resumeState passed in', !resumeShapedLikeMarker), landedTasks: Array.isArray(resumeOpt.landedTasks) ? resumeOpt.landedTasks : [] } : null
+// The checkpoint's escalated policies (run.json only, never a PR marker): raise-only, so a forged
+// entry can make a task stricter, never looser.
+if (resumeOpt && resumeOpt.policies && typeof resumeOpt.policies === 'object' && !Array.isArray(resumeOpt.policies))
+  for (const [id, p] of Object.entries(resumeOpt.policies).slice(0, 500)) if (inProject.has(id) && p === 'strict') escalatedPolicies.set(id, p)
 let resumeBase = resumeSafe
 if (!resumeBase) for (const m of markerStates) if (!resumeBase || newerState(m, resumeBase)) resumeBase = m
 if (resumeBase && resumeBase !== resumeSafe) log(`◎ run state taken from the PR marker of ${resumeBase.repo}${resumeBase.url ? ` (${resumeBase.url})` : ''}: attempt ${stateRank(resumeBase)[0]}, seq ${stateRank(resumeBase)[1]}`)
@@ -4299,7 +4341,7 @@ if (!execute) {
     [...new Set(pendingIndex.map((i) => i.repo))].map((repo) => [repo, { spec: panelFor(repo, 'spec').map((p) => p.name), quality: panelFor(repo, 'quality').map((p) => p.name), terminal: panelFor(repo, 'terminal').map((p) => p.name) }]),
   )
   const repoView = Object.fromEntries(
-    repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null, ...(r.policy ? { policy: r.policy } : {}) }]),
+    repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null, ...(r.policy ? { policy: r.policy } : {}), ...(r.check ? { check: r.check } : {}) }]),
   )
   // Policies at index level: declared files are not known before hydration, so only the floors the
   // index already shows (a strictTags repo, a dependency on another repo's issue) are listed here;
@@ -4478,13 +4520,15 @@ function earlyReviews(task, range) {
 }
 // `first`: this stage's round 0 when the caller already dispatched it (a round, or a promise of
 // one). Every later round, the verifier, the fixes and the guard are unchanged.
-async function runReviewStage(task, mode, personas, phaseName, resolved, range, { first } = {}) {
+async function runReviewStage(task, mode, personas, phaseName, resolved, range, { first, spentFixes = 0 } = {}) {
+  // a task escalated from FAST already spent its one fix round: it counts against this budget
+  const maxFix = Math.max(0, MAX_FIX_ATTEMPTS - spentFixes)
   if (personas.length === 0) return { verdict: 'PASS', findings: [], advisory: [], summary: 'no applicable reviewers' }
   reviewStats.stages++
   log(`   · ${task.id} (${task.repo}): ${mode} review — ${personas.length} reviewer(s)…`)
   let aggregate = null
   let fixed = null // {from, findings} of the latest fix: a re-review round checks it for weakened tests
-  for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt <= maxFix; attempt++) {
     const { reviews, unavailable } = attempt === 0 && first ? await first : await reviewRound(task, mode, personas, phaseName, range, attempt, '', fixed)
     if (unavailable) {
       for (const p of unavailable) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: attempt })
@@ -4544,12 +4588,12 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range, 
       log(`   · ${task.id}: ${mode} PASS${advisory.length ? ` · ${advisory.length} advisory note(s), no rework` : ''}${softFails.length ? ` · ${softFails.length} nit-only FAIL(s) not gated` : ''}`)
       return aggregate
     }
-    if (attempt === MAX_FIX_ATTEMPTS) break // out of fix budget — return this FAIL
+    if (attempt === maxFix) break // out of fix budget — return this FAIL
 
     // Route ONLY the gating findings back to the SAME implementer. Advisory notes are
     // deliberately withheld from the fix brief: including them re-imports exactly the
     // rework this gate exists to prevent. They surface in the run summary instead.
-    log(`   · ${task.id}: ${mode} FAIL — ${aggregate.summary}; fix attempt ${attempt + 1}/${MAX_FIX_ATTEMPTS}…`)
+    log(`   · ${task.id}: ${mode} FAIL — ${aggregate.summary}; fix attempt ${attempt + 1}/${maxFix}…`)
     const fixFrom = range && range.headSha // HEAD before the fix — isolates the fix's own diff for the guard
     reviewStats.fixDispatches++
     task.fixRounds = (task.fixRounds || 0) + 1
@@ -4754,6 +4798,93 @@ function integrateLane(task, tip) {
   return p
 }
 
+// ── FAST (workflows/policies.md): one round, one consolidated fix, the guard once ──
+// spec-hawk ∥ break-it judge the same head once. No gating finding: PASS. Otherwise ONE fix
+// carries every stage's verified gating findings (spec first), and the guard alone checks it,
+// with the repo's `check` command. Anything but a guard PASS is a FAIL the caller escalates (or
+// books). Same personas, same verdict schema, same verifier and guard as every other policy.
+async function runFast(task, resolved, range, early) {
+  const panels = { spec: panelForTask(task, 'spec'), quality: panelForTask(task, 'quality') }
+  log(`   · ${task.id}: FAST review — ${[...panels.spec, ...panels.quality].map((p) => p.name).join(' ∥ ')}, one round…`)
+  const fromEarly = early && !early.discarded
+  const rounds = {
+    spec: await (fromEarly ? early.spec : reviewRound(task, 'spec', panels.spec, 'Spec review', { ...range }, 0)),
+    quality: null,
+  }
+  rounds.quality = await (fromEarly ? early.quality : reviewRound(task, 'quality', panels.quality, 'Quality review', { ...range }, 0))
+  const stages = {}
+  for (const mode of ['spec', 'quality']) {
+    reviewStats.stages++
+    const { reviews, unavailable } = rounds[mode]
+    if (unavailable) {
+      for (const p of unavailable) emit('review', { task: task.id, stage: mode, persona: p.name, verdict: 'UNAVAILABLE', gating: 0, advisory: 0, round: 0 })
+      return { verdict: 'UNAVAILABLE', findings: [], advisory: [], summary: `the ${mode} lens(es) ${unavailable.map((p) => p.name).join(', ')} returned nothing, ${REVIEWER_RETRIES + 1} time(s)` }
+    }
+    for (const r of reviews)
+      emit('review', { task: task.id, stage: mode, persona: r.persona, verdict: r.v.verdict, gating: (r.v.findings || []).filter(isGating).length, advisory: (r.v.findings || []).filter((f) => !isGating(f)).length, round: 0 })
+    stages[mode] = { reviews, findings: reviews.flatMap((r) => (r.v.findings || []).map((f) => ({ ...f, persona: r.persona }))) }
+  }
+  const checked = await parallel(['spec', 'quality'].map((mode) => () => verifyFindings(task, mode, stages[mode].findings.filter(isGating), range, 0, mode === 'spec' ? 'Spec review' : 'Quality review')))
+  const gates = {}
+  for (const [i, mode] of ['spec', 'quality'].entries()) {
+    const c = checked[i] || { kept: stages[mode].findings.filter(isGating), rejected: [] }
+    overturned.push(...c.rejected.map((f) => ({ task: task.id, repo: task.repo, stage: mode, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue, evidence: f.overturnedBy })))
+    const voidFails = stages[mode].reviews.filter((r) => r.v.verdict === 'FAIL' && !(r.v.findings || []).length)
+    gates[mode] = c.kept.concat(voidFails.map((r) => ({ severity: 'major', file: '?', line: 0, issue: `${r.persona} returned FAIL without any finding — unverifiable, treated as blocking: ${r.v.summary || '(no summary given)'}`, persona: r.persona })))
+    stages[mode].advisory = stages[mode].findings.filter((f) => !isGating(f))
+    reviewStats.gatingFindings += gates[mode].length
+    reviewStats.advisoryFindings += stages[mode].advisory.length
+    if (!gates[mode].length) reviewStats.passedFirstRound++
+  }
+  const findings = stages.spec.findings.concat(stages.quality.findings)
+  const advisory = stages.spec.advisory.concat(stages.quality.advisory)
+  const gate = gates.spec.concat(gates.quality) // spec first: what the task must do before how well it does it
+  const specGated = gates.spec.length > 0
+  if (!gate.length) {
+    log(`   · ${task.id}: FAST PASS first round${advisory.length ? ` · ${advisory.length} advisory note(s), no rework` : ''}`)
+    return { verdict: 'PASS', findings, advisory, summary: `FAST: ${stages.spec.reviews.length + stages.quality.reviews.length} reviewer(s) passed the gate` }
+  }
+  log(`   · ${task.id}: FAST FAIL — ${gate.length} blocking finding(s) from ${[...new Set(gate.map((f) => f.persona))].join(', ')}; one consolidated fix…`)
+  const fixFrom = range.headSha
+  reviewStats.fixDispatches++
+  task.fixRounds = (task.fixRounds || 0) + 1
+  const fix = await dispatchImpl(task, gate, resolved || [], `fix:${task.id}:fast#1`, 'fast')
+  if (!fix || fix.status === 'BLOCKED' || fix.status === 'NEEDS_CONTEXT')
+    return { verdict: 'FAIL', blocked: true, specGated, findings, advisory, summary: `implementer ${fix ? fix.status : 'died'} during the FAST fix` }
+  Object.assign(range, reviewRange(fix, range))
+  recordTouched(task, fix)
+  const fixed = { from: fixFrom, head: range.headSha, findings: gate }
+  guardChecks.checked++
+  const g = await agentT(guardPrompt(task, gate, fix, fixed, range, 1, (repoCfg(task.repo) || {}).check || null), {
+    label: `guard:${task.id}:fast`,
+    phase: 'Quality review',
+    model: 'sonnet',
+    agentType: pluginAgent('reviewer'),
+    schema: GUARD_SCHEMA,
+  })
+  emit('guard', { task: task.id, stage: 'fast', round: 1, decision: g ? g.decision : 'RE_REVIEW', reason: g ? g.reason : 'guard died — failing safe' })
+  if (g && g.decision === 'PASS') {
+    guardChecks.passed++
+    log(`   · ${task.id}: FAST — the guard verified the fix${g.reason ? ` (${g.reason.slice(0, 140)})` : ''}`)
+    return { verdict: 'PASS', findings, advisory, summary: `FAST: ${gate.length} blocking finding(s) fixed in one round; the guard verified the fix` }
+  }
+  guardChecks.reReviewed++
+  return { verdict: 'FAIL', specGated, findings, advisory, summary: `FAST: the guard did not pass the fix — ${g ? (g.reason || g.decision).slice(0, 200) : 'guard died'}` }
+}
+// A FAST attempt that failed continues as STRICT on the SAME head: the commits stay, the task's
+// whole range is reviewed by the strict panel, the fix round spent counts against its budget, and
+// the implementer moves to opus. Never a second implementation, never a replan spent.
+function escalateToStrict(task, why) {
+  task.policy = 'strict'
+  task.escalatedFrom = 'fast'
+  if (task.model !== 'opus') task.model = 'opus'
+  escalatedPolicies.set(task.id, 'strict')
+  policyStats.fast.escalated++
+  if (policyStats.tasks[task.id]) policyStats.tasks[task.id].escalated = true
+  emit('fast', { task: task.id, repo: task.repo, verdict: 'FAIL', then: 'escalate', reason: why })
+  log(`   · ${task.id}: FAST failed (${why}) → escalating to STRICT on the same head — commits kept, the strict panel reviews the whole task`)
+}
+
 async function runTask(task) {
   log(`   · ${task.id} (${task.repo}): implementing…`)
   const resolved = [] // Q→A the resolver settled for this task; carried into every later dispatch
@@ -4887,6 +5018,33 @@ async function runTask(task) {
     }
   }
 
+  // ── FAST: a docs-only pick that changed code is raised first; then one round, one fix ──
+  if (task.policy === 'fast' && task.docsOnly) {
+    const code = (impl.filesChanged || []).map(policyPath).filter((f) => f && !globHit(POLICY_CFG.docsPaths, f))
+    if (code.length) {
+      task.policy = 'balanced'
+      if (policyStats.tasks[task.id]) policyStats.tasks[task.id].raisedAtPrecheck = code.slice(0, 3)
+      log(`   · ${task.id}: FAST was picked for a docs-only footprint, but the implementer changed ${code.slice(0, 3).join(', ')} — runs balanced`)
+    }
+  }
+  let fastPassed = null
+  if (task.policy === 'fast') {
+    const f = await runFast(task, resolved, range, early)
+    if (f.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: f }
+    if (f.verdict === 'PASS') {
+      fastPassed = f
+      policyStats.fast.passed++
+      emit('fast', { task: task.id, repo: task.repo, verdict: 'PASS', then: 'land' })
+    } else if (f.blocked || POLICY_CFG.fast.onFail === 'fail') {
+      policyStats.fast.failed++
+      emit('fast', { task: task.id, repo: task.repo, verdict: 'FAIL', then: 'fail', reason: f.summary })
+      return { id: task.id, repo: task.repo, status: f.specGated ? 'SPEC_FAILED' : 'QUALITY_FAILED', impl, review: f, policy: 'fast' }
+    } else escalateToStrict(task, f.summary)
+  }
+  const staged = task.escalatedFrom ? null : early // FAST consumed the early rounds
+  const strictTag = task.escalatedFrom ? '~strict' : '' // round 0 again, as STRICT, after the FAST round
+  const spentFixes = task.escalatedFrom ? Math.min(1, task.fixRounds || 0) : 0
+
   // ── spec ∥ quality (reviewParallel) ──
   // Spec and quality round 0 judge the SAME head at once ('stages': after the precheck; 'all':
   // next to it, see earlyReviews). Each reviewer runs commands in its own worktree (runBlock), so
@@ -4894,37 +5052,41 @@ async function runTask(task) {
   // verdict holds only while the head it judged is still the head: a spec fix that moves HEAD
   // (or one whose head is unknown) discards it, and quality starts over on the fixed head as
   // `<persona>:<id>~h<n>`. 'off', or an 'all' whose precheck failed, runs spec, then quality.
-  const specPanel = panelForTask(task, 'spec')
-  const qualityPanel = panelForTask(task, 'quality')
-  const reruns = { spec: 0, quality: 0 }
-  const rerun = (mode) => `~h${++reruns[mode]}` // round 0 of a stage again, after a discarded one
-  let spec0 = null
-  let quality0 = null
-  let h0 = range.headSha
-  if (early && !early.discarded) ({ spec: spec0, quality: quality0, head: h0 } = early)
-  else if (early) spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', range, 0, rerun('spec'))
-  else if (REVIEW_PARALLEL !== 'off') {
-    log(`   · ${task.id}: spec ∥ quality review on ${h0 || 'the reported head'}…`)
-    spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', { ...range }, 0)
-    quality0 = ahead(reviewRound(task, 'quality', qualityPanel, 'Quality review', { ...range }, 0))
-  }
-  const fixesBefore = task.fixRounds || 0
-  const spec = await runReviewStage(task, 'spec', specPanel, 'Spec review', resolved, range, { first: spec0 })
-  if (spec.verdict !== 'PASS' && quality0) discardRound(task, 'quality', quality0, `the spec stage ended ${spec.verdict}`)
-  if (spec.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: spec }
-  if (spec.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'SPEC_FAILED', impl, review: spec }
+  let spec = { advisory: [] }
+  let quality = fastPassed
+  if (!fastPassed) {
+    const specPanel = panelForTask(task, 'spec')
+    const qualityPanel = panelForTask(task, 'quality')
+    const reruns = { spec: 0, quality: 0 }
+    const rerun = (mode) => `~h${++reruns[mode]}` // round 0 of a stage again, after a discarded one
+    let spec0 = null
+    let quality0 = null
+    let h0 = range.headSha
+    if (staged && !staged.discarded) ({ spec: spec0, quality: quality0, head: h0 } = staged)
+    else if (staged) spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', range, 0, rerun('spec'))
+    else if (REVIEW_PARALLEL !== 'off' || strictTag) {
+      log(`   · ${task.id}: spec ∥ quality review on ${h0 || 'the reported head'}…`)
+      spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', { ...range }, 0, strictTag)
+      quality0 = ahead(reviewRound(task, 'quality', qualityPanel, 'Quality review', { ...range }, 0, strictTag))
+    }
+    const fixesBefore = task.fixRounds || 0
+    spec = await runReviewStage(task, 'spec', specPanel, 'Spec review', resolved, range, { first: spec0, spentFixes })
+    if (spec.verdict !== 'PASS' && quality0) discardRound(task, 'quality', quality0, `the spec stage ended ${spec.verdict}`)
+    if (spec.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: spec }
+    if (spec.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'SPEC_FAILED', impl, review: spec }
 
-  let qualityFirst = quality0
-  if (quality0 && (range.headSha !== h0 || (!range.headSha && (task.fixRounds || 0) > fixesBefore))) {
-    const tag = rerun('quality')
-    const moved = `a spec fix moved the head ${h0 || '(unreported)'} → ${range.headSha || '(unreported)'}`
-    log(`   · ${task.id}: ${moved} — the quality round-0 verdict is stale; quality reviews the fixed head (${tag})`)
-    discardRound(task, 'quality', quality0, moved)
-    qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, tag)
-  } else if (early && early.discarded) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, rerun('quality'))
-  const quality = await runReviewStage(task, 'quality', qualityPanel, 'Quality review', resolved, range, { first: qualityFirst })
-  if (quality.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: quality }
-  if (quality.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'QUALITY_FAILED', impl, review: quality }
+    let qualityFirst = quality0
+    if (quality0 && (range.headSha !== h0 || (!range.headSha && (task.fixRounds || 0) > fixesBefore))) {
+      const tag = rerun('quality')
+      const moved = `a spec fix moved the head ${h0 || '(unreported)'} → ${range.headSha || '(unreported)'}`
+      log(`   · ${task.id}: ${moved} — the quality round-0 verdict is stale; quality reviews the fixed head (${tag})`)
+      discardRound(task, 'quality', quality0, moved)
+      qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, tag)
+    } else if (staged && staged.discarded) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, rerun('quality'))
+    quality = await runReviewStage(task, 'quality', qualityPanel, 'Quality review', resolved, range, { first: qualityFirst, spentFixes })
+    if (quality.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: quality }
+    if (quality.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'QUALITY_FAILED', impl, review: quality }
+  }
 
   const advisory = precheckAdvisory.concat(spec.advisory || [], quality.advisory || [])
 
@@ -4980,6 +5142,8 @@ async function runTask(task) {
     harnessMemory = typeof ctx.harnessMemory === 'string' ? ctx.harnessMemory : ''
     agentMemory = ctx.agentMemory && typeof ctx.agentMemory === 'object' ? ctx.agentMemory : {}
     priorLearnings = Array.isArray(ctx.priorLearnings) ? ctx.priorLearnings.map((l) => toLearning(l, [])).filter(Boolean) : []
+    for (const h of Array.isArray(ctx.policyHistory) ? ctx.policyHistory : [])
+      if (h && typeof h.repo === 'string' && Number.isInteger(h.fast) && Number.isInteger(h.escalated) && h.fast > 0 && h.escalated >= 0 && h.escalated <= h.fast) policyHistory.set(h.repo, { fast: h.fast, escalated: h.escalated })
     const withMem = Object.entries(agentMemory).filter(([, v]) => v && v.trim()).map(([k]) => k)
     log(`◎ harness context: ${priorLearnings.length} prior learning(s) from ${(ctx.priorLedgers || []).length} ledger(s) · memory for ${withMem.length ? withMem.join(', ') : 'no agent yet'}`)
   } else log('⚠ harness-context loader died — running with empty memory (agents still read their own memory files)')
@@ -5317,6 +5481,8 @@ runJsonFor = (final) => ({
     replansUsed: replans,
     learnings: learnings.slice(-CHECKPOINT_LEARNINGS).map((l) => ({ text: trim(l.text, CHECKPOINT_LEARNING_CHARS), repos: l.repos || [] })),
     fixRounds: fixRoundsNow(),
+    // FAST tasks escalated to STRICT and not landed: a resume keeps them STRICT (never FAST twice)
+    policies: Object.fromEntries([...escalatedPolicies].filter(([id]) => !landedIds.has(id))),
     outputTokensSpent: runSpent(),
     lastSeq: journal.seq,
     landed: [...landedIds],
@@ -5876,12 +6042,39 @@ function routeTask(t, cycle) {
 // `grimoire:policy/<p>`, else the repo's {policy}, else the run's {policy} — or balanced when none
 // is set (0.15.1, bit for bit). 'auto' takes the router's pick. An explicit policy below a hard
 // floor is refused (STRICT runs, logged) unless policies.allowBelowFloor.
-const policyStats = { byPolicy: {}, auto: {}, refused: 0, belowFloor: 0, tasks: {} }
+// D6: history is a raise, never a demotion. A repo whose FAST tasks escalated more than
+// policies.historyMaxEscalation of the time over at least HISTORY_MIN_FAST earlier tasks, and a
+// learning about the repo that names one of the task's files, each keep the task off FAST.
+const HISTORY_MIN_FAST = 4
+const historyLogged = new Set()
+function historyRaises(t) {
+  const out = []
+  const h = policyHistory.get(t.repo)
+  if (h && h.fast >= HISTORY_MIN_FAST && h.escalated / h.fast > POLICY_CFG.historyMaxEscalation) {
+    out.push(`history: FAST escalated ${h.escalated}/${h.fast} in earlier runs of ${t.repo}`)
+    if (!historyLogged.has(t.repo)) {
+      historyLogged.add(t.repo)
+      log(`   · ${t.repo}: FAST escalated ${h.escalated}/${h.fast} times in earlier runs (> ${POLICY_CFG.historyMaxEscalation}) — its tasks run at least balanced this run`)
+    }
+  }
+  const files = (t.files || []).map(policyPath).filter((f) => f.length > 4 && /[/.]/.test(f))
+  for (const l of priorLearnings) {
+    if (!(l.repos || []).includes(t.repo)) continue
+    const text = String(l.text || '').toLowerCase()
+    const f = files.find((x) => text.includes(x))
+    if (f) {
+      out.push(`history: a learning about ${t.repo} names ${f}`)
+      break
+    }
+  }
+  return out
+}
+const policyStats = { byPolicy: {}, auto: {}, refused: 0, belowFloor: 0, fast: { passed: 0, escalated: 0, failed: 0 }, tasks: {} }
 function resolvePolicy(t, { selectorModel, afterCode }) {
   const crossRepo = (t.dependsOn || []).filter((d) => indexRepoById.has(d) && indexRepoById.get(d) !== t.repo).map((d) => `${indexRepoById.get(d)}:${d}`)
-  const proposed = POLICIES.includes(t.policy) ? t.policy : null // hydration's proposal: raise-only
+  const proposed = POLICIES.includes(t.policy) && !t.routedPolicy ? t.policy : null // hydration's (or the replanner's) proposal: raise-only, never a policy the engine set itself
   const c = classifyPolicy(
-    { files: t.files, tags: tagsOf(t.repo), migration: t.agent === resolveAgent('migration-engineer'), crossRepo, downstream: downstreamOf(t.id), model: selectorModel, replannedAfterCode: afterCode, history: [], proposed, proposedReason: str(t.policyReason) },
+    { files: t.files, tags: tagsOf(t.repo), migration: t.agent === resolveAgent('migration-engineer'), crossRepo, downstream: downstreamOf(t.id), model: selectorModel, replannedAfterCode: afterCode, history: historyRaises(t), proposed, proposedReason: str(t.policyReason) },
     POLICY_CFG,
   )
   const label = labelPolicy(t.labels)
@@ -5903,13 +6096,26 @@ function resolvePolicy(t, { selectorModel, afterCode }) {
       log(`   · ${t.id}: ${source} policy ${refused} refused — below the hard floor (${c.floor[0]}); runs STRICT`)
     }
   }
-  if (policy === 'fast' && !FAST_LIVE) policy = 'balanced' // the FAST profile ships in a later slice; until then its tasks run balanced
+  // a task escalated from FAST (this session, or a checkpoint's) stays STRICT: never FAST twice
+  const kept = escalatedPolicies.get(t.id) || (t.escalatedFrom ? 'strict' : null)
+  if (kept && POLICIES.indexOf(kept) > POLICIES.indexOf(policy)) {
+    policy = kept
+    t.escalatedFrom = t.escalatedFrom || 'fast'
+    escalatedPolicies.set(t.id, kept)
+  }
   t.policy = policy
   t.promote = c.promote
+  t.docsOnly = c.docsOnly
   if (belowFloor) t.belowFloor = c.floor.slice(0, 3)
+  const before = policyStats.tasks[t.id] // a replanned task is routed again: count it once, under its latest policy
+  if (before) {
+    policyStats.byPolicy[before.policy]--
+    policyStats.auto[before.auto]--
+  }
   policyStats.byPolicy[policy] = (policyStats.byPolicy[policy] || 0) + 1
   policyStats.auto[c.auto] = (policyStats.auto[c.auto] || 0) + 1
-  policyStats.tasks[t.id] = { policy, auto: c.auto, source, ...(refused ? { refused } : {}), ...(belowFloor ? { belowFloor: true } : {}), signals: c.floor.concat(c.raise).slice(0, 6) }
+  policyStats.tasks[t.id] = { repo: t.repo, policy, auto: c.auto, source, ...(refused ? { refused } : {}), ...(belowFloor ? { belowFloor: true } : {}), ...(t.escalatedFrom ? { escalated: true } : {}), signals: c.floor.concat(c.raise).slice(0, 6) }
+  t.routedPolicy = true
   if (policy !== 'balanced' || source !== 'default') log(`   · ${t.id}: policy ${policy} (${source}${wanted === 'auto' ? ` → auto` : ''}${c.floor.length || c.raise.length ? `; ${c.floor.concat(c.raise)[0]}` : ''})`)
   return { ...c, source, refused }
 }
@@ -5982,7 +6188,8 @@ function settle(r) {
     return
   }
   pendingById.delete(r.id)
-  emit('settle', { task: r.id, repo: r.repo, status: r.status })
+  const ht = hydratedById.get(r.id)
+  emit('settle', { task: r.id, repo: r.repo, status: r.status, ...(ht && ht.policy ? { policy: ht.policy } : {}), ...(ht && ht.escalatedFrom ? { escalatedFrom: ht.escalatedFrom } : {}) })
   {
     const st = hydratedById.get(r.id) || { id: r.id }
     if (landed(r)) queueStatus(st, 'inReview')
@@ -6611,6 +6818,10 @@ while (true) {
         }
         pendingById.set(t.id, { id: t.id, title: '', repo: t.repo, state: 'todo', slice: t.slice ?? 0, sliceLabel: t.sliceLabel || '', dependsOn: t.dependsOn || [] })
         inProject.add(t.id)
+        // the issue's labels (a policy override) survive a replan; the replanner may still propose a stricter policy
+        const prior = hydratedById.get(t.id)
+        if (prior && Array.isArray(prior.labels) && !Array.isArray(t.labels)) t.labels = prior.labels
+        if (prior && prior.escalatedFrom) t.escalatedFrom = prior.escalatedFrom
         t.replanned = true
         // A task the replanner INVENTED has no failure of its own: it repairs this replan's
         // failures in its repo, code-kind if any of them was.

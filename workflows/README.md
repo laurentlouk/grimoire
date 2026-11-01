@@ -97,6 +97,7 @@ task list would bypass `roast`, which is the point of requiring the artifacts.
 | `runBranch` | the run's `runBranch`, else derived | this repo's run branch, verbatim (two repos that share one checkout, a branch an earlier run used) |
 | `remote` | — | not read by the loop: the repo's `origin` URL, without credentials, recorded by `/grimoire:setup` for a hub whose repos are nested clones, so the manager's fix for a missing clone can name it |
 | `policy` | the run's `policy` | `auto \| fast \| balanced \| strict` for this repo's tasks; a tracker label `grimoire:policy/<p>` on an issue wins over it. See "Execution policies" |
+| `check` | — | a quick command (`npm test -- --changed`) the FAST guard runs, in its own worktree, after a FAST task's one fix; non-zero is RE_REVIEW. Trusted like `gate.run` |
 | `laneSetup` | — | a shell line run when a parallel lane's worktree is created; `<lane>` is substituted with the worktree path (e.g. giving the lane its dependencies). Some bundlers refuse a symlinked `node_modules` that points outside the project root (Next.js 16's Turbopack does); clone it instead (`cp -cR`, copy-on-write on APFS) |
 
 ### `repos[].gate`
@@ -161,7 +162,7 @@ ignored, with a warning.)
 | `maxPrecheckFixes` | `1` | fix dispatches a precheck FAIL may buy before the task fails as `PRECHECK_FAILED` |
 | `verifyFindings` | `true` | verify each gating finding against the code before a fix is bought (`false` disables) |
 | `policy` | balanced | `auto \| fast \| balanced \| strict`: the execution policy of every task, unless its repo's `policy` or its tracker label says otherwise. Absent, every task runs balanced (the lifecycle of 0.15.1) and the router's `auto` pick is journaled only. See "Execution policies" |
-| `policies` | see "Execution policies" | the router's rules: `{strictPaths, strictTags, docsPaths, fastMaxFiles, fanOut, historyMaxEscalation, allowBelowFloor, promote}`, each key over its default; a malformed key keeps its default, with a warning |
+| `policies` | see "Execution policies" | the router's rules: `{strictPaths, strictTags, docsPaths, fastMaxFiles, fanOut, historyMaxEscalation, allowBelowFloor, promote, fast: {onFail}}`, each key over its default (`workflows/policies.md` lists them); a malformed key keeps its default, with a warning |
 | `escalateAtFixRound` | `2` | from this fix round on, the implementer runs on opus whatever tier was chosen (`0` disables) |
 | `specialists` | `[]` | `[{agent, repos: ['*'] \| [names], use}]` — implementers the selector may route a repo's tasks to instead of its owner |
 | `agentNamespace` | `'grimoire'` | the prefix of the plugin-shipped agents (`agents/*.md`): the reviewer, the scouts, the `finalCheck` default and plugin specialists dispatch as `<ns>:<name>` (`grimoire:reviewer`). `''` keeps bare names, for a project that copied `agents/` into its own `.claude/agents/`. Repo/team agents, project-defined specialists and names that already contain `:` are used as given; memory stays at `agents/<bare name>.md` |
@@ -1098,13 +1099,41 @@ it; only the per-task panel, the implementer's tier and (from the FAST slice) th
 | | fast | balanced (the default) | strict |
 |---|---|---|---|
 | Implementer tier | the selector's | the selector's | at least opus |
-| Per-task panel | (next slice) | spec ∥ the repo's quality core | the same, plus `privacy` and/or `data-integrity` when the task's declared files match `policies.promote` (a dependency on another repo's task promotes `data-integrity`) |
-| Fix rounds, guard, replan | (next slice) | as described above | as described above |
+| Per-task panel | `spec-hawk` ∥ `break-it`, round 0 only | spec ∥ the repo's quality core | the same, plus `privacy` and/or `data-integrity` when the task's declared files match `policies.promote` (a dependency on another repo's task promotes `data-integrity`) |
+| Fix rounds | one, carrying both stages' verified gating findings, spec first | up to `maxFixAttempts` per stage | up to `maxFixAttempts` per stage |
+| After a fix | the guard once, plus `repos[].check` when set | the guard, then the panel on RE_REVIEW | the same |
+| On failure | escalates to strict on the same head (or `policies.fast.onFail: 'fail'`) | the replanner | the replanner |
+
+The profile table, shared with `/grimoire:implement`, `/grimoire:review` and the manager's launch
+prompts, is `workflows/policies.md`; the drift check holds it to the engine's constants.
 
 **What runs.** A tracker label `grimoire:policy/<p>` on the issue (hydration copies the labels),
 else `repos[].policy`, else the run's `policy`; with none of them, balanced, which is the lifecycle
-of 0.15.1, bit for bit. `auto` takes the router's pick. In this version a `fast` pick runs balanced:
-the FAST profile ships in the next slice.
+of 0.15.1, bit for bit. `auto` takes the router's pick. Hydration's proposal applies under `auto`
+only: an explicit policy is the owner's word, floors aside.
+
+**FAST, step by step.** After the precheck, `spec-hawk` and `break-it` judge the same head once.
+Gating findings are verified as everywhere else. None: the task lands. Otherwise ONE fix
+(`fix:<id>:fast#1`) carries every stage's gating findings, spec first, and the guard alone checks it
+(`guard:<id>:fast`), running `repos[].check` in its own worktree when the repo sets one. A guard PASS
+lands the task. Anything else, a dead guard included, is a visible FAST failure (`fast` event,
+`then`), and the task **escalates to strict on the same head**: the commits stay, the strict panel
+reviews the task's whole range as round 0 again (`<persona>:<id>~strict`), the fix round already spent
+counts against `maxFixAttempts`, the implementer moves to opus, and nothing is re-implemented. With
+`policies.fast.onFail: 'fail'` the task is booked `SPEC_FAILED` (a spec finding gated) or
+`QUALITY_FAILED` instead, for the replanner. An implementer that blocks during the FAST fix fails
+the same way, without escalating. A FAST pick made for a docs-only footprint whose implementer
+changed code runs balanced (`policies.tasks[id].raisedAtPrecheck`).
+
+**Resume.** An escalated task that has not landed is kept in the checkpoint (`checkpoint.policies`,
+id → `strict`); a resume runs it strict, never FAST again. Only the local `run.json` carries it,
+never a PR marker, and it can only raise a task. A replan keeps the issue's `labels` and an
+escalation.
+
+**History (D6).** The harness-context loader returns, per repo, the FAST tasks of earlier ledgers
+and how many escalated (`policyHistory`). A repo above `policies.historyMaxEscalation` over at
+least 4 such tasks keeps its tasks off FAST for the run (logged once), and a learning about the
+repo that names one of a task's declared files raises that task. History never lowers a task.
 
 **The router** (`classifyPolicy`, deterministic, no model call) reads facts the engine already holds:
 - **Floor, STRICT:** a declared file matching `strictPaths` (default `**/migrations/**`, `**/auth/**`,
@@ -1128,7 +1157,7 @@ refused: the task runs strict, the refusal is logged with the signal and journal
 **Where it shows.** Every `route` event carries `policy`, `autoPolicy`, `policySource` and up to
 six `policySignals` (and `promoted` lenses under strict). With no policy asked for, `autoPolicy` is
 the shadow record: what `auto` would have run. The result carries `policies`
-(`{byPolicy, auto, refused, belowFloor, tasks: {id: {policy, auto, source, signals}}}`), and so
+(`{byPolicy, auto, refused, belowFloor, fast: {passed, escalated, failed}, tasks: {id: {repo, policy, auto, source, signals, escalated?}}}`), every `settle` event carries `policy` (and `escalatedFrom`), and so
 does the run ledger. The preview lists `policies.strictAtIndex`, the issues already strict before
 hydration (a `strictTags` repo, a cross-repo dependency), and the rules in force.
 `render-logs.mjs summary --json` groups first-round passes, fix dispatches and cost by policy

@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.17.0 — execution policies: FAST, escalation, history, and the edge
+
+Slices 3–5 of [execution policies](docs/specs/2026-10-31-execution-policies-design.md). The default
+is still balanced, as in 0.15.1: FAST runs only where `policy` (run, repo or label) asks for it or
+`auto` picks it.
+
+- **FAST is live.** `spec-hawk` ∥ `break-it` judge the head once; verified gating findings from
+  both stages go to ONE fix, spec first (`fix:<id>:fast#1`); the guard alone checks it
+  (`guard:<id>:fast`), running the repo's new `repos[].check` command when set. A guard PASS lands.
+- **Escalation in place.** Any other outcome is a visible FAST failure (`fast` event) and the task
+  continues as STRICT on the same head: the commits stay, the strict panel reviews the whole task
+  range as round 0 (`<persona>:<id>~strict`), the fix round spent counts against
+  `maxFixAttempts`, the implementer moves to opus. No second implementation, no replan spent.
+  `policies.fast.onFail: 'fail'` books `SPEC_FAILED` / `QUALITY_FAILED` instead.
+- **Resume keeps it:** `checkpoint.policies` holds escalated tasks not yet landed (raise-only, from
+  the local `run.json` only); a replan keeps the issue's labels and an escalation.
+- **History raise (D6):** the harness-context loader sums each repo's FAST tasks and escalations
+  from earlier ledgers (`policyHistory`); a repo above `historyMaxEscalation` over at least 4 tasks
+  keeps its tasks off FAST, and a learning about the repo naming a task's file raises that task.
+- **A docs-only FAST pick that changed code** runs balanced (`raisedAtPrecheck`).
+- **`workflows/policies.md`**, the one profile table, read by `/grimoire:implement`,
+  `/grimoire:review` (a session's default is FAST unless a floor or raise applies: the owner's
+  one-review rule as a profile) and the manager's launch prompts. Drift-checked against the
+  engine's router block (group 10 of `npm run check`).
+- **Manager:** a loose issue's launch prompt names its execution policy, and a launch into a repo a
+  live grimoire run named waits for it (`waitsForRuns`).
+- **`settle` events carry `policy` and `escalatedFrom`**; `result.policies.fast` counts passes,
+  escalations and failures.
+- **Review follow-ups from 0.16.0 fixed:** annotated declared files (`x.proto (new)`, backticks,
+  `x.tf: add`) meet their floor; a re-routed task counts once in `byPolicy`; a replanned task keeps
+  its labels; `*` and `?` inside a glob's `{a,b}` work; hydration's proposal applies under `auto`
+  only (documented).
+- Tests: `execution-policies.test.mjs` grows to 81 assertions (FAST pass, consolidated fix,
+  escalation without re-implementation, shared fix budget, `onFail`, mixed DAG, resume, history,
+  annotated paths); `manager.test.mjs` covers the live-run wait.
+
 ## 0.16.0 — execution policies: the router, shadow mode, and STRICT
 
 The first two slices of execution policies ([spec](docs/specs/2026-10-31-execution-policies-design.md)).
