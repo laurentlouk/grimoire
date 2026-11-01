@@ -96,6 +96,7 @@ task list would bypass `roast`, which is the point of requiring the artifacts.
 | `deliver` | the run's `deliver` | `'end'` keeps this repo's pushes for the terminal slot: a pre-push hook that demands the gate, or CI and previews too costly to run on every landing |
 | `runBranch` | the run's `runBranch`, else derived | this repo's run branch, verbatim (two repos that share one checkout, a branch an earlier run used) |
 | `remote` | — | not read by the loop: the repo's `origin` URL, without credentials, recorded by `/grimoire:setup` for a hub whose repos are nested clones, so the manager's fix for a missing clone can name it |
+| `policy` | the run's `policy` | `auto \| fast \| balanced \| strict` for this repo's tasks; a tracker label `grimoire:policy/<p>` on an issue wins over it. See "Execution policies" |
 | `laneSetup` | — | a shell line run when a parallel lane's worktree is created; `<lane>` is substituted with the worktree path (e.g. giving the lane its dependencies). Some bundlers refuse a symlinked `node_modules` that points outside the project root (Next.js 16's Turbopack does); clone it instead (`cp -cR`, copy-on-write on APFS) |
 
 ### `repos[].gate`
@@ -159,6 +160,8 @@ ignored, with a warning.)
 | `precheck` | `true` | the haiku structural check between implementer and panel (`false` disables) |
 | `maxPrecheckFixes` | `1` | fix dispatches a precheck FAIL may buy before the task fails as `PRECHECK_FAILED` |
 | `verifyFindings` | `true` | verify each gating finding against the code before a fix is bought (`false` disables) |
+| `policy` | balanced | `auto \| fast \| balanced \| strict`: the execution policy of every task, unless its repo's `policy` or its tracker label says otherwise. Absent, every task runs balanced (the lifecycle of 0.15.1) and the router's `auto` pick is journaled only. See "Execution policies" |
+| `policies` | see "Execution policies" | the router's rules: `{strictPaths, strictTags, docsPaths, fastMaxFiles, fanOut, historyMaxEscalation, allowBelowFloor, promote}`, each key over its default; a malformed key keeps its default, with a warning |
 | `escalateAtFixRound` | `2` | from this fix round on, the implementer runs on opus whatever tier was chosen (`0` disables) |
 | `specialists` | `[]` | `[{agent, repos: ['*'] \| [names], use}]` — implementers the selector may route a repo's tasks to instead of its owner |
 | `agentNamespace` | `'grimoire'` | the prefix of the plugin-shipped agents (`agents/*.md`): the reviewer, the scouts, the `finalCheck` default and plugin specialists dispatch as `<ns>:<name>` (`grimoire:reviewer`). `''` keeps bare names, for a project that copied `agents/` into its own `.claude/agents/`. Repo/team agents, project-defined specialists and names that already contain `:` are used as given; memory stays at `agents/<bare name>.md` |
@@ -1084,6 +1087,59 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
   landed slices (3.5 hours for two small commits). Durable progress therefore comes from state:
   resume with `runId` + `resumeState` ("Resume" above), and keep `resumeFromRunId` for a
   byte-identical relaunch.
+
+## Execution policies
+
+Each task runs under a profile: **fast**, **balanced** or **strict**
+([design](../docs/specs/2026-10-31-execution-policies-design.md)). The profile is a field on the
+hydrated task. The scheduler, the lanes, integration, ship, the journal and resume never branch on
+it; only the per-task panel, the implementer's tier and (from the FAST slice) the fix budget do.
+
+| | fast | balanced (the default) | strict |
+|---|---|---|---|
+| Implementer tier | the selector's | the selector's | at least opus |
+| Per-task panel | (next slice) | spec ∥ the repo's quality core | the same, plus `privacy` and/or `data-integrity` when the task's declared files match `policies.promote` (a dependency on another repo's task promotes `data-integrity`) |
+| Fix rounds, guard, replan | (next slice) | as described above | as described above |
+
+**What runs.** A tracker label `grimoire:policy/<p>` on the issue (hydration copies the labels),
+else `repos[].policy`, else the run's `policy`; with none of them, balanced, which is the lifecycle
+of 0.15.1, bit for bit. `auto` takes the router's pick. In this version a `fast` pick runs balanced:
+the FAST profile ships in the next slice.
+
+**The router** (`classifyPolicy`, deterministic, no model call) reads facts the engine already holds:
+- **Floor, STRICT:** a declared file matching `strictPaths` (default `**/migrations/**`, `**/auth/**`,
+  `**/payment*/**`, `**/billing/**`, `**/*.proto`, `**/openapi*.{yml,yaml,json}`,
+  `**/schema.graphql`, `.github/workflows/**`, `**/*.tf`), a repo tag in `strictTags` (`infra`),
+  routing to the migration specialist, a `dependsOn` on another repo's issue.
+- **Raise, at least BALANCED:** no declared files, more than `fastMaxFiles` (3), unlocking `fanOut`
+  (3) or more downstream tasks, the selector picking opus, a replan after a code failure.
+- **FAST:** every declared file in `docsPaths` (`**/*.md`, `**/*.mdx`, `docs/**`), or no raise at all.
+- Hydration may **propose** a stricter policy with a reason (a risk the files do not show: money, an
+  authorization rule, personal data); the router takes the higher of the two, never the lower.
+
+Globs match a declared file's path, lower-cased and repo-relative: `**/` is zero or more
+directories, `*` stays inside one, `{a,b}` is a choice.
+
+**Overrides and floors.** An explicit policy (label, repo or run, not `auto`) below a hard floor is
+refused: the task runs strict, the refusal is logged with the signal and journaled as
+`policy.override_refused`. `policies.allowBelowFloor: true` honours it instead, logged and counted
+(`policies.belowFloor`).
+
+**Where it shows.** Every `route` event carries `policy`, `autoPolicy`, `policySource` and up to
+six `policySignals` (and `promoted` lenses under strict). With no policy asked for, `autoPolicy` is
+the shadow record: what `auto` would have run. The result carries `policies`
+(`{byPolicy, auto, refused, belowFloor, tasks: {id: {policy, auto, source, signals}}}`), and so
+does the run ledger. The preview lists `policies.strictAtIndex`, the issues already strict before
+hydration (a `strictTags` repo, a cross-repo dependency), and the rules in force.
+`render-logs.mjs summary --json` groups first-round passes, fix dispatches and cost by policy
+(`byPolicy`, `costByPolicy`) and counts the `auto` picks (`autoPolicyMix`).
+
+**The counterfactual.** `node scripts/policy-counterfactual.mjs --root <project>…` re-routes every
+recorded task through the engine's own router (the `policy:begin` … `policy:end` block, evaluated
+as is) and checks that no task it would send FAST carries a recorded failure signal FAST handles
+worse (a round-0 FAIL, two or more fix rounds, a data-integrity finding that gated, a terminal-sweep
+FAIL in its repo). Recorded runs hold no `dependsOn`, and a landed task's files include the ones it
+changed, so the mix it reports leans balanced.
 
 ## Token economy (built in)
 

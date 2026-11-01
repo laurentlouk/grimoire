@@ -48,6 +48,17 @@ Set `agent`, `model` and a one-sentence `routeReason` naming the deciding signal
 The engine escalates a task to opus by itself after repeated fix rounds, and routes a task
 replanned after a code failure to opus; you do not need to hedge for that.
 
+## Labels, and a stricter policy when the issue calls for one
+Copy each issue's tracker labels into `labels`, verbatim: a `grimoire:policy/<p>` label is the
+owner's override of how strictly the task is reviewed.
+
+The engine picks each task's execution policy (fast, balanced, strict) itself, from its declared
+files, its repo and its dependencies; you do not classify tasks. Set `policy` (with a one-sentence
+`policyReason`) ONLY to propose a STRICTER one than its files would suggest, because the issue
+shows a risk they do not: an authorization rule in an ordinary-looking file, money, personal data,
+a contract another team consumes. The engine takes the higher of your proposal and its own pick; it
+never lowers a task for you. Omit both when you have no such reason.
+
 If the header carries learnings from earlier work, fold them into `taskText` where relevant
 so this work does not repeat a failure. Where an issue is silent on something the implementer
 will need (a path, a table, an existing helper), look it up in the repo and state it in the

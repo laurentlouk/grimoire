@@ -273,6 +273,9 @@ const TASK_ITEM_SCHEMA = {
     successCriteria: { type: 'string' },
     deferred: { type: 'boolean', description: 'true if blocked on a deploy or another repo (cannot run unattended)' },
     deferredReason: { type: 'string' },
+    labels: { type: 'array', items: { type: 'string' }, description: "the issue's tracker labels, verbatim — a `grimoire:policy/<p>` label overrides the run's execution policy for this task" },
+    policy: { type: 'string', enum: ['fast', 'balanced', 'strict'], description: 'OPTIONAL: propose a STRICTER execution policy than the engine would pick, when the issue shows a risk its declared files do not (an authorization rule, money, a data contract). Raise-only: the engine takes the higher of this and its own pick. Omit when unsure' },
+    policyReason: { type: 'string', description: 'one sentence: the risk behind a proposed policy (logged)' },
   },
 }
 
@@ -2359,6 +2362,157 @@ function panelFor(repo, stage) {
     (p) => p.stage === stage && (p.appliesTo === '*' || (Array.isArray(p.appliesTo) && p.appliesTo.some((t) => tags.includes(t)))),
   )
 }
+// ── execution policy: the pure router ──
+// No engine state in here: scripts/policy-counterfactual.mjs evaluates this block AS IS over recorded
+// runs (the benchmark's first stage), so the router it measures is this one, never a copy.
+// policy:begin
+// Execution policies (workflows/policies.md): the profile a task runs under, cheapest first. The
+// routing rules below are {policies:{…}} defaults; every glob matches a declared file's path,
+// lower-cased, repo-relative (`**/` is zero or more directories, `*` stays inside one).
+const POLICIES = ['fast', 'balanced', 'strict']
+const DEFAULT_POLICY_RULES = {
+  // a hard floor: a declared file here makes the task STRICT (an explicit lower override is refused)
+  strictPaths: ['**/migrations/**', '**/auth/**', '**/payment*/**', '**/billing/**', '**/*.proto', '**/openapi*.{yml,yaml,json}', '**/schema.graphql', '.github/workflows/**', '**/*.tf'],
+  strictTags: ['infra'], // a repo tag that floors every task of the repo at STRICT
+  docsPaths: ['**/*.md', '**/*.mdx', 'docs/**'], // a footprint of only these is FAST-eligible whatever the tier
+  fastMaxFiles: 3, // more declared files than this raises a task to at least BALANCED
+  fanOut: 3, // a task that unlocks this many downstream tasks is at least BALANCED (they inherit it)
+  historyMaxEscalation: 0.25, // a repo whose FAST tasks escalated more often than this in earlier runs gets BALANCED instead
+  allowBelowFloor: false, // true: an override below a hard floor is honoured (and said in the PR body) instead of refused
+  // STRICT promotes these lenses into the task's per-task quality stage when a declared file matches
+  promote: {
+    privacy: ['**/auth/**', '**/*auth*.*', '**/session*/**', '**/*session*.*', '**/*secret*', '**/payment*/**', '**/billing/**', '**/*pii*'],
+    'data-integrity': ['**/migrations/**', '**/migration/**', '**/*.sql', '**/*.prisma', '**/*.proto', '**/openapi*.{yml,yaml,json}', '**/schema.graphql'],
+  },
+}
+// A glob as a RegExp over a lower-cased, repo-relative path: `**/` is zero or more directories,
+// `**` anything, `*` and `?` stay inside one segment, `{a,b}` is a choice.
+function policyGlob(glob) {
+  const esc = (s) => s.replace(/[.+^$()|[\]\\]/g, '\\$&')
+  const g = String(glob).trim().toLowerCase().replace(/^\.\//, '')
+  let re = ''
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i]
+    if (c === '*' && g[i + 1] === '*') {
+      i++
+      if (g[i + 1] === '/') {
+        i++
+        re += '(?:.*/)?'
+      } else re += '.*'
+    } else if (c === '*') re += '[^/]*'
+    else if (c === '?') re += '[^/]'
+    else if (c === '{' && g.indexOf('}', i) > i) {
+      const end = g.indexOf('}', i)
+      re += `(?:${g.slice(i + 1, end).split(',').map(esc).join('|')})`
+      i = end
+    } else re += esc(c)
+  }
+  return new RegExp(`^${re}$`)
+}
+// A declared `files` entry ("path — what to change", sometimes "path - what") as the path a glob matches.
+const policyPath = (s) => String(s || '').split(/ [—-] /)[0].trim().toLowerCase().replace(/^\.\//, '')
+const globHit = (globs, path) => (globs || []).find((g) => policyGlob(g).test(path))
+// The router, pure: what `auto` picks for a task from facts the engine already holds — no model call.
+// facts: {files, tags, migration, crossRepo, downstream, model, replannedAfterCode, history, proposed, proposedReason}
+// Returns {auto, floor, raise, promote}: the signals behind the pick, and the lenses STRICT promotes.
+//   floor (→ strict): a declared file in strictPaths · a repo tag in strictTags · the migration
+//     specialist · a dependency on another repo's task
+//   raise (→ at least balanced): no declared files · more than fastMaxFiles · unlocks ≥ fanOut
+//     tasks · the selector chose opus · replanned after a code failure · history
+//   fast: every declared file in docsPaths (tier and size do not matter), or no raise at all
+// Hydration may propose a higher policy; the pick is the higher of the two, never lower.
+function classifyPolicy(facts, cfg) {
+  const files = (facts.files || []).map(policyPath).filter(Boolean)
+  const floor = []
+  const raise = []
+  for (const f of files) {
+    const g = globHit(cfg.strictPaths, f)
+    if (g) floor.push(`${f} matches ${g}`)
+  }
+  for (const t of facts.tags || []) if ((cfg.strictTags || []).includes(t)) floor.push(`repo tag ${t}`)
+  if (facts.migration) floor.push('routed to the migration specialist')
+  for (const d of facts.crossRepo || []) floor.push(`depends on ${d} in another repo`)
+  if (!files.length) raise.push('no declared files')
+  else if (files.length > cfg.fastMaxFiles) raise.push(`${files.length} declared files > ${cfg.fastMaxFiles}`)
+  if (cfg.fanOut > 0 && (facts.downstream || 0) >= cfg.fanOut) raise.push(`unlocks ${facts.downstream} downstream task(s) ≥ ${cfg.fanOut}`)
+  if (facts.model === 'opus') raise.push('the selector chose opus')
+  const hard = [] // raises a docs-only footprint does not lift
+  if (facts.replannedAfterCode) hard.push('replanned after a code failure')
+  for (const h of facts.history || []) hard.push(h)
+  const docsOnly = files.length > 0 && files.every((f) => globHit(cfg.docsPaths, f))
+  let auto = floor.length ? 'strict' : hard.length || (raise.length && !docsOnly) ? 'balanced' : 'fast'
+  const proposed = POLICIES.includes(facts.proposed) ? facts.proposed : null
+  if (proposed && POLICIES.indexOf(proposed) > POLICIES.indexOf(auto)) {
+    hard.push(`hydration proposed ${proposed}${facts.proposedReason ? `: ${facts.proposedReason}` : ''}`)
+    auto = proposed
+  }
+  const promote = Object.entries(cfg.promote || {})
+    .filter(([lens, globs]) => files.some((f) => globHit(globs, f)) || (lens === 'data-integrity' && (facts.crossRepo || []).length))
+    .map(([lens]) => lens)
+  return { auto, floor, raise: raise.concat(hard), promote, docsOnly }
+}
+// A tracker label `grimoire:policy/<p>` (read by hydration) as an override, or null.
+function labelPolicy(labels) {
+  for (const l of Array.isArray(labels) ? labels : []) {
+    const m = /^grimoire:policy\/([a-z]+)$/i.exec(String(l).trim())
+    if (m && (m[1].toLowerCase() === 'auto' || POLICIES.includes(m[1].toLowerCase()))) return m[1].toLowerCase()
+  }
+  return null
+}
+// policy:end
+const FAST_LIVE = false // the FAST profile (one round, one consolidated fix, escalation) ships in the next slice; until then a FAST pick runs balanced
+
+// A task's per-task panel: its repo's, plus — under STRICT — the lenses its declared files promote
+// into the quality stage (privacy for auth/session/secret paths, data-integrity for migration,
+// schema and contract paths), each persona reused as it is, only its stage moved for this task.
+function panelForTask(task, stage) {
+  const panel = panelFor(task.repo, stage)
+  if (stage !== 'quality' || task.policy !== 'strict') return panel
+  const extra = REVIEW_PANEL.filter((p) => (task.promote || []).includes(p.id) && !panel.includes(p))
+  return panel.concat(extra)
+}
+
+// ── execution policy: which profile a task runs under ──
+// `policy` names one of POLICIES, or 'auto' (the router decides). Anything else is ignored, logged.
+function policyOpt(v, what) {
+  if (v === undefined || v === null || v === '') return null
+  const p = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  if (p === 'auto' || POLICIES.includes(p)) return p
+  log(`⚠ ${what} ${JSON.stringify(v)} is not one of auto | ${POLICIES.join(' | ')} — ignored`)
+  return null
+}
+// {policies:{…}} over DEFAULT_POLICY_RULES, key by key; a malformed value keeps the default, logged.
+function policyConfig(o) {
+  const cfg = { ...DEFAULT_POLICY_RULES, promote: { ...DEFAULT_POLICY_RULES.promote } }
+  if (o === undefined || o === null) return cfg
+  if (typeof o !== 'object' || Array.isArray(o)) {
+    log(`⚠ policies ${JSON.stringify(o)} ignored — expected an object; the default routing rules apply`)
+    return cfg
+  }
+  const globs = (v) => Array.isArray(v) && v.every((g) => typeof g === 'string' && g.trim())
+  for (const k of ['strictPaths', 'strictTags', 'docsPaths'])
+    if (k in o) {
+      if (globs(o[k]) || (Array.isArray(o[k]) && !o[k].length)) cfg[k] = o[k].map((g) => g.trim())
+      else log(`⚠ policies.${k} ignored — expected an array of strings; the default applies`)
+    }
+  for (const k of ['fastMaxFiles', 'fanOut'])
+    if (k in o) {
+      if (Number.isInteger(o[k]) && o[k] >= 0) cfg[k] = o[k]
+      else log(`⚠ policies.${k} ${JSON.stringify(o[k])} ignored — expected a whole number ≥ 0; the default ${cfg[k]} applies`)
+    }
+  if ('historyMaxEscalation' in o) {
+    if (Number.isFinite(o.historyMaxEscalation) && o.historyMaxEscalation >= 0 && o.historyMaxEscalation <= 1) cfg.historyMaxEscalation = o.historyMaxEscalation
+    else log(`⚠ policies.historyMaxEscalation ${JSON.stringify(o.historyMaxEscalation)} ignored — expected a rate between 0 and 1`)
+  }
+  if ('allowBelowFloor' in o) cfg.allowBelowFloor = o.allowBelowFloor === true
+  if (o.promote && typeof o.promote === 'object' && !Array.isArray(o.promote))
+    for (const [lens, v] of Object.entries(o.promote)) {
+      if (!REVIEW_PANEL.some((p) => p.id === lens)) log(`⚠ policies.promote.${lens} ignored — no review persona has that id`)
+      else if (globs(v) || (Array.isArray(v) && !v.length)) cfg.promote[lens] = v.map((g) => g.trim())
+      else log(`⚠ policies.promote.${lens} ignored — expected an array of globs`)
+    }
+  return cfg
+}
 
 // ── the gate condition: decided from what the RUN touched, not one task ──
 // A gate hook/script typically inspects the WHOLE branch (`git diff origin/main...HEAD`),
@@ -2867,6 +3021,11 @@ const REVIEW_PARALLEL_MODES = ['stages', 'all', 'off']
 const REVIEW_PARALLEL = REVIEW_PARALLEL_MODES.includes(opts.reviewParallel) ? opts.reviewParallel : DEFAULT_REVIEW_PARALLEL
 if (opts.reviewParallel !== undefined && !REVIEW_PARALLEL_MODES.includes(opts.reviewParallel))
   log(`⚠ reviewParallel ${JSON.stringify(opts.reviewParallel)} is not one of ${REVIEW_PARALLEL_MODES.join(' | ')} — using '${DEFAULT_REVIEW_PARALLEL}'`)
+// Execution policy (see classifyPolicy / resolvePolicy): {policy: 'auto' | 'fast' | 'balanced' |
+// 'strict'} for the run, {policies:{…}} for the routing rules. Absent: every task runs balanced,
+// the lifecycle of 0.15.1, and the `auto` choice is only journaled (shadow) for the benchmark.
+const POLICY_REQUESTED = policyOpt(opts.policy, 'policy')
+const POLICY_CFG = policyConfig(opts.policies)
 // Model escalation: the fix round from which the implementer runs on opus. 0 disables.
 const ESCALATE_AT_FIX_ROUND =
   Number.isInteger(opts.escalateAtFixRound) && opts.escalateAtFixRound >= 0 ? opts.escalateAtFixRound : DEFAULT_ESCALATE_AT_FIX_ROUND
@@ -2991,7 +3150,7 @@ const refName = (v, where) => {
 const RUN_BRANCH_OPT = refName(opts.runBranch, 'runBranch')
 
 // ── repo configuration: the ONLY place a stack enters this workflow ──
-// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup?, deliver?, runBranch? }]
+// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup?, deliver?, runBranch?, policy? }]
 const repoList = Array.isArray(opts.repos)
   ? opts.repos
       .filter((r) => r && typeof r.name === 'string' && r.name.trim() && typeof r.agent === 'string' && r.agent.trim())
@@ -3005,6 +3164,7 @@ const repoList = Array.isArray(opts.repos)
         laneSetup: typeof r.laneSetup === 'string' ? r.laneSetup : undefined,
         deliver: deliverOpt(r.deliver, `repos[${r.name.trim()}].deliver`, undefined),
         runBranch: refName(r.runBranch, `repos[${r.name.trim()}].runBranch`) || undefined,
+        policy: policyOpt(r.policy, `repos[${r.name.trim()}].policy`) || undefined,
       }))
   : []
 repoConfig = new Map(repoList.map((r) => [r.name, r]))
@@ -3716,6 +3876,7 @@ for (const s of [...(index.slices || [])].sort((a, b) => (a.slice ?? 0) - (b.sli
 const alreadyDoneIds = new Set(alreadyDone.map((d) => d.id))
 const titleById = new Map(pendingIndex.map((i) => [i.id, str(i.title) || ''])) // the PR body names each landed issue
 const inProject = new Set([...pendingIndex.map((i) => i.id), ...alreadyDoneIds, ...claimedElsewhere.map((c) => c.id)])
+const indexRepoById = new Map([...alreadyDone, ...claimedElsewhere, ...pendingIndex].map((i) => [i.id, i.repo])) // a cross-repo dependsOn floors a task at STRICT
 
 // ── RESUMED: what an earlier attempt of THIS run landed, from the run's own state ──
 // The tracker closes an issue only when its PR merges, so it alone re-dispatched every task an
@@ -4138,8 +4299,20 @@ if (!execute) {
     [...new Set(pendingIndex.map((i) => i.repo))].map((repo) => [repo, { spec: panelFor(repo, 'spec').map((p) => p.name), quality: panelFor(repo, 'quality').map((p) => p.name), terminal: panelFor(repo, 'terminal').map((p) => p.name) }]),
   )
   const repoView = Object.fromEntries(
-    repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null }]),
+    repoList.map((r) => [r.name, { path: r.path, agent: r.agent, tags: r.tags, gate: r.gate ? r.gate.run || '(no command)' : null, ...(r.policy ? { policy: r.policy } : {}) }]),
   )
+  // Policies at index level: declared files are not known before hydration, so only the floors the
+  // index already shows (a strictTags repo, a dependency on another repo's issue) are listed here;
+  // each task's policy and its signals are resolved, logged and journaled when it is hydrated.
+  const policyView = {
+    policy: POLICY_REQUESTED || 'balanced (default — no policy asked for; `auto` is journaled only)',
+    strictAtIndex: Object.fromEntries(
+      pendingIndex
+        .map((i) => [i.id, classifyPolicy({ files: ['?'], tags: tagsOf(i.repo), crossRepo: (i.dependsOn || []).filter((d) => indexRepoById.has(d) && indexRepoById.get(d) !== i.repo).map((d) => `${indexRepoById.get(d)}:${d}`) }, POLICY_CFG).floor])
+        .filter(([, floor]) => floor.length),
+    ),
+    rules: POLICY_CFG,
+  }
   // Wall-clock estimate. The minutes per task (hydrate → implement → precheck → review) and for
   // the terminal review + gate come from measured 0.8.x runs; {estimatePerTaskMin: N | {low, high}}
   // overrides the per-task bounds. Declared files are unknown at index level, so `low` lets
@@ -4173,7 +4346,7 @@ if (!execute) {
   log(`⏱ estimated wall clock ≈ ${hours.low}–${hours.high} h — ${estimate.basis}`)
   log(resumeProofLine())
   const stillToBuild = pendingIndex.map((i) => ({ id: i.id, repo: i.repo, title: i.title || '' }))
-  return { preview: true, ...(FRESH_START ? { freshStart: true } : {}), resumedLanded, unverifiedLanded, stillToBuild, branches: branchesView, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran, no branch touched (the reconcile ran read-only). ${resumeProofLine().replace(/^◎ /, '')}. Estimated wall clock ≈ ${hours.low}–${hours.high} h for what is still to build (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
+  return { preview: true, ...(FRESH_START ? { freshStart: true } : {}), resumedLanded, unverifiedLanded, stillToBuild, branches: branchesView, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran, no branch touched (the reconcile ran read-only). ${resumeProofLine().replace(/^◎ /, '')}. Estimated wall clock ≈ ${hours.low}–${hours.high} h for what is still to build (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, policies: policyView, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
 }
 
 // ═══════════════════════ 1 · per-task lifecycle ═══════════════════════
@@ -4291,8 +4464,8 @@ function earlyReviews(task, range) {
   const e = {
     head: r.headSha,
     discarded: false,
-    spec: ahead(reviewRound(task, 'spec', panelFor(task.repo, 'spec'), 'Spec review', r, 0)),
-    quality: ahead(reviewRound(task, 'quality', panelFor(task.repo, 'quality'), 'Quality review', r, 0)),
+    spec: ahead(reviewRound(task, 'spec', panelForTask(task, 'spec'), 'Spec review', r, 0)),
+    quality: ahead(reviewRound(task, 'quality', panelForTask(task, 'quality'), 'Quality review', r, 0)),
     discard(why) {
       if (e.discarded) return
       e.discarded = true
@@ -4721,8 +4894,8 @@ async function runTask(task) {
   // verdict holds only while the head it judged is still the head: a spec fix that moves HEAD
   // (or one whose head is unknown) discards it, and quality starts over on the fixed head as
   // `<persona>:<id>~h<n>`. 'off', or an 'all' whose precheck failed, runs spec, then quality.
-  const specPanel = panelFor(task.repo, 'spec')
-  const qualityPanel = panelFor(task.repo, 'quality')
+  const specPanel = panelForTask(task, 'spec')
+  const qualityPanel = panelForTask(task, 'quality')
   const reruns = { spec: 0, quality: 0 }
   const rerun = (mode) => `~h${++reruns[mode]}` // round 0 of a stage again, after a discarded one
   let spec0 = null
@@ -5674,9 +5847,11 @@ function routeTask(t, cycle) {
   }
   let reason = str(t.routeReason) || (MODELS.includes(t.model) ? '(no reason given)' : 'tier unset → opus')
   if (!MODELS.includes(t.model)) t.model = 'opus'
+  const selectorModel = t.model
+  // its own last failure, else — for a task the replan invented — the failure it repairs
+  const lastOfReplan = t.replanned ? lastFailure.get(t.id) || t.repairs : null
   if (t.replanned && t.model !== 'opus') {
-    // its own last failure, else — for a task the replan invented — the failure it repairs
-    const last = lastFailure.get(t.id) || t.repairs
+    const last = lastOfReplan
     if (last && last.kind === 'code') {
       reason = `replanned after a code failure (${last.status}) → opus (selector chose ${t.model})`
       t.model = 'opus'
@@ -5684,9 +5859,59 @@ function routeTask(t, cycle) {
     log(`   · ${t.id}: ${reason}`)
   }
   if (!Number.isInteger(t.fixRounds) && Number.isInteger(resumeFixRounds[t.id])) t.fixRounds = resumeFixRounds[t.id]
+  const pol = resolvePolicy(t, { selectorModel, afterCode: !!(lastOfReplan && lastOfReplan.kind === 'code') })
+  if (t.policy === 'strict' && t.model !== 'opus') {
+    reason = `STRICT → opus (selector chose ${t.model}); ${reason}`
+    t.model = 'opus'
+  }
   routingStats.byAgent[t.agent] = (routingStats.byAgent[t.agent] || 0) + 1
   routingStats.byModel[t.model] = (routingStats.byModel[t.model] || 0) + 1
-  emit('route', { task: t.id, repo: t.repo, agent: t.agent, model: t.model, reason, fallback })
+  emit('route', { task: t.id, repo: t.repo, agent: t.agent, model: t.model, reason, fallback, policy: t.policy, autoPolicy: pol.auto, policySource: pol.source, policySignals: pol.floor.concat(pol.raise).slice(0, 6), ...(t.promote.length && t.policy === 'strict' ? { promoted: t.promote } : {}) })
+}
+
+// ── the policy a task runs under (D5–D7 of docs/specs/2026-10-31-execution-policies-design.md) ──
+// The router's pick (classifyPolicy) is ALWAYS computed and journaled on the route event as
+// `autoPolicy`: with no policy asked for, that is the shadow record the benchmark compares against
+// the balanced run that actually happened. What runs: an override — a tracker label
+// `grimoire:policy/<p>`, else the repo's {policy}, else the run's {policy} — or balanced when none
+// is set (0.15.1, bit for bit). 'auto' takes the router's pick. An explicit policy below a hard
+// floor is refused (STRICT runs, logged) unless policies.allowBelowFloor.
+const policyStats = { byPolicy: {}, auto: {}, refused: 0, belowFloor: 0, tasks: {} }
+function resolvePolicy(t, { selectorModel, afterCode }) {
+  const crossRepo = (t.dependsOn || []).filter((d) => indexRepoById.has(d) && indexRepoById.get(d) !== t.repo).map((d) => `${indexRepoById.get(d)}:${d}`)
+  const proposed = POLICIES.includes(t.policy) ? t.policy : null // hydration's proposal: raise-only
+  const c = classifyPolicy(
+    { files: t.files, tags: tagsOf(t.repo), migration: t.agent === resolveAgent('migration-engineer'), crossRepo, downstream: downstreamOf(t.id), model: selectorModel, replannedAfterCode: afterCode, history: [], proposed, proposedReason: str(t.policyReason) },
+    POLICY_CFG,
+  )
+  const label = labelPolicy(t.labels)
+  const repoPolicy = (repoCfg(t.repo) || {}).policy
+  const [source, wanted] = label ? ['label', label] : repoPolicy ? ['repo', repoPolicy] : POLICY_REQUESTED ? ['run', POLICY_REQUESTED] : ['default', 'balanced']
+  let policy = wanted === 'auto' ? c.auto : wanted
+  let refused = null
+  let belowFloor = false
+  if (source !== 'default' && c.floor.length && policy !== 'strict') {
+    if (POLICY_CFG.allowBelowFloor) {
+      belowFloor = true
+      policyStats.belowFloor++
+      log(`⚠ ${t.id}: ${source} policy ${policy} honoured below its hard floor (${c.floor[0]}) — policies.allowBelowFloor`)
+    } else {
+      refused = policy
+      policy = 'strict'
+      policyStats.refused++
+      emit('policy.override_refused', { task: t.id, repo: t.repo, wanted: refused, source, floor: c.floor.slice(0, 3) })
+      log(`   · ${t.id}: ${source} policy ${refused} refused — below the hard floor (${c.floor[0]}); runs STRICT`)
+    }
+  }
+  if (policy === 'fast' && !FAST_LIVE) policy = 'balanced' // the FAST profile ships in a later slice; until then its tasks run balanced
+  t.policy = policy
+  t.promote = c.promote
+  if (belowFloor) t.belowFloor = c.floor.slice(0, 3)
+  policyStats.byPolicy[policy] = (policyStats.byPolicy[policy] || 0) + 1
+  policyStats.auto[c.auto] = (policyStats.auto[c.auto] || 0) + 1
+  policyStats.tasks[t.id] = { policy, auto: c.auto, source, ...(refused ? { refused } : {}), ...(belowFloor ? { belowFloor: true } : {}), signals: c.floor.concat(c.raise).slice(0, 6) }
+  if (policy !== 'balanced' || source !== 'default') log(`   · ${t.id}: policy ${policy} (${source}${wanted === 'auto' ? ` → auto` : ''}${c.floor.length || c.raise.length ? `; ${c.floor.concat(c.raise)[0]}` : ''})`)
+  return { ...c, source, refused }
 }
 
 // Start one task NOW. The promise never rejects and always carries the task's id so
@@ -6650,6 +6875,7 @@ if (execute) {
     reviewStats,
     precheckStats,
     routing: routingStats,
+    policies: policyStats,
     overturnedFindings: overturned,
     claimedElsewhere,
     claimsReleased,
@@ -6795,6 +7021,9 @@ return {
   overturnedFindings: overturned,
   // The selector: agent × model picks, fallbacks to the owner, escalations to opus.
   routing: routingStats,
+  // Execution policies: what each task ran under, what `auto` would have picked (the shadow record
+  // when no policy was asked for), the signals behind it, overrides refused below a hard floor.
+  policies: policyStats,
   meta: runMeta,
   telemetry: {
     totalOutputTokens: spentTokens(),

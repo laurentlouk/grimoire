@@ -11,6 +11,8 @@
   },
   "preflight": true,
   "maxOutputTokens": 4000000,
+  "policy": "balanced",
+  "policies": { "strictTags": ["infra"], "fastMaxFiles": 3, "allowBelowFloor": false },
   "telemetry": { "enabled": true, "dir": ".grimoire/runs", "retentionDays": 183 },
   "claim": { "identity": "grimoire-bot" },
   "trackerStatus": { "names": { "inReview": "In Review", "blocked": "Blocked" } },
@@ -44,7 +46,8 @@
       "agent": "api-engineer",
       "tags": ["backend"],
       "gate": { "run": "make e2e-test E2E_LOCK_WAIT=1800", "stamp": "tests/e2e/.e2e-green" },
-      "timeoutMin": 60
+      "timeoutMin": 60,
+      "policy": "auto"
     },
     {
       "name": "mobile",
