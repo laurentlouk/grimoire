@@ -128,5 +128,23 @@
         "evidence": ""
       }
     ]
+  },
+  {
+    "id": 6,
+    "query": "Roast a plan to route small tasks to a cheaper review path and save about 20 % per run. Recorded runs are under .grimoire/runs.",
+    "should_trigger": true,
+    "expected_output": "Before approving, runs the proposed routing rule over the recorded runs and states in the spec what share of tasks it would send down the cheaper path, next to the claimed saving; treats an unmeasured share as a guess and recalibrates the claim when the share is small.",
+    "expectations": [
+      {
+        "text": "Applies the routing rule to the recorded runs before approval and reports the resulting mix",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Puts the measured share next to the claimed saving in the spec, and revises the claim if the share is small",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
   }
 ]

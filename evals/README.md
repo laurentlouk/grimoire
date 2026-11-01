@@ -29,7 +29,7 @@ and no key. Running the cases is manual and paid, and needs the command-line `cl
 | manager | 11 | 1 | 1 | 9 |
 | orchestrate | 12 | 1 | 1 | 10 |
 | review | 6 | 1 | 1 | 4 |
-| roast | 5 | 1 | 1 | 3 |
+| roast | 6 | 1 | 1 | 4 |
 | setup | 13 | 1 | 2 | 10 |
 | tdd | 4 | 1 | 1 | 2 |
 | to-issues | 4 | 1 | 1 | 2 |
