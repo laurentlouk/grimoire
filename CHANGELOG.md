@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.16.0 — execution policies: the router, shadow mode, and STRICT
+
+The first two slices of execution policies ([spec](docs/specs/2026-10-31-execution-policies-design.md)).
+Each task runs under a profile, fast, balanced or strict, picked by a deterministic router inside
+the existing engine: one scheduler, one task graph, one journal, one resume path. Without a
+`policy` in the config, every task runs balanced, the lifecycle of 0.15.1 unchanged, and the
+existing suites pass as they were.
+
+- **The router** (`classifyPolicy`, no model call). Hard floors make a task STRICT: a declared
+  file in `policies.strictPaths` (migrations, auth, payments, billing, protobuf, OpenAPI, GraphQL
+  schema, CI workflows, Terraform by default), a repo tag in `strictTags` (`infra`), the migration
+  specialist, a dependency on another repo's issue. Raises keep it at least balanced: no declared
+  files, more than `fastMaxFiles` (3), `fanOut` (3) dependents, an opus pick, a replan after a code
+  failure. A docs-only footprint, or a small one with no raise, picks fast. Hydration may propose a
+  stricter policy with a reason (`policy`, `policyReason` on the task); it never lowers one.
+- **Shadow mode, always on.** Every `route` event records `autoPolicy` and the signals behind it,
+  whatever ran. With no policy asked for, that is the benchmark's shadow record.
+- **STRICT** floors the implementer at opus and moves `privacy` (auth, session, secret, payment
+  paths) and `data-integrity` (migrations, SQL, schemas, contracts, and any cross-repo dependency)
+  into the task's own quality stage, as reused personas (`policies.promote` reshapes the globs).
+- **Overrides:** a tracker label `grimoire:policy/<p>` (hydration copies `labels`) >
+  `repos[].policy` > the run's `policy`; `auto` takes the router's pick. An explicit policy below a
+  hard floor is refused (the task runs strict, `policy.override_refused` journaled) unless
+  `policies.allowBelowFloor`.
+- **FAST is not live yet:** a `fast` pick runs balanced until the next slice ships its profile
+  (one review round, one consolidated fix, the guard once, escalation to strict on failure).
+- **Where it shows:** `result.policies` and the ledger (`byPolicy`, `auto`, `refused`,
+  `belowFloor`, per task `policy`, `auto`, `source`, `signals`); the preview's
+  `policies.strictAtIndex` and rules; `render-logs.mjs summary --json` groups first-round passes,
+  fixes and cost by policy (`byPolicy`, `costByPolicy`, `autoPolicyMix`).
+- **`scripts/policy-counterfactual.mjs`**, the benchmark's first stage: it re-routes recorded runs
+  through the engine's own router block (`policy:begin` … `policy:end`, evaluated as is) and lists
+  any task it would send FAST that carries a recorded failure signal. On this machine's 113
+  recorded tasks: balanced 96, strict 16, fast 1, and no round-0 failure on the FAST pick (its one
+  flag is a terminal finding in its repo, an IAM grant unrelated to its files).
+- Tests: `workflows/tests/execution-policies.test.mjs` (default, auto, raises, floors, overrides,
+  proposals, config, preview) and `scripts/policy-counterfactual.test.mjs`.
+
 ## 0.15.1 — crystallize: what PR #55 taught
 
 The crystallize pass on the token economy's first slice ([#55](https://github.com/laurentlouk/grimoire/pull/55)). Report: `docs/crystallize/2026-10-30-grimoire-pr55.md`.

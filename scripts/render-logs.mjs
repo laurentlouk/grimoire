@@ -278,6 +278,20 @@ function runFacts(run) {
   // for something else still counts. Read the second number as an upper bound.
   const guards = []
   ev.forEach((e, i) => { if (e.type === 'guard' && e.decision === 'PASS' && e.stage !== 'terminal') guards.push([e, i]) })
+  // Execution policies (0.16.0): per policy a task RAN under, its tasks, first-round passes and fix
+  // dispatches; and the mix `auto` would have picked (the shadow record). A run older than 0.16.0
+  // carries no policy on its route events: every task of it ran balanced, and no auto pick exists.
+  const policyOf = policyMap(ev)
+  const byPolicy = {}
+  for (const t of tasks) (byPolicy[policyOf[t] || 'balanced'] ||= { tasks: 0, firstRoundPassed: 0, firstRoundTotal: 0, fixes: 0 }).tasks++
+  for (const [k, f] of Object.entries(firstRound)) {
+    const b = (byPolicy[policyOf[k.split('|')[0]] || 'balanced'] ||= { tasks: 0, firstRoundPassed: 0, firstRoundTotal: 0, fixes: 0 })
+    b.firstRoundTotal++
+    if (f.pass) b.firstRoundPassed++
+  }
+  for (const e of ev) if (e.type === 'fix' && e.task != null && byPolicy[policyOf[e.task] || 'balanced']) byPolicy[policyOf[e.task] || 'balanced'].fixes++
+  const autoPolicy = {}
+  for (const e of ev) if (e.type === 'route' && typeof e.autoPolicy === 'string') autoPolicy[e.autoPolicy] = (autoPolicy[e.autoPolicy] || 0) + 1
   return {
     tasks: tasks.size,
     firstRound: { passed: fr.filter((f) => f.pass).length, total: fr.length },
@@ -290,7 +304,15 @@ function runFacts(run) {
     halted: run.status === 'halted' || ev.some((e) => e.type === 'halt'),
     tokens: finalTokens(run),
     cost: run.cost || null,
+    byPolicy,
+    autoPolicy,
   }
+}
+// task → the policy it ran under, from its (last) route event; absent before 0.16.0
+function policyMap(ev) {
+  const o = {}
+  for (const e of ev) if (e.type === 'route' && e.task != null && typeof e.policy === 'string') o[String(e.task)] = e.policy
+  return o
 }
 
 const addInto = (dst, src) => { for (const [k, v] of Object.entries(src)) dst[k] = (dst[k] || 0) + v }
@@ -310,10 +332,13 @@ export function costOf(run, bill) {
     if (e.repo != null) repos.add(s(e.repo))
     if (e.task != null && e.repo != null) taskRepo[s(e.task)] = s(e.repo)
   }
+  const policyOf = policyMap(ev)
   const list = (bill ? bill.dispatches : []).map((d) => {
     const a = attribute(d.label, { tasks, repos })
     const repo = a.repo ?? (a.task != null ? taskRepo[a.task] ?? null : null)
-    return { label: d.label, kind: a.kind, task: a.task, repo, lens: a.lens, tier: d.tier, agentType: d.agentType, usage: d.usage, effective: d.effective, pricedBy: d.pricedBy }
+    // a task's dispatches by the policy it ran under (balanced before 0.16.0); run-level work has none
+    const policy = a.task != null && taskRepo[a.task] != null && !/:final$/.test(a.task) ? policyOf[a.task] || 'balanced' : null
+    return { label: d.label, kind: a.kind, task: a.task, repo, lens: a.lens, policy, tier: d.tier, agentType: d.agentType, usage: d.usage, effective: d.effective, pricedBy: d.pricedBy }
   })
   const dispatched = new Set(ev.filter((e) => e.type === 'dispatch' && e.task != null).map((e) => s(e.task)))
   const costCoverage = { dispatched: dispatched.size, matched: [...dispatched].filter((t) => list.some((d) => d.kind === 'impl' && d.task === t)).length }
@@ -327,7 +352,7 @@ export function costOf(run, bill) {
   const output = list.reduce((a, d) => a + (d.usage.output || 0), 0) * 5
   return {
     cost: { effective, output, dispatches: list.length, fallbackPriced: list.filter((d) => d.pricedBy === 'fallback').length,
-      byKind: by('kind'), byTier: by('tier'), byLens: by('lens'), byRepo: by('repo'), byTask: by('task'), list },
+      byKind: by('kind'), byTier: by('tier'), byLens: by('lens'), byRepo: by('repo'), byTask: by('task'), byPolicy: by('policy'), list },
     costCoverage,
   }
 }
@@ -345,6 +370,7 @@ export function aggregate(runs) {
       escalations: 0, escalationsByPath: {}, replans: 0, halts: 0,
       tokensPerRun: { avg: null, max: null, values: [] }, skippedLines: 0,
       costRuns: 0, costPerRun: { avg: null, max: null, values: [] }, costByTier: {}, costByLens: {}, costByKind: {},
+      byPolicy: {}, autoPolicyMix: {}, costByPolicy: {},
     })
     const g = groups.get(key)
     const f = runFacts(run)
@@ -363,13 +389,15 @@ export function aggregate(runs) {
       d.overturned += o.overturned
       d.checked += o.checked
     }
+    for (const [p, b] of Object.entries(f.byPolicy)) addInto((g.byPolicy[p] ||= { tasks: 0, firstRoundPassed: 0, firstRoundTotal: 0, fixes: 0 }), b)
+    addInto(g.autoPolicyMix, f.autoPolicy)
     g.replans += f.replans
     g.halts += f.halted ? 1 : 0
     if (f.tokens !== null) g.tokensPerRun.values.push(f.tokens)
     if (f.cost) {
       g.costRuns++
       g.costPerRun.values.push(f.cost.effective)
-      for (const [dst, src] of [[g.costByTier, f.cost.byTier], [g.costByLens, f.cost.byLens], [g.costByKind, f.cost.byKind]])
+      for (const [dst, src] of [[g.costByTier, f.cost.byTier], [g.costByLens, f.cost.byLens], [g.costByKind, f.cost.byKind], [g.costByPolicy, f.cost.byPolicy || {}]])
         for (const [k, v] of Object.entries(src)) dst[k] = round2((dst[k] || 0) + v)
     }
     g.skippedLines += run.badLines
