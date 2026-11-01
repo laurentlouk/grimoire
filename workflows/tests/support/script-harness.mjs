@@ -71,7 +71,7 @@ export const indexOf = (tasks, extra) => ({
   slices: [{ slice: 1, sliceLabel: 'v', issues: tasks.map((t) => ({ id: t.id, title: t.title || `Title of ${t.id}`, repo: t.repo, state: 'todo', assignee: '', dependsOn: t.dependsOn || [] })) }],
   hookProblems: [], ...extra,
 })
-export async function run(scenario, tasks, responder, { args = {}, index = {} } = {}) {
+export async function run(scenario, tasks, responder, { args = {}, index = {}, context = {} } = {}) {
   const calls = []
   const shim = 'scriptsDir' in args ? (a) => a : lockShim // a scenario that names its own scriptsDir tests the file itself
   const agent = shim(async (prompt, opts = {}) => {
@@ -79,7 +79,7 @@ export async function run(scenario, tasks, responder, { args = {}, index = {} } 
     calls.push({ label, prompt, opts })
     if (label === 'parse-index') return typeof index === 'function' ? index(prompt) : indexOf(tasks, index)
     if (label.startsWith('hydrate:')) return { tasks: tasks.filter((t) => prompt.includes(`- ${t.id} `)).map((t) => ({ ...t })) }
-    if (label === 'harness-context') return { harnessMemory: '', agentMemory: {}, priorLearnings: [], priorLedgers: [] }
+    if (label === 'harness-context') return { harnessMemory: '', agentMemory: {}, priorLearnings: [], priorLedgers: [], ...context }
     if (label === 'ledger') return { path: 'runs/x.json', branch: 'harness/run-x' }
     if (label === 'crystallize') return { reports: [], skillsCreated: [], skillsPatched: [], memoryEntriesAdded: 0, docsSynced: [], prUrl: '', summary: '' }
     return responder(label, prompt, opts, calls)

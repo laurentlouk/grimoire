@@ -113,3 +113,6 @@ exactly like DONE. Keep DONE_WITH_CONCERNS for a real concern.
 
 End by returning the structured status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED;
 in a gated repo, DONE_PENDING_GATE instead of DONE — the gate still to run is not a concern).
+
+## A FAST fix round
+Under the FAST policy the header's findings come from both review stages at once, the spec lens's first: what the task must do comes before how well it does it. Fix every item in this one pass. No reviewer re-runs after it: a guard checks each finding against your fix's own diff, and runs the repo's check command when it has one, so a finding half-fixed, or a test loosened to pass, sends the task to the strict panel.

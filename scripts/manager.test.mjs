@@ -1422,7 +1422,7 @@ try {
       'a sliced project → one /grimoire:orchestrate on the project')
     ok(JSON.stringify(g1.repos.map((r) => r.name)) === '["odyyy-app","odyyy-backend","webapp"]', 'its repos are every repo the project\'s open issues map to, ticked or not')
     const route = (g, id) => g.issues.find((i) => i.id === id)?.route
-    ok(route(g2, 'B-1') === 'implement' && g2.prompt.includes('/grimoire:implement B-1 (repo webapp, repositories/webapp), then /grimoire:review on it.'), 'a loose ready issue → /grimoire:implement, then /grimoire:review')
+    ok(route(g2, 'B-1') === 'implement' && g2.prompt.includes('/grimoire:implement B-1 (repo webapp, repositories/webapp), then /grimoire:review on it, under the issue'), 'a loose ready issue → /grimoire:implement, then /grimoire:review')
     ok(route(g2, 'B-2') === 'roast' && g2.prompt.includes('/grimoire:roast B-2'), 'an issue without acceptance criteria → /grimoire:roast first')
     ok(JSON.stringify(g2.waitsFor) === '["g1"]' && /Start only after the launch for project proj-a \(g1\) has finished: it uses the same checkout \(repositories\/webapp\)/.test(g2.prompt),
       'two groups sharing a repo run one after the other: the later one waits, and its prompt says so')
@@ -1436,6 +1436,14 @@ try {
     ok(/matches 2 items \(sources linear, github\): name it as <sourceId>:<id>/.test(why('X-1')), 'an id in two sources is refused as ambiguous')
     ok(plan.refused.some((x) => x.id === null && x.reason === 'not a plain tracker id'), 'an id that is not plain is refused without being echoed')
     ok(mod.launchPlan(['github:X-1'], items, config, { repos: up }).groups[0]?.sourceId === 'github', '<sourceId>:<id> picks one')
+    // a live grimoire run holds the checkouts it named (0.17.0): a launch into one waits for it
+    const held = mod.launchPlan(['B-1', 'C-1'], items, config, { repos: up, live: [{ runId: 'run-7', repos: ['webapp'] }] })
+    const [hb, hc] = held.groups
+    ok(JSON.stringify(hb.waitsForRuns) === '["run-7"]' && /Start only after the grimoire run run-7 has finished: it is working in repositories\/webapp/.test(hb.prompt), 'a group on a repo a live run named waits for that run, and its prompt says so')
+    ok(hc.waitsForRuns === undefined && !hc.prompt.includes('grimoire run'), 'a group on other repos does not')
+    const runs = [{ events: [{ type: 'run.start', repos: ['webapp', 'cloud'] }] }, { events: [{ type: 'run.start', repos: ['webapp'] }] }, { events: [] }]
+    const rows = [{ runId: 'r1', status: 'running', stale: false }, { runId: 'r2', status: 'running', stale: true }, { runId: 'r3', status: 'running', stale: false }]
+    ok(JSON.stringify(mod.liveRuns(runs, rows)) === '[{"runId":"r1","repos":["webapp","cloud"]}]', 'liveRuns: running and fresh, with the repos it named at start (stale or repo-less runs hold nothing)')
     const slashed = mod.launchPlan(['S-1', 'S-2'], [item('S-1', { ...ok1, project: { id: 'p1' }, repo: 'web' }), item('S-2', { ...ok1, project: { id: 'p2' }, repo: 'web-too' })],
       { repos: [{ name: 'web', path: 'repositories/web' }, { name: 'web-too', path: 'repositories/web/' }] }, { root: join(TMP, 'no-such-root') })
     ok(JSON.stringify(slashed.groups.map((g) => g.waitsFor)) === '[[],["g1"]]', `repositories/web and repositories/web/ are one checkout: the second group waits (${JSON.stringify(slashed.groups.map((g) => g.waitsFor))})`)
@@ -1599,7 +1607,7 @@ try {
     const want = mod.launchPlan(['linear:A-1', 'linear:B-1'], items, config, { repos: mod.checkRepos(config, root), root }).groups.map((g) => g.prompt)
     ok(copied.length === 2 && copied[0] === want[0] && copied[1] === want[1], 'each project\'s "Copy launch prompt" copies the prompt launch-plan gives for the ticked issues')
     const both = copied.join('\n')
-    ok(/\/grimoire:orchestrate on the tracker project proj-a \(ticked: A-1\)/.test(both) && both.includes('/grimoire:implement B-1 (repo webapp, repositories/webapp), then /grimoire:review on it.')
+    ok(/\/grimoire:orchestrate on the tracker project proj-a \(ticked: A-1\)/.test(both) && both.includes('/grimoire:implement B-1 (repo webapp, repositories/webapp), then /grimoire:review on it, under the issue')
       && both.includes('- odyyy-app: repositories/odyyy-app') && both.includes(`Project root: ${root}`), 'the ids, the routes and the repo paths are in them')
     ok(!both.includes('ignore previous instructions') && !both.includes('Billing') && !both.includes('<img'), 'and no ticket title, next step, label or project name')
     const waits = live.all.find((e) => e.className === 'waits' && !e.hidden)
@@ -1754,6 +1762,8 @@ try {
       `a briefing older than the headline's stale rule refuses every id (${why(stale, 'A-1')})`)
     const graced = mod.launchCheck(['A-1'], V, config, { repos: mod.checkRepos(config, root), root, now: at(24 * HOUR + 10 * 60000) })
     ok(graced.briefing.stale === false && graced.groups.length === 1, 'within the headline\'s 15 min grace past 24 h, the briefing is not stale yet')
+    const held = mod.launchCheck(['A-1'], V, config, { repos: mod.checkRepos(config, root), root, now: at(HOUR), live: [{ runId: 'run-9', repos: graced.groups[0].repos.map((r) => r.name) }] })
+    ok(JSON.stringify(held.groups[0]?.waitsForRuns) === '["run-9"]' && /Start only after the grimoire run run-9 has finished/.test(held.groups[0]?.prompt ?? ''), 'launch-check: a live run on its repo holds the launch, as launch-plan does')
     const hourly = mod.launchCheck(['A-1'], V, { ...config, manager: { ...config.manager, schedule: { when: 'hourly' } } }, { repos: mod.checkRepos(config, root), root, now: at(2 * HOUR) })
     ok(hourly.groups.length === 0 && /\(manager\.schedule's 1 h, plus 15 min\)/.test(hourly.refused[0]?.reason ?? ''), `with an hourly schedule, 2 h is stale already (${hourly.refused[0]?.reason})`)
     renameSync(join(root, 'repositories', 'webapp'), join(root, 'repositories', 'webapp.off'))

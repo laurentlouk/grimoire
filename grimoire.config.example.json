@@ -47,7 +47,8 @@
       "tags": ["backend"],
       "gate": { "run": "make e2e-test E2E_LOCK_WAIT=1800", "stamp": "tests/e2e/.e2e-green" },
       "timeoutMin": 60,
-      "policy": "auto"
+      "policy": "auto",
+      "check": "npm test -- --changed"
     },
     {
       "name": "mobile",

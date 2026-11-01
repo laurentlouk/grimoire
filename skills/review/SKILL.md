@@ -5,7 +5,13 @@ description: Review an implemented issue with an independent, diverse-lens panel
 
 # Review the implementation
 
-Review the diff against its issue with an independent reviewer (never the implementer), in two gates.
+Review the diff against its issue with an independent reviewer (never the implementer), in two gates, as strictly as the issue's **execution policy** says (`workflows/policies.md`, resolved as `implement` did):
+
+- **`fast`** (a session's default when no floor or raise applies): one review covering the spec and adversarial-QA lenses together, one fix round for blockers and majors carrying every finding, minors to the PR description, then no re-review: re-run the tests and check each finding is addressed in the fix's own diff (the guard's job). Anything still open, or a test weakened, escalates to `strict` on the same branch.
+- **`balanced`**: the two gates below, with the lenses that fit the repository.
+- **`strict`**: the same, plus the privacy and data-integrity lenses when the change touches auth, sessions, secrets, payments, migrations, schemas or another repository's contract.
+
+The gates:
 
 **Spec gate.** One reviewer, the spec hawk: does the diff do exactly what the issue says, nothing missing, nothing smuggled in, happy path working end to end?
 
