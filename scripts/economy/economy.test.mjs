@@ -57,6 +57,8 @@ try {
     '{"type":"assistant","message":{"id":"r","model":"claude-haiku-5-5","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}',
   ], null)
   eq(readAgent(join(dir, 'agent-quoted.jsonl'), { usageOnly: true }).usage, readTranscript(join(dir, 'agent-quoted.jsonl')).usage, 'usageOnly: a tool result quoting an assistant line is not billed')
+  writeAgent(dir, 'spaced', ['{"type": "assistant", "message": {"id": "s", "model": "claude-haiku-5-5", "content": [], "usage": {"input_tokens": 4, "output_tokens": 2}}}'], null)
+  eq(readTranscript(join(dir, 'agent-spaced.jsonl'), { usageOnly: true }).usage, readTranscript(join(dir, 'agent-spaced.jsonl')).usage, 'usageOnly: a transcript written with spaces is read in full rather than billed as nothing')
 
   section('pricing')
   eq(WEIGHTS, { input: 1, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2, output: 5 }, 'weights relative to fresh input')
@@ -73,6 +75,11 @@ try {
     mkdirSync(join(link, 'projects'), { recursive: true })
     symlinkSync(join(real, 'projects', slugOf('/ws/linked')), join(link, 'projects', slugOf('/ws/linked')))
     eq(runBill('RL', { claudeDir: link, roots: ['/ws/linked'] }).total.effective, runBill('RL', { claudeDir: real, roots: ['/ws/linked'] }).total.effective, 'a symlinked project dir is followed')
+    // a renamed checkout whose old project dir links to the new one: both names match the roots, billed once
+    symlinkSync(join(real, 'projects', slugOf('/ws/linked')), join(real, 'projects', slugOf('/ws/linked-old')))
+    symlinkSync(join(ROOT, 'nowhere'), join(real, 'projects', slugOf('/ws/linked-gone'))) // a broken link is skipped
+    const once = runBill('RL', { claudeDir: real, roots: ['/ws/linked', '/ws/linked-old', '/ws/linked-gone'] })
+    eq([once.workflows, once.total.effective], [['wf_1', 'wf_3'], runBill('RL', { claudeDir: real, roots: ['/ws/linked'] }).total.effective], 'a workflow reached through two names is billed once; a broken link is skipped')
   }
   eq(projectSlug('/Users/a/b.c/.claude/worktrees/x_y'), '-Users-a-b-c--claude-worktrees-x-y', 'project slug: every non-alphanumeric is -')
   eq(claudeDir('/x'), '/x', 'an explicit claude dir wins')

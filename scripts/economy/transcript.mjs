@@ -28,6 +28,12 @@ const resultText = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map(
 export function readTranscript(file, { usageOnly = false } = {}) {
   let text = ''
   try { text = readFileSync(file, 'utf8') } catch {}
+  const t = parse(text, usageOnly)
+  // the fast filter found no request in a file that has lines: another writer's spacing, say. Read it in full.
+  return usageOnly && !t.usage.requests && text.trim() ? parse(text, false) : t
+}
+
+function parse(text, usageOnly) {
   const usageById = new Map()
   const modelById = new Map()
   const calls = []

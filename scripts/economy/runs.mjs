@@ -39,12 +39,17 @@ export function scanWorkflows({ claudeDir: dir, roots = [] } = {}) {
   const projects = join(claudeDir(dir), 'projects')
   const slugs = roots.map(projectSlug)
   const out = []
+  const seen = new Set() // real paths: a project dir linked under two matching names is read once
   for (const name of dirs(projects)) {
     if (!slugs.some((s) => name === s || name.startsWith(`${s}-`))) continue
     const projectDir = join(projects, name)
     for (const session of dirs(projectDir)) {
       const wfDir = join(projectDir, session, 'workflows')
       for (const f of files(wfDir, /^wf_.*\.json$/)) {
+        let real = join(wfDir, f)
+        try { real = realpathSync(real) } catch {}
+        if (seen.has(real)) continue
+        seen.add(real)
         let j
         try { j = JSON.parse(readFileSync(join(wfDir, f), 'utf8')) } catch { continue }
         if (!isObj(j) || !isObj(j.args) || typeof j.args.runId !== 'string' || !j.args.runId) continue
