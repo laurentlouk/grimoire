@@ -3460,8 +3460,8 @@ function writerGotOld() {
 }
 function writerSettled() { oldWriters = Math.max(0, oldWriters - 1) }
 function judgeTick() {
-  if (!oldWriters || judgeStopped || bodyReturned || dispatchClosed || halt || typeof setTimeout !== 'function') { judgeTicking = false; return }
-  if (!judgeBusy) runJudge()
+  if (!oldWriters || judgeStopped || bodyReturned || dispatchClosed || typeof setTimeout !== 'function') { judgeTicking = false; return }
+  if (!judgeBusy && !halt) runJudge() // a halt can lift (an environment check that passes again): skip, keep ticking
   const next = setTimeout(judgeTick, JUDGE_EVERY_MIN * 60 * 1000)
   if (next && typeof next.unref === 'function') next.unref()
 }
