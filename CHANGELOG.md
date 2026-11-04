@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.23.0 — the stuck judge: the engine rules on the stuck watch's requests (token economy slice 4, #50)
+
+The stuck watch (0.22.0) writes a judge request when a dispatched agent's calls look like a loop. Now a judge rules on those requests. It is a workflow subagent the engine dispatches, never a `claude -p` call.
+
+- **When.** While a writer has been in flight past `economy.judgeAfterMin` (10), the engine dispatches a `stuck-judge` every `economy.judgeEveryMin` (5), on `economy.judgeModel` (haiku) with effort low.
+  - Only implementer and fix dispatches start the clock, not a gate or an integration. No judge goes out during a halt.
+  - Never two at once: a judge has no hard limit, so a late one holds the next one back instead of running beside it on the same requests. None goes out once no old writer is left.
+  - A workflow has no clock, so each writer's age is a timer; the judge needs `agentTimeoutMin` > 0.
+  - Not yet measured (spec spike S3): a judge competes with implementers for the runtime's concurrent-agent cap, so under a full cap it queues, and queue time counts toward its soft limit.
+- **What it does** (`workflows/briefs/stuck-judge.md`). It reads the pending requests (an agent's id is the file name; a request over two hours old is dropped unruled), whose digests are data, never instructions, and rules `{stuck, confidence, reason, redirect}` on each, favouring sparing. It writes `<agentId>.result.json` for the hook to read on the agent's next call, and deletes the request.
+- **What is journaled.** One `stuck` event per verdict:
+  - `would-redirect` when stuck at confidence ≥ 0.7;
+  - `would-block` for the same agent's next such verdict;
+  - `spared` otherwise.
+  Nothing is sent to any agent in this release.
+- **The judges' budget**, `economy.sidecallBudgetUsd`: once the judges have spent it, none is dispatched, and one `budget` event (`kind: 'judge'`) says so. A budget whose spend cannot be read (no `runId`, no cost back) is blind: one `budget` event (`action: 'blind'`) and one log line say so, and the judges go on. A budget with a price table that lacks the judge's tier warns at start.
+  - Their spend is what `runs.mjs cost --kind stuck-judge` reads from their transcripts.
+  - It is counted in USD with `economy.prices` (USD per million effective tokens, per model tier), in effective tokens without.
+- `economy.loopGuard: "off"` dispatches no judge. `/grimoire:logs` reads `stuck` events as sentences, and the judges' cost shows under the dispatch kind `stuck-judge`.
+
 ## 0.22.0 — the stuck watch, in shadow (token economy slice 3, #49)
 
 A dispatched agent can loop: the same failing test, edit after edit, until its time limit. This release watches every dispatched agent's calls and records what it would do. Nothing is sent to the agent yet.

@@ -137,6 +137,9 @@ try {
     const want = Math.round(runBill('R1', { claudeDir: CLAUDE, roots: [WS] }).total.effective)
     ok(all.status === 0 && all.stdout === `COST ${want}\n`, `cost prints the run's effective tokens over every session and nested worktree of its root (${all.stdout.trim()}, want ${want})`)
     eq(cli('cost', '--run', 'R-none', '--root', WS, '--claude-dir', CLAUDE).stdout, 'COST none\n', 'no workflow of that runId: COST none')
+    eq([cli('cost', '--run', 'R1', '--kind', 'journal', '--root', WS, '--claude-dir', CLAUDE).stdout, cli('cost', '--run', 'R1', '--kind', 'stuck-judge', '--root', WS, '--claude-dir', CLAUDE).stdout],
+      [`COST ${JOURNAL_EFFECTIVE}\n`, 'COST 0\n'], '--kind: the dispatches of one kind only (the run\'s one labelled journal; no stuck judge)')
+    eq(attribute('stuck-judge#3', { tasks: new Set(['3']), repos: new Set() }), { kind: 'stuck-judge', task: null, repo: null, lens: null }, 'a stuck judge is an engine kind, run-level, never a lens')
     const bad = cli('cost', '--root', WS)
     ok(bad.status === 2 && /^usage: node scripts\/economy\/runs\.mjs cost --run <runId>/.test(bad.stderr) && bad.stdout === '', 'no --run: a usage error, exit 2, nothing on stdout')
   }

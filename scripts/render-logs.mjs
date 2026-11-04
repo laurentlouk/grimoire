@@ -835,6 +835,7 @@ function client(score) {
     // after run.end: the details of tasks that landed since the last confirmed flush, LANDED_DELTA_MAX per chunk
     'landed.flush': (e) => `${s(e.left)} landed task detail(s) still to write to landed.jsonl: one more chunk`,
     'run.end': (e) => `${s(e.status)} · done ${s(e.done)} · failed ${s(e.failed)} · blocked ${s(e.blocked)} · PRs ${s(e.prs)} · tokens ${s(e.tokens)}`,
+    stuck: (e) => `${s(e.action)} · ${s(e.agentType)}@${s(e.repo)} · confidence ${s(e.confidence)} · ${s(e.reason)}`,
     'run.close': (e) => `closed (${s(e.reason)})${e.note ? `: ${s(e.note)}` : ''} · by ${s(e.by)}`,
   }
   const summarize = (e) => { try { return SUM[e.type] ? SUM[e.type](e) : rest(e) } catch { return rest(e) } }
