@@ -110,5 +110,16 @@
       { "text": "Leaves the existing cases unchanged: the diff of evals.json shows only the added case, not a re-serialised file", "passed": null, "evidence": "" },
       { "text": "Regenerates the eval suite when the repository generates one, and reports the check's result", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 9,
+    "query": "Crystallize the last loop runs. render-logs summary --json shows toolEvidence for odyyy-backend/backend-engineer: candidates mcp__fal-ai__* (never used over 120 dispatches in 9 runs) and mcp__ccd_turn__* (the desktop app's own tools, called here though they act on the launching session); the role used mcp__Claude_Code_iOS_Simulator__*.",
+    "should_trigger": true,
+    "expected_output": "Proposes disallowedTools entries mcp__fal-ai__* and mcp__ccd_turn__* on .claude/agents/backend-engineer.md in its PR, citing the counts and that the desktop-app candidate was called, never proposes the simulator server the role used, never a tools: allowlist, and states that the denial fails open and is undone by deleting the entry.",
+    "expectations": [
+      { "text": "Proposes disallowedTools: mcp__fal-ai__* and mcp__ccd_turn__* on the backend-engineer definition, with their counts", "passed": null, "evidence": "" },
+      { "text": "Never proposes a server the role used (the simulator), nor a tools: allowlist", "passed": null, "evidence": "" },
+      { "text": "Says the denial fails open and is restored by deleting the entry", "passed": null, "evidence": "" }
+    ]
   }
 ]

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.21.0 — tool evidence: the MCP servers each role loads and never uses (token economy slice 8, #54)
+
+Every dispatched agent is sent its loaded tools and the names of its deferred ones on each request, used or not. On recorded runs, the deferred tool-name list of a team engineer was about 8.7 k tokens, 775 of them MCP. This slice measures what each role never uses. Nothing is changed automatically; `crystallize` proposes the denials.
+
+- **`scripts/economy/tools.mjs`** reads the recorded runs offline, with slice 1's reader. Per role, a (repo, agent type), it records the MCP servers its dispatches loaded (`.prefix.json` plus the deferred-tool deltas) and whether any of them called it.
+  - A server is a candidate when the role never used it and loaded it over at least 10 dispatches in at least 2 runs, or over 5 runs. The thresholds are adapted from TokenEconomizer's tool pruning (commit `1deb887`, Apache-2.0, credited in the file).
+  - Built-in tools are never candidates.
+  - The desktop app's own servers (`ccd_*`) always are. On real runs, the app and webapp engineers did call `ccd_session` and `ccd_turn`, which act on the launching session's panes, so the candidate says so.
+  - Dispatches the journal places in no repo (startup probes, run-level agents) and the generic `workflow-subagent` are left out: a probe loads a role's tools and calls none.
+- **`render-logs.mjs summary`** reports it: `toolEvidence` in `--json`, with each candidate's counts and the tokens its deferred names cost each dispatch, and one line per role in the text.
+  - On the maintainer's 13 recorded runs, it never proposes the simulator for the app engineer or the browser for the webapp engineer, both of which used them.
+- **`crystallize`** proposes `disallowedTools: mcp__<server>__*` on the role's definition, with the counts (new signal row and eval case). The denial fails open for teammates whose connectors carry other ids.
+- **The team-agent template** withholds the desktop app's servers, one `mcp__ccd_<server>__*` entry each. A prefix wildcard across servers is not documented for `disallowedTools`. `/grimoire:setup` proposes the line for an existing agent that lacks it (new eval case).
+- `scripts/economy/runs.mjs` exports `labelContext` and `attributeIn`, which `costOf` now uses too. The transcript reader gains a `skipResults` mode: the calls and tool deltas without their results.
+
 ## 0.20.1 — the cost report: exact attribution, a faster read (#56)
 
 The follow-ups from the review of the token economy's slice 1 ([#55](https://github.com/laurentlouk/grimoire/pull/55)).

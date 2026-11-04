@@ -136,6 +136,27 @@ export function attribute(label, { tasks = new Set(), repos = new Set() } = {}) 
   return { kind, task: null, repo: null, lens }
 }
 
+/** What a run's journal says about its labels: its task ids, its repos, and each task's repo. */
+export function labelContext(events) {
+  const str = (v) => (typeof v === 'string' ? v : JSON.stringify(v))
+  const tasks = new Set(), repos = new Set(), taskRepo = {}
+  const start = (events || []).find((e) => e && e.type === 'run.start') || {}
+  for (const r of Array.isArray(start.repos) ? start.repos : []) repos.add(str(isObj(r) && r.name != null ? r.name : r))
+  for (const e of events || []) {
+    if (!isObj(e)) continue
+    if (e.task != null) tasks.add(str(e.task))
+    if (e.repo != null) repos.add(str(e.repo))
+    if (e.task != null && e.repo != null) taskRepo[str(e.task)] = str(e.repo)
+  }
+  return { tasks, repos, taskRepo }
+}
+
+/** attribute(), with the repo filled in from the task's when the label names a task only. */
+export function attributeIn(label, ctx) {
+  const a = attribute(label, ctx)
+  return { ...a, repo: a.repo ?? (a.task != null ? ctx.taskRepo[a.task] ?? null : null) }
+}
+
 /** A root (as given and resolved through symlinks) and every git worktree of its repository: where a
  * run's sessions may have been launched. Claude Code names a project dir after the cwd it was given,
  * which may be either spelling (macOS's /var is /private/var). */

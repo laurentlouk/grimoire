@@ -677,7 +677,17 @@ try {
   ok(sc9 && sc9.medianCostPerLanded === I + 2 * J + 2 * Rv, 'median cost per landed task, over the runs that have a cost')
   const grp9 = S9 && S9.groups.find((g) => g.version === '0.14.0')
   ok(grp9 && JSON.stringify(grp9.costByTier) === JSON.stringify(c1.byTier) && JSON.stringify(grp9.costByLens) === JSON.stringify(c1.byLens), 'the per-version group carries cost by tier and by lens, for crystallize')
+  // tool evidence (#54): per role, the MCP servers loaded and never used; the desktop app's own always proposed
+  ok(S9 && JSON.stringify(S9.toolEvidence) === JSON.stringify({
+    runs: 1,
+    roles: {
+      'api/backend-engineer': { dispatches: 2, runs: 1, servers: { ccd_session: { tools: 1, loadedDispatches: 1, loadedRuns: 1, used: false }, x: { tools: 1, loadedDispatches: 1, loadedRuns: 1, used: false } },
+        candidates: [{ server: 'ccd_session', deny: 'mcp__ccd_session__*', tools: 1, loadedDispatches: 1, loadedRuns: 1, deferredNameTokens: 0, why: "the desktop app's own tools" }] },
+      'api/grimoire:reviewer': { dispatches: 1, runs: 1, servers: {}, candidates: [] },
+    },
+  }), `summary --json: toolEvidence per role, the read runs counted (${S9 && JSON.stringify(S9.toolEvidence)})`)
   const t9 = spawnSync(process.execPath, [SCRIPT, 'summary', '--claude-dir', CLAUDE9], { cwd: ROOT9, encoding: 'utf8' }).stdout
+  ok(t9.includes("  tool evidence over 1 run: api/backend-engineer (2 dispatches, 1 run) could deny mcp__ccd_session__* (the desktop app's own tools)\n"), `summary text: the servers each role could deny (${(t9.match(/tool evidence.*/) || ['no line'])[0]})`)
   ok(/cost: 12[,.]?921 effective tokens · output 1[,.]?520 \(12%\) · cost coverage 50% \(1\/2 implementer dispatches with a transcript\)/.test(t9), `summary text: the cost line (${(t9.match(/cost: .*/) || [''])[0]})`)
   ok(/cost by tier: haiku 10[,.]?104, sonnet 1[,.]?711, opus 1[,.]?106/.test(t9), 'summary text: cost by tier, largest first')
   const r9 = spawnSync(process.execPath, [SCRIPT, '--out', 'logs.html', '--claude-dir', CLAUDE9, '--run', 'R1'], { cwd: ROOT9, encoding: 'utf8' })
