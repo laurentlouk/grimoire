@@ -97,6 +97,7 @@ task list would bypass `roast`, which is the point of requiring the artifacts.
 | `runBranch` | the run's `runBranch`, else derived | this repo's run branch, verbatim (two repos that share one checkout, a branch an earlier run used) |
 | `remote` | — | not read by the loop: the repo's `origin` URL, without credentials, recorded by `/grimoire:setup` for a hub whose repos are nested clones, so the manager's fix for a missing clone can name it |
 | `policy` | the run's `policy` | `auto \| fast \| balanced \| strict` for this repo's tasks; a tracker label `grimoire:policy/<p>` on an issue wins over it. See "Execution policies" |
+| `strictPaths` | — | floor globs for this repo only, added to `policies.strictPaths`: where its auth, money or contract code lives under names the defaults miss (`src/services/auth.rs`, `**/aws_cognito/**`). A declared or changed file matching one makes the task strict |
 | `check` | — | a quick command (`npm test -- --changed`) the FAST guard runs, in its own worktree, after a FAST task's one fix; non-zero is RE_REVIEW. Trusted like `gate.run` |
 | `laneSetup` | — | a shell line run when a parallel lane's worktree is created; `<lane>` is substituted with the worktree path (e.g. giving the lane its dependencies). Some bundlers refuse a symlinked `node_modules` that points outside the project root (Next.js 16's Turbopack does); clone it instead (`cp -cR`, copy-on-write on APFS) |
 
@@ -1122,14 +1123,24 @@ reviews the task's whole range as round 0 again (`<persona>:<id>~strict`), the f
 counts against `maxFixAttempts`, the implementer moves to opus, and nothing is re-implemented. With
 `policies.fast.onFail: 'fail'` the task is booked `SPEC_FAILED` (a spec finding gated) or
 `QUALITY_FAILED` instead, for the replanner. An implementer that blocks during the FAST fix fails
-the same way, without escalating. A FAST pick made for a docs-only footprint whose implementer
-changed code runs balanced (`policies.tasks[id].raisedAtPrecheck`).
+the same way, without escalating.
+
+**After the build, routed again (raise-only).** The router classified the declared files; before
+the panel, the files the implementer changed are classified again. A changed file on a floor (the
+repo's `strictPaths` included), or the precheck's `authChange` (the diff adds, removes or changes an
+authentication or authorization check, whatever the file is named), makes the task strict, with
+the lenses its changed files promote (`privacy` for an auth change) and its fixes on opus
+(`policies.tasks[id].raisedAfterBuild`, a `policy.raised` event); a task already strict gains those
+lenses (`promotedAfterBuild`). An `auto` FAST pick whose build went past FAST's footprint (code in a
+docs-only pick, more than `fastMaxFiles` files changed) runs balanced
+(`policies.tasks[id].raisedAtPrecheck`); an explicit `fast` keeps its size, not its floors. The
+task's `policy` and `byPolicy` count what ran. Never with no policy asked for, never lower, never
+under `allowBelowFloor: true`. Early rounds that drew the old panel are discarded.
 
 **Resume.** An escalated task that has not landed is kept in the checkpoint (`checkpoint.policies`,
-id → `strict`); a resume runs it strict, never FAST again. Only the local `run.json` carries it,
-never a PR marker (a resume from a PR marker alone may run such a task FAST again), and it can only
-raise a task. A replan keeps the issue's `labels` and an
-escalation.
+id → `strict`) and in its repo's PR marker (`esc`, the ids only); a resume from either runs it
+strict, never FAST again. Both can only raise a task: a forged entry makes it stricter, never
+looser. A replan keeps the issue's `labels` and an escalation.
 
 **History (D6).** The harness-context loader returns, per repo, the FAST tasks of earlier ledgers
 and how many escalated (`policyHistory`). A repo above `policies.historyMaxEscalation` over at
@@ -1146,6 +1157,12 @@ repo that names one of a task's declared files raises that task. History never l
 - **FAST:** every declared file in `docsPaths` (`**/*.md`, `**/*.mdx`, `docs/**`), or no raise at all.
 - Hydration may **propose** a stricter policy with a reason (a risk the files do not show: money, an
   authorization rule, personal data); the router takes the higher of the two, never the lower.
+- **Promotion (strict only):** `policies.promote` adds a lens to the per-task quality stage when a
+  declared file matches its globs: `privacy` (auth, session, secret, payment paths), `data-integrity`
+  (migrations, SQL, schemas), `contract` (proto, OpenAPI, AsyncAPI, GraphQL, Avro). A `dependsOn` on
+  another repo's issue promotes `data-integrity` and `contract`. The `contract` lens is never drawn
+  by a repo tag: it reads both sides of the interface, the other repositories' paths and run
+  branches in its brief, and FAILs a mismatch or a breaking change with no stated release order.
 
 Globs match a declared file's path, lower-cased and repo-relative: `**/` is zero or more
 directories, `*` stays inside one, `{a,b}` is a choice.

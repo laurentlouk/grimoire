@@ -200,6 +200,9 @@ const REVIEW_PANEL = [
   { id: 'accessibility', name: 'Accessibility Lead', stage: 'terminal', appliesTo: ['mobile', 'web'] },
   { id: 'privacy', name: 'Privacy Engineer', stage: 'terminal', appliesTo: '*' },
   { id: 'app-store', name: 'App Store Reviewer', stage: 'terminal', appliesTo: ['mobile'] },
+  // no repo draws it by tag: STRICT promotes it into a contract-shaped task's quality stage
+  // (policies.promote.contract, or a dependency on another repo's task), both sides read
+  { id: 'contract', name: 'Cross-Repo Contract Checker', stage: 'quality', appliesTo: [] },
 ]
 
 // ═══════════════════════════════ schemas ═══════════════════════════════
@@ -552,6 +555,7 @@ const PRECHECK_SCHEMA = {
       description: 'one entry per failed check from the brief; empty on PASS',
     },
     summary: { type: 'string' },
+    authChange: { type: 'string', description: 'NOT a check, never a FAIL: where the diff adds, removes or changes an authentication or authorization check (path:line — what changed), whatever the file is named; empty string when it does not' },
   },
 }
 
@@ -1326,7 +1330,17 @@ ${task.taskText}
 Spec excerpt:
 ${task.specExcerpt || '(see the spec/plan)'}
 
-${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${integrity}${runBlock(task, who, reviewedHead(task, range))}`
+${persona.id === 'contract' ? contractBlock(task) : ''}${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${integrity}${runBlock(task, who, reviewedHead(task, range))}`
+}
+// The contract lens reads BOTH sides: where the project's other repositories are checked out, and
+// the tasks this one depends on in them.
+function contractBlock(task) {
+  const others = [...repoConfig.values()].filter((r) => r.name !== task.repo)
+  const deps = (task.dependsOn || []).filter((d) => indexRepoById.has(d) && indexRepoById.get(d) !== task.repo)
+  return `## The other side of the contract
+${others.length ? others.map((r) => `- ${r.name}: \`${r.path}\` (run branch \`${runBranchFor(r.name)}\`, base \`${BASE_BRANCH}\`)`).join('\n') : '- (no other repository in this run: compare against the schema or generated client the change names)'}
+${deps.length ? `This task depends on ${deps.map((d) => `${d} (${indexRepoById.get(d)})`).join(', ')}: read that side on its run branch.\n` : ''}
+`
 }
 
 // The TERMINAL sweep judges the whole integrated branch, but each persona reads only the
@@ -1512,7 +1526,9 @@ A non-zero exit is a FAIL with \`check: "ancestry"\`: the work is on another bra
 // `fixed`: {from, head} when this round re-reviewed a fix. A weakened-test finding is about a change
 // in the fix's own diff, invisible in the whole range (see testIntegrityBlock), so the verifier is
 // handed that diff too, or it would overturn the finding for not finding the removed line.
-function verifyPrompt(task, mode, findings, range, attempt, fixed = null) {
+// `tag`: round 0 of a stage again under another name (an escalated task's STRICT round, `~strict`):
+// its own label and worktree, so the journal never confuses it with the FAST round it follows.
+function verifyPrompt(task, mode, findings, range, attempt, fixed = null, tag = '') {
   const head = fixed && fixed.head
   const fixDiff =
     fixed && fixed.from && head && fixed.from !== head
@@ -1532,7 +1548,7 @@ ${findings.map((f, i) => `${i + 1}. [${f.severity}${f.persona ? ` · ${f.persona
 ## Task (verbatim — what the change had to do)
 ${task.taskText}
 
-${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${fixDiff}${runBlock(task, `verify-${mode}-r${attempt || 0}`, reviewedHead(task, range))}`
+${mode === 'terminal' ? sweepBlock(task) : rangeBlock(task, range)}${fixDiff}${runBlock(task, `verify-${mode}-r${attempt || 0}${tag ? `-${tag.replace(/[^a-z0-9]/gi, '')}` : ''}`, reviewedHead(task, range))}`
 }
 
 // The telemetry WRITER — a fixed shell script, so the cheap agent only has to run it. Each
@@ -2404,9 +2420,12 @@ const DEFAULT_POLICY_RULES = {
   promote: {
     privacy: ['**/auth/**', '**/*auth*.*', '**/session*/**', '**/*session*.*', '**/*secret*', '**/payment*/**', '**/billing/**', '**/*pii*'],
     'data-integrity': ['**/migrations/**', '**/migration/**', '**/*.sql', '**/*.prisma', '**/*.proto', '**/openapi*.{yml,yaml,json}', '**/schema.graphql'],
+    contract: ['**/*.proto', '**/openapi*.{yml,yaml,json}', '**/asyncapi*.{yml,yaml,json}', '**/*.graphql', '**/*.avsc'],
   },
   fast: { onFail: 'escalate' }, // a FAST failure: 'escalate' to STRICT on the same head, or 'fail' (booked failed, left to the replanner)
 }
+// Lenses a dependency on another repo's task promotes under STRICT, whatever the task's files
+const CROSS_REPO_LENSES = ['data-integrity', 'contract']
 // FAST's per-task panel: the spec lens and the adversarial core, nothing promoted or drawn by tag
 const FAST_PANEL = { spec: ['spec-hawk'], quality: ['break-it'] }
 // A glob as a RegExp over a lower-cased, repo-relative path: `**/` is zero or more directories,
@@ -2478,7 +2497,7 @@ function classifyPolicy(facts, cfg) {
     auto = proposed
   }
   const promote = Object.entries(cfg.promote || {})
-    .filter(([lens, globs]) => files.some((f) => globHit(globs, f)) || (lens === 'data-integrity' && (facts.crossRepo || []).length))
+    .filter(([lens, globs]) => files.some((f) => globHit(globs, f)) || (CROSS_REPO_LENSES.includes(lens) && (facts.crossRepo || []).length))
     .map(([lens]) => lens)
   return { auto, floor, raise: raise.concat(hard), promote, docsOnly }
 }
@@ -2511,6 +2530,19 @@ function policyOpt(v, what) {
   if (p === 'auto' || POLICIES.includes(p)) return p
   log(`⚠ ${what} ${JSON.stringify(v)} is not one of auto | ${POLICIES.join(' | ')} — ignored`)
   return null
+}
+// `repos[].strictPaths`: floor globs of ONE repo, added to the run's — where its auth, money or
+// contract code lives under names the defaults do not know (`src/services/auth.rs`, `aws_cognito/`).
+function repoStrictPaths(r) {
+  if (r.strictPaths === undefined) return undefined
+  if (Array.isArray(r.strictPaths) && r.strictPaths.every((g) => typeof g === 'string' && g.trim())) return r.strictPaths.map((g) => g.trim())
+  log(`⚠ repos[${r.name.trim()}].strictPaths ignored — expected an array of globs; the run's strictPaths apply`)
+  return undefined
+}
+// The routing rules for one repo: the run's, plus the repo's own floor globs.
+function policyCfgFor(repo) {
+  const extra = (repoCfg(repo) || {}).strictPaths
+  return extra && extra.length ? { ...POLICY_CFG, strictPaths: POLICY_CFG.strictPaths.concat(extra) } : POLICY_CFG
 }
 // {policies:{…}} over DEFAULT_POLICY_RULES, key by key; a malformed value keeps the default, logged.
 function policyConfig(o) {
@@ -3186,7 +3218,7 @@ const refName = (v, where) => {
 const RUN_BRANCH_OPT = refName(opts.runBranch, 'runBranch')
 
 // ── repo configuration: the ONLY place a stack enters this workflow ──
-// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup?, deliver?, runBranch?, policy?, check? }]
+// [{ name, path?, agent, tags?, gate?, timeoutMin?, laneSetup?, deliver?, runBranch?, policy?, strictPaths?, check? }]
 const repoList = Array.isArray(opts.repos)
   ? opts.repos
       .filter((r) => r && typeof r.name === 'string' && r.name.trim() && typeof r.agent === 'string' && r.agent.trim())
@@ -3201,6 +3233,7 @@ const repoList = Array.isArray(opts.repos)
         deliver: deliverOpt(r.deliver, `repos[${r.name.trim()}].deliver`, undefined),
         runBranch: refName(r.runBranch, `repos[${r.name.trim()}].runBranch`) || undefined,
         policy: policyOpt(r.policy, `repos[${r.name.trim()}].policy`) || undefined,
+        strictPaths: repoStrictPaths(r),
         check: str(r.check) ? r.check.trim() : undefined,
       }))
   : []
@@ -3988,6 +4021,7 @@ function markerCounters(s, p) {
     landedTasks: Array.isArray(s.landedTasks) ? s.landedTasks.slice(0, MARKER_TASK_CAP) : [],
     runId: str(s.runId) || null,
     replan: Array.isArray(s.replan) ? s.replan.filter((x) => typeof x === 'string').slice(0, MARKER_TASK_CAP) : [],
+    esc: Array.isArray(s.esc) ? s.esc.filter((x) => typeof x === 'string').slice(0, MARKER_TASK_CAP) : [],
     url: str(p.url) || '',
     state: str(p.state) || '',
     isDraft: p.isDraft,
@@ -4061,10 +4095,11 @@ const newerState = (a, b) => {
 const resumeShapedLikeMarker = !!resumeOpt && ['repo', 'runBranch', 'base'].some((k) => k in resumeOpt) // a PR marker passed as resumeState: its spend is not this run's own
 const escalatedPolicies = new Map() // id → 'strict': FAST tasks escalated and not landed yet; the checkpoint keeps them across a resume
 const resumeSafe = resumeOpt ? { ...stateCounters(resumeOpt, 'the resumeState passed in', !resumeShapedLikeMarker), landedTasks: Array.isArray(resumeOpt.landedTasks) ? resumeOpt.landedTasks : [] } : null
-// The checkpoint's escalated policies (run.json only, never a PR marker): raise-only, so a forged
-// entry can make a task stricter, never looser.
+// The escalated policies of the checkpoint (`policies`) and of every verified PR marker (`esc`, the
+// only copy on another machine): raise-only, so a forged entry can make a task stricter, never looser.
 if (resumeOpt && resumeOpt.policies && typeof resumeOpt.policies === 'object' && !Array.isArray(resumeOpt.policies))
   for (const [id, p] of Object.entries(resumeOpt.policies).slice(0, 500)) if (inProject.has(id) && p === 'strict') escalatedPolicies.set(id, p)
+for (const m of markerStates) for (const id of m.esc || []) if (inProject.has(id)) escalatedPolicies.set(id, 'strict')
 let resumeBase = resumeSafe
 if (!resumeBase) for (const m of markerStates) if (!resumeBase || newerState(m, resumeBase)) resumeBase = m
 if (resumeBase && resumeBase !== resumeSafe) log(`◎ run state taken from the PR marker of ${resumeBase.repo}${resumeBase.url ? ` (${resumeBase.url})` : ''}: attempt ${stateRank(resumeBase)[0]}, seq ${stateRank(resumeBase)[1]}`)
@@ -4420,11 +4455,11 @@ const overturned = [] // gating findings the verifier REJECTED with evidence —
 // a REJECTED finding counts only with cited evidence. A dead verifier keeps every finding
 // (fail safe to the reviewers). Synthesized findings (a FAIL with no finding) are not sent:
 // there is nothing concrete to verify.
-async function verifyFindings(task, mode, findings, range, attempt, phaseName, fixed = null) {
+async function verifyFindings(task, mode, findings, range, attempt, phaseName, fixed = null, tag = '') {
   if (!VERIFY_FINDINGS || !findings.length) return { kept: findings, rejected: [] }
   reviewStats.verifyChecks++
-  const v = await agentT(verifyPrompt(task, mode, findings, range, attempt, fixed), {
-    label: `verify:${task.id}:${mode}#${attempt}`,
+  const v = await agentT(verifyPrompt(task, mode, findings, range, attempt, fixed, tag), {
+    label: `verify:${task.id}:${mode}#${attempt}${tag}`,
     phase: phaseName,
     model: 'sonnet',
     agentType: pluginAgent('reviewer'),
@@ -4520,7 +4555,8 @@ function earlyReviews(task, range) {
 }
 // `first`: this stage's round 0 when the caller already dispatched it (a round, or a promise of
 // one). Every later round, the verifier, the fixes and the guard are unchanged.
-async function runReviewStage(task, mode, personas, phaseName, resolved, range, { first, spentFixes = 0 } = {}) {
+// `tag`: round 0's name when it is not the stage's first review (an escalated task's `~strict`).
+async function runReviewStage(task, mode, personas, phaseName, resolved, range, { first, spentFixes = 0, tag = '' } = {}) {
   // a task escalated from FAST already spent its one fix round: it counts against this budget
   const maxFix = Math.max(0, MAX_FIX_ATTEMPTS - spentFixes)
   if (personas.length === 0) return { verdict: 'PASS', findings: [], advisory: [], summary: 'no applicable reviewers' }
@@ -4554,7 +4590,7 @@ async function runReviewStage(task, mode, personas, phaseName, resolved, range, 
     // One exception, so the gate can't be talked past: a reviewer that returns FAIL with NO
     // findings at all gave us nothing to verify, so we cannot classify it as a nit — it gates,
     // carrying its summary as a synthesized major.
-    const checked = await verifyFindings(task, mode, findings.filter(isGating), range, attempt, phaseName, fixed)
+    const checked = await verifyFindings(task, mode, findings.filter(isGating), range, attempt, phaseName, fixed, attempt === 0 ? tag : '')
     overturned.push(...checked.rejected.map((f) => ({ task: task.id, repo: task.repo, stage: mode, severity: f.severity, persona: f.persona, where: `${f.file || '?'}:${f.line || '?'}`, issue: f.issue, evidence: f.overturnedBy })))
     const gating = checked.kept
     const advisory = findings.filter((f) => !isGating(f))
@@ -4870,6 +4906,61 @@ async function runFast(task, resolved, range, early) {
   guardChecks.reReviewed++
   return { verdict: 'FAIL', specGated, findings, advisory, summary: `FAST: the guard did not pass the fix — ${g ? (g.reason || g.decision).slice(0, 200) : 'guard died'}` }
 }
+// The router classified the DECLARED files. What the implementer changed is classified again before
+// the panel: a changed file on a floor (an issue that declared nothing, or a build past its footprint)
+// or the precheck's word that the diff changes an auth check, whatever its files are named, makes
+// the task STRICT, with the lenses its changed files promote (privacy for an auth change) — a task
+// already STRICT still gains those lenses. An `auto` FAST pick whose build went past FAST's footprint
+// (code in a docs-only pick, more than fastMaxFiles files) runs balanced; an explicit `fast` is the
+// owner's word on size, as at routing. Raise-only, and never with no policy asked for (balanced
+// runs, 0.15.1) nor under policies.allowBelowFloor (an override is honoured below a floor there).
+function raiseAfterBuild(task, impl, early, authChange) {
+  if (task.policySource === 'default' || POLICY_CFG.allowBelowFloor) return
+  const cfg = policyCfgFor(task.repo)
+  const changed = [...new Set((impl.filesChanged || []).map(policyPath).filter(Boolean))]
+  const floor = changed.flatMap((f) => { const g = globHit(cfg.strictPaths, f); return g ? [`changed ${f} matches ${g}`] : [] })
+  if (authChange) floor.push(`the precheck: the diff changes an auth check (${authChange})`)
+  const st = policyStats.tasks[task.id]
+  const moveTo = (to) => {
+    if (st && st.policy !== to) {
+      policyStats.byPolicy[st.policy]--
+      policyStats.byPolicy[to] = (policyStats.byPolicy[to] || 0) + 1
+      st.policy = to
+    }
+    task.policy = to
+  }
+  const promote = [...new Set([...(task.promote || []), ...classifyPolicy({ files: changed }, cfg).promote, ...(authChange ? ['privacy'] : [])])]
+  if (task.policy === 'strict') {
+    // already STRICT: no raise, but the lenses the build's files (or an auth change) promote join the panel
+    const added = promote.filter((l) => !(task.promote || []).includes(l))
+    if (!added.length) return
+    task.promote = promote
+    if (early) early.discard(`the build promoted ${added.join(', ')}: the panel changed`)
+    if (st) st.promotedAfterBuild = added
+    log(`   · ${task.id}: STRICT — the build promotes ${added.join(', ')}${authChange ? ` (${floor[floor.length - 1]})` : ''}`)
+    return
+  }
+  if (floor.length) {
+    const from = task.policy
+    moveTo('strict')
+    if (task.model !== 'opus') task.model = 'opus' // the fixes from here on: the build itself already ran
+    task.promote = promote
+    if (early) early.discard(`raised ${from} → strict after the build: the panel changed`)
+    if (st) st.raisedAfterBuild = floor.slice(0, 3)
+    emit('policy.raised', { task: task.id, repo: task.repo, from, to: 'strict', signals: floor.slice(0, 3) })
+    log(`   · ${task.id}: ${from} → STRICT after the build — ${floor[0]}${floor.length > 1 ? ` (+${floor.length - 1})` : ''}`)
+    return
+  }
+  if (task.policy !== 'fast' || task.policyWanted !== 'auto') return
+  const code = changed.filter((f) => !globHit(cfg.docsPaths, f))
+  if (!code.length || (!task.docsOnly && changed.length <= cfg.fastMaxFiles)) return
+  moveTo('balanced')
+  if (early) early.discard('FAST raised to balanced: the panel changed') // its rounds drew the FAST panel
+  if (st) st.raisedAtPrecheck = code.slice(0, 3)
+  emit('policy.raised', { task: task.id, repo: task.repo, from: 'fast', to: 'balanced', signals: [task.docsOnly ? `a docs-only pick changed ${code.slice(0, 3).join(', ')}` : `${changed.length} changed files > ${cfg.fastMaxFiles}`] })
+  log(`   · ${task.id}: ${task.docsOnly ? `FAST was picked for a docs-only footprint, but the implementer changed ${code.slice(0, 3).join(', ')}` : `FAST's footprint is ${cfg.fastMaxFiles} file(s); the implementer changed ${changed.length}`} — runs balanced`)
+}
+
 // A FAST attempt that failed continues as STRICT on the SAME head: the commits stay, the task's
 // whole range is reviewed by the strict panel, the fix round spent counts against its budget, and
 // the implementer moves to opus. Never a second implementation, never a replan spent.
@@ -4950,6 +5041,7 @@ async function runTask(task) {
   // back to the SAME implementer (bounded); a dead precheck passes through (it is an
   // optimisation, never a gate the reviewers depend on).
   const precheckAdvisory = [] // footprint problems demoted to advisory (see below)
+  let authChange = '' // the precheck's word that the diff changes an auth check (raiseAfterBuild)
   const early = REVIEW_PARALLEL === 'all' && PRECHECK ? earlyReviews(task, range) : null // 'all': spec ∥ quality round 0 next to the precheck
   if (PRECHECK) {
     let lastFail = null // {files, head} of the previous footprint-only FAIL
@@ -4965,6 +5057,7 @@ async function runTask(task) {
         schema: PRECHECK_SCHEMA,
         kind: 'precheck', // 6/15 min, hedged at 6
       })
+      if (pc && str(pc.authChange)) authChange = trim(pc.authChange.trim(), 200)
       let problems = pc && pc.verdict === 'FAIL' ? (pc.problems || []).filter((x) => x && str(x.issue)) : []
       if (early && problems.length) early.discard('the precheck failed')
       // A bad `startSha` is the REPORT's defect, not the code's: drop it and judge from firstSha^
@@ -5017,16 +5110,8 @@ async function runTask(task) {
     }
   }
 
-  // ── FAST: a docs-only pick that changed code is raised first; then one round, one fix ──
-  if (task.policy === 'fast' && task.docsOnly) {
-    const code = (impl.filesChanged || []).map(policyPath).filter((f) => f && !globHit(POLICY_CFG.docsPaths, f))
-    if (code.length) {
-      task.policy = 'balanced'
-      if (early) early.discard('FAST raised to balanced: the panel changed') // its rounds drew the FAST panel
-      if (policyStats.tasks[task.id]) policyStats.tasks[task.id].raisedAtPrecheck = code.slice(0, 3)
-      log(`   · ${task.id}: FAST was picked for a docs-only footprint, but the implementer changed ${code.slice(0, 3).join(', ')} — runs balanced`)
-    }
-  }
+  // ── the footprint the build actually wrote, routed again (raise-only); then FAST: one round, one fix ──
+  raiseAfterBuild(task, impl, early, authChange)
   let fastPassed = null
   if (task.policy === 'fast') {
     const f = await runFast(task, resolved, range, early)
@@ -5064,26 +5149,29 @@ async function runTask(task) {
     let h0 = range.headSha
     if (staged && !staged.discarded) ({ spec: spec0, quality: quality0, head: h0 } = staged)
     else if (staged) spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', range, 0, rerun('spec'))
-    else if (REVIEW_PARALLEL !== 'off' || strictTag) {
+    else if (REVIEW_PARALLEL !== 'off') {
       log(`   · ${task.id}: spec ∥ quality review on ${h0 || 'the reported head'}…`)
       spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', { ...range }, 0, strictTag)
       quality0 = ahead(reviewRound(task, 'quality', qualityPanel, 'Quality review', { ...range }, 0, strictTag))
-    }
+    } else if (strictTag) spec0 = reviewRound(task, 'spec', specPanel, 'Spec review', { ...range }, 0, strictTag) // 'off': spec, then quality — STRICT's round 0 too
     const fixesBefore = task.fixRounds || 0
-    spec = await runReviewStage(task, 'spec', specPanel, 'Spec review', resolved, range, { first: spec0, spentFixes })
+    spec = await runReviewStage(task, 'spec', specPanel, 'Spec review', resolved, range, { first: spec0, spentFixes, tag: strictTag })
     if (spec.verdict !== 'PASS' && quality0) discardRound(task, 'quality', quality0, `the spec stage ended ${spec.verdict}`)
     if (spec.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: spec }
     if (spec.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'SPEC_FAILED', impl, review: spec }
 
     let qualityFirst = quality0
+    let qualityTag = strictTag // the name quality round 0 ran under (its verifier's too)
     if (quality0 && (range.headSha !== h0 || (!range.headSha && (task.fixRounds || 0) > fixesBefore))) {
       const tag = rerun('quality')
       const moved = `a spec fix moved the head ${h0 || '(unreported)'} → ${range.headSha || '(unreported)'}`
       log(`   · ${task.id}: ${moved} — the quality round-0 verdict is stale; quality reviews the fixed head (${tag})`)
       discardRound(task, 'quality', quality0, moved)
+      qualityTag = tag
       qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, tag)
-    } else if (staged && staged.discarded) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, rerun('quality'))
-    quality = await runReviewStage(task, 'quality', qualityPanel, 'Quality review', resolved, range, { first: qualityFirst, spentFixes })
+    } else if (staged && staged.discarded) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, (qualityTag = rerun('quality')))
+    else if (!qualityFirst && strictTag) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, strictTag)
+    quality = await runReviewStage(task, 'quality', qualityPanel, 'Quality review', resolved, range, { first: qualityFirst, spentFixes, tag: qualityTag })
     if (quality.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: quality }
     if (quality.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'QUALITY_FAILED', impl, review: quality }
   }
@@ -5439,6 +5527,9 @@ const landedTaskRecord = (d) => ({
   commits: d.commits || [],
   summary: trim(d.summary, 400),
   files: (d.files || []).slice(0, 50),
+  // the footprint hydration DECLARED (files above adds what the implementer changed): what the router
+  // classified, so the policy counterfactual re-routes the task on the same facts
+  ...(Array.isArray(d.declared) ? { declared: d.declared.slice(0, 50) } : {}),
 })
 // `replan: true` marks a task a replan invented (its id is no issue of the project): a resume of
 // this runId absorbs it like an issue's, once verified (see RESUMED).
@@ -5455,7 +5546,7 @@ landedDelta = () => {
   const out = []
   let bytes = 0
   for (const d of landedUnsent()) {
-    const b = utf8Bytes(JSON.stringify(d))
+    const b = utf8Bytes(JSON.stringify({ attempt: '__ATTEMPT__', at: '__AT__', k: landedKey(d), ...d })) + 1 // the line as the payload carries it
     if (out.length && (out.length >= LANDED_DELTA_MAX || bytes + b > LANDED_DELTA_BYTES)) break
     out.push(d)
     bytes += b
@@ -5515,6 +5606,8 @@ function stateFor(repo, gen = 0) {
   const repoOfId = (id) => (hydratedById.get(id) || pendingById.get(id) || mine.find((d) => d.id === id) || {}).repo
   const rounds = Object.entries(fixRoundsNow()).filter(([id, n]) => Number.isInteger(n) && n > 0 && repoOfId(id) === repo)
   const openRounds = rounds.filter(([id]) => !landedHere.has(id))
+  // FAST tasks of this repo escalated to STRICT and not landed: a resume from this marker alone keeps them STRICT
+  const esc = [...escalatedPolicies.keys()].filter((id) => !landedHere.has(id) && repoOfId(id) === repo).slice(0, MARKER_TASK_CAP)
   const rec = (d, firstLen) => {
     const head = asSha(d.headSha || (d.range && d.range.headSha))
     const first = asSha((d.range && d.range.firstSha) || (d.commits || [])[0])
@@ -5524,7 +5617,7 @@ function stateFor(repo, gen = 0) {
     const omitted = mine.length - kept.length
     const replanIds = kept.filter((d) => !indexIds.has(d.id)).map((d) => d.id) // tasks a replan invented: a resume of this runId absorbs them from the marker too
     // `text`: the project's wording when it is not the key itself, so a resume can say a marker was written for another wording of the same key
-    return { version: 2, runId: runId || null, project: PROJECT_KEY === project ? trim(project, 200) : String(PROJECT_KEY), ...(PROJECT_KEY === project ? {} : { text: trim(project, 120) }), repo, runBranch: runBranchFor(repo), base: BASE_BRANCH, attempt: sessionAttempt, lastSeq: journal.seq, replansUsed: replans, fixRounds: Object.fromEntries(fr.slice(0, MARKER_TASK_CAP)), outputTokensSpent: runSpent(), session: journal.session || null, ship: gen, landedTasks: kept.map((d) => rec(d, firstLen)), ...(replanIds.length ? { replan: replanIds } : {}), ...(omitted ? { omitted } : {}) }
+    return { version: 2, runId: runId || null, project: PROJECT_KEY === project ? trim(project, 200) : String(PROJECT_KEY), ...(PROJECT_KEY === project ? {} : { text: trim(project, 120) }), repo, runBranch: runBranchFor(repo), base: BASE_BRANCH, attempt: sessionAttempt, lastSeq: journal.seq, replansUsed: replans, fixRounds: Object.fromEntries(fr.slice(0, MARKER_TASK_CAP)), outputTokensSpent: runSpent(), session: journal.session || null, ship: gen, landedTasks: kept.map((d) => rec(d, firstLen)), ...(replanIds.length ? { replan: replanIds } : {}), ...(esc.length ? { esc } : {}), ...(omitted ? { omitted } : {}) }
   }
   const size = (st) => Math.ceil(utf8Encode(scrubPaths(JSON.stringify(st))).length / 3) * 4
   let kept = mine.slice(0, MARKER_TASK_CAP)
@@ -6075,7 +6168,7 @@ function resolvePolicy(t, { selectorModel, afterCode }) {
   const proposed = POLICIES.includes(t.policy) && !t.routedPolicy ? t.policy : null // hydration's (or the replanner's) proposal: raise-only, never a policy the engine set itself
   const c = classifyPolicy(
     { files: t.files, tags: tagsOf(t.repo), migration: t.agent === resolveAgent('migration-engineer'), crossRepo, downstream: downstreamOf(t.id), model: selectorModel, replannedAfterCode: afterCode, history: historyRaises(t), proposed, proposedReason: str(t.policyReason) },
-    POLICY_CFG,
+    policyCfgFor(t.repo),
   )
   const label = labelPolicy(t.labels)
   const repoPolicy = (repoCfg(t.repo) || {}).policy
@@ -6104,6 +6197,8 @@ function resolvePolicy(t, { selectorModel, afterCode }) {
     escalatedPolicies.set(t.id, kept)
   }
   t.policy = policy
+  t.policySource = source
+  t.policyWanted = wanted
   t.promote = c.promote
   t.docsOnly = c.docsOnly
   if (belowFloor) t.belowFloor = c.floor.slice(0, 3)
@@ -6207,8 +6302,9 @@ function settle(r) {
     // only when that was the range it judged (verify-only), or SHAs already reviewed for this task
     const judged = [...(r.impl?.commits || []), ...(r.verifiedPrior || []), r.range && r.range.firstSha, r.range && r.range.headSha, r.headSha]
     markReviewed(r.id, r.runBranch || runBranchFor(r.repo), judged)
-    const files = [...new Set([...((t && t.files) || []).map((f) => String(f).split(' — ')[0].trim()), ...(r.impl?.filesChanged || []).map(String)].filter(Boolean))]
-    doneTasks.push({ id: r.id, repo: r.repo, status: r.status, summary: r.impl?.summary, ticket: (t && t.ticket) || r.id, runBranch: r.runBranch, headSha: asSha(r.headSha), commits, files, range: r.range || null })
+    const declared = [...new Set(((t && t.files) || []).map((f) => String(f).split(' — ')[0].trim()).filter(Boolean))]
+    const files = [...new Set([...declared, ...(r.impl?.filesChanged || []).map(String)].filter(Boolean))]
+    doneTasks.push({ id: r.id, repo: r.repo, status: r.status, summary: r.impl?.summary, ticket: (t && t.ticket) || r.id, runBranch: r.runBranch, headSha: asSha(r.headSha), commits, files, declared, range: r.range || null })
     // the gate is briefed on the RUN branch — a lane branch no longer exists after integration
     repoRef[r.repo] = { ticket: (t && t.ticket) || 'NO_TICKET', branch: r.runBranch || (t && t.branch) || '' }
     // a landing is the checkpoint worth having on disk at once: the next session absorbs it

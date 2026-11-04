@@ -341,6 +341,10 @@ Settled while building, inside the approved design:
   floor; `finalCheck` still checks cross-repo contracts at project end. A per-task contract
   dispatch needs a verdict adapter for an agent that does not return `VERDICT_SCHEMA`, and its own
   calibration. Revisit if the benchmark shows contract escapes on STRICT tasks.
+  **0.18.0:** shipped without an adapter, as a reviewer persona (`contract`, no tag draws it)
+  promoted under STRICT by `policies.promote.contract` or a cross-repo dependency. It returns
+  `VERDICT_SCHEMA` like any lens, so verify, fix and guard apply unchanged; its brief names the
+  other repositories' paths and run branches.
 - **The promoted lenses' globs are config** (`policies.promote: {privacy: [...], 'data-integrity': [...]}`).
 - **S2 (0.16.0 counterfactual, 113 recorded tasks):** balanced 96, strict 16, fast 1. No
   round-0 failure on the FAST pick; its one flag is a terminal-sweep finding in its repo (a

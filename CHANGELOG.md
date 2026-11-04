@@ -1,12 +1,61 @@
 # Changelog
 
-## 0.17.1 — crystallize: what PRs #59 and #60 taught
+## 0.18.1 — crystallize: what PRs #59 and #60 taught
 
 The crystallize pass on execution policies ([#59](https://github.com/laurentlouk/grimoire/pull/59), [#60](https://github.com/laurentlouk/grimoire/pull/60)). Report: `docs/crystallize/2026-11-01-grimoire-pr59-pr60.md`.
 
 - **`roast`: measure what the design promises.** When a design's value rests on a sorting rule (a router, a threshold, a classifier), run it over the recorded data before approval and put the mix next to the claimed saving. The execution-policy router sent 1 of 113 recorded tasks to FAST, which was found only after approval. New eval case `roast-6`.
 - **Docs synced to the code:** the execution-policies spec's status (shipped in 0.16.0 and 0.17.0), its `policies.mode: 'shadow'` mentions (no such flag: every route event records `autoPolicy`), and its resume test (the policy is kept; the implementer is dispatched again and finds its commits).
-- **Follow-ups** filed as [#61](https://github.com/laurentlouk/grimoire/issues/61): the benchmark (slice 6), FAST rule tuning, the #60 review minors, the deferred per-task contract check.
+- **Follow-ups** filed as [#61](https://github.com/laurentlouk/grimoire/issues/61); all but the live-run benchmark shipped in 0.18.0.
+
+## 0.18.0 — execution policies: the gaps the first live run found
+
+Closes the follow-ups of [#61](https://github.com/laurentlouk/grimoire/issues/61): what the first live
+run of the policies (three issues, two repos, `/grimoire:implement` + `/grimoire:review`) and the
+#60 review left open.
+
+- **Routed again after the build.** The router classifies the declared files; before the panel the
+  files the implementer changed are classified again, raise-only: a changed file on a floor makes
+  the task strict (the lenses its files promote, fixes on opus, `raisedAfterBuild`, a
+  `policy.raised` event), and a FAST build past FAST's footprint (code in a docs-only pick, more
+  than `fastMaxFiles` files) runs balanced. An issue with no declared files is no longer judged on
+  a guess.
+- **An auth change is strict whatever the file is named.** The precheck reports `authChange` (the
+  diff adds, removes or changes an authentication or authorization check, `path:line — what`); it
+  never fails the change, it raises it to strict with the privacy lens.
+- **`repos[].strictPaths`:** floor globs for one repo, added to the run's, where its auth, money or
+  contract code lives under names the defaults miss (`src/services/auth.rs`, `**/aws_cognito/**`).
+  `setup` proposes them while exploring a repo.
+- **The `contract` lens** (the deferred per-task contract check): a reviewer persona no repo draws
+  by tag, promoted under strict by a contract file (`policies.promote.contract`: proto, OpenAPI,
+  AsyncAPI, GraphQL, Avro) or a dependency on another repo's issue. Its brief names the other
+  repositories' paths and run branches and the task it depends on; it FAILs a mismatch or a breaking
+  change with no stated release order. It runs on the reviewer agent and its verdict schema, so
+  verify, fix and guard treat it like any lens.
+- **One rule, stated once.** `workflows/policies.md` now carries the promotion rule and a session's
+  version of the floors: a session lists the files it will touch when none are declared, classifies
+  the diff again after the build, floors on a blocking relation on another repo's issue (declared or
+  found while building), and promotes lenses only by `policies.promote` and a cross-repo
+  dependency. `implement` and `review` defer to it instead of paraphrasing it.
+- **A session's panel is written down:** with no terminal sweep, `balanced` and `strict` add the
+  terminal lenses that fit the repo's tags. On the live run those lenses found all three majors.
+- **The spec hawk reads the repo's rules.** The invariants and golden rules of its agent
+  instruction files (`AGENTS.md` and its peers) are part of the task; a breach is a major. **`break-it`**: a new limit or check that a retry,
+  resend, job or second path skips is a major. Both misses were caught by an outside reviewer on
+  the live run.
+- **#60 review minors:** an escalated task's STRICT round-0 verifier has its own label and worktree
+  (`verify:<id>:<mode>#0~strict`, `verify-<mode>-r0-strict`); `reviewParallel: 'off'` holds after an
+  escalation (spec ~strict, then quality ~strict); escalations not landed are in the PR marker
+  (`esc`, raise-only), so a resume from the marker alone never runs such a task FAST again.
+- **The benchmark's input:** `landed.jsonl` records each task's `declared` files apart from the files
+  it changed, and `policy-counterfactual.mjs` routes on them when present (`declaredCoverage`), so
+  the FAST tuning in #61 can be decided on the router's own facts.
+- **Fixed:** a landed delta now counts its bytes as written (the stamp included), so it stays under
+  `LANDED_DELTA_BYTES`.
+- Tests: `execution-policies.test.mjs` 105 assertions (build re-routing, the auth signal, `allowBelowFloor`, an already-strict task gaining lenses,
+  `repos[].strictPaths`, the contract lens, the marker's `esc`, `reviewParallel: 'off'` after an
+  escalation); the resume suite reads `esc`; the counterfactual routes on declared files. New eval
+  cases `implement-7`, `review-7`, `setup-14`.
 
 ## 0.17.0 — execution policies: FAST, escalation, history, and the edge
 
