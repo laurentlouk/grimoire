@@ -135,6 +135,38 @@ try {
     const none = spawnSync('bash', ['-c', script.replace("RUNID='run-mc4'", "RUNID='no-such-run'")], { cwd: root, encoding: 'utf8', env: { ...process.env, PWD: root, CLAUDE_CONFIG_DIR: claude } })
     ok(/^COST none$/m.test(none.stdout) && /^RUNDIR /m.test(none.stdout), `no workflow of that runId: COST none, and the chunk is still written (${(none.stdout.match(/^COST.*$/m) || ['no COST line'])[0]})`)
   }
+
+  // ══════ MC-5 · the installed layout: the skill runs a copy of workflows/ only, and passes pluginRoot ══════
+  {
+    const root = fresh('root')
+    const claude = fresh('claude')
+    writeClaudeRun(claude, root, 'run-mc5')
+    const engine = join(root, '.grimoire', 'engine-0.20.0') // what skills/orchestrate copies: $P/workflows/. and nothing else
+    mkdirSync(engine, { recursive: true })
+    spawnSync('cp', ['-R', `${DIR}/.`, engine])
+    const PLUGIN = new URL('../..', import.meta.url).pathname.replace(/\/$/, '')
+    const script = async (args) => {
+      const r = await run('MC-5 · (capture) the installed engine', [T(1)], (label, p) => (label.startsWith('journal#') ? confirming(p, 0) : happy(label)),
+        { args: { ...QUIET, runId: 'run-mc5', briefsDir: join(engine, 'briefs'), maxCost: 1e9, telemetry: { dir: fresh('tel'), flushEvery: 1000 }, ...args } })
+      const s = bashOf(r.calls.find((c) => /^journal#\d+$/.test(c.label)).prompt)
+      return spawnSync('bash', ['-c', s], { cwd: root, encoding: 'utf8', env: { ...process.env, PWD: root, CLAUDE_CONFIG_DIR: claude } })
+    }
+    const withRoot = await script({ pluginRoot: PLUGIN })
+    ok(/^COST 12921$/m.test(withRoot.stdout), `with pluginRoot, the copied engine reaches the plugin's cost script (${(withRoot.stdout.match(/^COST.*$/m) || ['no COST line'])[0]})`)
+    const r = await run('MC-5b · no pluginRoot, an engine copy with no cost script beside it', [T(1)], (label, p) => (label.startsWith('journal#') ? confirming(p) : happy(label)),
+      { args: { ...QUIET, runId: 'run-mc5b', briefsDir: join(engine, 'briefs'), maxCost: 1e9, telemetry: { dir: fresh('tel'), flushEvery: 1000 } } })
+    ok(r.logs.some((l) => l.includes(`the cost cap is blind: a journal flush returned no cost; the cost script is looked for at ${join(engine, 'scripts')}/../../scripts/economy/runs.mjs, and an engine copy holds workflows/ only: pass pluginRoot`)),
+      `without pluginRoot, the blind cap says where it looked for the cost script and what to pass (${r.logs.find((l) => /cost cap is blind/.test(l)) || 'no line'})`)
+    ok(r.logs.filter((l) => /cost cap is blind/.test(l)).length === 1 && !r.logs.some((l) => /cost cap is blind.*maxOutputTokens still applies/.test(l)), 'said once, and without naming an output-token cap the run does not have')
+  }
+
+  // ══════ MC-6 · a resumed run already past the cap dispatches nothing ══════
+  {
+    const r = await run('MC-6 · resumed, its earlier sessions already cost more than the cap', [T(1), T(2)], (label, p) => (label.startsWith('journal#') ? confirming(p, 5000) : happy(label)),
+      { args: { ...QUIET, runId: 'run-mc6', scriptsDir: SCRIPTS, maxCost: 1000, resumeState: { version: 2, runId: 'run-mc6', attempt: 1, lastSeq: 40, landed: [], pending: [] }, telemetry: { dir: fresh('tel'), flushEvery: 1000 } } })
+    ok(!r.labels.some((l) => l.startsWith('impl:')) && r.result.halt && /^budget_exhausted: this run's cost cap \(1\.0k effective tokens\) reached at 5\.0k/.test(r.result.halt.reason),
+      `the start flush is read before the first dispatch: no implementer runs (${r.labels.filter((l) => l.startsWith('impl:')).join(' ') || 'none'} · ${JSON.stringify(r.result.halt)})`)
+  }
 } finally {
   rmSync(TMP, { recursive: true, force: true })
 }

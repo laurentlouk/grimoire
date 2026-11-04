@@ -789,7 +789,7 @@ function client(score) {
     terminal: (e) => `${s(e.repo)} → ${s(e.verdict)}`,
     gate: (e) => `${s(e.repo)} → ${s(e.status)}${e.applies === false ? ' (not applicable)' : ''}${e.prUrl ? ' · ' + s(e.prUrl) : ''}`,
     claim: (e) => `${s(e.action)} by ${s(e.by)}`,
-    budget: (e) => `${e.kind === 'cost' ? 'cost ' : ''}${e.spent == null ? 'unread' : s(e.spent)} / ${s(e.cap)} → ${s(e.action)}`,
+    budget: (e) => (e.kind === 'cost' ? `cost ${e.spent == null ? 'unread' : s(e.spent)} / ${s(e.cap)} → ${s(e.action)}` : `${s(e.spent)} / ${s(e.cap)} → ${s(e.action)}`),
     halt: (e) => `${e.kind ? `[${s(e.kind)}] ` : ''}${s(e.reason)}`,
     // 0.9.0 · run durability: late and wedged dispatches, incremental delivery, environment checks, resume
     late: (e) => `${s(e.label)} past its ${s(e.softMin)}-min soft limit${e.kind ? ` (${s(e.kind)})` : ''}: still awaited, not stopped`,

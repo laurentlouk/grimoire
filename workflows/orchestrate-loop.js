@@ -2283,7 +2283,7 @@ let journalWriterCheck = null // [cksum, bytes] of JOURNAL_WRITER, once
 // inline once a flush found the file missing (`inline`). A RESEND carries one part only: a chunk's
 // events, or run.json alone; `tag` names a resent chunk's file (`<firstSeq>.r1.jsonl`), never the one
 // the first try may have written.
-function journalPrompt({ lines, runJson, landed = [], firstSeq, tag = '', runDir, slug, session, seed, inline = false }) {
+function journalPrompt({ lines, runJson, landed = [], firstSeq, tag = '', runDir, slug, session, seed, inline = false, cost = false }) {
   const dir = runDir ? `DIR=${shq(runDir)}` : `DIR=${shq(TELEMETRY_DIR)}/"$(date -u +%Y%m%d-%H%M%S)"-${shq(slug)}`
   const chunk = lines.length ? String(firstSeq).padStart(8, '0') + (/^\.r\d+$/.test(tag) ? tag : '') : ''
   const newSeq = Number.isInteger(runJson && runJson.checkpoint && runJson.checkpoint.lastSeq) ? runJson.checkpoint.lastSeq : 0
@@ -2312,7 +2312,7 @@ ${dir}
 case "$DIR" in /*) ;; *) C=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true); if [ "\${C##*/}" = .git ]; then DIR="\${C%/.git}/$DIR"; else DIR="$PWD/$DIR"; fi ;; esac
 mkdir -p "$DIR/events"
 SESSION=${tok}; SEED=${Number.isInteger(seed) && seed > 0 ? seed : 0}; NEWSEQ=${newSeq}; CHUNK=${chunk}; ${checks}
-COSTJS=${MAX_COST && runId ? shq(`${SCRIPTS_DIR}/../../scripts/economy/runs.mjs`) : ''}; RUNID=${MAX_COST && runId ? shq(runId) : ''}
+COSTJS=${cost && MAX_COST && runId ? shq(costScript()) : ''}; RUNID=${cost && MAX_COST && runId ? shq(runId) : ''}
 ${writer}\`\`\``
 }
 
@@ -2853,13 +2853,15 @@ let costBlind = false
 function costIsBlind(why) {
   if (costBlind) return
   costBlind = true
-  log(`⚠ maxCost=${fmtTok(MAX_COST)}: the cost cap is blind: ${why} — it will not halt the run; maxOutputTokens still applies`)
+  log(`⚠ maxCost=${fmtTok(MAX_COST)}: the cost cap is blind: ${why} — it will not halt the run${MAX_OUTPUT_TOKENS ? '; maxOutputTokens still applies' : ''}`)
   emit('budget', { spent: null, cap: MAX_COST, action: 'blind', kind: 'cost' })
 }
+// A flush the writer lost or never ran (no receipt, WRITER missing) says nothing about the cost: only
+// a receipt with no COST number makes the cap blind.
 function noteCost(r) {
-  if (!MAX_COST || !runId) return
-  if (r && Number.isInteger(r.costSoFar) && r.costSoFar >= 0) costSoFar = Math.max(costSoFar ?? 0, r.costSoFar)
-  else costIsBlind('a journal flush returned no cost (no transcripts of this run under the Claude config dir, or the cost script failed)')
+  if (!MAX_COST || !runId || !r || r.writer === 'missing') return
+  if (Number.isInteger(r.costSoFar) && r.costSoFar >= 0) costSoFar = Math.max(costSoFar ?? 0, r.costSoFar)
+  else costIsBlind(`a journal flush returned no cost; the cost script is looked for at ${costScript()}${PLUGIN_ROOT ? ' (no transcripts of this run under the Claude config dir, or the script failed)' : ', and an engine copy holds workflows/ only: pass pluginRoot'}`)
 }
 const clip = (v) => (typeof v === 'string' && v.length > 300 ? v.slice(0, 297) + '…' : v)
 function emit(type, data) {
@@ -2876,12 +2878,12 @@ let landedDelta = () => [] // the landed tasks whose detail landed.jsonl does no
 // One writer dispatch. Its chunk (`lines`), `runJson` and `landed` delta are each optional: a resend
 // carries one of them only, so its payload is small. A writer that returns nothing counts toward
 // JOURNAL_DEAD_AFTER, whichever of them it carried.
-async function writeJournal(label, { lines = [], firstSeq = 0, tag = '', runJson = null, landed = [] }) {
+async function writeJournal(label, { lines = [], firstSeq = 0, tag = '', runJson = null, landed = [], cost = false }) {
   // Every flush carries the session token and seed, never a "first of session" flag: the writer
   // registers the attempt once per token, so a first flush abandoned at its hard limit that runs
   // after a later one has landed stamps the same attempt and loses the run.json guard on seq.
   const dispatch = (lbl) =>
-    agentT(journalPrompt({ lines, runJson, landed, firstSeq, tag, runDir: journal.absRunDir || journal.runDir, slug: projectSlug, session: journal.session, seed: journal.seed, inline: journal.inline }), {
+    agentT(journalPrompt({ lines, runJson, landed, firstSeq, tag, runDir: journal.absRunDir || journal.runDir, slug: projectSlug, session: journal.session, seed: journal.seed, inline: journal.inline, cost }), {
       label: lbl,
       phase: 'Implement',
       model: 'haiku',
@@ -2964,7 +2966,7 @@ function flushJournal() {
     const lines = batch.map((e) => e.line)
     const runJson = runJsonFor(journal.final)
     const landed = landedDelta()
-    const r = await writeJournal(`journal#${n}`, { lines, firstSeq: batch[0].seq, runJson, landed })
+    const r = await writeJournal(`journal#${n}`, { lines, firstSeq: batch[0].seq, runJson, landed, cost: true }) // resends read no cost
     noteCost(r)
     if (chunkWritten(r, lines)) journal.written += lines.length
     else {
@@ -3137,6 +3139,11 @@ const JOURNAL_FLUSH_BYTES =
 // briefs, personas and config, because crystallize changes the prose between releases and a
 // version alone would not say which behaviour a run had.
 const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+// The plugin's own root (absolute), for the scripts that live outside workflows/: the skill runs a
+// project-local COPY of workflows/ (.grimoire/engine-<v>/), so `<scriptsDir>/../..` is the plugin
+// only when the engine runs from the plugin's own tree.
+const PLUGIN_ROOT = str(opts.pluginRoot) ? opts.pluginRoot.trim().replace(/\/+$/, '') : null
+const costScript = () => (PLUGIN_ROOT ? `${PLUGIN_ROOT}/scripts/economy/runs.mjs` : `${SCRIPTS_DIR}/../../scripts/economy/runs.mjs`)
 const runMetaOpt = opts.runMeta && typeof opts.runMeta === 'object' ? opts.runMeta : {}
 const runMeta = {
   grimoireVersion: str(runMetaOpt.grimoireVersion),
@@ -5314,7 +5321,6 @@ if (PREFLIGHT) {
 
 // ── telemetry on (execute runs) + cross-session resume ──
 journal.enabled = execute && telemetryOpt.enabled !== false
-if (MAX_COST && execute && (!journal.enabled || !runId)) costIsBlind(!journal.enabled ? 'the journal is off (telemetry.enabled: false), and only a journal flush reads the cost' : 'no runId, so no transcript can be matched to this run')
 if (runId) journal.runDir = `${TELEMETRY_DIR}/${runId}`
 else if (resumeOpt && journal.enabled) log('⚠ resumeState without runId — the journal starts a NEW run directory; pass the earlier run\'s runId to continue its log')
 // A checkpoint from an earlier session: continue its sequence numbers, keep the replans and
@@ -5371,6 +5377,7 @@ emit('run.start', {
   knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, wedgeGraceMin: WEDGE_GRACE_MIN, hydrateAhead: HYDRATE_AHEAD, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, maxCost: MAX_COST, budgetFloor: BUDGET_FLOOR, claims: !!claim, trackerStatus: TRACKER_STATUS },
   repos: repoList.map((r) => r.name),
 })
+if (MAX_COST && (!journal.enabled || !runId)) costIsBlind(!journal.enabled ? 'the journal is off (telemetry.enabled: false), and only a journal flush reads the cost' : 'no runId, so no transcript can be matched to this run')
 for (const c of claimedElsewhere) emit('claim', { task: c.id, action: 'skip', by: c.by })
 if (envState.start) emit('env', { when: 'start', why: 'startup', ...envState.start })
 
@@ -6620,8 +6627,10 @@ function stillRunningReason() {
 
 // The run is on disk from its start: run.start, the startup checks and what was absorbed, in a chunk
 // small enough to arrive whole, and run.json with them. Held until the first landing (hours in, as
-// many as 24 events by then), the first chunk was the one most often lost.
-flushJournal()
+// many as 24 events by then), the first chunk was the one most often lost. A resumed run under maxCost
+// waits for it: its earlier sessions' cost comes back with it, before anything is dispatched.
+const startFlush = flushJournal()
+if (MAX_COST && runId && journal.enabled && (resumeBase || resumedLanded.length)) await startFlush
 
 while (true) {
   // A failed environment check (in flight) stops new dispatches at once; in-flight work settles.

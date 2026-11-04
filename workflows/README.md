@@ -169,6 +169,7 @@ ignored, with a warning.)
 | `agentNamespace` | `'grimoire'` | the prefix of the plugin-shipped agents (`agents/*.md`): the reviewer, the scouts, the `finalCheck` default and plugin specialists dispatch as `<ns>:<name>` (`grimoire:reviewer`). `''` keeps bare names, for a project that copied `agents/` into its own `.claude/agents/`. Repo/team agents, project-defined specialists and names that already contain `:` are used as given; memory stays at `agents/<bare name>.md` |
 | `toolHints` | — | `{<capability>: <hint>}`, free-form and all optional, e.g. `{tracker: 'mcp__<server-id>__* (Linear, claude.ai connector)', design: 'mcp__<id>__* (Figma)', errors: '<error-tracker> CLI, already authenticated'}`. Pasted as a `## Tool hints` block into every dispatch header, as the first route of the shared tool-unavailable fallback (every brief's preamble: configured hint → another server/connector with the same capability via ToolSearch → an already-authenticated CLI/API → report every route tried). The older `tracker: {kind?, tools, note?}` still works and becomes `toolHints.tracker` |
 | `maxOutputTokens` | — | cost fuse: this run's output tokens, counted across resumed sessions; reaching it halts as `budget_exhausted` |
+| `pluginRoot` | — | the plugin's absolute root, for the scripts outside `workflows/` (`maxCost` runs `<pluginRoot>/scripts/economy/runs.mjs`). The orchestrate skill passes it, because it runs a copy of `workflows/` only; without it the engine looks two levels above `scriptsDir`, which is the plugin only in its own tree |
 | `maxCost` | — | cost cap: what this run really costs, in effective tokens (input, cache reads and writes, output, weighted as in `scripts/economy/pricing.mjs`), counted across resumed sessions from Claude Code's transcripts; reaching it halts as `budget_exhausted`. Needs the journal and a `runId`; without them, or with no transcript readable, the cap is blind and never halts |
 | `budgetFloor` | `80000` | stop dispatching when the turn's remaining token budget drops below this |
 | `claim` | — | `{identity}` — claim issues at hydration, never build one someone else started, release what did not land |
@@ -472,7 +473,10 @@ dispatching, lets in-flight work settle and halts as `budget_exhausted`, naming 
   `costSoFar`. The cap therefore lags by up to one flush (`telemetry.flushEvery` events). When
   no flush can read the cost (the journal off, no `runId`, no transcripts on this machine, the
   script failing) the cap is blind: one `budget` event (`action: 'blind'`) and one log line say
-  so, and it never halts. Its `budget` events carry `kind: 'cost'`.
+  so, and it never halts. Its `budget` events carry `kind: 'cost'`. A resumed run waits for its
+  start flush before dispatching, so its earlier sessions' cost is known first. The cost script is
+  `<pluginRoot>/scripts/economy/runs.mjs`: an engine copy holds `workflows/` only, so pass
+  `pluginRoot` (the orchestrate skill does).
 
 ## Run durability
 
@@ -1014,7 +1018,7 @@ warnings, and each stall-check failure its re-check found answering, `{name, exi
 'environment'` is the machine and `'wedged'` a writer still running, neither failed code;
 `'harness'` is the loop itself failing — reviewers that never answer, hydration dying twice, three
 quick deaths in a row, the replanner dying, or a replanner that halted on a harness cause; `'budget'`
-is the output-token cap or floor; the rest (replan budget exhausted, a replanner's code-cause HALT,
+is the cost cap, the output-token cap or the floor (the reason names which); the rest (replan budget exhausted, a replanner's code-cause HALT,
 input problems) have none) · `contextResolves`
 (every `NEEDS_CONTEXT` question, who answered it, which escalated — a high count means the
 spec was underspecified, take it back to `roast`) · `guardChecks` · `reviewStats` ·
@@ -1201,7 +1205,7 @@ changed, so the mix it reports leans balanced.
 
 ## Token economy (built in)
 
-- What a run really costs is in `/grimoire:logs`, read after the fact from Claude Code's transcripts (cache reads and writes included). `maxOutputTokens` and the journal's `tok` count output tokens only, which were 4–7 % of the real cost on recorded runs; quote the cost lines, not `tok`, when judging spend.
+- What a run really costs is in `/grimoire:logs`, read after the fact from Claude Code's transcripts (cache reads and writes included). `maxOutputTokens` and the journal's `tok` count output tokens only, which were 4–7 % of the real cost on recorded runs; quote the cost lines, not `tok`, when judging spend. `maxCost` caps that real cost while the run goes (see "Cost fuse").
 - The terminal sweep reads **by lens**: each persona takes the branch `--stat` and reads only the files its Scope section names, never the whole branch.
 - Mechanical dispatches (index, harness-context, agent preflight, integrate, precheck, journal, ship, seal, environment checks, claim release, ledger) run with `effort: 'low'`; ship, seal and environment checks run on haiku, index and hydration on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
 - A precheck stops an unreviewable diff before the panel; a verifier stops a false-positive finding before it buys a fix.

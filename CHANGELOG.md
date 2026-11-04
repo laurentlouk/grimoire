@@ -7,6 +7,8 @@
 - **The journal reads the cost.** With `maxCost` set, each journal flush runs `scripts/economy/runs.mjs cost --run <runId>` after writing. It reads every session of the runId from Claude Code's transcripts, under the project root and its worktrees, and the writer returns `costSoFar`. `journal-writer.sh` is regenerated.
 - **The engine checks it before every dispatch**, beside `maxOutputTokens`. At 80 % it warns once. At the cap it stops dispatching, lets in-flight work settle, and halts `budget_exhausted` naming the cost cap. Its `budget` events carry `kind: 'cost'`. The cap lags by up to one flush.
 - **A cost it cannot read never halts.** With the journal off, no `runId`, no transcripts on this machine, or a cost script that fails, one `budget` event (`action: 'blind'`) and one log line say the cap is blind.
+- **`pluginRoot`**, a new engine arg the orchestrate skill passes: the skill runs a copy of `workflows/` only, so the cost script is found in the plugin itself. Without it, the blind cap's log line says where it looked.
+- **A resumed run waits for its start flush** before dispatching, so its earlier sessions' cost is checked first. A flush the writer lost or never ran does not make the cap blind, and resends do not run the cost command.
 - **`runs.mjs cost`** is a new CLI: `COST <n>`, or `COST none` when no workflow of the runId is found. A run's roots now include the real path of a symlinked root.
 - `/grimoire:setup` proposes `maxCost` beside `maxOutputTokens` (new eval case). `/grimoire:logs` labels cost `budget` events, and the knobs table, the "Cost fuse" paragraph, the orchestrate skill and the example config list the new cap.
 
