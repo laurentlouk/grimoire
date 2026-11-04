@@ -60,7 +60,9 @@
         "reviewRequested": { "description": "A pull request with a review request still pending, from anyone asked (reviewRequests not empty). true is Decide.", "type": ["boolean", "null"] },
         "isDraft": { "description": "A draft pull request. true is Not now, whatever its checks or review say.", "type": ["boolean", "null"] },
         "needsAttention": { "description": "A grimoire run's (kind run) tasks that never landed or are still running past their limit. Written by scripts/manager.mjs, never by a scout.", "type": ["integer", "null"], "minimum": 0 },
-        "haltReason": { "description": "Why a halted grimoire run (kind run) stopped, its halt's first line. Written by scripts/manager.mjs, never by a scout.", "type": ["string", "null"] }
+        "haltReason": { "description": "Why a halted grimoire run (kind run) stopped, its halt's first line. Written by scripts/manager.mjs, never by a scout.", "type": ["string", "null"] },
+        "runIssues": { "description": "The issue ids a grimoire run (kind run) names: its checkpoint's landed, pending and landedTasks, and landed.jsonl's. None open, every tracker source read in full: the run may have finished outside the loop. Written by scripts/manager.mjs, never by a scout.", "type": ["array", "null"], "items": { "type": "string", "minLength": 1 } },
+        "runPrs": { "description": "The pull request urls a grimoire run (kind run) names: its summary's prUrls, its checkpoint's shipped repos and its events. Read with runIssues. Written by scripts/manager.mjs, never by a scout.", "type": ["array", "null"], "items": { "type": "string", "minLength": 1 } }
       }
     }
   }

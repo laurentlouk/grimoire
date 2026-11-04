@@ -887,6 +887,107 @@ try {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
+  section('runs finished outside the loop: the hint, close-run, and a closed run left out')
+  {
+    const writeRun = (dir, runId, run, events = [], landed = []) => {
+      const d = join(dir, runId)
+      mkdirSync(join(d, 'events'), { recursive: true })
+      writeFileSync(join(d, 'run.json'), JSON.stringify({ runId, meta: {}, ...run }))
+      const lines = [{ type: 'run.start', project: run.project }, ...events].map((e, i) => JSON.stringify({ seq: i + 1, at: run.updatedAt, ...e }))
+      writeFileSync(join(d, 'events', '00000001.jsonl'), `${lines.join('\n')}\n`)
+      if (landed.length) writeFileSync(join(d, 'landed.jsonl'), `${landed.map((l) => JSON.stringify(l)).join('\n')}\n`)
+    }
+    const PR1 = 'https://github.com/acme/api/pull/12', PR2 = 'https://github.com/acme/web/pull/7', PR3 = 'https://github.com/acme/api/pull/15'
+    const root = join(TMP, 'finished-project')
+    const RUNS = join(root, '.grimoire', 'runs')
+    // where a run names its work: the checkpoint (landed, pending, landedTasks, shipped), landed.jsonl,
+    // the summary's prUrls and the events' prUrl
+    writeRun(RUNS, 'F-shipped', {
+      project: 'Shipped project', status: 'halted', startedAt: at(-9 * DAY), updatedAt: at(-8 * DAY),
+      summary: { done: 3, failed: 0, prUrls: [PR1] },
+      checkpoint: { landed: ['A-2', 'A-1'], pending: ['A-3'], landedTasks: [{ id: 'A-1' }, { id: '10.1' }], shipped: { web: { prUrl: PR2 } } },
+    }, [{ type: 'gate', repo: 'api', status: 'DONE', prUrl: PR1 }, { type: 'ship', repo: 'api', prUrl: PR3 }, { type: 'gate', repo: 'web', prUrl: '' },
+      { type: 'halt', kind: 'environment', reason: 'signing locked' }, { type: 'run.end', status: 'halted', done: 3, failed: 0, blocked: 0, stillRunning: 0 }],
+    [{ id: 'A-4', repo: 'api' }])
+    writeRun(RUNS, 'F-stale', { project: 'Stale project', status: 'running', startedAt: at(-9 * DAY), updatedAt: at(-8 * DAY), checkpoint: { landed: [], pending: ['B-1', 'B-2'] } })
+    writeRun(RUNS, 'F-nothing', { project: 'Empty project', status: 'halted', startedAt: at(-9 * DAY), updatedAt: at(-8 * DAY) },
+      [{ type: 'halt', reason: 'no slices' }, { type: 'run.end', status: 'halted', done: 0, failed: 0, blocked: 0, stillRunning: 0 }])
+    writeRun(RUNS, 'F-closed', { project: 'Closed project', status: 'halted', startedAt: at(-9 * DAY), updatedAt: at(-8 * DAY) },
+      [{ type: 'halt', reason: 'signing locked' }, { type: 'run.end', status: 'halted', done: 1, failed: 0, blocked: 0, stillRunning: 0 },
+        { type: 'run.close', reason: 'shipped', note: null, by: 'manager close-run' }])
+
+    // one project, two runs: the older one closed today, the newer one halted and still to resume
+    writeRun(RUNS, 'F-twin-new', { project: 'Twin project', status: 'halted', startedAt: at(-3 * DAY), updatedAt: at(-2 * DAY) },
+      [{ type: 'halt', reason: 'signing locked' }, { type: 'run.end', status: 'halted', done: 1, failed: 0, blocked: 0, stillRunning: 0 }])
+    writeRun(RUNS, 'F-twin-old', { project: 'Twin project', status: 'halted', startedAt: at(-6 * DAY), updatedAt: at(-5 * DAY) },
+      [{ type: 'halt', reason: 'replans spent' }, { type: 'run.end', status: 'halted', done: 0, failed: 1, blocked: 0, stillRunning: 0 },
+        { type: 'run.close', at: NOW, reason: 'superseded', note: null, by: 'manager close-run' }])
+
+    const R = mod.readRuns(RUNS, { sourceId: 'runs', now: NOW })
+    const r = (id) => R.items.find((i) => i.id === id)
+    ok(JSON.stringify(R.items.map((i) => i.id).sort()) === '["F-nothing","F-shipped","F-stale","F-twin-new"]', `a closed run is left out (${R.items.map((i) => i.id).join(' ')})`)
+    ok(r('F-twin-new')?.haltReason === 'signing locked', 'closing an older run today does not make it its project\'s latest: the newer halted run is still listed')
+    ok(JSON.stringify(r('F-shipped').runIssues) === '["10.1","A-1","A-2","A-3","A-4"]' && JSON.stringify(r('F-shipped').runPrs) === JSON.stringify([PR1, PR3, PR2].sort()),
+      `a run item names every issue and PR its journal names, once each, sorted (${JSON.stringify(r('F-shipped').runIssues)} ${JSON.stringify(r('F-shipped').runPrs)})`)
+    ok(JSON.stringify(r('F-nothing').runIssues) === '[]' && JSON.stringify(r('F-nothing').runPrs) === '[]' && mod.validate(R.items).length === 0,
+      'a run that names nothing has empty lists, and every run item is still a valid WorkItem')
+
+    const cfg = { manager: { sources: [{ id: 'linear', category: 'tracker' }, { id: 'gh', category: 'prs' }, { id: 'runs', category: 'runs', kind: 'grimoire' }] } }
+    const done = (id) => item(id, { stateType: 'completed' })
+    const pr = (n, url) => ({ sourceId: 'gh', id: `api#${n}`, kind: 'pr', title: `pr ${n}`, stateType: 'started', url, createdAt: '2026-10-01T00:00:00Z' })
+    const tracker = [done('A-1'), item('L-other')], prs = [pr(99, 'https://github.com/acme/api/pull/99')]
+    const srcs = (over = {}) => [{ id: 'linear', status: 'ok', count: 2 }, { id: 'gh', status: 'ok', count: 1 }, R.source].map((s) => ({ ...s, ...(over[s.id] || {}) }))
+    const look = (V, id) => V.groups.flatMap((g) => g.items).find((i) => i.id === id)
+    const CLOSE = (id) => `If its work shipped or was replaced, close it: /grimoire:manager close ${id} shipped (or superseded)`
+
+    const V = mod.view([...tracker, ...prs, ...R.items], cfg, null, NOW, srcs())
+    ok(look(V, 'F-shipped').group === 'do' && look(V, 'F-shipped').reasons.join('; ') === 'finished outside the loop? none of its 5 issues or 3 PRs is open; halted: signing locked'
+      && look(V, 'F-shipped').nextStep === CLOSE('F-shipped'),
+      `a halted run none of whose issues or PRs is open, every source read in full: the hint, and the close command as its next step (${look(V, 'F-shipped').reasons.join('; ')} → ${look(V, 'F-shipped').nextStep})`)
+    ok(look(V, 'F-stale').reasons[0] === 'finished outside the loop? none of its 2 issues is open' && /^no journal write for 8 days/.test(look(V, 'F-stale').reasons[1]) && look(V, 'F-stale').nextStep === CLOSE('F-stale'),
+      `a stale run gets it too (${look(V, 'F-stale').reasons.join('; ')})`)
+    ok(look(V, 'F-nothing').reasons.join('; ') === 'halted: no slices' && /^Read why it halted, then resume it: \/grimoire:orchestrate on Empty project$/.test(look(V, 'F-nothing').nextStep),
+      'a run that names no issue and no PR gets no hint: nothing shows it finished')
+
+    const plain = (V2) => look(V2, 'F-shipped').reasons.join('; ') === 'halted: signing locked' && /resume it: \/grimoire:orchestrate on Shipped project$/.test(look(V2, 'F-shipped').nextStep)
+    ok(plain(mod.view([...tracker, item('A-3'), ...prs, ...R.items], cfg, null, NOW, srcs({ linear: { count: 3 } }))), 'one of its issues still open: no hint, the resume step')
+    ok(plain(mod.view([...tracker, ...prs, pr(12, PR1), ...R.items], cfg, null, NOW, srcs({ gh: { count: 2 } }))), 'one of its PRs still open: no hint')
+    ok(plain(mod.view([...tracker, ...prs, pr(12, `${PR1.replace('acme', 'Acme')}/`), ...R.items], cfg, null, NOW, srcs({ gh: { count: 2 } }))),
+      'an open PR whose url differs only in case or a trailing slash is the same PR: no hint')
+    ok(plain(mod.view([...tracker, ...prs, ...R.items], cfg, null, NOW, srcs({ linear: { status: 'capped' } }))), 'the tracker read capped: no hint (an issue it did not show may be open)')
+    ok(plain(mod.view([...tracker, ...R.items], cfg, null, NOW, [{ id: 'linear', status: 'ok', count: 2 }, { id: 'gh', status: 'failed', reason: 'auth', fix: 'gh auth login' }, R.source])),
+      'the PRs not read: no hint for a run that names PRs')
+    const noPrSource = { manager: { sources: [{ id: 'linear', category: 'tracker' }, { id: 'runs', category: 'runs', kind: 'grimoire' }] } }
+    const NV = mod.view([...tracker, ...R.items], noPrSource, null, NOW, [{ id: 'linear', status: 'ok', count: 2 }, R.source])
+    ok(plain(NV) && look(NV, 'F-stale').reasons[0] === 'finished outside the loop? none of its 2 issues is open',
+      'no prs source: a run that names PRs gets no hint, one that names only issues still does')
+
+    // close-run: one run.close in the run's journal, then the briefing leaves it out
+    const cfgFile = join(root, 'grimoire.config.json')
+    writeFileSync(cfgFile, JSON.stringify(cfg))
+    const usage = cli(['close-run', 'F-shipped', '--root', root, '--config', cfgFile])
+    ok(usage.status === 2 && /close-run needs --reason shipped\|superseded\|abandoned/.test(usage.stderr), `close-run without --reason is a usage error (${usage.stderr.split('\n')[0]})`)
+    ok(cli(['close-run', '--reason', 'shipped', '--root', root, '--config', cfgFile]).status === 2, 'and without a run id too')
+    const bad = cli(['close-run', 'F-shipped', '--reason', 'merged', '--root', root, '--config', cfgFile])
+    ok(bad.status === 2 && /reason: expected one of shipped, superseded, abandoned/.test(bad.stderr), 'an unknown reason is a usage error')
+    const unknown = cli(['close-run', 'F-none', '--reason', 'shipped', '--root', root, '--config', cfgFile])
+    ok(unknown.status === 1 && unknown.stderr.trim() === `no run F-none under ${RUNS}`, `an unknown run is refused (${unknown.stderr.trim()})`)
+    const closed = cli(['close-run', 'F-shipped', '--reason', 'shipped', '--note', 'merged in api#12', '--root', root, '--config', cfgFile, '--now', NOW])
+    const chunk = join(RUNS, 'F-shipped', 'events', '00000007.close.jsonl')
+    ok(closed.status === 0 && closed.stdout.trim() === chunk && JSON.stringify(JSON.parse(readFileSync(chunk, 'utf8')))
+      === JSON.stringify({ seq: 7, type: 'run.close', at: NOW, attempt: 1, reason: 'shipped', note: 'merged in api#12', by: 'manager close-run' }),
+      `close-run writes the run.close chunk and prints its path (${closed.stdout.trim() || closed.stderr.trim()})`)
+    const twice = cli(['close-run', 'F-shipped', '--reason', 'abandoned', '--root', root, '--config', cfgFile, '--now', NOW])
+    ok(twice.status === 0 && twice.stdout.trim() === `F-shipped is already closed (shipped, ${NOW}): nothing written` && readdirSync(join(RUNS, 'F-shipped', 'events')).length === 2,
+      `closing it again writes nothing and says so (${twice.stdout.trim()})`)
+    writeRun(RUNS, 'F-live', { project: 'Live project', status: 'running', startedAt: at(-2 * HOUR), updatedAt: at(-HOUR) })
+    const live = cli(['close-run', 'F-live', '--reason', 'abandoned', '--root', root, '--config', cfgFile, '--now', NOW])
+    ok(live.status === 1 && /F-live is still writing its journal \(last write 1 h ago\)/.test(live.stderr), `a run still writing is refused (${live.stderr.trim()})`)
+    const after = mod.readRuns(RUNS, { sourceId: 'runs', now: NOW })
+    ok(!after.items.some((i) => i.id === 'F-shipped') && after.items.some((i) => i.id === 'F-stale'), 'the next briefing leaves the closed run out, and keeps the others')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
   // ODY-877, the shared post: share-body renders the view model without what is one person's (the
   // badges, the since-last line), with its footer and marker, ticket text escaped and mentions
   // broken, byte-identical for the same input, and cut to the destination's limit with "… N

@@ -818,7 +818,9 @@ issues close only when the PR merges, so landed-but-unmerged work still looks op
 
 Every decision is an event: `run.start`, `route`, `dispatch`, `precheck`, `review` (one per
 reviewer), `verify`, `fix`, `escalate`, `guard`, `resolve`, `integrate`, `settle`, `replan`,
-`terminal`, `gate`, `claim`, `budget`, `halt`, `run.end`, and, from 0.9.0, `late`, `hedge`,
+`terminal`, `gate`, `claim`, `budget`, `halt`, `run.end`, `run.close` (from 0.19.0, `{reason,
+note, by}`: written by a person through `manager.mjs close-run`, never by the loop, when the run's
+work finished outside it; the run reads `closed` until a later session's `run.start`), and, from 0.9.0, `late`, `hedge`,
 `wedged`, `late-result`, `fence` (a repo held or released), `ship` (`{repo, mode, pushed, head,
 prUrl, draft, failedStep, detail, disabled, skipped?}`; `pushed: null` = nothing to push;
 `skipped: 'ready'` = the PR was out of draft, `skipped: 'unknown'` = the PR could not be read

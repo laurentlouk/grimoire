@@ -32,7 +32,7 @@
 //      as drained (from the newest session's run.end), a silent "running" run is stale,
 //      lost seqs and the writer's temp files make an incomplete journal, and the page and
 //      `summary` sum the same rows
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, realpathSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -546,6 +546,94 @@ try {
   ok(o8('run-kept') && o8('run-kept').journal.leftovers === 1, "the writer file's temp names (.runjson.<pid>.b64) count as an unfinished write")
   ok(o8('run-kept') && o8('run-kept').status === 'drained' && /run\.json still says halted \(written by session 1\); run\.end #10 of session 2 says drained/.test(o8('run-kept').journal.statusNote),
     "session 1's halted run.json loses to session 2's run.end, and says so")
+
+  // ══════ 9 · closed: a run whose work finished outside the loop, closed by hand ══════
+  section('9 · closeRun: a run.close event closes a halted or stale run; a later session reopens it')
+  {
+    const mod = await import(SCRIPT)
+    const RUNS10 = join(ROOT, 'closing', '.grimoire', 'runs')
+    const meta10 = { grimoireVersion: '0.18.1', briefsHash: 'cccc999', personasHash: 'p9', configHash: 'c9' }
+    const NOW10 = Date.parse('2026-11-04T12:00:00.000Z')
+    const at10 = (h) => new Date(NOW10 + h * 3600000).toISOString()
+    const write10 = (runId, run, events) => {
+      mkdirSync(join(RUNS10, runId, 'events'), { recursive: true })
+      writeFileSync(join(RUNS10, runId, 'run.json'), JSON.stringify({ runId, project: `P-${runId}`, meta: meta10, startedAt: at10(-72), ...run }))
+      const a = events[0].attempt ?? 1
+      writeFileSync(join(RUNS10, runId, 'events', `${pad(events[0].seq)}${a > 1 ? `.a${a}` : ''}.jsonl`), events.map((e) => JSON.stringify({ tok: 1, ...e })).join('\n') + '\n')
+    }
+    const files = (runId) => readdirSync(join(RUNS10, runId, 'events')).sort()
+    write10('run-shipped', { status: 'halted', updatedAt: at10(-48) }, [
+      { seq: 1, at: at10(-50), type: 'run.start', project: 'P-run-shipped', mode: 'execute', meta: meta10, repos: ['api'] },
+      { seq: 2, at: at10(-49), type: 'halt', kind: 'environment', reason: 'signing locked' },
+      { seq: 3, at: at10(-48), type: 'run.end', status: 'halted', done: 2, failed: 0, blocked: 0, prs: 1, tokens: 10 },
+    ])
+    write10('run-second', { status: 'halted', attempt: 2, updatedAt: at10(-30) }, [
+      { seq: 9, attempt: 2, at: at10(-31), type: 'run.start', project: 'P-run-second', mode: 'execute', meta: meta10, resumed: true, repos: ['api'] },
+      { seq: 10, attempt: 2, at: at10(-30), type: 'run.end', status: 'halted', done: 1, failed: 1, blocked: 0, prs: 0, tokens: 10 },
+    ])
+    write10('run-stale', { status: 'running', updatedAt: at10(-240) }, [
+      { seq: 1, at: at10(-240), type: 'run.start', project: 'P-run-stale', mode: 'execute', meta: meta10, repos: ['web'] },
+    ])
+    write10('run-live', { status: 'running', updatedAt: at10(-1) }, [
+      { seq: 1, at: at10(-1), type: 'run.start', project: 'P-run-live', mode: 'execute', meta: meta10, repos: ['web'] },
+    ])
+
+    const c1 = mod.closeRun(RUNS10, 'run-shipped', { reason: 'shipped', note: 'merged in api#12', now: NOW10 })
+    const ev1 = { seq: 4, type: 'run.close', at: at10(0), attempt: 1, reason: 'shipped', note: 'merged in api#12', by: 'manager close-run' }
+    ok(c1.file === join(RUNS10, 'run-shipped', 'events', '00000004.close.jsonl') && JSON.stringify(c1.event) === JSON.stringify(ev1),
+      `closeRun writes one run.close event, next in its session's sequence, in a chunk of its own (${JSON.stringify(c1)})`)
+    ok(readFileSync(c1.file, 'utf8') === `${JSON.stringify(ev1)}\n` && JSON.stringify(files('run-shipped')) === '["00000001.jsonl","00000004.close.jsonl"]',
+      'the chunk holds exactly that event, and nothing else is written')
+    const c2 = mod.closeRun(RUNS10, 'run-second', { reason: 'superseded', now: NOW10 })
+    ok(c2.file === join(RUNS10, 'run-second', 'events', '00000011.close.a2.jsonl') && c2.event.attempt === 2 && c2.event.seq === 11 && c2.event.note === null,
+      `a later session's run: the event carries its attempt, the chunk its .a<attempt> suffix, and no note is null (${c2.file})`)
+    const c3 = mod.closeRun(RUNS10, 'run-stale', { reason: 'abandoned', now: NOW10 })
+    ok(c3.file === join(RUNS10, 'run-stale', 'events', '00000002.close.jsonl'), 'a "running" run silent past the stale limit can be closed: its session is gone')
+
+    const live = mod.closeRun(RUNS10, 'run-live', { reason: 'shipped', now: NOW10 })
+    ok(live.error === 'run-live is still writing its journal (last write 1 h ago): let it finish, or stop its session, before closing it' && JSON.stringify(files('run-live')) === '["00000001.jsonl"]',
+      `a run still writing its journal is refused, and nothing is written (${live.error})`)
+    const again = mod.closeRun(RUNS10, 'run-shipped', { reason: 'abandoned', now: NOW10 + 3600000 })
+    ok(again.already === true && JSON.stringify(again.closed) === JSON.stringify({ reason: 'shipped', note: 'merged in api#12', at: at10(0) }) && JSON.stringify(files('run-shipped')) === '["00000001.jsonl","00000004.close.jsonl"]',
+      'closing a closed run writes nothing and returns the close it already has')
+    ok(mod.closeRun(RUNS10, 'run-shipped', { reason: 'merged', now: NOW10 }).error === 'reason: expected one of shipped, superseded, abandoned', 'an unknown reason is refused')
+    ok(mod.closeRun(RUNS10, 'run-live', { reason: 'shipped', note: 'two\nlines', now: NOW10 }).error === 'note: expected one line of at most 300 characters', 'a note of two lines is refused')
+    ok(mod.closeRun(RUNS10, 'no-such-run', { reason: 'shipped', now: NOW10 }).error === `no run no-such-run under ${RUNS10}`, 'an unknown runId is refused')
+
+    // reopened: a later session's run.start after the close, then its own run.end
+    write10('run-reopened', { status: 'halted', attempt: 1, updatedAt: at10(-20) }, [
+      { seq: 1, at: at10(-50), type: 'run.start', project: 'P-run-reopened', mode: 'execute', meta: meta10, repos: ['api'] },
+      { seq: 2, at: at10(-49), type: 'run.end', status: 'halted', done: 0, failed: 1, blocked: 0, prs: 0, tokens: 10 },
+      { seq: 3, at: at10(-40), type: 'run.close', reason: 'abandoned', note: null, by: 'manager close-run' },
+    ])
+    writeFileSync(join(RUNS10, 'run-reopened', 'events', '00000004.a2.jsonl'), [
+      { seq: 4, attempt: 2, at: at10(-21), type: 'run.start', project: 'P-run-reopened', mode: 'execute', meta: meta10, resumed: true, repos: ['api'] },
+      { seq: 5, attempt: 2, at: at10(-20), type: 'run.end', status: 'drained', done: 1, failed: 0, blocked: 0, prs: 1, tokens: 10 },
+    ].map((e) => JSON.stringify(e)).join('\n') + '\n')
+
+    const runs10 = mod.loadRuns(RUNS10)
+    const r10 = (id) => runs10.find((r) => r.runId === id)
+    const o10 = (id) => mod.runOutcome(r10(id), NOW10)
+    ok(r10('run-shipped').status === 'closed' && JSON.stringify(r10('run-shipped').closed) === JSON.stringify({ reason: 'shipped', note: 'merged in api#12', at: at10(0) }),
+      'loadRuns reads a run with a run.close as closed, with its reason, note and time')
+    ok(o10('run-shipped').status === 'closed' && JSON.stringify(o10('run-shipped').closed) === JSON.stringify(r10('run-shipped').closed) && o10('run-shipped').halts.length === 1,
+      'runOutcome carries the close, and keeps the halt that came before it')
+    ok(o10('run-stale').status === 'closed' && o10('run-stale').stale === false, 'a closed run is never stale')
+    ok(r10('run-shipped').updatedAt === at10(-48) && o10('run-shipped').activeMin === 120,
+      `the close is no work: the run's updatedAt stays its last write, and its active time its sessions' own (${r10('run-shipped').updatedAt}, ${o10('run-shipped').activeMin} min)`)
+    ok(r10('run-reopened').status === 'drained' && r10('run-reopened').closed === null, 'a session that starts after the close reopens the run: its own run.end decides')
+    ok(r10('run-live').status === 'running' && r10('run-live').closed === null, 'a run with no run.close is as before')
+
+    const sc10 = mod.scorecard(runs10.map((r) => mod.runOutcome(r, NOW10)))
+    ok(sc10.runs === 5 && sc10.closed === 3 && sc10.halted === 0 && sc10.drained === 1 && sc10.running === 1 && sc10.stale === 0 && sc10.runSuccess === 1,
+      `scorecard: closed runs count as closed, not halted or stale, and stay out of run success (${JSON.stringify({ closed: sc10.closed, halted: sc10.halted, runSuccess: sc10.runSuccess })})`)
+    const t10 = spawnSync(process.execPath, [SCRIPT, 'summary'], { cwd: join(ROOT, 'closing'), encoding: 'utf8' })
+    ok(t10.status === 0 && /outcomes: 5 runs · drained 1 · halted 0 · closed 3 · running 1 · stale 0/.test(t10.stdout), `the text summary counts the closed runs (${(t10.stdout.match(/outcomes:.*/) || [''])[0]})`)
+    ok(JSON.stringify(sc10.closeReasons) === JSON.stringify({ abandoned: 1, shipped: 1, superseded: 1 }) && /\n {2}closed 3: abandoned 1, shipped 1, superseded 1\n/.test(t10.stdout),
+      'and says why they were closed, by reason')
+    const t7b = spawnSync(process.execPath, [SCRIPT, 'summary'], { cwd: join(ROOT, 'resumes'), encoding: 'utf8' })
+    ok(t7b.status === 0 && !/closed/.test(t7b.stdout), 'a journal with no closed run says nothing about closing')
+  }
 
   section('cost: each dispatch billed from its Claude Code transcript (--claude-dir)')
   const ROOT9 = realpathSync(mkdtempSync(join(tmpdir(), 'grimoire-cost-')))
