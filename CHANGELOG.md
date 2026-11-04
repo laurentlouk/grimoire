@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.18.1 — crystallize: what PRs #59 and #60 taught
+
+The crystallize pass on execution policies ([#59](https://github.com/laurentlouk/grimoire/pull/59), [#60](https://github.com/laurentlouk/grimoire/pull/60)). Report: `docs/crystallize/2026-11-01-grimoire-pr59-pr60.md`.
+
+- **`roast`: measure what the design promises.** When a design's value rests on a sorting rule (a router, a threshold, a classifier), run it over the recorded data before approval and put the mix next to the claimed saving. The execution-policy router sent 1 of 113 recorded tasks to FAST, which was found only after approval. New eval case `roast-6`.
+- **Docs synced to the code:** the execution-policies spec's status (shipped in 0.16.0 and 0.17.0), its `policies.mode: 'shadow'` mentions (no such flag: every route event records `autoPolicy`), and its resume test (the policy is kept; the implementer is dispatched again and finds its commits).
+- **Follow-ups** filed as [#61](https://github.com/laurentlouk/grimoire/issues/61); all but the live-run benchmark shipped in 0.18.0.
+
 ## 0.18.0 — execution policies: the gaps the first live run found
 
 Closes the follow-ups of [#61](https://github.com/laurentlouk/grimoire/issues/61): what the first live

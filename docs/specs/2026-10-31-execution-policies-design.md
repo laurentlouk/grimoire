@@ -1,6 +1,6 @@
 # Execution policies: design
 
-**Status:** approved 2026-11-01, as written, with the five recommended answers · **Date:** 2026-10-31 · **Targets:** `origin/main` at 0.15.1 (`5d9dcc1`) · **Input:** the "Adaptive Hybrid Orchestration" brief (FAST / BALANCED / STRICT)
+**Status:** approved 2026-11-01, as written, with the five recommended answers; slices 1–5 shipped in 0.16.0 ([#59](https://github.com/laurentlouk/grimoire/pull/59)) and 0.17.0 ([#60](https://github.com/laurentlouk/grimoire/pull/60)), slice 6 open · **Date:** 2026-10-31 · **Targets:** `origin/main` at 0.15.1 (`5d9dcc1`) · **Input:** the "Adaptive Hybrid Orchestration" brief (FAST / BALANCED / STRICT)
 
 ## Summary
 
@@ -271,7 +271,7 @@ Nothing new is needed to measure the current engine. The baseline in §3 came fr
    - the policy mix;
    - the dispatches FAST would have skipped (an upper bound on its saving);
    - how many recorded round-0 failures and terminal findings fell on tasks routed FAST. A miss rate above zero is a routing defect to fix before anything runs live.
-2. **Shadow in real runs** (`policies.mode: 'shadow'`, the first shipped slice). The run executes BALANCED and journals what `auto` would have chosen. After 3–5 runs, report the same table with real outcomes. This mirrors how the token-economy loop guard ships.
+2. **Shadow in real runs** (built in: every `route` event records `autoPolicy`, so any run with no policy set is a shadow run; see Implementation notes). The run executes BALANCED and journals what `auto` would have chosen. After 3–5 runs, report the same table with real outcomes. This mirrors how the token-economy loop guard ships.
 3. **Controlled A/B.**
    - A fixture project of about 12 seeded issues: a known risk mix, hidden acceptance tests, and 3–4 planted defect traps. One trap is an auth check a FAST task could plausibly drop.
    - Arms: `balanced` (today) vs `auto`, optionally `auto` + combined single reviewer.
@@ -290,7 +290,7 @@ Vertical slices, smallest first. Each ships with its tests and version bump.
 
 1. **Policy plumbing, shadow.**
    - Schema field, `resolvePolicy`, config, preview column, `route.policy` events, checkpoint persistence, `byPolicy` in logs.
-   - No behaviour change; `mode: 'shadow'` only.
+   - No behaviour change; the `auto` pick is journaled on every route event (no mode flag).
    - Includes the counterfactual script over recorded runs.
 2. **STRICT.** Promoted lenses by signal, opus floor. A quality gain, independent of FAST.
 3. **FAST.** One round, consolidated fix, guard once plus `repos[].check`, escalation in place, `onFail`.
@@ -304,7 +304,7 @@ Vertical slices, smallest first. Each ships with its tests and version bump.
 - FAST guard RE_REVIEW escalates to STRICT on the same head, with no second `impl` dispatch;
 - a FAST task failing blocks only its dependents;
 - concurrent lanes across policies with overlapping files are held;
-- kill and resume mid-escalation keeps the policy and does not re-implement;
+- kill and resume mid-escalation keeps the policy (shipped: `checkpoint.policies`; the resumed task's implementer is dispatched again and finds its commits on the branch, as any unlanded task does today);
 - a hard-floor task refuses a `fast` override;
 - `policy` absent: dispatch sequence identical to 0.15.1 on every existing suite.
 

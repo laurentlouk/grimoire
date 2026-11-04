@@ -37,6 +37,10 @@ List the questions you answered yourself in the spec so the user can veto any of
 
 When neither the docs nor the code shows how to do something, look at how large, maintained open-source projects that use the same technologies solve it. Only credible sources count: widely adopted repositories (roughly two thousand stars or more, or an official vendor project), active in the last year, with a known license. Read the actual code path, not the README's claim. Then map the pattern onto this codebase and write down explicitly what you are *not* adopting. The stack and the architecture are fixed inputs to a roast, never its output: a reference tells you *how*, not *with what*. A `reference-scout` agent exists for exactly this if the project ships one.
 
+## Measure what the design promises
+
+When a design's value rests on how work will be sorted (a router, a threshold, a classifier that sends some of it down a cheaper or a stricter path), run that rule over the data the project already holds (run journals, ledgers, merged PRs) before approval, and put the resulting mix in the spec next to the saving it claims. A rule nobody measured is a guess about the share it applies to. In grimoire's execution policies, the router sent 1 of 113 recorded tasks to the cheap path; that was found only after approval, and it shrank the promised saving to almost nothing on those projects.
+
 ## The spec
 
 Write the approved design to a short spec, for example `docs/specs/YYYY-MM-DD-topic-design.md`, with: the problem, goals and non-goals; numbered decisions, each with the alternative rejected and why; the vertical slices; edge cases and failure modes; the questions still owned by the user. Add three short sections that make the roast auditable: **Sources consulted** (docs read, scouts sent, code that settled a question), **Self-answered questions** (question, answer, source), **Docs drift fixed** (document, what it said, what the code does, where it was fixed), and **Reference projects** if any (repository, path, pattern adopted, what was deliberately not adopted).
