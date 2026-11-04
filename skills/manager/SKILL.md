@@ -7,11 +7,13 @@ description: The team's briefing from the tracker, open pull requests and grimoi
 
 The briefing answers "what needs us, and what can AI take?" from the tracker, the open pull requests and the grimoire runs, in one local file. The reading is done by read-only scouts; everything that is not judgment (urgency, grouping, order, the ledger, the Markdown) is done by `scripts/manager.mjs`, so the same tickets give the same briefing every time. The model contributes two things per item, each from reading the ticket: `bucketHint` (is it waiting on someone outside the team, or parked?) and `nextStep` (one line). Urgency is never the model's.
 
-**Writes: one, opt-in.** When `manager.share` is set, the shared briefing post ("Share the briefing" below), by you, replacing the previous one; nothing else to the tracker, GitHub or Slack, ever. The only files written are the scouts' WorkItems and your sources file in the session scratchpad, and the script's `.grimoire/manager/` (gitignored; `/grimoire:setup` adds `.grimoire/`). Launching starts new conversations, and a repo's fix (a clone, a submodule init) runs only on the user's yes.
+**Writes: one, opt-in.** When `manager.share` is set, the shared briefing post ("Share the briefing" below), by you, replacing the previous one; nothing else to the tracker, GitHub or Slack, ever. The only files written are the scouts' WorkItems and your sources file in the session scratchpad, and the script's `.grimoire/manager/` (gitignored; `/grimoire:setup` adds `.grimoire/`). Launching starts new conversations, and a repo's fix (a clone, a submodule init) runs only on the user's yes. Closing a run ("Close a finished run" below) writes one event into that run's local journal, only when the user asks.
 
 **Explore before asking; don't guess.** Read `grimoire.config.json` before asking which tracker, team or project to read. Ask only what the config and the code can't settle: which scope to read when no source has one, or whether to go ahead when a source fails.
 
 **Invoked as `/grimoire:manager launch <ids…>`** (the message the panel's **Launch** sends, step 5, or one the user types): don't brief again. Go straight to **Launch from the panel** in step 6.
+
+**Invoked as `/grimoire:manager close <runId> <reason> [note]`** (the next step the briefing gives a run that may have finished outside the loop, or one the user types): don't brief again. Go straight to **Close a finished run**.
 
 **Headless runs.** A run is headless when it can't ask the user: there is no AskUserQuestion tool (a `claude -p` run; `--permission-prompts none` removes it), or the prompt says it is a scheduled run (the desktop task and the crontab line `/grimoire:setup` proposes both send `/grimoire:manager scheduled "<project path>"`). A path given that way is the project root: work there, with absolute paths. Headless:
 - **Ask nothing.** A source with no scope is not read: it is `failed` with the reason `no scope set` and the fix `/grimoire:setup`. A source that fails is listed as not checked, and the briefing goes ahead.
@@ -95,7 +97,7 @@ Read the file it printed and give the user:
 
 - the **next step** line, the counts line and the line under it: "Since the last briefing: N new · N changed · N resolved", or "First briefing" (then nothing is new, and say so rather than announcing every item as new);
 - the **Not checked** section when there is one, with each source's fix, and that the briefing is therefore partial; a capped source's "≥ N" as not complete;
-- **Decide**, **Do** and **Hand to AI** in full, each item with its link, its **new** or **changed** badge, why it is there and its next step: issues, pull requests (a review to give, CI to fix, an approval to merge) and runs (a halted or stale run, or one that drained with tasks needing attention, with the `/grimoire:orchestrate` command that resumes it); for Hand to AI, its repo too;
+- **Decide**, **Do** and **Hand to AI** in full, each item with its link, its **new** or **changed** badge, why it is there and its next step: issues, pull requests (a review to give, CI to fix, an approval to merge) and runs (a halted or stale run, or one that drained with tasks needing attention, with the `/grimoire:orchestrate` command that resumes it, or, for one marked "finished outside the loop?", the `/grimoire:manager close` command that closes it); for Hand to AI, its repo too;
 - the issues held back only by their repo ("repo not checked out: …, fix: …"), so the user can fix it before launching (step 6);
 - **Waiting on others** and **Not now** as counts, unless the user asks for them;
 - the briefing's path, to open later;
@@ -169,6 +171,22 @@ On a `/grimoire:manager launch <ids…>` message (the panel's **Launch**, or the
 
 Then say what was started, what waits, and what was refused and why.
 
+## Close a finished run
+
+A halted or stale run whose work finished outside the loop (its PRs merged by hand, its issues done, redone or canceled) is listed again by every briefing until it is closed. Close one only on the user's word: the briefing's hint is evidence, not a verdict (an issue outside the tracker's scope reads as not open too).
+
+1. **Check, then confirm with the user**, unless their message is the close command itself: the run's PRs (`gh pr view <url> --json state,mergedAt`) and its issues' states. A PR still open, or an issue still open, means the run is not finished: say so and stop.
+2. **Close it**, with the reason: `shipped` (its work merged), `superseded` (replaced by other work, its issues canceled or redone), or `abandoned` (dropped, nothing shipped). The note is one line, at most 300 characters, of your words (the PRs that shipped it, the work that replaced it), never ticket text:
+
+   ```sh
+   node "<plugin root>/scripts/manager.mjs" close-run <runId> --reason <reason> --note "<one line>" --root "<project>" --config "<project>/grimoire.config.json"
+   ```
+
+   It writes one `run.close` event into that run's journal (`<telemetry.dir>/<runId>/events/<seq>.close.jsonl`) and prints its path. A run already closed: it says so and writes nothing. Exit 1: no such run, or a run still writing its journal (wait for it, or stop its session first), or a note it refuses.
+3. **What it does not do**: close a PR, delete a branch, move a tracker issue or touch run.json. A ticket left open after its PR merged is the user's to close, or yours with their yes. A later `/grimoire:orchestrate` on the same project starts a fresh run, or resumes this one only if the user asks: a session that starts under its runId reopens it.
+
+The next briefing leaves the closed run out; `/grimoire:logs` shows it as `closed` with its reason.
+
 ## The rules the script applies
 
 So you can explain a placement without guessing:
@@ -181,7 +199,7 @@ So you can explain a placement without guessing:
 - **Priority**: with none on the item, a `nativePriority` label is mapped by `manager.priorityLabels` (case-insensitive; the defaults above when the config has none, and a config map replaces them); with neither, the most urgent of its `labels[]` that maps. An unknown priority ranks last.
 - **Decide**: in triage, or urgent with no assignee. **Do**: any other urgent item. **Hand to AI**: an issue with acceptance criteria, not started (backlog or unstarted), nothing open blocking it, no assignee or the assignee is `claim.identity`, no linked PR, no sub-issues, mapped to a `repos[]` entry (first by `manager.repoLabels`, a label → a repo name, then by the item's `repo`, else, in a single-repo project, to its one entry) and that repo checked out. Each failing condition is a reason: "in progress", "no repo mapped: no label in repoLabels", "repo not checked out: repositories/webapp, fix: …". Only issues: a PR or a run is never handed to AI. **Waiting on others**: the scout read it as waiting on someone outside the team. **Not now**: the rest, with the reason it isn't ready for AI.
 - **Pull requests** by their own rules, first match wins: a draft → Not now; a pending review request (anyone asked to review) → Decide; failing CI, or approved and not merged → Do; the rest → Waiting on others. Never counted urgent.
-- **Runs**: each project's latest run, under Do when it halted, is still "running" with no journal write for 12 h (its session most likely died), or drained with tasks that need attention; a drained run with nothing pending is left out. Never counted urgent.
+- **Runs**: each project's latest run, under Do when it halted, is still "running" with no journal write for 12 h (its session most likely died), or drained with tasks that need attention; a drained run with nothing pending, and a closed one, are left out. Never counted urgent. A halted or stale run whose issues (its checkpoint's and `landed.jsonl`'s ids) and PRs (its summary's, its checkpoint's shipped repos', its events') are all absent from the open items, every tracker source and every prs source read in full, leads with "finished outside the loop? none of its N issues or M PRs is open", and its next step is the close command instead of the resume. A run that names PRs gets no hint without a prs source; one that names nothing gets none at all.
 - `bucketHint` moves an issue only between Hand to AI, Waiting on others and Not now: it never makes an item urgent and never moves one out of Decide or Do. A PR's or a run's group is its rules alone.
 - Order within a group: urgent first, then priority (no priority last), due date (none last), oldest created, id.
 - **Badges**, against the ledger: **new** when the item wasn't in the last briefing, **changed** when its state, priority, assignee, due date, blockers, labels or linked PR changed (for a PR, its review or checks too; for a run, its tasks needing attention). **Resolved**: last briefing's items now gone or completed or canceled, counted, not listed. An item a failed, capped or count-mismatched source didn't show is not resolved: it is unknown, and kept for next time.

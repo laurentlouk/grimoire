@@ -70,9 +70,13 @@
 //                render-logs' loadRuns and runOutcome (readRuns). Each project's latest run is
 //                listed under Do when it halted, is still "running" with no journal write for
 //                STALE_HOURS (12), or drained with tasks that need attention; its next step names
-//                /grimoire:orchestrate on the project. A drained run with nothing pending, or one
-//                still writing, is left out. Its status joins the sources like the others (no dir:
-//                ok, 0), in place of any entry --sources has for it. Never counted urgent.
+//                /grimoire:orchestrate on the project. A drained run with nothing pending, one
+//                still writing, or a closed one (close-run, below) is left out. Its status joins the
+//                sources like the others (no dir: ok, 0), in place of any entry --sources has for it.
+//                Never counted urgent. A halted or stale run that names issues or PRs (runIssues,
+//                runPrs: its checkpoint, landed.jsonl, summary and events) none of which is open,
+//                every tracker source (and, when it names PRs, every prs source) read in full, leads
+//                with "finished outside the loop? …" and its next step is the close command.
 //    bucketHint  the model's reading. It moves an item only between the non-urgent groups
 //                (Hand to AI, Waiting on others, Not now): it never makes an item urgent, never
 //                moves one out of Decide or Do, and never makes an issue ready for AI.
@@ -124,6 +128,15 @@
 //      → records how the shared post went at the end of latest.md and of its briefings/ copy:
 //        "Share: failed (<reason>)", or "Share: updated <url>". A second call replaces the line.
 //        Exit 0 recorded · 1 no latest.md · 2 usage · 3 a briefing is in progress.
+//
+//  node scripts/manager.mjs close-run <runId> --reason shipped | superseded | abandoned [--note <text>]
+//                                     [--root <dir>] [--config <file>] [--now <iso>]
+//      → closes a run whose work finished outside the loop, on a person's word: one run.close event
+//        in its journal under telemetry.dir (render-logs.mjs closeRun), and prints that chunk's path.
+//        The run reads `closed` from then on, and the briefing leaves it out. Already closed: says
+//        so, writes nothing, exit 0. Exit 1 no such run, a run still writing its journal (running,
+//        written to within STALE_HOURS), a note that is not one line of ≤ 300 chars, a bad config
+//        · 2 usage (no run id, no --reason or an unknown one).
 //
 //  node scripts/manager.mjs headline [--root <dir>] [--now <iso>] [--config <file>]
 //      → one line from <root>/.grimoire/manager/latest.md's front matter, for the SessionStart
@@ -243,7 +256,7 @@ import { resolve, join, dirname, basename, sep, relative, isAbsolute, posix } fr
 import { spawnSync, execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { loadRuns, runOutcome, STALE_HOURS } from './render-logs.mjs'
+import { loadRuns, runOutcome, closeRun, CLOSE_REASONS, STALE_HOURS } from './render-logs.mjs'
 import { CONFIG_FILE, configLayers, loadConfig, mainCheckout } from './project-config.mjs'
 
 const HOUR = 3600000
@@ -378,6 +391,8 @@ const FIELDS = {
   // a grimoire run's (kind run, written by readRuns)
   needsAttention: nullable((v) => (Number.isInteger(v) && v >= 0 ? null : fail('expected a whole number, 0 or more'))),
   haltReason: nullable(C.string),
+  runIssues: nullable(C.refs),
+  runPrs: nullable(C.refs),
 }
 const REQUIRED = ['sourceId', 'id', 'title', 'kind', 'stateType']
 // A field name is the scout's, not the ticket's, but it is still printed only when it looks like one.
@@ -501,6 +516,7 @@ function normalize(it, labels) {
     bucketHint: it.bucketHint ?? null, nextStep: it.nextStep ?? null,
     reviewDecision: it.reviewDecision ?? null, checks: it.checks ?? null, reviewRequested: it.reviewRequested ?? null, isDraft: it.isDraft ?? null,
     needsAttention: it.needsAttention ?? null, haltReason: it.haltReason ?? null,
+    runIssues: [...(it.runIssues ?? [])], runPrs: [...(it.runPrs ?? [])],
   }
 }
 
@@ -709,14 +725,33 @@ export function placePr(it) {
 export function placeRun(it, ctx) {
   const n = it.needsAttention ?? 0
   const attention = n > 0 ? [`${plural(n, 'task')} need${n === 1 ? 's' : ''} attention`] : []
-  if (it.nativeState === 'halted') return { group: 'do', reasons: [it.haltReason ? `halted: ${it.haltReason}` : 'halted', ...attention] }
+  // halted or stale, with nothing it names still open: offer to close it rather than resume it
+  const orClose = (p) => {
+    const hint = finishedOutside(it, ctx)
+    return hint ? { group: p.group, reasons: [hint, ...p.reasons], nextStep: `If its work shipped or was replaced, close it: /grimoire:manager close ${it.id} shipped (or superseded)` } : p
+  }
+  if (it.nativeState === 'halted') return orClose({ group: 'do', reasons: [it.haltReason ? `halted: ${it.haltReason}` : 'halted', ...attention] })
   if (it.nativeState === 'running') {
     const silent = it.updatedAt === null ? NaN : ctx.now - parseTime(it.updatedAt)
-    if (silent > STALE_HOURS * HOUR) return { group: 'do', reasons: [`no journal write for ${ageText(silent)}: its session most likely died`, ...attention] }
+    if (silent > STALE_HOURS * HOUR) return orClose({ group: 'do', reasons: [`no journal write for ${ageText(silent)}: its session most likely died`, ...attention] })
     return { group: 'waiting', reasons: ['running', ...attention] }
   }
   const state = it.nativeState ?? 'finished'
   return n > 0 ? { group: 'do', reasons: [`${state}, ${attention[0]}`] } : { group: 'notnow', reasons: [`${state}, nothing pending`] }
+}
+
+// A run whose work may have finished outside the loop (its PRs merged by hand, its issues done,
+// redone or canceled): it names at least one issue or PR, and none is open in this briefing. An
+// issue counts only when every tracker source was read in full, a PR only when every prs source
+// was (an item a capped or failed source did not show may be open). Returns the reason, or null.
+// A hint, not a verdict: an issue outside the tracker's scope reads as not open too.
+function finishedOutside(it, ctx) {
+  const issues = it.runIssues ?? [], prs = it.runPrs ?? []
+  if (!issues.length && !prs.length) return null
+  if (issues.length && (!ctx.trackerComplete || issues.some((id) => ctx.openRefs.has(id)))) return null
+  if (prs.length && (!ctx.prsComplete || prs.some((u) => ctx.openPrUrls.has(u)))) return null
+  const named = [issues.length && plural(issues.length, 'issue'), prs.length && plural(prs.length, 'PR')].filter(Boolean)
+  return `finished outside the loop? none of its ${named.join(' or ')} is open`
 }
 
 function place(it, ctx) {
@@ -797,7 +832,8 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
   const all = items.map((it) => normalize(it, priorityLabels))
   const states = new Map()
   for (const it of all) for (const ref of new Set([it.id, it.key])) if (!states.has(ref)) states.set(ref, it.stateType)
-  const ctx = { now: t, urgent, states, repoLabels, live, ...aiContext(config, repos) }
+  const srcs = sourcesOf(all, sources, configured.map((s) => s.id))
+  const ctx = { now: t, urgent, states, repoLabels, live, ...aiContext(config, repos), ...runEvidence(all, srcs, configured) }
   // null: no ledger to compare with, the first briefing (or one that starts over)
   const seen = usableLedger(ledger) ? ledger.items : null
   const generatedAt = new Date(t).toISOString()
@@ -813,7 +849,7 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
       stateType: it.stateType, nativeState: it.nativeState, priority: it.priority, priorityName: PRIORITY_NAMES[it.priority],
       assignee: it.assignee, dueAt: it.dueAt, createdAt: it.createdAt, project: it.project, labels: it.labels, linkedPr: it.linkedPr,
       checks: it.checks, reviewDecision: it.reviewDecision, reviewRequested: it.reviewRequested, isDraft: it.isDraft, needsAttention: it.needsAttention,
-      repo, urgent: p.urgent, group: p.group, reasons: p.reasons, nextStep: it.nextStep,
+      repo, urgent: p.urgent, group: p.group, reasons: p.reasons, nextStep: p.nextStep ?? it.nextStep,
       heldBack: held,
       // a Hand to AI issue's launch pick (launchPick), and a held-back one's (launch-check takes it
       // once its repo is fixed); its project is renamed p1, p2… below
@@ -822,7 +858,6 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
       firstSeenAt: prev && Number.isFinite(parseTime(prev.firstSeenAt)) ? prev.firstSeenAt : generatedAt, hash,
     }
   })
-  const srcs = sourcesOf(all, sources, configured.map((s) => s.id))
   // Resolved since the last briefing: a ledger item read now as completed or canceled, or missing
   // from a source read in full. Missing from a failed or capped source, or from one whose count
   // does not match its items, is unknown, not resolved.
@@ -851,6 +886,24 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
     partial: srcs.some((s) => s.status === 'failed'),
     sources: srcs, counts, groups, nextStep: overallNext(counts),
     launch: launchView(groups.find((g) => g.id === 'ai').items, groups.flatMap((g) => g.items).filter((it) => it.heldBack), all, ctx, root),
+  }
+}
+
+// What finishedOutside reads: the open issues' ids and keys and the open PRs' urls, and whether every
+// tracker source and every prs source was read in full. A source's category comes from
+// manager.sources; with none configured, the sources of the issues, and of the PRs, read.
+function runEvidence(all, srcs, configured) {
+  const open = all.filter((it) => it.kind !== 'run' && OPEN.has(it.stateType))
+  const ofCategory = (category, kind) => {
+    const named = configured.filter((s) => s.category === category).map((s) => s.id)
+    return named.length ? named : [...new Set(all.filter((it) => it.kind === kind).map((it) => it.sourceId))]
+  }
+  const complete = (ids) => ids.length > 0 && ids.every((id) => srcs.some((s) => s.id === id && s.complete))
+  return {
+    openRefs: new Set(open.filter((it) => it.kind === 'issue').flatMap((it) => [it.id, it.key])),
+    openPrUrls: new Set(open.filter((it) => it.kind === 'pr' && it.url).map((it) => it.url)),
+    trackerComplete: complete(ofCategory('tracker', 'issue')),
+    prsComplete: complete(ofCategory('prs', 'pr')),
   }
 }
 
@@ -915,16 +968,34 @@ export function nextLedger(v, ledger, items = []) {
 export function readRuns(dir, { sourceId = 'runs', now = Date.now() } = {}) {
   if (!existsSync(dir)) return { source: { id: sourceId, status: 'ok', count: 0 }, items: [], live: [] }
   let runs, rows
-  try { runs = loadRuns(dir); rows = runs.map((r) => runOutcome(r, toMs(now))) } catch (e) {
+  try { runs = loadRuns(dir); rows = runs.map((r) => ({ ...runOutcome(r, toMs(now)), work: runWork(r) })) } catch (e) {
     return { source: { id: sourceId, status: 'failed', reason: `the run journals could not be read (${e.code || 'error'})`, fix: `check that ${dir} is a readable directory` }, items: [], live: [] }
   }
   const items = runItems(rows, sourceId)
   return { source: { id: sourceId, status: 'ok', count: items.length }, items, live: liveRuns(runs, rows) }
 }
+// The issues and PRs a run names, each once, sorted: its checkpoint's landed, pending and
+// landedTasks ids, landed.jsonl's, and the PR urls of its summary, its checkpoint's shipped repos and
+// its events. What finishedOutside checks against the briefing.
+function runWork(run) {
+  const cp = isObj(run.checkpoint) ? run.checkpoint : {}
+  const list = (v) => (Array.isArray(v) ? v : [])
+  const ids = [...list(cp.landed), ...list(cp.pending), ...list(cp.landedTasks).map((t) => t?.id), ...list(run.landed).map((l) => l?.id)]
+  const shipped = isObj(cp.shipped) ? Object.values(cp.shipped).map((s) => s?.prUrl) : []
+  const urls = [...list(run.summary?.prUrls), ...shipped, ...list(run.events).map((e) => e?.prUrl)]
+  const uniq = (xs, keep) => [...new Set(xs.filter((x) => typeof x === 'string' && keep(x)))].sort()
+  return { issues: uniq(ids, (x) => x.length > 0), prs: uniq(urls, (x) => /^https?:\/\/\S+$/i.test(x)) }
+}
+
 // The live runs of the project's journal (telemetry.dir, resolved against the main checkout), or [].
 function liveRunsAt(config, root) {
+  return readRuns(runsDirOf(config, root)).live
+}
+// The project's run journals: telemetry.dir (default .grimoire/runs), a relative one resolved against
+// the main checkout when root is a linked worktree, where the loop's writer and render-logs keep them.
+function runsDirOf(config, root) {
   const t = isObj(config.telemetry) && typeof config.telemetry.dir === 'string' && config.telemetry.dir ? config.telemetry.dir : '.grimoire/runs'
-  return readRuns(resolve(mainCheckout(root) ?? root, t)).live
+  return resolve(mainCheckout(root) ?? root, t)
 }
 // The runs still writing their journal (running, not stale), with the repos each named at start: a
 // launch into one of those checkouts waits for it (never two agents on one checkout). Pure.
@@ -969,7 +1040,7 @@ export function runItems(rows, sourceId = 'runs') {
     out.push({
       sourceId, id: o.runId, title, kind: 'run', stateType: 'started', nativeState: o.status,
       createdAt: validDate(o.startedAt), updatedAt: validDate(o.updatedAt), project: project ? { name: project } : null,
-      needsAttention, haltReason, nextStep,
+      needsAttention, haltReason, nextStep, runIssues: o.work?.issues ?? [], runPrs: o.work?.prs ?? [],
     })
   }
   return out
@@ -2303,6 +2374,7 @@ const USAGE = [
   '       node scripts/manager.mjs launch-check <id> [<id>…] [--root <dir>] [--config <file>] [--now <iso>]',
   '       node scripts/manager.mjs share-body [--max <chars>] [--root <dir>] [--config <file>] [--now <iso>]',
   '       node scripts/manager.mjs share-status --status created|updated|failed [--url <url>] [--reason <text>] [--root <dir>]',
+  '       node scripts/manager.mjs close-run <runId> --reason shipped|superseded|abandoned [--note <text>] [--root <dir>] [--config <file>] [--now <iso>]',
 ].join('\n')
 
 // A config file as the project sees it. One named grimoire.config.json is read with the layers
@@ -2445,6 +2517,33 @@ function viewMain(cmd, format, args, { items, config, sources, now, root, dir, l
   return 0
 }
 
+// `close-run`: one run.close event in the run's journal (render-logs.mjs closeRun), on a person's
+// word: its work finished outside the loop. Prints the chunk's path; a closed run says so and writes
+// nothing. Exit 1: no such run, a run still writing its journal, a bad note or config; 2: usage.
+function closeRunMain(args) {
+  const id = args._[1]
+  if (typeof id !== 'string' || !id) { console.error(`close-run needs a run id\n${USAGE}`); return 2 }
+  if (typeof args.reason !== 'string') { console.error(`close-run needs --reason ${CLOSE_REASONS.join('|')}\n${USAGE}`); return 2 }
+  if (!CLOSE_REASONS.includes(args.reason)) { console.error(`reason: expected one of ${CLOSE_REASONS.join(', ')}\n${USAGE}`); return 2 }
+  if (args.note !== undefined && typeof args.note !== 'string') { console.error(`--note needs a text\n${USAGE}`); return 2 }
+  const now = args.now === undefined ? Date.now() : typeof args.now === 'string' ? Date.parse(args.now) : NaN
+  if (!Number.isFinite(now)) { console.error(`--now: expected an ISO date-time\n${USAGE}`); return 2 }
+  const root = resolve(typeof args.root === 'string' ? args.root : stateRoot())
+  const configFile = resolve(typeof args.config === 'string' ? args.config : CONFIG_FILE)
+  let config = {}
+  if (hasConfig(configFile)) {
+    const c = readProjectConfig(configFile)
+    if (c.error) { console.error(c.error); return 1 }
+    if (!isObj(c.value)) { console.error(`config ${configFile}: the top level must be a JSON object`); return 1 }
+    config = c.value
+  }
+  const r = closeRun(runsDirOf(config, root), id, { reason: args.reason, note: args.note ?? null, now })
+  if (r.error) { console.error(r.error); return 1 }
+  if (r.already) { console.log(`${id} is already closed (${r.closed.reason}, ${r.closed.at}): nothing written`); return 0 }
+  console.log(r.file)
+  return 0
+}
+
 function main(argv) {
   const args = parseArgs(argv)
   const cmd = args._[0]
@@ -2454,7 +2553,8 @@ function main(argv) {
   if (cmd === 'launch-check') return launchCheckMain(args)
   if (cmd === 'share-body') return shareBodyMain(args)
   if (cmd === 'share-status') return shareStatusMain(args)
-  if (!['brief', 'view', 'render'].includes(cmd)) { console.error(cmd ? `unknown command: ${cmd} (expected brief, view, render, headline, repos, launch-plan, launch-check, share-body or share-status)\n${USAGE}` : USAGE); return 2 }
+  if (cmd === 'close-run') return closeRunMain(args)
+  if (!['brief', 'view', 'render'].includes(cmd)) { console.error(cmd ? `unknown command: ${cmd} (expected brief, view, render, headline, repos, launch-plan, launch-check, share-body, share-status or close-run)\n${USAGE}` : USAGE); return 2 }
   let format = null
   if (cmd === 'view' && args.json !== true) { console.error(`view needs --json, its one format\n${USAGE}`); return 2 }
   if (cmd === 'render') {
@@ -2504,8 +2604,7 @@ function main(argv) {
   let live = []
   const runsSource = mc.sources.find((s) => s.category === 'runs')
   if (runsSource) {
-    const t = isObj(config.telemetry) && typeof config.telemetry.dir === 'string' && config.telemetry.dir ? config.telemetry.dir : '.grimoire/runs'
-    const runs = readRuns(resolve(mainCheckout(root) ?? root, t), { sourceId: runsSource.id, now })
+    const runs = readRuns(runsDirOf(config, root), { sourceId: runsSource.id, now })
     items = [...items, ...runs.items]
     live = runs.live
     sources = [...(sources ?? inferSources(input.value)).filter((s) => !(isObj(s) && s.id === runsSource.id)), runs.source]

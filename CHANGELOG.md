@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.19.0 — close a run whose work finished outside the loop
+
+A run that halted or died while its work shipped by hand (PRs merged after the halt, issues redone or canceled) kept coming back in every manager briefing as "resume it", because nothing in the journal could say it was over. On one project, all 7 runs the briefing flagged were already finished: 5 had every PR merged, and 2 had every issue canceled and redone by hand.
+
+- **`run.close`, a new journal event** (`{reason, note, by}`, reason `shipped`, `superseded` or `abandoned`), written in a chunk of its own (`<next seq>.close[.a<N>].jsonl`) by `render-logs.mjs` `closeRun`. Only a person writes it, never the loop. The run reads `closed` from then on, whatever run.json or its `run.end` says, until a later session's `run.start` reopens it. A run still writing its journal (running, written to within 12 h) is refused, and closing a closed run writes nothing.
+- **`manager.mjs close-run <runId> --reason … [--note …]`**, and `/grimoire:manager close <runId> <reason> [note]` in the skill: check the PRs and issues, confirm, close. It does not close a PR, delete a branch, move a ticket or touch run.json.
+- **The briefing leaves closed runs out.** A halted or stale run whose issues and PRs (`runIssues`, `runPrs`: from its checkpoint, `landed.jsonl`, summary and events) are all absent from the open items now leads with "finished outside the loop? none of its N issues or M PRs is open", and its next step is the close command. This needs every tracker source (and, when the run names PRs, every prs source) read in full. It is a hint, not a verdict.
+- **`/grimoire:logs`** shows `closed` with its reason in the runs table, the overview and the timeline. The scorecard counts closed runs apart (`closed N: shipped 1, …`), out of run success.
+- **`/grimoire:orchestrate`** does not resume a closed run on its own: it says why it was closed and asks whether to start a new run or reopen this one.
+
 ## 0.18.1 — crystallize: what PRs #59 and #60 taught
 
 The crystallize pass on execution policies ([#59](https://github.com/laurentlouk/grimoire/pull/59), [#60](https://github.com/laurentlouk/grimoire/pull/60)). Report: `docs/crystallize/2026-11-01-grimoire-pr59-pr60.md`.

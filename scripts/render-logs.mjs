@@ -29,7 +29,13 @@
 //  parse are counted and skipped, never fatal. From 0.9.0, <dir>/<runId>/landed.jsonl holds
 //  each landed task's detail (summary, commits, files), one line per landing, appended once:
 //  run.json's checkpoint keeps only what a resume needs, and the checkpoint card joins the two.
-import { readFileSync, writeFileSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync } from 'node:fs'
+//
+//  Closed runs (0.19.0): a run whose work finished outside the loop (its PRs merged by hand, its
+//  issues redone or canceled) is closed by a `run.close` event ({reason, note, by}), written in a
+//  chunk of its own, <next seq>.close[.a<N>].jsonl, by closeRun (below; the CLI is `manager.mjs
+//  close-run`). The run's status is then `closed`, whatever run.json or its run.end says, until a
+//  later session's run.start reopens it. Only a person closes a run: the loop never writes one.
+import { readFileSync, writeFileSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync, renameSync } from 'node:fs'
 import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -114,7 +120,10 @@ function leftovers(p) {
 // wrote (its `attempt` below the newest session's): a session whose generation is behind the one on
 // disk keeps every run.json write, so session 1's "halted" can outlive session 2's drain. A later
 // session without a run.end is still running.
+// A run.close wins over all of that: the run finished outside the loop and a person said so. A
+// session that starts after it (a run.start later in the sorted events) reopens the run.
 function statusOf(run, events) {
+  if (closeOf(events)) return { status: 'closed', statusNote: null }
   const declared = typeof run.status === 'string' ? run.status : null
   const last = events.length ? Math.max(...events.map(attemptOf)) : null
   const end = [...events].reverse().find((e) => e.type === 'run.end' && attemptOf(e) === last && typeof e.status === 'string')
@@ -122,6 +131,16 @@ function statusOf(run, events) {
   if (end && (!declared || declared === 'running' || (older && declared !== end.status)))
     return { status: end.status, statusNote: declared ? `run.json still says ${declared} (${older ? `written by session ${run.attempt}` : 'its last write lost'}); run.end #${s(end.seq)} of session ${last} says ${end.status}` : null }
   return { status: declared ?? 'running', statusNote: null }
+}
+// The run's close, from its events sorted by attempt then seq: the last run.close with no run.start
+// after it, or null.
+function closeOf(events) {
+  let close = null
+  for (const e of events) {
+    if (e.type === 'run.close') close = e
+    else if (e.type === 'run.start') close = null
+  }
+  return close ? { reason: typeof close.reason === 'string' ? close.reason : null, note: typeof close.note === 'string' ? close.note : null, at: close.at ?? null } : null
 }
 const s = (v) => (v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v))
 const later = (a, b) => (Date.parse(b ?? '') > Date.parse(a ?? '') ? b : a ?? b)
@@ -188,6 +207,7 @@ export function loadRuns(dir) {
       startedAt: run.startedAt ?? events[0]?.at ?? mtime,
       updatedAt: later(run.updatedAt, lastAt) ?? mtime, // a chunk can land after run.json's last write
       ...statusOf(run, events),
+      closed: closeOf(events),
       summary: isObj(run.summary) ? run.summary : null,
       checkpoint: isObj(run.checkpoint) ? run.checkpoint : null,
       landed: landedDetail(p),
@@ -199,6 +219,40 @@ export function loadRuns(dir) {
   }
   runs.sort((a, b) => String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? '')))
   return runs
+}
+
+// ── close ──
+export const CLOSE_REASONS = ['shipped', 'superseded', 'abandoned']
+const MAX_NOTE = 300
+const agoText = (ms) => (ms < 3600000 ? `${Math.floor(ms / 60000)} min` : ms < 48 * 3600000 ? `${Math.floor(ms / 3600000)} h` : `${Math.floor(ms / DAY)} days`)
+
+// Closes the run <runId> under <dir> (its runId or its directory's name): one run.close event, the
+// next in its newest session's sequence, in a chunk of its own, written whole (a temp file renamed).
+// → {file, event} · {already: true, closed} when it is closed already (nothing written) · {error}
+// for a reason not in CLOSE_REASONS, a note that is not one line of at most MAX_NOTE characters, no
+// such run, or a run still writing its journal (running, written to within STALE_HOURS).
+export function closeRun(dir, runId, { reason, note = null, now = Date.now(), by = 'manager close-run' } = {}) {
+  if (!CLOSE_REASONS.includes(reason)) return { error: `reason: expected one of ${CLOSE_REASONS.join(', ')}` }
+  if (note !== null && (typeof note !== 'string' || !note.trim() || note.length > MAX_NOTE || /[\u0000-\u001f\u007f]/.test(note))) {
+    return { error: `note: expected one line of at most ${MAX_NOTE} characters` }
+  }
+  const run = loadRuns(dir).find((r) => r.runId === runId || r.dirName === runId)
+  if (!run) return { error: `no run ${runId} under ${dir}` }
+  if (run.closed) return { already: true, closed: run.closed }
+  const silent = now - Date.parse(run.updatedAt ?? '')
+  if (run.status === 'running' && !(silent > STALE_HOURS * 3600000)) {
+    return { error: `${runId} is still writing its journal (last write ${Number.isFinite(silent) ? `${agoText(silent)} ago` : 'unknown'}): let it finish, or stop its session, before closing it` }
+  }
+  const attempt = run.events.length ? Math.max(...run.events.map(attemptOf)) : 1
+  const seq = Math.max(0, ...run.events.filter((e) => attemptOf(e) === attempt).map((e) => num(e.seq) ?? 0)) + 1
+  const event = { seq, type: 'run.close', at: new Date(now).toISOString(), attempt, reason, note: note === null ? null : note.trim(), by }
+  const file = join(dir, run.dirName, 'events', `${String(seq).padStart(8, '0')}.close${attempt > 1 ? `.a${attempt}` : ''}.jsonl`)
+  if (existsSync(file)) return { error: `${file} exists already` }
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}`
+  writeFileSync(tmp, `${JSON.stringify(event)}\n`)
+  renameSync(tmp, file)
+  return { file, event }
 }
 
 export function loadLedgers(dir) {
@@ -493,7 +547,7 @@ export function runOutcome(run, now = Date.now()) {
   return {
     runId: run.runId, project: run.project ?? null, version: run.meta.grimoireVersion ?? 'unknown', briefs: run.meta.briefsHash ?? 'unknown',
     startedAt: run.startedAt ?? null, updatedAt: run.updatedAt ?? null,
-    status: run.status, stale: run.status === 'running' && Number.isFinite(updated) && now - updated > STALE_HOURS * 3600000,
+    status: run.status, stale: run.status === 'running' && Number.isFinite(updated) && now - updated > STALE_HOURS * 3600000, closed: run.closed ?? null,
     attempts: Object.keys(seqs).length || 1, activeMin,
     tasks, prs, firstRound: f.firstRound, fixes: count('fix'), escalations: count('escalate'), replans: f.replans,
     // late: every agent past its soft limit (readers, fixes and ships too); lateImpl: implementer dispatches only
@@ -519,7 +573,9 @@ export function scorecard(rows) {
     return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : Math.round((v[v.length / 2 - 1] + v[v.length / 2]) / 2)) : null
   }
   const by = (st) => rows.filter((r) => r.status === st).length
-  const drained = by('drained'), halted = by('halted')
+  const drained = by('drained'), halted = by('halted'), closed = by('closed')
+  const closeReasons = {}
+  for (const r of rows) if (r.status === 'closed') { const k = r.closed?.reason || 'unknown'; closeReasons[k] = (closeReasons[k] || 0) + 1 }
   const tasks = { landed: sum((r) => r.tasks.landed), failed: sum((r) => r.tasks.failed), blocked: sum((r) => r.tasks.blocked), inFlight: sum((r) => r.tasks.inFlight) }
   const firstRound = { passed: sum((r) => r.firstRound.passed), total: sum((r) => r.firstRound.total) }
   const haltKinds = {}
@@ -548,7 +604,7 @@ export function scorecard(rows) {
   }
   const cov = { dispatched: sum((r) => r.costCoverage && r.costCoverage.dispatched), matched: sum((r) => r.costCoverage && r.costCoverage.matched) }
   return {
-    runs: rows.length, drained, halted, running: rows.filter((r) => r.status === 'running' && !r.stale).length, stale: rows.filter((r) => r.stale).length,
+    runs: rows.length, drained, halted, closed, closeReasons: Object.fromEntries(Object.entries(closeReasons).sort(([a], [b]) => a.localeCompare(b))), running: rows.filter((r) => r.status === 'running' && !r.stale).length, stale: rows.filter((r) => r.stale).length,
     runSuccess: rate(drained, drained + halted),
     cleanDrains: rows.filter((r) => r.status === 'drained' && !r.tasks.failed && !r.tasks.blocked).length,
     tasks, landingRate: rate(tasks.landed, tasks.landed + tasks.failed + tasks.blocked),
@@ -573,7 +629,8 @@ function scorecardText(sc) {
   const pct = (x) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`)
   const kinds = Object.entries(sc.haltKinds).map(([k, v]) => `${k} ${v.count}${v.resumedToDrain ? ` (${v.resumedToDrain} resumed to a drain)` : ''}`).join(', ') || 'none'
   return [
-    `outcomes: ${sc.runs} run${sc.runs === 1 ? '' : 's'} · drained ${sc.drained} · halted ${sc.halted} · running ${sc.running} · stale ${sc.stale} (no write for ${STALE_HOURS} h)`,
+    `outcomes: ${sc.runs} run${sc.runs === 1 ? '' : 's'} · drained ${sc.drained} · halted ${sc.halted}${sc.closed ? ` · closed ${sc.closed}` : ''} · running ${sc.running} · stale ${sc.stale} (no write for ${STALE_HOURS} h)`,
+    ...(sc.closed ? [`  closed ${sc.closed}: ${Object.entries(sc.closeReasons).map(([k, v]) => `${k} ${v}`).join(', ')}`] : []),
     `  run success ${pct(sc.runSuccess)} of finished runs · clean drains ${sc.cleanDrains} · PRs ${sc.prs}`,
     `  tasks landed ${sc.tasks.landed} · failed ${sc.tasks.failed} · blocked ${sc.tasks.blocked} → landing rate ${pct(sc.landingRate)}`,
     `  halts ${sc.halts}: ${kinds}`,
@@ -679,7 +736,7 @@ main{padding:16px;max-width:1200px;margin:0 auto}section{margin:0 0 22px}h2{font
 .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:600;font-size:12px}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}td.txt{overflow-wrap:anywhere;min-width:220px}td.mono{font-family:var(--mono);font-size:12px;white-space:nowrap}
-.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.SHIP_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY,.STILL_RUNNING,.FENCED{color:var(--warn)}
+.PASS,.DONE,.DONE_WITH_CONCERNS,.DONE_PENDING_GATE,.drained,.answered{color:var(--ok)}.FAIL,.halted,.HALT,.BLOCKED,.FAILED,.GATE_FAILED,.SHIP_FAILED,.REVIEWERS_UNAVAILABLE{color:var(--bad)}.RE_REVIEW,.REVISE,.running,.NEEDS_ATTENTION,.ADVISORY,.STILL_RUNNING,.FENCED{color:var(--warn)}.closed{color:var(--mut)}
 .lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.lane .task{border-top:1px solid var(--line);padding:6px 0;cursor:pointer}.lane .task:hover{color:var(--acc)}
 details{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--card)}summary{cursor:pointer;padding:8px 10px;font-weight:600;overflow-wrap:anywhere}
 details ol{margin:0;padding:0 10px 10px 30px}details li{margin:3px 0;overflow-wrap:anywhere}.k{font-family:var(--mono);font-size:12px;color:var(--mut)}
@@ -706,7 +763,7 @@ function client(score) {
     for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c))
     return el
   }
-  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'SHIP_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'STILL_RUNNING', 'FENCED', 'answered']
+  const STATUS = ['PASS', 'FAIL', 'DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE', 'drained', 'halted', 'running', 'HALT', 'REVISE', 'RE_REVIEW', 'ADVISORY', 'BLOCKED', 'FAILED', 'GATE_FAILED', 'SHIP_FAILED', 'REVIEWERS_UNAVAILABLE', 'NEEDS_ATTENTION', 'STILL_RUNNING', 'FENCED', 'answered', 'closed']
   const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
   const cls = (v) => (STATUS.includes(String(v)) ? String(v) : null)
   const s = (v) => (v == null ? '' : typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(v))
@@ -768,6 +825,7 @@ function client(score) {
     // after run.end: the details of tasks that landed since the last confirmed flush, LANDED_DELTA_MAX per chunk
     'landed.flush': (e) => `${s(e.left)} landed task detail(s) still to write to landed.jsonl: one more chunk`,
     'run.end': (e) => `${s(e.status)} · done ${s(e.done)} · failed ${s(e.failed)} · blocked ${s(e.blocked)} · PRs ${s(e.prs)} · tokens ${s(e.tokens)}`,
+    'run.close': (e) => `closed (${s(e.reason)})${e.note ? `: ${s(e.note)}` : ''} · by ${s(e.by)}`,
   }
   const summarize = (e) => { try { return SUM[e.type] ? SUM[e.type](e) : rest(e) } catch { return rest(e) } }
   const verdictOf = (e) => e.verdict ?? e.decision ?? e.status ?? null
@@ -832,12 +890,13 @@ function client(score) {
     const haltCell = (o) => {
       const last = o.halts[o.halts.length - 1]
       if (o.status === 'halted' && last) return h('span', { class: 'FAIL', title: last.reason }, `${last.kind ? `[${last.kind}] ` : ''}${clipT(last.reason, 110)}`)
+      if (o.status === 'closed') return h('span', { class: 'closed', title: o.closed?.note || '' }, `closed: ${o.closed?.reason || 'no reason'}`)
       return o.halts.length ? h('span', { class: 'muted' }, `resumed after ${o.halts.length} halt(s)`) : '—'
     }
     return h('section', null,
       h('h2', null, `Scorecard (${sc.runs} run${sc.runs === 1 ? '' : 's'}${st.version || st.briefs || st.project ? ', filtered' : ''})`),
       h('div', { class: 'grid' },
-        tile('runs', String(sc.runs), `${sc.drained} drained · ${sc.halted} halted · ${sc.running} running${sc.stale ? ` · ${sc.stale} stale` : ''}`),
+        tile('runs', String(sc.runs), `${sc.drained} drained · ${sc.halted} halted${sc.closed ? ` · ${sc.closed} closed` : ''} · ${sc.running} running${sc.stale ? ` · ${sc.stale} stale` : ''}`),
         tile('run success', pct(sc.runSuccess), `drained, of ${sc.drained + sc.halted} finished · ${sc.cleanDrains} with nothing left open`),
         tile('task landing', pct(sc.landingRate), `${sc.tasks.landed} landed · ${sc.tasks.failed} failed · ${sc.tasks.blocked} blocked`),
         tile('1st-round review pass', pct(sc.firstRoundRate), `${sc.firstRound.passed}/${sc.firstRound.total} task stages`),
@@ -934,8 +993,9 @@ function client(score) {
       prUrls.length || drafts.length ? h('div', { class: 'tags' }, prUrls.map((u) => h('span', { class: 'tag' }, u)), drafts.map((u) => h('span', { class: 'tag' }, `${u} (draft)`))) : null,
       r.statusNote ? h('p', { class: 'muted' }, `status: ${r.statusNote}`) : null,
       o && o.stale ? h('p', { class: 'warnc' }, `⚠ still "running" but nothing written for ${ago(r.updatedAt)} (over ${D.staleHours} h): its session most likely died — resume it with /orchestrate`) : null,
+      r.closed ? h('p', { class: 'closed' }, `closed (${s(r.closed.reason)}) ${s(r.closed.at)}${r.closed.note ? `: ${r.closed.note}` : ''}: its work finished outside the loop`) : null,
       r.status === 'halted' && (lastHalt || sm.halt) ? h('p', { class: 'FAIL' }, `halt: ${haltText(lastHalt || sm.halt)}`)
-        : lastHalt ? h('p', { class: 'muted' }, `halted in session ${s(lastHalt.attempt ?? 1)}, then resumed: ${haltText(lastHalt)}`) : null,
+        : lastHalt ? h('p', { class: 'muted' }, `halted in session ${s(lastHalt.attempt ?? 1)}, then ${r.closed ? 'closed' : 'resumed'}: ${haltText(lastHalt)}`) : null,
       r.checkpoint ? checkpoint(r.checkpoint, r.landed) : null,
       isObj(sm.telemetry) ? kvBlock('Telemetry (run summary)', sm.telemetry) : null,
       r.badLines ? h('p', { class: 'muted' }, `${r.badLines} malformed event line(s) skipped`) : null,
