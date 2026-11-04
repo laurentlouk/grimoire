@@ -19,9 +19,10 @@
 //  Each --root is a project (default: the current directory): its grimoire.config.json gives the
 //  repos' tags, the specialists and {policies}; its telemetry.dir (default .grimoire/runs) the runs.
 //  What a recorded run cannot tell: dependsOn (no cross-repo floor, no fan-out raise) and the
-//  declared files of a task that never landed (treated as undeclared: raised). A landed task's files
-//  are its declared files plus those it changed, so file counts read high: the mix leans BALANCED,
-//  which errs toward fewer FAST tasks, never more.
+//  declared files of a task that never landed (treated as undeclared: raised). A landed task is
+//  re-routed on its declared files (`declared` in landed.jsonl, 0.18.0 on); an older record has only
+//  its declared files plus those it changed, so its file count reads high and the mix leans BALANCED,
+//  which errs toward fewer FAST tasks, never more. `declaredCoverage` says how many tasks had them.
 import { readFileSync, readdirSync, lstatSync, existsSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -62,7 +63,11 @@ function landedFiles(runDir) {
   for (const line of text.split('\n')) {
     let d
     try { d = JSON.parse(line) } catch { continue }
-    if (isObj(d) && typeof d.id === 'string' && Array.isArray(d.files)) out.set(d.id, [...new Set([...(out.get(d.id) || []), ...d.files.map(String)])])
+    if (!isObj(d) || typeof d.id !== 'string') continue
+    const prev = out.get(d.id)
+    // the declared footprint when the record carries it, else the files list (declared + changed)
+    if (Array.isArray(d.declared)) out.set(d.id, { files: [...new Set([...(prev && prev.declared ? prev.files : []), ...d.declared.map(String)])], declared: true })
+    else if (Array.isArray(d.files) && !(prev && prev.declared)) out.set(d.id, { files: [...new Set([...(prev ? prev.files : []), ...d.files.map(String)])], declared: false })
   }
   return out
 }
@@ -78,7 +83,7 @@ export function counterfactualRun(run, runDir, { router, rules, tagsOf, migratio
     const replannedAfterCode = /replanned after a code failure/.test(String(r.reason || ''))
     const selectorModel = (/selector chose (haiku|sonnet|opus)/.exec(String(r.reason || '')) || [])[1] || r.model
     const c = router.classifyPolicy(
-      { files: files.get(id) || [], tags: tagsOf(r.repo), migration: migrationAgents.some((a) => String(r.agent || '').endsWith(a)), crossRepo: [], downstream: 0, model: selectorModel, replannedAfterCode, history: [] },
+      { files: (files.get(id) || {}).files || [], tags: tagsOf(r.repo), migration: migrationAgents.some((a) => String(r.agent || '').endsWith(a)), crossRepo: [], downstream: 0, model: selectorModel, replannedAfterCode, history: [] },
       rules,
     )
     const reviews = ev.filter((e) => e.type === 'review' && String(e.task) === id && e.discarded !== true && e.stage !== 'terminal')
@@ -89,7 +94,7 @@ export function counterfactualRun(run, runDir, { router, rules, tagsOf, migratio
     // what FAST would not have dispatched: re-review rounds (the guard replaces them), fixes past the
     // first, and data-integrity (not drawn per task) — counted on what was recorded
     const skipped = reviews.filter((e) => (e.round ?? 0) > 0).length + Math.max(0, fixes - 1) + reviews.filter((e) => /data-integrity/i.test(String(e.persona))).length
-    tasks.push({ id, repo: r.repo, model: selectorModel, auto: c.auto, signals: c.floor.concat(c.raise).slice(0, 4), round0Fail, fixes, diGated, status: settle ? settle.status : null, skippedIfFast: skipped })
+    tasks.push({ id, repo: r.repo, model: selectorModel, declared: !!(files.get(id) || {}).declared, auto: c.auto, signals: c.floor.concat(c.raise).slice(0, 4), round0Fail, fixes, diGated, status: settle ? settle.status : null, skippedIfFast: skipped })
   }
   const terminalFail = new Set(ev.filter((e) => (e.type === 'terminal' && e.verdict === 'FAIL') || (e.type === 'review' && e.stage === 'terminal' && e.verdict === 'FAIL' && e.discarded !== true))
     .map((e) => e.repo ?? (/^(.+):final$/.exec(String(e.task ?? '')) || [])[1]).filter(Boolean))
@@ -105,6 +110,7 @@ export function report(rows) {
     .map((t) => ({ run: t.run, id: t.id, repo: t.repo, why: [...(t.round0Fail.length ? [`round-0 FAIL (${t.round0Fail.join(', ')})`] : []), ...(t.fixes >= 2 ? [`${t.fixes} fix rounds`] : []), ...(t.diGated ? ['data-integrity gated'] : []), ...(t.terminalFailInRepo ? ['terminal sweep failed in its repo'] : [])] }))
   return {
     tasks: rows.length,
+    declaredCoverage: rows.filter((t) => t.declared).length,
     mix,
     fastSkippableDispatches: fast.reduce((a, t) => a + t.skippedIfFast, 0),
     misroutes,
@@ -143,6 +149,7 @@ function main(argv) {
   if (json) console.log(JSON.stringify({ ...out, rows }, null, 2))
   else {
     console.log(`${out.tasks} recorded task(s) · auto would pick: ${Object.entries(out.mix).map(([p, n]) => `${p} ${n}`).join(' · ') || '—'}`)
+    console.log(`routed on declared files: ${out.declaredCoverage}/${out.tasks} (the rest on declared + changed files, which overstates the count)`)
     console.log(`dispatches FAST would have skipped (upper bound): ${out.fastSkippableDispatches}`)
     for (const m of out.misroutes) console.log(`  ⚠ ${m.run} ${m.id} (${m.repo}): ${m.why.join('; ')}`)
     console.log(out.verdict)

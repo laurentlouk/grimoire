@@ -362,5 +362,16 @@
         "evidence": ""
       }
     ]
+  },
+  {
+    "id": 14,
+    "query": "Set up grimoire for our project. The Rust backend keeps its auth in src/services/auth.rs and lib/aws_cognito/, and payments in src/billing_engine/.",
+    "should_trigger": true,
+    "expected_output": "While exploring the backend, checks where its auth, payment and contract code lives against the default policies.strictPaths, and proposes repos[].strictPaths for what the defaults miss (src/services/auth.rs, **/aws_cognito/**, src/billing_engine/**) in the config diff, written only on the user's yes.",
+    "expectations": [
+      { "text": "Checks the backend's auth and payment paths against the default strictPaths", "passed": null, "evidence": "" },
+      { "text": "Proposes repos[].strictPaths for the paths the defaults miss, in the config diff", "passed": null, "evidence": "" },
+      { "text": "Writes nothing before the user approves", "passed": null, "evidence": "" }
+    ]
   }
 ]

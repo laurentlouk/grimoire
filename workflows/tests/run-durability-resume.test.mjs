@@ -289,6 +289,15 @@ const decodeMarker = (line) => JSON.parse(unb64((/grimoire:state v1 ([A-Za-z0-9+
   eq(rt.result.resumedLanded.map((x) => x.id), ['PROJ-1', 'PROJ-2'], 'both absorbed; only PROJ-3 runs')
 }
 
+// ══════════════ E · an escalation survives a resume from the PR marker alone ══════════════
+{
+  const st = stateOf({ landedTasks: [['PROJ-1', 'aaaaaaa']], esc: ['PROJ-2', 'NOT-IN-PROJECT'] })
+  const r = await run('E-1 · a resume from the PR marker alone (esc) keeps the task STRICT', [A, T('PROJ-2', { files: ['README.md — document it'] })], happy,
+    { args: { ...QUIET, policy: 'auto' }, index: { prState: [PR(st)], reconcile: [TASKLINE('PROJ-1', 'aaaaaaa')], runBranches: [BRANCH()] } })
+  eq([r.result.policies.tasks['PROJ-2'].policy, r.result.policies.tasks['PROJ-2'].auto], ['strict', 'fast'], 'strict from the marker, though auto alone would pick fast')
+  ok(!('NOT-IN-PROJECT' in r.result.policies.tasks), 'an id that is not an issue of the project is ignored')
+}
+
 // ══════════════ B · sync states: said out loud; a branch the run cannot build on refuses ══════════════
 {
   const st = stateOf()

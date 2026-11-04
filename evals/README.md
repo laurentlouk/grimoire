@@ -23,14 +23,14 @@ and no key. Running the cases is manual and paid, and needs the command-line `cl
 | architecture | 5 | 1 | 2 | 2 |
 | crystallize | 8 | 1 | 1 | 6 |
 | graph | 7 | 1 | 3 | 3 |
-| implement | 6 | 1 | 1 | 4 |
+| implement | 7 | 1 | 1 | 5 |
 | launch-agent | 5 | 1 | 1 | 3 |
 | logs | 6 | 1 | 1 | 4 |
 | manager | 11 | 1 | 1 | 9 |
 | orchestrate | 12 | 1 | 1 | 10 |
-| review | 6 | 1 | 1 | 4 |
+| review | 7 | 1 | 1 | 5 |
 | roast | 5 | 1 | 1 | 3 |
-| setup | 13 | 1 | 2 | 10 |
+| setup | 14 | 1 | 2 | 11 |
 | tdd | 4 | 1 | 1 | 2 |
 | to-issues | 4 | 1 | 1 | 2 |
 | to-plan | 3 | 1 | 1 | 1 |

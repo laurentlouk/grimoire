@@ -39,6 +39,13 @@ means the implementer reported no usable range: establish it as the header says.
    the implementer's reported start must be an ancestor of the head. Run the command the
    header gives; a non-zero exit is a FAIL (the engine then judges from the first commit).
 
+## Also report (not a check, never a FAIL)
+**`authChange`**: does the diff add, remove or change an authentication or authorization check —
+a guard or middleware call, a permission or role test, a token or session check, a route made
+public — whatever the file is named? Then give `path:line — what changed` ("src/resolvers/user.rs:41
+— drops check_user_authenticated()"); otherwise an empty string. It never fails the change: it tells
+the loop to review it as strict, with the privacy lens.
+
 ## Return
 - **PASS** with `problems: []` when every check holds.
 - **FAIL** with one `problems` entry per failed check: `check` (the name in brackets above),
