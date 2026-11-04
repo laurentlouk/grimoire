@@ -49,7 +49,8 @@ function stream(tasks, s = newStore('acme/widget')) {
   return { s, rendered }
 }
 const life = (over) => ({ ...newLife(false, false), ...over })
-const confirms = (...pairs) => pairs.map(([i, f]) => [i, [f]])
+// a confirmation keeps its fold only: environment facts do not drift, so its edited files are never read (nor kept)
+const confirms = (...pairs) => pairs.map(([i]) => [i, []])
 
 // ---- the sessions the source's scenarios repeat ----
 const broken = (i) => [edit(`pkg/mod${i}.py`), cmd('python -m pytest tests/test_a.py -q', `${BASE}: No module named pytest`, 1), cmd(`${PROJ} -m pytest tests/test_a.py -q`, '1 passed in 0.2s', 0)]
@@ -126,6 +127,13 @@ section('form repair')
   stream(range(4, 9).map((i) => [edit(`pkg/g${i}.py`), cmd('pytest -q', 'bash: pytest: command not found', 127), cmd('python -m pytest -q', `${BASE}: No module named pytest`, 1)]), s)
   const f = s.facts['form_repair:run_tests:pytest']
   eq([f.params.bCounts, f.params.bFails, workingForm(f), claim(f), render(s)], [{ 'python -m pytest': 4 }, { 'python -m pytest': 5 }, null, '', ''], 'a named form that stops working is named no more: the fact makes no claim')
+}
+
+section('a store read back')
+{
+  const s = fromJSON({ repo: 'r', now: 3, facts: { 'form_repair:run_tests:x': { id: 'form_repair:run_tests:x', family: 'form_repair', params: { intent: 'run_tests', a: 'x' }, life: newLife(false, false) },
+    'boundary:fetch_remote': { id: 'boundary:fetch_remote', family: 'boundary', params: { hosts: { 'a.example': 1 } }, life: newLife(true, false) } } }, 'r')
+  eq(Object.keys(s.facts), ['boundary:fetch_remote'], 'a fact missing its family\'s params is dropped, never folded')
 }
 
 section('empty probe and boundary')
@@ -261,6 +269,20 @@ eq([
   labelFailed(['app.tests.Missing'], "AttributeError: module 'app.tests' has no attribute 'Missing'"),
   labelFailed(['app.tests'], "AttributeError: 'NoneType' object has no attribute 'pk'"),
 ], [false, true, true, false], 'a missing runner is a form failure, not a label one')
+
+section('never a secret (grimoire: the block reaches every later session)')
+{
+  const NEED_KEY = 'Traceback (most recent call last):\nRuntimeError: missing environment variable STRIPE_API_KEY'
+  const { s, rendered } = stream(range(0, 6).map((i) => [edit(`/r/pkg/k${i}.py`), py('import app; app.run()', NEED_KEY), py('import app; app.run()', 'ran', 'STRIPE_API_KEY=sk_live_51Habc123SECRET ')]))
+  eq([s.facts['env_value:STRIPE_API_KEY'].params, rendered[5]], [{ var: 'STRIPE_API_KEY', good: { '<redacted>': 6 }, bad: {} },
+    block('Code that imports the project needs `STRIPE_API_KEY` set here (its value is not recorded).')], 'a secret-looking variable\'s value is never stored nor shown: the fact names the variable only')
+  const NEED_DB = 'Traceback (most recent call last):\nRuntimeError: missing environment variable APP_DB'
+  const db = stream(range(0, 6).map((i) => [edit(`/r/pkg/d${i}.py`), py('import app', NEED_DB), py('import app', 'ran', 'APP_DB=postgres://admin:hunter2@db.internal/app ')])).s
+  ok(!JSON.stringify(db.facts).includes('hunter2') && !render(db).includes('hunter2'), 'a value that is not a short plain word or path (a URL with credentials) is redacted, whatever the name')
+  const clone = (i) => [edit(`pkg/c${i}.py`), cmd('git clone https://x-access-token:ghp_AbCdEf123456@github.com/acme/private.git', "fatal: unable to access 'https://github.com/acme/private.git/': Could not resolve host: github.com", 128)]
+  const cl = stream(range(0, 4).map(clone)).s
+  ok(!JSON.stringify(cl.facts).includes('ghp_') && render(cl).includes('github.com') && !render(cl).includes('x-access-token'), `a URL's userinfo never reaches a host (${render(cl).split('\n')[1] || 'no block'})`)
+}
 
 section('environment variables (test_envfacts_args.py)')
 const NEED = 'Traceback (most recent call last):\n  ...\nRuntimeError: settings are missing. Define the environment variable APP_SETTINGS before importing app.'

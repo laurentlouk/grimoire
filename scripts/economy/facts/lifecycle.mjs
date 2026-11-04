@@ -77,7 +77,7 @@ export function updateLife(life, now, verdict, fired, exercised, files) {
     life.fireDen++
     if (fired) life.fireNum++
   }
-  if (verdict === 'confirm') life.confirms.push([now, [...files].sort()])
+  if (verdict === 'confirm') life.confirms.push([now, life.drift ? [...files].sort() : []]) // the files are read only under drift
   else if (verdict === 'contradict') life.contradicts.push(now)
   if (life.state === 'CANDIDATE') {
     if (driftedConfirms(life) >= K_PROMOTE) { life.state = 'ACTIVE'; life.promotedAt = now }

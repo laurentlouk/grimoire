@@ -49,8 +49,12 @@ export const newStore = (repo) => sessionFields({ repo: String(repo ?? ''), now:
 /** The store as it is saved. */
 export const toJSON = (store) => ({ repo: store.repo, now: store.now, vocab: store.vocab, facts: store.facts })
 
-const validFact = (f) => isObj(f) && typeof f.id === 'string' && typeof f.family === 'string' && isObj(f.params) && isObj(f.life) &&
-  Array.isArray(f.life.confirms) && Array.isArray(f.life.contradicts)
+// what each family's params must hold: a fact read back without them is dropped, never folded
+const PARAMS = { form_repair: { intent: 's', a: 's', bCounts: 'o', errorCounts: 'o' }, arg_repair: { form: 's', kind: 's', param: 's', examples: 'o' },
+  env_value: { var: 's', good: 'o', bad: 'o' }, boundary: { hosts: 'o' }, empty_probe: { kinds: 'o' } }
+const validFact = (f) => isObj(f) && typeof f.id === 'string' && typeof f.family === 'string' && Object.hasOwn(PARAMS, f.family) && isObj(f.params) && isObj(f.life) &&
+  Array.isArray(f.life.confirms) && Array.isArray(f.life.contradicts) &&
+  Object.entries(PARAMS[f.family]).every(([k, t]) => (t === 's' ? typeof f.params[k] === 'string' : isObj(f.params[k])))
 
 /** A store read back from its JSON (an object or a string). A malformed file or fact is dropped, never
  * thrown: the facts are re-learned. */

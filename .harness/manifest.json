@@ -11,7 +11,7 @@
     "hooks/scripts/guard.mjs": "9c7c1976101f1a3a202ab38410ed82622f91f1d31132502b117833defd5cdf70",
     "hooks/scripts/graph-refresh.sh": "1c6d2a808e4998a35eb0c2a2d02c20e00ddd3e2820df05796d17fe62959fd0ea",
     "hooks/scripts/economy.sh": "3b95bbba010b3ebb8c5cf1135ca149f53859026aad1f3029071cade670342eb7",
-    "hooks/scripts/economy.mjs": "c244b74930262477a5d1e9216559a6252a91f7fa846c355f33f63d8d19218698",
+    "hooks/scripts/economy.mjs": "93250303e8a2ad418a4325e259e98ea2f7dfcad7f36b912a39c0424aa11ec882",
     "scripts/project-config.mjs": "b828299a5cb0f1012d654edfda65917959879ce114146c492cfe9d4c1f6529af"
   }
 }

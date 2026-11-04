@@ -103,7 +103,8 @@ const PROBE_HIT = {
 const words = (s) => String(s).split(/\s+/).filter(Boolean) // Python's str.split()
 const lstripDotSlash = (s) => s.replace(/^[./]+/, '') // Python's s.lstrip("./")
 const tail = (p) => p.split('/').pop() // the last path component of an executable
-const hostsOf = (s) => [...s.matchAll(URL_HOST_RE)].map((m) => m[1])
+// a URL's host, never its userinfo: `https://x-access-token:<token>@github.com/…` is github.com
+const hostsOf = (s) => [...s.matchAll(URL_HOST_RE)].map((m) => m[1].replace(/^[^@]*@/, '')).filter(Boolean)
 const stripParens = (s) => s.trim().replace(/^[()]+|[()]+$/g, '').trim()
 
 /** `rtk pytest -q` → `pytest -q`; anything else unchanged. */
@@ -343,7 +344,9 @@ export function errorClass(output) {
   return null
 }
 
-const exitCodeHint = (output) => { const m = /\bexit code[:=\s]+(\d+)/i.exec(output || ''); return m ? Number(m[1]) : null }
+// Claude Code starts a failed command's result with `Exit code N`: only that line is a hint, not a
+// mention of an exit code anywhere in a successful command's output.
+const exitCodeHint = (output) => { const m = /^\s*exit code[:=\s]+(\d+)/i.exec(output || ''); return m ? Number(m[1]) : null }
 
 // The runner could not load a test label. Read off the output rather than the exit code: agents pipe
 // test runs through `| tail`.
@@ -412,12 +415,19 @@ export function labelRule(a, b) {
   return null
 }
 
+// A value an environment fact may keep, and show in every later session's context: never a secret.
+// A name that reads like one, or a value that is not a short plain word or path (a URL, which can
+// carry credentials, included), is kept as REDACTED: the fact still says the variable is needed.
+export const REDACTED = '<redacted>'
+const SECRET_NAME = /KEY|TOKEN|SECRET|PASS|PWD|CRED|AUTH|URL|URI|DSN|PRIVATE|SESSION|COOKIE|CERT|SIGN/i
+export const safeEnvValue = (name, value) => (!SECRET_NAME.test(name) && /^[A-Za-z0-9._/-]{1,64}$/.test(value) ? value : REDACTED)
+
 // What one call says about environment variables: those its output asks for, and those its command
 // sets (inline, exported or in the code it runs).
 function envCall(cmd, out, success) {
   const sets = {}
-  for (const m of cmd.matchAll(ENV_PREFIX_RE)) sets[m[1]] = m[3]
-  for (const m of cmd.matchAll(ENV_INCODE_RE)) sets[m[1]] = m[2]
+  for (const m of cmd.matchAll(ENV_PREFIX_RE)) sets[m[1]] = safeEnvValue(m[1], m[3])
+  for (const m of cmd.matchAll(ENV_INCODE_RE)) sets[m[1]] = safeEnvValue(m[1], m[2])
   const need = [...new Set([...(out || '').matchAll(ENV_NEED_RE)].map((m) => m[1]))].sort()
   return { need, sets, ok: !!success && !FAILED_RE.test(out || '') }
 }

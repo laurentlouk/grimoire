@@ -47,6 +47,7 @@ const LOCK_STALE_MS = 10000
 const KEEP_TURNS_MS = 7 * 86400000
 const KEEP_FOLDED = 5000 // the most recent folded dispatch and session keys
 const KEEP_CONFIRMS = 50 // a fact's history, by fold: older confirmations weigh 0.8^age ≈ nothing
+const KEEP_COUNTS = 20 // per count table of a fact (hosts, forms, values, examples): the most frequent
 const INJECT_SOURCES = new Set(['startup', 'clear', 'compact'])
 const CONTENT_TOOLS = new Set(['read', 'grep', 'glob', 'view'])
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -72,14 +73,25 @@ function resultText(toolName, response, error) {
 }
 
 // The repos[] entry a working directory is in, by its path under the main checkout; null outside every one.
+// A git worktree of a repo (a loop lane, a session worktree) is that repo: its checkout's `.git` file
+// names the repo's main checkout (no git subprocess).
 function repoMatcher(root, config) {
   const base = mainCheckout(root) ?? root
   const repos = (Array.isArray(config?.repos) ? config.repos : []).filter((r) => isObj(r) && typeof r.name === 'string')
     .map((r) => ({ name: r.name, path: resolve(base, typeof r.path === 'string' && r.path ? r.path : r.name) }))
+  const within = (where) => repos.find((r) => where === r.path || where.startsWith(r.path + sep))?.name ?? null
+  const seen = new Map()
   return (cwd) => {
     if (typeof cwd !== 'string' || !cwd) return null
     const where = resolve(cwd)
-    return repos.find((r) => where === r.path || where.startsWith(r.path + sep))?.name ?? null
+    if (seen.has(where)) return seen.get(where)
+    let name = within(where)
+    for (let d = where; !name; d = resolve(d, '..')) {
+      if (existsSync(join(d, '.git'))) { const main = mainCheckout(d); if (main) name = within(main); break }
+      if (resolve(d, '..') === d) break
+    }
+    seen.set(where, name)
+    return name
   }
 }
 
@@ -98,11 +110,25 @@ const factsDir = (dir) => join(dir, 'facts')
 const factsOn = (config) => !(isObj(config?.economy) && config.economy.facts === 'off')
 const loadStore = (dir, repo) => fromJSON(readJson(join(factsDir(dir), `${repo}.json`)) ?? { repo }, repo)
 
+// A fact's count tables kept to their most frequent entries, and its history to its last folds: the
+// store is read at every SessionStart and rewritten at every fold.
+function trimFact(f) {
+  f.life.confirms = f.life.confirms.slice(-KEEP_CONFIRMS)
+  f.life.contradicts = f.life.contradicts.slice(-KEEP_CONFIRMS)
+  for (const [k, v] of Object.entries(f.params)) {
+    if (!isObj(v) || !Object.values(v).every((n) => Number.isFinite(n))) continue
+    const entries = Object.entries(v)
+    if (entries.length > KEEP_COUNTS) f.params[k] = Object.fromEntries(entries.sort((a, b) => b[1] - a[1]).slice(0, KEEP_COUNTS))
+  }
+}
+
 // Fold one finished dispatch or session (`key`, once) into the store of each repo its calls ran in.
+// Returns false when it was not folded (a busy lock), so a session keeps what it was shown.
 function foldTranscript(dir, root, event, key, file, injected, now) {
-  if (typeof file !== 'string' || !file) return
+  if (typeof file !== 'string' || !file) return true
   const { config } = loadConfig(root)
-  if (!factsOn(config)) return
+  if (!factsOn(config)) return true
+  if (Object.hasOwn(readJson(join(factsDir(dir), 'folded.json')) ?? {}, key)) return true // folded already: no transcript read
   const repoOf = repoMatcher(root, config)
   const byRepo = new Map()
   for (const c of readTranscript(file).calls) {
@@ -113,20 +139,26 @@ function foldTranscript(dir, root, event, key, file, injected, now) {
   const done = withLock(join(dir, 'facts.lock'), () => {
     const folded = readJson(join(factsDir(dir), 'folded.json')) ?? {}
     if (Object.hasOwn(folded, key)) return
+    // every repo's new store is computed before anything is written: a repo whose fold throws is left
+    // as it was (and logged), the others are written once, then the key, so a retry folds nothing twice
+    const out = []
     for (const [repo, calls] of byRepo) {
-      const store = loadStore(dir, repo)
-      if (Array.isArray(injected?.[repo])) seedInjected(store, injected[repo])
-      foldFacts(store, calls, { iid: key, at: new Date(now).toISOString() })
-      for (const f of Object.values(store.facts)) {
-        f.life.confirms = f.life.confirms.slice(-KEEP_CONFIRMS)
-        f.life.contradicts = f.life.contradicts.slice(-KEEP_CONFIRMS)
+      try {
+        const store = loadStore(dir, repo)
+        if (Array.isArray(injected?.[repo])) seedInjected(store, injected[repo])
+        foldFacts(store, calls, { iid: key, at: new Date(now).toISOString() })
+        for (const f of Object.values(store.facts)) trimFact(f)
+        out.push([repo, toJSON(store)])
+      } catch (e) {
+        logError(dir, event, `facts of ${key.replace(':', ' ')} not folded into ${repo}: ${e && e.message ? e.message : e}`, now)
       }
-      writeJson(join(factsDir(dir), `${repo}.json`), toJSON(store))
     }
+    for (const [repo, data] of out) writeJson(join(factsDir(dir), `${repo}.json`), data)
     folded[key] = now
     writeJson(join(factsDir(dir), 'folded.json'), Object.fromEntries(Object.entries(folded).sort((a, b) => a[1] - b[1]).slice(-KEEP_FOLDED)))
   })
   if (!done) logError(dir, event, `facts of ${key.replace(':', ' ')} not folded: the lock stayed busy`, now)
+  return done
 }
 
 // SessionStart: the repo's block, and the ids it holds kept for the session's fold.
@@ -149,8 +181,7 @@ function onSessionStart(dir, root, payload) {
 function onSessionEnd(dir, root, payload, now) {
   if (typeof payload.session_id !== 'string' || !AGENT_ID.test(payload.session_id)) return
   const shown = join(factsDir(dir), 'sessions', `${payload.session_id}.json`)
-  foldTranscript(dir, root, 'SessionEnd', `session:${payload.session_id}`, payload.transcript_path, readJson(shown), now)
-  rmSync(shown, { force: true })
+  if (foldTranscript(dir, root, 'SessionEnd', `session:${payload.session_id}`, payload.transcript_path, readJson(shown), now)) rmSync(shown, { force: true })
 }
 
 function onCall(dir, payload, now) {
@@ -232,8 +263,9 @@ function onStop(dir, root, payload, now) {
     const fed = withLock(join(dir, 'envelope.lock'), () => writeJson(join(dir, 'envelope.json'), withSample(readJson(join(dir, 'envelope.json')), role, t.calls)))
     if (!fed) logError(dir, 'SubagentStop', `envelope sample of ${role} (${t.calls} calls) dropped: the lock stayed busy`, now)
   }
-  // states and judge requests older than a week go (an agent that never stopped leaves its request)
-  for (const sub of ['turns', 'judge']) {
+  // states, judge requests and sessions' shown ids older than a week go (an agent that never stopped
+  // leaves its request, a session that never ended its ids)
+  for (const sub of ['turns', 'judge', join('facts', 'sessions')]) {
     let names = []
     try { names = readdirSync(join(dir, sub)) } catch {}
     for (const f of names) {

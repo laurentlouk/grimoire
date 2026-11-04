@@ -10,7 +10,14 @@ Agents keep rediscovering the same things about a repository's environment. The 
   - `lifecycle.mjs`: three confirmations, the 0.8^age score with contradictions weighted 5×, the firing gate of ≥ 40 % over ≥ 4.
   - `render.mjs`: at most 4 facts and about 600 characters, with the advice lint.
   - All of its envfacts tests are ported (89 checks). A differential against the Python matched on 3,485 of 3,486 comparisons; the one difference is a tie the Python breaks by hash order.
-- **The hook folds** each finished dispatch (`SubagentStop`, its transcript) and session (`SessionEnd`) once, into the store of each repo its calls ran in (`.grimoire/economy/facts/<repo>.json`). This happens under a lock; a busy lock skips the fold until the next stop. A fact's history keeps its last 50 folds.
+- **The hook folds** each finished dispatch (`SubagentStop`, its transcript) and session (`SessionEnd`) once, into the store of each repo its calls ran in (`.grimoire/economy/facts/<repo>.json`; a git worktree of a repo, such as a loop lane, counts as that repo).
+  - This happens under a lock. Every repo's store is computed before anything is written, so a retry never folds twice.
+  - A busy lock skips a dispatch's fold until its next stop.
+  - A fact's history keeps its last 50 folds and its count tables their 20 most frequent entries. A fact missing its family's fields is dropped as it is read.
+- **Never a secret.** The block reaches every later session in the repo, so secrets are kept out of it at capture:
+  - a URL's credentials never reach a boundary host;
+  - an environment variable's value is kept only when its name does not read like a secret and the value is a short plain word or path. Otherwise the fact names the variable alone.
+- **Small changes from the source**: a failed command's `Exit code N` counts only at the start of its output, where Claude Code puts it; and a confirmation no longer keeps the session's edited files (environment facts do not drift, so they were never read).
 - **It shows them** at `SessionStart` (`startup`, `clear`, `compact`; never `resume`): a session inside a repo gets that repo's block as `additionalContext`. The ids shown are kept so the session's fold counts a prevented failure as fired.
 - `economy.facts: "off"` learns and shows nothing. The wrapper lets the session events through. The hooks README has a "Learned environment facts" section.
 

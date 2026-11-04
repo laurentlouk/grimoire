@@ -9,6 +9,7 @@
 // Apache-2.0): `EnvFact.claim` and `working_form`, `EnvFactsDistiller._select` and `_merged_lines`,
 // `lint_ok`. The header is the plugin's (`GENERIC_HEADER`); the experiments' per-task header and
 // `injectable_claims` (what a paid proposer stacked on top is told not to restate) are left out.
+import { REDACTED } from './observe.mjs'
 import { firingRate, injectable } from './lifecycle.mjs'
 
 export const MAX_FACTS = 4
@@ -99,7 +100,9 @@ export function claim(fact) {
     }
     case 'env_value': {
       const good = best(p.good) || ''
-      const bad = Object.keys(p.bad || {}).sort().filter((v) => v !== good).slice(0, 1)
+      // a value that may be a secret is never recorded: the fact names the variable only
+      if (good === REDACTED) return `Code that imports the project needs \`${p.var}\` set here (its value is not recorded).`
+      const bad = Object.keys(p.bad || {}).sort().filter((v) => v !== good && v !== REDACTED).slice(0, 1)
       return `Code that imports the project needs \`${p.var}\` set here: \`${p.var}=${good}\` works` + (bad.length ? `, \`${bad[0]}\` does not.` : '.')
     }
     case 'empty_probe':

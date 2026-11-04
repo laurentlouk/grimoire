@@ -239,6 +239,33 @@ try {
     rmSync(join(eco(P), 'facts.lock'), { recursive: true })
     run(P, stopF('f9', broken(9)))
     eq(store().now, 6, 'a dispatch skipped on a busy lock is folded at its next stop')
+    // two repos in one transcript, one store holding a corrupt fact: both folded once
+    const M = project('facts-multi', { repos: [{ name: 'api', path: 'repositories/api' }, { name: 'web', path: 'repositories/web' }] })
+    mkdirSync(join(M, 'repositories', 'web'), { recursive: true })
+    mkdirSync(join(eco(M), 'facts'), { recursive: true })
+    writeFileSync(join(eco(M), 'facts', 'web.json'), JSON.stringify({ repo: 'web', now: 1, facts: { x: { id: 'x' } } }))
+    const two = (name) => {
+      const lines = [['Bash', { command: 'python -m pytest -q' }, `${BASE}: No module named pytest`, true, join(M, 'repositories', 'api')], ['Bash', { command: 'npm test' }, 'ok', false, join(M, 'repositories', 'web')], ['Bash', { command: 'ls' }, 'a', false, null]]
+        .flatMap(([tool, input, out, err, cwd], i) => [JSON.stringify({ type: 'assistant', ...(cwd ? { cwd } : {}), message: { id: `mm${i}`, content: [{ type: 'tool_use', id: `cc${i}`, name: tool, input }], usage: { input_tokens: 1, output_tokens: 1 } } }),
+          JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `cc${i}`, is_error: err, content: out }] } })])
+      const f = join(SANDBOX, `${name}.jsonl`); writeFileSync(f, `${lines.join('\n')}\n`); return f
+    }
+    const mStop = (id) => run(M, { hook_event_name: 'SubagentStop', cwd: M, session_id: 's', agent_id: id, agent_type: 'x', agent_transcript_path: two(id) })
+    mStop('m1'); mStop('m1')
+    eq([readJ(join(eco(M), 'facts', 'api.json')).now, readJ(join(eco(M), 'facts', 'web.json')).now, readJ(join(eco(M), 'facts', 'web.json')).facts, Object.keys(readJ(join(eco(M), 'facts', 'folded.json')))], [1, 2, {}, ['agent:m1']],
+      'calls are split by repo (a call with no cwd belongs to none); a corrupt fact is dropped as its store is read; each repo folded once, the key recorded once')
+    // a worktree of a repo (a loop lane) is that repo
+    const W = project('facts-wt')
+    const repoDir = join(W, 'repositories', 'api')
+    const g = (...a) => execFileSync('git', ['-C', repoDir, ...a], { stdio: 'ignore' })
+    g('init', '-q', '-b', 'main'); g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'x')
+    const lane = join(W, 'repositories', 'api-lane')
+    g('worktree', 'add', '-q', lane)
+    const laneFile = join(SANDBOX, 'lane.jsonl')
+    writeFileSync(laneFile, [JSON.stringify({ type: 'assistant', cwd: join(lane, 'src'), message: { id: 'l1', content: [{ type: 'tool_use', id: 'lt1', name: 'Bash', input: { command: 'ls' } }], usage: { input_tokens: 1, output_tokens: 1 } } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'lt1', content: 'a' }] } })].join('\n') + '\n')
+    run(W, { hook_event_name: 'SubagentStop', cwd: lane, session_id: 's', agent_id: 'lane1', agent_type: 'x', agent_transcript_path: laneFile })
+    eq(readJ(join(eco(W), 'facts', 'api.json')).now, 1, 'a call in a worktree of a repo (a loop lane) folds into that repo')
     const O = project('facts-off', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { facts: 'off' } })
     run(O, { ...stopF('o1', broken(1)), cwd: join(O, 'repositories', 'api') })
     ok(!existsSync(join(eco(O), 'facts')), 'economy.facts "off": nothing learned')
