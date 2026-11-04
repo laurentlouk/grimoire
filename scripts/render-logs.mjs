@@ -394,7 +394,8 @@ export function costOf(run, bill) {
     const repo = a.repo ?? (a.task != null ? taskRepo[a.task] ?? null : null)
     // a task's dispatches by the policy it ran under (balanced before 0.16.0); run-level work has none
     const policy = a.task != null && taskRepo[a.task] != null && !/:final$/.test(a.task) ? policyOf[a.task] || 'balanced' : null
-    return { label: d.label, kind: a.kind, task: a.task, repo, lens: a.lens, policy, tier: d.tier, agentType: d.agentType, usage: d.usage, effective: d.effective, pricedBy: d.pricedBy }
+    // every review persona is one kind, review: the lens split names each (#56 c)
+    return { label: d.label, kind: a.lens ? 'review' : a.kind, task: a.task, repo, lens: a.lens, policy, tier: d.tier, agentType: d.agentType, usage: d.usage, effective: d.effective, pricedBy: d.pricedBy }
   })
   const dispatched = new Set(ev.filter((e) => e.type === 'dispatch' && e.task != null).map((e) => s(e.task)))
   const costCoverage = { dispatched: dispatched.size, matched: [...dispatched].filter((t) => list.some((d) => d.kind === 'impl' && d.task === t)).length }
@@ -907,7 +908,7 @@ function client(score) {
         tile('active time / run', mins(sc.medianActiveMin), 'median, first to last write of each session'),
         tile('output tokens / landed task', fmt(sc.medianTokensPerLanded), `median · ${fmt(sc.tokens)} in all`),
         tile('cost (effective tokens)', sc.cost.runs ? fmt(Math.round(sc.cost.effective)) : '—', sc.cost.runs
-          ? `${pct(sc.cost.effective ? sc.cost.output / sc.cost.effective : null)} of it output · median ${fmt(sc.medianCostPerLanded)} / landed task · coverage ${pct(sc.costCoverage)}`
+          ? `the dispatched agents only, not the launching session · ${pct(sc.cost.effective ? sc.cost.output / sc.cost.effective : null)} of it output · median ${fmt(sc.medianCostPerLanded)} / landed task · coverage ${pct(sc.costCoverage)}`
           : `no transcripts on this machine · coverage ${pct(sc.costCoverage)}`),
         tile('implementers past the soft limit', `${sc.lateImpl}/${sc.dispatches}`, `${pct(sc.lateShare)} of dispatches · ${sc.late} agents late in all · ${sc.wedged} wedged`),
         tile('runs with an incomplete journal', sc.journal.runsIncomplete ? `⚠ ${sc.journal.runsIncomplete} of ${sc.runs}` : '0',
