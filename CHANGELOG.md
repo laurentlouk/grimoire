@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.26.0 — the stuck watch acts, under `loopGuard: "on"` (token economy slice 5, #51)
+
+The stuck watch (0.22.0, 0.23.0) can now tell a looping agent, once `economy.loopGuard` is `"on"`. The default stays `"shadow"`, which records what it would do and sends nothing. Spike S1 confirmed that a `PostToolUse` hook's `additionalContext` reaches the subagent's own context, not its parent's.
+
+- **The redirect, then BLOCKED.** The first stuck verdict on a dispatched agent sends it the judge's `redirect` text, or the template when no judge ruled. It goes as `additionalContext`, under the event name the call came in on (`PostToolUse` or `PostToolUseFailure`), and a fresh segment starts. The next stuck verdict sends one line: stop and return BLOCKED, with what it tried and the reason, the summary starting `STUCK WATCH <agent_id>:`.
+  - At the block the hook writes the watch's record, `.grimoire/economy/judge/<agent_id>.blocked.json` (the reason and the digest: counts, commands and failure signatures, never output), and drops any pending judge request.
+  - A judge's `reason` and `redirect` are model-written: each is cut to one line of bounded length before it reaches an agent.
+- **Only the backstop acts without a judge.** A stuck segment past 2.5 × the role's envelope is a verdict with no judge. A stuck segment past the envelope but short of the backstop is the judge's to rule on. In shadow it was recorded as `would-redirect` until now; it no longer is, so shadow's record matches what `"on"` would do. `replay.mjs` still counts the envelope tier.
+- **The engine.** The judges' `stuck` journal events are `redirect` and `block` under `"on"` (`would-` under shadow), and the judge is told its verdicts are delivered. A BLOCKED whose summary starts with `STUCK WATCH` goes to the resolve rung, as a NEEDS_CONTEXT question does. The scout gets the agent's summary and the command that reads the watch's record. An answer re-dispatches the implementer with it; without one, the task stays BLOCKED for the replanner. The resolve brief gains a paragraph: the record's digest is evidence of what failed.
+- **The main session, under `"on"` only.** One turn per prompt (`turns/main-<session_id>.json`), dropped at `UserPromptSubmit` and closed at `Stop`. `Stop` feeds the `<repo>/main` envelope from a turn that ended green. Free rule only, no judge: one redirect line, then a `systemMessage` asking the person to press Esc if the turn is not making progress. `hooks.json` registers the wrapper on `UserPromptSubmit` and `Stop`. The wrapper starts `node` for the main session's events only when `grimoire.config.json` sets `"loopGuard": "on"`.
+
 ## 0.25.0 — learned facts in the loop's briefs (token economy slice 7, #53)
 
 The environment facts the economy hook learns (0.24.0) now reach the loop's agents, and the ones that hold are proposed as memory.

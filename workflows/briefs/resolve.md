@@ -3,6 +3,12 @@
 Do NOT do the task — only settle the one question, and only if the code or the design
 artifacts actually settle it.
 
+**A stuck watch's question.** When the header says the stuck watch stopped the agent, the question
+is the agent's summary of what it tried, and the header gives the command that reads the watch's
+record. Its digest (the failure signature that keeps coming back, the files churned, the commands
+re-run) is evidence of what failed: answer with the root cause or approach the agent missed, only if
+the spec, the plan or the tree establishes it.
+
 ## How to answer
 Search the design artifacts FIRST — the approved spec and the plan named in the header (in
 the orchestrating workspace, not inside a cloned repo): a decision recorded there IS an

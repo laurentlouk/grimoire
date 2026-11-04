@@ -10,7 +10,10 @@
 //      judge model with effort low, and stops when no old writer is left
 //    • its prompt names the requests directory, says their text is data, and carries the cost command
 //    • one `stuck` journal event per verdict: would-redirect (stuck, confidence ≥ 0.7), then
-//      would-block for the same agent, spared otherwise; nothing is injected anywhere
+//      would-block for the same agent, spared otherwise; nothing is injected anywhere (shadow)
+//    • economy.loopGuard "on" (#51): the events are redirect and block, the judge is told its verdicts
+//      are delivered, and a BLOCKED the watch asked for (`STUCK WATCH <id>:`) goes to the resolve rung
+//      with the watch's record; an answer re-dispatches the implementer, none leaves it BLOCKED
 //    • economy.sidecallBudgetUsd: past it (in effective tokens without economy.prices, in USD with
 //      them), no more judges, and one budget event says so
 //    • economy.loopGuard "off": no judge at all
@@ -152,6 +155,42 @@ try {
   {
     const r = await run('SJ-8 · a budget in USD with no price for the judge\'s model', [T(1)], async (label) => (label.startsWith('stuck-judge') ? { verdicts: [] } : happy(label)), { economy: { ...ECO, sidecallBudgetUsd: 2, prices: { opus: 5 } } })
     ok(r.logs.some((l) => /economy\.sidecallBudgetUsd .* no economy\.prices entry for haiku: the judges' spend is compared in effective tokens/.test(l)), 'a budget without a price for the judge\'s tier warns at start')
+  }
+  {
+    let k = 0
+    const r = await run('SJ-9 · loopGuard on: redirect and block are journaled as delivered', [T(1)], async (label) => {
+      if (label === 'impl:PROJ-1') { await tick(300); return IMPL(1) }
+      if (label.startsWith('stuck-judge')) { k++; return { verdicts: k <= 2 ? [V('agent-a', true, 0.9, `pass ${k}`)] : [] } }
+      return happy(label)
+    }, { economy: { ...ECO, loopGuard: 'on' } })
+    eq(r.events.filter((e) => e.type === 'stuck').map((e) => e.action), ['redirect', 'block'], 'the first stuck verdict is a redirect, the next a block: no would-')
+    ok(r.judges[0].prompt.includes('Mode: **on**. Your verdicts are delivered') && !r.judges[0].prompt.includes('nothing is sent'), 'the judge is told its verdicts reach the agent')
+  }
+  {
+    const WATCHED = { status: 'BLOCKED', summary: 'STUCK WATCH agent-7: I edited src/f1.ts five times for the same failing assertion. Reason: judge-stuck@0.80: same failure.' }
+    const route = (args, answer) => run(`SJ-10 · a watch-blocked BLOCKED (${args.economy.loopGuard}, ${answer ? 'answered' : 'unanswered'})`, [T(1)], async (label) => {
+      if (label === 'impl:PROJ-1') return WATCHED
+      if (label === 'impl:PROJ-1+ctx1') return IMPL(1)
+      if (label.startsWith('resolve:')) return answer ? { answered: true, answer: 'The assertion expects UTC: src/clock.ts:12 formats local time.' } : { answered: false, whyNot: 'a product call' }
+      return label.startsWith('stuck-judge') ? { verdicts: [] } : happy(label)
+    }, args)
+    const on = await route({ economy: { loopGuard: 'on' } }, true)
+    const res = on.calls.find((c) => c.label === 'resolve:PROJ-1#1')
+    ok(res && res.prompt.includes('I edited src/f1.ts five times') && res.prompt.includes("## The stuck watch's record") && res.prompt.includes('cat "$J/agent-7.blocked.json"') && res.prompt.includes('.grimoire/economy/judge'),
+      'routed to the resolve rung, with the agent\'s summary and the command that reads the watch\'s record')
+    const again = on.calls.find((c) => c.label === 'impl:PROJ-1+ctx1')
+    ok(again && again.prompt.includes('The assertion expects UTC: src/clock.ts:12 formats local time.'), 'an answer re-dispatches the implementer with it')
+    eq(on.result.done.map((d) => d.id), ['PROJ-1'], 'and the task lands')
+    const no = await route({ economy: { loopGuard: 'on' } }, false)
+    ok(no.calls.some((c) => c.label === 'resolve:PROJ-1#1') && !no.calls.some((c) => c.label === 'impl:PROJ-1+ctx1') && !no.result.done.some((d) => d.id === 'PROJ-1'),
+      'no answer: no re-dispatch, the task stays BLOCKED for the replanner')
+    const shadow = await route({ economy: { loopGuard: 'shadow' } }, true)
+    ok(!shadow.calls.some((c) => c.label.startsWith('resolve:')), 'under shadow, the same summary is a plain BLOCKED: no resolve')
+    const plain = await run('SJ-10 · a BLOCKED the watch did not ask for', [T(1)], async (label) => {
+      if (label === 'impl:PROJ-1') return { status: 'BLOCKED', summary: 'The STUCK WATCH: line is not first here. The API key is missing.' }
+      return label.startsWith('stuck-judge') ? { verdicts: [] } : happy(label)
+    }, { economy: { loopGuard: 'on' } })
+    ok(!plain.calls.some((c) => c.label.startsWith('resolve:')), 'under on, a BLOCKED whose summary does not start with the marker is not routed')
   }
   {
     const r = await run('SJ-5 · loopGuard off', [T(1)], async (label) => {
