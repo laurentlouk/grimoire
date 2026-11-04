@@ -14,7 +14,7 @@
 //       read from the project dirs of <root> (default: the cwd) and of its git worktrees; `COST
 //       none` when no workflow of that runId is found. The loop's journal script runs it after each
 //       write when maxCost is set (token economy slice 2). Exit 2 on a usage error only.
-import { readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -23,7 +23,9 @@ import { readAgent } from './transcript.mjs'
 import { price, tierOf } from './pricing.mjs'
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
-const dirs = (p) => { try { return readdirSync(p, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort() } catch { return [] } }
+// a symlink to a directory counts as one (a project or session dir linked from elsewhere)
+const isDir = (p) => { try { return statSync(p).isDirectory() } catch { return false } }
+const dirs = (p) => { try { return readdirSync(p, { withFileTypes: true }).filter((d) => d.isDirectory() || (d.isSymbolicLink() && isDir(join(p, d.name)))).map((d) => d.name).sort() } catch { return [] } }
 const files = (p, re) => { try { return readdirSync(p).filter((f) => re.test(f)).sort() } catch { return [] } }
 
 /** Claude Code's config dir: the override, else $CLAUDE_CONFIG_DIR, else ~/.claude. */
@@ -77,7 +79,7 @@ export function runBill(runId, opts = {}) {
   const total = { usage: zero(), effective: 0 }
   for (const wf of workflows) {
     for (const f of files(wf.agentsDir, /^agent-.*\.jsonl$/)) {
-      const a = readAgent(join(wf.agentsDir, f))
+      const a = readAgent(join(wf.agentsDir, f), { usageOnly: true })
       const model = a.model ?? null
       const p = price(a.usage, model ?? (a.meta && a.meta.model))
       dispatches.push({
@@ -95,12 +97,17 @@ export function runBill(runId, opts = {}) {
 // The engine's own dispatch kinds; any other label prefix is a review persona (a lens).
 export const ENGINE_KINDS = new Set(['impl', 'fix', 'precheck', 'verify', 'guard', 'integrate', 'resolve', 'hydrate', 'env', 'ship', 'seal', 'gate',
   'journal', 'status', 'claim', 'replan', 'preflight', 'parse-index', 'harness-context', 'ledger', 'crystallize', 'contract-check', 'release-claims', 'agent'])
+// Run-level kinds: whatever their label's rest holds (an agent name, a cycle), it is no task or repo.
+const RUN_KINDS = new Set(['preflight', 'journal', 'status', 'claim', 'replan', 'hydrate'])
+const ATTEMPT_SUFFIX = /(?:#[^#:~+]*|~[^#:~+]*|\+[^#:~+]*)$/
 
 /**
  * A dispatch label's kind, task, repo and lens, given the run's task ids and repo names. Labels are
  * `<kind>[:<rest>]` with suffixes the engine appends (`#<n>`, `~r<n>`, `+ctx<n>`, `:<stage>`); the
- * rest is shortened one suffix at a time until it names a task, a `<repo>:final` slot or a repo.
- * Task ids may hold `#` themselves (`#5`), so a suffix is dropped only when the whole rest fails.
+ * rest is shortened one suffix at a time, attempt suffixes before `:` segments, until it names a
+ * task, a `<repo>:final` slot or a repo. Task ids may hold `#` and `:` themselves (`#5`,
+ * `org/r:12`), so a suffix is dropped only when the whole rest fails. Run-level kinds (RUN_KINDS)
+ * name no task or repo.
  */
 export function attribute(label, { tasks = new Set(), repos = new Set() } = {}) {
   const none = { kind: 'unknown', task: null, repo: null, lens: null }
@@ -109,13 +116,15 @@ export function attribute(label, { tasks = new Set(), repos = new Set() } = {}) 
   if (!m) return none
   const kind = m[1]
   const lens = ENGINE_KINDS.has(kind) ? null : kind
+  if (RUN_KINDS.has(kind)) return { kind, task: null, repo: null, lens }
   let rest = m[2] ?? ''
   while (rest) {
     if (tasks.has(rest)) return { kind, task: rest, repo: (/^(.+):final$/.exec(rest) || [])[1] ?? null, lens }
     const fin = /^(.+):final$/.exec(rest)
     if (fin && repos.has(fin[1])) return { kind, task: rest, repo: fin[1], lens }
     if (repos.has(rest)) return { kind, task: null, repo: rest, lens }
-    const shorter = rest.replace(/(?:#[^#:~+]*|~[^#:~+]*|\+[^#:~+]*|:[^:]*)$/, '')
+    // an attempt suffix (#n, ~rn, +ctxn) goes before a `:<segment>`: a task id may hold ':' itself
+    const shorter = ATTEMPT_SUFFIX.test(rest) ? rest.replace(ATTEMPT_SUFFIX, '') : rest.replace(/:[^:]*$/, '')
     if (shorter === rest) break
     rest = shorter
   }

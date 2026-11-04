@@ -18,8 +18,14 @@ const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf8')) } cat
 
 const resultText = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (isObj(x) && typeof x.text === 'string' ? x.text : '')).filter(Boolean).join(' ') : '')
 
-/** {calls, usage, model, badLines} of one transcript file; a missing file reads as empty. */
-export function readTranscript(file) {
+/**
+ * {calls, usage, model, badLines} of one transcript file; a missing file reads as empty. With
+ * `usageOnly` (what a bill needs), only assistant lines are parsed and no calls or tool deltas are
+ * read: the user lines, which carry the tool results, are most of a transcript's bytes. A line is
+ * an assistant line when it holds `"type":"assistant"` unescaped; quoted inside a tool result it is
+ * escaped, so it is skipped, and parsing confirms the type.
+ */
+export function readTranscript(file, { usageOnly = false } = {}) {
   let text = ''
   try { text = readFileSync(file, 'utf8') } catch {}
   const usageById = new Map()
@@ -30,6 +36,7 @@ export function readTranscript(file) {
   let badLines = 0, anon = 0
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
+    if (usageOnly && !line.includes('"type":"assistant"')) continue
     let e
     try { e = JSON.parse(line) } catch { badLines++; continue }
     if (!isObj(e)) { badLines++; continue }
@@ -44,6 +51,7 @@ export function readTranscript(file) {
       if (isObj(m.usage)) usageById.set(id, m.usage)
       if (typeof m.model === 'string' && m.model && m.model !== '<synthetic>') modelById.set(id, m.model)
     }
+    if (usageOnly) continue
     for (const b of Array.isArray(m.content) ? m.content : []) {
       if (!isObj(b)) continue
       if (e.type === 'assistant' && b.type === 'tool_use' && typeof b.id === 'string' && !byToolId.has(b.id)) {
@@ -75,15 +83,16 @@ export function readTranscript(file) {
   return { calls, usage, model, badLines, deferredDeltas: deferred }
 }
 
-/** A subagent transcript plus its .meta.json (label = the dispatch description) and loaded tools. */
-export function readAgent(jsonlFile) {
-  const t = readTranscript(jsonlFile)
+/** A subagent transcript plus its .meta.json (label = the dispatch description) and loaded tools
+ * (none read under `usageOnly`). */
+export function readAgent(jsonlFile, { usageOnly = false } = {}) {
+  const t = readTranscript(jsonlFile, { usageOnly })
   const base = jsonlFile.replace(/\.jsonl$/, '')
   const m = readJson(`${base}.meta.json`)
   const meta = isObj(m)
     ? { agentType: m.agentType ?? null, label: m.description ?? null, model: m.model ?? null, workflowPhase: m.workflowPhase ?? null }
     : null
-  const p = readJson(`${base}.prefix.json`)
+  const p = usageOnly ? null : readJson(`${base}.prefix.json`)
   const loaded = isObj(p) && isObj(p.state) && Array.isArray(p.state.toolNames) ? p.state.toolNames.map(String) : []
   const deferred = []
   for (const d of t.deferredDeltas) {

@@ -15,7 +15,7 @@
 //      several sessions), from the checkout's project dir and its nested worktrees, and ignores
 //      other runs and malformed files
 //    • a dispatch label is attributed to its kind, task, repo and review lens
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -49,6 +49,14 @@ try {
   const bare = readAgent(join(dir, 'agent-bare.jsonl'))
   eq([bare.meta, bare.tools, bare.usage.requests, bare.model], [null, { loaded: [], deferred: [] }, 0, null], 'no meta, no prefix, no usage, no model: empty, never an error (a message without usage is no billed request)')
   eq(readTranscript(join(dir, 'missing.jsonl')).usage.requests, 0, 'a missing file reads as empty')
+  // the bill's fast path (#56 d): only assistant lines are parsed, and it bills exactly what the full read does
+  const fast = readAgent(join(dir, 'agent-a1.jsonl'), { usageOnly: true })
+  eq([fast.usage, fast.model, fast.meta, fast.calls, fast.tools], [t.usage, t.model, a.meta, [], { loaded: [], deferred: [] }], 'usageOnly: the same usage, model and meta, no calls and no tools')
+  writeAgent(dir, 'quoted', [
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"q","content":"{\\"type\\":\\"assistant\\",\\"message\\":{\\"id\\":\\"fake\\",\\"usage\\":{\\"output_tokens\\":999}}}"}]}}',
+    '{"type":"assistant","message":{"id":"r","model":"claude-haiku-5-5","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}',
+  ], null)
+  eq(readAgent(join(dir, 'agent-quoted.jsonl'), { usageOnly: true }).usage, readTranscript(join(dir, 'agent-quoted.jsonl')).usage, 'usageOnly: a tool result quoting an assistant line is not billed')
 
   section('pricing')
   eq(WEIGHTS, { input: 1, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2, output: 5 }, 'weights relative to fresh input')
@@ -58,6 +66,14 @@ try {
   eq(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'opus', 'gpt-5.6-sol', null].map(tierOf), ['opus', 'sonnet', 'haiku', 'opus', 'other', 'unknown'], 'tiers')
 
   section('a run\'s bill')
+  // #56 nit: a symlinked project dir (or session dir) is read like any other
+  {
+    const real = join(ROOT, 'claude-real'), link = join(ROOT, 'claude-link')
+    writeClaudeRun(real, '/ws/linked', 'RL')
+    mkdirSync(join(link, 'projects'), { recursive: true })
+    symlinkSync(join(real, 'projects', slugOf('/ws/linked')), join(link, 'projects', slugOf('/ws/linked')))
+    eq(runBill('RL', { claudeDir: link, roots: ['/ws/linked'] }).total.effective, runBill('RL', { claudeDir: real, roots: ['/ws/linked'] }).total.effective, 'a symlinked project dir is followed')
+  }
   eq(projectSlug('/Users/a/b.c/.claude/worktrees/x_y'), '-Users-a-b-c--claude-worktrees-x-y', 'project slug: every non-alphanumeric is -')
   eq(claudeDir('/x'), '/x', 'an explicit claude dir wins')
   const CLAUDE = join(ROOT, 'claude')
@@ -93,6 +109,14 @@ try {
   eq(at('ship:api#3'), { kind: 'ship', task: null, repo: 'api', lens: null }, 'ship: the repo')
   eq(at('gate:api'), { kind: 'gate', task: null, repo: 'api', lens: null }, 'gate: the repo')
   eq(at('journal#4'), { kind: 'journal', task: null, repo: null, lens: null }, 'journal')
+  // #56 (a): the #, ~ and + suffixes go before a : segment, so a task id holding ':' keeps its task
+  const colon = { tasks: new Set(['org/r:12', 'api:final']), repos: new Set(['api', 'org/r', 'grimoire']) }
+  eq(attribute('privacy:org/r:12#2', colon), { kind: 'privacy', task: 'org/r:12', repo: null, lens: 'privacy' }, 'a task id with ":" and an attempt suffix keeps its task')
+  eq(attribute('privacy:api:final#1', colon), { kind: 'privacy', task: 'api:final', repo: 'api', lens: 'privacy' }, 'a terminal slot with an attempt suffix keeps its task')
+  eq(attribute('fix:org/r:12:spec#3', colon), { kind: 'fix', task: 'org/r:12', repo: null, lens: null }, 'a fix of such a task: the attempt, then the stage, are dropped')
+  // #56 (b): run-level kinds never carry a repo or task, whatever their label holds
+  eq(['preflight:grimoire:perf-scout', 'journal#3', 'status#1', 'claim:api', 'replan#2', 'hydrate:api'].map((l) => attribute(l, colon)),
+    ['preflight', 'journal', 'status', 'claim', 'replan', 'hydrate'].map((kind) => ({ kind, task: null, repo: null, lens: null })), 'run-level kinds are attributed to no repo, even one named like their rest')
   eq(at('preflight:grimoire:reviewer'), { kind: 'preflight', task: null, repo: null, lens: null }, 'preflight is an engine kind, not a lens')
   eq(at(null), { kind: 'unknown', task: null, repo: null, lens: null }, 'no label')
 

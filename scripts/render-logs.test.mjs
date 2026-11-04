@@ -665,7 +665,7 @@ try {
   const c1 = o9('R1') && o9('R1').cost
   const J = JOURNAL_EFFECTIVE, Rv = REVIEW_EFFECTIVE, I = IMPL_EFFECTIVE
   ok(c1 && c1.effective === I + 2 * J + 2 * Rv, `a run's cost sums its dispatches across both sessions (${c1 && c1.effective} = ${I + 2 * J + 2 * Rv})`)
-  ok(c1 && JSON.stringify(c1.byKind) === JSON.stringify({ impl: I, journal: J, 'spec-hawk': Rv, fix: Rv, unknown: J }), `cost by dispatch kind; an agent with no meta has no label, so no kind (${c1 && JSON.stringify(c1.byKind)})`)
+  ok(c1 && JSON.stringify(c1.byKind) === JSON.stringify({ impl: I, journal: J, review: Rv, fix: Rv, unknown: J }), `cost by dispatch kind, the review personas as one kind, review; an agent with no meta has no label, so no kind (${c1 && JSON.stringify(c1.byKind)})`)
   ok(c1 && JSON.stringify(c1.byTier) === JSON.stringify({ sonnet: I, haiku: 2 * J, opus: 2 * Rv }), `cost by model tier, read from the transcript's messages (${c1 && JSON.stringify(c1.byTier)})`)
   ok(c1 && JSON.stringify(c1.byLens) === JSON.stringify({ 'spec-hawk': Rv }), 'cost by review lens')
   ok(c1 && JSON.stringify(c1.byRepo) === JSON.stringify({ api: I + 2 * Rv }) && JSON.stringify(c1.byTask) === JSON.stringify({ T1: I + 2 * Rv }), 'cost by repo and by task; mechanical dispatches belong to neither')
@@ -698,7 +698,7 @@ try {
   try { new Function('document', 'Node', js9)(doc9, El9); text9 = doc9.body.textContent } catch (e) { ok(false, `the renderer ran (${e.message})`) }
   ok(/Cost by dispatch/.test(text9) && /impl:T1/.test(text9) && /spec-hawk:T1#1/.test(text9), 'the run view lists each dispatch with its cost')
   ok(/Where the cost went/.test(text9) && /journal/.test(text9), 'the scorecard shows the cost by dispatch kind')
-  ok(/cost \(effective tokens\)/.test(text9), 'a scorecard tile for the cost')
+  ok(/cost \(effective tokens\)/.test(text9) && /the dispatched agents only, not the launching session/.test(text9), 'a scorecard tile for the cost, saying it counts the dispatched agents only')
   rmSync(ROOT9, { recursive: true, force: true })
 } finally {
   rmSync(ROOT, { recursive: true, force: true })

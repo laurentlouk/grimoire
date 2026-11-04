@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.20.1 — the cost report: exact attribution, a faster read (#56)
+
+The follow-ups from the review of the token economy's slice 1 ([#55](https://github.com/laurentlouk/grimoire/pull/55)).
+
+- **Attribution** (`scripts/economy/runs.mjs`):
+  - An attempt suffix (`#n`, `~rn`, `+ctxn`) is dropped before a `:<segment>`, so a task id that holds `:` keeps its task (`privacy:org/r:12#2` → `org/r:12`, `privacy:api:final#1` → `api:final`).
+  - Run-level kinds (`preflight`, `journal`, `status`, `claim`, `replan`, `hydrate`) are attributed to no task or repo, whatever their label holds (`preflight:grimoire:perf-scout` is no longer billed to a repo named `grimoire`).
+  - A symlinked project or session dir is read like any other.
+- **"Cost by kind"** counts every review persona as one kind, `review`. The lens split still names each persona.
+- **A faster read.** A bill parses only the assistant lines of each transcript and reads no calls or tool lists. On 1,588 recorded transcripts (1.1 GB), billing every run went from 3.2 s to 1.8 s with identical totals. The workflow-file scan was 67 ms of it, so the bounded peek the review proposed was left out.
+- **The cost tile** says it counts the dispatched agents only, not the launching session.
+- **Not done: labels on the journal's events.** The review's root fix would add an event per dispatch, so more journal flushes, each a paid haiku dispatch. The attribution fixes above give the same answers without that cost.
+
 ## 0.20.0 — maxCost: a cap on what a run really costs (token economy slice 2, #48)
 
 `maxOutputTokens` caps output tokens, the one usage counter a script sees, and those were 4–7 % of the real cost on recorded runs. `maxCost` caps the real cost, in effective tokens with the cache included (the slice 1 weights), across every session of the run.
