@@ -732,7 +732,7 @@ function harnessContextPrompt(project, repos, agents) {
   return `Load the harness context for an automated build run of tracker project ${project} touching repos: ${repos.join(', ') || '(unknown yet)'}. Read-only; return the structured object.
 1. Read \`${MEMORY_DIR}/harness.md\` and, for each of ${agents.join(', ')}, \`${MEMORY_DIR}/agents/<agent>.md\`. Return each file's ENTRIES verbatim (drop the leading HTML comment header and a literal "(no entries yet)" placeholder — return "" for those). Do not summarize or reword entries.
 2. List \`${RUNS_DIR}/*.json\` (if the directory exists). Read, newest first, the ledgers whose \`project\` equals ${project} OR whose \`repos\` intersect the list above — at most 8 files. Collect their \`learnings\` arrays. An entry is either an object \`{text, repos}\` (return it as is) or a bare string (older ledgers: return \`{text: <the string>, repos: <that ledger's repos array>}\`). Deduplicate on text (case-insensitive, trimmed), keep newest first, cap at 30, return as priorLearnings and the paths read as priorLedgers.
-3. From the same ledgers, where one has a \`policies.tasks\` object (id → {repo, policy, escalated?}), count per repo the entries whose \`policy\` is "fast" and, of those, the ones with \`escalated: true\`. Return the sums over all ledgers read as \`policyHistory: [{repo, fast, escalated}]\` (copy the numbers; do not estimate).${repos.length ? `
+3. From the same ledgers, where one has a \`policies.tasks\` object (id → {repo, policy, escalated?}), count per repo the entries whose \`policy\` is "fast" and, of those, the ones with \`escalated: true\`. Return the sums over all ledgers read as \`policyHistory: [{repo, fast, escalated}]\` (copy the numbers; do not estimate).${repos.length && factsOn() ? `
 4. Run \`node ${shq(factsCli())} render --root ${ROOT ? shq(ROOT) : '.'} --repos ${shq(repos.join(','))}\` once. It prints JSON \`{"repos": {<repo>: {"block": "...", "ids": [...]}}}\`: the environment facts learned in each repo (machine-observed, read-only). Return \`factBlocks\` (repo → its block, verbatim) and \`factIds\` (repo → its ids). It prints \`{"repos":{}}\` when nothing is learned; when it fails, return both empty.` : ''}
 Missing files/dirs are normal on a fresh harness — return empty values, never an error.`
 }
@@ -741,12 +741,16 @@ Missing files/dirs are normal on a fresh harness — return empty values, never 
 // with a marker naming the ids it shows: the economy hook reads it from the dispatch's transcript, so
 // a failure the block prevented still counts as fired. Implementers, fixes and gates get it; reviewers
 // run no project commands.
+const factsOn = () => ECON.facts !== 'off'
+// what the facts CLI renders: its header, and about 600 characters; anything else is not pasted
+const FACTS_HEADER = '# environment facts'
+const factsValid = (block) => typeof block === 'string' && block.trim().startsWith(FACTS_HEADER) && block.trim().length <= 1000
 const factsCli = () => (PLUGIN_ROOT ? `${PLUGIN_ROOT}/scripts/economy/facts/cli.mjs` : `${SCRIPTS_DIR}/../../scripts/economy/facts/cli.mjs`)
 function factsBlock(repo) {
-  const block = typeof factBlocks[repo] === 'string' ? factBlocks[repo].trim() : ''
-  if (!block) return ''
+  if (!factsOn() || !factsValid(factBlocks[repo])) return ''
   const ids = Array.isArray(factIds[repo]) ? factIds[repo].filter((x) => typeof x === 'string') : []
-  return `## Learned environment facts (machine-observed; you never write them)\n${block}\n<!-- grimoire:facts ${JSON.stringify({ repo, ids })} -->\n\n`
+  // `>` escaped in the marker's JSON: no id can end the comment (it parses back the same)
+  return `## Learned environment facts (machine-observed; you never write them)\n${factBlocks[repo].trim()}\n<!-- grimoire:facts ${JSON.stringify({ repo, ids }).replace(/>/g, '\\u003e')} -->\n\n`
 }
 // The "## Your memory" block pasted at the top of every brief, per agent.
 function memoryBlock(agent) {
@@ -5415,13 +5419,14 @@ async function runTask(task) {
   if (ctx) {
     harnessMemory = typeof ctx.harnessMemory === 'string' ? ctx.harnessMemory : ''
     agentMemory = ctx.agentMemory && typeof ctx.agentMemory === 'object' ? ctx.agentMemory : {}
-    for (const [repo, block] of Object.entries(ctx.factBlocks && typeof ctx.factBlocks === 'object' ? ctx.factBlocks : {})) if (typeof block === 'string' && block.trim()) factBlocks[repo] = block
+    for (const [repo, block] of Object.entries(ctx.factBlocks && typeof ctx.factBlocks === 'object' ? ctx.factBlocks : {})) if (factsOn() && factsValid(block)) factBlocks[repo] = block
     for (const [repo, ids] of Object.entries(ctx.factIds && typeof ctx.factIds === 'object' ? ctx.factIds : {})) if (Array.isArray(ids)) factIds[repo] = ids.filter((x) => typeof x === 'string')
     priorLearnings = Array.isArray(ctx.priorLearnings) ? ctx.priorLearnings.map((l) => toLearning(l, [])).filter(Boolean) : []
     for (const h of Array.isArray(ctx.policyHistory) ? ctx.policyHistory : [])
       if (h && typeof h.repo === 'string' && Number.isInteger(h.fast) && Number.isInteger(h.escalated) && h.fast > 0 && h.escalated >= 0 && h.escalated <= h.fast) policyHistory.set(h.repo, { fast: h.fast, escalated: h.escalated })
     const withMem = Object.entries(agentMemory).filter(([, v]) => v && v.trim()).map(([k]) => k)
-    log(`◎ harness context: ${priorLearnings.length} prior learning(s) from ${(ctx.priorLedgers || []).length} ledger(s) · memory for ${withMem.length ? withMem.join(', ') : 'no agent yet'}`)
+    const withFacts = Object.keys(factBlocks)
+    log(`◎ harness context: ${priorLearnings.length} prior learning(s) from ${(ctx.priorLedgers || []).length} ledger(s) · memory for ${withMem.length ? withMem.join(', ') : 'no agent yet'}${withFacts.length ? ` · learned facts for ${withFacts.length} repo(s): ${withFacts.join(', ')}` : ''}`)
   } else log('⚠ harness-context loader died — running with empty memory (agents still read their own memory files)')
 }
 

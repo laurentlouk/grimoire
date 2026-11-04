@@ -47,8 +47,9 @@ export function durableFacts(root, { minFolds = 10 } = {}) {
       const l = fact.life
       if (l.state !== 'ACTIVE' || !Number.isInteger(l.promotedAt)) continue
       const activeFolds = store.now - l.promotedAt
-      if (activeFolds < minFolds) continue
-      out.push({ repo, id: fact.id, family: fact.family, claim: claim(fact), activeFolds, fired: l.fireNum, exercised: l.fireDen })
+      const said = claim(fact)
+      if (activeFolds < minFolds || !said) continue // a fact with nothing to say proposes nothing
+      out.push({ repo, id: fact.id, family: fact.family, claim: said, activeFolds, fired: l.fireNum, exercised: l.fireDen })
     }
   }
   return out.sort((a, b) => b.activeFolds - a.activeFolds || a.repo.localeCompare(b.repo) || a.id.localeCompare(b.id))

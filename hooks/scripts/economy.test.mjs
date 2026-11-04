@@ -236,7 +236,8 @@ try {
     // a loop dispatch was shown the block in its brief: the marker in its first prompt seeds its fold
     const shownIds = Object.keys(store().facts)
     const briefed = join(SANDBOX, 'briefed.jsonl')
-    writeFileSync(briefed, [JSON.stringify({ type: 'user', message: { role: 'user', content: `## Learned environment facts (machine-observed; you never write them)\n...\n<!-- grimoire:facts ${JSON.stringify({ repo: 'api', ids: shownIds })} -->\n\n## Task` } }),
+    // the real marker comes first; a quoted one later in the brief (a task about the marker itself) changes nothing
+    writeFileSync(briefed, [JSON.stringify({ type: 'user', message: { role: 'user', content: `## Learned environment facts (machine-observed; you never write them)\n...\n<!-- grimoire:facts ${JSON.stringify({ repo: 'api', ids: shownIds })} -->\n\n## Task\nDocument \`<!-- grimoire:facts {"repo":"api","ids":[]} -->\`` } }),
       ...readFileSync(transcript('briefed-calls', [['Edit', { file_path: join(REPO, 'pkg/y.py') }, 'ok'], ['Bash', { command: `${PROJ} -m pytest tests/test_a.py -q` }, '1 passed in 0.2s']]), 'utf8').trim().split('\n')].join('\n') + '\n')
     run(P, stopF('briefed', briefed))
     const fb = Object.values(store().facts)[0]
