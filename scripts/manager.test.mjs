@@ -916,9 +916,17 @@ try {
       [{ type: 'halt', reason: 'signing locked' }, { type: 'run.end', status: 'halted', done: 1, failed: 0, blocked: 0, stillRunning: 0 },
         { type: 'run.close', reason: 'shipped', note: null, by: 'manager close-run' }])
 
+    // one project, two runs: the older one closed today, the newer one halted and still to resume
+    writeRun(RUNS, 'F-twin-new', { project: 'Twin project', status: 'halted', startedAt: at(-3 * DAY), updatedAt: at(-2 * DAY) },
+      [{ type: 'halt', reason: 'signing locked' }, { type: 'run.end', status: 'halted', done: 1, failed: 0, blocked: 0, stillRunning: 0 }])
+    writeRun(RUNS, 'F-twin-old', { project: 'Twin project', status: 'halted', startedAt: at(-6 * DAY), updatedAt: at(-5 * DAY) },
+      [{ type: 'halt', reason: 'replans spent' }, { type: 'run.end', status: 'halted', done: 0, failed: 1, blocked: 0, stillRunning: 0 },
+        { type: 'run.close', at: NOW, reason: 'superseded', note: null, by: 'manager close-run' }])
+
     const R = mod.readRuns(RUNS, { sourceId: 'runs', now: NOW })
     const r = (id) => R.items.find((i) => i.id === id)
-    ok(JSON.stringify(R.items.map((i) => i.id).sort()) === '["F-nothing","F-shipped","F-stale"]', `a closed run is left out (${R.items.map((i) => i.id).join(' ')})`)
+    ok(JSON.stringify(R.items.map((i) => i.id).sort()) === '["F-nothing","F-shipped","F-stale","F-twin-new"]', `a closed run is left out (${R.items.map((i) => i.id).join(' ')})`)
+    ok(r('F-twin-new')?.haltReason === 'signing locked', 'closing an older run today does not make it its project\'s latest: the newer halted run is still listed')
     ok(JSON.stringify(r('F-shipped').runIssues) === '["10.1","A-1","A-2","A-3","A-4"]' && JSON.stringify(r('F-shipped').runPrs) === JSON.stringify([PR1, PR3, PR2].sort()),
       `a run item names every issue and PR its journal names, once each, sorted (${JSON.stringify(r('F-shipped').runIssues)} ${JSON.stringify(r('F-shipped').runPrs)})`)
     ok(JSON.stringify(r('F-nothing').runIssues) === '[]' && JSON.stringify(r('F-nothing').runPrs) === '[]' && mod.validate(R.items).length === 0,
@@ -944,6 +952,8 @@ try {
     const plain = (V2) => look(V2, 'F-shipped').reasons.join('; ') === 'halted: signing locked' && /resume it: \/grimoire:orchestrate on Shipped project$/.test(look(V2, 'F-shipped').nextStep)
     ok(plain(mod.view([...tracker, item('A-3'), ...prs, ...R.items], cfg, null, NOW, srcs({ linear: { count: 3 } }))), 'one of its issues still open: no hint, the resume step')
     ok(plain(mod.view([...tracker, ...prs, pr(12, PR1), ...R.items], cfg, null, NOW, srcs({ gh: { count: 2 } }))), 'one of its PRs still open: no hint')
+    ok(plain(mod.view([...tracker, ...prs, pr(12, `${PR1.replace('acme', 'Acme')}/`), ...R.items], cfg, null, NOW, srcs({ gh: { count: 2 } }))),
+      'an open PR whose url differs only in case or a trailing slash is the same PR: no hint')
     ok(plain(mod.view([...tracker, ...prs, ...R.items], cfg, null, NOW, srcs({ linear: { status: 'capped' } }))), 'the tracker read capped: no hint (an issue it did not show may be open)')
     ok(plain(mod.view([...tracker, ...R.items], cfg, null, NOW, [{ id: 'linear', status: 'ok', count: 2 }, { id: 'gh', status: 'failed', reason: 'auth', fix: 'gh auth login' }, R.source])),
       'the PRs not read: no hint for a run that names PRs')

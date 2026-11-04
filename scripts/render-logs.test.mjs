@@ -619,6 +619,8 @@ try {
     ok(o10('run-shipped').status === 'closed' && JSON.stringify(o10('run-shipped').closed) === JSON.stringify(r10('run-shipped').closed) && o10('run-shipped').halts.length === 1,
       'runOutcome carries the close, and keeps the halt that came before it')
     ok(o10('run-stale').status === 'closed' && o10('run-stale').stale === false, 'a closed run is never stale')
+    ok(r10('run-shipped').updatedAt === at10(-48) && o10('run-shipped').activeMin === 120,
+      `the close is no work: the run's updatedAt stays its last write, and its active time its sessions' own (${r10('run-shipped').updatedAt}, ${o10('run-shipped').activeMin} min)`)
     ok(r10('run-reopened').status === 'drained' && r10('run-reopened').closed === null, 'a session that starts after the close reopens the run: its own run.end decides')
     ok(r10('run-live').status === 'running' && r10('run-live').closed === null, 'a run with no run.close is as before')
 

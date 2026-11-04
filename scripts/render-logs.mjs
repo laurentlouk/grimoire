@@ -198,7 +198,9 @@ export function loadRuns(dir) {
     const meta = { ...(isObj(start.meta) ? start.meta : {}), ...(isObj(run.meta) ? run.meta : {}) }
     let mtime = null
     try { mtime = lstatSync(p).mtime.toISOString() } catch {}
-    const lastAt = events.reduce((a, e) => later(a, e.at), null)
+    // a run.close is no work: a closed run's last write stays its loop's, so closing an older run
+    // never makes it its project's latest
+    const lastAt = events.reduce((a, e) => (e.type === 'run.close' ? a : later(a, e.at)), null)
     runs.push({
       runId: String(run.runId ?? name),
       dirName: name,
@@ -502,7 +504,7 @@ export function runOutcome(run, now = Date.now()) {
   const spans = {}
   for (const e of ev) {
     const t = Date.parse(e.at ?? '')
-    if (!Number.isFinite(t)) continue
+    if (!Number.isFinite(t) || e.type === 'run.close') continue // a close, written days later, is no work
     const a = (spans[attemptOf(e)] ||= { from: t, to: t })
     a.from = Math.min(a.from, t)
     a.to = Math.max(a.to, t)

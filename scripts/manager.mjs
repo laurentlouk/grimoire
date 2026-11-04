@@ -749,7 +749,7 @@ function finishedOutside(it, ctx) {
   const issues = it.runIssues ?? [], prs = it.runPrs ?? []
   if (!issues.length && !prs.length) return null
   if (issues.length && (!ctx.trackerComplete || issues.some((id) => ctx.openRefs.has(id)))) return null
-  if (prs.length && (!ctx.prsComplete || prs.some((u) => ctx.openPrUrls.has(u)))) return null
+  if (prs.length && (!ctx.prsComplete || prs.some((u) => ctx.openPrUrls.has(prKey(u))))) return null
   const named = [issues.length && plural(issues.length, 'issue'), prs.length && plural(prs.length, 'PR')].filter(Boolean)
   return `finished outside the loop? none of its ${named.join(' or ')} is open`
 }
@@ -889,6 +889,9 @@ export function view(items, config, ledger, now, sources, repos = null, { root =
   }
 }
 
+// A PR url as finishedOutside compares it: case and a trailing slash ignored.
+const prKey = (u) => u.toLowerCase().replace(/\/+$/, '')
+
 // What finishedOutside reads: the open issues' ids and keys and the open PRs' urls, and whether every
 // tracker source and every prs source was read in full. A source's category comes from
 // manager.sources; with none configured, the sources of the issues, and of the PRs, read.
@@ -901,7 +904,7 @@ function runEvidence(all, srcs, configured) {
   const complete = (ids) => ids.length > 0 && ids.every((id) => srcs.some((s) => s.id === id && s.complete))
   return {
     openRefs: new Set(open.filter((it) => it.kind === 'issue').flatMap((it) => [it.id, it.key])),
-    openPrUrls: new Set(open.filter((it) => it.kind === 'pr' && it.url).map((it) => it.url)),
+    openPrUrls: new Set(open.filter((it) => it.kind === 'pr' && it.url).map((it) => prKey(it.url))),
     trackerComplete: complete(ofCategory('tracker', 'issue')),
     prsComplete: complete(ofCategory('prs', 'pr')),
   }
