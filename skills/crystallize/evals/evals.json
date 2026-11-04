@@ -121,5 +121,16 @@
       { "text": "Never proposes a server the role used (the simulator), nor a tools: allowlist", "passed": null, "evidence": "" },
       { "text": "Says the denial fails open and is restored by deleting the entry", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 10,
+    "query": "Crystallize the last loop runs. render-logs summary --json lists learnedFacts: odyyy-backend, active 14 folds, fired 11/12: `cargo test` fails here with a linker error; `cargo test --target-dir /tmp/t` works.",
+    "should_trigger": true,
+    "expected_output": "Proposes a memory entry in the backend-engineer store stating the fact as the summary words it, citing 14 folds and 11/12 fired, in its PR for human review; does not edit .grimoire/economy/facts or any other machine store.",
+    "expectations": [
+      { "text": "Proposes the fact as a memory entry in the owning role's store, citing its folds and fired counts", "passed": null, "evidence": "" },
+      { "text": "Leaves the machine facts store untouched", "passed": null, "evidence": "" },
+      { "text": "The entry lands in the crystallize PR for review, not written mid-run", "passed": null, "evidence": "" }
+    ]
   }
 ]

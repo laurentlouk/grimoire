@@ -131,7 +131,13 @@ function foldTranscript(dir, root, event, key, file, injected, now) {
   if (Object.hasOwn(readJson(join(factsDir(dir), 'folded.json')) ?? {}, key)) return true // folded already: no transcript read
   const repoOf = repoMatcher(root, config)
   const byRepo = new Map()
-  for (const c of readTranscript(file).calls) {
+  const read = readTranscript(file)
+  // a loop dispatch was shown its repo's facts in its brief: the marker there names the ids
+  if (!injected) for (const m of String(read.prompt ?? '').matchAll(/<!-- grimoire:facts (\{[^\n]*?\}) -->/g)) {
+    // the first marker of a repo is the engine's (it heads the brief); a later one is quoted text
+    try { const v = JSON.parse(m[1]); if (typeof v.repo === 'string' && Array.isArray(v.ids) && !Object.hasOwn(injected ?? {}, v.repo)) (injected ??= {})[v.repo] = v.ids.filter((x) => typeof x === 'string') } catch {}
+  }
+  for (const c of read.calls) {
     const repo = repoOf(c.cwd)
     if (repo) (byRepo.get(repo) ?? byRepo.set(repo, []).get(repo)).push(c)
   }

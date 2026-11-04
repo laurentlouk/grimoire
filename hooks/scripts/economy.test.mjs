@@ -233,12 +233,29 @@ try {
     eq(run(P, { hook_event_name: 'SessionEnd', cwd: REPO, session_id: 'sess-1', transcript_path: prevented, reason: 'clear' }).stdout, '{}', 'SessionEnd answers {}')
     const f = Object.values(store().facts)[0]
     eq([store().now, f.life.fireNum, f.life.fireDen, existsSync(join(eco(P), 'facts', 'sessions', 'sess-1.json'))], [5, 5, 5, false], 'the session is folded with the ids it was shown: a prevented failure counts as fired')
+    // a loop dispatch was shown the block in its brief: the marker in its first prompt seeds its fold
+    const shownIds = Object.keys(store().facts)
+    const briefed = join(SANDBOX, 'briefed.jsonl')
+    // the real marker comes first; a quoted one later in the brief (a task about the marker itself) changes nothing
+    writeFileSync(briefed, [JSON.stringify({ type: 'user', message: { role: 'user', content: `## Learned environment facts (machine-observed; you never write them)\n...\n<!-- grimoire:facts ${JSON.stringify({ repo: 'api', ids: shownIds })} -->\n\n## Task\nDocument \`<!-- grimoire:facts {"repo":"api","ids":[]} -->\`` } }),
+      ...readFileSync(transcript('briefed-calls', [['Edit', { file_path: join(REPO, 'pkg/y.py') }, 'ok'], ['Bash', { command: `${PROJ} -m pytest tests/test_a.py -q` }, '1 passed in 0.2s']]), 'utf8').trim().split('\n')].join('\n') + '\n')
+    run(P, stopF('briefed', briefed))
+    const fb = Object.values(store().facts)[0]
+    eq([store().now, fb.life.fireNum, fb.life.fireDen], [6, 6, 6], 'a loop dispatch whose brief showed the fact and that ran the working form: the prevented failure counts as fired')
     mkdirSync(join(eco(P), 'facts.lock'))
     run(P, stopF('f9', broken(9)))
-    ok(store().now === 5 && /SubagentStop facts of agent f9 not folded: the lock stayed busy/.test(readFileSync(join(eco(P), 'errors.log'), 'utf8')), 'a busy lock skips the fold, never writes unlocked, and logs it')
+    ok(store().now === 6 && /SubagentStop facts of agent f9 not folded: the lock stayed busy/.test(readFileSync(join(eco(P), 'errors.log'), 'utf8')), 'a busy lock skips the fold, never writes unlocked, and logs it')
     rmSync(join(eco(P), 'facts.lock'), { recursive: true })
     run(P, stopF('f9', broken(9)))
-    eq(store().now, 6, 'a dispatch skipped on a busy lock is folded at its next stop')
+    eq(store().now, 7, 'a dispatch skipped on a busy lock is folded at its next stop')
+    const { renderRepos, durableFacts } = await import('../../scripts/economy/facts/cli.mjs')
+    const rr = renderRepos(P, ['api', 'web', '../evil'])
+    eq([Object.keys(rr.repos), rr.repos.api.block, rr.repos.api.ids], [['api'], render(fromJSON(store(), 'api')), Object.keys(store().facts)], 'the facts CLI: a block and its ids for each listed repo that has one (a bad name is skipped)')
+    const cliOut = spawnSync(process.execPath, [new URL('../../scripts/economy/facts/cli.mjs', import.meta.url).pathname, 'render', '--root', P, '--repos', 'api,web'], { encoding: 'utf8' })
+    eq(JSON.parse(cliOut.stdout), rr.repos.api ? { repos: { api: rr.repos.api } } : null, 'and the same JSON from the command line')
+    const id = Object.keys(store().facts)[0]
+    eq([durableFacts(P, { minFolds: 10 }), durableFacts(P, { minFolds: 4 }).map((d) => [d.repo, d.id, d.activeFolds, d.fired, d.exercised])], [[], [['api', id, 5, 7, 7]]],
+      'durable facts: active for at least that many of the repo\'s folds (promoted at fold 2, now 7: 5), with their counts')
     // two repos in one transcript, one store holding a corrupt fact: both folded once
     const M = project('facts-multi', { repos: [{ name: 'api', path: 'repositories/api' }, { name: 'web', path: 'repositories/web' }] })
     mkdirSync(join(M, 'repositories', 'web'), { recursive: true })
