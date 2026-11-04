@@ -16,6 +16,7 @@
 //      other runs and malformed files
 //    • a dispatch label is attributed to its kind, task, repo and review lens
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readTranscript, readAgent } from './transcript.mjs'
@@ -94,6 +95,17 @@ try {
   eq(at('journal#4'), { kind: 'journal', task: null, repo: null, lens: null }, 'journal')
   eq(at('preflight:grimoire:reviewer'), { kind: 'preflight', task: null, repo: null, lens: null }, 'preflight is an engine kind, not a lens')
   eq(at(null), { kind: 'unknown', task: null, repo: null, lens: null }, 'no label')
+
+  section('cost: the command the journal script runs (maxCost, slice 2)')
+  {
+    const cli = (...a) => spawnSync(process.execPath, [new URL('./runs.mjs', import.meta.url).pathname, ...a], { encoding: 'utf8' })
+    const all = cli('cost', '--run', 'R1', '--root', WS, '--claude-dir', CLAUDE)
+    const want = Math.round(runBill('R1', { claudeDir: CLAUDE, roots: [WS] }).total.effective)
+    ok(all.status === 0 && all.stdout === `COST ${want}\n`, `cost prints the run's effective tokens over every session and nested worktree of its root (${all.stdout.trim()}, want ${want})`)
+    eq(cli('cost', '--run', 'R-none', '--root', WS, '--claude-dir', CLAUDE).stdout, 'COST none\n', 'no workflow of that runId: COST none')
+    const bad = cli('cost', '--root', WS)
+    ok(bad.status === 2 && /^usage: node scripts\/economy\/runs\.mjs cost --run <runId>/.test(bad.stderr) && bad.stdout === '', 'no --run: a usage error, exit 2, nothing on stdout')
+  }
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

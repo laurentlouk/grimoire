@@ -373,5 +373,16 @@
       { "text": "Proposes repos[].strictPaths for the paths the defaults miss, in the config diff", "passed": null, "evidence": "" },
       { "text": "Writes nothing before the user approves", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 15,
+    "query": "Set up grimoire for this project. Our last loop run cost about 40M effective tokens in /grimoire:logs and I want unattended runs capped.",
+    "should_trigger": true,
+    "expected_output": "Proposes maxCost in effective tokens beside maxOutputTokens in the config diff, sized from the recorded run's cost, explains that maxCost counts the real cost with the cache while maxOutputTokens counts output tokens only, says both are the user's call, and writes nothing before the user approves.",
+    "expectations": [
+      { "text": "Proposes maxCost in effective tokens, sized from the recorded run's cost", "passed": null, "evidence": "" },
+      { "text": "Says maxCost counts the real cost (cache included) and maxOutputTokens output tokens only", "passed": null, "evidence": "" },
+      { "text": "Leaves the caps as the user's call and writes nothing before the user approves", "passed": null, "evidence": "" }
+    ]
   }
 ]

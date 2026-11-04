@@ -169,6 +169,7 @@ ignored, with a warning.)
 | `agentNamespace` | `'grimoire'` | the prefix of the plugin-shipped agents (`agents/*.md`): the reviewer, the scouts, the `finalCheck` default and plugin specialists dispatch as `<ns>:<name>` (`grimoire:reviewer`). `''` keeps bare names, for a project that copied `agents/` into its own `.claude/agents/`. Repo/team agents, project-defined specialists and names that already contain `:` are used as given; memory stays at `agents/<bare name>.md` |
 | `toolHints` | — | `{<capability>: <hint>}`, free-form and all optional, e.g. `{tracker: 'mcp__<server-id>__* (Linear, claude.ai connector)', design: 'mcp__<id>__* (Figma)', errors: '<error-tracker> CLI, already authenticated'}`. Pasted as a `## Tool hints` block into every dispatch header, as the first route of the shared tool-unavailable fallback (every brief's preamble: configured hint → another server/connector with the same capability via ToolSearch → an already-authenticated CLI/API → report every route tried). The older `tracker: {kind?, tools, note?}` still works and becomes `toolHints.tracker` |
 | `maxOutputTokens` | — | cost fuse: this run's output tokens, counted across resumed sessions; reaching it halts as `budget_exhausted` |
+| `maxCost` | — | cost cap: what this run really costs, in effective tokens (input, cache reads and writes, output, weighted as in `scripts/economy/pricing.mjs`), counted across resumed sessions from Claude Code's transcripts; reaching it halts as `budget_exhausted`. Needs the journal and a `runId`; without them, or with no transcript readable, the cap is blind and never halts |
 | `budgetFloor` | `80000` | stop dispatching when the turn's remaining token budget drops below this |
 | `claim` | — | `{identity}` — claim issues at hydration, never build one someone else started, release what did not land |
 | `trackerStatus` | on | moves each tracker issue as the run goes, on any tracker (`briefs/status.md`): **in progress** when its implementer starts (again when a replan retries it), **in review** once it has landed, **blocked** with a comment saying why when it fails or blocks, and at the end for an issue the run started and did not land. **Done** is left to the PR merge. Moves are batched into one cheap dispatch at a time and never hold the loop up; `result.trackerStatus` counts them. `false` turns it off; `{names: {inProgress, inReview, blocked}}` names the project's own states. With `claim`, hydration's claim is the in-progress move, and the release leaves a blocked issue blocked |
@@ -460,10 +461,18 @@ hydration assigns the issues it is about to build (a replan that re-enters an un
 tracker issue claims it through `briefs/claim.md`); at the end one dispatch
 (`briefs/claim.md`) hands back every claimed issue that did not land.
 
-**Cost fuse.** `maxOutputTokens` is checked before every dispatch, counting what earlier
-sessions of the same run spent. At 80% the run logs a warning; at the cap it stops
-dispatching, lets in-flight work settle and halts as `budget_exhausted`. The script only
-sees output tokens (`budget.spent()`); input and cache tokens are not visible to it.
+**Cost fuse.** Two caps are checked before every dispatch, each counting what earlier
+sessions of the same run spent. At 80% of either the run logs a warning; at a cap it stops
+dispatching, lets in-flight work settle and halts as `budget_exhausted`, naming the cap.
+- `maxOutputTokens` sees output tokens only (`budget.spent()`, the one usage counter a script
+  gets), which were 4–7 % of the real cost on recorded runs.
+- `maxCost` sees the real cost, in effective tokens, cache included. The script cannot read it,
+  so each journal flush runs `scripts/economy/runs.mjs cost --run <runId>` after writing; it
+  reads every session of the runId from Claude Code's transcripts and the writer returns
+  `costSoFar`. The cap therefore lags by up to one flush (`telemetry.flushEvery` events). When
+  no flush can read the cost (the journal off, no `runId`, no transcripts on this machine, the
+  script failing) the cap is blind: one `budget` event (`action: 'blind'`) and one log line say
+  so, and it never halts. Its `budget` events carry `kind: 'cost'`.
 
 ## Run durability
 

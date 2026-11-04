@@ -33,4 +33,6 @@ Return `writer` = `missing` when it printed `WRITER missing`, else `ok`; `runDir
 `bytes` from the script's `RUNDIR`, `LINES` and `BYTES` output (0 when there is none),
 `runJson` = the word after `RUNJSON` (`ok`, `kept` or `bad`), `runJsonBytes` = the number after
 `RUNJSON_BYTES` (0 when there is none), `runJsonKept` = the words after `RUNJSON kept:` (only when
-it printed that line), and ALWAYS `landed` = the number after `LANDED ok` (0 when there is none).
+it printed that line), ALWAYS `landed` = the number after `LANDED ok` (0 when there is none), and
+`costSoFar` = the number after `COST` only when it printed `COST <number>` (leave it out when it
+printed `COST none` or no `COST` line).

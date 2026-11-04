@@ -116,7 +116,7 @@ Each worktree is its own checkout, but the project's settings are not per branch
 
 ## 🛡️ Seatbelts for unattended runs
 
-- **Cost fuse**: `maxOutputTokens` caps a run's output tokens, across resumed sessions; the run stops dispatching, lets in-flight work settle and halts as `budget_exhausted`.
+- **Cost fuse**: `maxCost` caps what a run really costs, in effective tokens with the cache included, read from Claude Code's transcripts after each journal flush; `maxOutputTokens` caps its output tokens. Both count across resumed sessions; at either cap the run stops dispatching, lets in-flight work settle and halts as `budget_exhausted`.
 - **Guard hook**: a `PreToolUse` hook denies pushes to protected branches, recursive deletes outside the project, and agent edits to the project's Claude settings and hooks (`hooks/README.md`). A seatbelt, not a sandbox.
 - **Claims**: with `claim.identity` set, the loop assigns each issue to itself as it starts it, never builds an issue someone else has started, and hands back what it did not land.
 - **Cheap checks before expensive ones**: a haiku precheck rejects an empty or stubbed diff before any reviewer is paid, and each blocking finding is verified against the code before it buys a fix.

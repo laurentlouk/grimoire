@@ -11,6 +11,7 @@
   },
   "preflight": true,
   "maxOutputTokens": 4000000,
+  "maxCost": 60000000,
   "policy": "balanced",
   "policies": { "strictTags": ["infra"], "fastMaxFiles": 3, "allowBelowFloor": false },
   "telemetry": { "enabled": true, "dir": ".grimoire/runs", "retentionDays": 183 },

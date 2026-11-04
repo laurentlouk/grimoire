@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.20.0 — maxCost: a cap on what a run really costs (token economy slice 2, #48)
+
+`maxOutputTokens` caps output tokens, the one usage counter a script sees, and those were 4–7 % of the real cost on recorded runs. `maxCost` caps the real cost, in effective tokens with the cache included (the slice 1 weights), across every session of the run.
+
+- **The journal reads the cost.** With `maxCost` set, each journal flush runs `scripts/economy/runs.mjs cost --run <runId>` after writing. It reads every session of the runId from Claude Code's transcripts, under the project root and its worktrees, and the writer returns `costSoFar`. `journal-writer.sh` is regenerated.
+- **The engine checks it before every dispatch**, beside `maxOutputTokens`. At 80 % it warns once. At the cap it stops dispatching, lets in-flight work settle, and halts `budget_exhausted` naming the cost cap. Its `budget` events carry `kind: 'cost'`. The cap lags by up to one flush.
+- **A cost it cannot read never halts.** With the journal off, no `runId`, no transcripts on this machine, or a cost script that fails, one `budget` event (`action: 'blind'`) and one log line say the cap is blind.
+- **`runs.mjs cost`** is a new CLI: `COST <n>`, or `COST none` when no workflow of the runId is found. A run's roots now include the real path of a symlinked root.
+- `/grimoire:setup` proposes `maxCost` beside `maxOutputTokens` (new eval case). `/grimoire:logs` labels cost `budget` events, and the knobs table, the "Cost fuse" paragraph, the orchestrate skill and the example config list the new cap.
+
 ## 0.19.0 — close a run whose work finished outside the loop
 
 A run that halted or died while its work shipped by hand (PRs merged after the halt, issues redone or canceled) kept coming back in every manager briefing as "resume it", because nothing in the journal could say it was over. On one project, all 7 runs the briefing flagged were already finished: 5 had every PR merged, and 2 had every issue canceled and redone by hand.
