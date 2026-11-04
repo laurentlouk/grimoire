@@ -28,13 +28,13 @@ const CLAUDE = join(ROOT, 'claude')
 const WS = '/ws/proj'
 const line = (o) => JSON.stringify(o)
 const call = (id, name) => line({ type: 'assistant', message: { id, model: 'claude-sonnet-5-5', content: [{ type: 'tool_use', id: `t-${id}`, name, input: {} }], usage: { input_tokens: 1, output_tokens: 1 } } })
-const delta = (added) => line({ type: 'attachment', attachment: { type: 'deferred_tools_delta', addedNames: added, removedNames: [] } })
+const delta = (added, removed = []) => line({ type: 'attachment', attachment: { type: 'deferred_tools_delta', addedNames: added, removedNames: removed } })
 
 // One recorded run: its journal (the events the attribution reads) and its agents' transcripts.
 let wfN = 0
 function writeRun(runId, agents) {
   const dir = writeWorkflow(join(CLAUDE, 'projects', slugOf(WS)), `s-${runId}`, `wf_${++wfN}`, runId)
-  agents.forEach((a, i) => writeAgent(dir, `${runId}-${i}`, [delta(a.deferred || []), ...(a.calls || []).map((c, j) => call(`${runId}-${i}-${j}`, c))],
+  agents.forEach((a, i) => writeAgent(dir, `${runId}-${i}`, [delta(a.deferred || []), ...(a.removed ? [delta([], a.removed)] : []), ...(a.calls || []).map((c, j) => call(`${runId}-${i}-${j}`, c))],
     { agentType: a.type, description: a.label, model: 'sonnet' }, a.prefix || ['Bash', 'Read', 'Edit']))
   const tasks = [...new Set(agents.map((a) => /^impl:(.+)$/.exec(a.label)?.[1]).filter(Boolean))]
   return { runId, events: [{ type: 'run.start', repos: ['api', 'web'] }, ...tasks.map((t) => ({ type: 'dispatch', task: t, repo: t.startsWith('W') ? 'web' : 'api' }))] }
@@ -58,8 +58,9 @@ const runs = [
   // an agent the journal cannot place: no repo
   writeRun('R4', [{ type: 'grimoire:reviewer', label: 'spec-hawk:X1#1', deferred: FAL }]),
 ]
-// linear: loaded once in each of 5 runs by a role that never used it → a candidate on runs alone
-for (let i = 5; i <= 9; i++) runs.push(writeRun(`R${i}`, [{ type: 'infra-engineer', label: `impl:I${i}`, deferred: ['mcp__linear__get_issue'] }]))
+// linear: loaded once in each of 5 runs by a role that never used it → a candidate on runs alone;
+// slack: added then removed by a later delta in each of those dispatches → never loaded, never a candidate
+for (let i = 5; i <= 9; i++) runs.push(writeRun(`R${i}`, [{ type: 'infra-engineer', label: `impl:I${i}`, deferred: ['mcp__linear__get_issue', 'mcp__slack__send'], removed: ['mcp__slack__send'] }]))
 
 try {
   section('servers')
@@ -89,6 +90,7 @@ try {
   eq(ev.roles['web/webapp-engineer'].candidates, [], 'the web role used the browser server: not a candidate there, though the api role never used it')
   eq(ev.roles['api/test-engineer'].candidates, [], 'figma over 3 dispatches of 1 run: too little evidence')
   eq(ev.roles['api/infra-engineer'].candidates.map((c) => [c.server, c.why]), [['linear', 'never used over 5 dispatches in 5 runs']], 'unused over 5 runs qualifies on runs alone')
+  eq(Object.keys(ev.roles['api/infra-engineer'].servers), ['linear'], 'a deferred tool a later delta removed is not counted as loaded')
   eq(ev.runs, 9, 'the runs read')
 
   section('the team-agent template')

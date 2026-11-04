@@ -13,6 +13,7 @@ Every dispatched agent is sent its loaded tools and the names of its deferred on
   - On the maintainer's 13 recorded runs, it never proposes the simulator for the app engineer or the browser for the webapp engineer, both of which used them.
 - **`crystallize`** proposes `disallowedTools: mcp__<server>__*` on the role's definition, with the counts (new signal row and eval case). The denial fails open for teammates whose connectors carry other ids.
 - **The team-agent template** withholds the desktop app's servers, one `mcp__ccd_<server>__*` entry each. A prefix wildcard across servers is not documented for `disallowedTools`. `/grimoire:setup` proposes the line for an existing agent that lacks it (new eval case).
+- **Not counted: an agent's own subagents.** The issue asked for the used tools "subagents included". A dispatched agent's Agent-tool subagents are not in the workflow's agent dir, so their calls are not joined to it. The recorded runs hold no such call from an engineer (0 of 1,551 dispatches), so no candidate rests on the gap.
 - `scripts/economy/runs.mjs` exports `labelContext` and `attributeIn`, which `costOf` now uses too. The transcript reader gains a `skipResults` mode: the calls and tool deltas without their results.
 
 ## 0.20.1 — the cost report: exact attribution, a faster read (#56)

@@ -57,6 +57,9 @@ try {
     '{"type":"assistant","message":{"id":"r","model":"claude-haiku-5-5","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}',
   ], null)
   eq(readAgent(join(dir, 'agent-quoted.jsonl'), { usageOnly: true }).usage, readTranscript(join(dir, 'agent-quoted.jsonl')).usage, 'usageOnly: a tool result quoting an assistant line is not billed')
+  const calls = readAgent(join(dir, 'agent-a1.jsonl'), { skipResults: true })
+  eq([calls.usage, calls.model, calls.calls, calls.tools], [t.usage, t.model, t.calls.map((c) => ({ ...c, result: '', ok: true })), a.tools],
+    'skipResults: the same usage, calls and tools, without their results')
   writeAgent(dir, 'spaced', ['{"type": "assistant", "message": {"id": "s", "model": "claude-haiku-5-5", "content": [], "usage": {"input_tokens": 4, "output_tokens": 2}}}'], null)
   eq(readTranscript(join(dir, 'agent-spaced.jsonl'), { usageOnly: true }).usage, readTranscript(join(dir, 'agent-spaced.jsonl')).usage, 'usageOnly: a transcript written with spaces is read in full rather than billed as nothing')
 

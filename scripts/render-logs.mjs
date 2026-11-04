@@ -645,7 +645,9 @@ function toolEvidenceText(tools) {
   const roles = Object.entries(tools.roles).filter(([, r]) => r.candidates.length)
   if (!roles.length) return `  tool evidence over ${n(tools.runs, 'run')}: no server to deny yet`
   const SHOWN = 6 // per role; summary --json lists them all
-  const list = (cs) => `${cs.slice(0, SHOWN).map((c) => `${c.deny} (${c.why})`).join(', ')}${cs.length > SHOWN ? `, and ${cs.length - SHOWN} more (summary --json)` : ''}`
+  // the costliest first: their deferred names, then the server's own name
+  const order = (cs) => [...cs].sort((a, b) => b.deferredNameTokens - a.deferredNameTokens || a.server.localeCompare(b.server))
+  const list = (cs) => `${order(cs).slice(0, SHOWN).map((c) => `${c.deny} (${c.why})`).join(', ')}${cs.length > SHOWN ? `, and ${cs.length - SHOWN} more (summary --json)` : ''}`
   return roles.map(([role, r]) => `  tool evidence over ${n(tools.runs, 'run')}: ${role} (${n(r.dispatches, 'dispatch', 'dispatches')}, ${n(r.runs, 'run')}) could deny ${list(r.candidates)}`).join('\n')
 }
 

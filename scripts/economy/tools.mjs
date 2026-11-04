@@ -29,7 +29,9 @@ export const MIN_RUNS = 5
 const DESKTOP_APP = /^ccd_/
 const GENERIC_AGENT = 'workflow-subagent'
 
-/** The MCP server a tool belongs to (`mcp__<server>__<tool>`), else null (a built-in tool). */
+/** The MCP server a tool belongs to (`mcp__<server>__<tool>`), else null (a built-in tool). The server
+ * ends at the first `__`: Claude Code names MCP tools that way, so a server whose own name held `__`
+ * could not be told from its tools. */
 export function serverOf(tool) {
   const m = /^mcp__(.+?)__(.+)$/.exec(String(tool ?? ''))
   return m ? m[1] : null
