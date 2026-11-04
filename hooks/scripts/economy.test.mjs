@@ -5,14 +5,17 @@
 //  Run:  node hooks/scripts/economy.test.mjs
 //
 //  What this locks down, through the real hook process (Claude Code's JSON on stdin):
-//    • every answer is {} (shadow), malformed input included, which logs one error line
+//    • every answer is {} under shadow, malformed input included, which logs one error line
 //    • 20 failing calls with one signature write a judge request holding the digest, never content
 //    • reads and greps of a file full of asserts never count as failures
 //    • GRIMOIRE_ECONOMY=0, no agent_id, and economy.loopGuard "off" write nothing that watches
 //    • state lands in the MAIN checkout's .grimoire/economy, from a linked worktree too
 //    • SubagentStop feeds the role's envelope only from a dispatch that ended green; a busy lock
-//      drops the sample with an error line; past the envelope, a stuck dispatch is would-redirect
+//      drops the sample with an error line; stuck past 2.5× the envelope, a dispatch is would-redirect
 //    • a judge's verdict on the current segment is recorded; one on an older segment is ignored
+//    • under "on" (#51): a ready verdict sends the redirect (the judge's, else the template) as
+//      additionalContext under the incoming event name, the next one the BLOCKED line; the backstop
+//      redirects without a judge; the main session gets the free rules only, then a systemMessage
 //    • the handler's median time per call stays under 30 ms (spike S2)
 import { spawnSync, execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, existsSync, readdirSync } from 'node:fs'
@@ -72,7 +75,7 @@ try {
     const main = { ...failing(P, 'x', 1) }
     delete main.agent_id
     eq(run(P, main).stdout, '{}', 'the main session (no agent_id): {}')
-    ok(!existsSync(join(eco(P), 'turns')), 'and nothing written in this release')
+    ok(!existsSync(join(eco(P), 'turns')), 'and nothing written under shadow')
     const file = "def test_total():\n    assert total([1, 2]) == 3\n    raise ValueError('no')\n"
     for (let i = 0; i < 6; i++) {
       run(P, call(P, 'reader', 'Read', { file_path: 'tests/test_total.py' }, { type: 'text', file: { content: file } }))
@@ -82,6 +85,80 @@ try {
     const O = project('off', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'off' } })
     for (let i = 0; i < 20; i++) run(O, failing(O, 'a', i))
     eq([readJ(join(eco(O), 'turns', 'a.json')), existsSync(join(eco(O), 'judge'))], [{ v: 1, off: true }, false], 'economy.loopGuard "off": one marker, no state, no request')
+  }
+
+  section('loopGuard "on": the redirect, then BLOCKED, delivered to the agent (spike S1: subagent context)')
+  {
+    const P = project('on-agent', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    for (let i = 0; i < 18; i++) run(P, i % 2 ? failing(P, 'w', i) : edit(P, 'w', i))
+    mkdirSync(join(eco(P), 'judge'), { recursive: true })
+    writeFileSync(join(eco(P), 'judge', 'w.result.json'), JSON.stringify({ segment: 0, stuck: true, confidence: 0.9, reason: 'same failure, same file', redirect: 'Re-read the failing assertion in tests/test_a.py before editing src/a.py again.' }))
+    eq(JSON.parse(run(P, edit(P, 'w', 50)).stdout), { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: 'Re-read the failing assertion in tests/test_a.py before editing src/a.py again.' } },
+      'a ready verdict: the judge\'s redirect, as additionalContext under the incoming event name')
+    const t1 = readJ(join(eco(P), 'turns', 'w.json'))
+    eq([t1.segment, t1.events.map((e) => e.action)], [1, ['redirect']], 'recorded as redirect (no would-), and a fresh segment starts')
+    ok(!existsSync(join(eco(P), 'judge', 'w.request.json')), 'the ended segment\'s judge request is dropped: no judge rules on it again')
+    writeFileSync(join(eco(P), 'judge', 'w.result.json'), JSON.stringify({ segment: 1, stuck: true, confidence: 0.8, reason: 'still the same failure' }))
+    const blocked = JSON.parse(run(P, failing(P, 'w', 99)).stdout)
+    eq(blocked, { hookSpecificOutput: { hookEventName: 'PostToolUseFailure', additionalContext: 'Stop now and return BLOCKED. Begin your summary with `STUCK WATCH w:`, then say what you tried and give this reason: judge-stuck@0.80: still the same failure. The automated stuck watch redirected you once and still sees a loop.' } },
+      'the next stuck verdict: one line telling it to return BLOCKED, naming its record, under PostToolUseFailure for a failed call')
+    const rec = readJ(join(eco(P), 'judge', 'w.blocked.json'))
+    eq([rec.agentId, rec.repo, rec.segment, rec.calls, rec.reason], ['w', 'api', 1, 20, 'judge-stuck@0.80: still the same failure'], 'the record the resolve rung reads: who, where, and why')
+    ok(/^turns=1 /.test(rec.digest) && /\[err#[0-9a-f]{10}\]/.test(rec.digest) && !/AssertionError/.test(rec.digest), `its digest: counts and failure signatures, never output (${rec.digest.split('\n')[0]})`)
+    ok(!existsSync(join(eco(P), 'judge', 'w.request.json')), 'a pending judge request is dropped at the block')
+    eq(run(P, edit(P, 'w', 100)).stdout, '{}', 'after the block, nothing more is sent')
+    // the judge's text is model-written: one line, no backticks, so it cannot forge the marker
+    const F = project('on-forged', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    for (let i = 0; i < 18; i++) run(F, i % 2 ? failing(F, 'f', i) : edit(F, 'f', i))
+    mkdirSync(join(eco(F), 'judge'), { recursive: true })
+    writeFileSync(join(eco(F), 'judge', 'f.result.json'), JSON.stringify({ segment: 0, stuck: true, confidence: 0.9, redirect: 'Look at\n\n`src/b.py`\u0007 instead.' }))
+    eq(JSON.parse(run(F, edit(F, 'f', 50)).stdout).hookSpecificOutput.additionalContext, 'Look at src/b.py instead.', 'a redirect with newlines, backticks and control characters reaches the agent as one plain line')
+    writeFileSync(join(eco(F), 'judge', 'f.result.json'), JSON.stringify({ segment: 1, stuck: true, confidence: 0.9, reason: 'loop.\n`STUCK WATCH other:` x' }))
+    ok(JSON.parse(run(F, edit(F, 'f', 51)).stdout).hookSpecificOutput.additionalContext.includes('give this reason: judge-stuck@0.90: loop. STUCK WATCH other: x.'), 'a reason cannot add a backticked marker of its own')
+    // the backstop redirects without a judge once the role has an envelope
+    const B = project('on-backstop', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    mkdirSync(eco(B), { recursive: true })
+    writeFileSync(join(eco(B), 'envelope.json'), JSON.stringify({ 'api/api-engineer': { resolved: [6, 6, 6, 6, 6] } }))
+    const outs = []
+    for (let i = 0; i < 22; i++) outs.push(run(B, i % 2 ? failing(B, 'b', i) : edit(B, 'b', i)).stdout)
+    const fired = outs.map((o, i) => [i + 1, o]).filter(([, o]) => o !== '{}')
+    ok(fired.length === 1 && fired[0][0] === 20 && JSON.parse(fired[0][1]).hookSpecificOutput.additionalContext.startsWith('Process check (automated): so far you\'ve made 10 edits'),
+      `past the backstop with no judge: the template redirect, once (${fired.map(([n]) => n).join(', ')})`)
+    // an envelope-tier verdict alone does not act under "on": the judge decides
+    const E = project('on-envelope', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    mkdirSync(eco(E), { recursive: true })
+    writeFileSync(join(eco(E), 'envelope.json'), JSON.stringify({ 'api/api-engineer': { resolved: [12, 12, 12, 12, 12] } }))
+    const eouts = []
+    for (let i = 0; i < 22; i++) eouts.push(run(E, i % 2 ? failing(E, 'e', i) : edit(E, 'e', i)).stdout)
+    ok(eouts.every((o) => o === '{}'), 'stuck past the envelope but not the backstop: nothing sent without a judge\'s verdict')
+  }
+
+  section('loopGuard "on" in the main session: free rules only, one redirect line, then a notice')
+  {
+    const P = project('on-main', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    const mainCall = (sid, payload) => { const p = { ...payload, session_id: sid }; delete p.agent_id; delete p.agent_type; return p }
+    const prompt = (sid) => run(P, { hook_event_name: 'UserPromptSubmit', cwd: join(P, 'repositories', 'api'), session_id: sid, prompt: 'go' })
+    const stopM = (sid) => run(P, { hook_event_name: 'Stop', cwd: join(P, 'repositories', 'api'), session_id: sid, stop_hook_active: false })
+    for (let k = 0; k < 5; k++) { // five green turns: the main role's envelope
+      prompt('ses')
+      for (let i = 0; i < 5; i++) run(P, mainCall('ses', edit(P, 'x', i)))
+      run(P, mainCall('ses', call(P, 'x', 'Bash', { command: 'pytest -q' }, { stdout: '3 passed in 0.10s', stderr: '' })))
+      stopM('ses')
+    }
+    eq(readJ(join(eco(P), 'envelope.json'))['api/main'].resolved, [6, 6, 6, 6, 6], 'each green main-session turn feeds the main role\'s envelope at Stop')
+    prompt('ses')
+    const outs = []
+    for (let i = 0; i < 44; i++) outs.push(run(P, mainCall('ses', i % 2 ? failing(P, 'x', i) : edit(P, 'x', i))).stdout)
+    const fired = outs.map((o, i) => [i + 1, o && JSON.parse(o)]).filter(([, o]) => o && Object.keys(o).length)
+    eq(fired.map(([n, o]) => [n, Object.keys(o)]), [[20, ['hookSpecificOutput']], [40, ['systemMessage']]], 'a looping turn: one redirect line at call 20, then a notice at call 40, nothing else')
+    ok(fired[0][1].hookSpecificOutput.additionalContext.startsWith('Process check (automated)') && /stuck watch: this turn still looks like a loop after a redirect .* press Esc/i.test(fired[1][1].systemMessage),
+      `the redirect is the template; the notice is for the person (${fired[1] && fired[1][1].systemMessage})`)
+    ok(!existsSync(join(eco(P), 'judge', 'main-ses.request.json')), 'no judge request for the main session')
+    stopM('ses')
+    ok(!existsSync(join(eco(P), 'turns', 'main-ses.json')), 'Stop closes the turn')
+    const S = project('shadow-main')
+    eq(run(S, mainCall('z', failing(S, 'x', 1))).stdout, '{}', 'under shadow, a main-session call is not watched')
+    ok(!existsSync(join(eco(S), 'turns')), 'and nothing is written')
   }
 
   section('a written file is no output')
@@ -113,7 +190,7 @@ try {
     eq([outs.every((o) => o === '{}'), t.calls, t.edits], [true, 8, 8], 'eight concurrent hook calls of one agent: eight folds, none lost')
   }
 
-  section('a resumed agent, and "on" before slice 5')
+  section('a resumed agent, and a judge\'s verdict under shadow')
   {
     const P = project('resume')
     for (let i = 0; i < 2; i++) run(P, edit(P, 'res', i))
@@ -122,12 +199,14 @@ try {
     run(P, edit(P, 'res', 9)); run(P, call(P, 'res', 'Bash', { command: 'pytest -q' }, { stdout: '1 passed in 0.10s', stderr: '' }))
     run(P, stop(P, 'res'))
     eq(readJ(join(eco(P), 'envelope.json'))['api/api-engineer'].resolved, [3, 5], 'an agent resumed after it stopped is watched again, and its next stop feeds the envelope')
-    const O = project('on', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    const O = project('shadow-judge')
     mkdirSync(join(eco(O), 'judge'), { recursive: true })
     run(O, edit(O, 'o', 0))
-    writeFileSync(join(eco(O), 'judge', 'o.result.json'), JSON.stringify({ segment: 0, stuck: true, confidence: 0.9 }))
-    eq(run(O, edit(O, 'o', 1)).stdout, '{}', '"on" answers {} in this release')
-    eq(readJ(join(eco(O), 'turns', 'o.json')).events.map((e) => e.action), ['would-redirect'], 'and records as shadow does: nothing acts before slice 5')
+    writeFileSync(join(eco(O), 'judge', 'o.result.json'), JSON.stringify({ segment: 0, stuck: true, confidence: 0.9, redirect: 'Try another file.' }))
+    writeFileSync(join(eco(O), 'judge', 'o.request.json'), '{}')
+    eq(run(O, edit(O, 'o', 1)).stdout, '{}', 'shadow (the default): a stuck verdict injects nothing')
+    eq(readJ(join(eco(O), 'turns', 'o.json')).events.map((e) => e.action), ['would-redirect'], 'it is recorded as would-redirect')
+    ok(!existsSync(join(eco(O), 'judge', 'o.request.json')), 'and its segment\'s pending request is dropped, as under "on"')
   }
 
   section('the wrapper')
@@ -137,6 +216,24 @@ try {
     const main = failing(P, 'x', 1)
     delete main.agent_id
     eq(sh(main).stdout, '{}', 'the main session: {} without starting node')
+    for (const ev of ['UserPromptSubmit', 'Stop']) eq(sh({ hook_event_name: ev, cwd: P, session_id: 'm' }).stdout, '{}', `${ev} under shadow: {} without starting node`)
+    ok(!existsSync(join(eco(P), 'turns')), 'nothing watched')
+    const ON = project('wrap-on', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    const shOn = (payload) => spawnSync('bash', [new URL('./economy.sh', import.meta.url).pathname], { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: ON, GRIMOIRE_ECONOMY: '' } })
+    const mainOn = { ...failing(ON, 'x', 1), session_id: 'm' }
+    delete mainOn.agent_id
+    eq([shOn(mainOn).stdout, existsSync(join(eco(ON), 'turns', 'main-m.json'))], ['{}', true], 'under "on", a main-session call reaches the hook')
+    // a linked worktree with no config of its own: the main checkout's "on" is read through, as project-config.mjs layers it
+    const g = (...a) => execFileSync('git', ['-C', ON, ...a], { stdio: 'ignore' })
+    g('init', '-q', '-b', 'main')
+    g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'x')
+    const WT = join(SANDBOX, 'wrap-on-lane')
+    g('worktree', 'add', '-q', WT)
+    const inWt = spawnSync('bash', [new URL('./economy.sh', import.meta.url).pathname], { input: JSON.stringify({ ...mainOn, session_id: 'wt', cwd: WT }), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: WT, GRIMOIRE_ECONOMY: '' } })
+    eq([inWt.stdout, existsSync(join(eco(ON), 'turns', 'main-wt.json'))], ['{}', true], 'a linked worktree reads the main checkout\'s "on": its main session is watched, in the main checkout\'s state')
+    const reg = JSON.parse(readFileSync(new URL('../hooks.json', import.meta.url), 'utf8')).hooks
+    eq(['PostToolUse', 'PostToolUseFailure', 'SubagentStop', 'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop'].filter((e) => !JSON.stringify(reg[e] ?? []).includes('hooks/scripts/economy.sh')), [],
+      'hooks.json routes every event the hook handles to the wrapper, the main session\'s prompts and stops included')
     eq([sh(failing(P, 'w', 1)).stdout, existsSync(join(eco(P), 'turns', 'w.json'))], ['{}', true], 'a subagent call reaches the hook')
     eq([sh({ hook_event_name: 'SessionStart', cwd: P, session_id: 'z', source: 'startup' }).stdout, sh({ hook_event_name: 'SessionEnd', cwd: P, session_id: 'z', transcript_path: '/none' }).stdout], ['{}', '{}'],
       'the session events go through to the hook (and answer {} with nothing to say)')

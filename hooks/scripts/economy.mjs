@@ -1,15 +1,23 @@
 #!/usr/bin/env node
-// grimoire · economy hook: the stuck watch on dispatched agents (token economy slice 3, shadow).
+// grimoire · economy hook: the stuck watch (token economy slices 3 and 5).
 //
 // Runs on PostToolUse and PostToolUseFailure, and on SubagentStop. Inside a subagent (the hook
 // input carries `agent_id`) each completed call is folded into that agent's state,
 // `.grimoire/economy/turns/<agent_id>.json` (scripts/economy/loopguard/turn.mjs), in the project's
 // main checkout. Then:
-//   • the free rules: stuck past the role's envelope (or 2.5× it, the backstop) is recorded as
-//     would-redirect, a later one as would-block, in the state's `events`;
+//   • the free rule: stuck past 2.5× the role's envelope (the backstop) is a stuck verdict;
 //   • the gate (≥ 18 calls, and a repeated failure or ≥ 8 error outputs) writes a judge request,
 //     `judge/<agent_id>.request.json`: the digest of counts and recent actions, never file content;
-//   • a verdict a judge left in `judge/<agent_id>.result.json` is recorded the same way.
+//   • a verdict a judge left in `judge/<agent_id>.result.json` is a stuck verdict too.
+// The first stuck verdict redirects and starts a fresh segment, a later one blocks. Under
+// `economy.loopGuard: "on"` the agent is told, as additionalContext under the event name the call came
+// in on (spike S1: it reaches the subagent's own context): the judge's redirect, else the template;
+// then one line telling it to return BLOCKED (`STUCK WATCH:` heads its summary, for the engine's
+// resolve rung). Under "shadow" (the default) both are only recorded, as would-redirect and would-block.
+//
+// The main session (no `agent_id`) is watched only under "on", per prompt: UserPromptSubmit starts a
+// fresh turn (`turns/main-<session_id>.json`), Stop closes it and feeds the `<repo>/main` envelope.
+// Free rules only, no judge (a person is there to press Esc): one redirect line, then a systemMessage.
 // At SubagentStop a dispatch that ended green (no failed check after its last edit) feeds its role's
 // envelope, `envelope.json` (per repo and agent type), under a lock; a busy lock drops the sample.
 //
@@ -21,12 +29,11 @@
 // shown are kept (`facts/sessions/<session_id>.json`) so its fold counts a prevented failure as fired.
 // `economy.facts: "off"` learns and injects nothing. Transcripts are read at a stop, never on a call.
 //
-// This release changes nothing: it always answers `{}` to calls and stops, and `economy.loopGuard: "on"` records as
-// "shadow" does until token economy slice 5 delivers redirects. No model call, no git, no transcript
-// read on a call. Every failure answers `{}` and adds a line to `.grimoire/economy/errors.log`.
-// `GRIMOIRE_ECONOMY=0` in the session's environment turns it off; so does `economy.loopGuard: "off"`
-// in grimoire.config.json, read once per agent. One agent's parallel calls fold one at a time, under
-// a per-agent lock. The wrapper (economy.sh) answers the main session's calls without starting node.
+// No model call, no git, no transcript read on a call. Every failure answers `{}` and adds a line to
+// `.grimoire/economy/errors.log`. `GRIMOIRE_ECONOMY=0` in the session's environment turns it off; so
+// does `economy.loopGuard: "off"` in grimoire.config.json, read once per agent. One agent's parallel
+// calls fold one at a time, under a per-agent lock. The wrapper (economy.sh) answers the main
+// session's events without starting node unless the config sets "on".
 import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync, rmSync, appendFileSync, readdirSync, statSync, rmdirSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,7 +41,7 @@ import { projectRoot, economyDir } from '../../scripts/economy/paths.mjs'
 import { loadConfig, mainCheckout } from '../../scripts/project-config.mjs'
 import { newTurn, foldCall, resolved, freeVerdict, wantsJudge, decide, verificationState } from '../../scripts/economy/loopguard/turn.mjs'
 import { recentDigest } from '../../scripts/economy/loopguard/state.mjs'
-import { DEFAULT_THRESHOLDS } from '../../scripts/economy/loopguard/rules.mjs'
+import { DEFAULT_THRESHOLDS, nudgeText } from '../../scripts/economy/loopguard/rules.mjs'
 import { envelopeOf, withSample } from '../../scripts/economy/loopguard/envelope.mjs'
 import { readTranscript } from '../../scripts/economy/transcript.mjs'
 import { fromJSON, toJSON, update as foldFacts, render as renderFacts, injectedIds, seedInjected } from '../../scripts/economy/facts/families.mjs'
@@ -50,7 +57,11 @@ const KEEP_CONFIRMS = 50 // a fact's history, by fold: older confirmations weigh
 const KEEP_COUNTS = 20 // per count table of a fact (hosts, forms, values, examples): the most frequent
 const INJECT_SOURCES = new Set(['startup', 'clear', 'compact'])
 const CONTENT_TOOLS = new Set(['read', 'grep', 'glob', 'view'])
+const MAIN_TYPE = 'main' // the main session's role: <repo>/main
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+// a judge's text, as one line of bounded length with no backticks or control characters: it is model-written,
+// it goes into an agent's context, and it must not forge the BLOCKED line's `STUCK WATCH` marker
+const oneLine = (s, max) => (typeof s === 'string' ? s.replace(/[\u0000-\u001f\u007f`]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max) : '')
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return null } }
 function writeJson(p, v) {
   const tmp = `${p}.${process.pid}.tmp`
@@ -95,11 +106,13 @@ function repoMatcher(root, config) {
   }
 }
 
+const guardMode = (config) => (isObj(config?.economy) && MODES.has(config.economy.loopGuard) ? config.economy.loopGuard : 'shadow')
+
 // The agent's settings, read once at its first call: the mode, the thresholds and its repo.
 function firstLook(root, cwd) {
   const { config } = loadConfig(root)
   const eco = isObj(config?.economy) ? config.economy : {}
-  const mode = MODES.has(eco.loopGuard) ? eco.loopGuard : 'shadow'
+  const mode = guardMode(config)
   const thr = { ...DEFAULT_THRESHOLDS }
   for (const [k, v] of Object.entries(isObj(eco.loopGuardThresholds) ? eco.loopGuardThresholds : {})) if (k in thr && Number.isFinite(v) && v >= 0) thr[k] = v
   return { mode, thr, repo: repoMatcher(root, config)(cwd || root) }
@@ -190,23 +203,55 @@ function onSessionEnd(dir, root, payload, now) {
   if (foldTranscript(dir, root, 'SessionEnd', `session:${payload.session_id}`, payload.transcript_path, readJson(shown), now)) rmSync(shown, { force: true })
 }
 
-function onCall(dir, payload, now) {
+// One call: folded under its agent's lock (parallel calls run concurrent hooks), and what to answer.
+function onCall(dir, root, payload, id, now) {
   mkdirSync(join(dir, 'turns'), { recursive: true })
-  // one agent's parallel calls run concurrent hooks: fold them one at a time
-  const folded = withLock(join(dir, 'turns', `${payload.agent_id}.lock`), () => foldOne(dir, payload, now), CALL_LOCK_WAIT_MS)
-  if (!folded) logError(dir, payload.hook_event_name, `a call of ${payload.agent_id} was not folded: its state stayed locked`, now)
+  let answer = {}
+  const folded = withLock(join(dir, 'turns', `${id}.lock`), () => { answer = foldOne(dir, root, payload, id, now) }, CALL_LOCK_WAIT_MS)
+  if (!folded) logError(dir, payload.hook_event_name, `a call of ${id} was not folded: its state stayed locked`, now)
+  return answer
 }
 
-function foldOne(dir, payload, now) {
-  const id = payload.agent_id
+// The BLOCKED line: `STUCK WATCH <id>:` heads the agent's summary, which the engine routes to its
+// resolve rung with the record kept under that id (`judge/<id>.blocked.json`).
+const blockedLine = (id, reason) => `Stop now and return BLOCKED. Begin your summary with \`STUCK WATCH ${id}:\`, then say what you tried and give this reason: ${reason}. The automated stuck watch redirected you once and still sees a loop.`
+
+/**
+ * One stuck verdict on the ladder, and what this call answers: under "on", the redirect (the judge's
+ * text, else the template, read before the segment resets), then the BLOCKED line, as additionalContext;
+ * the main session's second verdict is a systemMessage to the person instead. Under shadow, {}.
+ */
+function act(dir, t, payload, main, why, { reason = '', redirect = '', envelope = null, at }) {
+  const said = reason ? `${why}: ${reason}` : why
+  const text = t.nudges < 1 ? (redirect || nudgeText(t.st))
+    : main ? `grimoire stuck watch: this turn still looks like a loop after a redirect (${why}). If it is not making progress, press Esc to interrupt it.`
+      : blockedLine(t.agentId, said)
+  const action = decide(t, why, { shadow: t.mode !== 'on', at })
+  // a pending request is on a segment that just ended (a redirect) or a ladder that did (a block): a judge
+  // must not rule on it again; the new segment writes its own once it reaches the gate
+  if (!main) rmSync(join(dir, 'judge', `${t.agentId}.request.json`), { force: true })
+  if (action.startsWith('would-')) return {}
+  if (main && action === 'block') return { systemMessage: text }
+  if (action === 'block') {
+    // the record the resolve rung reads (a block keeps its segment: the digest is the one that looped)
+    mkdirSync(join(dir, 'judge'), { recursive: true })
+    writeJson(join(dir, 'judge', `${t.agentId}.blocked.json`), { v: 1, agentId: t.agentId, agentType: t.agentType, repo: t.repo, segment: t.segment, calls: t.calls, at, reason: said,
+      digest: recentDigest(t.st, { envelope, verification: verificationState(t) }) })
+  }
+  return { hookSpecificOutput: { hookEventName: payload.hook_event_name, additionalContext: text } }
+}
+
+function foldOne(dir, root, payload, id, now) {
+  const main = id !== payload.agent_id
   const file = join(dir, 'turns', `${id}.json`)
   let t = readJson(file)
-  if (isObj(t) && t.off) return
+  if (isObj(t) && t.off) return {}
   if (!isObj(t) || t.v !== 1) {
-    const root = projectRoot({ cwd: payload.cwd })
     const look = firstLook(root, payload.cwd)
-    if (look.mode === 'off') return writeJson(file, { v: 1, off: true })
-    t = { ...newTurn({ agentId: id, agentType: typeof payload.agent_type === 'string' ? payload.agent_type : null, cwd: payload.cwd ?? null, repo: look.repo, at: now }), mode: look.mode, thr: look.thr }
+    if (main && look.mode !== 'on') return {} // the main session is watched only under "on": nothing written
+    if (look.mode === 'off') { writeJson(file, { v: 1, off: true }); return {} }
+    const agentType = main ? MAIN_TYPE : typeof payload.agent_type === 'string' ? payload.agent_type : null
+    t = { ...newTurn({ agentId: id, agentType, cwd: payload.cwd ?? null, repo: look.repo, at: now }), mode: look.mode, thr: look.thr }
   }
   t.stopped = false // an agent resumed after it stopped is watched again
   const failed = payload.hook_event_name === 'PostToolUseFailure'
@@ -215,23 +260,21 @@ function foldOne(dir, payload, now) {
   foldCall(t, { name: payload.tool_name, args: isObj(payload.tool_input) ? payload.tool_input : {}, result: resultText(payload.tool_name, resp, payload.error), exitCode })
   const role = `${t.repo ?? '-'}/${t.agentType ?? '-'}`
   const envelope = envelopeOf(readJson(join(dir, 'envelope.json'))?.[role]?.resolved, t.thr)
-  const shadow = true // "on" acts from token economy slice 5; until then it records as shadow does
-  // a judge's verdict on this segment, left by the engine's stuck-judge dispatch
+  let answer = {}
+  // a judge's verdict on this segment, left by the engine's stuck-judge dispatch (never for the main session)
   const resultFile = join(dir, 'judge', `${id}.result.json`)
-  if (existsSync(resultFile)) {
+  if (!main && existsSync(resultFile)) {
     const v = readJson(resultFile)
     rmSync(resultFile, { force: true })
     if (isObj(v) && v.segment === t.segment && !t.blocked) {
       const conf = Number(v.confidence) || 0
-      if (v.stuck === true && conf >= t.thr.judge_confidence) decide(t, `judge-stuck@${conf.toFixed(2)}`, { shadow, at: now })
+      if (v.stuck === true && conf >= t.thr.judge_confidence) answer = act(dir, t, payload, main, `judge-stuck@${conf.toFixed(2)}`, { reason: oneLine(v.reason, 300), redirect: oneLine(v.redirect, 1200), envelope, at: now })
       else t.events.push({ action: 'spared', reason: v.stuck === false ? 'judge-productive' : 'judge-unsure', calls: t.calls, segment: t.segment, at: now })
     }
   }
-  if (!t.blocked) {
-    const free = freeVerdict(t, envelope, t.thr)
-    if (free) decide(t, `${free}:${t.calls}>=${Math.round(free === 'backstop' ? envelope * t.thr.backstop_mult : envelope)}`, { shadow, at: now })
-  }
-  if (wantsJudge(t, t.thr)) {
+  // the free rule acts only past the backstop: short of it, a stuck segment is the judge's to rule on
+  if (!t.blocked && freeVerdict(t, envelope, t.thr) === 'backstop') answer = act(dir, t, payload, main, `backstop:${t.calls}>=${Math.round(envelope * t.thr.backstop_mult)}`, { envelope, at: now })
+  if (!main && wantsJudge(t, t.thr)) {
     mkdirSync(join(dir, 'judge'), { recursive: true })
     writeJson(join(dir, 'judge', `${id}.request.json`), { v: 1, agentId: id, agentType: t.agentType, repo: t.repo, segment: t.segment, calls: t.calls, at: now,
       digest: recentDigest(t.st, { envelope, verification: verificationState(t) }) })
@@ -239,6 +282,7 @@ function foldOne(dir, payload, now) {
   }
   t.updatedAt = now
   writeJson(file, t)
+  return answer
 }
 
 function withLock(lock, fn, wait = LOCK_WAIT_MS) {
@@ -255,22 +299,17 @@ function withLock(lock, fn, wait = LOCK_WAIT_MS) {
   return true
 }
 
-function onStop(dir, root, payload, now) {
-  foldTranscript(dir, root, 'SubagentStop', `agent:${payload.agent_id}`, payload.agent_transcript_path, null, now)
-  const file = join(dir, 'turns', `${payload.agent_id}.json`)
-  const t = readJson(file)
-  if (!isObj(t) || t.v !== 1 || t.off || t.stopped) return
-  t.stopped = true
-  t.updatedAt = now
-  writeJson(file, t)
-  rmSync(join(dir, 'judge', `${payload.agent_id}.request.json`), { force: true })
-  if (resolved(t)) {
-    const role = `${t.repo ?? '-'}/${t.agentType ?? '-'}`
-    const fed = withLock(join(dir, 'envelope.lock'), () => writeJson(join(dir, 'envelope.json'), withSample(readJson(join(dir, 'envelope.json')), role, t.calls)))
-    if (!fed) logError(dir, 'SubagentStop', `envelope sample of ${role} (${t.calls} calls) dropped: the lock stayed busy`, now)
-  }
-  // states, judge requests and sessions' shown ids older than a week go (an agent that never stopped
-  // leaves its request, a session that never ended its ids)
+// A dispatch or a main-session turn that ended green adds its length to its role's envelope.
+function feedEnvelope(dir, t, event, now) {
+  if (!resolved(t)) return
+  const role = `${t.repo ?? '-'}/${t.agentType ?? '-'}`
+  const fed = withLock(join(dir, 'envelope.lock'), () => writeJson(join(dir, 'envelope.json'), withSample(readJson(join(dir, 'envelope.json')), role, t.calls)))
+  if (!fed) logError(dir, event, `envelope sample of ${role} (${t.calls} calls) dropped: the lock stayed busy`, now)
+}
+
+// States, judge requests and sessions' shown ids older than a week go (an agent that never stopped
+// leaves its request, a session that never ended its ids, a turn interrupted with Esc its state).
+function sweep(dir, now) {
   for (const sub of ['turns', 'judge', join('facts', 'sessions')]) {
     let names = []
     try { names = readdirSync(join(dir, sub)) } catch {}
@@ -281,6 +320,34 @@ function onStop(dir, root, payload, now) {
   }
 }
 
+// The main session's turn: UserPromptSubmit drops what an interrupted turn left (it never ended
+// green), Stop closes the turn, under its lock, feeding the envelope when it ended green.
+function onMainTurn(dir, payload, id, now) {
+  const file = join(dir, 'turns', `${id}.json`)
+  if (payload.hook_event_name === 'UserPromptSubmit') return void rmSync(file, { force: true })
+  if (!existsSync(file)) return
+  const closed = withLock(join(dir, 'turns', `${id}.lock`), () => {
+    const t = readJson(file)
+    rmSync(file, { force: true })
+    if (isObj(t) && t.v === 1 && !t.off) feedEnvelope(dir, t, 'Stop', now)
+  }, CALL_LOCK_WAIT_MS)
+  if (!closed) logError(dir, 'Stop', `the turn ${id} was not closed: its state stayed locked`, now)
+  sweep(dir, now)
+}
+
+function onStop(dir, root, payload, now) {
+  foldTranscript(dir, root, 'SubagentStop', `agent:${payload.agent_id}`, payload.agent_transcript_path, null, now)
+  const file = join(dir, 'turns', `${payload.agent_id}.json`)
+  const t = readJson(file)
+  if (!isObj(t) || t.v !== 1 || t.off || t.stopped) return
+  t.stopped = true
+  t.updatedAt = now
+  writeJson(file, t)
+  rmSync(join(dir, 'judge', `${payload.agent_id}.request.json`), { force: true })
+  feedEnvelope(dir, t, 'SubagentStop', now)
+  sweep(dir, now)
+}
+
 function logError(dir, event, message, now) {
   try {
     mkdirSync(dir, { recursive: true })
@@ -288,7 +355,7 @@ function logError(dir, event, message, now) {
   } catch {}
 }
 
-/** One hook call; always `{}` in this release. Throws only on input that is not a hook payload. */
+/** One hook call: `{}`, or what the agent (or the person) is told. Throws only on input that is not a hook payload. */
 export function handle(payload, { env = process.env, now = Date.now() } = {}) {
   if (env.GRIMOIRE_ECONOMY === '0') return {}
   if (!isObj(payload)) throw new Error('the hook input is not a JSON object')
@@ -299,12 +366,26 @@ export function handle(payload, { env = process.env, now = Date.now() } = {}) {
     onSessionEnd(dir, root, payload, now)
     return {}
   }
-  const id = payload.agent_id
-  if (typeof id !== 'string' || !AGENT_ID.test(id)) return {} // the main session: not watched in this release
+  const ev = payload.hook_event_name
+  const call = ev === 'PostToolUse' || ev === 'PostToolUseFailure'
+  if (typeof payload.agent_id === 'string') {
+    if (!AGENT_ID.test(payload.agent_id)) return {}
+    const root = projectRoot({ env, cwd: payload.cwd })
+    const dir = economyDir(root)
+    if (call) return onCall(dir, root, payload, payload.agent_id, now)
+    if (ev === 'SubagentStop') onStop(dir, root, payload, now)
+    return {}
+  }
+  // the main session, keyed per session and closed at each Stop: one turn per prompt
+  const sid = payload.session_id
+  if (typeof sid !== 'string' || !AGENT_ID.test(sid) || !(call || ev === 'UserPromptSubmit' || ev === 'Stop')) return {}
   const root = projectRoot({ env, cwd: payload.cwd })
   const dir = economyDir(root)
-  if (payload.hook_event_name === 'PostToolUse' || payload.hook_event_name === 'PostToolUseFailure') onCall(dir, payload, now)
-  else if (payload.hook_event_name === 'SubagentStop') onStop(dir, root, payload, now)
+  const id = `main-${sid}`
+  // watched only under "on": a turn's state exists only then (the wrapper filters these events out otherwise)
+  if (call && !existsSync(join(dir, 'turns', `${id}.json`)) && guardMode(loadConfig(root).config) !== 'on') return {}
+  if (call) return onCall(dir, root, payload, id, now)
+  onMainTurn(dir, payload, id, now)
   return {}
 }
 

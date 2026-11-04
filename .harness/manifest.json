@@ -1,17 +1,17 @@
 {
   "schema": 1,
   "name": "grimoire",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "host": "claude-code",
   "files": {
     ".harness/mcp-policy.json": "6ed274eb105556410a08835aff94971f678bdc86d6541aea83ac42209f75f010",
     ".mcp.json": "f6667436ee59516743f79390597bd9509f3c5983e6f121c18c72b3b86ed18ba4",
-    "hooks/hooks.json": "7d03bbfa1dfdc00b37105d09452cfc8ae4054cd1e16bfb79fbf0dba0b108df3a",
+    "hooks/hooks.json": "7aec394ee2b6566f376b8206cf8e85e9bf9f9dd52cca8e7b63aabe933a2a69c5",
     "hooks/scripts/guard.sh": "62b809b6738af5b06654b6855f1f73cab62e67c0a6048afe35962ce025850d3c",
     "hooks/scripts/guard.mjs": "9c7c1976101f1a3a202ab38410ed82622f91f1d31132502b117833defd5cdf70",
     "hooks/scripts/graph-refresh.sh": "1c6d2a808e4998a35eb0c2a2d02c20e00ddd3e2820df05796d17fe62959fd0ea",
-    "hooks/scripts/economy.sh": "3b95bbba010b3ebb8c5cf1135ca149f53859026aad1f3029071cade670342eb7",
-    "hooks/scripts/economy.mjs": "ab8150767d3a8e4b04b05cb2f95ff6d5c78eb9e69bbbc407b23acc9c1774401c",
+    "hooks/scripts/economy.sh": "472ae44b100aff9fb75449f27f7d443bdef599e8167aefc0f70bdac487a720c7",
+    "hooks/scripts/economy.mjs": "6b3d06a119381abd5f6caad6e0bd895220a9be271f30063cf0b10303a9abbd27",
     "scripts/project-config.mjs": "b828299a5cb0f1012d654edfda65917959879ce114146c492cfe9d4c1f6529af"
   }
 }
