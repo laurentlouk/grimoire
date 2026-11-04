@@ -1130,10 +1130,12 @@ the panel, the files the implementer changed are classified again. A changed fil
 repo's `strictPaths` included), or the precheck's `authChange` (the diff adds, removes or changes an
 authentication or authorization check, whatever the file is named), makes the task strict, with
 the lenses its changed files promote (`privacy` for an auth change) and its fixes on opus
-(`policies.tasks[id].raisedAfterBuild`, a `policy.raised` event). A FAST task whose build went past
-FAST's footprint (code in a docs-only pick, more than `fastMaxFiles` files changed) runs balanced
-(`policies.tasks[id].raisedAtPrecheck`). Never with no policy asked for, never lower, never under an
-override `allowBelowFloor` let through. Early rounds that drew the old panel are discarded.
+(`policies.tasks[id].raisedAfterBuild`, a `policy.raised` event); a task already strict gains those
+lenses (`promotedAfterBuild`). An `auto` FAST pick whose build went past FAST's footprint (code in a
+docs-only pick, more than `fastMaxFiles` files changed) runs balanced
+(`policies.tasks[id].raisedAtPrecheck`); an explicit `fast` keeps its size, not its floors. The
+task's `policy` and `byPolicy` count what ran. Never with no policy asked for, never lower, never
+under `allowBelowFloor: true`. Early rounds that drew the old panel are discarded.
 
 **Resume.** An escalated task that has not landed is kept in the checkpoint (`checkpoint.policies`,
 id → `strict`) and in its repo's PR marker (`esc`, the ids only); a resume from either runs it

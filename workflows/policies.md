@@ -58,11 +58,13 @@ classified again, raise-only:
 - a changed file matching a floor glob, or the precheck's `authChange` (the diff adds, removes or
   changes an authentication or authorization check, whatever the file is named) → `strict`, with
   the lenses the changed files promote (`privacy` for an auth change), the fixes on opus;
-- a `fast` task whose build went past FAST's footprint (code in a docs-only pick, more than
-  `fastMaxFiles` files changed) → `balanced`.
+- a task already `strict` gains the lenses its changed files (or an auth change) promote;
+- an `auto` pick of `fast` whose build went past FAST's footprint (code in a docs-only pick, more
+  than `fastMaxFiles` files changed) → `balanced`. An explicit `fast` (label, repo or run) is the
+  owner's word on size, as at routing; its floors still apply.
 
-Never with no policy set in the loop (balanced runs as in 0.15.1), and never under an override
-`allowBelowFloor` let through.
+Never with no policy set in the loop (balanced runs as in 0.15.1), and never under
+`allowBelowFloor: true` (an override is honoured below a floor there, declared or changed).
 
 ## Defaults (`policies`)
 

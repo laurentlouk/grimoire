@@ -4909,32 +4909,52 @@ async function runFast(task, resolved, range, early) {
 // The router classified the DECLARED files. What the implementer changed is classified again before
 // the panel: a changed file on a floor (an issue that declared nothing, or a build past its footprint)
 // or the precheck's word that the diff changes an auth check, whatever its files are named, makes
-// the task STRICT, with the lenses its changed files promote (privacy for an auth change); a FAST
-// task whose build went past FAST's footprint (code in a docs-only pick, more than fastMaxFiles
-// files) runs balanced. Raise-only, and never with no policy asked for (balanced runs, 0.15.1) or
-// under an override allowBelowFloor let through.
+// the task STRICT, with the lenses its changed files promote (privacy for an auth change) — a task
+// already STRICT still gains those lenses. An `auto` FAST pick whose build went past FAST's footprint
+// (code in a docs-only pick, more than fastMaxFiles files) runs balanced; an explicit `fast` is the
+// owner's word on size, as at routing. Raise-only, and never with no policy asked for (balanced
+// runs, 0.15.1) nor under policies.allowBelowFloor (an override is honoured below a floor there).
 function raiseAfterBuild(task, impl, early, authChange) {
-  if (task.policySource === 'default' || task.belowFloor || task.policy === 'strict') return
+  if (task.policySource === 'default' || POLICY_CFG.allowBelowFloor) return
   const cfg = policyCfgFor(task.repo)
   const changed = [...new Set((impl.filesChanged || []).map(policyPath).filter(Boolean))]
   const floor = changed.flatMap((f) => { const g = globHit(cfg.strictPaths, f); return g ? [`changed ${f} matches ${g}`] : [] })
   if (authChange) floor.push(`the precheck: the diff changes an auth check (${authChange})`)
   const st = policyStats.tasks[task.id]
+  const moveTo = (to) => {
+    if (st && st.policy !== to) {
+      policyStats.byPolicy[st.policy]--
+      policyStats.byPolicy[to] = (policyStats.byPolicy[to] || 0) + 1
+      st.policy = to
+    }
+    task.policy = to
+  }
+  const promote = [...new Set([...(task.promote || []), ...classifyPolicy({ files: changed }, cfg).promote, ...(authChange ? ['privacy'] : [])])]
+  if (task.policy === 'strict') {
+    // already STRICT: no raise, but the lenses the build's files (or an auth change) promote join the panel
+    const added = promote.filter((l) => !(task.promote || []).includes(l))
+    if (!added.length) return
+    task.promote = promote
+    if (early) early.discard(`the build promoted ${added.join(', ')}: the panel changed`)
+    if (st) st.promotedAfterBuild = added
+    log(`   · ${task.id}: STRICT — the build promotes ${added.join(', ')}${authChange ? ` (${floor[floor.length - 1]})` : ''}`)
+    return
+  }
   if (floor.length) {
     const from = task.policy
-    task.policy = 'strict'
+    moveTo('strict')
     if (task.model !== 'opus') task.model = 'opus' // the fixes from here on: the build itself already ran
-    task.promote = [...new Set([...(task.promote || []), ...classifyPolicy({ files: changed }, cfg).promote, ...(authChange ? ['privacy'] : [])])]
+    task.promote = promote
     if (early) early.discard(`raised ${from} → strict after the build: the panel changed`)
     if (st) st.raisedAfterBuild = floor.slice(0, 3)
     emit('policy.raised', { task: task.id, repo: task.repo, from, to: 'strict', signals: floor.slice(0, 3) })
     log(`   · ${task.id}: ${from} → STRICT after the build — ${floor[0]}${floor.length > 1 ? ` (+${floor.length - 1})` : ''}`)
     return
   }
-  if (task.policy !== 'fast') return
+  if (task.policy !== 'fast' || task.policyWanted !== 'auto') return
   const code = changed.filter((f) => !globHit(cfg.docsPaths, f))
   if (!code.length || (!task.docsOnly && changed.length <= cfg.fastMaxFiles)) return
-  task.policy = 'balanced'
+  moveTo('balanced')
   if (early) early.discard('FAST raised to balanced: the panel changed') // its rounds drew the FAST panel
   if (st) st.raisedAtPrecheck = code.slice(0, 3)
   emit('policy.raised', { task: task.id, repo: task.repo, from: 'fast', to: 'balanced', signals: [task.docsOnly ? `a docs-only pick changed ${code.slice(0, 3).join(', ')}` : `${changed.length} changed files > ${cfg.fastMaxFiles}`] })
@@ -5141,15 +5161,17 @@ async function runTask(task) {
     if (spec.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'SPEC_FAILED', impl, review: spec }
 
     let qualityFirst = quality0
+    let qualityTag = strictTag // the name quality round 0 ran under (its verifier's too)
     if (quality0 && (range.headSha !== h0 || (!range.headSha && (task.fixRounds || 0) > fixesBefore))) {
       const tag = rerun('quality')
       const moved = `a spec fix moved the head ${h0 || '(unreported)'} → ${range.headSha || '(unreported)'}`
       log(`   · ${task.id}: ${moved} — the quality round-0 verdict is stale; quality reviews the fixed head (${tag})`)
       discardRound(task, 'quality', quality0, moved)
+      qualityTag = tag
       qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, tag)
-    } else if (staged && staged.discarded) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, rerun('quality'))
+    } else if (staged && staged.discarded) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, (qualityTag = rerun('quality')))
     else if (!qualityFirst && strictTag) qualityFirst = reviewRound(task, 'quality', qualityPanel, 'Quality review', range, 0, strictTag)
-    quality = await runReviewStage(task, 'quality', qualityPanel, 'Quality review', resolved, range, { first: qualityFirst, spentFixes, tag: strictTag })
+    quality = await runReviewStage(task, 'quality', qualityPanel, 'Quality review', resolved, range, { first: qualityFirst, spentFixes, tag: qualityTag })
     if (quality.verdict === 'UNAVAILABLE') return { id: task.id, repo: task.repo, status: 'REVIEWERS_UNAVAILABLE', impl, review: quality }
     if (quality.verdict !== 'PASS') return { id: task.id, repo: task.repo, status: 'QUALITY_FAILED', impl, review: quality }
   }
@@ -6176,6 +6198,7 @@ function resolvePolicy(t, { selectorModel, afterCode }) {
   }
   t.policy = policy
   t.policySource = source
+  t.policyWanted = wanted
   t.promote = c.promote
   t.docsOnly = c.docsOnly
   if (belowFloor) t.belowFloor = c.floor.slice(0, 3)

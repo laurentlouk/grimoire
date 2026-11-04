@@ -342,7 +342,7 @@ const FIX = (head = 'bbbbbbb') => ({ status: 'DONE', summary: 'fixed', commits: 
     'guard:PROJ-1#1': GUARD('PASS'),
   }), { args: ARGS({ policy: 'auto' }) })
   const p = result.policies.tasks['PROJ-1']
-  eq([p.auto, p.policy], ['balanced', 'balanced'], 'routed balanced on the declared footprint (none)')
+  eq([p.auto, p.policy, result.policies.byPolicy], ['balanced', 'strict', { balanced: 0, strict: 1 }], 'routed balanced on the declared footprint (none); policy and byPolicy count what ran')
   ok((p.raisedAfterBuild || []).some((x) => x.includes('changed src/auth/session.ts matches **/auth/**')), 'raised after the build, the changed file and glob named')
   ok(labels.includes('privacy:PROJ-1'), 'privacy is promoted into the quality stage')
   eq(calls.find((c) => c.label === 'fix:PROJ-1:quality#1').opts.model, 'opus', 'the fixes from here on run on opus')
@@ -363,6 +363,26 @@ const FIX = (head = 'bbbbbbb') => ({ status: 'DONE', summary: 'fixed', commits: 
     'impl:PROJ-1': { ...impl('aaaaaaa'), filesChanged: ['src/auth/session.ts'] },
   }), { args: ARGS() })
   ok(!d.labels.includes('privacy:PROJ-1') && !('raisedAfterBuild' in d.result.policies.tasks['PROJ-1']), 'no raise, no promoted lens')
+}
+
+// ── 20b. the review's majors: allowBelowFloor, an already-STRICT task, an explicit fast ──
+{
+  const ab = await run('allowBelowFloor: the build raises nothing', [S('PROJ-1', [])], by({
+    'impl:PROJ-1': { ...impl('aaaaaaa'), filesChanged: ['src/auth/session.ts'] },
+  }), { args: ARGS({ policy: 'auto', policies: { allowBelowFloor: true } }) })
+  ok(!('raisedAfterBuild' in ab.result.policies.tasks['PROJ-1']) && !ab.labels.includes('privacy:PROJ-1'), 'an undeclared floor file is honoured below its floor like a declared one')
+
+  const st = await run('already STRICT (another repo), the diff drops an auth check: privacy joins', [S('PROJ-1', ['src/a.ts']), S('PROJ-2', ['web/page.tsx'], { repo: 'web', agent: 'web-engineer', dependsOn: ['PROJ-1'] })], by({
+    'precheck:PROJ-2': { verdict: 'PASS', problems: [], summary: 'ok', authChange: 'web/page.tsx:9 — calls the API without the session check' },
+  }), { args: ARGS({ policy: 'auto', precheck: true, repos: [API, WEB] }) })
+  eq(st.result.policies.tasks['PROJ-2'].promotedAfterBuild, ['privacy'], 'the strict task gains privacy')
+  ok(st.labels.includes('privacy:PROJ-2'), 'and the privacy lens reviews it')
+
+  const ex = await run('an explicit fast keeps its size; its floors still apply', [S('PROJ-1', ['src/a.ts']), S('PROJ-2', ['src/b.ts'])], by({
+    'impl:PROJ-1': { ...impl('aaaaaaa'), filesChanged: ['src/a.ts', 'src/a.test.ts', 'src/b.ts', 'src/c.ts'] },
+    'impl:PROJ-2': { ...impl('bbbbbbb'), filesChanged: ['src/b.ts', 'db/migrations/0002.sql'] },
+  }), { args: ARGS({ policy: 'fast' }) })
+  eq([ex.result.policies.tasks['PROJ-1'].policy, ex.result.policies.tasks['PROJ-2'].policy], ['fast', 'strict'], 'four changed files stay FAST; a changed migration is still STRICT')
 }
 
 // ── 21. repos[].strictPaths: one repo's own floor globs ──

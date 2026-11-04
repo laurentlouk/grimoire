@@ -44,7 +44,7 @@ run of the policies (three issues, two repos, `/grimoire:implement` + `/grimoire
   the FAST tuning in #61 can be decided on the router's own facts.
 - **Fixed:** a landed delta now counts its bytes as written (the stamp included), so it stays under
   `LANDED_DELTA_BYTES`.
-- Tests: `execution-policies.test.mjs` 101 assertions (build re-routing, the auth signal,
+- Tests: `execution-policies.test.mjs` 105 assertions (build re-routing, the auth signal, `allowBelowFloor`, an already-strict task gaining lenses,
   `repos[].strictPaths`, the contract lens, the marker's `esc`, `reviewParallel: 'off'` after an
   escalation); the resume suite reads `esc`; the counterfactual routes on declared files. New eval
   cases `implement-7`, `review-7`, `setup-14`.
