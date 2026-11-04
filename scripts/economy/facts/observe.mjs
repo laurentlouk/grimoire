@@ -420,7 +420,10 @@ export function labelRule(a, b) {
 // carry credentials, included), is kept as REDACTED: the fact still says the variable is needed.
 export const REDACTED = '<redacted>'
 const SECRET_NAME = /KEY|TOKEN|SECRET|PASS|PWD|CRED|AUTH|URL|URI|DSN|PRIVATE|SESSION|COOKIE|CERT|SIGN/i
-export const safeEnvValue = (name, value) => (!SECRET_NAME.test(name) && /^[A-Za-z0-9._/-]{1,64}$/.test(value) ? value : REDACTED)
+// A value shaped like a token is one, whatever its name: a known prefix, or a long run of letters and
+// digits with no path or dotted-name separator.
+const TOKEN_VALUE = /^(?:gh[pousr]_|github_pat_|glpat-|sk[-_]|pk_|rk_|xox[abpr]-|AKIA|ASIA|AIza|ya29\.|eyJ)|^(?=[^./]*\d)(?=[^./]*[A-Za-z])[A-Za-z0-9_-]{20,}$/
+export const safeEnvValue = (name, value) => (!SECRET_NAME.test(name) && /^[A-Za-z0-9._/-]{1,64}$/.test(value) && !TOKEN_VALUE.test(value) ? value : REDACTED)
 
 // What one call says about environment variables: those its output asks for, and those its command
 // sets (inline, exported or in the code it runs).

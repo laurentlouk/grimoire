@@ -16,7 +16,7 @@ Agents keep rediscovering the same things about a repository's environment. The 
   - A fact's history keeps its last 50 folds and its count tables their 20 most frequent entries. A fact missing its family's fields is dropped as it is read.
 - **Never a secret.** The block reaches every later session in the repo, so secrets are kept out of it at capture:
   - a URL's credentials never reach a boundary host;
-  - an environment variable's value is kept only when its name does not read like a secret and the value is a short plain word or path. Otherwise the fact names the variable alone.
+  - an environment variable's value is kept only when its name does not read like a secret and the value is a short plain word or path that does not look like a token. Otherwise the fact names the variable alone.
 - **Small changes from the source**: a failed command's `Exit code N` counts only at the start of its output, where Claude Code puts it; and a confirmation no longer keeps the session's edited files (environment facts do not drift, so they were never read).
 - **It shows them** at `SessionStart` (`startup`, `clear`, `compact`; never `resume`): a session inside a repo gets that repo's block as `additionalContext`. The ids shown are kept so the session's fold counts a prevented failure as fired.
 - `economy.facts: "off"` learns and shows nothing. The wrapper lets the session events through. The hooks README has a "Learned environment facts" section.

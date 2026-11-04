@@ -14,7 +14,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { classifyCommand, errorClass, labelRule, testLabels, labelFailed, repositoryTop, observeCalls, stripRtkPrefix, formWorked } from './facts/observe.mjs'
+import { classifyCommand, errorClass, labelRule, testLabels, labelFailed, repositoryTop, observeCalls, stripRtkPrefix, formWorked, safeEnvValue } from './facts/observe.mjs'
 import { newStore, update, render, injectedIds, seedInjected, toJSON, fromJSON } from './facts/families.mjs'
 import { newLife } from './facts/lifecycle.mjs'
 import { HEADER, MAX_FACTS, MAX_CHARS, lintOk, claim, workingForm } from './facts/render.mjs'
@@ -279,6 +279,8 @@ section('never a secret (grimoire: the block reaches every later session)')
   const NEED_DB = 'Traceback (most recent call last):\nRuntimeError: missing environment variable APP_DB'
   const db = stream(range(0, 6).map((i) => [edit(`/r/pkg/d${i}.py`), py('import app', NEED_DB), py('import app', 'ran', 'APP_DB=postgres://admin:hunter2@db.internal/app ')])).s
   ok(!JSON.stringify(db.facts).includes('hunter2') && !render(db).includes('hunter2'), 'a value that is not a short plain word or path (a URL with credentials) is redacted, whatever the name')
+  eq(['ghp_AbCdEf1234567890xyz', 'sk_live_51Habc123SECRET', 'AKIAABCDEFGHIJKLMNOP', 'a1b2c3d4e5f6a7b8c9d0e1', 'conf.dev', '/testbed', 'tests.settings.local', '1', 'production'].map((v) => safeEnvValue('GH_STUFF', v)),
+    ['<redacted>', '<redacted>', '<redacted>', '<redacted>', 'conf.dev', '/testbed', 'tests.settings.local', '1', 'production'], 'a token-shaped value is redacted under any name; plain words, paths and dotted names are kept')
   const clone = (i) => [edit(`pkg/c${i}.py`), cmd('git clone https://x-access-token:ghp_AbCdEf123456@github.com/acme/private.git', "fatal: unable to access 'https://github.com/acme/private.git/': Could not resolve host: github.com", 128)]
   const cl = stream(range(0, 4).map(clone)).s
   ok(!JSON.stringify(cl.facts).includes('ghp_') && render(cl).includes('github.com') && !render(cl).includes('x-access-token'), `a URL's userinfo never reaches a host (${render(cl).split('\n')[1] || 'no block'})`)
