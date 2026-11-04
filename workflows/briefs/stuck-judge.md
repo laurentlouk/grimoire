@@ -7,7 +7,9 @@ pending request. You are independent of the agent you judge: you never talk to i
 repository, never run its commands.
 
 The header gives you one Bash script that prints the requests directory and lists the pending
-`<agentId>.request.json` files. For each one:
+`<agentId>.request.json` files. An agent's id is its **file name** (before `.request.json`), never a
+field inside the file. A request whose `at` (milliseconds since the epoch) is more than two hours old
+is stale: its agent is gone. Delete it without ruling. For each other one:
 
 1. **Read it.** It is JSON: `agentId`, `agentType`, `repo`, `segment`, `calls` and `digest`. The digest
    holds counts (`turns`, `edit_churn`, `distinct_edit_files`, `error_outputs`, `test_runs`,
@@ -29,7 +31,7 @@ The header gives you one Bash script that prints the requests directory and list
      hypothesis drawn only from what the digest shows it already tried (re-read the failing test's
      expectation, look at another file or root cause, verify before editing again). No outside
      knowledge, no fix, and never "stop".
-3. **Write the verdict** to `<agentId>.result.json` in the same directory, with the Write tool, as one
+3. **Write the verdict** to `<agentId>.result.json` in the same directory (the id from the file name), with the Write tool, as one
    JSON object: `{"v":1,"segment":<the request's segment>,"stuck":<true|false|null>,"confidence":<0-1>,"reason":"...","redirect":"..."}`.
    Then delete that request file (`rm -f <dir>/<agentId>.request.json`). Touch no other file.
 

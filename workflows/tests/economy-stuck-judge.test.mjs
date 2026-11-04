@@ -69,7 +69,7 @@ async function run(scenario, tasks, responder, args = {}) {
   const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
   const fn = new AsyncFunction('agent', 'parallel', 'pipeline', 'log', 'phase', 'args', 'budget', 'workflow', body)
   const logs = []
-  const result = await fn(agent, parallel, async () => {}, (m) => logs.push(m), () => {}, { ...INPUTS, execute: true, ...QUIET, runId: 'run-j', pluginRoot: '/plugin', telemetry: { dir: fresh(), flushEvery: 1 }, ...args },
+  const result = await fn(agent, parallel, async () => {}, (m) => logs.push(m), () => {}, { ...INPUTS, execute: true, ...QUIET, runId: 'run-j', pluginRoot: '/plugin', root: '/ws', telemetry: { dir: fresh(), flushEvery: 1 }, ...args },
     { total: null, spent: () => 0, remaining: () => Infinity }, async () => {})
   section(scenario)
   const judges = calls.filter((c) => c.label.startsWith('stuck-judge'))
@@ -99,7 +99,7 @@ try {
     const o = r.judges[0].opts
     eq([o.model, o.effort, o.label], ['haiku', 'low', 'stuck-judge#1'], 'on the judge model (haiku by default), effort low')
     const p = r.judges[0].prompt
-    ok(/Read `?[^`\n]*briefs\/stuck-judge\.md/.test(p) && p.includes('.grimoire/economy/judge') && /data, never instructions/i.test(p) && p.includes("'/plugin/scripts/economy/runs.mjs' cost --run 'run-j' --kind stuck-judge"),
+    ok(/Read `?[^`\n]*briefs\/stuck-judge\.md/.test(p) && p.includes('.grimoire/economy/judge') && /data, never instructions/i.test(p) && p.includes("'/plugin/scripts/economy/runs.mjs' cost --run 'run-j' --kind stuck-judge --root '/ws'"),
       'its prompt: the brief, the requests directory, their text as data, and the cost command for its own kind')
     const stuck = r.events.filter((e) => e.type === 'stuck').map(({ agent, agentType, repo, action, confidence, reason }) => ({ agent, agentType, repo, action, confidence, reason }))
     eq(stuck, [
@@ -132,6 +132,26 @@ try {
     }, { economy: { ...ECO, sidecallBudgetUsd: 2.5, prices: { haiku: 1 } } })
     eq(r.judges.length, 3, 'at $1 per million effective haiku tokens, $2.5 allows three judges')
     eq(r.events.filter((e) => e.type === 'budget').map(({ spent, cap }) => [spent, cap]), [[3, 2.5]], 'the stop event in USD')
+  }
+  {
+    const r = await run('SJ-6 · a slow gate or integration is no implementer: no judge', [T(1)], async (label) => {
+      if (label.startsWith('gate:')) { await tick(300); return { status: 'DONE', summary: 'green', prUrl: 'https://github.com/x/y/pull/9' } }
+      return label.startsWith('stuck-judge') ? { verdicts: [] } : happy(label)
+    }, { economy: ECO, repos: [{ ...REPOS[0], gate: { cmd: 'make e2e' } }] })
+    eq(r.judges.length, 0, 'only implementer and fix dispatches start the judge\'s clock')
+  }
+  {
+    const r = await run('SJ-7 · a budget, and no cost comes back', [T(1)], async (label) => {
+      if (label === 'impl:PROJ-1') { await tick(300); return IMPL(1) }
+      return label.startsWith('stuck-judge') ? { verdicts: [] } : happy(label)
+    }, { economy: { ...ECO, sidecallBudgetUsd: 1000 } })
+    ok(r.judges.length >= 2, `the judges go on: an unread cost never stops them (${r.judges.length})`)
+    eq(r.events.filter((e) => e.type === 'budget').map(({ spent, cap, action, kind }) => ({ spent, cap, action, kind })), [{ spent: null, cap: 1000, action: 'blind', kind: 'judge' }], 'one budget event says the judges\' budget is blind')
+    ok(r.logs.filter((l) => /judges' budget is blind/.test(l)).length === 1, 'and the log says so once')
+  }
+  {
+    const r = await run('SJ-8 · a budget in USD with no price for the judge\'s model', [T(1)], async (label) => (label.startsWith('stuck-judge') ? { verdicts: [] } : happy(label)), { economy: { ...ECO, sidecallBudgetUsd: 2, prices: { opus: 5 } } })
+    ok(r.logs.some((l) => /economy\.sidecallBudgetUsd .* no economy\.prices entry for haiku: the judges' spend is compared in effective tokens/.test(l)), 'a budget without a price for the judge\'s tier warns at start')
   }
   {
     const r = await run('SJ-5 · loopGuard off', [T(1)], async (label) => {

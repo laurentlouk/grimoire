@@ -1098,7 +1098,7 @@ return, and why memory and ledgers are read and written by dedicated cheap agent
 - **Replay is best-effort.** `resumeFromRunId` returns cached results for the longest
   unchanged prefix of `agent()` calls; the first changed prompt or option, and everything after
   it, runs live. Results of dispatches the original run had abandoned are recorded and come
-  back instantly, so any branch that depended on a timer (a timeout, a hedge) or on completion
+  back instantly, so any branch that depended on a timer (a timeout, a hedge, a stuck judge) or on completion
   order (the race, parallel lanes) can diverge even with identical args, and journal prompts
   carry the token count, so the cache rarely survives the first flush. A 0.8.0 relaunch with
   only `agentTimeoutMin` raised diverged at the first late result and re-implemented three

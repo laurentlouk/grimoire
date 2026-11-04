@@ -3412,7 +3412,9 @@ const KIND_LIMITS = {
   env: () => ({ soft: 2, hard: 4, onHard: 'null' }),
   status: () => ({ soft: 4, hard: 8, onHard: 'null' }), // one batch of tracker moves (briefs/status.md)
   crystallize: () => ({ soft: Math.max(CRYSTALLIZE_TIMEOUT_MIN, AGENT_TIMEOUT_MIN), hard: 180, onHard: 'null' }),
-  'stuck-judge': () => ({ soft: 4, hard: 8, onHard: 'null' }), // reads a few request files and writes verdicts
+  // no hard limit: a judge given up on would free its slot while it still runs, and the next one would
+  // run beside it on the same requests; a late judge holds the next one back instead
+  'stuck-judge': () => ({ soft: 4, hard: 0, onHard: 'null' }),
 }
 // A hedge runs the same prompt twice, so only a kind without side effects may hedge — hydration
 // only when it does not claim tracker issues.
@@ -3444,13 +3446,21 @@ let judgeN = 0
 let judgeSpent = null // what the judges have cost so far, in effective tokens (their last report)
 const stuckSoFar = new Map() // agent id → stuck verdicts so far: the first redirects, a later one blocks
 const judgeOn = () => LOOP_GUARD !== 'off' && execute
+let judgeBlind = false
+// a budget the judges' spend cannot be read against: said once, and the judges go on (as maxCost's blind cap)
+function judgeBudgetBlind(why) {
+  if (judgeBlind) return
+  judgeBlind = true
+  log(`⚠ economy.sidecallBudgetUsd: the judges' budget is blind: ${why} — it will not stop them`)
+  emit('budget', { spent: null, cap: JUDGE_BUDGET, action: 'blind', kind: 'judge' })
+}
 function writerGotOld() {
   oldWriters++
   if (!judgeTicking) { judgeTicking = true; judgeTick() }
 }
 function writerSettled() { oldWriters = Math.max(0, oldWriters - 1) }
 function judgeTick() {
-  if (!oldWriters || judgeStopped || bodyReturned || typeof setTimeout !== 'function') { judgeTicking = false; return }
+  if (!oldWriters || judgeStopped || bodyReturned || dispatchClosed || halt || typeof setTimeout !== 'function') { judgeTicking = false; return }
   if (!judgeBusy) runJudge()
   const next = setTimeout(judgeTick, JUDGE_EVERY_MIN * 60 * 1000)
   if (next && typeof next.unref === 'function') next.unref()
@@ -3471,6 +3481,7 @@ async function runJudge() {
       emit('stuck', { agent: v.agentId, agentType: v.agentType ?? null, repo: v.repo ?? null, action, confidence, reason: typeof v.reason === 'string' ? v.reason : '' })
     }
     if (r && Number.isInteger(r.judgeCost) && r.judgeCost >= 0) judgeSpent = Math.max(judgeSpent ?? 0, r.judgeCost)
+    else if (r && JUDGE_BUDGET !== null) judgeBudgetBlind('a judge returned no cost (no transcripts of this run, or the cost command failed)')
     if (JUDGE_BUDGET !== null && judgeSpent !== null) {
       const spent = JUDGE_PRICE !== null ? Math.round((judgeSpent * JUDGE_PRICE) / 1e4) / 100 : judgeSpent
       if (spent >= JUDGE_BUDGET) {
@@ -3487,7 +3498,7 @@ async function runJudge() {
   }
 }
 function stuckJudgePrompt() {
-  const cost = runId ? `\n\nLast, run \`node ${shq(costScript())} cost --run ${shq(runId)} --kind stuck-judge\` and return the number after \`COST\` as \`judgeCost\` (leave it out when it prints \`COST none\` or nothing).` : ''
+  const cost = runId ? `\n\nLast, run \`node ${shq(costScript())} cost --run ${shq(runId)} --kind stuck-judge${ROOT ? ` --root ${shq(ROOT)}` : ''}\` and return the number after \`COST\` as \`judgeCost\` (leave it out when it prints \`COST none\` or nothing).` : ''
   return `${brief('stuck-judge')}Mode: **${LOOP_GUARD}**. Your verdicts are recorded; nothing is sent to the agents in this release.
 
 List the pending requests, in one Bash call ${fromRoot()}:
@@ -3779,7 +3790,7 @@ function withLimits(start, lim, label, meta) {
       if (old) { old = false; writerSettled() }
       resolve(v)
     }
-    if (lim.kind === 'writer' && judgeOn()) {
+    if (lim.kind === 'writer' && /^(?:impl|fix):/.test(label) && judgeOn()) { // implementers and their fixes, not a gate or an integration
       // unref'd: the judge's clock never keeps a process alive on its own (the run awaits its writers anyway)
       const jt = setTimeout(() => { if (!settled) { old = true; writerGotOld() } }, JUDGE_AFTER_MIN * 60 * 1000)
       if (jt && typeof jt.unref === 'function') jt.unref()
@@ -5495,6 +5506,10 @@ emit('run.start', {
   knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, wedgeGraceMin: WEDGE_GRACE_MIN, hydrateAhead: HYDRATE_AHEAD, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, maxCost: MAX_COST, budgetFloor: BUDGET_FLOOR, claims: !!claim, trackerStatus: TRACKER_STATUS },
   repos: repoList.map((r) => r.name),
 })
+if (judgeOn() && JUDGE_BUDGET !== null) {
+  if (!runId) judgeBudgetBlind('no runId, so no transcript can be matched to the judges')
+  else if (JUDGE_PRICE === null && ECON.prices && typeof ECON.prices === 'object') log(`⚠ economy.sidecallBudgetUsd ${JUDGE_BUDGET} has no economy.prices entry for ${JUDGE_MODEL}: the judges' spend is compared in effective tokens`)
+}
 if (MAX_COST && (!journal.enabled || !runId)) costIsBlind(!journal.enabled ? 'the journal is off (telemetry.enabled: false), and only a journal flush reads the cost' : 'no runId, so no transcript can be matched to this run')
 for (const c of claimedElsewhere) emit('claim', { task: c.id, action: 'skip', by: c.by })
 if (envState.start) emit('env', { when: 'start', why: 'startup', ...envState.start })
