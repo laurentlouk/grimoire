@@ -1,13 +1,13 @@
 # Hooks
 
-Five hooks ship with the plugin (`hooks.json`). All are silent unless they have something to say, and all fail open: a hook that breaks must never wedge a session.
+Five hooks ship with the plugin (`hooks.json`); the economy hook runs on five events. All are silent unless they have something to say, and all fail open: a hook that breaks must never wedge a session.
 
 | Hook | Event · matcher | What it does |
 | --- | --- | --- |
 | `scripts/first-run.sh` | `SessionStart` | One line pointing at `/grimoire:setup` while the project has no `AGENTS.md` and no `memory/`. |
 | `scripts/briefing.sh` → `scripts/manager.mjs headline` | `SessionStart` | One line from the latest manager briefing (`.grimoire/manager/latest.md`, the main checkout's in a linked worktree): urgent and ready-for-AI counts, new items, its age, the page when `briefing.html` exists, the sources not checked when it is partial, and "stale" once the next briefing is more than 15 minutes overdue by `manager.schedule` (24 h without one; a week for a cron restricted to some days other than weekdays; a weekdays schedule skips the weekend). Reads files only, never runs a briefing; ids and counts only, never ticket text. Silent with no briefing or a corrupt one. |
 | `scripts/guard.sh` → `guard.mjs` | `PreToolUse` · `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit\|mcp__.*` | Blocks a narrow set of irreversible actions, and MCP writes by the plugin's read-only agents, so an unattended loop cannot do them by mistake. |
-| `scripts/economy.sh` → `economy.mjs` | `PostToolUse` · `PostToolUseFailure` · `SubagentStop` | The stuck watch on dispatched agents, in shadow mode: folds each subagent call into `.grimoire/economy/turns/<agent_id>.json`, writes a judge request when the gate opens, records what it would redirect or block, and feeds each role's envelope from dispatches that ended green. Always answers `{}`. See "The stuck watch" below. |
+| `scripts/economy.sh` → `economy.mjs` | `PostToolUse` · `PostToolUseFailure` · `SubagentStop` · `SessionStart` · `SessionEnd` | The stuck watch on dispatched agents, in shadow mode: folds each subagent call into `.grimoire/economy/turns/<agent_id>.json`, writes a judge request when the gate opens, records what it would redirect or block, and feeds each role's envelope from dispatches that ended green. Learned environment facts: folds each finished dispatch and session into its repos' facts, and gives a session started in a repo that repo's block. Answers `{}` except for that block. See "The stuck watch" and "Learned environment facts" below. |
 | `scripts/graph-refresh.sh` | `SubagentStop` · async | Re-indexes the code graph after every subagent (an implementer's commit, an integrate merge), with the deterministic indexer, never a model: `tools/graph/graph.mjs refresh`. Runs in the background, so nothing waits on it. |
 
 ## The guard
@@ -49,6 +49,17 @@ A dispatched agent can loop: the same failing test, edit after edit, until its t
 - **Latency**: the main session's calls are answered by the wrapper without starting `node` (an input without `agent_id`). A dispatched agent's call costs about 50–60 ms, almost all of it `node`'s startup; the handler's own work is about 0.3 ms (the test's median must stay under 30 ms). No model, no git, no transcript read on a call; the config is read once per agent. One agent's parallel calls fold one at a time, under a per-agent lock.
 - **Failing open**: every failure answers `{}` and adds a line to `.grimoire/economy/errors.log` (a malformed input's position only, never its text). Without `node` the wrapper answers `{}`. `GRIMOIRE_ECONOMY=0` turns it off; so does `"economy": {"loopGuard": "off"}` in `grimoire.config.json`. `economy.loopGuardThresholds` pins any threshold (`min_turns`, `gate_min_turns`, `error_outputs`, `backstop_mult`, ...). The envelope is written under a lock; a busy lock drops the sample.
 - Stopped agents' states are kept a week.
+
+## Learned environment facts
+
+Agents keep rediscovering the same things about a repository's environment: the bare `python` has no `pytest`, the project's own interpreter does; a host is unreachable; `git tag` always comes back empty. The economy hook learns these from finished work, with no model, through microsoft/TokenEconomizer's micro-skill families (commit `1deb887`, Apache-2.0, `scripts/economy/facts/`):
+
+- **What it learns**: a failing command form followed by a working one (form repair), a test label that loads only once rewritten (arg repair), an environment variable a later run sets (env value), a host every fetch to fails (boundary), a VCS probe that always comes back empty (empty probe). rtk's prefix is stripped first.
+- **When**: at `SubagentStop` (the agent's transcript) and `SessionEnd` (the session's), each dispatch or session once (`facts/folded.json`), into the store of each repo its calls ran in (`.grimoire/economy/facts/<repo>.json`, matched from each call's working directory against `repos[].path`, a git worktree of a repo counting as that repo), under a lock. A busy lock skips a dispatch's fold until its next stop; a session's is skipped for good, and its shown ids are kept a week.
+- **Never a secret**: a URL's credentials never reach a host, and an environment variable's value is kept only when its name does not read like a secret (`KEY`, `TOKEN`, `PASS`, `URL`, `DSN`, ...) and the value is a short plain word or path that does not look like a token (a known prefix such as `ghp_`, `sk_` or `AKIA`, or a long run of letters and digits); otherwise the fact names the variable alone.
+- **How a fact lives**: active after three confirmations; retired on contradiction; shown only while the failure it prevents keeps occurring, or keeps being prevented, in at least 40 % of the work that exercises it, over at least four. A prevented failure still counts as fired.
+- **Where it shows**: at `SessionStart` (`startup`, `clear`, `compact`; never `resume`, which replays the session's own bytes), a session whose directory is inside a repo gets that repo's block, at most 4 facts and about 600 characters, as `additionalContext`. The loop pastes it into its agents' briefs from token economy slice 7.
+- `"economy": {"facts": "off"}` learns and shows nothing. A fact's history keeps its last 50 folds and each of its count tables its 20 most frequent entries.
 
 ## Configuration
 
