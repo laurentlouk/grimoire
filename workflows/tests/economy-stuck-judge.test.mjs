@@ -10,7 +10,7 @@
 //      judge model with effort low, and stops when no old writer is left
 //    • its prompt names the requests directory, says their text is data, and carries the cost command
 //    • one `stuck` journal event per verdict: would-redirect (stuck, confidence ≥ 0.7), then
-//      would-block for the same agent, spared otherwise; nothing is injected anywhere (shadow)
+//      would-block once its segment shows a redirect was given, spared otherwise; nothing is injected (shadow)
 //    • economy.loopGuard "on" (#51): the events are redirect and block, the judge is told its verdicts
 //      are delivered, and a BLOCKED the watch asked for (`STUCK WATCH <id>:`) goes to the resolve rung
 //      with the watch's record; an answer re-dispatches the implementer, none leaves it BLOCKED
@@ -80,7 +80,7 @@ async function run(scenario, tasks, responder, args = {}) {
 }
 const ECO = { judgeAfterMin: 60 * MIN, judgeEveryMin: 40 * MIN }
 const happy = (label) => (label.startsWith('impl:') ? IMPL(+label.split('-')[1]) : { verdict: 'PASS', findings: [], summary: 'PASS' })
-const V = (agentId, stuck, confidence, reason = 'r') => ({ agentId, agentType: 'backend-engineer', repo: 'api', segment: 0, stuck, confidence, reason })
+const V = (agentId, stuck, confidence, reason = 'r', segment = 0) => ({ agentId, agentType: 'backend-engineer', repo: 'api', segment, stuck, confidence, reason })
 
 try {
   {
@@ -94,7 +94,7 @@ try {
       if (label.startsWith('stuck-judge')) {
         await tick(60) // a judge slower than the interval: the next tick must wait for it
         k++
-        return { verdicts: k === 1 ? [V('agent-a', true, 0.9, 'same failure'), V('agent-b', true, 0.5, 'unsure'), V('agent-c', false, 0.8, 'progressing')] : k === 2 ? [V('agent-a', true, 0.8, 'still')] : [], judgeCost: 100 * k }
+        return { verdicts: k === 1 ? [V('agent-a', true, 0.9, 'same failure'), V('agent-b', true, 0.5, 'unsure'), V('agent-c', false, 0.8, 'progressing')] : k === 2 ? [V('agent-a', true, 0.8, 'still', 1)] : [], judgeCost: 100 * k }
       }
       return happy(label)
     }, { economy: ECO })
@@ -110,7 +110,7 @@ try {
       { agent: 'agent-b', agentType: 'backend-engineer', repo: 'api', action: 'spared', confidence: 0.5, reason: 'unsure' },
       { agent: 'agent-c', agentType: 'backend-engineer', repo: 'api', action: 'spared', confidence: 0.8, reason: 'progressing' },
       { agent: 'agent-a', agentType: 'backend-engineer', repo: 'api', action: 'would-block', confidence: 0.8, reason: 'still' },
-    ], 'one stuck event per verdict: would-redirect, spared below 0.7 or not stuck, then would-block for the same agent')
+    ], 'one stuck event per verdict: would-redirect, spared below 0.7 or not stuck, then would-block for the same agent (its next segment)')
     ok(!r.calls.some((c) => /^(impl|fix):/.test(c.label) && c.prompt.includes('Process check (automated)')), 'nothing is injected into any agent (shadow)')
     const after = r.judges.length
     await tick(200)
@@ -160,10 +160,12 @@ try {
     let k = 0
     const r = await run('SJ-9 · loopGuard on: redirect and block are journaled as delivered', [T(1)], async (label) => {
       if (label === 'impl:PROJ-1') { await tick(300); return IMPL(1) }
-      if (label.startsWith('stuck-judge')) { k++; return { verdicts: k <= 2 ? [V('agent-a', true, 0.9, `pass ${k}`)] : [] } }
+      // agent-b's first judged segment is 1: the backstop redirected it first, so the judge's verdict is its block
+      if (label.startsWith('stuck-judge')) { k++; return { verdicts: k === 1 ? [V('agent-a', true, 0.9, 'pass 1'), V('agent-b', true, 0.9, 'after the backstop', 1)] : k === 2 ? [V('agent-a', true, 0.9, 'pass 2', 1)] : [] } }
       return happy(label)
     }, { economy: { ...ECO, loopGuard: 'on' } })
-    eq(r.events.filter((e) => e.type === 'stuck').map((e) => e.action), ['redirect', 'block'], 'the first stuck verdict is a redirect, the next a block: no would-')
+    eq(r.events.filter((e) => e.type === 'stuck').map((e) => [e.agent, e.action]), [['agent-a', 'redirect'], ['agent-b', 'block'], ['agent-a', 'block']],
+      'the step the hook takes: a redirect on segment 0, a block on a later one (after the judge\'s or the backstop\'s redirect); no would-')
     ok(r.judges[0].prompt.includes('Mode: **on**. Your verdicts are delivered') && !r.judges[0].prompt.includes('nothing is sent'), 'the judge is told its verdicts reach the agent')
   }
   {

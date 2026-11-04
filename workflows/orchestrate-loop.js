@@ -3488,7 +3488,6 @@ let judgeBusy = false
 let judgeStopped = false // the judges' budget is spent
 let judgeN = 0
 let judgeSpent = null // what the judges have cost so far, in effective tokens (their last report)
-const stuckSoFar = new Map() // agent id → stuck verdicts so far: the first redirects, a later one blocks
 const judgeOn = () => LOOP_GUARD !== 'off' && execute
 let judgeBlind = false
 // a budget the judges' spend cannot be read against: said once, and the judges go on (as maxCost's blind cap)
@@ -3517,12 +3516,10 @@ async function runJudge() {
       if (!v || typeof v.agentId !== 'string') continue
       const confidence = Number.isFinite(v.confidence) ? v.confidence : 0
       let action = 'spared'
-      if (v.stuck === true && confidence >= JUDGE_CONFIDENCE) {
-        const n = stuckSoFar.get(v.agentId) || 0
-        stuckSoFar.set(v.agentId, n + 1)
-        // the hook delivers it under "on" (the redirect, then the BLOCKED line); under shadow it only records it
-        action = `${LOOP_GUARD === 'on' ? '' : 'would-'}${n ? 'block' : 'redirect'}`
-      }
+      // the ladder step the verdict lands on, from the hook's own state: the request's segment counts the
+      // redirects already given (the judge's or the backstop's), so a later segment is a block. The hook
+      // delivers it under "on"; under shadow it only records it.
+      if (v.stuck === true && confidence >= JUDGE_CONFIDENCE) action = `${LOOP_GUARD === 'on' ? '' : 'would-'}${v.segment > 0 ? 'block' : 'redirect'}`
       emit('stuck', { agent: v.agentId, agentType: v.agentType ?? null, repo: v.repo ?? null, action, confidence, reason: typeof v.reason === 'string' ? v.reason : '' })
     }
     if (r && Number.isInteger(r.judgeCost) && r.judgeCost >= 0) judgeSpent = Math.max(judgeSpent ?? 0, r.judgeCost)

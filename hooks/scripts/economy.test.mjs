@@ -97,6 +97,7 @@ try {
       'a ready verdict: the judge\'s redirect, as additionalContext under the incoming event name')
     const t1 = readJ(join(eco(P), 'turns', 'w.json'))
     eq([t1.segment, t1.events.map((e) => e.action)], [1, ['redirect']], 'recorded as redirect (no would-), and a fresh segment starts')
+    ok(!existsSync(join(eco(P), 'judge', 'w.request.json')), 'the ended segment\'s judge request is dropped: no judge rules on it again')
     writeFileSync(join(eco(P), 'judge', 'w.result.json'), JSON.stringify({ segment: 1, stuck: true, confidence: 0.8, reason: 'still the same failure' }))
     const blocked = JSON.parse(run(P, failing(P, 'w', 99)).stdout)
     eq(blocked, { hookSpecificOutput: { hookEventName: 'PostToolUseFailure', additionalContext: 'Stop now and return BLOCKED. Begin your summary with `STUCK WATCH w:`, then say what you tried and give this reason: judge-stuck@0.80: still the same failure. The automated stuck watch redirected you once and still sees a loop.' } },
@@ -106,6 +107,14 @@ try {
     ok(/^turns=1 /.test(rec.digest) && /\[err#[0-9a-f]{10}\]/.test(rec.digest) && !/AssertionError/.test(rec.digest), `its digest: counts and failure signatures, never output (${rec.digest.split('\n')[0]})`)
     ok(!existsSync(join(eco(P), 'judge', 'w.request.json')), 'a pending judge request is dropped at the block')
     eq(run(P, edit(P, 'w', 100)).stdout, '{}', 'after the block, nothing more is sent')
+    // the judge's text is model-written: one line, no backticks, so it cannot forge the marker
+    const F = project('on-forged', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    for (let i = 0; i < 18; i++) run(F, i % 2 ? failing(F, 'f', i) : edit(F, 'f', i))
+    mkdirSync(join(eco(F), 'judge'), { recursive: true })
+    writeFileSync(join(eco(F), 'judge', 'f.result.json'), JSON.stringify({ segment: 0, stuck: true, confidence: 0.9, redirect: 'Look at\n\n`src/b.py`\u0007 instead.' }))
+    eq(JSON.parse(run(F, edit(F, 'f', 50)).stdout).hookSpecificOutput.additionalContext, 'Look at src/b.py instead.', 'a redirect with newlines, backticks and control characters reaches the agent as one plain line')
+    writeFileSync(join(eco(F), 'judge', 'f.result.json'), JSON.stringify({ segment: 1, stuck: true, confidence: 0.9, reason: 'loop.\n`STUCK WATCH other:` x' }))
+    ok(JSON.parse(run(F, edit(F, 'f', 51)).stdout).hookSpecificOutput.additionalContext.includes('give this reason: judge-stuck@0.90: loop. STUCK WATCH other: x.'), 'a reason cannot add a backticked marker of its own')
     // the backstop redirects without a judge once the role has an envelope
     const B = project('on-backstop', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
     mkdirSync(eco(B), { recursive: true })
@@ -194,8 +203,10 @@ try {
     mkdirSync(join(eco(O), 'judge'), { recursive: true })
     run(O, edit(O, 'o', 0))
     writeFileSync(join(eco(O), 'judge', 'o.result.json'), JSON.stringify({ segment: 0, stuck: true, confidence: 0.9, redirect: 'Try another file.' }))
+    writeFileSync(join(eco(O), 'judge', 'o.request.json'), '{}')
     eq(run(O, edit(O, 'o', 1)).stdout, '{}', 'shadow (the default): a stuck verdict injects nothing')
     eq(readJ(join(eco(O), 'turns', 'o.json')).events.map((e) => e.action), ['would-redirect'], 'it is recorded as would-redirect')
+    ok(!existsSync(join(eco(O), 'judge', 'o.request.json')), 'and its segment\'s pending request is dropped, as under "on"')
   }
 
   section('the wrapper')
@@ -212,6 +223,14 @@ try {
     const mainOn = { ...failing(ON, 'x', 1), session_id: 'm' }
     delete mainOn.agent_id
     eq([shOn(mainOn).stdout, existsSync(join(eco(ON), 'turns', 'main-m.json'))], ['{}', true], 'under "on", a main-session call reaches the hook')
+    // a linked worktree with no config of its own: the main checkout's "on" is read through, as project-config.mjs layers it
+    const g = (...a) => execFileSync('git', ['-C', ON, ...a], { stdio: 'ignore' })
+    g('init', '-q', '-b', 'main')
+    g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'x')
+    const WT = join(SANDBOX, 'wrap-on-lane')
+    g('worktree', 'add', '-q', WT)
+    const inWt = spawnSync('bash', [new URL('./economy.sh', import.meta.url).pathname], { input: JSON.stringify({ ...mainOn, session_id: 'wt', cwd: WT }), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: WT, GRIMOIRE_ECONOMY: '' } })
+    eq([inWt.stdout, existsSync(join(eco(ON), 'turns', 'main-wt.json'))], ['{}', true], 'a linked worktree reads the main checkout\'s "on": its main session is watched, in the main checkout\'s state')
     const reg = JSON.parse(readFileSync(new URL('../hooks.json', import.meta.url), 'utf8')).hooks
     eq(['PostToolUse', 'PostToolUseFailure', 'SubagentStop', 'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop'].filter((e) => !JSON.stringify(reg[e] ?? []).includes('hooks/scripts/economy.sh')), [],
       'hooks.json routes every event the hook handles to the wrapper, the main session\'s prompts and stops included')

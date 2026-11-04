@@ -59,8 +59,9 @@ const INJECT_SOURCES = new Set(['startup', 'clear', 'compact'])
 const CONTENT_TOOLS = new Set(['read', 'grep', 'glob', 'view'])
 const MAIN_TYPE = 'main' // the main session's role: <repo>/main
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
-// a judge's text, as one line of bounded length: it is model-written, and it goes into an agent's context
-const oneLine = (s, max) => (typeof s === 'string' ? s.replace(/\s+/g, ' ').trim().slice(0, max) : '')
+// a judge's text, as one line of bounded length with no backticks or control characters: it is model-written,
+// it goes into an agent's context, and it must not forge the BLOCKED line's `STUCK WATCH` marker
+const oneLine = (s, max) => (typeof s === 'string' ? s.replace(/[\u0000-\u001f\u007f`]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max) : '')
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return null } }
 function writeJson(p, v) {
   const tmp = `${p}.${process.pid}.tmp`
@@ -225,15 +226,17 @@ function act(dir, t, payload, main, why, { reason = '', redirect = '', envelope 
   const text = t.nudges < 1 ? (redirect || nudgeText(t.st))
     : main ? `grimoire stuck watch: this turn still looks like a loop after a redirect (${why}). If it is not making progress, press Esc to interrupt it.`
       : blockedLine(t.agentId, said)
-  const digest = recentDigest(t.st, { envelope, verification: verificationState(t) }) // read before a redirect resets the segment
   const action = decide(t, why, { shadow: t.mode !== 'on', at })
+  // a pending request is on a segment that just ended (a redirect) or a ladder that did (a block): a judge
+  // must not rule on it again; the new segment writes its own once it reaches the gate
+  if (!main) rmSync(join(dir, 'judge', `${t.agentId}.request.json`), { force: true })
   if (action.startsWith('would-')) return {}
   if (main && action === 'block') return { systemMessage: text }
   if (action === 'block') {
-    // the record the resolve rung reads; a pending request is moot now
+    // the record the resolve rung reads (a block keeps its segment: the digest is the one that looped)
     mkdirSync(join(dir, 'judge'), { recursive: true })
-    writeJson(join(dir, 'judge', `${t.agentId}.blocked.json`), { v: 1, agentId: t.agentId, agentType: t.agentType, repo: t.repo, segment: t.segment, calls: t.calls, at, reason: said, digest })
-    rmSync(join(dir, 'judge', `${t.agentId}.request.json`), { force: true })
+    writeJson(join(dir, 'judge', `${t.agentId}.blocked.json`), { v: 1, agentId: t.agentId, agentType: t.agentType, repo: t.repo, segment: t.segment, calls: t.calls, at, reason: said,
+      digest: recentDigest(t.st, { envelope, verification: verificationState(t) }) })
   }
   return { hookSpecificOutput: { hookEventName: payload.hook_event_name, additionalContext: text } }
 }

@@ -7,7 +7,8 @@ artifacts actually settle it.
 is the agent's summary of what it tried, and the header gives the command that reads the watch's
 record. Its digest (the failure signature that keeps coming back, the files churned, the commands
 re-run) is evidence of what failed: answer with the root cause or approach the agent missed, only if
-the spec, the plan or the tree establishes it.
+the spec, the plan or the tree establishes it. A record that is missing, or names another repo than
+the task's, is no evidence: answer from the summary alone.
 
 ## How to answer
 Search the design artifacts FIRST — the approved spec and the plan named in the header (in

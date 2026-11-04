@@ -10,8 +10,8 @@
     "hooks/scripts/guard.sh": "62b809b6738af5b06654b6855f1f73cab62e67c0a6048afe35962ce025850d3c",
     "hooks/scripts/guard.mjs": "9c7c1976101f1a3a202ab38410ed82622f91f1d31132502b117833defd5cdf70",
     "hooks/scripts/graph-refresh.sh": "1c6d2a808e4998a35eb0c2a2d02c20e00ddd3e2820df05796d17fe62959fd0ea",
-    "hooks/scripts/economy.sh": "69e64d3841fd570a31212f3a2d70c0db0553694469d01c71eb6d74f5b33a30ea",
-    "hooks/scripts/economy.mjs": "b938a1b952e2fdedb9eb73f4134b219120d14a4af3b6075faed1e1424cc2f4f1",
+    "hooks/scripts/economy.sh": "472ae44b100aff9fb75449f27f7d443bdef599e8167aefc0f70bdac487a720c7",
+    "hooks/scripts/economy.mjs": "6b3d06a119381abd5f6caad6e0bd895220a9be271f30063cf0b10303a9abbd27",
     "scripts/project-config.mjs": "b828299a5cb0f1012d654edfda65917959879ce114146c492cfe9d4c1f6529af"
   }
 }
