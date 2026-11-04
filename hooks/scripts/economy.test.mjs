@@ -14,7 +14,7 @@
 //      drops the sample with an error line; past the envelope, a stuck dispatch is would-redirect
 //    • a judge's verdict on the current segment is recorded; one on an older segment is ignored
 //    • the handler's median time per call stays under 30 ms (spike S2)
-import { spawnSync, execFileSync } from 'node:child_process'
+import { spawnSync, execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -82,6 +82,62 @@ try {
     const O = project('off', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'off' } })
     for (let i = 0; i < 20; i++) run(O, failing(O, 'a', i))
     eq([readJ(join(eco(O), 'turns', 'a.json')), existsSync(join(eco(O), 'judge'))], [{ v: 1, off: true }, false], 'economy.loopGuard "off": one marker, no state, no request')
+  }
+
+  section('a written file is no output')
+  {
+    const P = project('writes')
+    for (let i = 0; i < 20; i++) {
+      const content = `def test_${i}():\n    assert f(${i}) == ${i}\n    raise ValueError('no')\n`
+      run(P, call(P, 'writer', 'Write', { file_path: `tests/t${i}.py`, content }, { type: 'create', filePath: `tests/t${i}.py`, content, structuredPatch: [], originalFile: null, userModified: false }))
+    }
+    const t = readJ(join(eco(P), 'turns', 'writer.json'))
+    eq([t.calls, t.whole.errorOutputs, t.whole.repeatedFailSigs, existsSync(join(eco(P), 'judge', 'writer.request.json'))], [20, 0, 0, false],
+      "20 Writes of test files full of asserts (Claude Code's Write response carries the file): no failure, no request")
+    run(P, call(P, 'sh', 'Bash', { command: 'cat a.py' }, { stdout: 'all good', stderr: 'ValueError: boom', interrupted: false, isImage: false }))
+    eq(readJ(join(eco(P), 'turns', 'sh.json')).whole.errorOutputs, 1, "a Bash response's stdout and stderr are read")
+  }
+
+  section('one agent\'s parallel calls are all folded')
+  {
+    const P = project('parallel')
+    const procs = Array.from({ length: 8 }, (_, i) => new Promise((done) => {
+      const c = spawn(process.execPath, [HOOK], { env: { ...process.env, CLAUDE_PROJECT_DIR: P, GRIMOIRE_ECONOMY: '' } })
+      let out = ''
+      c.stdout.on('data', (d) => { out += d })
+      c.on('close', () => done(out))
+      c.stdin.end(JSON.stringify(edit(P, 'par', i)))
+    }))
+    const outs = await Promise.all(procs)
+    const t = readJ(join(eco(P), 'turns', 'par.json'))
+    eq([outs.every((o) => o === '{}'), t.calls, t.edits], [true, 8, 8], 'eight concurrent hook calls of one agent: eight folds, none lost')
+  }
+
+  section('a resumed agent, and "on" before slice 5')
+  {
+    const P = project('resume')
+    for (let i = 0; i < 2; i++) run(P, edit(P, 'res', i))
+    run(P, call(P, 'res', 'Bash', { command: 'pytest -q' }, { stdout: '1 passed in 0.10s', stderr: '' }))
+    run(P, stop(P, 'res'))
+    run(P, edit(P, 'res', 9)); run(P, call(P, 'res', 'Bash', { command: 'pytest -q' }, { stdout: '1 passed in 0.10s', stderr: '' }))
+    run(P, stop(P, 'res'))
+    eq(readJ(join(eco(P), 'envelope.json'))['api/api-engineer'].resolved, [3, 5], 'an agent resumed after it stopped is watched again, and its next stop feeds the envelope')
+    const O = project('on', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { loopGuard: 'on' } })
+    mkdirSync(join(eco(O), 'judge'), { recursive: true })
+    run(O, edit(O, 'o', 0))
+    writeFileSync(join(eco(O), 'judge', 'o.result.json'), JSON.stringify({ segment: 0, stuck: true, confidence: 0.9 }))
+    eq(run(O, edit(O, 'o', 1)).stdout, '{}', '"on" answers {} in this release')
+    eq(readJ(join(eco(O), 'turns', 'o.json')).events.map((e) => e.action), ['would-redirect'], 'and records as shadow does: nothing acts before slice 5')
+  }
+
+  section('the wrapper')
+  {
+    const P = project('wrap')
+    const sh = (payload) => spawnSync('bash', [new URL('./economy.sh', import.meta.url).pathname], { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: P, GRIMOIRE_ECONOMY: '' } })
+    const main = failing(P, 'x', 1)
+    delete main.agent_id
+    eq(sh(main).stdout, '{}', 'the main session: {} without starting node')
+    eq([sh(failing(P, 'w', 1)).stdout, existsSync(join(eco(P), 'turns', 'w.json'))], ['{}', true], 'a subagent call reaches the hook')
   }
 
   section('a linked worktree shares the main checkout\'s state')

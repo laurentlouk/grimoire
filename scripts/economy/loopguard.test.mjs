@@ -150,6 +150,12 @@ section('the failure signature')
   eq(failureSig('all good'), null, 'no failure line: no signature')
   ok(failureSig('FAIL: test_x (t.T)') === null && failureSig('--- FAIL: TestAdd (0.00s)') !== null, "unittest's `FAIL: test_x` is not Go's `--- FAIL:`")
   ok(/^[0-9a-f]{10}$/.test(failureSig('ValueError: no')), 'ten hex characters, never the content')
+  eq(failureSig('downloading 10%\rdownloading 100%\rValueError: no'), failureSig('ValueError: no'), 'a progress line ended by a lone \\r is its own line')
+  const p = newState()
+  update(p, 'Edit', { file_path: 'src/constructor' }, 'ok'); update(p, 'Edit', { file_path: 'src/constructor' }, 'ok'); update(p, 'constructor', {}, 'ok')
+  eq([editChurn(p), p.editCounts.constructor], [2, 2], 'a file named like an Object key counts like any other')
+  update(p, 'Bash', { command: ['not', 'a', 'string'] }, 'ok')
+  eq(p.turns, 4, 'a command that is not a string is folded without throwing')
 }
 
 section('the gate, the stuck rule and the ladder')
@@ -173,6 +179,14 @@ section('the gate, the stuck rule and the ladder')
   ok(t.blocked && !wantsJudge(t), 'no judge request after a block')
   eq(t.events.map((e) => [e.action, e.reason, e.segment]), [['would-redirect', 'envelope', 0], ['would-block', 'judge-stuck@0.80', 1]], 'both recorded, with their segments')
   ok(!resolved(t), 'a blocked dispatch never ended green')
+  {
+    // the envelope tier reads the segment's length, the backstop the whole dispatch's (the source's rule)
+    const u = newTurn()
+    for (let k = 0; k < 10; k++) { fold(u, 'Edit', { file_path: 'src/b.py' }, 'ok'); fold(u, 'Bash', { command: 'python -m unittest' }, fail, 1) }
+    decide(u, 'first')
+    for (let k = 0; k < 10; k++) { fold(u, 'Edit', { file_path: 'src/b.py' }, 'ok'); fold(u, 'Bash', { command: 'python -m unittest' }, fail, 1) }
+    eq([u.calls, u.st.turns, freeVerdict(u, 25), freeVerdict(u, 19)], [40, 20, null, 'envelope'], 'after a redirect: 40 calls, 20 in the segment; an envelope of 25 is not passed (though the dispatch is past it), one of 19 is')
+  }
   ok(nudgeText(newTurn().st).includes('Do NOT stop') && nudgeText(t.whole).includes('most to `calc.py`'), 'the redirect mirrors the agent\'s own actions and never says stop')
 }
 

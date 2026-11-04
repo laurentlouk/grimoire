@@ -32,16 +32,19 @@ const callLines = (name, input, result, isError = false) => {
     line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content: result }] } })]
 }
 const FAIL_OUT = 'Traceback (most recent call last):\nAssertionError: 3 != 4\nFAILED (failures=1)'
+// each line carries its time, as Claude Code writes it; the file names below sort against the start order
+let clock = Date.parse('2026-11-01T00:00:00Z')
+const stamp = (lines) => lines.map((l) => { const o = JSON.parse(l); o.timestamp = new Date(clock += 1000).toISOString(); return JSON.stringify(o) })
 const green = () => [...callLines('Edit', { file_path: 'src/a.py' }, 'ok'), ...callLines('Edit', { file_path: 'src/a.py' }, 'ok'), ...callLines('Bash', { command: 'pytest -q' }, '3 passed in 0.10s')]
 const spiral = (k) => Array.from({ length: k }, (_, i) => (i % 2 ? callLines('Bash', { command: 'pytest -q' }, FAIL_OUT, true) : callLines('Edit', { file_path: 'src/a.py' }, 'ok'))).flat()
 
 const dir = writeWorkflow(join(CLAUDE, 'projects', slugOf(WS)), 's1', 'wf_1', 'R1')
 // five green dispatches (3 calls each), then a spiral of 42 calls: envelope = p90(3) × 1.25 = 3.75; stuck from
 // call 20 (past the 9.4-call backstop): would redirect, then 20 calls into its fresh segment, would block
-;['T1', 'T2', 'T3', 'T4', 'T5'].forEach((t, i) => writeAgent(dir, `a${i}`, green(), { agentType: 'backend-engineer', description: `impl:${t}` }))
-writeAgent(dir, 'a5', spiral(42), { agentType: 'backend-engineer', description: 'impl:T6' })
+;['T1', 'T2', 'T3', 'T4', 'T5'].forEach((t, i) => writeAgent(dir, `z${9 - i}`, stamp(green()), { agentType: 'backend-engineer', description: `impl:${t}` }))
+writeAgent(dir, 'a0', stamp(spiral(42)), { agentType: 'backend-engineer', description: 'impl:T6' }) // started last, sorts first
 // a reviewer that only reads: never gated
-writeAgent(dir, 'a6', callLines('Read', { file_path: 'src/a.py' }, "assert x\nraise ValueError('no')"), { agentType: 'grimoire:reviewer', description: 'spec-hawk:T6#1' })
+writeAgent(dir, 'b6', callLines('Read', { file_path: 'src/a.py' }, "assert x\nraise ValueError('no')"), { agentType: 'grimoire:reviewer', description: 'spec-hawk:T6#1' })
 const runs = [{ runId: 'R1', events: [{ type: 'run.start', repos: ['api'] }, ...['T1', 'T2', 'T3', 'T4', 'T5', 'T6'].map((t) => ({ type: 'dispatch', task: t, repo: 'api' }))] }]
 
 try {

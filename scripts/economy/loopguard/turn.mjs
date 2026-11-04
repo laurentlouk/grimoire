@@ -64,11 +64,15 @@ export function verificationState(t) {
   return `The last verification run ${t.lastVerifyFailed ? 'failed' : 'passed'}.${t.lastEdit > t.lastVerify ? ' There have been edits since.' : ''}`
 }
 
-/** What the free rules say of the segment: 'backstop' (stuck and past backstop_mult × envelope), 'envelope' (stuck and past it), or null. */
+/**
+ * What the free rules say: 'backstop' (the segment is stuck and the whole dispatch is past
+ * backstop_mult × the envelope), 'envelope' (the segment is stuck and itself past the envelope), or
+ * null. The source compares the backstop to the dispatch's calls and the envelope to the segment's.
+ */
 export function freeVerdict(t, envelope, thr = DEFAULT_THRESHOLDS) {
   if (envelope === null || envelope === undefined || !isStuck(t.st, thr)) return null
   if (t.calls >= envelope * thr.backstop_mult) return 'backstop'
-  return t.calls >= envelope ? 'envelope' : null
+  return t.st.turns >= envelope ? 'envelope' : null
 }
 
 /** Should a judge request go out now: the gate is open and JUDGE_GAP calls passed since the last one of this segment. */

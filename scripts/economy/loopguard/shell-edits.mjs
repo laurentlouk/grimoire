@@ -5,7 +5,8 @@
 //
 // Ported from microsoft/TokenEconomizer, tokeneconomizer/loopguard/shell_edits.py (commit 1deb887,
 // Apache-2.0), with Python's shlex in non-POSIX punctuation mode (`tokens` below) ported alongside so
-// quoting reads the same.
+// quoting reads the same. One difference: a `#` inside a word ends it and comments out the rest of the
+// line, where shlex glues the word to the next line's first one.
 import { basename } from './state.mjs'
 
 const HEREDOC_START = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1/

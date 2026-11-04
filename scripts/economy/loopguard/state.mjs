@@ -23,7 +23,7 @@ const CONTENT_TOOLS = new Set(['view', 'grep', 'glob'])
 const CANON = { bash: 'bash', shell: 'bash', read: 'view', view: 'view', grep: 'grep', glob: 'glob', edit: 'edit', multiedit: 'edit', str_replace: 'edit', apply_patch: 'edit', write: 'create', create: 'create' }
 
 /** Claude Code's tool names onto the canon the fold keys on; unknown names pass through. */
-export const canonTool = (name) => CANON[String(name || '').toLowerCase()] ?? (name || '?')
+export const canonTool = (name) => { const k = String(name || '').toLowerCase(); return Object.hasOwn(CANON, k) ? CANON[k] : name || '?' }
 export const basename = (p) => (p ? String(p).replace(/\/+$/, '').split('/').pop() : p || '')
 // rtk rewrites `cmd` to `rtk cmd` (and `rtk proxy cmd`): classify the command it runs
 export const stripRtk = (cmd) => (typeof cmd === 'string' ? cmd.replace(/^\s*rtk(?:\s+proxy)?\s+/, '') : cmd)
@@ -31,11 +31,14 @@ export const stripRtk = (cmd) => (typeof cmd === 'string' ? cmd.replace(/^\s*rtk
 /** A normalized signature of a failing output: its first failure line, with numbers, hex and paths dropped, hashed. */
 export function failureSig(text) {
   if (!text) return null
-  const first = String(text).split(/\r?\n/).find((l) => errMatch(l))
+  const first = String(text).split(/\r\n|\r|\n/).find((l) => errMatch(l)) // Python's splitlines: a lone \r ends a line too
   if (first === undefined) return null
   const norm = first.replace(/0x[0-9a-f]+|\d+|\/\S+/g, '').trim()
   return createHash('md5').update(norm, 'utf8').digest('hex').slice(0, 10)
 }
+
+// a count kept under a file's name: own keys only, so a file named `constructor` counts like any other
+const count = (o, k) => (Object.hasOwn(o, k) ? o[k] : 0)
 
 export const newState = () => ({ turns: 0, editCounts: {}, editOrder: [], errorOutputs: 0, testRuns: 0, failSigs: {}, repeatedFailSigs: 0, recent: [] })
 export const editChurn = (s) => Math.max(0, ...Object.values(s.editCounts))
@@ -59,11 +62,11 @@ export function update(s, toolName, args, resultText, failed = null) {
     const b = basename(args.path || args.filePath || args.file_path || '')
     if (b) {
       s.editOrder.push(b)
-      s.editCounts[b] = (s.editCounts[b] || 0) + 1
+      s.editCounts[b] = count(s.editCounts, b) + 1
       action = `edit ${b}`
     }
   }
-  const cmd = tool === 'bash' ? stripRtk(args.command || '') : ''
+  const cmd = tool === 'bash' && typeof args.command === 'string' ? stripRtk(args.command) : ''
   if (cmd) {
     action = `$ ${cmd.trim().replace(/\s+/g, ' ').slice(0, 90)}`
     if (TEST_RUN_RE.test(cmd)) s.testRuns++
@@ -76,8 +79,8 @@ export function update(s, toolName, args, resultText, failed = null) {
     const sig = failureSig(resultText)
     if (sig) {
       fail = sig
-      if (sig in s.failSigs) s.repeatedFailSigs++
-      s.failSigs[sig] = (s.failSigs[sig] || 0) + 1
+      if (Object.hasOwn(s.failSigs, sig)) s.repeatedFailSigs++
+      s.failSigs[sig] = count(s.failSigs, sig) + 1
     }
   }
   s.recent.push(`${String(s.turns).padStart(3)}: ${action}${fail ? `  [err#${fail}]` : ''}`)
@@ -88,7 +91,7 @@ export function update(s, toolName, args, resultText, failed = null) {
 export function foldShellEdits(s, names) {
   for (const b of names) {
     s.editOrder.push(b)
-    s.editCounts[b] = (s.editCounts[b] || 0) + 1
+    s.editCounts[b] = count(s.editCounts, b) + 1
   }
   if (names.length && s.recent.length) s.recent[s.recent.length - 1] += `  [edits ${names.slice(0, 4).join(', ')}${names.length > 4 ? ', ...' : ''}]`
 }

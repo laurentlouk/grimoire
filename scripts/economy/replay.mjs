@@ -37,8 +37,10 @@ export function replay(runs, opts = {}) {
     read++
     const ctx = labelContext(run.events)
     for (const wf of workflows) {
-      for (const f of agentFiles(wf.agentsDir)) {
-        const a = readAgent(join(wf.agentsDir, f))
+      // in the order they started (their first line's time), not their random ids': the envelope learns causally
+      const agents = agentFiles(wf.agentsDir).map((f) => readAgent(join(wf.agentsDir, f)))
+        .sort((x, y) => (Date.parse(x.firstAt ?? '') || Infinity) - (Date.parse(y.firstAt ?? '') || Infinity))
+      for (const a of agents) {
         if (!a.meta || !a.meta.agentType) continue
         const role = `${attributeIn(a.meta.label, ctx).repo ?? '-'}/${a.meta.agentType}`
         const r = (roles[role] ||= { dispatches: 0, gated: 0, stuck: 0, wouldRedirect: 0, wouldBlock: 0, envelope: null, flaggedCost: 0 })

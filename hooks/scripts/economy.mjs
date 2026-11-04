@@ -13,10 +13,12 @@
 // At SubagentStop a dispatch that ended green (no failed check after its last edit) feeds its role's
 // envelope, `envelope.json` (per repo and agent type), under a lock; a busy lock drops the sample.
 //
-// Shadow mode changes nothing: it always answers `{}`. No model call, no git, no transcript read on
-// a call. Every failure answers `{}` and adds a line to `.grimoire/economy/errors.log`.
-// `GRIMOIRE_ECONOMY=0` turns it off (a judge dispatch sets it, so the watch never watches itself);
-// so does `economy.loopGuard: "off"` in grimoire.config.json, read once per agent.
+// This release changes nothing: it always answers `{}`, and `economy.loopGuard: "on"` records as
+// "shadow" does until token economy slice 5 delivers redirects. No model call, no git, no transcript
+// read on a call. Every failure answers `{}` and adds a line to `.grimoire/economy/errors.log`.
+// `GRIMOIRE_ECONOMY=0` in the session's environment turns it off; so does `economy.loopGuard: "off"`
+// in grimoire.config.json, read once per agent. One agent's parallel calls fold one at a time, under
+// a per-agent lock. The wrapper (economy.sh) answers the main session's calls without starting node.
 import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync, rmSync, appendFileSync, readdirSync, statSync, rmdirSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,6 +32,7 @@ import { envelopeOf, withSample } from '../../scripts/economy/loopguard/envelope
 const AGENT_ID = /^[A-Za-z0-9_.-]{1,128}$/
 const MODES = new Set(['off', 'shadow', 'on'])
 const LOCK_WAIT_MS = 250
+const CALL_LOCK_WAIT_MS = 2000 // a fold takes well under a millisecond: only a crashed holder waits this long
 const LOCK_STALE_MS = 10000
 const KEEP_TURNS_MS = 7 * 86400000
 const CONTENT_TOOLS = new Set(['read', 'grep', 'glob', 'view'])
@@ -42,15 +45,17 @@ function writeJson(p, v) {
 }
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 
-/** The text a tool returned, for its failure markers; a content tool's is never read (it cannot fail by its content). */
+/**
+ * The text a call produced, for its failure markers: the failure's error, a string response, or a
+ * command's stdout and stderr. Never a file's content: a Write's response carries the whole file it
+ * wrote, and a Read's or a Grep's what it found, and a file full of `assert` is no failure.
+ */
 function resultText(toolName, response, error) {
   if (typeof error === 'string' && error) return error
   if (CONTENT_TOOLS.has(String(toolName).toLowerCase())) return ''
   if (typeof response === 'string') return response
   if (!isObj(response)) return ''
-  const parts = [response.stdout, response.stderr, response.output, response.error].filter((x) => typeof x === 'string' && x)
-  if (parts.length) return parts.join('\n')
-  return typeof response.content === 'string' ? response.content : ''
+  return [response.stdout, response.stderr].filter((x) => typeof x === 'string' && x).join('\n')
 }
 
 // The agent's settings, read once at its first call: the mode, the thresholds and its repo.
@@ -72,6 +77,13 @@ function firstLook(root, cwd) {
 }
 
 function onCall(dir, payload, now) {
+  mkdirSync(join(dir, 'turns'), { recursive: true })
+  // one agent's parallel calls run concurrent hooks: fold them one at a time
+  const folded = withLock(join(dir, 'turns', `${payload.agent_id}.lock`), () => foldOne(dir, payload, now), CALL_LOCK_WAIT_MS)
+  if (!folded) logError(dir, payload.hook_event_name, `a call of ${payload.agent_id} was not folded: its state stayed locked`, now)
+}
+
+function foldOne(dir, payload, now) {
   const id = payload.agent_id
   const file = join(dir, 'turns', `${id}.json`)
   let t = readJson(file)
@@ -79,17 +91,17 @@ function onCall(dir, payload, now) {
   if (!isObj(t) || t.v !== 1) {
     const root = projectRoot({ cwd: payload.cwd })
     const look = firstLook(root, payload.cwd)
-    mkdirSync(join(dir, 'turns'), { recursive: true })
     if (look.mode === 'off') return writeJson(file, { v: 1, off: true })
     t = { ...newTurn({ agentId: id, agentType: typeof payload.agent_type === 'string' ? payload.agent_type : null, cwd: payload.cwd ?? null, repo: look.repo, at: now }), mode: look.mode, thr: look.thr }
   }
+  t.stopped = false // an agent resumed after it stopped is watched again
   const failed = payload.hook_event_name === 'PostToolUseFailure'
   const resp = payload.tool_response
   const exitCode = failed ? 1 : isObj(resp) && Number.isInteger(resp.exitCode) ? resp.exitCode : null
   foldCall(t, { name: payload.tool_name, args: isObj(payload.tool_input) ? payload.tool_input : {}, result: resultText(payload.tool_name, resp, payload.error), exitCode })
   const role = `${t.repo ?? '-'}/${t.agentType ?? '-'}`
   const envelope = envelopeOf(readJson(join(dir, 'envelope.json'))?.[role]?.resolved, t.thr)
-  const shadow = t.mode !== 'on'
+  const shadow = true // "on" acts from token economy slice 5; until then it records as shadow does
   // a judge's verdict on this segment, left by the engine's stuck-judge dispatch
   const resultFile = join(dir, 'judge', `${id}.result.json`)
   if (existsSync(resultFile)) {
@@ -115,14 +127,14 @@ function onCall(dir, payload, now) {
   writeJson(file, t)
 }
 
-function withLock(lock, fn) {
+function withLock(lock, fn, wait = LOCK_WAIT_MS) {
   const start = Date.now()
   for (;;) {
     try { mkdirSync(lock); break } catch (e) {
       if (e.code !== 'EEXIST') throw e
       try { if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) { rmdirSync(lock); continue } } catch {}
-      if (Date.now() - start > LOCK_WAIT_MS) return false
-      sleep(10)
+      if (Date.now() - start > wait) return false
+      sleep(5)
     }
   }
   try { fn() } finally { try { rmdirSync(lock) } catch {} }
@@ -142,10 +154,14 @@ function onStop(dir, payload, now) {
     const fed = withLock(join(dir, 'envelope.lock'), () => writeJson(join(dir, 'envelope.json'), withSample(readJson(join(dir, 'envelope.json')), role, t.calls)))
     if (!fed) logError(dir, 'SubagentStop', `envelope sample of ${role} (${t.calls} calls) dropped: the lock stayed busy`, now)
   }
-  // stopped agents' states older than a week go
-  for (const f of readdirSync(join(dir, 'turns'))) {
-    const p = join(dir, 'turns', f)
-    try { if (now - statSync(p).mtimeMs > KEEP_TURNS_MS) rmSync(p, { force: true }) } catch {}
+  // states and judge requests older than a week go (an agent that never stopped leaves its request)
+  for (const sub of ['turns', 'judge']) {
+    let names = []
+    try { names = readdirSync(join(dir, sub)) } catch {}
+    for (const f of names) {
+      const p = join(dir, sub, f)
+      try { if (f.endsWith('.json') && now - statSync(p).mtimeMs > KEEP_TURNS_MS) rmSync(p, { force: true }) } catch {}
+    }
   }
 }
 
