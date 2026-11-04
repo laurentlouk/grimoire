@@ -384,5 +384,16 @@
       { "text": "Says maxCost counts the real cost (cache included) and maxOutputTokens output tokens only", "passed": null, "evidence": "" },
       { "text": "Leaves the caps as the user's call and writes nothing before the user approves", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 16,
+    "query": "Set up grimoire here. We already have .claude/agents/api-engineer.md, written by hand, with no disallowedTools line.",
+    "should_trigger": true,
+    "expected_output": "Keeps the existing api-engineer definition and proposes adding the template's disallowedTools line, one mcp__ccd_<server>__* entry per desktop-app server, explaining that those servers act on the launching session, written only on the user's yes.",
+    "expectations": [
+      { "text": "Keeps the existing definition and proposes adding the disallowedTools line from the template", "passed": null, "evidence": "" },
+      { "text": "Lists one mcp__ccd_<server>__* entry per desktop-app server, not a prefix wildcard", "passed": null, "evidence": "" },
+      { "text": "Writes nothing before the user approves", "passed": null, "evidence": "" }
+    ]
   }
 ]

@@ -25,15 +25,19 @@ const resultText = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map(
  * an assistant line when it holds `"type":"assistant"` unescaped; quoted inside a tool result it is
  * escaped, so it is skipped, and parsing confirms the type.
  */
-export function readTranscript(file, { usageOnly = false } = {}) {
+export function readTranscript(file, { usageOnly = false, skipResults = false } = {}) {
   let text = ''
   try { text = readFileSync(file, 'utf8') } catch {}
-  const t = parse(text, usageOnly)
+  const mode = usageOnly ? 'usage' : skipResults ? 'calls' : 'full'
+  const t = parse(text, mode)
   // the fast filter found no request in a file that has lines: another writer's spacing, say. Read it in full.
-  return usageOnly && !t.usage.requests && text.trim() ? parse(text, false) : t
+  return mode !== 'full' && !t.usage.requests && text.trim() ? parse(text, 'full') : t
 }
 
-function parse(text, usageOnly) {
+// `usage`: assistant lines only, no calls. `calls`: assistant and attachment lines, so the calls and
+// the deferred-tool deltas without their results (what tool evidence needs). `full`: every line.
+function parse(text, mode) {
+  const usageOnly = mode === 'usage'
   const usageById = new Map()
   const modelById = new Map()
   const calls = []
@@ -42,11 +46,11 @@ function parse(text, usageOnly) {
   let badLines = 0, anon = 0
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
-    if (usageOnly && !line.includes('"type":"assistant"')) continue
+    if (mode !== 'full' && !line.includes('"type":"assistant"') && !(mode === 'calls' && line.includes('"deferred_tools_delta"'))) continue
     let e
     try { e = JSON.parse(line) } catch { badLines++; continue }
     if (!isObj(e)) { badLines++; continue }
-    if (e.type === 'attachment' && isObj(e.attachment) && e.attachment.type === 'deferred_tools_delta') {
+    if (!usageOnly && e.type === 'attachment' && isObj(e.attachment) && e.attachment.type === 'deferred_tools_delta') {
       deferred.push(e.attachment)
       continue
     }
@@ -91,8 +95,8 @@ function parse(text, usageOnly) {
 
 /** A subagent transcript plus its .meta.json (label = the dispatch description) and loaded tools
  * (none read under `usageOnly`). */
-export function readAgent(jsonlFile, { usageOnly = false } = {}) {
-  const t = readTranscript(jsonlFile, { usageOnly })
+export function readAgent(jsonlFile, { usageOnly = false, skipResults = false } = {}) {
+  const t = readTranscript(jsonlFile, { usageOnly, skipResults })
   const base = jsonlFile.replace(/\.jsonl$/, '')
   const m = readJson(`${base}.meta.json`)
   const meta = isObj(m)

@@ -2,6 +2,7 @@
 name: <repo>-engineer
 description: Team agent owning <repo> (<stack in one line>). Dispatch for any implementation task from the plan that touches this repository.
 model: sonnet
+disallowedTools: mcp__ccd_connectors__*, mcp__ccd_directory__*, mcp__ccd_host__*, mcp__ccd_pr__*, mcp__ccd_session__*, mcp__ccd_session_mgmt__*, mcp__ccd_settings__*, mcp__ccd_sidebar__*, mcp__ccd_turn__*, mcp__ccd_view__*, mcp__ccd_window__*
 ---
 
 You are the standing specialist for the `<repo>` repository (clone at `repositories/<repo>/`).

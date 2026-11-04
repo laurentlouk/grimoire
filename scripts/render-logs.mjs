@@ -41,7 +41,8 @@ import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readConfig } from './project-config.mjs'
-import { runBill, indexWorkflows, attribute, rootsOf } from './economy/runs.mjs'
+import { runBill, indexWorkflows, rootsOf, labelContext, attributeIn } from './economy/runs.mjs'
+import { toolEvidence } from './economy/tools.mjs'
 
 const DAY = 86400000
 
@@ -380,18 +381,12 @@ const round2 = (n) => Math.round(n * 100) / 100
 // journal says were dispatched whose implementer has a transcript: what the join could see.
 export function costOf(run, bill) {
   const ev = run.events
-  const tasks = new Set(), repos = new Set(), taskRepo = {}
-  const start = ev.find((e) => e.type === 'run.start') || {}
-  for (const r of Array.isArray(start.repos) ? start.repos : []) repos.add(s(isObj(r) && r.name != null ? r.name : r))
-  for (const e of ev) {
-    if (e.task != null) tasks.add(s(e.task))
-    if (e.repo != null) repos.add(s(e.repo))
-    if (e.task != null && e.repo != null) taskRepo[s(e.task)] = s(e.repo)
-  }
+  const ctx = labelContext(ev)
+  const { taskRepo } = ctx
   const policyOf = policyMap(ev)
   const list = (bill ? bill.dispatches : []).map((d) => {
-    const a = attribute(d.label, { tasks, repos })
-    const repo = a.repo ?? (a.task != null ? taskRepo[a.task] ?? null : null)
+    const a = attributeIn(d.label, ctx)
+    const repo = a.repo
     // a task's dispatches by the policy it ran under (balanced before 0.16.0); run-level work has none
     const policy = a.task != null && taskRepo[a.task] != null && !/:final$/.test(a.task) ? policyOf[a.task] || 'balanced' : null
     // every review persona is one kind, review: the lens split names each (#56 c)
@@ -642,6 +637,18 @@ function scorecardText(sc) {
     ...costLines(sc),
     `  journal: ${sc.journal.runsIncomplete} run(s) incomplete (${sc.journal.missingEvents} event(s) missing, ${sc.journal.leftovers} unfinished write(s)) · ${sc.journal.statusRepaired} status(es) taken from run.end`,
   ].join('\n')
+}
+
+// The servers each role could deny, one line per role that has any: crystallize's evidence for disallowedTools.
+function toolEvidenceText(tools) {
+  const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+  const roles = Object.entries(tools.roles).filter(([, r]) => r.candidates.length)
+  if (!roles.length) return `  tool evidence over ${n(tools.runs, 'run')}: no server to deny yet`
+  const SHOWN = 6 // per role; summary --json lists them all
+  // the costliest first: their deferred names, then the server's own name
+  const order = (cs) => [...cs].sort((a, b) => b.deferredNameTokens - a.deferredNameTokens || a.server.localeCompare(b.server))
+  const list = (cs) => `${order(cs).slice(0, SHOWN).map((c) => `${c.deny} (${c.why})`).join(', ')}${cs.length > SHOWN ? `, and ${cs.length - SHOWN} more (summary --json)` : ''}`
+  return roles.map(([role, r]) => `  tool evidence over ${n(tools.runs, 'run')}: ${role} (${n(r.dispatches, 'dispatch', 'dispatches')}, ${n(r.runs, 'run')}) could deny ${list(r.candidates)}`).join('\n')
 }
 
 // The real bill (cache included) from the transcripts, largest first: crystallize cites these lines
@@ -1227,10 +1234,12 @@ function main() {
 
   if (cmd === 'summary') {
     const sc = scorecard(outcomes)
-    if (args.json) console.log(JSON.stringify({ dir, runs: runs.length, skippedLines: runs.reduce((a, r) => a + r.badLines, 0), scorecard: sc, outcomes, groups }, null, 2))
+    // which MCP servers each role loads and never uses: crystallize's disallowedTools evidence (summary only: it reads every transcript's calls)
+    const tools = toolEvidence(runs, { claudeDir, index })
+    if (args.json) console.log(JSON.stringify({ dir, runs: runs.length, skippedLines: runs.reduce((a, r) => a + r.badLines, 0), scorecard: sc, outcomes, groups, toolEvidence: tools }, null, 2))
     else {
       const [head, ...rest] = summaryText(groups, runs, dir).split('\n') // outcomes first, then the per-version detail
-      console.log([head, ...(runs.length ? [scorecardText(sc)] : []), ...rest].join('\n'))
+      console.log([head, ...(runs.length ? [scorecardText(sc), toolEvidenceText(tools)] : []), ...rest].join('\n'))
     }
     return
   }
