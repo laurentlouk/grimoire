@@ -73,4 +73,5 @@ rm -f "$T" "$T.s" "$T.d"
 fi
 rm -f "$DIR/.chunk.$$.b64" "$DIR/.runjson.$$.b64" "$DIR/.landed.$$.b64"
 unlock
+if [ -n "${COSTJS:-}" ]; then CO=$(node "$COSTJS" cost --run "$RUNID" --root "$PWD" 2>/dev/null | head -n 1); case "$CO" in "COST "[0-9]*) echo "$CO" ;; *) echo "COST none" ;; esac; fi
 echo "RUNDIR $DIR"

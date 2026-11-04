@@ -8,8 +8,16 @@
 // A resumed run has one workflow file per session, all with the same args.runId. The launching
 // session's cwd is the workspace root, the main checkout or one of its worktrees, so the project
 // dirs read are the roots' own and those nested under them (worktrees in .claude/worktrees/…).
-import { readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+//
+//   node scripts/economy/runs.mjs cost --run <runId> [--root <dir>] [--claude-dir <dir>]
+//     → `COST <effective tokens>` for every session of the run so far (a resumed run's included),
+//       read from the project dirs of <root> (default: the cwd) and of its git worktrees; `COST
+//       none` when no workflow of that runId is found. The loop's journal script runs it after each
+//       write when maxCost is set (token economy slice 2). Exit 2 on a usage error only.
+import { readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { readAgent } from './transcript.mjs'
 import { price, tierOf } from './pricing.mjs'
@@ -113,3 +121,27 @@ export function attribute(label, { tasks = new Set(), repos = new Set() } = {}) 
   }
   return { kind, task: null, repo: null, lens }
 }
+
+/** A root (as given and resolved through symlinks) and every git worktree of its repository: where a
+ * run's sessions may have been launched. Claude Code names a project dir after the cwd it was given,
+ * which may be either spelling (macOS's /var is /private/var). */
+export function rootsOf(root) {
+  const roots = new Set([root])
+  try { roots.add(realpathSync(root)) } catch {}
+  const r = spawnSync('git', ['-C', root, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' })
+  if (r.status === 0) for (const l of r.stdout.split('\n')) if (l.startsWith('worktree ')) roots.add(l.slice('worktree '.length))
+  return [...roots]
+}
+
+function costMain(argv) {
+  const arg = (k) => { const i = argv.indexOf(`--${k}`); return i >= 0 && typeof argv[i + 1] === 'string' && !argv[i + 1].startsWith('--') ? argv[i + 1] : null }
+  const runId = arg('run')
+  if (argv[0] !== 'cost' || !runId) { console.error('usage: node scripts/economy/runs.mjs cost --run <runId> [--root <dir>] [--claude-dir <dir>]'); return 2 }
+  const root = resolve(arg('root') ?? process.cwd())
+  const bill = runBill(runId, { claudeDir: arg('claude-dir') ?? undefined, roots: rootsOf(root) })
+  console.log(bill.workflows.length ? `COST ${Math.round(bill.total.effective)}` : 'COST none')
+  return 0
+}
+
+const isMain = () => { try { return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) } catch { return false } }
+if (isMain()) process.exitCode = costMain(process.argv.slice(2))

@@ -606,6 +606,7 @@ const JOURNAL_SCHEMA = {
     runJsonBytes: { type: 'integer', description: 'the number the script printed for RUNJSON_BYTES; 0 when it printed none' },
     runJsonKept: { type: 'string', description: 'only when it printed RUNJSON kept: the words after "kept:", verbatim; omit otherwise' },
     landed: { type: 'integer', description: 'the number after LANDED ok; 0 when it printed LANDED bad or no LANDED line' },
+    costSoFar: { type: 'integer', description: 'the number after COST; omit it when the script printed COST none or no COST line' },
   },
 }
 
@@ -2272,6 +2273,7 @@ rm -f "$T" "$T.s" "$T.d"
 fi
 rm -f "$DIR/.chunk.$$.b64" "$DIR/.runjson.$$.b64" "$DIR/.landed.$$.b64"
 unlock
+if [ -n "\${COSTJS:-}" ]; then CO=$(node "$COSTJS" cost --run "$RUNID" --root "$PWD" 2>/dev/null | head -n 1); case "$CO" in "COST "[0-9]*) echo "$CO" ;; *) echo "COST none" ;; esac; fi
 echo "RUNDIR $DIR"
 `
 // ── the journal WRITER: end ──
@@ -2281,7 +2283,7 @@ let journalWriterCheck = null // [cksum, bytes] of JOURNAL_WRITER, once
 // inline once a flush found the file missing (`inline`). A RESEND carries one part only: a chunk's
 // events, or run.json alone; `tag` names a resent chunk's file (`<firstSeq>.r1.jsonl`), never the one
 // the first try may have written.
-function journalPrompt({ lines, runJson, landed = [], firstSeq, tag = '', runDir, slug, session, seed, inline = false }) {
+function journalPrompt({ lines, runJson, landed = [], firstSeq, tag = '', runDir, slug, session, seed, inline = false, cost = false }) {
   const dir = runDir ? `DIR=${shq(runDir)}` : `DIR=${shq(TELEMETRY_DIR)}/"$(date -u +%Y%m%d-%H%M%S)"-${shq(slug)}`
   const chunk = lines.length ? String(firstSeq).padStart(8, '0') + (/^\.r\d+$/.test(tag) ? tag : '') : ''
   const newSeq = Number.isInteger(runJson && runJson.checkpoint && runJson.checkpoint.lastSeq) ? runJson.checkpoint.lastSeq : 0
@@ -2310,6 +2312,7 @@ ${dir}
 case "$DIR" in /*) ;; *) C=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true); if [ "\${C##*/}" = .git ]; then DIR="\${C%/.git}/$DIR"; else DIR="$PWD/$DIR"; fi ;; esac
 mkdir -p "$DIR/events"
 SESSION=${tok}; SEED=${Number.isInteger(seed) && seed > 0 ? seed : 0}; NEWSEQ=${newSeq}; CHUNK=${chunk}; ${checks}
+COSTJS=${cost && MAX_COST && runId ? shq(costScript()) : ''}; RUNID=${cost && MAX_COST && runId ? shq(runId) : ''}
 ${writer}\`\`\``
 }
 
@@ -2843,6 +2846,23 @@ const journal = {
   runJsonKept: 0, // run.json writes the script kept from (a newer checkpoint on disk); the first is logged with its reason
   landedSent: new Set(), // `${id}@${headSha}` of landed tasks whose detail landed.jsonl confirmed (or an earlier session wrote)
 }
+// The run's cost so far, as the last journal flush read it (null until one does); `costBlind` once a
+// flush could not read it, or the cap can't be read at all (said once: a blind cap never halts).
+let costSoFar = null
+let costBlind = false
+function costIsBlind(why) {
+  if (costBlind) return
+  costBlind = true
+  log(`⚠ maxCost=${fmtTok(MAX_COST)}: the cost cap is blind: ${why} — it will not halt the run${MAX_OUTPUT_TOKENS ? '; maxOutputTokens still applies' : ''}`)
+  emit('budget', { spent: null, cap: MAX_COST, action: 'blind', kind: 'cost' })
+}
+// A flush the writer lost or never ran (no receipt, WRITER missing) says nothing about the cost: only
+// a receipt with no COST number makes the cap blind.
+function noteCost(r) {
+  if (!MAX_COST || !runId || !r || r.writer === 'missing') return
+  if (Number.isInteger(r.costSoFar) && r.costSoFar >= 0) costSoFar = Math.max(costSoFar ?? 0, r.costSoFar)
+  else costIsBlind(`a journal flush returned no cost; the cost script is looked for at ${costScript()}${PLUGIN_ROOT ? ' (no transcripts of this run under the Claude config dir, or the script failed)' : ', and an engine copy holds workflows/ only: pass pluginRoot'}`)
+}
 const clip = (v) => (typeof v === 'string' && v.length > 300 ? v.slice(0, 297) + '…' : v)
 function emit(type, data) {
   if (!journal.enabled) return
@@ -2858,12 +2878,12 @@ let landedDelta = () => [] // the landed tasks whose detail landed.jsonl does no
 // One writer dispatch. Its chunk (`lines`), `runJson` and `landed` delta are each optional: a resend
 // carries one of them only, so its payload is small. A writer that returns nothing counts toward
 // JOURNAL_DEAD_AFTER, whichever of them it carried.
-async function writeJournal(label, { lines = [], firstSeq = 0, tag = '', runJson = null, landed = [] }) {
+async function writeJournal(label, { lines = [], firstSeq = 0, tag = '', runJson = null, landed = [], cost = false }) {
   // Every flush carries the session token and seed, never a "first of session" flag: the writer
   // registers the attempt once per token, so a first flush abandoned at its hard limit that runs
   // after a later one has landed stamps the same attempt and loses the run.json guard on seq.
   const dispatch = (lbl) =>
-    agentT(journalPrompt({ lines, runJson, landed, firstSeq, tag, runDir: journal.absRunDir || journal.runDir, slug: projectSlug, session: journal.session, seed: journal.seed, inline: journal.inline }), {
+    agentT(journalPrompt({ lines, runJson, landed, firstSeq, tag, runDir: journal.absRunDir || journal.runDir, slug: projectSlug, session: journal.session, seed: journal.seed, inline: journal.inline, cost }), {
       label: lbl,
       phase: 'Implement',
       model: 'haiku',
@@ -2946,7 +2966,8 @@ function flushJournal() {
     const lines = batch.map((e) => e.line)
     const runJson = runJsonFor(journal.final)
     const landed = landedDelta()
-    const r = await writeJournal(`journal#${n}`, { lines, firstSeq: batch[0].seq, runJson, landed })
+    const r = await writeJournal(`journal#${n}`, { lines, firstSeq: batch[0].seq, runJson, landed, cost: true }) // resends read no cost
+    noteCost(r)
     if (chunkWritten(r, lines)) journal.written += lines.length
     else {
       if (r) {
@@ -3101,6 +3122,12 @@ const ESCALATE_AT_FIX_ROUND =
 // usage counter a script gets — input and cache tokens are not visible to it); a resumed
 // run counts what its earlier sessions spent. `budgetFloor` keeps the turn-level floor.
 const MAX_OUTPUT_TOKENS = Number.isFinite(opts.maxOutputTokens) && opts.maxOutputTokens > 0 ? opts.maxOutputTokens : null
+// `maxCost` caps what the run REALLY costs, in effective tokens (input, cache reads and writes and
+// output, weighted: scripts/economy/pricing.mjs), across every session of its runId. A script can't
+// see that, so each journal flush runs scripts/economy/runs.mjs cost over Claude Code's transcripts
+// and its writer returns `costSoFar` (token economy slice 2). No cost read (no journal, no runId,
+// no transcripts): the cap is blind and never halts, and says so once.
+const MAX_COST = Number.isFinite(opts.maxCost) && opts.maxCost > 0 ? opts.maxCost : null
 const BUDGET_FLOOR = Number.isFinite(opts.budgetFloor) && opts.budgetFloor >= 0 ? opts.budgetFloor : DEFAULT_BUDGET_FLOOR
 // Telemetry: {telemetry:{enabled?, dir?, flushEvery?, flushBytes?}}. ON for execute runs unless enabled:false.
 const telemetryOpt = opts.telemetry && typeof opts.telemetry === 'object' ? opts.telemetry : {}
@@ -3112,6 +3139,11 @@ const JOURNAL_FLUSH_BYTES =
 // briefs, personas and config, because crystallize changes the prose between releases and a
 // version alone would not say which behaviour a run had.
 const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+// The plugin's own root (absolute), for the scripts that live outside workflows/: the skill runs a
+// project-local COPY of workflows/ (.grimoire/engine-<v>/), so `<scriptsDir>/../..` is the plugin
+// only when the engine runs from the plugin's own tree.
+const PLUGIN_ROOT = str(opts.pluginRoot) ? opts.pluginRoot.trim().replace(/\/+$/, '') : null
+const costScript = () => (PLUGIN_ROOT ? `${PLUGIN_ROOT}/scripts/economy/runs.mjs` : `${SCRIPTS_DIR}/../../scripts/economy/runs.mjs`)
 const runMetaOpt = opts.runMeta && typeof opts.runMeta === 'object' ? opts.runMeta : {}
 const runMeta = {
   grimoireVersion: str(runMetaOpt.grimoireVersion),
@@ -4213,7 +4245,7 @@ log(
   `${pendingIndex.length} issue(s) to run across ${new Set(pendingIndex.map((i) => i.slice)).size} slice(s) · ${alreadyDone.length} already done/canceled (absorbed) · ` +
     `mode=${execute ? 'EXECUTE' : 'PREVIEW (no implementers)'} · scheduling=dependsOn-driven · maxPerRepo=${MAX_PER_REPO} (disjoint-file lanes) · maxReplans=${MAX_REPLANS} · maxFixAttempts=${MAX_FIX_ATTEMPTS} · maxContextResolves=${MAX_CONTEXT_RESOLVES} · agentTimeout=${AGENT_TIMEOUT_MIN ? `${AGENT_TIMEOUT_MIN}m (hard ${AGENT_HARD_TIMEOUT_MIN ? `${AGENT_HARD_TIMEOUT_MIN}m` : 'off for writers'})` : 'off'} · hydrateAhead=${HYDRATE_AHEAD || 'off'}` +
     ` · precheck=${PRECHECK ? 'on' : 'off'} · verifyFindings=${VERIFY_FINDINGS ? 'on' : 'off'} · escalateAtFixRound=${ESCALATE_AT_FIX_ROUND || 'off'}` +
-    `${MAX_OUTPUT_TOKENS ? ` · maxOutputTokens=${fmtTok(MAX_OUTPUT_TOKENS)}` : ''}${specialists.length ? ` · specialists=${specialists.map((s) => s.agent).join(',')}` : ''}` +
+    `${MAX_OUTPUT_TOKENS ? ` · maxOutputTokens=${fmtTok(MAX_OUTPUT_TOKENS)}` : ''}${MAX_COST ? ` · maxCost=${fmtTok(MAX_COST)}` : ''}${specialists.length ? ` · specialists=${specialists.map((s) => s.agent).join(',')}` : ''}` +
     `${claimedElsewhere.length ? ` · ${claimedElsewhere.length} started by someone else (not dispatched): ${claimedElsewhere.map((c) => `${c.id}@${c.by}`).join(', ')}` : ''}`,
 )
 // The RESUME PROOF, before anything runs: what landed, verified on which branch head and from which
@@ -4423,7 +4455,7 @@ if (!execute) {
   log(`⏱ estimated wall clock ≈ ${hours.low}–${hours.high} h — ${estimate.basis}`)
   log(resumeProofLine())
   const stillToBuild = pendingIndex.map((i) => ({ id: i.id, repo: i.repo, title: i.title || '' }))
-  return { preview: true, ...(FRESH_START ? { freshStart: true } : {}), resumedLanded, unverifiedLanded, stillToBuild, branches: branchesView, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran, no branch touched (the reconcile ran read-only). ${resumeProofLine().replace(/^◎ /, '')}. Estimated wall clock ≈ ${hours.low}–${hours.high} h for what is still to build (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, policies: policyView, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, meta: runMeta }
+  return { preview: true, ...(FRESH_START ? { freshStart: true } : {}), resumedLanded, unverifiedLanded, stillToBuild, branches: branchesView, estimate, note: `PREVIEW ONLY — index level (no hydration), no implementers ran, no branch touched (the reconcile ran read-only). ${resumeProofLine().replace(/^◎ /, '')}. Estimated wall clock ≈ ${hours.low}–${hours.high} h for what is still to build (estimate.basis says why). Scheduling is dependsOn-driven: "startable" issues run first, in parallel across repos AND within a repo when their declared files are disjoint (worktree lanes, up to maxPerRepo). Re-invoke with {execute:true} to dispatch.`, inputs: { specPath, planPath, project }, repos: repoView, plan: planView, reviewPanels, policies: policyView, routing: Object.fromEntries(repoList.map((r) => [r.name, { owner: r.agent, specialists: specialistsFor(r.name).map((sp) => sp.agent) }])), reviewerAgent: pluginAgent('reviewer'), alreadyDone, claimedElsewhere, maxPerRepo: MAX_PER_REPO, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, hydrateAhead: HYDRATE_AHEAD, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, maxCost: MAX_COST, meta: runMeta }
 }
 
 // ═══════════════════════ 1 · per-task lifecycle ═══════════════════════
@@ -5342,9 +5374,10 @@ emit('run.start', {
   mode: 'execute',
   meta: runMeta,
   resumed: !!resumeBase || resumedLanded.length > 0,
-  knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, wedgeGraceMin: WEDGE_GRACE_MIN, hydrateAhead: HYDRATE_AHEAD, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, budgetFloor: BUDGET_FLOOR, claims: !!claim, trackerStatus: TRACKER_STATUS },
+  knobs: { maxPerRepo: MAX_PER_REPO, agentTimeoutMin: AGENT_TIMEOUT_MIN, agentHardTimeoutMin: AGENT_HARD_TIMEOUT_MIN, wedgeGraceMin: WEDGE_GRACE_MIN, hydrateAhead: HYDRATE_AHEAD, maxReplans: MAX_REPLANS, maxFixAttempts: MAX_FIX_ATTEMPTS, maxContextResolves: MAX_CONTEXT_RESOLVES, precheck: PRECHECK, verifyFindings: VERIFY_FINDINGS, escalateAtFixRound: ESCALATE_AT_FIX_ROUND, maxOutputTokens: MAX_OUTPUT_TOKENS, maxCost: MAX_COST, budgetFloor: BUDGET_FLOOR, claims: !!claim, trackerStatus: TRACKER_STATUS },
   repos: repoList.map((r) => r.name),
 })
+if (MAX_COST && (!journal.enabled || !runId)) costIsBlind(!journal.enabled ? 'the journal is off (telemetry.enabled: false), and only a journal flush reads the cost' : 'no runId, so no transcript can be matched to this run')
 for (const c of claimedElsewhere) emit('claim', { task: c.id, action: 'skip', by: c.by })
 if (envState.start) emit('env', { when: 'start', why: 'startup', ...envState.start })
 
@@ -5934,9 +5967,22 @@ const shippedOf = () =>
       .map(([repo, s]) => [repo, { pushedHead: s.pushedHead, prUrl: s.prUrl || '', draft: gateDone.has(repo) ? false : s.draft, disabled: s.disabled }]),
   )
 let budgetWarned = false
-let budgetStop = null // why dispatching stopped: 'floor' | 'cap'
+let costWarned = false
+let budgetStop = null // why dispatching stopped: 'floor' | 'cap' | 'cost'
 const budgetLow = () => {
   if (budgetStop) return true
+  if (MAX_COST && costSoFar !== null) {
+    if (!costWarned && costSoFar >= 0.8 * MAX_COST) {
+      costWarned = true
+      log(`⚠ cost at ${fmtTok(costSoFar)} of the ${fmtTok(MAX_COST)} effective-token cap (80%)`)
+      emit('budget', { spent: costSoFar, cap: MAX_COST, action: 'warn', kind: 'cost' })
+    }
+    if (costSoFar >= MAX_COST) {
+      budgetStop = 'cost'
+      emit('budget', { spent: costSoFar, cap: MAX_COST, action: 'stop', kind: 'cost' })
+      return true
+    }
+  }
   if (MAX_OUTPUT_TOKENS) {
     const spent = runSpent()
     if (!budgetWarned && spent >= 0.8 * MAX_OUTPUT_TOKENS) {
@@ -6581,8 +6627,10 @@ function stillRunningReason() {
 
 // The run is on disk from its start: run.start, the startup checks and what was absorbed, in a chunk
 // small enough to arrive whole, and run.json with them. Held until the first landing (hours in, as
-// many as 24 events by then), the first chunk was the one most often lost.
-flushJournal()
+// many as 24 events by then), the first chunk was the one most often lost. A resumed run under maxCost
+// waits for it: its earlier sessions' cost comes back with it, before anything is dispatched.
+const startFlush = flushJournal()
+if (MAX_COST && runId && journal.enabled && (resumeBase || resumedLanded.length)) await startFlush
 
 while (true) {
   // A failed environment check (in flight) stops new dispatches at once; in-flight work settles.
@@ -6772,7 +6820,9 @@ while (true) {
       reason:
         budgetStop === 'cap'
           ? `budget_exhausted: this run's output-token cap (${fmtTok(MAX_OUTPUT_TOKENS)}) reached — stopped cleanly at quiescence`
-          : `token budget floor (${BUDGET_FLOOR}) reached — stopped cleanly at quiescence`,
+          : budgetStop === 'cost'
+            ? `budget_exhausted: this run's cost cap (${fmtTok(MAX_COST)} effective tokens) reached at ${fmtTok(costSoFar)} — stopped cleanly at quiescence`
+            : `token budget floor (${BUDGET_FLOOR}) reached — stopped cleanly at quiescence`,
       kind: 'budget',
     }
     log(`⛔ ${halt.reason}`)
@@ -7336,6 +7386,8 @@ return {
     totalOutputTokens: spentTokens(),
     runOutputTokens: runSpent(),
     maxOutputTokens: MAX_OUTPUT_TOKENS,
+    maxCost: MAX_COST,
+    costSoFar,
     steps: telemetry,
     // the session probe: seconds a trivial Bash call waited before it ran (null = not measured)
     toolLatencySec,

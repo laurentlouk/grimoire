@@ -41,7 +41,7 @@ import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readConfig } from './project-config.mjs'
-import { runBill, indexWorkflows, attribute } from './economy/runs.mjs'
+import { runBill, indexWorkflows, attribute, rootsOf } from './economy/runs.mjs'
 
 const DAY = 86400000
 
@@ -789,7 +789,7 @@ function client(score) {
     terminal: (e) => `${s(e.repo)} → ${s(e.verdict)}`,
     gate: (e) => `${s(e.repo)} → ${s(e.status)}${e.applies === false ? ' (not applicable)' : ''}${e.prUrl ? ' · ' + s(e.prUrl) : ''}`,
     claim: (e) => `${s(e.action)} by ${s(e.by)}`,
-    budget: (e) => `${s(e.spent)} / ${s(e.cap)} → ${s(e.action)}`,
+    budget: (e) => (e.kind === 'cost' ? `cost ${e.spent == null ? 'unread' : s(e.spent)} / ${s(e.cap)} → ${s(e.action)}` : `${s(e.spent)} / ${s(e.cap)} → ${s(e.action)}`),
     halt: (e) => `${e.kind ? `[${s(e.kind)}] ` : ''}${s(e.reason)}`,
     // 0.9.0 · run durability: late and wedged dispatches, incremental delivery, environment checks, resume
     late: (e) => `${s(e.label)} past its ${s(e.softMin)}-min soft limit${e.kind ? ` (${s(e.kind)})` : ''}: still awaited, not stopped`,
@@ -1196,10 +1196,7 @@ function stateRoot() {
 
 // Where the loop's sessions ran: the main checkout, the cwd, and every worktree of the checkout.
 function costRoots() {
-  const roots = new Set([stateRoot(), process.cwd()])
-  const r = spawnSync('git', ['worktree', 'list', '--porcelain'], { encoding: 'utf8' })
-  if (r.status === 0) for (const l of r.stdout.split('\n')) if (l.startsWith('worktree ')) roots.add(l.slice('worktree '.length))
-  return [...roots]
+  return [...new Set([...rootsOf(stateRoot()), process.cwd()])]
 }
 
 // ── main ──

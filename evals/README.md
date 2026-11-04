@@ -30,7 +30,7 @@ and no key. Running the cases is manual and paid, and needs the command-line `cl
 | orchestrate | 12 | 1 | 1 | 10 |
 | review | 7 | 1 | 1 | 5 |
 | roast | 6 | 1 | 1 | 4 |
-| setup | 14 | 1 | 2 | 11 |
+| setup | 15 | 1 | 2 | 12 |
 | tdd | 4 | 1 | 1 | 2 |
 | to-issues | 4 | 1 | 1 | 2 |
 | to-plan | 3 | 1 | 1 | 1 |
