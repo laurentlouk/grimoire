@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  Execution policies (0.16.0 – 0.17.0) — orchestrate-loop.js
+//  Execution policies (0.16.0 – 0.18.0) — orchestrate-loop.js
 // ════════════════════════════════════════════════════════════════════════════
 //
 //  Run:  node workflows/tests/execution-policies.test.mjs
@@ -21,7 +21,7 @@
 //    • hydration may propose a stricter policy, never a looser one
 //
 //  Same stubbed runtime as the other loop tests (agent / parallel / log / phase / args / budget).
-import { run, by, QUIET, API, T, V, impl } from './support/script-harness.mjs'
+import { run, by, QUIET, API, T, V, impl, heredocs } from './support/script-harness.mjs'
 
 let PASS = 0, FAIL = 0
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
@@ -299,6 +299,91 @@ const FIX = (head = 'bbbbbbb') => ({ status: 'DONE', summary: 'fixed', commits: 
   const tasks = [S('PROJ-1', ['api/foo.proto (new)']), S('PROJ-2', ['`infra/main.tf` — add a bucket']), S('PROJ-3', ['src/x.gen.ts: regenerate'])]
   const { result } = await run('annotated declared files still meet their floor', tasks, by({}), { args: ARGS({ policy: 'auto', policies: { strictPaths: ['**/*.proto', '**/*.tf', '**/*.{gen.ts,gen.js}'] } }) })
   eq(['PROJ-1', 'PROJ-2', 'PROJ-3'].map((id) => result.policies.tasks[id].auto), ['strict', 'strict', 'strict'], '"(new)", backticks and ": what" are stripped; braces take globs')
+}
+
+// ── 18. an escalation not landed is written to its repo's PR marker (esc) ──
+{
+  const { calls } = await run('marker: esc lists the escalated task that did not land', [S('PROJ-1', ['src/a.ts']), S('PROJ-2', ['src/b.ts'])], by({
+    'break-it:PROJ-1': VF(FINDING('blocker', 'src/a.ts', 'races')),
+    'fix:PROJ-1:fast#1': FIX(),
+    'guard:PROJ-1:fast': GUARD('RE_REVIEW'),
+    'break-it:PROJ-1~strict': VF(FINDING('blocker', 'src/a.ts', 'still racy')),
+    'impl:PROJ-2': impl('ccccccc'),
+  }), { args: ARGS({ policy: 'fast', maxFixAttempts: 1, maxReplans: 0 }) })
+  const ship = calls.filter((c) => /^ship:api/.test(c.label)).pop()
+  const tok = ship && (/grimoire:state v1 ([A-Za-z0-9+/=]+) -->/.exec([ship.prompt, ...heredocs(ship.prompt)].join('\n')) || [])[1]
+  const st = tok ? JSON.parse(Buffer.from(tok, 'base64').toString('utf8')) : {}
+  eq(st.esc, ['PROJ-1'], 'the escalated task is listed, the landed one is not')
+}
+
+// ── 19. reviewParallel 'off': an escalated task's STRICT round 0 runs spec, then quality; its verifier has its own name ──
+{
+  const { labels } = await run("reviewParallel 'off' after an escalation", [S('PROJ-1', ['src/a.ts'])], by({
+    'break-it:PROJ-1': VF(FINDING('blocker', 'src/a.ts', 'race')),
+    'fix:PROJ-1:fast#1': FIX(),
+    'guard:PROJ-1:fast': GUARD('RE_REVIEW'),
+    'break-it:PROJ-1~strict': VF(FINDING('major', 'src/a.ts', 'still racy')),
+    'verify:PROJ-1:quality#0': { results: [{ index: 1, verdict: 'CONFIRMED', evidence: 'x' }] },
+    'verify:PROJ-1:quality#0~strict': { results: [{ index: 1, verdict: 'CONFIRMED', evidence: 'x' }] },
+    'fix:PROJ-1:quality#1': FIX('ccccccc'),
+    'guard:PROJ-1#1': GUARD('PASS'),
+  }), { args: ARGS({ policy: 'fast', reviewParallel: 'off', verifyFindings: true }) })
+  const at = (l) => labels.indexOf(l)
+  ok(at('spec-hawk:PROJ-1~strict') >= 0 && at('break-it:PROJ-1~strict') > at('spec-hawk:PROJ-1~strict'), 'spec ~strict first, quality ~strict after it')
+  ok(labels.includes('verify:PROJ-1:quality#0') && labels.includes('verify:PROJ-1:quality#0~strict'), "the FAST and the STRICT round-0 verifiers have their own labels")
+}
+
+// ── 20. the build is routed again: a floor on a changed file, the precheck's auth signal, FAST's footprint ──
+{
+  const { result, labels, calls } = await run('no declared files, the build changed an auth file → STRICT before the panel', [S('PROJ-1', [])], by({
+    'impl:PROJ-1': { ...impl('aaaaaaa'), filesChanged: ['src/auth/session.ts', 'src/a.ts'] },
+    'privacy:PROJ-1': VF(FINDING('major', 'src/auth/session.ts', 'logs the token')),
+    'fix:PROJ-1:quality#1': FIX(),
+    'guard:PROJ-1#1': GUARD('PASS'),
+  }), { args: ARGS({ policy: 'auto' }) })
+  const p = result.policies.tasks['PROJ-1']
+  eq([p.auto, p.policy], ['balanced', 'balanced'], 'routed balanced on the declared footprint (none)')
+  ok((p.raisedAfterBuild || []).some((x) => x.includes('changed src/auth/session.ts matches **/auth/**')), 'raised after the build, the changed file and glob named')
+  ok(labels.includes('privacy:PROJ-1'), 'privacy is promoted into the quality stage')
+  eq(calls.find((c) => c.label === 'fix:PROJ-1:quality#1').opts.model, 'opus', 'the fixes from here on run on opus')
+
+  const a = await run("the precheck's auth signal raises a FAST task, whatever its files are named", [S('PROJ-1', ['src/resolvers/user.ts'])], by({
+    'precheck:PROJ-1': { verdict: 'PASS', problems: [], summary: 'ok', authChange: 'src/resolvers/user.ts:41 — drops check_user_authenticated()' },
+  }), { args: ARGS({ policy: 'auto', precheck: true }) })
+  ok((a.result.policies.tasks['PROJ-1'].raisedAfterBuild || []).some((x) => x.includes('drops check_user_authenticated()')), 'the signal is the precheck\'s words')
+  eq(reviewersOf(a.labels, 'PROJ-1'), ['break-it', 'data-integrity', 'privacy', 'spec-hawk'], 'the strict panel with privacy, not FAST\'s two lenses')
+
+  const f = await run("a FAST build past FAST's footprint runs balanced", [S('PROJ-1', ['src/a.ts'])], by({
+    'impl:PROJ-1': { ...impl('aaaaaaa'), filesChanged: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'] },
+  }), { args: ARGS({ policy: 'auto' }) })
+  eq(f.result.policies.tasks['PROJ-1'].raisedAtPrecheck, ['src/a.ts', 'src/b.ts', 'src/c.ts'], 'raised, the files named')
+  ok(f.labels.includes('data-integrity:PROJ-1'), "the repo's full quality core")
+
+  const d = await run('no policy asked for: the build changes nothing (balanced, 0.15.1)', [S('PROJ-1', [])], by({
+    'impl:PROJ-1': { ...impl('aaaaaaa'), filesChanged: ['src/auth/session.ts'] },
+  }), { args: ARGS() })
+  ok(!d.labels.includes('privacy:PROJ-1') && !('raisedAfterBuild' in d.result.policies.tasks['PROJ-1']), 'no raise, no promoted lens')
+}
+
+// ── 21. repos[].strictPaths: one repo's own floor globs ──
+{
+  const API2 = { ...API, strictPaths: ['src/services/auth.rs', '**/aws_cognito/**'] }
+  const tasks = [S('PROJ-1', ['src/services/auth.rs — check the token']), S('PROJ-2', ['lib/aws_cognito/client.rs']), S('PROJ-3', ['src/services/feed.rs'])]
+  const { result } = await run('repos[].strictPaths add to the run\'s floor globs', tasks, by({}), { args: ARGS({ policy: 'auto', repos: [API2] }) })
+  eq(['PROJ-1', 'PROJ-2', 'PROJ-3'].map((id) => result.policies.tasks[id].auto), ['strict', 'strict', 'fast'], "the repo's globs floor its tasks; the rest route as before")
+  const bad = await run('a malformed repos[].strictPaths is ignored', [S('PROJ-1', ['src/a.ts'])], by({}), { args: ARGS({ policy: 'auto', repos: [{ ...API, strictPaths: 'src/**' }] }) })
+  ok(bad.logs.some((l) => l.includes('repos[api].strictPaths ignored')), 'logged, the run\'s globs apply')
+}
+
+// ── 22. the contract lens: promoted by a contract file or a cross-repo dependency, both sides in its brief ──
+{
+  const tasks = [S('PROJ-1', ['api/events.proto — add a field']), S('PROJ-2', ['web/page.tsx'], { repo: 'web', agent: 'web-engineer', dependsOn: ['PROJ-1'] }), S('PROJ-3', ['src/a.ts'])]
+  const { labels, prompt } = await run('contract: promoted under STRICT, never by a tag', tasks, by({}), { args: ARGS({ policy: 'auto', repos: [API, WEB] }) })
+  ok(labels.includes('contract:PROJ-1'), 'a .proto footprint promotes the contract lens')
+  ok(labels.includes('contract:PROJ-2'), 'so does a dependency on another repo\'s task')
+  ok(!labels.includes('contract:PROJ-3'), 'a plain task never draws it')
+  const p2 = prompt('contract:PROJ-2')
+  ok(p2.includes('The other side of the contract') && p2.includes('`repositories/api`') && p2.includes('PROJ-1 (api)'), "its brief names the other repo's path and the task it depends on")
 }
 
 console.log(`\n${PASS} passed, ${FAIL} failed`)

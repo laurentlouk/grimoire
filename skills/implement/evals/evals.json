@@ -134,5 +134,17 @@
       { "text": "The handoff names the branch, the head, what is done and the open feedback", "passed": null, "evidence": "" },
       { "text": "The new brief keeps the 4-minute wait rule", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 7,
+    "query": "Implement ODY-792: per-user rate limits on SMS OTP and chat send, backend half. The issue declares no files and there is no policy in grimoire.config.json.",
+    "should_trigger": true,
+    "expected_output": "Resolves the profile from workflows/policies.md before building: no declared files, so it lists the files the change will touch and classifies those (the repo's strictPaths included); the auth service and the deploy workflow are floors, so the profile is strict and the build runs on opus. After the build it classifies what actually changed (a floor file, or an auth check added, removed or changed) and never lowers the profile. The PR description names the profile and the signal that set it.",
+    "expectations": [
+      { "text": "Lists the files the change will touch and classifies them against strictPaths, including the repo's own strictPaths, before building", "passed": null, "evidence": "" },
+      { "text": "Resolves strict from a floor signal it names, and builds on opus", "passed": null, "evidence": "" },
+      { "text": "Classifies the changed files (and any auth check the diff changes) again after the build, raise-only", "passed": null, "evidence": "" },
+      { "text": "States the profile and its signal in the PR description", "passed": null, "evidence": "" }
+    ]
   }
 ]

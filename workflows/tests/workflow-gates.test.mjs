@@ -917,7 +917,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
   ok(withBrief.every((c) => /## Brief\nYour FIRST action: Read `workflows\/briefs\//.test(c.prompt)), 'every implementer/reviewer/guard/gate/fix dispatch opens with its brief pointer')
   const src = readFileSync(`${DIR}/orchestrate-loop.js`, 'utf8')
   const personaIds = [...src.matchAll(/\{ id: '([a-z-]+)', name: '/g)].map((m) => m[1])
-  ok(personaIds.length === 8 && personaIds.every((id) => existsSync(`${DIR}/personas/${id}.md`)), 'every REVIEW_PANEL persona has its lens file')
+  ok(personaIds.length === 9 && personaIds.every((id) => existsSync(`${DIR}/personas/${id}.md`)), 'every REVIEW_PANEL persona has its lens file')
   const panelBlock = src.split('const REVIEW_PANEL')[1].split('// ═══')[0]
   ok(!/focus:/.test(panelBlock) && !/lens/i.test(panelBlock), 'the panel table carries structure only — no lens prose in the JS')
   ok(/^export const meta = \{\n {2}name: 'orchestrate-loop',/m.test(readFileSync(`${DIR}/orchestrate-loop.js`, 'utf8')), "the meta literal still names the workflow 'orchestrate-loop'")
@@ -929,7 +929,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
     'briefs/resolve.md', 'briefs/review.md', 'briefs/guard.md', 'briefs/integrate.md', 'briefs/gate.md', 'briefs/replan.md',
     'briefs/ledger.md', 'briefs/crystallize.md', 'personas/README.md', 'personas/spec-hawk.md', 'personas/break-it.md',
     'personas/data-integrity.md', 'personas/reliability-sre.md', 'personas/hig.md', 'personas/accessibility.md',
-    'personas/privacy.md', 'personas/app-store.md', 'briefs/precheck.md', 'briefs/verify.md', 'briefs/journal.md', 'briefs/claim.md',
+    'personas/privacy.md', 'personas/app-store.md', 'personas/contract.md', 'briefs/precheck.md', 'briefs/verify.md', 'briefs/journal.md', 'briefs/claim.md',
     'tests/loop-integrity-v08.test.mjs', 'tests/run-efficiency-v081.test.mjs', '../CHANGELOG.md']
   // Product, vendor and stack names that must not reappear when someone edits the prose.
   const BANNED = /\b(odyyy|linear mcp|claude\.md|redpanda|dynamodb|redisearch|drizzle|expo|nativewind|terragrunt|sentry|codex|laurent|e2e-green|smoke:android|smoke:ios)\b/i
@@ -986,7 +986,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
   ok(calls.find((c) => c.label.startsWith('hydrate:')).opts.model === 'sonnet', 'hydration runs on sonnet')
   const { readdirSync } = await import('node:fs')
   const personas = readdirSync(`${DIR}/personas`).filter((f) => f.endsWith('.md') && f !== 'README.md')
-  ok(personas.length === 8 && personas.every((f) => /## Scope/.test(readFileSync(`${DIR}/personas/${f}`, 'utf8'))), 'every persona declares the Scope the sweep reads')
+  ok(personas.length === 9 && personas.every((f) => /## Scope/.test(readFileSync(`${DIR}/personas/${f}`, 'utf8'))), 'every persona declares the Scope the sweep reads')
 }
 
 console.log(`\n${'═'.repeat(60)}\n${PASS} passed · ${FAIL} failed`)

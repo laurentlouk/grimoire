@@ -42,5 +42,15 @@ const out = report(rows.map((t) => ({ run: 'r1', ...t })))
 eq(out.mix, { fast: 2, strict: 1, balanced: 1 }, 'the mix')
 eq(out.misroutes.map((m) => [m.id, m.why]), [['P-3', ['round-0 FAIL (quality:Adversarial QA & Integrity)']]], 'a FAST pick with a recorded round-0 FAIL is a misroute to look at')
 
+// declared files (0.18.0 on): the router sees the declared footprint, not declared + changed
+mkdirSync(join(dir, 'r2'))
+writeFileSync(join(dir, 'r2', 'landed.jsonl'), [
+  { id: 'D-1', files: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'], declared: ['src/a.ts'] },
+  { id: 'D-2', files: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'] },
+].map((d) => JSON.stringify(d)).join('\n'))
+const rows2 = counterfactualRun({ runId: 'r2', events: [R('D-1', 'sonnet'), R('D-2', 'sonnet')] }, join(dir, 'r2'), { router, rules: rulesOf(router, {}), tagsOf: () => ['backend'], migrationAgents: ['migration-engineer'] })
+eq(rows2.map((t) => [t.id, t.auto, t.declared]), [['D-1', 'fast', true], ['D-2', 'balanced', false]], 'a record with `declared` routes on it; an older one on declared + changed files')
+eq(report(rows2).declaredCoverage, 1, 'declaredCoverage counts the tasks routed on declared files')
+
 console.log(`\n${PASS} passed, ${FAIL} failed`)
 process.exit(FAIL ? 1 : 0)

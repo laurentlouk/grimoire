@@ -6,6 +6,8 @@ appliesTo — what the scheduler needs to pick a panel); the *lens* an agent rea
 
 Stages: `spec` (per task, fidelity) · `quality` (per task, the build-safety core a dependent
 task would inherit) · `terminal` (once per repo at project end, the whole integrated branch).
+A persona whose `appliesTo` is empty (`contract`) is never drawn by tag: the STRICT policy promotes
+it into a task's quality stage (`policies.promote`, see `workflows/policies.md`).
 
 `appliesTo` matches on a repo's **tags**, never its name — set `args.repos[].tags` to
 `backend`, `mobile`, `web`, `infra` (or your own; a persona simply never fires for a tag no
