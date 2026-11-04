@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.22.0 — the stuck watch, in shadow (token economy slice 3, #49)
+
+A dispatched agent can loop: the same failing test, edit after edit, until its time limit. This release watches every dispatched agent's calls and records what it would do. Nothing is sent to the agent yet.
+
+- **`hooks/scripts/economy.mjs`**, a new hook on `PostToolUse`, `PostToolUseFailure` and `SubagentStop`, folds each subagent call into `.grimoire/economy/turns/<agent_id>.json`, in the main checkout.
+  - When the gate opens (18 calls, then a repeated failure or 8 error outputs), it writes a judge request holding counts, commands and failure signatures, never file content.
+  - Stuck and past the role's envelope (or 2.5× it) is recorded as `would-redirect`, a later one as `would-block`. A judge's verdict left for the current segment is recorded the same way.
+  - At `SubagentStop`, a dispatch that ended green feeds its role's envelope: the 90th percentile × 1.25, after 5 samples, per repo and agent type, under a lock that drops the sample when busy.
+  - It always answers `{}` and fails open: errors go to `errors.log`, with a malformed input's position only. `GRIMOIRE_ECONOMY=0` or `economy.loopGuard: "off"` turns it off.
+  - The main session's calls are answered by the wrapper without starting `node`. A dispatched agent's call costs about 50–60 ms, almost all of it `node`'s startup; the handler's own work is about 0.3 ms. No model, git or transcript read on a call.
+  - One agent's parallel calls fold one at a time, under a per-agent lock. A Write's response, which carries the whole file, is never read for failures.
+- **`scripts/economy/loopguard/`**: the fold and rules, ported from TokenEconomizer (commit `1deb887`, Apache-2.0, credited in each file). That is `SpiralState`, shell-edit detection, failure signatures, a runner's summary verdict for piped test runs, the gate, `is_stuck`, the redirect template and the envelope. Their pinned cases are ported with them (114 checks). Its learned thresholds and its judge cascade are left out: the judge is the engine's dispatch (slice 4).
+- **`scripts/economy/replay.mjs`** runs the same fold and free rules over recorded runs, each workflow's dispatches in the order they started, and prints, per role, the dispatches gated, stuck, would-redirect and would-block, the envelope and the flagged cost.
+  - On the maintainer's 13 runs, it would redirect 6 engineer dispatches and block 1.
+  - The gate opens on many dispatches, as it should: it only decides when a paid look is worth it.
+- `.grimoire/economy/` resolves to the main checkout (`scripts/economy/paths.mjs`). `grimoire.config.example.json` gets `economy.loopGuard` and `economy.loopGuardThresholds`, and the hooks README a "stuck watch" section.
+
 ## 0.21.0 — tool evidence: the MCP servers each role loads and never uses (token economy slice 8, #54)
 
 Every dispatched agent is sent its loaded tools and the names of its deferred ones on each request, used or not. On recorded runs, the deferred tool-name list of a team engineer was about 8.7 k tokens, 775 of them MCP. This slice measures what each role never uses. Nothing is changed automatically; `crystallize` proposes the denials.

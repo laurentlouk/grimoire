@@ -15,6 +15,7 @@
   "policy": "balanced",
   "policies": { "strictTags": ["infra"], "fastMaxFiles": 3, "allowBelowFloor": false },
   "telemetry": { "enabled": true, "dir": ".grimoire/runs", "retentionDays": 183 },
+  "economy": { "loopGuard": "shadow", "loopGuardThresholds": {} },
   "claim": { "identity": "grimoire-bot" },
   "trackerStatus": { "names": { "inReview": "In Review", "blocked": "Blocked" } },
   "toolHints": { "tracker": "mcp__<server-id>__* (Linear, the authenticated claude.ai connector)", "design": "mcp__<server-id>__* (Figma)", "errors": "the error tracker CLI (already authenticated)" },
