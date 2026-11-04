@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.24.0 — learned environment facts (token economy slice 6, #52)
+
+Agents keep rediscovering the same things about a repository's environment. The economy hook now learns them from finished work, with no model, and shows them to the next session in that repository.
+
+- **`scripts/economy/facts/`** ports microsoft/TokenEconomizer's LLM-free micro-skills (commit `1deb887`, Apache-2.0, credited per file):
+  - `observe.mjs`: command segmentation, intent and form, error classes, outcomes in compound commands. rtk's prefix is stripped too.
+  - `families.mjs`: the five families: form repair, arg repair, env value, boundary and empty probe.
+  - `lifecycle.mjs`: three confirmations, the 0.8^age score with contradictions weighted 5×, the firing gate of ≥ 40 % over ≥ 4.
+  - `render.mjs`: at most 4 facts and about 600 characters, with the advice lint.
+  - All of its envfacts tests are ported (89 checks). A differential against the Python matched on 3,485 of 3,486 comparisons; the one difference is a tie the Python breaks by hash order.
+- **The hook folds** each finished dispatch (`SubagentStop`, its transcript) and session (`SessionEnd`) once, into the store of each repo its calls ran in (`.grimoire/economy/facts/<repo>.json`). This happens under a lock; a busy lock skips the fold until the next stop. A fact's history keeps its last 50 folds.
+- **It shows them** at `SessionStart` (`startup`, `clear`, `compact`; never `resume`): a session inside a repo gets that repo's block as `additionalContext`. The ids shown are kept so the session's fold counts a prevented failure as fired.
+- `economy.facts: "off"` learns and shows nothing. The wrapper lets the session events through. The hooks README has a "Learned environment facts" section.
+
 ## 0.23.0 — the stuck judge: the engine rules on the stuck watch's requests (token economy slice 4, #50)
 
 The stuck watch (0.22.0) writes a judge request when a dispatched agent's calls look like a loop. Now a judge rules on those requests. It is a workflow subagent the engine dispatches, never a `claude -p` call.

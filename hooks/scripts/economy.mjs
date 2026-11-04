@@ -13,7 +13,15 @@
 // At SubagentStop a dispatch that ended green (no failed check after its last edit) feeds its role's
 // envelope, `envelope.json` (per repo and agent type), under a lock; a busy lock drops the sample.
 //
-// This release changes nothing: it always answers `{}`, and `economy.loopGuard: "on"` records as
+// Learned environment facts (token economy slice 6, microsoft/TokenEconomizer's micro-skills): at
+// SubagentStop (the agent's transcript) and SessionEnd (the session's), each dispatch or session is
+// folded once (`facts/folded.json`), under a lock, into the store of each repo its calls ran in
+// (`facts/<repo>.json`, scripts/economy/facts/). At SessionStart (startup, clear, compact; never
+// resume), a session inside a repo gets that repo's block as additionalContext, and the ids it was
+// shown are kept (`facts/sessions/<session_id>.json`) so its fold counts a prevented failure as fired.
+// `economy.facts: "off"` learns and injects nothing. Transcripts are read at a stop, never on a call.
+//
+// This release changes nothing: it always answers `{}` to calls and stops, and `economy.loopGuard: "on"` records as
 // "shadow" does until token economy slice 5 delivers redirects. No model call, no git, no transcript
 // read on a call. Every failure answers `{}` and adds a line to `.grimoire/economy/errors.log`.
 // `GRIMOIRE_ECONOMY=0` in the session's environment turns it off; so does `economy.loopGuard: "off"`
@@ -28,6 +36,8 @@ import { newTurn, foldCall, resolved, freeVerdict, wantsJudge, decide, verificat
 import { recentDigest } from '../../scripts/economy/loopguard/state.mjs'
 import { DEFAULT_THRESHOLDS } from '../../scripts/economy/loopguard/rules.mjs'
 import { envelopeOf, withSample } from '../../scripts/economy/loopguard/envelope.mjs'
+import { readTranscript } from '../../scripts/economy/transcript.mjs'
+import { fromJSON, toJSON, update as foldFacts, render as renderFacts, injectedIds, seedInjected } from '../../scripts/economy/facts/families.mjs'
 
 const AGENT_ID = /^[A-Za-z0-9_.-]{1,128}$/
 const MODES = new Set(['off', 'shadow', 'on'])
@@ -35,6 +45,9 @@ const LOCK_WAIT_MS = 250
 const CALL_LOCK_WAIT_MS = 2000 // a fold takes well under a millisecond: only a crashed holder waits this long
 const LOCK_STALE_MS = 10000
 const KEEP_TURNS_MS = 7 * 86400000
+const KEEP_FOLDED = 5000 // the most recent folded dispatch and session keys
+const KEEP_CONFIRMS = 50 // a fact's history, by fold: older confirmations weigh 0.8^age ≈ nothing
+const INJECT_SOURCES = new Set(['startup', 'clear', 'compact'])
 const CONTENT_TOOLS = new Set(['read', 'grep', 'glob', 'view'])
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return null } }
@@ -58,6 +71,18 @@ function resultText(toolName, response, error) {
   return [response.stdout, response.stderr].filter((x) => typeof x === 'string' && x).join('\n')
 }
 
+// The repos[] entry a working directory is in, by its path under the main checkout; null outside every one.
+function repoMatcher(root, config) {
+  const base = mainCheckout(root) ?? root
+  const repos = (Array.isArray(config?.repos) ? config.repos : []).filter((r) => isObj(r) && typeof r.name === 'string')
+    .map((r) => ({ name: r.name, path: resolve(base, typeof r.path === 'string' && r.path ? r.path : r.name) }))
+  return (cwd) => {
+    if (typeof cwd !== 'string' || !cwd) return null
+    const where = resolve(cwd)
+    return repos.find((r) => where === r.path || where.startsWith(r.path + sep))?.name ?? null
+  }
+}
+
 // The agent's settings, read once at its first call: the mode, the thresholds and its repo.
 function firstLook(root, cwd) {
   const { config } = loadConfig(root)
@@ -65,15 +90,67 @@ function firstLook(root, cwd) {
   const mode = MODES.has(eco.loopGuard) ? eco.loopGuard : 'shadow'
   const thr = { ...DEFAULT_THRESHOLDS }
   for (const [k, v] of Object.entries(isObj(eco.loopGuardThresholds) ? eco.loopGuardThresholds : {})) if (k in thr && Number.isFinite(v) && v >= 0) thr[k] = v
-  const base = mainCheckout(root) ?? root
-  const where = resolve(cwd || root)
-  let repo = null
-  for (const r of Array.isArray(config?.repos) ? config.repos : []) {
-    if (!isObj(r) || typeof r.name !== 'string') continue
-    const p = resolve(base, typeof r.path === 'string' && r.path ? r.path : r.name)
-    if (where === p || where.startsWith(p + sep)) { repo = r.name; break }
+  return { mode, thr, repo: repoMatcher(root, config)(cwd || root) }
+}
+
+// ── learned facts ──
+const factsDir = (dir) => join(dir, 'facts')
+const factsOn = (config) => !(isObj(config?.economy) && config.economy.facts === 'off')
+const loadStore = (dir, repo) => fromJSON(readJson(join(factsDir(dir), `${repo}.json`)) ?? { repo }, repo)
+
+// Fold one finished dispatch or session (`key`, once) into the store of each repo its calls ran in.
+function foldTranscript(dir, root, event, key, file, injected, now) {
+  if (typeof file !== 'string' || !file) return
+  const { config } = loadConfig(root)
+  if (!factsOn(config)) return
+  const repoOf = repoMatcher(root, config)
+  const byRepo = new Map()
+  for (const c of readTranscript(file).calls) {
+    const repo = repoOf(c.cwd)
+    if (repo) (byRepo.get(repo) ?? byRepo.set(repo, []).get(repo)).push(c)
   }
-  return { mode, thr, repo }
+  mkdirSync(factsDir(dir), { recursive: true })
+  const done = withLock(join(dir, 'facts.lock'), () => {
+    const folded = readJson(join(factsDir(dir), 'folded.json')) ?? {}
+    if (Object.hasOwn(folded, key)) return
+    for (const [repo, calls] of byRepo) {
+      const store = loadStore(dir, repo)
+      if (Array.isArray(injected?.[repo])) seedInjected(store, injected[repo])
+      foldFacts(store, calls, { iid: key, at: new Date(now).toISOString() })
+      for (const f of Object.values(store.facts)) {
+        f.life.confirms = f.life.confirms.slice(-KEEP_CONFIRMS)
+        f.life.contradicts = f.life.contradicts.slice(-KEEP_CONFIRMS)
+      }
+      writeJson(join(factsDir(dir), `${repo}.json`), toJSON(store))
+    }
+    folded[key] = now
+    writeJson(join(factsDir(dir), 'folded.json'), Object.fromEntries(Object.entries(folded).sort((a, b) => a[1] - b[1]).slice(-KEEP_FOLDED)))
+  })
+  if (!done) logError(dir, event, `facts of ${key.replace(':', ' ')} not folded: the lock stayed busy`, now)
+}
+
+// SessionStart: the repo's block, and the ids it holds kept for the session's fold.
+function onSessionStart(dir, root, payload) {
+  if (!INJECT_SOURCES.has(payload.source)) return {}
+  const { config } = loadConfig(root)
+  if (!factsOn(config)) return {}
+  const repo = repoMatcher(root, config)(payload.cwd)
+  if (!repo || !existsSync(join(factsDir(dir), `${repo}.json`))) return {}
+  const store = loadStore(dir, repo)
+  const block = renderFacts(store)
+  if (!block) return {}
+  if (typeof payload.session_id === 'string' && AGENT_ID.test(payload.session_id)) {
+    mkdirSync(join(factsDir(dir), 'sessions'), { recursive: true })
+    writeJson(join(factsDir(dir), 'sessions', `${payload.session_id}.json`), { [repo]: injectedIds(store) })
+  }
+  return { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: block } }
+}
+
+function onSessionEnd(dir, root, payload, now) {
+  if (typeof payload.session_id !== 'string' || !AGENT_ID.test(payload.session_id)) return
+  const shown = join(factsDir(dir), 'sessions', `${payload.session_id}.json`)
+  foldTranscript(dir, root, 'SessionEnd', `session:${payload.session_id}`, payload.transcript_path, readJson(shown), now)
+  rmSync(shown, { force: true })
 }
 
 function onCall(dir, payload, now) {
@@ -141,7 +218,8 @@ function withLock(lock, fn, wait = LOCK_WAIT_MS) {
   return true
 }
 
-function onStop(dir, payload, now) {
+function onStop(dir, root, payload, now) {
+  foldTranscript(dir, root, 'SubagentStop', `agent:${payload.agent_id}`, payload.agent_transcript_path, null, now)
   const file = join(dir, 'turns', `${payload.agent_id}.json`)
   const t = readJson(file)
   if (!isObj(t) || t.v !== 1 || t.off || t.stopped) return
@@ -176,11 +254,19 @@ function logError(dir, event, message, now) {
 export function handle(payload, { env = process.env, now = Date.now() } = {}) {
   if (env.GRIMOIRE_ECONOMY === '0') return {}
   if (!isObj(payload)) throw new Error('the hook input is not a JSON object')
+  if (payload.hook_event_name === 'SessionStart' || payload.hook_event_name === 'SessionEnd') {
+    const root = projectRoot({ env, cwd: payload.cwd })
+    const dir = economyDir(root)
+    if (payload.hook_event_name === 'SessionStart') return onSessionStart(dir, root, payload)
+    onSessionEnd(dir, root, payload, now)
+    return {}
+  }
   const id = payload.agent_id
   if (typeof id !== 'string' || !AGENT_ID.test(id)) return {} // the main session: not watched in this release
-  const dir = economyDir(projectRoot({ env, cwd: payload.cwd }))
+  const root = projectRoot({ env, cwd: payload.cwd })
+  const dir = economyDir(root)
   if (payload.hook_event_name === 'PostToolUse' || payload.hook_event_name === 'PostToolUseFailure') onCall(dir, payload, now)
-  else if (payload.hook_event_name === 'SubagentStop') onStop(dir, payload, now)
+  else if (payload.hook_event_name === 'SubagentStop') onStop(dir, root, payload, now)
   return {}
 }
 

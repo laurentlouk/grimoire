@@ -138,6 +138,8 @@ try {
     delete main.agent_id
     eq(sh(main).stdout, '{}', 'the main session: {} without starting node')
     eq([sh(failing(P, 'w', 1)).stdout, existsSync(join(eco(P), 'turns', 'w.json'))], ['{}', true], 'a subagent call reaches the hook')
+    eq([sh({ hook_event_name: 'SessionStart', cwd: P, session_id: 'z', source: 'startup' }).stdout, sh({ hook_event_name: 'SessionEnd', cwd: P, session_id: 'z', transcript_path: '/none' }).stdout], ['{}', '{}'],
+      'the session events go through to the hook (and answer {} with nothing to say)')
   }
 
   section('a linked worktree shares the main checkout\'s state')
@@ -189,6 +191,57 @@ try {
     const t = readJ(join(eco(P), 'turns', 'j.json'))
     eq(t.events.map((e) => [e.action, e.reason, e.segment]), [['would-redirect', 'judge-stuck@0.80', 0]], 'a stuck verdict at ≥ 0.7: would-redirect')
     ok(t.segment === 1 && !existsSync(join(eco(P), 'judge', 'j.result.json')), 'a fresh segment starts, and the verdict is consumed')
+  }
+
+  section('learned facts: folded at SubagentStop and SessionEnd, injected at SessionStart')
+  {
+    const P = project('facts')
+    const REPO = join(P, 'repositories', 'api')
+    let k = 0
+    // a Claude Code transcript: each call an assistant tool_use (with the call's cwd) and its result
+    const transcript = (name, calls) => {
+      const lines = calls.flatMap(([tool, input, out, err]) => {
+        const id = `c${++k}`
+        return [JSON.stringify({ type: 'assistant', cwd: REPO, message: { id: `m${k}`, model: 'claude-sonnet-5-5', content: [{ type: 'tool_use', id, name: tool, input }], usage: { input_tokens: 1, output_tokens: 1 } } }),
+          JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: !!err, content: out }] } })]
+      })
+      const f = join(SANDBOX, `${name}.jsonl`)
+      writeFileSync(f, `${lines.join('\n')}\n`)
+      return f
+    }
+    const BASE = '/opt/env/base/bin/python', PROJ = '/opt/env/proj/bin/python'
+    const broken = (i) => transcript(`broken${i}`, [['Edit', { file_path: join(REPO, `pkg/mod${i}.py`) }, 'ok'], ['Bash', { command: 'python -m pytest tests/test_a.py -q' }, `${BASE}: No module named pytest`, true],
+      ['Bash', { command: `${PROJ} -m pytest tests/test_a.py -q` }, '1 passed in 0.2s']])
+    const stopF = (id, file) => ({ hook_event_name: 'SubagentStop', cwd: REPO, session_id: 's', agent_id: id, agent_type: 'api-engineer', agent_transcript_path: file, stop_hook_active: false })
+    const store = () => readJ(join(eco(P), 'facts', 'api.json'))
+    for (let i = 0; i < 4; i++) eq(run(P, stopF(`f${i}`, broken(i))).stdout, '{}', `SubagentStop answers {} (dispatch ${i + 1})`)
+    const s1 = store()
+    eq([s1.repo, s1.now, Object.values(s1.facts).map((f) => [f.family, f.life.state, f.life.fireNum, f.life.fireDen])], ['api', 4, [['form_repair', 'ACTIVE', 4, 4]]],
+      'four dispatches that repaired the same form: an active fact, past the firing gate (≥ 40 % over ≥ 4)')
+    run(P, stopF('f0', broken(0)))
+    eq(store().now, 4, 'a dispatch is folded once, whatever its stops')
+    const start = (source, cwd = REPO) => run(P, { hook_event_name: 'SessionStart', cwd, session_id: 'sess-1', source, transcript_path: '/x.jsonl' })
+    const { render, fromJSON } = await import('../../scripts/economy/facts/families.mjs')
+    const want = render(fromJSON(s1, 'api'))
+    ok(want.includes('environment facts learned from earlier sessions') && want.includes(PROJ), `the repo renders a block naming the working form (${want.split('\n')[1] || want})`)
+    for (const source of ['startup', 'clear', 'compact']) eq(JSON.parse(start(source).stdout || '{}'), { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: want } }, `SessionStart (${source}): the block as additionalContext`)
+    eq(start('resume').stdout, '{}', 'SessionStart on resume: nothing (the session replays its own bytes)')
+    eq(start('startup', P).stdout, '{}', 'a session outside every repo gets no block')
+    ok(existsSync(join(eco(P), 'facts', 'sessions', 'sess-1.json')), 'the ids it was shown are kept for the session\'s fold')
+    // the session runs the working form first: the failure was prevented, and still counts as fired
+    const prevented = transcript('session', [['Edit', { file_path: join(REPO, 'pkg/x.py') }, 'ok'], ['Bash', { command: `${PROJ} -m pytest tests/test_a.py -q` }, '1 passed in 0.2s']])
+    eq(run(P, { hook_event_name: 'SessionEnd', cwd: REPO, session_id: 'sess-1', transcript_path: prevented, reason: 'clear' }).stdout, '{}', 'SessionEnd answers {}')
+    const f = Object.values(store().facts)[0]
+    eq([store().now, f.life.fireNum, f.life.fireDen, existsSync(join(eco(P), 'facts', 'sessions', 'sess-1.json'))], [5, 5, 5, false], 'the session is folded with the ids it was shown: a prevented failure counts as fired')
+    mkdirSync(join(eco(P), 'facts.lock'))
+    run(P, stopF('f9', broken(9)))
+    ok(store().now === 5 && /SubagentStop facts of agent f9 not folded: the lock stayed busy/.test(readFileSync(join(eco(P), 'errors.log'), 'utf8')), 'a busy lock skips the fold, never writes unlocked, and logs it')
+    rmSync(join(eco(P), 'facts.lock'), { recursive: true })
+    run(P, stopF('f9', broken(9)))
+    eq(store().now, 6, 'a dispatch skipped on a busy lock is folded at its next stop')
+    const O = project('facts-off', { repos: [{ name: 'api', path: 'repositories/api' }], economy: { facts: 'off' } })
+    run(O, { ...stopF('o1', broken(1)), cwd: join(O, 'repositories', 'api') })
+    ok(!existsSync(join(eco(O), 'facts')), 'economy.facts "off": nothing learned')
   }
 
   section('latency (spike S2)')
