@@ -681,6 +681,17 @@ try {
   ok(sc9 && sc9.medianCostPerLanded === I + 2 * J + 2 * Rv, 'median cost per landed task, over the runs that have a cost')
   const grp9 = S9 && S9.groups.find((g) => g.version === '0.14.0')
   ok(grp9 && JSON.stringify(grp9.costByTier) === JSON.stringify(c1.byTier) && JSON.stringify(grp9.costByLens) === JSON.stringify(c1.byLens), 'the per-version group carries cost by tier and by lens, for crystallize')
+  // learned facts (#53): those active for at least 10 of their repo's folds, for crystallize
+  mkdirSync(join(ROOT9, '.grimoire', 'economy', 'facts'), { recursive: true })
+  const fid = 'form_repair:run_tests:python -m pytest'
+  writeFileSync(join(ROOT9, '.grimoire', 'economy', 'facts', 'api.json'), JSON.stringify({ repo: 'api', now: 12, vocab: 'generic', facts: {
+    [fid]: { id: fid, family: 'form_repair', params: { intent: 'run_tests', a: 'python -m pytest', bCounts: { '/opt/p/bin/python -m pytest': 9 }, errorCounts: { module_missing: 9 }, bFails: {}, contraStreak: 0 },
+      life: { high: false, drift: false, state: 'ACTIVE', confirms: [[0, []], [1, []], [2, []]], contradicts: [], fireNum: 9, fireDen: 10, promotedAt: 2, retiredAt: null } } } }))
+  const s9b = spawnSync(process.execPath, [SCRIPT, 'summary', '--json', '--claude-dir', CLAUDE9], { cwd: ROOT9, encoding: 'utf8' })
+  const claim9 = '`python -m pytest …` fails here with ModuleNotFoundError; `/opt/p/bin/python -m pytest …` works.'
+  ok(JSON.stringify(JSON.parse(s9b.stdout || '{}').learnedFacts) === JSON.stringify([{ repo: 'api', id: fid, family: 'form_repair', claim: claim9, activeFolds: 10, fired: 9, exercised: 10 }]),
+    `summary --json: the durable learned facts, with their counts (${JSON.stringify(JSON.parse(s9b.stdout || '{}').learnedFacts)})`)
+  ok(spawnSync(process.execPath, [SCRIPT, 'summary', '--claude-dir', CLAUDE9], { cwd: ROOT9, encoding: 'utf8' }).stdout.includes(`  learned fact (api, active 10 folds, fired 9/10): ${claim9}\n`), 'and one line per fact in the text')
   // tool evidence (#54): per role, the MCP servers loaded and never used; the desktop app's own always proposed
   ok(S9 && JSON.stringify(S9.toolEvidence) === JSON.stringify({
     runs: 1,

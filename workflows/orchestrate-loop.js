@@ -155,6 +155,8 @@ const MODELS = ['haiku', 'sonnet', 'opus']
 // Filled by the harness-context loader (execute runs); read by every brief builder below.
 let agentMemory = {} // agent name → verbatim entries of <memoryDir>/agents/<agent>.md
 let harnessMemory = '' // verbatim entries of <memoryDir>/harness.md
+const factBlocks = {} // repo → its learned environment facts block, read once per run (factsBlock)
+const factIds = {} // repo → the fact ids that block shows
 let priorLearnings = [] // [{text, repos}] from earlier ledgers of this project / these repos
 const policyHistory = new Map() // repo → {fast, escalated}: FAST tasks of earlier runs and how many escalated (the D6 raise)
 
@@ -218,6 +220,16 @@ const HARNESS_CONTEXT_SCHEMA = {
       type: 'object',
       description: 'agent name → verbatim entries of <memoryDir>/agents/<agent>.md, for each agent named in the prompt',
       additionalProperties: { type: 'string' },
+    },
+    factBlocks: {
+      type: 'object',
+      description: "repo → that repo's learned-facts block, verbatim, from the facts CLI's JSON (`repos.<repo>.block`); omit repos it did not print",
+      additionalProperties: { type: 'string' },
+    },
+    factIds: {
+      type: 'object',
+      description: 'repo → the fact ids its block shows, verbatim, from the same JSON (`repos.<repo>.ids`)',
+      additionalProperties: { type: 'array', items: { type: 'string' } },
     },
     priorLearnings: {
       type: 'array',
@@ -720,8 +732,21 @@ function harnessContextPrompt(project, repos, agents) {
   return `Load the harness context for an automated build run of tracker project ${project} touching repos: ${repos.join(', ') || '(unknown yet)'}. Read-only; return the structured object.
 1. Read \`${MEMORY_DIR}/harness.md\` and, for each of ${agents.join(', ')}, \`${MEMORY_DIR}/agents/<agent>.md\`. Return each file's ENTRIES verbatim (drop the leading HTML comment header and a literal "(no entries yet)" placeholder — return "" for those). Do not summarize or reword entries.
 2. List \`${RUNS_DIR}/*.json\` (if the directory exists). Read, newest first, the ledgers whose \`project\` equals ${project} OR whose \`repos\` intersect the list above — at most 8 files. Collect their \`learnings\` arrays. An entry is either an object \`{text, repos}\` (return it as is) or a bare string (older ledgers: return \`{text: <the string>, repos: <that ledger's repos array>}\`). Deduplicate on text (case-insensitive, trimmed), keep newest first, cap at 30, return as priorLearnings and the paths read as priorLedgers.
-3. From the same ledgers, where one has a \`policies.tasks\` object (id → {repo, policy, escalated?}), count per repo the entries whose \`policy\` is "fast" and, of those, the ones with \`escalated: true\`. Return the sums over all ledgers read as \`policyHistory: [{repo, fast, escalated}]\` (copy the numbers; do not estimate).
+3. From the same ledgers, where one has a \`policies.tasks\` object (id → {repo, policy, escalated?}), count per repo the entries whose \`policy\` is "fast" and, of those, the ones with \`escalated: true\`. Return the sums over all ledgers read as \`policyHistory: [{repo, fast, escalated}]\` (copy the numbers; do not estimate).${repos.length ? `
+4. Run \`node ${shq(factsCli())} render --root ${ROOT ? shq(ROOT) : '.'} --repos ${shq(repos.join(','))}\` once. It prints JSON \`{"repos": {<repo>: {"block": "...", "ids": [...]}}}\`: the environment facts learned in each repo (machine-observed, read-only). Return \`factBlocks\` (repo → its block, verbatim) and \`factIds\` (repo → its ids). It prints \`{"repos":{}}\` when nothing is learned; when it fails, return both empty.` : ''}
 Missing files/dirs are normal on a fresh harness — return empty values, never an error.`
+}
+// A repo's learned environment facts (token economy slice 7): read once per run by the harness-context
+// loader, so every brief of the run carries the same block (the cached prefix never changes mid-run),
+// with a marker naming the ids it shows: the economy hook reads it from the dispatch's transcript, so
+// a failure the block prevented still counts as fired. Implementers, fixes and gates get it; reviewers
+// run no project commands.
+const factsCli = () => (PLUGIN_ROOT ? `${PLUGIN_ROOT}/scripts/economy/facts/cli.mjs` : `${SCRIPTS_DIR}/../../scripts/economy/facts/cli.mjs`)
+function factsBlock(repo) {
+  const block = typeof factBlocks[repo] === 'string' ? factBlocks[repo].trim() : ''
+  if (!block) return ''
+  const ids = Array.isArray(factIds[repo]) ? factIds[repo].filter((x) => typeof x === 'string') : []
+  return `## Learned environment facts (machine-observed; you never write them)\n${block}\n<!-- grimoire:facts ${JSON.stringify({ repo, ids })} -->\n\n`
 }
 // The "## Your memory" block pasted at the top of every brief, per agent.
 function memoryBlock(agent) {
@@ -1227,7 +1252,7 @@ function implPrompt(task, fixFindings, resolved) {
     owner && agent !== owner && (agentMemory[memName(owner)] || '').trim()
       ? `## Repo facts (\`${MEMORY_DIR}/agents/${memName(owner)}.md\` — the owning agent's memory; binding in this repo)\n${agentMemory[memName(owner)].trim()}\n\n`
       : ''
-  let out = `${memoryBlock(agent)}${ownerFacts}${brief('implement')}## Task (${task.id} · ${task.ticket || 'NO_TICKET'}) — from the plan, verbatim
+  let out = `${memoryBlock(agent)}${ownerFacts}${factsBlock(task.repo)}${brief('implement')}## Task (${task.id} · ${task.ticket || 'NO_TICKET'}) — from the plan, verbatim
 ${task.taskText}
 
 ## Where it fits
@@ -1290,7 +1315,7 @@ function gatePrompt(task, gate, hits, landedHere = [], ship = {}) {
   const cond = gate && gate.when && Array.isArray(gate.when.pathsMatching) && gate.when.pathsMatching.length
   const applies = !!(gate && gate.run) && (!cond || hits.length > 0)
   const cmdLine = gate && gate.run ? `\`${gate.run}\`` : '(this repo has no gate command)'
-  return `${memoryBlock(agentFor(task.repo))}${brief('gate')}- Repo: ${repoPath(task.repo)} · branch ${task.branch || '(the feature branch)'} · ticket ${task.ticket || 'NO_TICKET'} (PR title tag ${ticketTag(task)})
+  return `${memoryBlock(agentFor(task.repo))}${factsBlock(task.repo)}${brief('gate')}- Repo: ${repoPath(task.repo)} · branch ${task.branch || '(the feature branch)'} · ticket ${task.ticket || 'NO_TICKET'} (PR title tag ${ticketTag(task)})
 - Gate command: **${applies ? 'APPLIES' : 'does NOT apply'}** — ${cmdLine}${
     applies
       ? `${cond ? `\n- It applies because this run touched ${hits.slice(0, 12).map((h) => `\`${h}\``).join(', ')}${hits.length > 12 ? ` (+${hits.length - 12} more)` : ''}.` : ''}${gate.note ? `\n- Before you run it: ${gate.note}` : ''}
@@ -5390,6 +5415,8 @@ async function runTask(task) {
   if (ctx) {
     harnessMemory = typeof ctx.harnessMemory === 'string' ? ctx.harnessMemory : ''
     agentMemory = ctx.agentMemory && typeof ctx.agentMemory === 'object' ? ctx.agentMemory : {}
+    for (const [repo, block] of Object.entries(ctx.factBlocks && typeof ctx.factBlocks === 'object' ? ctx.factBlocks : {})) if (typeof block === 'string' && block.trim()) factBlocks[repo] = block
+    for (const [repo, ids] of Object.entries(ctx.factIds && typeof ctx.factIds === 'object' ? ctx.factIds : {})) if (Array.isArray(ids)) factIds[repo] = ids.filter((x) => typeof x === 'string')
     priorLearnings = Array.isArray(ctx.priorLearnings) ? ctx.priorLearnings.map((l) => toLearning(l, [])).filter(Boolean) : []
     for (const h of Array.isArray(ctx.policyHistory) ? ctx.policyHistory : [])
       if (h && typeof h.repo === 'string' && Number.isInteger(h.fast) && Number.isInteger(h.escalated) && h.fast > 0 && h.escalated >= 0 && h.escalated <= h.fast) policyHistory.set(h.repo, { fast: h.fast, escalated: h.escalated })

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.25.0 — learned facts in the loop's briefs (token economy slice 7, #53)
+
+The environment facts the economy hook learns (0.24.0) now reach the loop's agents, and the ones that hold are proposed as memory.
+
+- **In the briefs.** The harness-context loader runs the new `scripts/economy/facts/cli.mjs render` once for the run's repos and returns each repo's block and the ids it shows (`HARNESS_CONTEXT_SCHEMA.factBlocks` and `factIds`).
+  - Every implementer, fix and gate brief of a repo carries the block under "## Learned environment facts (machine-observed; you never write them)".
+  - It is the same block for the whole run, so the cached brief prefix never changes. Reviewers do not get it.
+- **Counted as fired.** A marker beside the block names the ids shown. The hook reads it from the dispatch's first prompt at `SubagentStop`, so a failure the block prevented in a loop dispatch counts as fired, as it does for a session.
+- **Into memory.** `render-logs.mjs summary` lists the facts active for at least 10 of their repo's folds, with how often they fired (`learnedFacts` in `--json`, one line each in the text). `crystallize` proposes them as memory entries in its PR (new signal row and eval case). The CLI's `durable` command gives the same list.
+
 ## 0.24.0 — learned environment facts (token economy slice 6, #52)
 
 Agents keep rediscovering the same things about a repository's environment. The economy hook now learns them from finished work, with no model, and shows them to the next session in that repository.

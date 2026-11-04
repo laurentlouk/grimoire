@@ -43,6 +43,7 @@ import { fileURLToPath } from 'node:url'
 import { readConfig } from './project-config.mjs'
 import { runBill, indexWorkflows, rootsOf, labelContext, attributeIn } from './economy/runs.mjs'
 import { toolEvidence } from './economy/tools.mjs'
+import { durableFacts } from './economy/facts/cli.mjs'
 
 const DAY = 86400000
 
@@ -638,6 +639,10 @@ function scorecardText(sc) {
     `  journal: ${sc.journal.runsIncomplete} run(s) incomplete (${sc.journal.missingEvents} event(s) missing, ${sc.journal.leftovers} unfinished write(s)) · ${sc.journal.statusRepaired} status(es) taken from run.end`,
   ].join('\n')
 }
+
+// Learned environment facts active for at least this many of their repo's folds count as durable.
+const DURABLE_FOLDS = 10
+const learnedFactsText = (learned) => learned.map((f) => `  learned fact (${f.repo}, active ${f.activeFolds} folds, fired ${f.fired}/${f.exercised}): ${f.claim}`)
 
 // The servers each role could deny, one line per role that has any: crystallize's evidence for disallowedTools.
 function toolEvidenceText(tools) {
@@ -1237,10 +1242,12 @@ function main() {
     const sc = scorecard(outcomes)
     // which MCP servers each role loads and never uses: crystallize's disallowedTools evidence (summary only: it reads every transcript's calls)
     const tools = toolEvidence(runs, { claudeDir, index })
-    if (args.json) console.log(JSON.stringify({ dir, runs: runs.length, skippedLines: runs.reduce((a, r) => a + r.badLines, 0), scorecard: sc, outcomes, groups, toolEvidence: tools }, null, 2))
+    // the learned environment facts that have held: crystallize may propose them as memory entries
+    const learned = durableFacts(stateRoot(), { minFolds: DURABLE_FOLDS })
+    if (args.json) console.log(JSON.stringify({ dir, runs: runs.length, skippedLines: runs.reduce((a, r) => a + r.badLines, 0), scorecard: sc, outcomes, groups, toolEvidence: tools, learnedFacts: learned }, null, 2))
     else {
       const [head, ...rest] = summaryText(groups, runs, dir).split('\n') // outcomes first, then the per-version detail
-      console.log([head, ...(runs.length ? [scorecardText(sc), toolEvidenceText(tools)] : []), ...rest].join('\n'))
+      console.log([head, ...(runs.length ? [scorecardText(sc), toolEvidenceText(tools)] : []), ...learnedFactsText(learned), ...rest].join('\n'))
     }
     return
   }

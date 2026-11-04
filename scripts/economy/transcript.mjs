@@ -43,7 +43,7 @@ function parse(text, mode) {
   const calls = []
   const byToolId = new Map()
   const deferred = []
-  let badLines = 0, anon = 0, firstAt = null
+  let badLines = 0, anon = 0, firstAt = null, prompt = null
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
     if (mode !== 'full' && !line.includes('"type":"assistant"') && !(mode === 'calls' && line.includes('"deferred_tools_delta"'))) continue
@@ -51,6 +51,12 @@ function parse(text, mode) {
     try { e = JSON.parse(line) } catch { badLines++; continue }
     if (!isObj(e)) { badLines++; continue }
     if (firstAt === null && typeof e.timestamp === 'string') firstAt = e.timestamp
+    // the first user message is the prompt the agent was given (the loop's brief)
+    if (prompt === null && e.type === 'user' && isObj(e.message)) {
+      const c = e.message.content
+      if (typeof c === 'string') prompt = c
+      else if (Array.isArray(c) && !c.some((b) => isObj(b) && b.type === 'tool_result')) prompt = c.filter((b) => isObj(b) && typeof b.text === 'string').map((b) => b.text).join('\n')
+    }
     if (!usageOnly && e.type === 'attachment' && isObj(e.attachment) && e.attachment.type === 'deferred_tools_delta') {
       deferred.push(e.attachment)
       continue
@@ -91,7 +97,7 @@ function parse(text, mode) {
   for (const md of modelById.values()) counts.set(md, (counts.get(md) || 0) + 1)
   let model = null, best = 0
   for (const [md, c] of counts) if (c > best) { model = md; best = c }
-  return { calls, usage, model, badLines, firstAt, deferredDeltas: deferred }
+  return { calls, usage, model, badLines, firstAt, prompt, deferredDeltas: deferred }
 }
 
 /** A subagent transcript plus its .meta.json (label = the dispatch description) and loaded tools
