@@ -271,6 +271,8 @@ try {
     { type: 'env', when: 'start', why: 'startup', ok: true, failed: [] },
     { type: 'late', label: 'impl:#5', task: '#5', kind: 'writer', softMin: 40 },
     { type: 'hedge', label: 'precheck:#5' },
+    { type: 'stuck', agent: 'agent-7', agentType: 'site-engineer', repo: 'site', action: 'would-redirect', confidence: 0.9, reason: 'same failure, same file' },
+    { type: 'budget', spent: 1200, cap: 1000, action: 'stop', kind: 'judge' },
     { type: 'late-result', label: 'impl:#5', task: '#5', accepted: true, status: 'DONE' },
     { type: 'review', task: '#5', stage: 'spec', persona: 'spec-hawk', verdict: 'FAIL', gating: 1, advisory: 0, round: 0 },
     { type: 'review', task: '#5', stage: 'quality', persona: 'break-it', verdict: 'FAIL', gating: 1, advisory: 0, round: 0, discarded: true, reason: 'a spec fix moved the head' },
@@ -322,6 +324,8 @@ try {
   let text = ''
   try { new Function('document', 'Node', js5)(doc, El); text = doc.body.textContent } catch (e) { ok(false, `the renderer ran (${e.message})`) }
   const has = (re, m) => ok(re.test(text), m)
+  has(/would-redirect · site-engineer@site · confidence 0\.9 · same failure, same file/, 'a stuck judge verdict reads as a sentence: the action, the role, the confidence, the reason')
+  has(/1200 \/ 1000 → stop/, "the judges' budget stop reads like any budget event")
   has(/impl:#5 past its 40-min soft limit \(writer\): still awaited, not stopped/, 'late: the label, the soft limit and that it is still awaited')
   has(/precheck:#5: a duplicate dispatch started/, 'hedge: a duplicate dispatch')
   has(/impl:#6 past its 180-min hard limit and still running: site fenced/, 'wedged: the hard limit and the fenced repo')

@@ -15,7 +15,7 @@
   "policy": "balanced",
   "policies": { "strictTags": ["infra"], "fastMaxFiles": 3, "allowBelowFloor": false },
   "telemetry": { "enabled": true, "dir": ".grimoire/runs", "retentionDays": 183 },
-  "economy": { "loopGuard": "shadow", "loopGuardThresholds": {} },
+  "economy": { "loopGuard": "shadow", "loopGuardThresholds": {}, "judgeModel": "haiku", "judgeAfterMin": 10, "judgeEveryMin": 5, "sidecallBudgetUsd": null, "prices": { "haiku": 1, "sonnet": 3, "opus": 5 } },
   "claim": { "identity": "grimoire-bot" },
   "trackerStatus": { "names": { "inReview": "In Review", "blocked": "Blocked" } },
   "toolHints": { "tracker": "mcp__<server-id>__* (Linear, the authenticated claude.ai connector)", "design": "mcp__<server-id>__* (Figma)", "errors": "the error tracker CLI (already authenticated)" },

@@ -9,8 +9,9 @@
 // session's cwd is the workspace root, the main checkout or one of its worktrees, so the project
 // dirs read are the roots' own and those nested under them (worktrees in .claude/worktrees/…).
 //
-//   node scripts/economy/runs.mjs cost --run <runId> [--root <dir>] [--claude-dir <dir>]
-//     → `COST <effective tokens>` for every session of the run so far (a resumed run's included),
+//   node scripts/economy/runs.mjs cost --run <runId> [--kind <kind>] [--root <dir>] [--claude-dir <dir>]
+//     → `COST <effective tokens>` for every session of the run so far (a resumed run's included), or
+//       for its dispatches of one kind only (`--kind stuck-judge`: what the stuck judges cost),
 //       read from the project dirs of <root> (default: the cwd) and of its git worktrees; `COST
 //       none` when no workflow of that runId is found. The loop's journal script runs it after each
 //       write when maxCost is set (token economy slice 2). Exit 2 on a usage error only.
@@ -101,9 +102,9 @@ export function runBill(runId, opts = {}) {
 
 // The engine's own dispatch kinds; any other label prefix is a review persona (a lens).
 export const ENGINE_KINDS = new Set(['impl', 'fix', 'precheck', 'verify', 'guard', 'integrate', 'resolve', 'hydrate', 'env', 'ship', 'seal', 'gate',
-  'journal', 'status', 'claim', 'replan', 'preflight', 'parse-index', 'harness-context', 'ledger', 'crystallize', 'contract-check', 'release-claims', 'agent'])
+  'journal', 'status', 'claim', 'replan', 'preflight', 'parse-index', 'harness-context', 'ledger', 'crystallize', 'contract-check', 'release-claims', 'agent', 'stuck-judge'])
 // Run-level kinds: whatever their label's rest holds (an agent name, a cycle), it is no task or repo.
-const RUN_KINDS = new Set(['preflight', 'journal', 'status', 'claim', 'replan', 'hydrate'])
+const RUN_KINDS = new Set(['preflight', 'journal', 'status', 'claim', 'replan', 'hydrate', 'stuck-judge'])
 const ATTEMPT_SUFFIX = /(?:#[^#:~+]*|~[^#:~+]*|\+[^#:~+]*)$/
 
 /**
@@ -171,10 +172,12 @@ export function rootsOf(root) {
 function costMain(argv) {
   const arg = (k) => { const i = argv.indexOf(`--${k}`); return i >= 0 && typeof argv[i + 1] === 'string' && !argv[i + 1].startsWith('--') ? argv[i + 1] : null }
   const runId = arg('run')
-  if (argv[0] !== 'cost' || !runId) { console.error('usage: node scripts/economy/runs.mjs cost --run <runId> [--root <dir>] [--claude-dir <dir>]'); return 2 }
+  if (argv[0] !== 'cost' || !runId) { console.error('usage: node scripts/economy/runs.mjs cost --run <runId> [--kind <kind>] [--root <dir>] [--claude-dir <dir>]'); return 2 }
   const root = resolve(arg('root') ?? process.cwd())
+  const kind = arg('kind')
   const bill = runBill(runId, { claudeDir: arg('claude-dir') ?? undefined, roots: rootsOf(root) })
-  console.log(bill.workflows.length ? `COST ${Math.round(bill.total.effective)}` : 'COST none')
+  const total = kind ? bill.dispatches.filter((d) => attribute(d.label).kind === kind).reduce((a, d) => a + d.effective, 0) : bill.total.effective
+  console.log(bill.workflows.length ? `COST ${Math.round(total)}` : 'COST none')
   return 0
 }
 
