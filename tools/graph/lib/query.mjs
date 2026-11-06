@@ -292,7 +292,8 @@ export class Graph {
     const tables = st.entities.filter((e) => e.kind === 'table'), views = st.entities.length - tables.length
     if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
     const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0)
-    return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), n(tables.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes'), conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
+    const implicit = Math.max(0, ...st.declarations.map((d) => d.implicitIndexes)) // the indexes SQLite builds for keys, beside the declared ones
+    return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), `${n(tables.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
   }
   sources(repo, list) { return list.map((s) => this.dloc({ repo, path: s.path, line: s.line })).join(' · ') }
   findStore(model, spec) {

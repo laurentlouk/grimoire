@@ -3,8 +3,11 @@
 // gets. Each table, column, key, index and foreign key is mapped to the migration file:line that
 // created or last altered it.
 //
-//   replay([{ path, text }] in order, DatabaseSync) → { entities, statements, stopped, notes }
+//   replay([{ path, text }] in order, DatabaseSync) → { entities, implicit, statements, stopped, notes }
 //     entities   the data model's declaration shape (model.mjs), sorted by name
+//     implicit   how many indexes SQLite built itself for primary and unique keys (sqlite_autoindex_*):
+//                the keys are the elements, this counts what PRAGMA index_list shows beside the
+//                declared indexes
 //     stopped    null, or { path, line, error }: the statement SQLite rejected. The replay stops
 //                there and the entities are the state just before it.
 //     notes      statements never run: ATTACH, DETACH and VACUUM reach files outside the replay
@@ -49,7 +52,7 @@ export function replay(files, DatabaseSync) {
         before = after
       }
     }
-    return { entities: read(db, tables, objects), statements, stopped, notes }
+    return { ...read(db, tables, objects), statements, stopped, notes }
   } finally { db.close() }
 }
 
@@ -90,6 +93,7 @@ function read(db, tables, objects) {
   const at = (loc) => ({ path: loc?.path ?? null, line: loc?.line ?? null })
   const pkOf = (table) => all('SELECT name, pk FROM pragma_table_xinfo(?) WHERE pk > 0 ORDER BY pk', table).map((c) => c.name)
   const out = []
+  let implicit = 0
   for (const { name, type } of all("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name")) {
     if (type === 'view') { out.push({ name, kind: 'view', ...at(objects.get(name)), fields: [], keys: [], indexes: [], relations: [] }); continue }
     const t = tables.get(name) || { loc: null, def: null, cols: new Map() }
@@ -101,7 +105,8 @@ function read(db, tables, objects) {
     if (pk.length) keys.push({ role: 'primary', parts: pk, ...at(lineIn(t.def, /\bPRIMARY\s+KEY\b/i) || colAt(pk[0])) })
     const indexes = []
     for (const ix of all('SELECT * FROM pragma_index_list(?) ORDER BY name', name)) {
-      if (ix.origin === 'pk') continue // the primary key's own index
+      if (ix.origin !== 'c') implicit++
+      if (ix.origin === 'pk') continue // the primary key's own index: the key is the element
       const columns = all('SELECT name FROM pragma_index_info(?) ORDER BY seqno', ix.name).map((c) => c.name ?? '(expression)')
       if (ix.origin === 'u') keys.push({ role: 'unique', parts: columns, ...at(lineIn(t.def, new RegExp(`\\bUNIQUE\\b.*${word(columns[0])}|${word(columns[0])}.*\\bUNIQUE\\b`, 'i'), /\bUNIQUE\b/i) || colAt(columns[0])) })
       else indexes.push({ name: ix.name, unique: !!ix.unique, columns, partial: !!ix.partial, ...at(objects.get(ix.name) || t.loc) })
@@ -120,5 +125,5 @@ function read(db, tables, objects) {
     })
     out.push({ name, kind: 'table', ...at(t.loc), fields, keys, indexes, relations })
   }
-  return out
+  return { entities: out, implicit }
 }

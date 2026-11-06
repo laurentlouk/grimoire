@@ -66,7 +66,7 @@ function merge(id, ds) {
     name: ds[0].store,
     dialect: store.dialect ?? null,
     dialectFrom: store.dialectFrom ?? null,
-    declarations: ds.map((d) => ({ extractor: d.extractor, kind: d.source.kind, path: d.source.path, line: d.source.line, status: d.status, label: d.label, stopped: d.stopped ?? null, error: d.error ?? null, notes: d.notes || [], files: d.files ?? null, dialect: d.dialect ?? null, dialectFrom: d.dialectFrom ?? null })),
+    declarations: ds.map((d) => ({ extractor: d.extractor, kind: d.source.kind, path: d.source.path, line: d.source.line, status: d.status, label: d.label, stopped: d.stopped ?? null, error: d.error ?? null, notes: d.notes || [], files: d.files ?? null, implicitIndexes: d.implicitIndexes ?? 0, dialect: d.dialect ?? null, dialectFrom: d.dialectFrom ?? null })),
     entities: [...entities.values()].sort(byName).map((E) => {
       const covering = complete.filter((d) => E.at.has(d)) // complete declarations that describe this entity
       const out = { id: `${id}/${E.name}`, ...done(E, complete, (d) => source(d, null)) }

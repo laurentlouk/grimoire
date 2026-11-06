@@ -128,7 +128,7 @@ ALTER TABLE books RENAME COLUMN title TO heading;
       '  primary (shelf_id, book_id) @db/0002_shelves.sql:5',
       '  fk (book_id) -> books(id) delete no action update no action @db/0002_shelves.sql:6'],
   ], 'every table, column, key, index and foreign key, each at the line that created or last altered it (a rebuilt table keeps its columns\' lines through the rename)')
-  eq([r.statements, r.stopped], [11, null], 'every statement ran')
+  eq([r.statements, r.stopped, r.implicit], [11, null, 3], "every statement ran; SQLite built 3 indexes of its own for keys (books' and shelf_books' primary keys, books' unique pair)")
 
   const bad = { path: 'db/0003_more.sql', text: 'ALTER TABLE books ADD COLUMN pages INTEGER;\n\nALTER TABLE nope ADD COLUMN x TEXT;\nCREATE TABLE never (x);\n' }
   const p = replay([init, bad], DatabaseSync)
@@ -317,17 +317,17 @@ async function indexed() {
     const list = await q('data')
     eq(list.split('\n').filter((l) => /^\w+:/.test(l)), [
       'api:prisma/migrations  sqlite  3 tables · 1 foreign key · 2 indexes · no conflicts',
-      'kiosk:storage/schema-changes  sqlite  2 tables · 0 foreign keys · 1 index · no conflicts',
-      'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts',
+      'kiosk:storage/schema-changes  sqlite  2 tables · 0 foreign keys · 1 index (+1 implicit, for keys) · no conflicts',
+      'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts',
       'web:db/changes  dialect unknown  found, not read (2 files)',
-      'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes · no conflicts',
+      'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes (+2 implicit, for keys) · no conflicts',
       'web:supabase/migrations  postgres  found, not read (1 file)',
     ], 'graph_data: a store per migration folder, found by its DDL whatever its name; the Drizzle replay and snapshot agree')
-    has(list, 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0003_snapshot.json\n  migration  sql-migrations@1  replayed 4 files, 13 statements  mobile/drizzle/0000_init.sql', "Drizzle: the newest snapshot (0003, not 0002) and the replay in the journal's order are two declarations of one store")
+    has(list, 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0003_snapshot.json\n  migration  sql-migrations@1  replayed 4 files, 13 statements  mobile/drizzle/0000_init.sql', "Drizzle: the newest snapshot (0003, not 0002) and the replay in the journal's order are two declarations of one store")
     has(list, '  migration  sql-migrations@1  replayed 3 files, 6 statements  api/prisma/migrations/20240105090000_init/migration.sql\n  dialect: stated at api/prisma/migrations/migration_lock.toml:3', 'Prisma: one migration per versioned subfolder, the dialect from its lock file')
     has(list, '  migration  sql-migrations@1  replayed 2 files, 3 statements  kiosk/storage/schema-changes/0001_visits.up.sql\n  dialect: sniffed: AUTOINCREMENT at kiosk/storage/schema-changes/0001_visits.up.sql:2', 'no tool named: the dialect sniffed, the down migrations and the seed left out')
     has(list, 'web:db/changes  dialect unknown  found, not read (2 files)\n  migration  sql-migrations@1  not read: dialect unknown (no config states it, and no dialect marker in the SQL)  web/db/changes/0001_events.sql', 'no dialect stated or seen: found, never replayed as SQLite by assumption')
-    has(list, 'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes · no conflicts\n  migration  sql-migrations@1  replayed 2 files, 2 statements  web/db/legacy/0001_accounts.sql\n  dialect: set in grimoire.config.json (graph.data.migrations)', 'the same kind of SQL is read once grimoire.config.json states its dialect')
+    has(list, 'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes (+2 implicit, for keys) · no conflicts\n  migration  sql-migrations@1  replayed 2 files, 2 statements  web/db/legacy/0001_accounts.sql\n  dialect: set in grimoire.config.json (graph.data.migrations)', 'the same kind of SQL is read once grimoire.config.json states its dialect')
     has(list, '  migration  sql-migrations@1  not read: no reader for postgres migrations yet  web/supabase/migrations/20240110120000_profiles.sql\n  dialect: Supabase migrations are Postgres', 'Postgres: found, not yet read')
     eq(await q('data', { entity: 'books' }), [
       'mobile:drizzle/books  table  (sqlite)',
@@ -348,7 +348,7 @@ async function indexed() {
       'Conflicts: none',
     ].join('\n'), 'graph_data entity: every field, key, index and foreign key with both its sources, file:line')
     eq(await q('data', { store: 'mobile:drizzle' }), [
-      'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts',
+      'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts',
       '  authors  table  3 fields · primary (id)  mobile/drizzle/meta/0003_snapshot.json:7 · mobile/drizzle/0003_author_bio_required.sql:10',
       '  books  table  5 fields · primary (id) · 2 indexes · foreign keys → authors  mobile/drizzle/meta/0003_snapshot.json:39 · mobile/drizzle/0002_book_isbn.sql:1',
       '  shelf_books  table  3 fields · primary (shelf_id, book_id) · foreign keys → shelves, books  mobile/drizzle/meta/0003_snapshot.json:113 · mobile/drizzle/0001_shelves.sql:6',
@@ -363,24 +363,24 @@ async function indexed() {
     has(await q('data', { entity: 'books' }), 'Conflicts (1): the declarations disagree; each side is kept\n  books.published_at  type: integer — mobile/drizzle/meta/0003_snapshot.json:63 [artifact] | text — mobile/drizzle/0000_init.sql:11 [migration]', 'a hand-edited migration disagreeing with the snapshot: a conflict carrying both sources')
     edit('mobile/drizzle/0002_book_isbn.sql', (t) => t.replace('ALTER TABLE `books`', 'ALTER TABLE `bookz`'))
     await q('index')
-    has(await q('data'), 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0003_snapshot.json\n  migration  sql-migrations@1  replayed to mobile/drizzle/0002_book_isbn.sql:1: no such table: bookz  mobile/drizzle/0000_init.sql', 'a rejected statement stops the replay there: labelled, with the error')
+    has(await q('data'), 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0003_snapshot.json\n  migration  sql-migrations@1  replayed to mobile/drizzle/0002_book_isbn.sql:1: no such table: bookz  mobile/drizzle/0000_init.sql', 'a rejected statement stops the replay there: labelled, with the error')
     has(await q('data', { entity: 'books' }), '  published_at  integer  null  — mobile/drizzle/meta/0003_snapshot.json:63 · mobile/drizzle/0000_init.sql:11\n  isbn  text  null  — mobile/drizzle/meta/0003_snapshot.json:70\n', 'the facts replayed so far are kept (and compared with nothing: they describe the store partway)')
     has(await q('status'), 'data: 1 store(s) (graph_data), 1 replay(s) stopped early', 'graph_status counts the replays that stopped')
     edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` text,', '`published_at` integer,'))
     edit('mobile/drizzle/0002_book_isbn.sql', (t) => t.replace('ALTER TABLE `bookz`', 'ALTER TABLE `books`'))
     rmSync(path.join(PROJ, 'api/prisma/migrations/20240301080000_tags'), { recursive: true })
     await q('index')
-    has(await q('data'), 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts', 'restored migrations replay in full again')
+    has(await q('data'), 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts', 'restored migrations replay in full again')
     has(await q('data', { store: 'api:prisma/migrations' }), 'api:prisma/migrations  sqlite  2 tables · 1 foreign key · 1 index · no conflicts', 'a deleted migration re-runs its folder')
     has(await q('data', { entity: 'Tag' }), 'No entity "Tag"', '… and what it created is gone')
 
     edit('mobile/drizzle/meta/0003_snapshot.json', (t) => t.slice(0, 200)) // read by the data model only: the query notices it
     has(await q('status'), 'data: 1 store(s) (graph_data); 1 extractor failure(s): drizzle-snapshot@1 on mobile/drizzle/meta/0003_snapshot.json: ', 'a snapshot that no longer parses: graph_status reports the extractor failure (after refreshing on its own)')
     const after = await q('data')
-    has(after, 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts\n  migration  sql-migrations@1  replayed 4 files, 13 statements  mobile/drizzle/0000_init.sql', '… its facts are lost, the replay still answers')
+    has(after, 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts\n  migration  sql-migrations@1  replayed 4 files, 13 statements  mobile/drizzle/0000_init.sql', '… its facts are lost, the replay still answers')
     has(after, 'Extractor failures (1), their facts are missing:\n  drizzle-snapshot@1 on mobile/drizzle/meta/0003_snapshot.json: ', '… and graph_data names the failure')
 
-    has(cli('data', 'list'), 'kiosk:storage/schema-changes  sqlite  2 tables · 0 foreign keys · 1 index · no conflicts', 'graph.mjs data list')
+    has(cli('data', 'list'), 'kiosk:storage/schema-changes  sqlite  2 tables · 0 foreign keys · 1 index (+1 implicit, for keys) · no conflicts', 'graph.mjs data list')
     has(cli('data', 'list', 'web:db/legacy'), '  sessions  table  3 fields · primary (id) · foreign keys → accounts  web/db/legacy/0002_sessions.sql:1', 'graph.mjs data list <store>')
     has(cli('data', 'show', 'Loan'), 'api:prisma/migrations/Loan  table  (sqlite)\n  declared at api/prisma/migrations/20240212143000_loan_notes/migration.sql:3 [migration sql-migrations@1]', 'graph.mjs data show <entity>')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }

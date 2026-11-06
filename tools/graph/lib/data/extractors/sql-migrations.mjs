@@ -87,6 +87,7 @@ export default {
     return { declarations: [{
       ...base,
       entities: r.entities,
+      implicitIndexes: r.implicit,
       notes: [...order.notes, ...r.notes],
       complete: !r.stopped, partial: !!r.stopped,
       status: r.stopped ? 'partial' : 'read',
