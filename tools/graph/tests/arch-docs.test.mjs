@@ -315,6 +315,7 @@ else {
   const vm = await import('node:vm')
   const blob = /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page)[1]
   const listeners = {}
+  const { ctlQuery } = await import('./stage-kit.mjs')
   class El {
     constructor(tag) { this.tagName = tag.toUpperCase(); this.nodeType = 1; this.kids = []; this.attrs = {}; this.on = {}; this.dataset = {}; this.html = ''; this.value = ''; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} } }
     setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-(.)/g, (_, c) => c.toUpperCase())] = String(v) }
@@ -323,10 +324,11 @@ else {
     set innerHTML(v) { this.html = v; this.firstChild = new El('svg') }
     get innerHTML() { return this.html }
     querySelectorAll() { return [] }
-    focus() {} setSelectionRange() {}
+    focus(o) { this.focusedWith = o || {} } setSelectionRange() {}
     get offsetHeight() { return 0 }
   }
-  const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null, querySelector: () => null }
+  const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null }
+  doc.querySelector = ctlQuery(() => ({ kids: doc.body.kids || [] }))
   const loc = { hash: '#architecture' }
   vm.runInNewContext(script, { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
   const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
@@ -359,7 +361,8 @@ else {
     const { scrollStageCases, inside } = await import('./stage-kit.mjs')
     const labels = ['API', 'Users']
     scrollStageCases(ok, {
-      name: 'Architecture', box: () => findIn(body(), (x) => x.attrs && x.attrs.id === 'arch-box'), zoom0: 1.15, // + was pressed above
+      name: 'Architecture', page, active: (el) => { doc.activeElement = el },
+      box: () => findIn(body(), (x) => x.attrs && x.attrs.id === 'arch-box'), zoom0: 1.15, // + was pressed above
       items: [inside('[data-comp]', { comp: 'api' }), inside('[data-comp]', { comp: 'users' })],
       opened: (i) => !!findIn(body(), (x) => x.tagName === 'H3' && x.kids.includes(labels[i])),
       fitted: () => byCtl(body(), 'arch-fit').attrs['aria-pressed'] === 'true', search: byCtl(body(), 'search'),

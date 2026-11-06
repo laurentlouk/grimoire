@@ -6,6 +6,16 @@
 // pointer capture, focus) and `fire(type, init, ...path)` hands one event to the listeners the
 // page's own script attached along `path` (default: the element), stopping where a listener stops
 // it: the stub has no bubbling, so a click is passed through the stage, then the svg inside it.
+// `bubble(type, init, child)` dispatches at a child and bubbles it up to the stage, as a browser
+// does (target: the child, currentTarget: each element it passes).
+//
+// ctlQuery(root) answers the shell's `[data-ctl="…"]` lookups in a stub document, so its focus
+// restore after a re-render finds the stage again.
+export const ctlQuery = (root) => (sel) => {
+  const m = /^\[data-ctl="([^"]+)"\]$/.exec(sel)
+  const find = (n) => { if (!n || typeof n !== 'object') return null; if (n.attrs && n.attrs['data-ctl'] === m[1]) return n; for (const k of n.kids || []) { const f = find(k); if (f) return f } return null }
+  return m ? find(root()) : null
+}
 export function stageKit(el, { width = 400, height = 300, scrollWidth = 2000, scrollHeight = 1500 } = {}) {
   const classes = new Set(String(el.attrs.class || '').split(/\s+/).filter(Boolean))
   const kit = { el, classes, captured: [], focused: null }
@@ -16,11 +26,12 @@ export function stageKit(el, { width = 400, height = 300, scrollWidth = 2000, sc
   el.getBoundingClientRect = () => ({ left: 0, top: 0, right: width, bottom: height, width, height })
   if (el.firstChild) el.firstChild.getBoundingClientRect = () => ({ left: 0, top: 0 }) // the svg drawn in a scroll box
   kit.fire = (type, init = {}, ...path) => {
-    const e = { type, target: el, button: 0, pointerId: 1, clientX: 0, clientY: 0, key: '', shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, defaultPrevented: false, stopped: false,
+    const e = { type, target: el, button: 0, pointerId: 1, pointerType: 'mouse', clientX: 0, clientY: 0, key: '', shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, defaultPrevented: false, stopped: false,
       preventDefault() { this.defaultPrevented = true }, stopPropagation() { this.stopped = true }, stopImmediatePropagation() { this.stopped = true }, ...init }
-    for (const node of path.length ? path : [el]) for (const f of node.on[type] || []) { if (e.stopped) return e; f(e) }
+    for (const node of path.length ? path : [el]) { e.currentTarget = node; for (const f of (node.on && node.on[type]) || []) { if (e.stopped) return e; f(e) } }
     return e
   }
+  kit.bubble = (type, init, child) => kit.fire(type, { target: child, ...init }, child, el)
   kit.key = (key, more = {}) => kit.fire('keydown', { key, ...more })
   return kit
 }
@@ -31,9 +42,10 @@ export const inside = (selector, dataset) => ({ tagName: 'g', closest: (sel) => 
 export const background = { tagName: 'svg', closest: () => null }
 
 // The cases every svg stage in a scroll box shares (Architecture, Data), one block run per tab.
-// v: { name, box(): the stage now, zoom0: its zoom, items: [two targets], opened(i): its passport is
-//      open, fitted(): Fit is pressed, search: the header's search box, win(type, e): the window's
-//      listeners, full(): toggles full size, isFull() }
+// v: { name, page: the page's HTML, box(): the stage now, zoom0: its zoom, items: [two targets],
+//      opened(i): its passport is open, fitted(): Fit is pressed, search: the header's search box,
+//      win(type, e): the window's listeners, active(el): the document's focused element,
+//      full(): toggles full size, isFull() }
 export function scrollStageCases(ok, v) {
   const sel = () => { const e = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }; v.win('selectstart', e); return e.defaultPrevented }
   let b = v.box(), k = stageKit(b)
@@ -64,11 +76,37 @@ export function scrollStageCases(ok, v) {
   k.fire('pointermove', { clientX: 300, clientY: 10 })
   ok(!k.classes.has('panning') && b.scrollLeft === 1580, `${v.name}: a lost capture ends the pan too`)
 
-  // a press on an item is no pan; its click still opens it
+  // a pen is captured by what it pressed (the svg): taking the capture to the stage makes the svg
+  // lose it, and that loss bubbles up to the stage. It must not end the pan; the stage's own does.
+  b.scrollLeft = 500; b.scrollTop = 500
+  k.bubble('pointerdown', { pointerType: 'pen', clientX: 100, clientY: 100 }, b.firstChild)
+  k.bubble('pointermove', { pointerType: 'pen', clientX: 90, clientY: 100 }, b.firstChild)
+  k.bubble('lostpointercapture', { pointerType: 'pen' }, b.firstChild)
+  k.fire('pointermove', { pointerType: 'pen', clientX: 50, clientY: 100 })
+  const kept = k.classes.has('panning') && b.scrollLeft === 550
+  k.fire('lostpointercapture', { pointerType: 'pen' })
+  ok(kept && !k.classes.has('panning'), `${v.name}: a capture lost by the svg inside the stage does not end the pan (a pen or a finger is first captured by what it pressed); one lost by the stage does`)
+  k.fire('pointerup', { pointerType: 'pen' })
+
+  // a finger scrolls the box natively: momentum, no selection, the page scrolls on past the ends
+  const touch = k.bubble('pointerdown', { pointerType: 'touch', clientX: 100, clientY: 100 }, b.firstChild)
+  k.bubble('pointermove', { pointerType: 'touch', clientX: 40, clientY: 40 }, b.firstChild)
+  ok(!touch.defaultPrevented && !k.classes.has('panning') && k.captured.length === 3 && b.scrollLeft === 550 && b.scrollTop === 500 && !sel(),
+    `${v.name}: a touch is left to the box's native scrolling (not cancelled, not captured, no pointer pan)`)
+  k.bubble('pointerup', { pointerType: 'touch' }, b.firstChild)
+  ok(!/\.archbox\{[^}]*touch-action/.test(v.page) && /#map canvas\{[^}]*touch-action:none/.test(v.page), `${v.name}: the scroll box keeps the browser's touch scrolling; only the file map's canvas takes touch-action none`)
+
+  // a press on an item is no pan, and a drag from it selects nothing; its click still opens it
+  b.scrollLeft = 1580
   const press = k.fire('pointerdown', { target: v.items[0], clientX: 50, clientY: 50 })
   k.fire('pointermove', { target: v.items[0], clientX: 80, clientY: 50 })
+  const held = sel()
+  v.win('pointermove', { clientX: -400, clientY: 900 }) // out of the stage, the button still down
+  const heldOut = sel()
   k.fire('pointerup', { target: v.items[0] })
-  ok(!press.defaultPrevented && !k.classes.has('panning') && k.captured.length === 2 && b.scrollLeft === 1580, `${v.name}: a press on an item starts no pan`)
+  ok(!press.defaultPrevented && !k.classes.has('panning') && k.captured.length === 3 && b.scrollLeft === 1580, `${v.name}: a press on an item starts no pan`)
+  ok(held && heldOut && !sel() && /svg\.arch text,svg\.erd text\{-webkit-user-select:none;user-select:none\}/.test(v.page),
+    `${v.name}: while a press that began on an item is held, even out of the stage, the page refuses to start a selection, and the drawing's text is never selectable`)
   k.fire('click', { target: v.items[0] }, b, b.firstChild)
   ok(v.opened(0), `${v.name}: and its click opens it`)
 
@@ -82,8 +120,15 @@ export function scrollStageCases(ok, v) {
   k.key('ArrowRight', { shiftKey: true }); k.key('ArrowDown', { shiftKey: true })
   ok(b.scrollLeft === 860 && b.scrollTop === 770, `${v.name}: Shift + an arrow pans by most of the visible size`)
   for (let i = 0; i < 4; i++) { k.key('ArrowLeft', { shiftKey: true }); k.key('ArrowUp', { shiftKey: true }) }
-  k.key('ArrowLeft')
-  ok(b.scrollLeft === 0 && b.scrollTop === 0, `${v.name}: panning stops cleanly at the edges`)
+  const stuck = [k.key('ArrowLeft'), k.key('ArrowUp')]
+  ok(b.scrollLeft === 0 && b.scrollTop === 0 && stuck.every((e) => !e.defaultPrevented), `${v.name}: panning stops cleanly at the edges, and an arrow that cannot move the drawing is left to the page (it scrolls)`)
+  b.scrollLeft = 1600
+  const edge = [k.key('ArrowRight'), k.key('ArrowLeft')]
+  ok(!edge[0].defaultPrevented && edge[1].defaultPrevented && b.scrollLeft === 1540, `${v.name}: at its right edge, → is left to the page, ← still pans`)
+  const wide = b.scrollWidth; b.scrollWidth = b.clientWidth; b.scrollLeft = 0
+  const small = [k.key('ArrowRight'), k.key('ArrowLeft', { shiftKey: true })]
+  ok(small.every((e) => !e.defaultPrevented), `${v.name}: a drawing narrower than its box leaves ← and → to the page`)
+  b.scrollWidth = wide
   const ignored = [k.key('ArrowRight', { ctrlKey: true }), k.key('ArrowRight', { metaKey: true }), k.key('ArrowDown', { altKey: true }), k.key('ArrowRight', { target: v.search }),
     k.key('ArrowRight', { target: { tagName: 'BUTTON', closest: (s) => (s === '.passport' ? {} : null) } }), k.key('ArrowRight', { target: { tagName: 'DIV', isContentEditable: true, closest: () => null } })]
   ok(ignored.every((e) => !e.defaultPrevented) && b.scrollLeft === 0 && b.scrollTop === 0, `${v.name}: Ctrl, ⌘ or Alt + an arrow, and an arrow from the search box, the passport or an editable field, leave the diagram alone`)
@@ -99,8 +144,11 @@ export function scrollStageCases(ok, v) {
   ok(b.firstChild.attrs.width === String(Math.round(W * v.zoom0)), `${v.name}: − zooms back out`)
   k.key('=')
   ok(b.firstChild.attrs.width === String(Math.round(W * z1)), `${v.name}: = zooms in too (the + key without Shift)`)
+  v.active(b)
   const fit = k.key('0')
   ok(fit.defaultPrevented && v.fitted(), `${v.name}: 0 fits, as the Fit button does`)
+  ok(v.box() !== b && (v.box().focusedWith || {}).preventScroll === true, `${v.name}: after the re-render the shell gives the focus back to the stage without scrolling the page`)
+  v.active(null)
 
   // Enter on an item still opens it; the stage leaves Enter, Space and Escape to the page
   b = v.box(); k = stageKit(b)
@@ -108,11 +156,15 @@ export function scrollStageCases(ok, v) {
   ok(enter.defaultPrevented && v.opened(1), `${v.name}: Enter on an item still opens it`)
   b = v.box(); k = stageKit(b)
   k.fire('pointerdown', { target: background, clientX: 5, clientY: 5 }); k.fire('pointerup', {})
+  v.active(b)
   k.fire('click', { target: background }, b, b.firstChild)
-  ok(!v.opened(1), `${v.name}: a click on the background (3 px or less) is still a click: it closes the passport`)
+  ok(!v.opened(1) && (v.box().focusedWith || {}).preventScroll === true, `${v.name}: a click on the background (3 px or less) is still a click: it closes the passport, and the focus comes back to the stage without scrolling the page`)
+  v.active(null)
   v.full()
   b = v.box(); k = stageKit(b)
   const esc = k.key('Escape'), space = k.key(' ')
+  v.active(b)
   v.win('keydown', { key: 'Escape' })
-  ok(!esc.defaultPrevented && !space.defaultPrevented && !v.isFull(), `${v.name}: Escape still leaves full size`)
+  ok(!esc.defaultPrevented && !space.defaultPrevented && !v.isFull() && (v.box().focusedWith || {}).preventScroll === true, `${v.name}: Escape still leaves full size, and the focus stays on the stage without scrolling the page`)
+  v.active(null)
 }

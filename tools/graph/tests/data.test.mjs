@@ -76,10 +76,12 @@ async function stubPage(page, hash) {
     set innerHTML(v) { this.html = v; this.firstChild = new El('svg') }
     get innerHTML() { return this.html }
     querySelectorAll() { return [] }
-    focus() {} setSelectionRange() {}
+    focus(o) { this.focusedWith = o || {} } setSelectionRange() {}
     get offsetHeight() { return 0 }
   }
-  const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null, querySelector: () => null }
+  const { ctlQuery } = await import('./stage-kit.mjs')
+  const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null }
+  doc.querySelector = ctlQuery(() => ({ kids: doc.body.kids || [] }))
   const loc = { hash }
   vm.runInNewContext(scriptOf(page), { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
   const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
@@ -100,6 +102,7 @@ async function stubPage(page, hash) {
     erd: () => find(body(), (n) => n.attrs && n.attrs.id === 'data-box'), // the drawing: its svg markup is .html
     click: (i) => pg.erd().firstChild.on.click[0]({ target: { closest: (sel) => (/data-tbl/.test(sel) ? { dataset: { tbl: String(i) } } : null) } }),
     win: (t, e) => listeners[t] && listeners[t](e), // the window's own listeners
+    active: (el) => { doc.activeElement = el }, // the element the document says has the focus
   }
   return pg
 }
@@ -692,7 +695,7 @@ CREATE INDEX books_author_idx ON books (author_id);
     const { scrollStageCases, inside } = await import('./stage-kit.mjs')
     const names = ['authors', 'books'], at = names.map((t) => String(D.data.stores[0].tables.findIndex((x) => x.name === t)))
     scrollStageCases(ok, {
-      name: 'Data', box: () => bare.erd(), zoom0: 1,
+      name: 'Data', page, active: bare.active, box: () => bare.erd(), zoom0: 1,
       items: at.map((tbl) => inside('[data-tbl]', { tbl })), opened: (i) => !!bare.find((n) => n.tagName === 'H3' && n.kids.includes(names[i])),
       fitted: () => bare.ctl('data-fit').attrs['aria-pressed'] === 'true', search: bare.ctl('search'),
       win: bare.win, full: () => bare.press('data-full'), isFull: () => /\bstage full\b/.test(bare.find((n) => n.attrs && n.attrs['data-stage'] === 'data').attrs.class),

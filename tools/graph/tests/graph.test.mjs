@@ -407,6 +407,9 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
       const sel = () => { const e = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }; pg.win('selectstart', e); return e.defaultPrevented }
       const down = k.fire('pointerdown', { clientX: 400, clientY: 300 })
       ok(down.defaultPrevented && k.classes.has('panning') && sel() && k.focused && k.focused.preventScroll === true, 'the file map: a press is cancelled (no selection), the canvas takes the no-select class and the focus')
+      // the canvas is the only way to pan the map: a capture it did not lose itself never ends a pan
+      k.fire('lostpointercapture', { target: { tagName: 'DIV' } })
+      ok(k.classes.has('panning'), 'the file map: a capture lost by another element does not end its pan')
       k.fire('pointermove', { clientX: 410, clientY: 305 })
       const [x1, y1] = last()
       k.fire('pointermove', { clientX: -2000, clientY: -3000 })
@@ -430,6 +433,13 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
       const [x8, y8] = last()
       ok(zs.join(' ') === '125% 100% 80% 100% 118%' && fit.defaultPrevented && pct() === '100%' && near(x8, x0) && near(y8, y0), `the file map: + − = zoom by the buttons' step about the centre, the wheel still zooms, 0 fits (${zs.join(' ')})`)
       ok(!k.key('Escape').defaultPrevented && !k.key('Enter').defaultPrevented, 'the file map leaves Escape and Enter to the page')
+      // a finger pans the map too: the canvas has no native scrolling to fall back on
+      const finger = k.fire('pointerdown', { pointerType: 'touch', pointerId: 7, clientX: 400, clientY: 300 })
+      k.fire('pointermove', { pointerType: 'touch', pointerId: 7, clientX: 380, clientY: 300 })
+      const [xt] = last()
+      k.fire('pointerup', { pointerType: 'touch', pointerId: 7 })
+      k.key('0'); last()
+      ok(finger.defaultPrevented && near(xt, x0 - 20) && k.captured.includes(7) && /#map canvas\{[^}]*touch-action:none/.test(pageP), 'the file map: a touch drag pans it (touch-action none, the pointer captured)')
       const visible = DP.map.files.filter((id) => !DP.files.find((f) => f[0] === id)[4])
       k.fire('pointerdown', { clientX: x0, clientY: y0 }); k.fire('pointerup', {})
       k.fire('click', { clientX: x0, clientY: y0 })

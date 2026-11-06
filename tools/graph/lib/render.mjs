@@ -449,8 +449,8 @@ details.problems{background:var(--panel);border:1px solid var(--line);border-rad
 .stage.full{position:fixed;inset:0;z-index:50;background:var(--bg);padding:12px;overscroll-behavior:contain}.stage.full .stagebody>:first-child{height:100%;max-height:none;margin:0}
 .stage.full>.stageside{width:min(420px,38vw);flex:none;overflow:auto;max-height:100%}.stage.full>.stageside>.detail{margin:0}
 .stage.full .sysbox:not(.zoomed) svg{width:100%;height:100%;min-width:0}.stage.full #map{height:100%}.stage.full .archbox{display:flex}.stage.full .archbox svg{margin:auto;flex:none}.svgbox.zoomed{overflow:auto}.svgbox.zoomed svg{width:auto;min-width:0;max-width:none}
-.archbox{padding:6px;overflow:auto;max-height:78vh;cursor:grab;touch-action:none}.archbox:active{cursor:grabbing}.archbox svg{width:auto;min-width:0;max-width:none;height:auto;margin:0 auto}
-.panning{-webkit-user-select:none;user-select:none}.archbox.panning,#map canvas.panning{cursor:grabbing}
+.archbox{padding:6px;overflow:auto;max-height:78vh;cursor:grab}.archbox:active{cursor:grabbing}.archbox svg{width:auto;min-width:0;max-width:none;height:auto;margin:0 auto}
+.panning{-webkit-user-select:none;user-select:none}.archbox.panning,#map canvas.panning{cursor:grabbing}svg.arch text,svg.erd text{-webkit-user-select:none;user-select:none}
 svg.arch text{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
 svg.arch .bound rect{fill:color-mix(in srgb,var(--hover) 60%,transparent);stroke:var(--line);stroke-width:1.3;stroke-dasharray:7 5}
 svg.arch .bound.k-trust rect{stroke:var(--t-security)}svg.arch .bound.k-region rect{stroke:var(--t-cloud)}svg.arch .bound.k-deploy rect{stroke:var(--t-backend)}svg.arch .bound.k-network rect{stroke:var(--t-messagebus)}svg.arch .bound.k-repo rect{stroke-dasharray:none}
@@ -1124,11 +1124,11 @@ function client() {
     document.body.replaceChildren(hd, h('main', null, view))
     document.documentElement.style.setProperty('--hdr', `${hd.offsetHeight + 12}px`)
     writeHash()
-    if (keepFocus) { search.focus(); if (caret && caret[0] !== null) search.setSelectionRange(caret[0], caret[1]) }
+    if (keepFocus) { search.focus({ preventScroll: true }); if (caret && caret[0] !== null) search.setSelectionRange(caret[0], caret[1]) }
     else {
       const t = st.focusMain && (document.querySelector('main .detail h3') || document.querySelector('main [data-focus]') || document.querySelector('main .toolbar'))
       if (t) { t.tabIndex = -1; t.focus({ preventScroll: true }) }
-      else if (ctl) { const el = document.querySelector(`[data-ctl="${ctl}"]`); if (el) el.focus() }
+      else if (ctl) { const el = document.querySelector(`[data-ctl="${ctl}"]`); if (el) el.focus({ preventScroll: true }) } // never scroll the page: the control is where it was
     }
     st.focusMain = false
   }
