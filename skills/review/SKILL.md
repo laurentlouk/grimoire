@@ -19,6 +19,8 @@ The gates:
 
 **Before the panel, a precheck.** Confirm there is something to review: a commit range, a non-empty diff, no conflict or stub markers added, tests moved with the behaviour. If any check fails, send it back before paying for reviewers. The loop does this with a cheap agent (`workflows/briefs/precheck.md`).
 
+**Changes to stored data outside the plan.** A change the design's delta does not plan is never a finding by itself: the implementer kept it with a reason or reverted it, the PR lists it, and the user acknowledges it in the Data tab. Judge it on its merits like any other change: one that drops a column, an index or a table another repository still reads, or that loses data, is a finding at its severity; one whose kept reason does not hold is too.
+
 Severity is a gate. Blocker and major send the work back; minor and nit are recorded for the human and never buy a rework round. A FAIL names at least one finding with `path:line`. "Fix everything" from the user does not change that: minors ride along with the next round a major already bought, or go to a ticket, never a round of their own.
 
 **Verify a blocking finding before it buys a fix.** Check each blocker or major against the code. Overturn a finding only with a cited counter-fact (the check it says is missing is at `path:line`), and report the overturned ones rather than dropping them. The loop does this with a verifier (`workflows/briefs/verify.md`). A reviewer whose findings keep being overturned is a lens for `crystallize` to recalibrate.
