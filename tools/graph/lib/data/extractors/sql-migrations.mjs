@@ -76,7 +76,7 @@ export default {
     const n = members.length
     const base = {
       store: key, dialect: dialect.dialect, dialectFrom: dialect.from ?? null,
-      source: { path: (order.files || members)[0].path, line: 1, kind: 'migration', confidence: 'exact' },
+      source: { path: (order.files?.length ? order.files : members)[0].path, line: 1, kind: 'migration', confidence: 'exact' },
       complete: false, partial: false, files: n, notes: order.notes, entities: [],
     }
     const found = (label) => ({ declarations: [{ ...base, status: 'not-read', label }] })
