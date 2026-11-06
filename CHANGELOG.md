@@ -2,10 +2,10 @@
 
 ## 0.27.1 — SQLite keeps the migration replay off the disk
 
-The data model's replay runs a repository's own SQL in an in-memory database. Until now, a text filter alone kept `ATTACH`, `DETACH` and `VACUUM` out. A crafted migration whose statement boundaries the splitter and SQLite's lexer read differently could have slipped one past it and written a file on the machine that indexes the repository.
+The data model's replay runs a repository's own SQL in an in-memory database. Until now, a text filter alone kept `ATTACH`, `DETACH` and `VACUUM` out. A crafted migration could slip one past it and write a file on the machine that indexes the repository. The review of this fix showed it with a trigger whose body uses an identifier such as `éCASE`: SQLite reads it as one name, the splitter read a `CASE` keyword in it, so the trigger never closed and swallowed the `ATTACH` that followed.
 
-- **The engine enforces it.** The replay's database allows no attached database (`limits.attach = 0`, which also stops `VACUUM INTO`, since it attaches its target). An authorizer denies `ATTACH` and `DETACH`. A probe `ATTACH` confirms the guard on every replay.
-- **Older Node.** Where Node provides neither, any statement whose text names `ATTACH`, `DETACH` or `VACUUM` stops the replay, with the reason. SQLite needs those keywords as plain tokens, so this can refuse too much but never too little. Each piece then runs as one prepared statement, never through `exec`.
+- **The engine enforces it.** The replay's database allows no attached database (`limits.attach = 0`, which also stops `VACUUM INTO`, since it attaches its target). An authorizer denies `ATTACH`, `DETACH` and the `temp_store_directory` and `data_store_directory` PRAGMAs. Those two are process-wide, so they would also move the graph store's temporary files. A probe `ATTACH` confirms the guard on every replay, and a refusal says why the replay stopped.
+- **Older Node.** Where Node provides neither, any statement whose text names `ATTACH`, `DETACH`, `VACUUM` or one of those PRAGMAs stops the replay, with the reason. SQLite needs those keywords as plain tokens, so this can refuse too much but never too little. Each piece then runs as one prepared statement, never through `exec`.
 - **Nothing else changes.** Columns named `attach` or `vacuum` still replay where the engine guards.
 
 ## 0.27.0 — the data model map reads SQL migrations: `graph_data` (data model map slice 1, #75)

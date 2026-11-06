@@ -14,9 +14,10 @@
 //
 // The replay runs a repository's own SQL, so SQLite itself keeps it off the disk, not a textual
 // filter alone: no database may be attached (`limits.attach = 0`, which also stops VACUUM INTO, as
-// it attaches its target) and an authorizer denies ATTACH and DETACH, where this Node provides them.
-// A probe ATTACH confirms the guard on every replay. On a Node with neither, a statement whose text
-// names ATTACH, DETACH or VACUUM anywhere stops the replay (SQLite needs that keyword as an ASCII
+// it attaches its target) and an authorizer denies ATTACH, DETACH and the process-wide
+// temp_store_directory / data_store_directory PRAGMAs, where this Node provides them. A probe ATTACH
+// confirms the guard on every replay. On a Node with neither, a statement whose text names ATTACH,
+// DETACH, VACUUM or one of those PRAGMAs anywhere stops the replay (SQLite needs that keyword as an ASCII
 // token, so a match on the raw text can only over-refuse, never miss), and each piece runs as one
 // prepared statement, never through exec.
 //
@@ -34,8 +35,12 @@ const NAME = `(?:${ID}\\s*\\.\\s*)?(${ID})`
 const CREATE_TABLE = new RegExp(`^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?(?:VIRTUAL\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${NAME}`, 'i')
 const ALTER_TABLE = new RegExp(`^ALTER\\s+TABLE\\s+${NAME}(?:\\s+RENAME\\s+TO\\s+${NAME})?`, 'i')
 const OUTSIDE = /^(ATTACH|DETACH|VACUUM)\b/i
-const NAMES_OUTSIDE = /\b(ATTACH|DETACH|VACUUM)\b/i
-const SQLITE_ATTACH = 24, SQLITE_DETACH = 25, SQLITE_DENY = 1, SQLITE_OK = 0 // sqlite3.h authorizer codes
+const NAMES_OUTSIDE = /\b(ATTACH|DETACH|VACUUM|TEMP_STORE_DIRECTORY|DATA_STORE_DIRECTORY)\b/i
+const SQLITE_PRAGMA = 19, SQLITE_ATTACH = 24, SQLITE_DETACH = 25, SQLITE_DENY = 1, SQLITE_OK = 0 // sqlite3.h authorizer codes
+// Process-wide: they would move every SQLite connection's temporary files, the graph store's too
+const DIRECTORY_PRAGMA = /^(temp|data)_store_directory$/i
+const GUARD_REFUSAL = /^(not authorized|authorization denied|too many attached databases)/
+const deny = (action, arg) => action === SQLITE_ATTACH || action === SQLITE_DETACH || (action === SQLITE_PRAGMA && DIRECTORY_PRAGMA.test(arg || ''))
 const GENERATED = { 2: 'virtual', 3: 'stored' }
 
 const unquote = (s) => (/^["`[]/.test(s) ? s.slice(1, -1).replace(/""/g, '"') : s)
@@ -48,7 +53,7 @@ export function openReplay(DatabaseSync) {
   const base = { enableForeignKeyConstraints: false } // SQLite's own default
   let db
   try { db = new DatabaseSync(':memory:', { ...base, limits: { attach: 0 } }) } catch { db = new DatabaseSync(':memory:', base) }
-  if (typeof db.setAuthorizer === 'function') db.setAuthorizer((action) => (action === SQLITE_ATTACH || action === SQLITE_DETACH ? SQLITE_DENY : SQLITE_OK))
+  if (typeof db.setAuthorizer === 'function') db.setAuthorizer((action, arg) => (deny(action, arg) ? SQLITE_DENY : SQLITE_OK))
   let guarded = true
   try { db.exec("ATTACH ':memory:' AS grimoire_probe") } catch { return { db, guarded } }
   guarded = false
@@ -70,7 +75,12 @@ export function replay(files, DatabaseSync) {
         if (outside) { notes.push(`skipped ${outside[1].toUpperCase()} at ${f.path}:${s.line} (never run: it reaches files outside the replay)`); continue }
         const named = !guarded && NAMES_OUTSIDE.exec(s.text)
         if (named) { stopped = { path: f.path, line: s.line, error: `refused: it names ${named[1].toUpperCase()}, and this Node cannot keep SQLite off the disk (no attach limit, no authorizer)` }; break run }
-        try { if (guarded) db.exec(s.text); else db.prepare(s.text).run() } catch (e) { stopped = { path: f.path, line: s.line, error: e.message }; break run }
+        try { if (guarded) db.exec(s.text); else db.prepare(s.text).run() } catch (e) {
+          // a guarded refusal says why, not only SQLite's "not authorized"
+          const error = guarded && GUARD_REFUSAL.test(e.message) ? `refused: ${e.message} (it reaches files outside the replay)` : e.message
+          stopped = { path: f.path, line: s.line, error }
+          break run
+        }
         statements++
         const after = schema(db)
         track(db, before, after, s.text, { path: f.path, line: s.line }, tables, objects)

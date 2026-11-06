@@ -144,13 +144,21 @@ ALTER TABLE books RENAME COLUMN title TO heading;
   // SQLite itself keeps the replay off the disk, whatever text reaches it (a piece the splitter
   // and SQLite's lexer read differently, a computed VACUUM INTO target)
   const disk = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-replay-')))
-  const { db, guarded } = openReplay(DatabaseSync)
-  const refused = []
-  for (const q of [`CREATE TABLE a (x); ATTACH '${disk}/a.db' AS other`, `VACUUM INTO '${disk}/' || 'copy.db'`, `DETACH main`]) { try { db.exec(q) } catch (e) { refused.push(e.message) } }
-  db.close()
-  eq([guarded, refused.length, readdirSync(disk)], [true, 3, []], `the engine refuses ATTACH, VACUUM INTO and DETACH, and no file is written (${refused.join(' | ')})`)
-  const keywords = replay([{ path: 'db/0001_t.sql', text: 'CREATE TABLE t (attach TEXT, vacuum INTEGER);' }], DatabaseSync)
-  eq([keywords.stopped, keywords.entities[0].fields.map((f) => f.name)], [null, ['attach', 'vacuum']], 'with the engine guarding, columns named like those keywords replay')
+  try {
+    const { db, guarded } = openReplay(DatabaseSync)
+    if (!guarded) { db.close(); console.log(`   · this Node (${process.version}) has no attach limit and no authorizer: the engine checks are skipped, the text guard below still runs`) } else {
+      const refused = []
+      for (const q of [`CREATE TABLE a (x); ATTACH '${disk}/a.db' AS other`, `VACUUM INTO '${disk}/' || 'copy.db'`, 'DETACH main', `PRAGMA temp_store_directory = '${disk}'`, 'PRAGMA data_store_directory']) { try { db.exec(q) } catch (e) { refused.push(e.message) } }
+      db.close()
+      eq([refused.length, readdirSync(disk)], [5, []], `the engine refuses ATTACH, VACUUM INTO, DETACH and the directory PRAGMAs, and no file is written (${refused.join(' | ')})`)
+      // A real splitter desync: SQLite reads `éCASE` as one identifier, the splitter as a CASE, so the
+      // trigger's piece never closes and swallows the ATTACH after it (this wrote a file before 0.27.1)
+      const desync = replay([{ path: 'db/0001_x.sql', text: `CREATE TABLE a (éCASE INTEGER);\nCREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE a SET éCASE = 1; END;\nATTACH '${disk}/pwned.db' AS o;\nCREATE TABLE z (x);` }], DatabaseSync)
+      eq([desync.stopped, readdirSync(disk)], [{ path: 'db/0001_x.sql', line: 2, error: 'refused: not authorized (it reaches files outside the replay)' }, []], 'a piece the splitter mis-cuts still cannot attach: SQLite refuses it, the replay stops there and says why')
+      const keywords = replay([{ path: 'db/0001_t.sql', text: 'CREATE TABLE t (attach TEXT, vacuum INTEGER);' }], DatabaseSync)
+      eq([keywords.stopped, keywords.entities[0].fields.map((f) => f.name)], [null, ['attach', 'vacuum']], 'with the engine guarding, columns named like those keywords replay')
+    }
+  } finally { rmSync(disk, { recursive: true, force: true }) }
 
   // A Node with neither guard (no attach limit, no authorizer): refused by text, one statement a piece
   class Unguarded {
@@ -164,7 +172,6 @@ ALTER TABLE books RENAME COLUMN title TO heading;
   const old = replay([{ path: 'db/0001_t.sql', text: 'CREATE TABLE t (x);\nCREATE TABLE u (attach TEXT);' }], Unguarded)
   eq([open.guarded, old.entities.map((e) => e.name), old.stopped], [false, ['t'], { path: 'db/0001_t.sql', line: 2, error: 'refused: it names ATTACH, and this Node cannot keep SQLite off the disk (no attach limit, no authorizer)' }],
     'without an engine guard, a statement naming ATTACH stops the replay before it runs')
-  rmSync(disk, { recursive: true, force: true })
 }
 
 // ── 4 · Drizzle snapshots ──
