@@ -1,0 +1,12 @@
+{
+  "repos": [
+    { "name": "mobile", "path": "mobile" },
+    { "name": "api", "path": "api" },
+    { "name": "kiosk", "path": "kiosk" },
+    { "name": "web", "path": "web" }
+  ],
+  "graph": {
+    "dir": ".grimoire/graph",
+    "data": { "migrations": [{ "path": "web:db/legacy", "dialect": "sqlite" }] }
+  }
+}

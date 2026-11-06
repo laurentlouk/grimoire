@@ -48,7 +48,7 @@ export default {
     return { declarations: [{
       store: path.posix.dirname(path.posix.dirname(file)),
       dialect: normDialect(j.dialect),
-      dialectFrom: `${file}:${lines.get(pathKey('dialect')) ?? 1}`,
+      dialectFrom: { how: 'stated', path: file, line: lines.get(pathKey('dialect')) ?? 1 },
       source: { path: file, line: 1, kind: 'artifact', confidence: 'declared' },
       complete: true, partial: false, status: 'read', label: 'snapshot', notes: [],
       ...(Array.isArray(j.ddl) ? { snapshot: { id: j.id, prevIds: j.prevIds || [] } } : {}),

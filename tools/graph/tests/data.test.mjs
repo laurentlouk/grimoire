@@ -10,10 +10,24 @@
 //   3. replaying SQLite migrations into node:sqlite, each element mapped to the file:line behind it
 //   4. reading Drizzle snapshots: the legacy `meta/NNNN_snapshot.json` (`tables{}`) and v1's `ddl[]`
 //   5. reconciling the declarations of one store: merged sources, conflicts kept with both sides
+//   6. finding migration folders by content, whatever tool wrote them, and ordering them
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
 //  without it, except under CI, where a missing runtime fails.
+//   7. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
+//      undeclared dialect and one stated in grimoire.config.json → graph_data and graph.mjs data
+//   8. incremental: a hand-edited migration (a conflict), a rejected statement, a deleted migration,
+//      a snapshot that no longer parses (reported by graph_status, the index goes on)
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const ROOT = path.resolve(HERE, '..')
+process.env.GRIMOIRE_GRAPH_FRESH_MS = '0' // every query checks freshness (commands.mjs reads it on load)
 
 const { split, hasDDL } = await import('../lib/data/readers/sql-split.mjs')
 const { sniffDialect } = await import('../lib/data/readers/sql-dialect.mjs')
@@ -21,10 +35,13 @@ const { replay } = await import('../lib/data/readers/sqlite-replay.mjs')
 const { driver } = await import('../lib/store.mjs')
 const { default: drizzleSnapshot } = await import('../lib/data/extractors/drizzle-snapshot.mjs')
 const { reconcile } = await import('../lib/data/reconcile.mjs')
+const { default: sqlMigrations } = await import('../lib/data/extractors/sql-migrations.mjs')
+const { candidates } = await import('../lib/data/registry.mjs')
 const { DatabaseSync } = await driver()
 
 let PASS = 0, FAIL = 0
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
+const has = (hay, needle, m) => ok(hay.includes(needle), `${m}${hay.includes(needle) ? '' : `\n       expected to find: ${needle}\n       in:\n${hay.split('\n').map((l) => '         ' + l).join('\n')}`}`)
 const eq = (got, want, m) => { const g = JSON.stringify(got), w = JSON.stringify(want); ok(g === w, `${m}${g === w ? '' : `\n       want: ${w}\n       got:  ${g}`}`) }
 
 // ── 1 · splitting SQL ──
@@ -183,7 +200,7 @@ const V1 = `{
   const jobs = drizzleSnapshot.discover(new Map(['db/meta/0002_snapshot.json', 'db/meta/0010_snapshot.json', 'db/meta/0009_snapshot.json', 'db/meta/_journal.json', 'next/20240101000000_init/snapshot.json', 'next/20240101000000_init/migration.sql', 'other/snapshot.json'].map((p) => [p, {}])))
   eq(jobs.map((j) => j.key).sort(), ['db/meta/0010_snapshot.json', 'next/20240101000000_init/snapshot.json'], "the newest legacy snapshot of each meta/ folder (numerically), and every v1 snapshot beside its migration.sql")
   const [d] = drizzleSnapshot.extract(LEGACY, 'db/meta/0010_snapshot.json').declarations
-  eq([d.store, d.dialect, d.dialectFrom, d.complete, d.source], ['db', 'sqlite', 'db/meta/0010_snapshot.json:3', true, { path: 'db/meta/0010_snapshot.json', line: 1, kind: 'artifact', confidence: 'declared' }], 'legacy: the store is the folder holding meta/, its dialect where the snapshot states it')
+  eq([d.store, d.dialect, d.dialectFrom, d.complete, d.source], ['db', 'sqlite', { how: 'stated', path: 'db/meta/0010_snapshot.json', line: 3 }, true, { path: 'db/meta/0010_snapshot.json', line: 1, kind: 'artifact', confidence: 'declared' }], 'legacy: the store is the folder holding meta/, its dialect where the snapshot states it')
   eq(d.entities.map(brief), [
     ['books table @db/meta/0010_snapshot.json:7',
       '  id text not null @db/meta/0010_snapshot.json:10', '  author_id integer not null @db/meta/0010_snapshot.json:11', "  title text not null default 'untitled' @db/meta/0010_snapshot.json:12",
@@ -215,7 +232,7 @@ const confl = (x) => x.conflicts.map((c) => `${c.attr}: ${c.values.map((v) => `$
 const everyConflict = (store) => store.entities.flatMap((e) => [[e.name, e], ...e.fields.map((f) => [`${e.name}.${f.name}`, f]), ...e.keys.map((k) => [`${e.name} ${k.role} (${k.parts.join(', ')})`, k]), ...e.indexes.map((i) => [`${e.name} index ${i.name}`, i]), ...e.relations.map((r) => [`${e.name} fk (${r.columns.join(', ')})`, r])]
   .flatMap(([label, x]) => confl(x).map((c) => `${label} ${c}`)))
 {
-  const migration = (text, extra = {}) => ({ declarations: [{ store: 'db', dialect: 'sqlite', dialectFrom: 'db/0001_init.sql:1', source: { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', label: 'replayed', notes: [], ...extra, entities: replay([{ path: 'db/0001_init.sql', text }], DatabaseSync).entities }] })
+  const migration = (text, extra = {}) => ({ declarations: [{ store: 'db', dialect: 'sqlite', dialectFrom: { how: 'sniffed', marker: 'AUTOINCREMENT', path: 'db/0001_init.sql', line: 1 }, source: { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', label: 'replayed', notes: [], ...extra, entities: replay([{ path: 'db/0001_init.sql', text }], DatabaseSync).entities }] })
   const AGREES = `CREATE TABLE \`books\` (
 \t\`id\` text PRIMARY KEY NOT NULL,
 \t\`author_id\` integer NOT NULL,
@@ -251,6 +268,122 @@ CREATE TABLE \`shelf_books\` (
   const v1 = (id, prevIds, text) => ({ repo: 'app', extractor: 'drizzle-snapshot@1', facts: drizzleSnapshot.extract(text.replace(/"id": "[^"]+"/, `"id": "${id}"`).replace(/"prevIds": \[[^\]]*\]/, `"prevIds": ${JSON.stringify(prevIds)}`), `next/${id.slice(-2)}_x/snapshot.json`) })
   const dag = reconcile([v1('00000000-0000-4000-8000-000000000012', [], V1.replace('"name": "title"', '"name": "subtitle"')), v1('00000000-0000-4000-8000-000000000013', ['00000000-0000-4000-8000-000000000012'], V1)]).stores[0]
   eq(dag.entities[0].fields.map((f) => [f.name, srcs(f)]), [['id', ['next/13_x/snapshot.json:8 artifact drizzle-snapshot@1']], ['title', ['next/13_x/snapshot.json:9 artifact drizzle-snapshot@1']]], 'Drizzle v1: only the leaves of the snapshot DAG declare the store')
+}
+
+// ── 6 · finding and ordering migration folders ──
+console.log('\n6 · finding and ordering migration folders')
+{
+  eq(candidates(['a/down.sql', 'a/0001_x.down.sql', 'a/0001_x.up.sql', 'tests/fixtures/db/0001_a.sql', 'node_modules/pkg/0001_a.sql', 'db/0007_tests.sql', 'src/app.ts', 'drizzle/meta/0003_snapshot.json'], { exclude: [] }),
+    ['a/0001_x.up.sql', 'db/0007_tests.sql', 'drizzle/meta/0003_snapshot.json'], 'inputs: SQL but no down migration, nothing under test-support folders or dependencies (a migration named …_tests.sql is still one)')
+  const info = new Map(Object.entries({
+    'drizzle.config.ts': {}, 'drizzle/0000_a.sql': { ddl: 1 }, 'drizzle/0001_b.sql': { ddl: 1 }, 'drizzle/meta/_journal.json': {},
+    'prisma/schema.prisma': {}, 'prisma/migrations/migration_lock.toml': {}, 'prisma/migrations/20240105090000_init/migration.sql': { ddl: 1 },
+    'storage/schema-changes/0001_visits.up.sql': { ddl: 1 }, 'storage/schema-changes/seed_visits.sql': { ddl: 0 },
+    'queries/find_user.sql': { ddl: 0 },
+  }))
+  eq(sqlMigrations.discover(info, { overrides: [{ path: 'storage/schema-changes', dialect: 'sqlite' }] }).map((j) => [j.key, j.inputs, j.override ?? null]), [
+    ['drizzle', ['drizzle/0000_a.sql', 'drizzle/0001_b.sql', 'drizzle.config.ts', 'drizzle/meta/_journal.json'], null],
+    ['prisma/migrations', ['prisma/migrations/20240105090000_init/migration.sql', 'drizzle.config.ts', 'prisma/migrations/migration_lock.toml', 'prisma/schema.prisma'], null],
+    ['storage/schema-changes', ['storage/schema-changes/0001_visits.up.sql', 'drizzle.config.ts'], 'sqlite'],
+  ], 'a folder is found by its DDL, whatever its name; one migration per versioned subfolder counts for its parent; seeds and queries are not migrations; the configs that may state its dialect come along (a drizzle.config above it applies when its `out` names the folder)')
+  const label = (key, files) => sqlMigrations.extract({ key, files: files.map(([path, text]) => ({ path, text })) }, { DatabaseSync }).declarations[0].label
+  const pk = 'INTEGER PRIMARY KEY AUTOINCREMENT'
+  eq(label('schema', [['schema/posts.sql', `CREATE TABLE posts (id ${pk});`], ['schema/users.sql', `CREATE TABLE users (id ${pk});`]]), 'order unknown (posts.sql has no numeric or timestamp prefix)', 'names without a version prefix: the order is unknown, nothing is replayed')
+  eq(label('flyway', [['flyway/V10__c.sql', 'ALTER TABLE b ADD COLUMN c TEXT;'], ['flyway/V1__a.sql', `CREATE TABLE a (id ${pk});`], ['flyway/V2__b.sql', 'CREATE TABLE b (id INTEGER);']]), 'replayed 3 files, 3 statements', 'versions compare as numbers: V1, V2, V10')
+  const dbmate = sqlMigrations.extract({ key: 'db', files: [{ path: 'db/20240101000000_t.sql', text: `-- migrate:up\nCREATE TABLE t (id ${pk});\n\n-- migrate:down\nDROP TABLE t;\n` }] }, { DatabaseSync }).declarations[0]
+  eq(dbmate.entities.map((e) => e.name), ['t'], "a file's down section is never replayed")
+}
+
+// ════ Part 2 · through call(), on an indexed project ════
+const { findDeps } = await import('../lib/deps.mjs')
+if (findDeps()) await indexed()
+else if (process.env.CI) { FAIL++; console.log('\n   ✗ FAIL: parser runtime missing (run npm ci --prefix tools/graph)') }
+else console.log('\n   - part 2 skipped: parser runtime not installed (npm ci --prefix tools/graph)')
+
+async function indexed() {
+  const { call } = await import('../lib/commands.mjs')
+  const SANDBOX = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-data-')))
+  const PROJ = path.join(SANDBOX, 'data')
+  cpSync(path.join(HERE, 'fixtures', 'data'), PROJ, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') }) // never a stray local index
+  const q = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: PROJ })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+  let tick = 0
+  const edit = (rel, fn) => { const f = path.join(PROJ, rel); writeFileSync(f, fn(readFileSync(f, 'utf8'))); const t = new Date(Date.now() + ++tick * 2000); utimesSync(f, t, t) }
+  const cli = (...a) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), ...a, '--root', PROJ], { encoding: 'utf8' }).stdout
+  try {
+    // ── 7 · the stores ──
+    console.log('\n7 · a project of four repositories (fixtures/data)')
+    const idx = await q('index')
+    ok(/mobile: 5 files/.test(idx) && !idx.includes('failure'), 'index: every repository, no extractor failure')
+    const list = await q('data')
+    eq(list.split('\n').filter((l) => /^\w+:/.test(l)), [
+      'api:prisma/migrations  sqlite  3 tables · 1 foreign key · 2 indexes · no conflicts',
+      'kiosk:storage/schema-changes  sqlite  2 tables · 0 foreign keys · 1 index · no conflicts',
+      'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts',
+      'web:db/changes  dialect unknown  found, not read (2 files)',
+      'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes · no conflicts',
+      'web:supabase/migrations  postgres  found, not read (1 file)',
+    ], 'graph_data: a store per migration folder, found by its DDL whatever its name; the Drizzle replay and snapshot agree')
+    has(list, 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0003_snapshot.json\n  migration  sql-migrations@1  replayed 4 files, 13 statements  mobile/drizzle/0000_init.sql', "Drizzle: the newest snapshot (0003, not 0002) and the replay in the journal's order are two declarations of one store")
+    has(list, '  migration  sql-migrations@1  replayed 3 files, 6 statements  api/prisma/migrations/20240105090000_init/migration.sql\n  dialect: stated at api/prisma/migrations/migration_lock.toml:3', 'Prisma: one migration per versioned subfolder, the dialect from its lock file')
+    has(list, '  migration  sql-migrations@1  replayed 2 files, 3 statements  kiosk/storage/schema-changes/0001_visits.up.sql\n  dialect: sniffed: AUTOINCREMENT at kiosk/storage/schema-changes/0001_visits.up.sql:2', 'no tool named: the dialect sniffed, the down migrations and the seed left out')
+    has(list, 'web:db/changes  dialect unknown  found, not read (2 files)\n  migration  sql-migrations@1  not read: dialect unknown (no config states it, and no dialect marker in the SQL)  web/db/changes/0001_events.sql', 'no dialect stated or seen: found, never replayed as SQLite by assumption')
+    has(list, 'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes · no conflicts\n  migration  sql-migrations@1  replayed 2 files, 2 statements  web/db/legacy/0001_accounts.sql\n  dialect: set in grimoire.config.json (graph.data.migrations)', 'the same kind of SQL is read once grimoire.config.json states its dialect')
+    has(list, '  migration  sql-migrations@1  not read: no reader for postgres migrations yet  web/supabase/migrations/20240110120000_profiles.sql\n  dialect: Supabase migrations are Postgres', 'Postgres: found, not yet read')
+    eq(await q('data', { entity: 'books' }), [
+      'mobile:drizzle/books  table  (sqlite)',
+      '  declared at mobile/drizzle/meta/0003_snapshot.json:39 [artifact drizzle-snapshot@1] · mobile/drizzle/0002_book_isbn.sql:1 [migration sql-migrations@1]',
+      'Fields (5):',
+      '  id  text  not null  — mobile/drizzle/meta/0003_snapshot.json:42 · mobile/drizzle/0000_init.sql:8',
+      '  title  text  not null  — mobile/drizzle/meta/0003_snapshot.json:49 · mobile/drizzle/0000_init.sql:9',
+      '  author_id  integer  not null  — mobile/drizzle/meta/0003_snapshot.json:56 · mobile/drizzle/0000_init.sql:10',
+      '  published_at  integer  null  — mobile/drizzle/meta/0003_snapshot.json:63 · mobile/drizzle/0000_init.sql:11',
+      '  isbn  text  null  — mobile/drizzle/meta/0003_snapshot.json:70 · mobile/drizzle/0002_book_isbn.sql:1',
+      'Keys (1):',
+      '  primary (id)  — mobile/drizzle/meta/0003_snapshot.json:42 · mobile/drizzle/0000_init.sql:8',
+      'Indexes (2):',
+      '  books_isbn_unique unique (isbn)  — mobile/drizzle/meta/0003_snapshot.json:79 · mobile/drizzle/0002_book_isbn.sql:2',
+      '  books_author_idx (author_id)  — mobile/drizzle/meta/0003_snapshot.json:86 · mobile/drizzle/0000_init.sql:15',
+      'Foreign keys (1):',
+      '  (author_id) → authors(id)  on delete cascade · on update no action  — mobile/drizzle/meta/0003_snapshot.json:95 · mobile/drizzle/0000_init.sql:12',
+      'Conflicts: none',
+    ].join('\n'), 'graph_data entity: every field, key, index and foreign key with both its sources, file:line')
+    eq(await q('data', { store: 'mobile:drizzle' }), [
+      'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts',
+      '  authors  table  3 fields · primary (id)  mobile/drizzle/meta/0003_snapshot.json:7 · mobile/drizzle/0003_author_bio_required.sql:10',
+      '  books  table  5 fields · primary (id) · 2 indexes · foreign keys → authors  mobile/drizzle/meta/0003_snapshot.json:39 · mobile/drizzle/0002_book_isbn.sql:1',
+      '  shelf_books  table  3 fields · primary (shelf_id, book_id) · foreign keys → shelves, books  mobile/drizzle/meta/0003_snapshot.json:113 · mobile/drizzle/0001_shelves.sql:6',
+      '  shelves  table  2 fields · primary (id)  mobile/drizzle/meta/0003_snapshot.json:180 · mobile/drizzle/0001_shelves.sql:1',
+    ].join('\n'), 'graph_data store: each table cites its snapshot entry and the migration line that created or last altered it (authors: rebuilt and renamed in 0003)')
+    has(await q('data', { entity: 'shelf_books' }), 'Keys (1):\n  primary (shelf_id, book_id)  — mobile/drizzle/meta/0003_snapshot.json:169 · mobile/drizzle/0001_shelves.sql:10', 'a composite primary key: one key, both sources, no conflict')
+
+    // ── 8 · incremental ──
+    console.log('\n8 · incremental refresh')
+    edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` integer,', '`published_at` text,'))
+    await q('index')
+    has(await q('data', { entity: 'books' }), 'Conflicts (1): the declarations disagree; each side is kept\n  books.published_at  type: integer — mobile/drizzle/meta/0003_snapshot.json:63 [artifact] | text — mobile/drizzle/0000_init.sql:11 [migration]', 'a hand-edited migration disagreeing with the snapshot: a conflict carrying both sources')
+    edit('mobile/drizzle/0002_book_isbn.sql', (t) => t.replace('ALTER TABLE `books`', 'ALTER TABLE `bookz`'))
+    await q('index')
+    has(await q('data'), 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0003_snapshot.json\n  migration  sql-migrations@1  replayed to mobile/drizzle/0002_book_isbn.sql:1: no such table: bookz  mobile/drizzle/0000_init.sql', 'a rejected statement stops the replay there: labelled, with the error')
+    has(await q('data', { entity: 'books' }), '  published_at  integer  null  — mobile/drizzle/meta/0003_snapshot.json:63 · mobile/drizzle/0000_init.sql:11\n  isbn  text  null  — mobile/drizzle/meta/0003_snapshot.json:70\n', 'the facts replayed so far are kept (and compared with nothing: they describe the store partway)')
+    has(await q('status'), 'data: 1 store(s) (graph_data), 1 replay(s) stopped early', 'graph_status counts the replays that stopped')
+    edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` text,', '`published_at` integer,'))
+    edit('mobile/drizzle/0002_book_isbn.sql', (t) => t.replace('ALTER TABLE `bookz`', 'ALTER TABLE `books`'))
+    rmSync(path.join(PROJ, 'api/prisma/migrations/20240301080000_tags'), { recursive: true })
+    await q('index')
+    has(await q('data'), 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts', 'restored migrations replay in full again')
+    has(await q('data', { store: 'api:prisma/migrations' }), 'api:prisma/migrations  sqlite  2 tables · 1 foreign key · 1 index · no conflicts', 'a deleted migration re-runs its folder')
+    has(await q('data', { entity: 'Tag' }), 'No entity "Tag"', '… and what it created is gone')
+
+    edit('mobile/drizzle/meta/0003_snapshot.json', (t) => t.slice(0, 200)) // read by the data model only: the query notices it
+    has(await q('status'), 'data: 1 store(s) (graph_data); 1 extractor failure(s): drizzle-snapshot@1 on mobile/drizzle/meta/0003_snapshot.json: ', 'a snapshot that no longer parses: graph_status reports the extractor failure (after refreshing on its own)')
+    const after = await q('data')
+    has(after, 'mobile:drizzle  sqlite  4 tables · 3 foreign keys · 2 indexes · no conflicts\n  migration  sql-migrations@1  replayed 4 files, 13 statements  mobile/drizzle/0000_init.sql', '… its facts are lost, the replay still answers')
+    has(after, 'Extractor failures (1), their facts are missing:\n  drizzle-snapshot@1 on mobile/drizzle/meta/0003_snapshot.json: ', '… and graph_data names the failure')
+
+    has(cli('data', 'list'), 'kiosk:storage/schema-changes  sqlite  2 tables · 0 foreign keys · 1 index · no conflicts', 'graph.mjs data list')
+    has(cli('data', 'list', 'web:db/legacy'), '  sessions  table  3 fields · primary (id) · foreign keys → accounts  web/db/legacy/0002_sessions.sql:1', 'graph.mjs data list <store>')
+    has(cli('data', 'show', 'Loan'), 'api:prisma/migrations/Loan  table  (sqlite)\n  declared at api/prisma/migrations/20240212143000_loan_notes/migration.sql:3 [migration sql-migrations@1]', 'graph.mjs data show <entity>')
+  } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 
 console.log(`\n${PASS} passed, ${FAIL} failed`)

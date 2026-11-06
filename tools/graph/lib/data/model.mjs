@@ -2,10 +2,11 @@
 // keyed, sourced model reconcile.mjs merges the declarations into.
 //
 // An extractor's facts are { declarations: [Declaration] }, one per store it read:
-//   Declaration { store: its folder, repo-relative ('.' at the root) · dialect · dialectFrom: where
-//                 the dialect was stated or seen · source: { path, line, kind, confidence } ·
-//                 complete: it describes the whole store (an element it lacks is a disagreement) ·
-//                 partial: a replay stopped early · status: read | partial | not-read · label ·
+//   Declaration { store: its folder, repo-relative ('.' at the root) · dialect · dialectFrom: how
+//                 the dialect is known, { how: stated | sniffed | supabase | override, path?, line?,
+//                 marker? } · source: { path, line, kind, confidence } · complete: it describes the
+//                 whole store (an element it lacks is a disagreement) · partial: a replay stopped
+//                 early · status: read | partial | not-read · label · stopped?: { path, line } ·
 //                 error · notes[] · files · snapshot?: { id, prevIds } (Drizzle v1) · entities[] }
 //   Entity      { name, kind: table | view, path, line, fields[], keys[], indexes[], relations[] }
 //   Field       { name (a dotted path when nested), type: as declared, nullable: true | false,

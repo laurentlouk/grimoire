@@ -4,14 +4,19 @@
 //
 // Runs in its own process (worker.mjs) with V8's Liftoff-only wasm tier: some grammars crash the
 // optimizing wasm compiler of current Node, and a crash must never take the MCP server with it.
-import { readFileSync } from 'node:fs'
+//
+// After a repository's code, its data model (lib/data): the files data extractors read are tracked
+// the same way (data_inputs), and each extraction job (one file, or one folder) runs again only when
+// the hash of one of its inputs, or its extractor's version, changed (data_facts).
+import { readFileSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { loadRuntime } from './deps.mjs'
 import { extract } from './extract.mjs'
 import { TEST_PATH } from './langs.mjs'
-import { scanRepo, gitHead } from './project.mjs'
-import { openStore, tx } from './store.mjs'
+import { scanRepo, gitHead, listPaths } from './project.mjs'
+import { openStore, tx, driver } from './store.mjs'
+import { candidates, inspect, plan, run, idOf, MAX_BYTES } from './data/registry.mjs'
 import { resolveRepo } from './resolve.mjs'
 import { cochange } from './cochange.mjs'
 
@@ -31,7 +36,8 @@ export async function indexProject(project, { full = false, only = null, log = (
     const rootRel = path.relative(project.root, repo.abs) || '.'
     if (full) dropRepo(db, repo.name)
     const prev = new Map(db.prepare('SELECT id, path, size, mtime, hash FROM files WHERE repo = ?').all(repo.name).map((f) => [f.path, f]))
-    const scanned = scanRepo(repo, project)
+    const rels = listPaths(repo.abs)
+    const scanned = scanRepo(repo, project, rels)
     rs.files = scanned.length
     const todo = []
     for (const f of scanned) {
@@ -67,12 +73,64 @@ export async function indexProject(project, { full = false, only = null, log = (
       const cc = db.prepare('SELECT cochange_head FROM repos WHERE name = ?').get(repo.name)
       if (head && (cc.cochange_head !== head || needsResolve)) { cochange(db, repo); db.prepare('UPDATE repos SET cochange_head = ? WHERE name = ?').run(head, repo.name) }
     })
-    log(`${repo.name}: ${rs.files} files, ${rs.parsed} parsed, ${rs.removed} removed`)
+    rs.data = await indexData(db, project, repo, rels)
+    log(`${repo.name}: ${rs.files} files, ${rs.parsed} parsed, ${rs.removed} removed${rs.data.extracted ? `, ${rs.data.extracted} data job(s) run` : ''}`)
     summary.repos.push(rs)
   }
   summary.ms = Date.now() - t0
   db.close()
   return summary
+}
+
+// A repository's data model: hash the inputs that moved, then run the jobs whose inputs changed.
+async function indexData(db, project, repo, rels) {
+  const out = { extracted: 0, failed: [] }
+  const prev = new Map(db.prepare('SELECT path, size, mtime, hash, ddl FROM data_inputs WHERE repo = ?').all(repo.name).map((r) => [r.path, r]))
+  const info = new Map() // path → { size, hash, ddl }
+  const texts = new Map()
+  const read = (p) => {
+    if (!texts.has(p)) {
+      if (info.get(p)?.size > MAX_BYTES) throw new Error(`${p} is larger than ${MAX_BYTES >> 20} MB: not read`)
+      texts.set(p, readFileSync(path.join(repo.abs, p), 'utf8'))
+    }
+    return texts.get(p)
+  }
+  const upsert = db.prepare('INSERT INTO data_inputs(repo, path, size, mtime, hash, ddl) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(repo, path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime, hash = excluded.hash, ddl = excluded.ddl')
+  tx(db, () => {
+    for (const p of candidates(rels, project)) {
+      let st
+      try { st = statSync(path.join(repo.abs, p)) } catch { continue }
+      if (!st.isFile()) continue
+      const r = prev.get(p), mtime = Math.floor(st.mtimeMs)
+      prev.delete(p)
+      if (r && r.size === st.size && r.mtime === mtime) { info.set(p, r); continue }
+      let hash = null, ddl = null
+      if (st.size <= MAX_BYTES) { try { const text = read(p); hash = createHash('sha1').update(text).digest('hex'); ddl = inspect(p, text) } catch { continue } }
+      info.set(p, { size: st.size, hash, ddl })
+      upsert.run(repo.name, p, st.size, mtime, hash, ddl)
+    }
+    for (const p of prev.keys()) db.prepare('DELETE FROM data_inputs WHERE repo = ? AND path = ?').run(repo.name, p)
+  })
+  const done = new Map(db.prepare('SELECT extractor, key, sig FROM data_facts WHERE repo = ?').all(repo.name).map((r) => [`${r.extractor}|${r.key}`, r]))
+  const keep = new Set()
+  const ctx = { DatabaseSync: (await driver()).DatabaseSync }
+  const results = []
+  for (const job of plan(info, { overrides: project.dataMigrations.filter((o) => !o.repo || o.repo === repo.name) })) {
+    const id = idOf(job.extractor)
+    const sig = createHash('sha1').update([id, job.salt || '', ...job.inputs.map((p) => `${p} ${info.get(p)?.hash}`)].join('\n')).digest('hex')
+    keep.add(`${id}|${job.key}`)
+    if (done.get(`${id}|${job.key}`)?.sig === sig) continue
+    const r = run(job, read, ctx)
+    results.push([job.extractor.scope, job.key, id, sig, r])
+    if (r.error) out.failed.push(`${job.key} (${id}): ${r.error}`)
+  }
+  tx(db, () => {
+    const put = db.prepare('INSERT OR REPLACE INTO data_facts(repo, scope, key, extractor, sig, facts, error) VALUES(?, ?, ?, ?, ?, ?, ?)')
+    for (const [scope, key, id, sig, r] of results) put.run(repo.name, scope, key, id, sig, r.facts ? JSON.stringify(r.facts) : null, r.error || null)
+    for (const [k, r] of done) if (!keep.has(k)) db.prepare('DELETE FROM data_facts WHERE repo = ? AND extractor = ? AND key = ?').run(repo.name, r.extractor, r.key)
+  })
+  out.extracted = results.length
+  return out
 }
 
 function writeFile(db, repo, f) {
@@ -106,6 +164,8 @@ function dropRepo(db, repo) {
     for (const { id } of db.prepare('SELECT id FROM files WHERE repo = ?').all(repo)) removeFile(db, id)
     db.prepare('DELETE FROM cochange WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM churn WHERE repo = ?').run(repo)
+    db.prepare('DELETE FROM data_inputs WHERE repo = ?').run(repo)
+    db.prepare('DELETE FROM data_facts WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM repos WHERE name = ?').run(repo)
   })
 }

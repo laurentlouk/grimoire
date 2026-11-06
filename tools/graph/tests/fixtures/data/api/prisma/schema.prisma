@@ -1,0 +1,30 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Member {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  motto     String   @default("read; then write -- always")
+  createdAt DateTime @default(now())
+  loans     Loan[]
+}
+
+model Loan {
+  id       Int      @id @default(autoincrement())
+  member   Member   @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  memberId Int
+  bookRef  String
+  dueOn    DateTime
+  note     String?
+}
+
+model Tag {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+}

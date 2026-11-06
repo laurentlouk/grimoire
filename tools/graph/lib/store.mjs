@@ -12,10 +12,15 @@
 //            syntax gives it, supertypes); imports: import statements
 //   cochange files that changed in the same commits (from git log), n = commits shared
 //   churn    per file, n = recent commits that touched it (same window as cochange)
+//   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
+//            ddl (1 when a .sql file creates or alters a table or an index)
+//   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
+//            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
+//            or error when the extractor threw
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '3'
+export const SCHEMA_VERSION = '4'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
@@ -28,7 +33,7 @@ export async function driver() {
 }
 
 // Every table of the index, in DDL order.
-export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn']
+export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts']
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -49,6 +54,8 @@ CREATE TABLE IF NOT EXISTS cochange(repo TEXT, a TEXT, b TEXT, n INTEGER);
 CREATE INDEX IF NOT EXISTS cochange_a ON cochange(repo, a);
 CREATE TABLE IF NOT EXISTS churn(repo TEXT, path TEXT, n INTEGER);
 CREATE INDEX IF NOT EXISTS churn_repo ON churn(repo, path);
+CREATE TABLE IF NOT EXISTS data_inputs(repo TEXT, path TEXT, size INTEGER, mtime INTEGER, hash TEXT, ddl INTEGER, PRIMARY KEY(repo, path));
+CREATE TABLE IF NOT EXISTS data_facts(repo TEXT, scope TEXT, key TEXT, extractor TEXT, sig TEXT, facts TEXT, error TEXT, PRIMARY KEY(repo, extractor, key));
 `
 
 export async function openStore(dbPath, { readOnly = false } = {}) {

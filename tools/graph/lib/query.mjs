@@ -3,8 +3,10 @@
 // The graph is a map for research (what relates to what, how far a change reaches). It is never
 // the source of truth for what code does: that is read in the code, at the path:line given here.
 import { langOf } from './langs.mjs'
+import { reconcile } from './data/reconcile.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
+export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files, never from a database. Open path:line before relying on any of it.'
 const CLASSY = "'class','struct','interface','trait','enum','protocol','module','object','type','namespace'"
 const MAX_TARGETS = 5
 
@@ -122,6 +124,12 @@ export class Graph {
       lines.push(`  call sites resolved: ${calls.resolved}/${calls.calls}${conf ? ` (${conf})` : ''}`)
       const n = byConf.reduce((a, e) => a + e.c, 0), guessed = byConf.filter((e) => e.confidence === 'ambiguous' || e.confidence === 'unique-name').reduce((a, e) => a + e.c, 0)
       if (n) lines.push(`  name guesses: ${Math.round((100 * guessed) / n)}% of ${n} call links (ambiguous + unique-name)`)
+      const data = this.q('SELECT key, extractor, facts, error FROM data_facts WHERE repo = ? ORDER BY key', r.name)
+      if (data.length) {
+        const decls = data.flatMap((x) => (x.facts ? JSON.parse(x.facts).declarations : []))
+        const stopped = decls.filter((d) => d.partial).length, failed = data.filter((x) => x.error)
+        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
+      }
     }
     const base = (() => { try { return JSON.parse(this.one("SELECT value FROM meta WHERE key = 'base'")?.value || 'null') } catch { return null } })()
     if (base) lines.push(`based on ${base.branch || 'the main checkout'} (${base.checkout})${base.rebasedAt ? `, last re-based ${base.rebasedAt}` : ''}`)
@@ -253,6 +261,77 @@ export class Graph {
     return out.join('\n')
   }
 
+  // ── the data model (lib/data): stores, entities of one store, one entity ──
+  dloc(s) { const root = this.roots.get(s.repo); const p = root && root !== '.' ? (s.path === '.' ? root : `${root}/${s.path}`) : s.path; return s.line ? `${p}:${s.line}` : p }
+  data({ store, entity, repo }) {
+    const R = repo ? ' AND repo = ?' : '', ra = repo ? [repo] : []
+    const model = reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL${R} ORDER BY repo, key, extractor`, ...ra).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+    const failed = this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra)
+    if (entity) return this.dataEntity(model, String(entity))
+    if (store) return this.dataStore(model, String(store))
+    if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables) and no Drizzle snapshot in the indexed repositories.'
+    const out = [`Data stores (${model.stores.length}), read from migrations and snapshots:`]
+    for (const st of model.stores) {
+      out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${this.storeSummary(st)}`)
+      for (const d of st.declarations) {
+        const how = d.stopped ? `replayed to ${this.dloc({ repo: st.repo, ...d.stopped })}: ${d.error}` : d.status === 'not-read' ? `not read: ${d.label}` : d.label
+        out.push(`  ${d.kind}  ${d.extractor}  ${how}  ${this.dloc({ repo: st.repo, path: d.path })}`)
+        for (const n of d.notes) out.push(`    note: ${n}`)
+      }
+      if (st.dialectFrom) out.push(`  dialect: ${this.dialectFrom(st.repo, st.dialectFrom)}`)
+    }
+    if (failed.length) out.push(`Extractor failures (${failed.length}), their facts are missing:`, ...failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
+    return out.join('\n')
+  }
+  dialectFrom(repo, f) {
+    const at = f.path ? this.dloc({ repo, path: f.path, line: f.line }) : ''
+    return f.how === 'stated' ? `stated at ${at}` : f.how === 'sniffed' ? `sniffed: ${f.marker} at ${at}` : f.how === 'supabase' ? 'Supabase migrations are Postgres' : 'set in grimoire.config.json (graph.data.migrations)'
+  }
+  storeSummary(st) {
+    const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+    const tables = st.entities.filter((e) => e.kind === 'table'), views = st.entities.length - tables.length
+    if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
+    const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0)
+    return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), n(tables.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes'), conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
+  }
+  sources(repo, list) { return list.map((s) => this.dloc({ repo, path: s.path, line: s.line })).join(' · ') }
+  findStore(model, spec) {
+    const hits = model.stores.filter((s) => s.id === spec || s.name === spec)
+    return hits.length ? hits : model.stores.filter((s) => s.id.toLowerCase() === spec.toLowerCase() || s.name.toLowerCase() === spec.toLowerCase())
+  }
+  dataStore(model, spec) {
+    const hits = this.findStore(model, spec)
+    if (!hits.length) return `No data store "${spec}". Stores: ${model.stores.map((s) => s.id).join(', ') || 'none'}.`
+    if (hits.length > 1) return `"${spec}" names ${hits.length} stores; give one as repo:folder: ${hits.map((s) => s.id).join(', ')}`
+    const [st] = hits
+    const out = [`${st.id}  ${st.dialect || 'dialect unknown'}  ${this.storeSummary(st)}`]
+    for (const e of st.entities) {
+      const pk = e.keys.find((k) => k.role === 'primary')
+      const conflicts = elementsOf(e).reduce((a, [, x]) => a + x.conflicts.length, 0)
+      const parts = [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.length ? `foreign keys → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null].filter(Boolean)
+      out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}`)
+    }
+    return out.join('\n')
+  }
+  dataEntity(model, spec) {
+    const all = model.stores.flatMap((st) => st.entities.map((e) => [st, e]))
+    const match = (fold) => all.filter(([, e]) => { const id = fold(e.id), s = fold(spec); return id === s || id.endsWith(`:${s}`) || id.endsWith(`/${s}`) })
+    let hits = match((x) => x)
+    if (!hits.length) hits = match((x) => x.toLowerCase())
+    if (!hits.length) return `No entity "${spec}" in the data model. Try graph_data with no argument for the stores, or with a store for its entities.`
+    if (hits.length > 1) return `"${spec}" names ${hits.length} entities; give store/entity or repo:store/entity: ${hits.map(([, e]) => e.id).join(', ')}`
+    const [[st, e]] = hits
+    const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}]`).join(' · ')}`]
+    const section = (title, list, line) => { if (list.length) out.push(`${title} (${list.length}):`, ...list.map((x) => `  ${line(x)}  — ${this.sources(st.repo, x.sources)}`)) }
+    section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}`)
+    section('Keys', e.keys, (k) => `${k.role} (${k.parts.join(', ')})`)
+    section('Indexes', e.indexes, (i) => `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}`)
+    section('Foreign keys', e.relations, (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
+    const conflicts = elementsOf(e).flatMap(([label, x]) => x.conflicts.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${v.value} — ${v.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
+    out.push(conflicts.length ? `Conflicts (${conflicts.length}): the declarations disagree; each side is kept` : 'Conflicts: none', ...conflicts)
+    return out.join('\n')
+  }
+
   path({ from, to, repo, depth = 6, strict = false }) {
     const a = this.targets(from, { repo }), b = this.targets(to, { repo })
     if (a.error) return a.error
@@ -266,6 +345,9 @@ export class Graph {
     return [`Call path ${from} → ${to} (${chain.length - 1} hops):`, ...chain.map(([n, i], k) => `  ${k}. ${this.row(n, i.conf ? `[${i.conf}]` : '')}`)].join('\n')
   }
 }
+
+// An entity and each of its elements, labelled as a conflict line names them.
+const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name}.${f.name}`, f]), ...e.keys.map((k) => [`${e.name} ${k.role} (${k.parts.join(', ')})`, k]), ...e.indexes.map((i) => [`${e.name} index ${i.name}`, i]), ...e.relations.map((r) => [`${e.name} foreign key (${r.columns.join(', ')})`, r])]
 
 // A read-only SELECT against the schema (see store.mjs), for questions the commands do not cover.
 export function sql(db, statement, limit = 200) {
