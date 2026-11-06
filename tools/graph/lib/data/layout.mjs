@@ -85,7 +85,7 @@ export function erdBox(t, collapsed) {
 //       referencing table, k: its relation), W, H, collapsed }
 export function layoutErd(tables, opts = {}) {
   const collapsed = !!opts.collapsed
-  const GX = collapsed ? 56 : 96, GY = collapsed ? 14 : 28, GC = collapsed ? 40 : 64, M = 24
+  const GX = collapsed ? 56 : 96, GY = collapsed ? 14 : 28, GC = collapsed ? 40 : 64, M = 24, TOP = 56 // TOP: the first row clears the zoom toolbar in the drawing's top right corner
   const n = tables.length
   const order = tables.map((_, i) => i).sort((a, b) => (tables[a].name < tables[b].name ? -1 : tables[a].name > tables[b].name ? 1 : a - b))
   const rk = new Array(n)
@@ -156,7 +156,7 @@ export function layoutErd(tables, opts = {}) {
   let cx = 0, cy = 0, shelf = 0
   for (const b of packed) {
     if (cx > 0 && cx + b.w > TW) { cx = 0; cy += shelf + GC; shelf = 0 }
-    for (const i of b.list) boxes[i] = { x: Math.round(M + cx + local[i][0]), y: Math.round(M + cy + local[i][1]), w: geo[i].w, h: geo[i].h }
+    for (const i of b.list) boxes[i] = { x: Math.round(M + cx + local[i][0]), y: Math.round(TOP + cy + local[i][1]), w: geo[i].w, h: geo[i].h }
     cx += b.w + GC
     shelf = Math.max(shelf, b.h)
   }
@@ -186,6 +186,6 @@ export function layoutErd(tables, opts = {}) {
       links.push({ from: i, to: p, k, d })
     })
   }
-  const W = Math.max(M * 2 + 100, ...boxes.map((b) => b.x + b.w + M + 60)), H = Math.max(M * 2 + 40, ...boxes.map((b) => b.y + b.h + M))
+  const W = Math.max(M * 2 + 100, ...boxes.map((b) => b.x + b.w + M + 60)), H = Math.max(TOP + M + 40, ...boxes.map((b) => b.y + b.h + M))
   return { boxes, links, W: Math.ceil(W), H: Math.ceil(H), collapsed }
 }

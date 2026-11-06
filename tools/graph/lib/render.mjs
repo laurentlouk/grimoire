@@ -142,14 +142,24 @@ function packStore(st, shown, fileId) {
   }
   const src = (list) => list.map((s) => [P(s.path, s.kind), s.line ?? null])
   const cf = (list) => list.map((c) => ({ attr: c.attr, values: c.values.map((v) => ({ value: v.value, src: src(v.sources) })) }))
+  // SQLite resolves table and column names in any letter case, and keeps a foreign key's as written
+  // (`REFERENCES Authors(ID)` for `authors.id`): each is resolved here, once, to the name the store
+  // declares, so the layout and the page match names exactly. One that names nothing stays as written.
+  const lower = (s) => String(s).toLowerCase()
+  const byName = new Map(), byLower = new Map()
+  for (const e of st.entities) { byName.set(e.name, e); if (!byLower.has(lower(e.name))) byLower.set(lower(e.name), e) }
+  const entity = (name) => byName.get(name) || byLower.get(lower(name)) || null
+  const column = (e, c) => { if (!e || c === null || c === undefined) return c; const f = e.fields.find((x) => x.name === c) || e.fields.find((x) => lower(x.name) === lower(c)); return f ? f.name : c }
   const tables = st.entities.map((e) => {
-    const pk = new Set(e.keys.filter((k) => k.role === 'primary').flatMap((k) => k.parts)), fk = new Set(e.relations.flatMap((r) => r.columns))
+    const rels = e.relations.map((r) => { const to = entity(r.to); return { r, columns: r.columns.map((c) => column(e, c)), to: to ? to.name : r.to, toColumns: r.toColumns.map((c) => column(to, c)) } })
+    const keys = e.keys.map((k) => ({ k, parts: k.parts.map((c) => column(e, c)) }))
+    const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
     return {
       name: e.name, kind: e.kind, src: src(e.sources), cf: cf(e.conflicts),
       fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, src: src(f.sources), cf: cf(f.conflicts) })),
-      keys: e.keys.map((k) => ({ role: k.role, parts: k.parts, src: src(k.sources), cf: cf(k.conflicts) })),
+      keys: keys.map(({ k, parts }) => ({ role: k.role, parts, src: src(k.sources), cf: cf(k.conflicts) })),
       indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, src: src(x.sources), cf: cf(x.conflicts) })),
-      rels: e.relations.map((r) => ({ columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, src: src(r.sources), cf: cf(r.conflicts) })),
+      rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, src: src(r.sources), cf: cf(r.conflicts) })),
     }
   })
   const f = st.dialectFrom, collapsed = tables.length > DATA_COLLAPSE

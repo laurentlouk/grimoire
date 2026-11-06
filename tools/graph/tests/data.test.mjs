@@ -412,6 +412,9 @@ console.log('\n7 · the Data tab: the ERD layout, and a page from a hand-built i
   const again = layoutErd(shop), rev = layoutErd(shop.slice().reverse())
   ok(JSON.stringify(again) === JSON.stringify(L) && shop.every((t, i) => JSON.stringify(rev.boxes[shop.length - 1 - i]) === JSON.stringify(L.boxes[i])),
     'deterministic: the same tables give the same coordinates, in whatever order they come')
+  // the zoom toolbar sits 8 px from the drawing box's top, about 37 px tall, over a 6 px padding
+  const TOOLBAR = 8 + 37 + 6
+  ok(Math.min(...L.boxes.map((b) => b.y)) > TOOLBAR && Math.min(...layoutErd(shop, { collapsed: true }).boxes.map((b) => b.y)) > TOOLBAR, `no table starts under the zoom toolbar (top-most at y ${Math.min(...L.boxes.map((b) => b.y))})`)
 
   // a hand-built index: one store whose snapshot and migration disagree on a column's type, a
   // Postgres folder found but not read, a store of 200 tables, a snapshot that failed to parse
@@ -457,6 +460,16 @@ CREATE INDEX books_author_idx ON books (author_id);
     })
     fact('warehouse', 'sql-migrations@1', { declarations: [decl('warehouse', { path: 'warehouse/0001_all.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 400 statements', files: 1, entities: wide })] })
     fact('db/meta/0002_snapshot.json', 'drizzle-snapshot@1', null, 'Unexpected end of JSON input')
+    // foreign keys naming their target in another letter case, as SQLite accepts and keeps them
+    const MIXED = 'CREATE TABLE authors(id INTEGER PRIMARY KEY); CREATE TABLE books(id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES Authors(id)); CREATE TABLE "Loans"(id INTEGER PRIMARY KEY); CREATE TABLE reviews(id INTEGER PRIMARY KEY, loan_id INTEGER REFERENCES loans(id));\nCREATE TABLE ratings(id INTEGER PRIMARY KEY, book_id INTEGER REFERENCES BOOKS(ID));\n'
+    const mixed = replay([{ path: 'x/legacy/0001_init.sql', text: MIXED }], DatabaseSync)
+    fact('x/legacy', 'sql-migrations@1', { declarations: [decl('x/legacy', { path: 'x/legacy/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 5 statements', files: 1, entities: mixed.entities })] })
+    // every name and path a hostile repository could choose, holding markup
+    const BAD = '"><img src=x onerror=alert(1)></title><script>x</script><!--', HOSTILE = `y/${BAD}.sql`
+    const at1 = (line) => ({ path: HOSTILE, line })
+    fact('y/hostile', 'sql-migrations@1', { declarations: [decl('y/hostile', { path: HOSTILE, line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 1 statement', files: 1, entities: [{ name: `t${BAD}`, kind: 'table', ...at1(1),
+      fields: [{ name: `c${BAD}`, type: `text${BAD}`, nullable: true, default: null, generated: null, ...at1(2) }], keys: [], indexes: [{ name: `i${BAD}`, unique: false, columns: [`c${BAD}`], partial: false, ...at1(3) }],
+      relations: [{ columns: [`c${BAD}`], to: `r${BAD}`, toColumns: ['id'], onDelete: 'no action', onUpdate: 'no action', ...at1(4) }] }] })] })
     db.close()
 
     const t0 = Date.now()
@@ -465,7 +478,9 @@ CREATE INDEX books_author_idx ON books (author_id);
     eq(D.data.stores.map((s) => `${s.id} ${s.dialect} ${s.tables.length}${s.collapsed ? ' collapsed' : ''} · ${s.summary}`), [
       'app:db sqlite 2 · 2 tables · 1 foreign key · 1 index (+2 implicit, for keys) · 1 conflict',
       'app:warehouse sqlite 200 collapsed · 200 tables · 152 foreign keys · 200 indexes · no conflicts',
-    ], 'one ERD per SQL store that has tables, in graph_data\'s order, with its counts; a store of more than 60 tables starts collapsed')
+      'app:x/legacy sqlite 5 · 5 tables · 3 foreign keys · 0 indexes · no conflicts',
+      'app:y/hostile sqlite 1 · 1 table · 1 foreign key · 1 index · no conflicts',
+    ],'one ERD per SQL store that has tables, in graph_data\'s order, with its counts; a store of more than 60 tables starts collapsed')
     const pg = await stubPage(page, '#data-0')
     eq(pg.find((n) => n.tagName === 'NAV').kids.map((b) => b.attrs['data-ctl']), ['tab-overview', 'tab-architecture', 'tab-data', 'tab-map', 'tab-files', 'tab-symbols', 'tab-hotspots', 'tab-docs'], 'the Data tab sits after Architecture')
     const svg = pg.erd().html
@@ -497,6 +512,33 @@ CREATE INDEX books_author_idx ON books (author_id);
     pg.search('')
     pg.click(137)
     eq([Object.keys(tablesIn(pg.erd().html)).sort(), fksIn(pg.erd().html)], [['t135', 't137'], ['t137 (parent_id) → t135 (id)']], 'focusing a table of a collapsed store draws it with its foreign key neighbours, columns and all')
+
+    // a foreign key naming its table or column in another case is drawn, linked and counted
+    pg.go('#data-2')
+    const ms2 = D.data.stores[2], mx = pg.erd().html
+    eq([/aria-label="app:x\/legacy: 5 tables, 3 foreign key lines"/.test(mx), fksIn(mx)], [true, ['books (author_id) → authors (id)', 'ratings (book_id) → books (id)', 'reviews (loan_id) → Loans (id)']],
+      'SQLite resolves table and column names in any case: every foreign key gets its line, to the table as it is named')
+    const rowsAt = ms2.layout.links.map((l) => {
+      const [, x1, y1, x2, y2] = /^M([\d.]+),([\d.]+) C.* ([\d.]+),([\d.]+)$/.exec(l.d).map(Number), A = ms2.layout.boxes[l.from], B = ms2.layout.boxes[l.to], T = ms2.tables[l.from], r = T.rels[l.k]
+      const rowY = (t, b, col) => b.y + 30 + 20 * t.fields.findIndex((f) => f.name === col) + 10
+      return `${T.name}.${r.columns[0]} ${x1 === A.x && y1 === rowY(T, A, r.columns[0]) ? 'from its row' : 'off'} ${x2 === B.x + B.w && y2 === rowY(ms2.tables[l.to], B, 'id') ? 'to the id row' : 'off'}`
+    })
+    eq(rowsAt, ['books.author_id from its row to the id row', 'ratings.book_id from its row to the id row', 'reviews.loan_id from its row to the id row'], '… from the referencing column\'s row to the referenced column\'s row (ID matches id), never the header')
+    pg.click(ms2.tables.findIndex((t) => t.name === 'authors'))
+    const refd = pg.text().includes('Referenced by (1)') && !!pg.find((n) => n.tagName === 'BUTTON' && n.kids[0] === 'books')
+    pg.click(ms2.tables.findIndex((t) => t.name === 'reviews'))
+    ok(refd && !!pg.find((n) => n.tagName === 'BUTTON' && n.kids[0] === 'Loans') && /class="tbl on"[^>]*aria-label="Loans,/.test(pg.erd().html),
+      '… and the passports agree: authors is referenced by books, reviews links to Loans, which focus lights')
+
+    // markup in any name, type, target or path is text, in the drawing and in the passport
+    pg.go('#data-3')
+    const escd = BAD.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'), hx = pg.erd().html
+    ok(!/<img|<script|<!--/i.test(hx) && [`t${escd}`, `c${escd}`, `text${escd}`, `r${escd}`, `app/y/${escd}.sql:3`].every((s) => hx.includes(s)),
+      'the ERD escapes a table name, a column name, a type, a foreign key target and a source path holding markup')
+    pg.click(0)
+    const markup = pg.all((n) => typeof n.html === 'string' && /<img|<script/i.test(n.html)).length + pg.all((n) => n.tagName === 'IMG' || n.tagName === 'SCRIPT').length
+    ok(markup === 0 && !!pg.find((n) => n.tagName === 'H3' && n.kids.includes(`t${BAD}`)) && !!pg.find((n) => n.tagName === 'CODE' && n.kids[0] === `app/y/${BAD}.sql:2`) && pg.text().includes(`r${BAD}`),
+      '… and the passport carries them as text nodes, never as markup')
     const D2 = dataOf(await renderGraph({ dbPath }))
     ok(JSON.stringify(D2.data.stores.map((s) => s.layout)) === JSON.stringify(D.data.stores.map((s) => s.layout)), 'the layout is computed once, in Node: the same model renders the same coordinates')
     const script = scriptOf(page)
