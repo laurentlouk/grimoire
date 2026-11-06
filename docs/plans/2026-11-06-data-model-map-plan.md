@@ -73,8 +73,11 @@ Numbers in brackets are the spec's slice numbers. The spec's slice 1 is split in
 ### 1. The model, SQL migrations and `graph_data` [spec 1, part 1]
 - **What:**
   - `model.mjs`, `registry.mjs`, the store tables, a hook in `indexer.mjs`'s loop and a per-unit pass after it.
-  - Extractors: SQL migration folders found by convention (`drizzle/`, `migrations/`, `prisma/migrations/`, `supabase/migrations/`, `db/migrate/*.sql`), SQLite ones replayed into `node:sqlite` `:memory:` (`readers/sqlite-replay.mjs`, `readers/sql-split.mjs` for Drizzle's `--> statement-breakpoint` and plain `;`), and Drizzle snapshots (v7 `tables{}` and v1 `ddl[]`).
-  - Dialect from config: `drizzle.config.*`, `prisma/schema.prisma`'s `provider`, and Supabase means Postgres. Non-SQLite folders are recorded as *found, not yet read* until slice 12.
+  - Extractors: SQL migration folders **found by content, whatever tool wrote them**, and Drizzle snapshots (v7 `tables{}` and v1 `ddl[]`) as a bonus where they exist. The owner, 2026-11-06: "if it's not Drizzle and it's another tool, it must work; that's what agnostic means".
+  - Discovery: any folder of ordered `.sql` files containing DDL, whatever its name, plus per-migration subfolders (`<prefix>_<name>/migration.sql` or `up.sql`). Down migrations and seeds are excluded; conventional names are only a fast path.
+  - Order: the tool's journal when present, else natural sort of the prefixes. Undecidable means "order unknown", not replayed.
+  - Dialect: from config (`drizzle.config.*`, `schema.prisma`'s `provider`, Supabase), else sniffed from the SQL (its own module, reused by slice 12), else unknown and not replayed. `graph.data.migrations: [{ path, dialect }]` overrides.
+  - SQLite folders are replayed into `node:sqlite` `:memory:` (`readers/sqlite-replay.mjs`, `readers/sql-split.mjs` for Drizzle's `--> statement-breakpoint` and plain `;`). Postgres and MySQL folders are recorded as *found, not yet read* until slice 12.
   - `graph_data` (stores, entities, one entity with sources) and `graph.mjs data list | show`.
   - `graph_status` reports extractor failures.
 - **Done:** on a Drizzle SQLite fixture, the replay and the snapshot agree element for element and each table cites its migration line. A deliberately hand-edited migration shows as a conflict. On odyyy-app: 23 tables, 7 FKs, 34 indexes.
