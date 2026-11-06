@@ -22,7 +22,8 @@
 //    • 0.9.0 run durability: the page summarizes late, hedge, wedged, late-result,
 //      fence, ship (a ship skipped on a ready PR or a held lock never reads as a
 //      failed push), env (a re-check, transient or failing again, and a halt a later
-//      check lifted), seal, absorb (each source) and harness-routed events in words,
+//      check lifted), seal, absorb (each source), harness-routed, and the data model's
+//      model (a change kept or reverted, with its reason) and delta (what a ship wrote) events in words,
 //      shows a halt's kind and draft
 //      PRs, and the checkpoint card shows a v2 checkpoint's landedTasks with their
 //      heads (the renderer is executed against a minimal DOM, not just grepped)
@@ -283,6 +284,11 @@ try {
     { type: 'absorb', task: '#8', repo: 'site', source: 'reviewed-earlier', head: 'ddddddd4444' },
     { type: 'harness-routed', task: 'site:final', stage: 'terminal', persona: 'Privacy Engineer', severity: 'major', where: 'grimoire.config.json:3' },
     { type: 'settle', task: '#5', repo: 'site', status: 'DONE' },
+    // the data model: what a landed task did to stored data, and what the ship wrote to the design's delta
+    { type: 'model', task: '#5', repo: 'site', target: 'site:db/books.subtitle', op: 'add', kept: true, reason: 'the search page shows it', delta: 'pending' },
+    { type: 'model', task: '#5', repo: 'site', target: 'site:db/books.legacy', op: 'remove', kept: false, reason: 'still read by the export', delta: null },
+    { type: 'delta', repo: 'site', label: 'ship:site#1', status: 'ok', added: 1, already: 0, refused: 0, detail: '' },
+    { type: 'delta', repo: 'site', label: 'ship:site#2', status: 'bad', added: null, already: null, refused: null, detail: 'DELTA bad step=node' },
     { type: 'ship', repo: 'site', mode: 'land', pushed: true, head: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true },
     { type: 'ship', repo: 'site', mode: 'halt', pushed: null, head: 'bbbbbbb2222', failedStep: 'comment', detail: 'gh: rate limited', prUrl: 'https://example.invalid/pr/7', draft: true },
     { type: 'env', when: 'stall', why: 'a failed push of site', ok: null, failed: [] },
@@ -350,6 +356,10 @@ try {
   has(/already on the branch, not reviewed for this task: sent to the panel as it stands @ ccccccc3333/, 'absorb verify-only: reviewed as it stands, never "landed earlier"')
   has(/already on the branch and reviewed for this task: landed with no new review @ ddddddd4444/, 'absorb reviewed-earlier: landed with no new review')
   has(/terminal · Privacy Engineer · major at grimoire\.config\.json:3: a harness file, routed to crystallize/, 'harness-routed: in words')
+  has(/kept site:db\/books\.subtitle \(add\) — the search page shows it · for the design's delta/, "model: a kept change, for the design's delta")
+  has(/reverted site:db\/books\.legacy \(remove\) — still read by the export/, 'model: a reverted change, with its reason')
+  has(/site → 1 unplanned change\(s\) added to the design's delta/, 'delta: what the ship wrote')
+  has(/site → not written \(bad\): DELTA bad step=node — the next ship carries them again/, 'delta: a write that failed, retried')
   has(/#5\s+DONE\s+3 reviews \(\+1 discarded\) · 1 fixes/, "a task's review count leaves the discarded round out and shows it apart")
   has(/\[environment\] environment: commit:site timed out/, 'halt: its kind')
   has(/Checkpoint\s+· v2/, 'the checkpoint card shows its version')

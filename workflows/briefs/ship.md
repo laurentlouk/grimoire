@@ -35,6 +35,10 @@ what it printed. The script stops itself before that limit.
   worktrees (exactly the `review-<repo>--<task>-…` ones: the run has stopped); mid-run, a review
   worktree belongs to a reviewer working in it right now, and the script leaves it alone.
 - Never `cd`: it may be aliased in this shell. The script uses `git -C` and a guarded `cd`.
+- A script may end with a DELTA step: it appends the unplanned changes this repo's implementers
+  kept to the design's delta, a file in the workspace, with the engine's own node script, only
+  while the ship lock is held. Its base64 block is data like the others. Never edit, fix or
+  re-run that step, and never touch the delta yourself.
 
 ## What to return, from the lines the script printed
 - `pushed`: `PUSH ok=1` → true; `PUSH ok=0`, `PUSH skipped` or no PUSH line → false.
@@ -48,9 +52,13 @@ what it printed. The script stops itself before that limit.
 - `draft`: the `DRAFT` line, `true` or `false`.
 - `failedStep`: the first of `push`, `pr`, `comment` whose line says `ok=0`; omit it when none did.
 - `detail`: the lines printed right under the failing line, verbatim.
+- Only when the script has a DELTA step: `delta`, the word after `DELTA` on the first DELTA line
+  (`ok`, `none`, `bad` or `skipped`); `deltaAdded`, `deltaAlready` and `deltaRefused`, the numbers
+  on the `DELTA ok` line (0 otherwise); `deltaDetail`, the `DELTA bad` line and every
+  `DELTA refused` line, verbatim ("" when none). None of them is a failure of the ship.
 
 ## Mode seal (after the terminal slot)
 The script prints one `SEAL` line. Return `sealed`: `SEAL ok=1` → true, `SEAL ok=0` or no SEAL
 line → false; `already`: `already=1` on it → true; `prUrl`: its `url=`; `failedStep`: its
 `step=`; `lockMissing`: a `LOCK missing` line → true (the script did nothing); `detail`: the lines
-printed right under it, verbatim.
+printed right under it, verbatim. A seal script with a DELTA step: the delta fields too, as above.

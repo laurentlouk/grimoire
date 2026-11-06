@@ -11,6 +11,10 @@ each failure in `inputProblems` (name the artifact and the fix, e.g. "planPath:
 docs/plans/x.md does not exist — run to-plan first"). NEVER invent an index from partial
 inputs.
 
+When the header names the design's delta (beside the spec), return `deltaFound`: true when that
+file exists, false when it does not. A design that changes no stored data has none: its absence
+is never an input problem.
+
 ## Then return the SLICE INDEX — lightweight, NO issue bodies
 Using your tracker's tool or MCP (Jira, Linear, GitHub Issues, or whatever this project
 uses), list ALL slice-tagged issues for the project — the WHOLE project, however many slices

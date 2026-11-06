@@ -837,6 +837,11 @@ function client(score) {
         : e.source === 'checkpoint' || e.source === 'pr' ? `landed in an earlier attempt, verified on the run branch (from the ${e.source === 'pr' ? 'PR state marker' : 'checkpoint'})`
           : `landed earlier, from ${s(e.source)}`}${e.head ? ` @ ${s(e.head)}` : ''}`,
     'harness-routed': (e) => `${s(e.stage)} · ${s(e.persona)} · ${s(e.severity)} at ${s(e.where)}: a harness file, routed to crystallize, not fixed on the product branch`,
+    // the data model (spec D4): a change to stored data a landed task's implementer reported (kept with
+    // its reason or reverted; delta: null, 'pending' for the next ship, 'added', 'refused: …', or why it
+    // is not recorded), and what a ship or seal wrote to the design's delta. Nothing here blocked the run.
+    model: (e) => `${e.kept ? 'kept' : 'reverted'} ${s(e.target)}${e.op ? ` (${s(e.op)})` : ''} — ${e.reason ? s(e.reason) : 'no reason given'}${e.delta === 'pending' ? ' · for the design\'s delta' : e.delta ? ` · ${s(e.delta)}` : ''}`,
+    delta: (e) => `${s(e.repo)} → ${e.status === 'ok' ? `${s(e.added ?? '?')} unplanned change(s) added to the design's delta${e.already ? `, ${s(e.already)} there already` : ''}${e.refused ? `, ${s(e.refused)} refused${e.detail ? `: ${s(e.detail)}` : ''}` : ''}` : e.status === 'none' ? "the design's delta is gone: nothing written" : `not written (${e.status ? s(e.status) : 'no DELTA line'})${e.detail ? `: ${s(e.detail)}` : ''} — the next ship carries them again`}`,
     // after run.end: the details of tasks that landed since the last confirmed flush, LANDED_DELTA_MAX per chunk
     'landed.flush': (e) => `${s(e.left)} landed task detail(s) still to write to landed.jsonl: one more chunk`,
     'run.end': (e) => `${s(e.status)} · done ${s(e.done)} · failed ${s(e.failed)} · blocked ${s(e.blocked)} · PRs ${s(e.prs)} · tokens ${s(e.tokens)}`,

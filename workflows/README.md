@@ -72,7 +72,7 @@ failures 0.9.0 removes ("Run durability"); the two overlap.
 
 | Input | Required | What it is |
 | ----- | -------- | ---------- |
-| `specPath` | yes | the approved spec from `roast` |
+| `specPath` | yes | the approved spec from `roast` (its delta, when the design changes stored data, sits beside it: `deltaPath`) |
 | `planPath` | yes | the plan from `to-plan` |
 | `project` | yes | the slice-tagged project or parent ticket from `to-issues` (an opaque id — Jira, Linear, GitHub Issues, or other) |
 | `repos` | yes | the repo table; see below |
@@ -137,6 +137,7 @@ ignored, with a warning.)
 | `agentTimeoutMin` | `40` | the SOFT limit per dispatch, in minutes (`0` disables every limit). Past it the dispatch is logged as late (event `late`, `telemetry.late`) and still awaited; a result that arrives later is accepted. An agent cannot be stopped, so a limit only decides how long the run waits. Mechanical kinds have shorter limits of their own (`timeouts`); `crystallize` has 90 minutes |
 | `agentHardTimeoutMin` | `180` | where waiting ends. A reader (reviewer, verifier, guard, replanner, …) is given up on at twice its soft limit, capped by this value (`telemetry.timedOut`). A writer (implementer, fix, integrate, gate) is never settled while it may still be running: it is marked wedged, its repo is fenced (nothing else is dispatched into that checkout, no replan requeues into it) and its result is still taken when it arrives. When only wedged work is left, the run waits out each wedged writer's grace window (`wedgeGraceMin`) and then halts with `kind: 'wedged'`. `0`: writers never wedge |
 | `wedgeGraceMin` | the hard limit, at most `60` | how long a wedged writer is still waited for once it is the only work left. Halting ends the run's agents, the wedged writer with them: one was minutes from done when its run halted, and the resume rebuilt its task for three hours. Other repos keep running meanwhile; a result that arrives inside the window is used as usual. `0`: halt as soon as only wedged work is left |
+| `deltaPath` | beside the spec | the design's delta, what it changes in stored data (`docs/specs/<date>-<topic>.delta.json` beside `<date>-<topic>-design.md`; any other spec `<stem>.md` has `<stem>.delta.json`). The index agent says whether it exists (`deltaFound`); none is normal: a design that changes no stored data has none. See "The data model: unplanned changes, resolved and reported" |
 | `root` | — | the workspace root, an absolute path (`/grimoire:orchestrate` passes it). Every brief names it and reads its file by absolute path, and every verbatim script (journal, ship, seal, environment check, reconcile) changes to it first, so an agent dispatched while the launching session sits in another folder still finds the run dir, the repos and the engine's scripts. Without it, prompts keep their relative paths |
 | `timeouts` | — | per dispatch kind, `{<kind>: {soft, hard, hedgeAfter}}` in minutes. Defaults: `writer` (soft `agentTimeoutMin`, hard `agentHardTimeoutMin`), `reader` (hard 2 × soft, capped by the hard limit), `hydrate` (hard 90), `preflight` 2/6 (hedge at 2), `precheck` 6/15 (hedge at 6), `journal` 4/8, `ship` 5/12 (the seal too; the ship script stops itself by 540 s), `env` 2/4, `status` 4/8, `crystallize` 90/180. `hedgeAfter` starts one duplicate of a side-effect-free dispatch and takes the first non-empty reply: it applies to `preflight`, `precheck`, and `hydrate` when `claim` is off (no default for hydrate), and is ignored with a warning for any other kind. Unknown kinds are ignored with a warning |
 | `deliver` | `'incremental'` | `'incremental'`: after each landing, push the landed SHA to the repo's run branch (fast-forward only, from a ship worktree, hooks never bypassed) and open or update its draft PR. `'end'`: nothing reaches the remote before the terminal slot. Per repo: `repos[].deliver` |
@@ -828,6 +829,54 @@ issues close only when the PR merges, so landed-but-unmerged work still looks op
 - `resumeFromRunId` is not a resume: it replays cached results for the longest unchanged
   prefix of agent calls ("Runtime constraints"). Use it only for a byte-identical relaunch.
 
+## The data model: unplanned changes, resolved and reported
+
+A design that changes stored data drafts its delta beside the spec (`roast`): each change to a
+table, column, key, index or foreign key, with a slice (`to-plan`), drawn over today's model and
+acknowledged by the owner in the graph page's Data tab. The loop builds against it, and never
+blocks on a change outside it (spec D4): the agent resolves it, the map is updated, the owner is
+told.
+
+- **The index** says whether the delta exists (`deltaFound`, at `deltaPath`). **The hydration**
+  copies each task's planned changes from it (`deltaChanges`: those of its slice, or that its
+  issue names, verbatim).
+- **The implementer** (and `migration-engineer`, `test-engineer`) gets them in its brief with the
+  delta's path, builds them, and before it returns runs `graph_changes` against its `startSha`
+  with the delta. It returns `deltaStates` (planned and built, pending, built differently, per
+  planned change) and `modelChanges`: one `{target, op, kept, reason, after}` per change the delta
+  does not plan, the parts built on a table the delta adds beyond what its `add` states included.
+  It keeps each one with a reason or reverts it; neither is a question, a pause or a failure.
+  With no delta it reports every change its commits made to stored data. Fix rounds report again:
+  the latest entry per target wins.
+- **The reviewers** never fail a change for being unplanned. A wrong change (it drops something
+  another repository still reads, it loses data) is a finding on its merits.
+- **The ship step is the single writer.** Once a task lands, its kept changes (with a reason and
+  an op; a kept change with no reason is listed, never recorded) wait for the repo's next ship.
+  Its script, after the PR steps and only while it holds the repo's ship lock, appends them to
+  the delta as `{id: unplanned-<task>-<hash>, op, target, after, why: <the reason>, slice, origin:
+  'unplanned'}`, never acknowledged, through `tools/graph/delta-append.mjs`: it validates each one
+  with `data/delta.mjs` (one that would not validate is refused and said), skips an id already
+  there (a ship sent again writes nothing twice), takes a lock beside the delta (the ships of two
+  repositories never interleave) and replaces the file through a temporary file renamed over it.
+  It prints `DELTA ok added=… already=… refused=…`, `DELTA none` (no delta there), `DELTA bad …`
+  or `DELTA skipped lock=0`; anything but `ok` or `none` leaves the changes for the next ship.
+  Ships of one repo are chained and coalesce, so two lanes landing while a ship is in flight are
+  written by the next one, in one step. A repo delivered at the end has no land ship: the seal
+  after its gate carries them, under the same lock; a halt ship does too. Lanes and implementers
+  never write the delta.
+- **The PR body** gets a **Data model and architecture changes** section, rebuilt with every
+  description: each planned change of the repo's tasks marked planned ✓, built differently (what
+  differs), pending (not built yet, or its task not landed), then each change outside the delta,
+  unplanned ⚠, kept or reverted, with its reason (and, once written, "added to the delta"). With no
+  delta it lists the branch's changes the implementers reported, kept or reverted; with no delta
+  and none reported there is no section. The gate keeps the section in the final body.
+- **The run report** says the same: a log line per landed task that changed stored data, one per
+  delta write, the `model` and `delta` journal events (rendered by `/grimoire:logs`), and the
+  result's `dataModel`. In a session, `implement` tells the user.
+
+The kept changes then show in the Data tab as unplanned and unacknowledged until the owner
+acknowledges them (`graph.mjs serve`).
+
 ## The decision journal
 
 Every decision is an event: `run.start`, `route`, `dispatch`, `precheck`, `review` (one per
@@ -849,7 +898,10 @@ source, head}`;
 implementer found already on the branch and reviewed, `verify-only` for one found there
 unreviewed and sent to the panel as it stands). `harness-routed` (from 0.8.1) records a
 terminal-sweep finding on a harness file routed to crystallize; `replan` carries the `cause`
-and `halt` its `kind`. Each carries a `seq` (a resumed session continues the checkpoint's;
+and `halt` its `kind`. From 0.31.0, `model` (`{task, repo, target, op, kept, reason, delta}`: a change to
+stored data a landed task's implementer reported, kept or reverted; `delta` says whether it waits
+for the delta, reached it, was refused, or why it is not recorded) and `delta` (`{repo, label,
+status, added, already, refused, detail}`: what a ship's or seal's delta step wrote). Each carries a `seq` (a resumed session continues the checkpoint's;
 one without a checkpoint starts at 1), the cumulative output tokens `tok`, and its fields
 (reasons included). The script has no clock and no filesystem, so events are buffered and one haiku
 writer per chunk (`briefs/journal.md`) runs a short script: it sets the run directory, the session,
@@ -1031,7 +1083,10 @@ dispatch past its soft limit, `{label, kind, softMin, outcome: 'accepted' | 'die
 (the readers given up on at their hard limit), and `journal`, the writer's receipt: `{runDir,
 events, written, chunks, mismatches, resent, lost, lostEvents, runJsonLost, runJsonResent, runJsonKept, inlineWriter}`) · `harness` (the ledger
 written and what crystallize produced; when PRs shipped but crystallize did not finish, the
-`note` says to run it by hand over them).
+`note` says to run it by hand over them) · `dataModel` (`{delta, changes, unrecorded}`: the design's
+delta, null when none was found; every change to stored data the implementers reported, `{task,
+repo, target, op, kept, reason, delta}`; and the kept ones no ship or seal could add to the delta,
+to add by hand or on the next run).
 
 A preview returns the plan instead (see "Previews by default"). A start-up refusal returns
 `{error, …}`: `missing_pipeline_inputs`, `parse_failed` (the index returned nothing),

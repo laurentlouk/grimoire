@@ -27,6 +27,13 @@ unattended even against local or mocked dependencies (a store submission, a manu
 third-party step). An acceptance demo that would be MORE convincing against a deployed
 dependency is a concern to report with DONE_WITH_CONCERNS, not a deferral.
 
+## The design's delta (only when the header names it)
+A design that changes stored data has a delta beside its spec: `{ data: [change] }`, each change
+`{id, op, target, why, slice, …}`. Copy into each task's `deltaChanges` the changes it builds:
+those whose `slice` is the task's slice, or that its issue names (`to-issues` lists them), each
+`{id, op, target, why}` verbatim, nothing paraphrased; `[]` when none. The implementer builds
+them and reports the state of each; the changes of other slices are not its business.
+
 ## Route each task: agent × model (you are the selector)
 You already read every issue in full, so you also decide who builds it and on which tier.
 Set `agent`, `model` and a one-sentence `routeReason` naming the deciding signal.
