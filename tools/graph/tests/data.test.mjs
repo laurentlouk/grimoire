@@ -4,30 +4,39 @@
 //
 //  Run:  node tools/graph/tests/data.test.mjs
 //
-//  Part 1 needs no parser runtime: the readers and the model, run directly on strings.
+//  Part 1 needs no parser runtime: the readers and the model, run directly on strings (and git, for
+//  the model at a ref).
 //   1. splitting SQL into statements (Drizzle breakpoints, `;` outside quotes and comments, triggers)
 //   2. sniffing a dialect from the SQL itself
 //   3. replaying SQLite migrations into node:sqlite, each element mapped to the file:line behind it
 //   4. reading Drizzle snapshots: the legacy `meta/NNNN_snapshot.json` (`tables{}`) and v1's `ddl[]`
 //   5. reconciling the declarations of one store: merged sources, conflicts kept with both sides
 //   6. finding migration folders by content, whatever tool wrote them, and ordering them
-//   7. the Data tab: the ERD layout (data/layout.mjs), then a page rendered from a hand-built index
+//   7. diffing two models (diff.mjs): added, removed, modified per element kind, rename candidates
+//      (ambiguous ones listed, never guessed), formatting that is no change, stores added and removed
+//   8. the model at a git ref (data/base.mjs): which base, a ref that does not resolve, the merge
+//      base, the same model from git and from disk
+//   9. the Data tab: the ERD layout (data/layout.mjs), then a page rendered from a hand-built index
 //      and its own script run in a stub DOM (as graph.test.mjs §5 and arch-docs.test.mjs §5 do):
 //      anchors, tables, columns, foreign key lines, a conflict badge, source links, the folders
-//      found but not read, a 200-table store collapsed and searchable, the CSP
+//      found but not read, a 200-table store collapsed and searchable, the CSP; then the change
+//      overlay against a git base: off by default, added / removed / modified / renamed, its legend,
+//      absent without a base, escaping
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
 //  without it, except under CI, where a missing runtime fails.
-//   8. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
+//  10. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
 //      undeclared dialect and one stated in grimoire.config.json → graph_data and graph.mjs data
-//   9. the Data tab of that project: its stores, ERD and links to the indexed migration files
-//  10. incremental: a hand-edited migration (a conflict, badged in the Data tab), a rejected
+//  11. the Data tab of that project: its stores, ERD and links to the indexed migration files
+//  12. incremental: a hand-edited migration (a conflict, badged in the Data tab), a rejected
 //      statement, a deleted migration, a snapshot that no longer parses (reported by graph_status,
 //      the index goes on)
+//  13. a branch against its base (two commits): a column added, an index dropped, a table renamed →
+//      graph_changes and graph.mjs changes; a ref that does not resolve; a base without the folder
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync } from 'node:fs'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -391,8 +400,139 @@ console.log('\n6 · finding and ordering migration folders')
   eq(dbmate.entities.map((e) => e.name), ['t'], "a file's down section is never replayed")
 }
 
-// ── 7 · the Data tab ──
-console.log('\n7 · the Data tab: the ERD layout, and a page from a hand-built index')
+// ── 7 · the model diff ──
+console.log('\n7 · diffing two models (diff.mjs)')
+const { diffModels } = await import('../lib/data/diff.mjs')
+// a store's model from SQL, as the index reconciles it
+const modelOf = (text, { store = 'db', dialect = 'sqlite', path: p = `${store}/0001_init.sql` } = {}) => reconcile([{ repo: 'app', extractor: 'sql-migrations@1', facts: { declarations: [{ store, dialect, source: { path: p, line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', notes: [], entities: replay([{ path: p, text }], DatabaseSync).entities }] } }])
+// one line per change: + added, - removed, ~ modified (before → after), then the rename candidates
+const changeLines = (d) => d.stores.flatMap((s) => [`${s.id} ${s.change}`,
+  ...s.changes.map((c) => `  ${{ added: '+', removed: '-', modified: '~' }[c.change]} ${c.kind} ${c.kind === 'entity' ? c.name : `${c.entity} ${c.name}`}${c.attrs.length ? `  ${c.attrs.map((a) => `${a.attr}: ${a.before} → ${a.after}`).join('; ')}` : ''}`),
+  ...s.renames.map((r) => `  rename? ${r.kind}${r.entity ? ` in ${r.entity}` : ''} ${r.from.map((i) => s.changes[i].name).join(', ')} → ${r.to.map((i) => s.changes[i].name).join(', ')} (${r.shape}${r.ambiguous ? ', ambiguous' : ''})`)])
+{
+  const BASE = `CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, bio TEXT);
+CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE, title TEXT NOT NULL DEFAULT 'untitled', isbn TEXT, UNIQUE (isbn));
+CREATE INDEX books_title_idx ON books (title);
+CREATE TABLE legacy_notes (id INTEGER PRIMARY KEY, body TEXT);`
+  const BRANCH = `CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, bio TEXT NOT NULL DEFAULT '', email TEXT);
+CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE SET NULL, title TEXT NOT NULL DEFAULT 'draft', isbn TEXT, UNIQUE (isbn, title));
+CREATE INDEX books_author_idx ON books (author_id);
+CREATE TABLE loans (id INTEGER PRIMARY KEY, book_id INTEGER REFERENCES books(id));
+CREATE VIEW recent AS SELECT id FROM books;`
+  const d = diffModels(modelOf(BASE), modelOf(BRANCH))
+  eq(changeLines(d), [
+    'app:db modified',
+    "  ~ field authors bio  nullable: true → false; default: null → ''",
+    '  + field authors email',
+    "  ~ field books title  default: 'untitled' → 'draft'",
+    '  + key books unique (isbn, title)',
+    '  - key books unique (isbn)',
+    '  + index books books_author_idx',
+    '  - index books books_title_idx',
+    '  ~ relation books (author_id) → authors (id)  onDelete: cascade → set null',
+    '  - entity legacy_notes',
+    '  + entity loans',
+    '  + entity recent',
+  ], 'added, removed and modified, per element kind: a column, a key (by its columns, as a whole), an index, a foreign key, a table, a view; modified ones with before → after')
+  eq(d.counts, { stores: 1, added: 5, removed: 3, modified: 3, renames: 0 }, '… counted; an added table counts once, not per column, and nothing is a rename when no shapes match')
+  const dropped = d.stores[0].changes.find((c) => c.name === 'legacy_notes'), email = d.stores[0].changes.find((c) => c.name === 'email')
+  eq([dropped.before.sources.map((s) => `${s.path}:${s.line}`), dropped.after, email.after.sources.map((s) => `${s.path}:${s.line}`), email.before], [['db/0001_init.sql:4'], null, ['db/0001_init.sql:1'], null], 'each side keeps its element, with its sources (path:line) on that side')
+  eq(changeLines(diffModels(modelOf(BASE), modelOf(BASE))), [], 'a model against itself: no change')
+
+  const TAGS = `CREATE TABLE tags (id INTEGER PRIMARY KEY, label TEXT NOT NULL);
+CREATE TABLE posts (id INTEGER PRIMARY KEY, tag_id INTEGER REFERENCES tags(id), body TEXT, due TEXT);
+CREATE INDEX posts_body_idx ON posts (body);`
+  const RENAMED = `CREATE TABLE labels (id INTEGER PRIMARY KEY, label TEXT NOT NULL);
+CREATE TABLE posts (id INTEGER PRIMARY KEY, tag_id INTEGER REFERENCES labels(id), body TEXT, due_on TEXT);
+CREATE INDEX posts_body_index ON posts (body);`
+  const r = diffModels(modelOf(TAGS), modelOf(RENAMED))
+  eq(changeLines(r), [
+    'app:db modified',
+    '  + entity labels',
+    '  + field posts due_on',
+    '  - field posts due',
+    '  + index posts posts_body_index',
+    '  - index posts posts_body_idx',
+    '  + relation posts (tag_id) → labels (id)',
+    '  - relation posts (tag_id) → tags (id)',
+    '  - entity tags',
+    '  rename? entity tags → labels (same columns)',
+    '  rename? field in posts due → due_on (same type and position)',
+    '  rename? index in posts posts_body_idx → posts_body_index (same columns)',
+    '  rename? relation in posts (tag_id) → tags (id) → (tag_id) → labels (id) (same columns)',
+  ], 'a removed and an added element of the same kind and shape are a rename candidate: flagged, never decided (each stays added and removed)')
+  eq(r.counts.renames, 4, '… and counted apart')
+
+  // two declarations of one table, written differently: names in another case, types in capitals,
+  // a default with its parentheses (as a snapshot writes it) or without (as SQLite reports it)
+  const decl = (dialect, entities) => reconcile([{ repo: 'app', extractor: 'drizzle-snapshot@1', facts: { declarations: [{ store: 'db', dialect, source: { path: 'db/meta/0001_snapshot.json', line: 1, kind: 'artifact', confidence: 'declared' }, complete: true, partial: false, status: 'read', notes: [], entities }] } }])
+  const books = (n, c) => [{ name: n('Books'), kind: 'table', line: 2, fields: [{ name: n('ID'), type: c('INTEGER'), nullable: false, default: null, line: 3 }, { name: n('Created'), type: c('integer'), nullable: false, default: n === String ? '(unixepoch())' : 'unixepoch()', line: 4 }, { name: n('Title'), type: c('TEXT'), nullable: true, default: "'x'", line: 5 }],
+    keys: [{ role: 'primary', parts: [n('ID')], line: 3 }], indexes: [{ name: n('Books_Title_Idx'), unique: false, columns: [n('Title')], partial: false, line: 6 }], relations: [{ columns: [n('ID')], to: n('Shelves'), toColumns: [n('Book')], onDelete: 'cascade', onUpdate: 'no action', line: 7 }] }]
+  const lowerAll = (s) => s.toLowerCase(), spaced = (t) => ` ${t.toLowerCase()}  `
+  eq(diffModels(decl('sqlite', books(String, String)), decl('sqlite', books(lowerAll, spaced))).stores, [], 'formatting is no change: names in another case (SQLite), types in another case or spacing, a default with or without its outer parentheses')
+  eq(changeLines(diffModels(decl('postgres', books(String, String)), decl('postgres', books(lowerAll, spaced)))).slice(0, 3), ['app:db modified', '  - entity Books', '  + entity books'], 'where the dialect\'s names are case-sensitive, another case is another table')
+
+  const SAME = 'CREATE TABLE a (id INTEGER PRIMARY KEY, v TEXT);\nCREATE TABLE b (id INTEGER PRIMARY KEY, v TEXT);'
+  const amb = diffModels(modelOf(SAME), modelOf(SAME.replace('TABLE a', 'TABLE c').replace('TABLE b', 'TABLE d')))
+  eq(changeLines(amb), ['app:db modified', '  - entity a', '  - entity b', '  + entity c', '  + entity d', '  rename? entity a, b → c, d (same columns, ambiguous)'], 'two removed and two added of one shape: one candidate group naming all four, never a guess at which goes with which')
+
+  eq(changeLines(diffModels({ stores: [] }, modelOf(TAGS))), ['app:db added', '  + entity posts', '  + entity tags'], 'a store absent from the base: the store and each of its tables added')
+  eq(changeLines(diffModels(modelOf(TAGS), { stores: [] })), ['app:db removed', '  - entity posts', '  - entity tags'], 'a store absent from the branch: removed')
+}
+
+// ── 8 · the model at a git ref ──
+console.log('\n8 · the model at a git ref (data/base.mjs): read through git, nothing checked out')
+const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' })
+const commit = (dir, m) => { git(dir, 'add', '-A'); git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', m); return git(dir, 'rev-parse', 'HEAD').stdout.trim() }
+{
+  const { resolveBase, modelAt } = await import('../lib/data/base.mjs')
+  const { extractAll } = await import('../lib/data/registry.mjs')
+  const { loadProject, listPaths } = await import('../lib/project.mjs')
+  const DIR = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-dataref-')))
+  const put = (rel, text) => { mkdirSync(path.dirname(path.join(DIR, rel)), { recursive: true }); writeFileSync(path.join(DIR, rel), text) }
+  try {
+    put('grimoire.config.json', JSON.stringify({ repos: [{ name: 'app', path: '.' }] }))
+    put('db/0001_init.sql', "CREATE TABLE authors (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  name TEXT NOT NULL DEFAULT 'café'\n);\n")
+    put('db/notes.txt', 'not a migration\n')
+    git(DIR, 'init', '-q', '-b', 'main')
+    const first = commit(DIR, 'base')
+    git(DIR, 'switch', '-q', '-c', 'feat')
+    put('db/0002_books.sql', 'CREATE TABLE books (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  author_id INTEGER REFERENCES authors(id)\n);\n')
+    put('kv/0001_kv.sql', 'CREATE TABLE kv (k TEXT PRIMARY KEY, v BLOB);\n')
+    const head = commit(DIR, 'branch')
+    const project = loadProject(DIR)
+
+    const b = resolveBase(project)
+    eq([b.ref, b.from, b.repos.map((r) => [r.name, r.commit, r.at]), b.skipped], ['main', "the index's base branch", [['app', first, first]], []], 'no base named: the branch the index is based on (main), at its merge base with HEAD')
+    eq([resolveBase({ ...project, baseBranch: 'main' }).from, resolveBase(project, { explicit: 'HEAD~1' }).repos[0].at], ['baseBranch in grimoire.config.json', first], 'baseBranch from grimoire.config.json comes first; a ref given comes before everything')
+    eq(resolveBase(project, { explicit: 'no-such-branch' }), { error: 'the base "no-such-branch" does not resolve to a commit in app (give a branch, a tag or a commit)' }, 'a ref that does not resolve is a clear error')
+
+    const at = await modelAt(project, b)
+    eq([at.failed, at.model.stores.map((s) => `${s.id} ${s.entities.map((e) => `${e.name}@${e.sources.map((x) => `${x.path}:${x.line}`).join(',')}`).join(' ')}`)], [[], ['app:db authors@db/0001_init.sql:1']],
+      "the base's model: only what that commit held (no kv store, no books), each element citing the base's path:line")
+    eq(at.model.stores[0].entities[0].fields.map((f) => f.default), [null, "'café'"], 'blobs are read as bytes and decoded as the index decodes files (UTF-8)')
+
+    // the same extractors on the same text, from either source, give the same model
+    const fromTree = reconcile(extractAll({ paths: listPaths(DIR), size: (p) => statSync(path.join(DIR, p)).size, read: (p) => readFileSync(path.join(DIR, p), 'utf8') }, project, [], { DatabaseSync }).filter((r) => r.facts).map((r) => ({ repo: 'app', extractor: r.extractor, facts: r.facts })))
+    const fromGit = (await modelAt(project, { repos: [{ name: 'app', abs: DIR, at: head }] })).model
+    ok(JSON.stringify(fromGit) === JSON.stringify(fromTree) && fromGit.stores.length === 2, 'HEAD read through git and the working tree read from disk give the same model: one discovery, one set of extractors')
+
+    // main moves on after the branch left it: those commits are not the branch's changes
+    git(DIR, 'switch', '-q', 'main')
+    put('db/0002_main_only.sql', 'CREATE TABLE audit (id INTEGER PRIMARY KEY);\n')
+    commit(DIR, 'main moves on')
+    git(DIR, 'switch', '-q', 'feat')
+    const moved = resolveBase(project)
+    eq([moved.repos[0].commit !== first, moved.repos[0].at, (await modelAt(project, moved)).model.stores[0].entities.map((e) => e.name)], [true, first, ['authors']], 'the base is read at its merge base with HEAD: a table main added since is not shown as one the branch removed')
+    ok(!existsSync(path.join(DIR, '.grimoire')), 'nothing is written: no index, no cache on disk')
+
+    const plain = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-nogit-')))
+    try { eq(resolveBase({ root: plain, repos: [{ name: 'x', abs: plain }] }).error, 'x is not in a git repository: there is no base to compare against', 'outside git there is no base, and it says so') } finally { rmSync(plain, { recursive: true, force: true }) }
+  } finally { rmSync(DIR, { recursive: true, force: true }) }
+}
+
+// ── 9 · the Data tab ──
+console.log('\n9 · the Data tab: the ERD layout, and a page from a hand-built index')
 {
   const { layoutErd } = await import('../lib/data/layout.mjs')
   // tables in the page's packed shape (render.mjs dataData)
@@ -564,8 +704,8 @@ async function indexed() {
   const edit = (rel, fn) => { const f = path.join(PROJ, rel); writeFileSync(f, fn(readFileSync(f, 'utf8'))); const t = new Date(Date.now() + ++tick * 2000); utimesSync(f, t, t) }
   const cli = (...a) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), ...a, '--root', PROJ], { encoding: 'utf8' }).stdout
   try {
-    // ── 8 · the stores ──
-    console.log('\n8 · a project of four repositories (fixtures/data)')
+    // ── 10 · the stores ──
+    console.log('\n10 · a project of four repositories (fixtures/data)')
     const idx = await q('index')
     ok(/mobile: 7 files/.test(idx) && !idx.includes('failure'), 'index: every repository, no extractor failure')
     const list = await q('data')
@@ -613,8 +753,8 @@ async function indexed() {
     const streaks = await q('data', { entity: 'streaks' })
     ok(streaks.includes('  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9') && streaks.endsWith('Conflicts: none'), `Drizzle's timestamp idiom, DEFAULT (unixepoch()): replay and snapshot agree, the default shown as written${streaks.endsWith('Conflicts: none') ? '' : `\n${streaks}`}`)
 
-    // ── 9 · the Data tab ──
-    console.log('\n9 · the Data tab of that project')
+    // ── 11 · the Data tab ──
+    console.log('\n11 · the Data tab of that project')
     const { renderGraph } = await import('../lib/render.mjs')
     const { loadProject } = await import('../lib/project.mjs')
     const page = await renderGraph(loadProject(PROJ))
@@ -639,8 +779,8 @@ async function indexed() {
     ok(!!pg.find((n) => n.tagName === 'A' && n.attrs.href === `#file-${init}` && n.kids[0] === 'mobile/drizzle/0000_init.sql:8') && !!pg.find((n) => n.tagName === 'CODE' && n.kids[0] === 'mobile/drizzle/meta/0005_snapshot.json:42'),
       "a column's sources: the migration line links to its file in the Files tab, the snapshot (not an indexed file) is cited as path:line")
 
-    // ── 10 · incremental ──
-    console.log('\n10 · incremental refresh')
+    // ── 12 · incremental ──
+    console.log('\n12 · incremental refresh')
     edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` integer,', '`published_at` text,'))
     await q('index')
     has(await q('data', { entity: 'books' }), 'Conflicts (1): the declarations disagree; each side is kept\n  books.published_at  type: integer — mobile/drizzle/meta/0005_snapshot.json:63 [artifact] | text — mobile/drizzle/0000_init.sql:11 [migration]', 'a hand-edited migration disagreeing with the snapshot: a conflict carrying both sources')

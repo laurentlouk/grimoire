@@ -1,0 +1,135 @@
+// grimoire graph · data · the model diff (spec D6, Liam's element-level approach): two reconciled
+// models (reconcile.mjs), compared store by store and element by element (entities, then their
+// fields, keys, indexes and foreign keys). Every element comes out added, removed or modified, the
+// last with the before and after of each attribute that changed. The elements of an added or a
+// removed entity are not listed one by one: the entity is the change.
+//
+// Compared through the same normalisation reconcile uses, so a change of formatting is no change:
+//   - names in any letter case where the dialect's are (SQLite: tables, columns, indexes, a foreign
+//     key's target);
+//   - types lower-cased and blank-collapsed (model.mjs normType), defaults without one outer pair of
+//     parentheses (normDefault);
+//   - a key by its role and its columns, as a whole (a key whose columns change is another key).
+// An element whose declarations disagree (a reconcile conflict) is compared by its merged value, the
+// most trusted declaration's.
+//
+// Rename candidates: a removed and an added element of the same kind and the same shape are paired,
+// never decided (drizzle-kit asks; this only flags). Shapes: a table or view, its columns (names and
+// types, in order; one with no column is never a candidate); a column, its type and position; an
+// index, its columns, uniqueness and partiality; a foreign key, its columns on both sides. Keys have
+// no name to change. When several removed and several added elements share a shape, they are one
+// candidate group listing them all (ambiguous), never a guess at which goes with which.
+//
+//   diffModels(before, after) → { stores: [StoreDiff], counts: { stores, added, removed, modified, renames } }
+//   StoreDiff  { id, repo, name, dialect, change: added | removed | modified, attrs: [Attr],
+//                before: Store | null, after: Store | null, changes: [Change], renames: [Rename] }
+//              (only stores with a change are listed)
+//   Change     { kind: entity | field | key | index | relation, change: added | removed | modified,
+//                entity: the entity's name (as the branch names it, else the base), name: the
+//                element's, key: its identity, pos: { before, after } (its index in its list on each
+//                side, null where absent), before: element | null, after: element | null,
+//                attrs: [Attr], rename: index into renames | null }
+//   Attr       { attr, before, after }   (values as declared)
+//   Rename     { kind, entity: null for entities, shape: 'same columns' | 'same type and position',
+//                from: [index into changes], to: [index into changes], ambiguous }
+import { normType, normDefault } from './model.mjs'
+
+// Dialects whose identifiers compare in any letter case.
+const CASELESS = new Set(['sqlite'])
+const LISTS = [['field', 'fields'], ['key', 'keys'], ['index', 'indexes'], ['relation', 'relations']]
+
+const KEY = {
+  entity: (e, f) => f(e.name),
+  field: (x, f) => f(x.name),
+  key: (k, f) => `${k.role}(${k.parts.map(f).join(',')})`,
+  index: (i, f) => f(i.name),
+  relation: (r, f) => `(${r.columns.map(f).join(',')})->${f(r.to)}(${r.toColumns.map(f).join(',')})`,
+}
+const NAME = {
+  entity: (e) => e.name,
+  field: (x) => x.name,
+  key: (k) => `${k.role} (${k.parts.join(', ')})`,
+  index: (i) => i.name,
+  relation: (r) => `(${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')})`,
+}
+// [compared, shown] per attribute
+const typeOf = (x) => x.type?.raw ?? x.type
+const ATTRS = {
+  entity: (e) => ({ kind: [e.kind, e.kind] }),
+  field: (x) => ({ type: [normType(typeOf(x)), typeOf(x)], nullable: [x.nullable, x.nullable], default: [normDefault(x.default), x.default ?? null], generated: [x.generated ?? null, x.generated ?? null] }),
+  key: () => ({}),
+  index: (i, f) => ({ unique: [!!i.unique, !!i.unique], columns: [i.columns.map(f).join(','), i.columns.join(', ')], partial: [!!i.partial, !!i.partial] }),
+  relation: (r) => ({ onDelete: [r.onDelete, r.onDelete], onUpdate: [r.onUpdate, r.onUpdate] }),
+}
+const SHAPE = {
+  entity: (e, f) => (e.fields?.length ? [`${e.kind}|${e.fields.map((x) => `${f(x.name)} ${normType(typeOf(x))}`).join(',')}`, 'same columns'] : null),
+  field: (x, f, pos) => [`${normType(typeOf(x))}|${pos}`, 'same type and position'],
+  key: () => null,
+  index: (i, f) => [`${!!i.unique}|${i.columns.map(f).join(',')}|${!!i.partial}`, 'same columns'],
+  relation: (r, f) => [`${r.columns.map(f).join(',')}|${r.toColumns.map(f).join(',')}`, 'same columns'],
+}
+
+export function diffModels(before, after) {
+  const B = new Map((before?.stores || []).map((s) => [s.id, s]))
+  const A = new Map((after?.stores || []).map((s) => [s.id, s]))
+  const stores = [...new Set([...B.keys(), ...A.keys()])].sort().map((id) => diffStore(B.get(id) || null, A.get(id) || null)).filter(Boolean)
+  const n = (c) => stores.reduce((a, s) => a + s.changes.filter((x) => x.change === c).length, 0)
+  return { stores, counts: { stores: stores.length, added: n('added'), removed: n('removed'), modified: n('modified'), renames: stores.reduce((a, s) => a + s.renames.length, 0) } }
+}
+
+function diffStore(b, a) {
+  const s = a || b
+  const dialect = a?.dialect ?? b?.dialect ?? null
+  const fold = CASELESS.has(dialect) ? (x) => String(x).toLowerCase() : (x) => String(x)
+  const out = { id: s.id, repo: s.repo, name: s.name, dialect, change: !b ? 'added' : !a ? 'removed' : null, attrs: [], before: b, after: a, changes: [], renames: [] }
+  if (b && a && (b.dialect ?? null) !== (a.dialect ?? null)) out.attrs.push({ attr: 'dialect', before: b.dialect ?? null, after: a.dialect ?? null })
+  const push = (kind, change, entity, x, y, pos, attrs = []) => out.changes.push({ kind, change, entity, name: NAME[kind](y || x), key: KEY[kind](y || x, fold), pos, before: x, after: y, attrs, rename: null })
+  const byName = (p, q) => { const m = KEY.entity(p[0] || p[1], fold), n = KEY.entity(q[0] || q[1], fold); return m < n ? -1 : m > n ? 1 : 0 }
+  for (const [x, y, px, py] of pairs(b?.entities || [], a?.entities || [], (e) => KEY.entity(e, fold)).sort(byName)) {
+    const name = (y || x).name
+    if (!x) { push('entity', 'added', name, null, y, { before: null, after: py }); continue }
+    if (!y) { push('entity', 'removed', name, x, null, { before: px, after: null }); continue }
+    const attrs = changed('entity', x, y, fold)
+    if (attrs.length) push('entity', 'modified', name, x, y, { before: px, after: py }, attrs)
+    for (const [kind, list] of LISTS) {
+      for (const [u, v, pu, pv] of pairs(x[list] || [], y[list] || [], (el) => KEY[kind](el, fold))) {
+        if (!u) push(kind, 'added', name, null, v, { before: null, after: pv })
+        else if (!v) push(kind, 'removed', name, u, null, { before: pu, after: null })
+        else { const d = changed(kind, u, v, fold); if (d.length) push(kind, 'modified', name, u, v, { before: pu, after: pv }, d) }
+      }
+    }
+  }
+  out.renames = renames(out.changes, fold)
+  if (!out.change && (out.attrs.length || out.changes.length)) out.change = 'modified'
+  return out.change ? out : null
+}
+
+// Both sides' elements matched by key: [before, after, before position, after position], the
+// branch's in its order (added and kept), then the base's that are gone, in theirs.
+function pairs(xs, ys, key) {
+  const bx = new Map(xs.map((x, i) => [key(x), [x, i]]))
+  const out = ys.map((y, j) => { const k = key(y), m = bx.get(k); bx.delete(k); return m ? [m[0], y, m[1], j] : [null, y, null, j] })
+  for (const [, [x, i]] of bx) out.push([x, null, i, null])
+  return out
+}
+
+function changed(kind, x, y, fold) {
+  const bx = ATTRS[kind](x, fold), by = ATTRS[kind](y, fold)
+  return Object.keys(bx).filter((k) => JSON.stringify(bx[k][0]) !== JSON.stringify(by[k][0])).map((k) => ({ attr: k, before: bx[k][1], after: by[k][1] }))
+}
+
+function renames(changes, fold) {
+  const groups = new Map()
+  changes.forEach((c, i) => {
+    if (c.change === 'modified') return
+    const el = c.before || c.after
+    const shape = SHAPE[c.kind](el, fold, c.change === 'removed' ? c.pos.before : c.pos.after)
+    if (!shape) return
+    const k = `${c.kind}\0${c.kind === 'entity' ? '' : fold(c.entity)}\0${shape[0]}`
+    if (!groups.has(k)) groups.set(k, { kind: c.kind, entity: c.kind === 'entity' ? null : c.entity, shape: shape[1], from: [], to: [] })
+    groups.get(k)[c.change === 'removed' ? 'from' : 'to'].push(i)
+  })
+  const out = [...groups.values()].filter((g) => g.from.length && g.to.length).map((g) => ({ ...g, ambiguous: g.from.length > 1 || g.to.length > 1 }))
+  out.forEach((g, r) => { for (const i of [...g.from, ...g.to]) changes[i].rename = r })
+  return out
+}

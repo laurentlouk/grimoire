@@ -7,7 +7,9 @@
 //     extract(text, path, ctx) (scope file) | extract({ key, files: [{ path, text }], override }, ctx)
 //       (scope unit) → facts: { declarations } (model.mjs) }
 // A job runs again when the hash of any input, the extractor's version or its salt changes. One
-// that throws loses its facts and leaves its error for graph_status; the index goes on.
+// that throws loses its facts and leaves its error for graph_status; the index goes on. The text
+// comes from the working tree (the index) or from a commit (extractAll, for the base of a diff):
+// one discovery and one set of extractors for both.
 import { schemaLevel } from './readers/sql-split.mjs'
 import sqlMigrations, { upOnly } from './extractors/sql-migrations.mjs'
 import drizzleSnapshot from './extractors/drizzle-snapshot.mjs'
@@ -40,4 +42,22 @@ export function run(job, read, ctx) {
   } catch (e) {
     return { error: String(e?.message || e).split('\n')[0].slice(0, 240) }
   }
+}
+
+// Every job of one repository at once, from whatever holds its files' text: the same candidates,
+// inspection, discovery and extractors the index runs (lib/indexer.mjs, incrementally there), with
+// the same size cap. The model at a git ref (data/base.mjs) reads its files through this.
+//   source { paths: the repository's files, size(path) → bytes, read(path) → its text }
+//   overrides  graph.data.migrations entries for this repository
+//   → [{ extractor: 'id@version', scope, key, facts } | { extractor, scope, key, error }]
+export function extractAll(source, project, overrides, ctx) {
+  const info = new Map()
+  for (const p of candidates(source.paths, project)) {
+    const size = source.size(p)
+    let ddl = null
+    if (size <= MAX_BYTES) { try { ddl = inspect(p, source.read(p)) } catch { continue } }
+    info.set(p, { size, ddl })
+  }
+  const read = (p) => { if (info.get(p)?.size > MAX_BYTES) throw new Error(`${p} is larger than ${MAX_BYTES >> 20} MB: not read`); return source.read(p) }
+  return plan(info, { overrides }).map((job) => ({ extractor: idOf(job.extractor), scope: job.extractor.scope, key: job.key, ...run(job, read, ctx) }))
 }
