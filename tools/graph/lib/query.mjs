@@ -3,7 +3,7 @@
 // The graph is a map for research (what relates to what, how far a change reaches). It is never
 // the source of truth for what code does: that is read in the code, at the path:line given here.
 import { langOf } from './langs.mjs'
-import { reconcile } from './data/reconcile.mjs'
+import { reconcile, elementsOf, storeSummary } from './data/reconcile.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files, never from a database. Open path:line before relying on any of it.'
@@ -272,7 +272,7 @@ export class Graph {
     if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables) and no Drizzle snapshot in the indexed repositories.'
     const out = [`Data stores (${model.stores.length}), read from migrations and snapshots:`]
     for (const st of model.stores) {
-      out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${this.storeSummary(st)}`)
+      out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`)
       for (const d of st.declarations) {
         const how = d.stopped ? `replayed to ${this.dloc({ repo: st.repo, ...d.stopped })}: ${d.error}` : d.status === 'not-read' ? `not read: ${d.label}` : d.label
         out.push(`  ${d.kind}  ${d.extractor}  ${how}  ${this.dloc({ repo: st.repo, path: d.path })}`)
@@ -287,14 +287,6 @@ export class Graph {
     const at = f.path ? this.dloc({ repo, path: f.path, line: f.line }) : ''
     return f.how === 'stated' ? `stated at ${at}` : f.how === 'sniffed' ? `sniffed: ${f.marker} at ${at}` : f.how === 'supabase' ? 'Supabase migrations are Postgres' : 'set in grimoire.config.json (graph.data.migrations)'
   }
-  storeSummary(st) {
-    const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
-    const tables = st.entities.filter((e) => e.kind === 'table'), views = st.entities.length - tables.length
-    if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
-    const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0)
-    const implicit = Math.max(0, ...st.declarations.map((d) => d.implicitIndexes)) // the indexes SQLite builds for keys, beside the declared ones
-    return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), `${n(tables.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
-  }
   sources(repo, list) { return list.map((s) => this.dloc({ repo, path: s.path, line: s.line })).join(' · ') }
   findStore(model, spec) {
     const hits = model.stores.filter((s) => s.id === spec || s.name === spec)
@@ -305,7 +297,7 @@ export class Graph {
     if (!hits.length) return `No data store "${spec}". Stores: ${model.stores.map((s) => s.id).join(', ') || 'none'}.`
     if (hits.length > 1) return `"${spec}" names ${hits.length} stores; give one as repo:folder: ${hits.map((s) => s.id).join(', ')}`
     const [st] = hits
-    const out = [`${st.id}  ${st.dialect || 'dialect unknown'}  ${this.storeSummary(st)}`]
+    const out = [`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`]
     for (const e of st.entities) {
       const pk = e.keys.find((k) => k.role === 'primary')
       const conflicts = elementsOf(e).reduce((a, [, x]) => a + x.conflicts.length, 0)
@@ -346,9 +338,6 @@ export class Graph {
     return [`Call path ${from} → ${to} (${chain.length - 1} hops):`, ...chain.map(([n, i], k) => `  ${k}. ${this.row(n, i.conf ? `[${i.conf}]` : '')}`)].join('\n')
   }
 }
-
-// An entity and each of its elements, labelled as a conflict line names them.
-const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name}.${f.name}`, f]), ...e.keys.map((k) => [`${e.name} ${k.role} (${k.parts.join(', ')})`, k]), ...e.indexes.map((i) => [`${e.name} index ${i.name}`, i]), ...e.relations.map((r) => [`${e.name} foreign key (${r.columns.join(', ')})`, r])]
 
 // A read-only SELECT against the schema (see store.mjs), for questions the commands do not cover.
 export function sql(db, statement, limit = 200) {
