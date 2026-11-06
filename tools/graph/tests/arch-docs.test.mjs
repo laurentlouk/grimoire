@@ -311,10 +311,11 @@ else {
   ok(!page.includes('connect-src') && D.serve === undefined && D.docs.length === scanDocs(project).length && page.includes("base-uri 'none'; form-action 'none'"), 'a rendered (not served) page cannot save, carries every note, and allows no base or form target')
   const script = (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(page) || [])[1] || ''
   ok(!/<!--|<script/i.test(script), 'the page script never opens an HTML comment or a script element')
-  ok(['mdToHtml', 'mdFront', 'mdSlug', 'archClient', 'docsClient'].every((n) => script.includes(`function ${n}(`)), 'the page carries the Markdown helpers and both tabs')
+  ok(['mdToHtml', 'mdFront', 'mdSlug', 'archClient', 'docsClient', 'stageClient'].every((n) => script.includes(`function ${n}(`)), 'the page carries the Markdown helpers, both tabs and the stages\' navigation')
   const vm = await import('node:vm')
   const blob = /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page)[1]
   const listeners = {}
+  const { ctlQuery } = await import('./stage-kit.mjs')
   class El {
     constructor(tag) { this.tagName = tag.toUpperCase(); this.nodeType = 1; this.kids = []; this.attrs = {}; this.on = {}; this.dataset = {}; this.html = ''; this.value = ''; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} } }
     setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-(.)/g, (_, c) => c.toUpperCase())] = String(v) }
@@ -323,10 +324,11 @@ else {
     set innerHTML(v) { this.html = v; this.firstChild = new El('svg') }
     get innerHTML() { return this.html }
     querySelectorAll() { return [] }
-    focus() {} setSelectionRange() {}
+    focus(o) { this.focusedWith = o || {} } setSelectionRange() {}
     get offsetHeight() { return 0 }
   }
-  const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null, querySelector: () => null }
+  const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null }
+  doc.querySelector = ctlQuery(() => ({ kids: doc.body.kids || [] }))
   const loc = { hash: '#architecture' }
   vm.runInNewContext(script, { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
   const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
@@ -354,6 +356,19 @@ else {
   ok(/\bstage full\b/.test(stageA().attrs.class), 'a zoom inside full size stays full size (the page re-renders)')
   listeners.keydown({ key: 'Escape' })
   ok(!/\bfull\b/.test(stageA().attrs.class) && byCtl(body(), 'arch-full').attrs['aria-pressed'] === 'false', 'Escape leaves full size')
+  // the stage: a drag never selects the page and follows the pointer past the box; the keys pan and zoom
+  {
+    const { scrollStageCases, inside } = await import('./stage-kit.mjs')
+    const labels = ['API', 'Users']
+    scrollStageCases(ok, {
+      name: 'Architecture', page, active: (el) => { doc.activeElement = el },
+      box: () => findIn(body(), (x) => x.attrs && x.attrs.id === 'arch-box'), zoom0: 1.15, // + was pressed above
+      items: [inside('[data-comp]', { comp: 'api' }), inside('[data-comp]', { comp: 'users' })],
+      opened: (i) => !!findIn(body(), (x) => x.tagName === 'H3' && x.kids.includes(labels[i])),
+      fitted: () => byCtl(body(), 'arch-fit').attrs['aria-pressed'] === 'true', search: byCtl(body(), 'search'),
+      win: (t, e) => listeners[t] && listeners[t](e), full: () => press('arch-full'), isFull: () => /\bstage full\b/.test(stageA().attrs.class),
+    })
+  }
   const at = (repo, p2) => D.docs.findIndex((d) => d[0] === repo && d[2] === p2)
   const hubName = path.basename(HUB), guide = at(hubName, 'docs/guide.md'), agents = at(hubName, 'AGENTS.md'), apiGuide = at('api', 'docs/guide.md'), apiReadme = at('api', 'README.md')
   go(`#doc-${agents}`)

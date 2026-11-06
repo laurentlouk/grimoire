@@ -328,14 +328,14 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   const scriptSrc = (/script-src ([^;"]+)/.exec(pageP) || [])[1] || ''
   ok(csp === `sha256-${createHash('sha256').update(script, 'utf8').digest('base64')}` && !scriptSrc.includes('unsafe-inline'),
     'the CSP admits the page\'s own script by its hash, and no inline handler: an escaping slip cannot run code')
-  const helpers = ['esc', 'cut', 'cutL', 'plural', 'parseHash', 'pairConf', 'heatOf', 'heatBands', 'squarify', 'lanePick', 'mdSlug', 'mdFront', 'mdToHtml', 'archClient', 'docsClient']
+  const helpers = ['esc', 'cut', 'cutL', 'plural', 'parseHash', 'pairConf', 'heatOf', 'heatBands', 'squarify', 'lanePick', 'mdSlug', 'mdFront', 'mdToHtml', 'archClient', 'docsClient', 'stageClient']
   ok(helpers.every((n) => script.includes(`function ${n}(`)), `the page carries every helper its client calls (${helpers.filter((n) => !script.includes(`function ${n}(`)).join(', ') || 'all'})`)
 
   // Run the page's own script against a small stub DOM: every view renders, anchors open what they
   // name, and the test-code toggle changes what a neighbourhood hides.
   const vm = await import('node:vm')
   const run = (hash) => {
-    const listeners = {}
+    const listeners = {}, frames = []
     class El {
       constructor(tag) { this.tagName = tag.toUpperCase(); this.nodeType = 1; this.kids = []; this.attrs = {}; this.on = {}; this.dataset = {}; this.html = ''; this.value = ''; this.checked = false; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} } }
       setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-(.)/g, (_, c) => c.toUpperCase())] = String(v); if (k === 'checked') this.checked = true }
@@ -351,11 +351,13 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
     const doc = { createElement: (t) => new El(t), getElementById: () => ({ textContent: blob }), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null, querySelector: () => null }
     const loc = { hash }
     const win = { addEventListener: (t, f) => { listeners[t] = f }, innerWidth: 1400, scrollTo() {} }
-    vm.runInNewContext(script, { document: doc, window: win, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
+    vm.runInNewContext(script, { document: doc, window: win, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: (f) => { frames.push(f) }, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
     const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
     const find = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = find(k, pred); if (f) return f } return null }
     const go = (h) => { loc.hash = h; listeners.hashchange() }
-    return { text: () => (doc.body.kids || []).map(dump).join(' '), go, find: (pred) => (doc.body.kids || []).map((k) => find(k, pred)).find(Boolean), hash: () => loc.hash }
+    // frames run only when a test flushes them (the file map draws in one)
+    const flush = () => { for (let i = 0; i < 5 && frames.length; i++) frames.splice(0).forEach((f) => f()) }
+    return { text: () => (doc.body.kids || []).map(dump).join(' '), go, find: (pred) => (doc.body.kids || []).map((k) => find(k, pred)).find(Boolean), hash: () => loc.hash, flush, win: (t, e) => listeners[t] && listeners[t](e) }
   }
   const blob = /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pageP)[1]
   try {
@@ -384,6 +386,66 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
     ok(/\bstage full\b/.test(stageOf('files').attrs.class), 'full size for the file map')
     press('files-full')
     ok(!/\bfull\b/.test(stageOf('files').attrs.class), 'the same button leaves full size')
+
+    // the file map: a drag never selects the page and follows the pointer past the canvas; the
+    // keys pan and zoom its view. Observed through what it draws: each file is a disc (an arc).
+    {
+      const { stageKit } = await import('./stage-kit.mjs')
+      const canvas = within(stageOf('files'), (n) => n.tagName === 'CANVAS')
+      const k = stageKit(canvas, { width: 800, height: 600 })
+      const arcs = []
+      const ctx2d = new Proxy({}, { get: (t, p) => (p === 'arc' ? (x, y) => arcs.push([x, y]) : p === 'measureText' ? () => ({ width: 10 }) : p in t ? t[p] : () => {}), set: (t, p, v) => { t[p] = v; return true } })
+      Object.assign(canvas, { isConnected: true, getContext: () => ctx2d })
+      pg.flush()
+      const [x0, y0] = arcs[arcs.length - 1] || [NaN, NaN]
+      let seen = [x0, y0]
+      const last = () => { arcs.length = 0; pg.flush(); if (arcs.length) seen = arcs[arcs.length - 1]; return seen } // where the last file is drawn now
+      const near = (a, b) => Math.abs(a - b) < 1e-6 // screen positions, in floating point
+      const pct = () => pg.find((n) => n.attrs && n.attrs['data-ctl'] === 'files-100').textContent
+      ok(canvas.attrs.tabindex === '0' && canvas.attrs.role === 'region' && /^File map: drag or use the arrow keys to pan \(Shift: a page\), \+ and − to zoom, 0 to fit$/.test(canvas.attrs['aria-label']) && Number.isFinite(x0),
+        'the file map is focusable, its label names the keys')
+      const sel = () => { const e = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }; pg.win('selectstart', e); return e.defaultPrevented }
+      const down = k.fire('pointerdown', { clientX: 400, clientY: 300 })
+      ok(down.defaultPrevented && k.classes.has('panning') && sel() && k.focused && k.focused.preventScroll === true, 'the file map: a press is cancelled (no selection), the canvas takes the no-select class and the focus')
+      // the canvas is the only way to pan the map: a capture it did not lose itself never ends a pan
+      k.fire('lostpointercapture', { target: { tagName: 'DIV' } })
+      ok(k.classes.has('panning'), 'the file map: a capture lost by another element does not end its pan')
+      k.fire('pointermove', { clientX: 410, clientY: 305 })
+      const [x1, y1] = last()
+      k.fire('pointermove', { clientX: -2000, clientY: -3000 })
+      const [x2, y2] = last()
+      ok(k.captured.join() === '1' && near(x1, x0 + 10) && near(y1, y0 + 5) && near(x2, x0 - 2400) && near(y2, y0 - 3300), 'the file map: past 3 px the pointer is captured, and the view follows it out of the canvas')
+      k.fire('pointerup', {})
+      const swallowed = k.fire('click', { clientX: x2, clientY: y2 })
+      ok(!k.classes.has('panning') && !sel() && swallowed.stopped && pg.hash() === '#map', 'the file map: released, the pan ends, and its click opens nothing')
+      const [x3] = last()
+      k.key('ArrowLeft'); const [x4] = last()
+      k.key('ArrowRight'); k.key('ArrowRight'); const [x5] = last()
+      k.key('ArrowDown', { shiftKey: true }); const [, y6] = last()
+      k.key('ArrowUp'); const [, y7] = last()
+      ok(near(x3, x2) && near(x4, x3 + 60) && near(x5, x3 - 60) && near(y6, y2 - 540) && near(y7, y6 + 60), 'the file map: the arrows pan its view by 60 px, Shift by most of the visible size')
+      const ignored = [k.key('ArrowLeft', { ctrlKey: true }), k.key('ArrowLeft', { metaKey: true }), k.key('ArrowLeft', { target: pg.find((n) => n.attrs && n.attrs['data-ctl'] === 'search') })]
+      ok(ignored.every((e) => !e.defaultPrevented) && near(last()[0], x5), 'the file map: Ctrl or ⌘ + an arrow, and an arrow typed in the search box, leave it alone')
+      const zs = []
+      for (const key of ['+', '-', '-', '=']) { k.key(key); zs.push(pct()) }
+      k.fire('wheel', { deltaY: -1, clientX: 400, clientY: 300 }); zs.push(pct())
+      const fit = k.key('0')
+      const [x8, y8] = last()
+      ok(zs.join(' ') === '125% 100% 80% 100% 118%' && fit.defaultPrevented && pct() === '100%' && near(x8, x0) && near(y8, y0), `the file map: + − = zoom by the buttons' step about the centre, the wheel still zooms, 0 fits (${zs.join(' ')})`)
+      ok(!k.key('Escape').defaultPrevented && !k.key('Enter').defaultPrevented, 'the file map leaves Escape and Enter to the page')
+      // a finger pans the map too: the canvas has no native scrolling to fall back on
+      const finger = k.fire('pointerdown', { pointerType: 'touch', pointerId: 7, clientX: 400, clientY: 300 })
+      k.fire('pointermove', { pointerType: 'touch', pointerId: 7, clientX: 380, clientY: 300 })
+      const [xt] = last()
+      k.fire('pointerup', { pointerType: 'touch', pointerId: 7 })
+      k.key('0'); last()
+      ok(finger.defaultPrevented && near(xt, x0 - 20) && k.captured.includes(7) && /#map canvas\{[^}]*touch-action:none/.test(pageP), 'the file map: a touch drag pans it (touch-action none, the pointer captured)')
+      const visible = DP.map.files.filter((id) => !DP.files.find((f) => f[0] === id)[4])
+      k.fire('pointerdown', { clientX: x0, clientY: y0 }); k.fire('pointerup', {})
+      k.fire('click', { clientX: x0, clientY: y0 })
+      ok(pg.hash() === `#file-${visible[visible.length - 1]}`, `the file map: a click on a file (3 px or less) still opens it (${pg.hash()})`)
+      pg.go('#map')
+    }
     press('mode-modules')
   }
   pg.go('#hotspots'); views.hotspots = /class="tile"/.test(pg.text())
