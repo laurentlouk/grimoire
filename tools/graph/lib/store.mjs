@@ -18,7 +18,8 @@ import path from 'node:path'
 export const SCHEMA_VERSION = '3'
 
 let sqlite = null
-async function driver() {
+// node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
+export async function driver() {
   if (sqlite) return sqlite
   const [maj, min] = process.versions.node.split('.').map(Number)
   if (maj < 22 || (maj === 22 && min < 5)) throw new Error(`the code graph needs Node ≥ 22.5 (node:sqlite); this is ${process.version}`)
