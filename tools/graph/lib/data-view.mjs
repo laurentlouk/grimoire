@@ -72,7 +72,7 @@ export function dataClient(ctx) {
     const fkTo = new Map()
     for (const r of t.rels) r.columns.forEach((c, j) => { if (!fkTo.has(c)) fkTo.set(c, `${r.to} (${r.toColumns[j] || r.toColumns[0] || '?'})`) })
     const label = `${t.name}, ${t.kind}, ${plural(t.fields.length, 'column')}${g.conflicts ? `, ${plural(g.conflicts, 'conflict')}` : ''}: open its passport`
-    const tip = `${t.name} · ${t.kind} · ${plural(t.fields.length, 'column')}${t.indexes.length ? ` · ${plural(t.indexes.length, 'index')}` : ''}${g.conflicts ? `\n${plural(g.conflicts, 'conflict')}: the declarations disagree` : ''}${sc.names ? '\nclick to draw it with its columns and neighbours' : ''}`
+    const tip = `${t.name} · ${t.kind} · ${plural(t.fields.length, 'column')}${t.indexes.length ? ` · ${t.indexes.length} ${t.indexes.length === 1 ? 'index' : 'indexes'}` : ''}${g.conflicts ? `\n${plural(g.conflicts, 'conflict')}: the declarations disagree` : ''}${sc.names ? '\nclick to draw it with its columns and neighbours' : ''}`
     const out = [`<g class="tbl${t.kind === 'view' ? ' tview' : ''}${cls}" data-tbl="${ti}" tabindex="0" role="button" aria-label="${esc(label)}"><title>${esc(tip)}</title>`]
     const glyph = `<path class="tglyph" d="M${x + 11},${y + 10}h13v10h-13z M${x + 11},${y + 13.5}h13 M${x + 15.5},${y + 13.5}v6.5"/>`
     if (g.collapsed) {
