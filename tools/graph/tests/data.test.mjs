@@ -51,8 +51,11 @@ console.log('\n1 · splitting SQL into statements')
   eq(split(drizzle).map((s) => [s.line, s.text]), [[1, 'CREATE TABLE `a` (\n\t`id` text PRIMARY KEY NOT NULL\n)'], [5, 'CREATE INDEX `a_idx` ON `a` (`id`)'], [6, 'DROP TABLE `b`']], "Drizzle: one statement per breakpoint, each with the line it starts on")
   const plain = "-- CreateTable\nCREATE TABLE \"t\" (\n  \"motto\" TEXT DEFAULT 'read; then write -- always',\n  \"n\" INTEGER /* a ; in a comment */\n);\n\n/* block;\n comment */ INSERT INTO \"t\" VALUES ('it''s; fine', 1);\n-- trailing comment; only"
   eq(split(plain).map((s) => [s.line, s.text.split('\n')[0]]), [[2, 'CREATE TABLE "t" ('], [8, 'INSERT INTO "t" VALUES (\'it\'\'s; fine\', 1)']], 'plain `;`: never inside a string, an escaped quote or a comment; comment-only text is no statement')
-  const trigger = 'CREATE TRIGGER t_upd AFTER UPDATE ON t BEGIN\n  UPDATE t SET n = 1;\n  UPDATE t SET n = 2;\nEND;\nCREATE TABLE u (x)'
-  eq(split(trigger).map((s) => s.line), [1, 5], "a trigger's body keeps its `;` until END")
+  const trigger = 'CREATE TRIGGER t_upd AFTER UPDATE ON t BEGIN\n  UPDATE t SET b = CASE WHEN NEW.a > 1 THEN 1 ELSE 0 END;\n  UPDATE t SET "end" = 2 WHERE a = 1;\nEND;\nCREATE TABLE u (x)'
+  eq(split(trigger).map((s) => s.line), [1, 5], "a trigger's BEGIN … END body keeps its `;`, and a CASE … END inside it does not close it")
+  const noBody = `CREATE TRIGGER t_audit BEFORE UPDATE ON a FOR EACH ROW EXECUTE FUNCTION audit();\n${'INSERT INTO a VALUES (1);\n'.repeat(40000)}CREATE TABLE b (x);`
+  eq(split(noBody).length, 40002, 'a trigger with no BEGIN (Postgres, MySQL) ends at its `;`: it swallows nothing after it')
+  ok(hasDDL('CREATE TRIGGER t BEFORE UPDATE ON a FOR EACH ROW EXECUTE FUNCTION f();\nCREATE TABLE b (x);\nALTER TABLE b ADD y TEXT;'), '… so DDL after it is still seen')
   ok(hasDDL('-- seed\nINSERT INTO t VALUES (1);') === false && hasDDL('/* CREATE TABLE x */ INSERT INTO t VALUES (1);') === false, 'a seed (no DDL, or DDL only in a comment) is not a migration')
   ok(['CREATE TABLE x (a)', 'alter table x add b', 'CREATE UNIQUE INDEX i ON x (a)', 'create index i on x (a)'].every(hasDDL), 'CREATE TABLE, ALTER TABLE and CREATE [UNIQUE] INDEX are DDL')
 }

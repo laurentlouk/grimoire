@@ -4,8 +4,11 @@
 //                turned into spaces: what is left is code (identifiers keep their quotes)
 //   split(text)  [{ line, text }]: one entry per statement, `line` where its first code starts.
 //                A statement ends at a `;` in code, or at Drizzle's `--> statement-breakpoint`
-//                comment; a trigger's body (CREATE TRIGGER … BEGIN … END) keeps its `;`. Text
-//                with no code left (comments only) is no statement.
+//                comment. A trigger whose header is followed by BEGIN (SQLite's form) keeps the
+//                `;` of its body until the END that closes it (a CASE … END inside does not); one
+//                without BEGIN (Postgres' EXECUTE FUNCTION, MySQL's single statement) ends at its
+//                `;`. Text with no code left (comments only) is no statement. One pass over the
+//                text's words: linear, however long the file.
 //   hasDDL(text) whether a statement creates or alters a table or an index: what tells a migration
 //                from a seed or a query file
 //
@@ -13,7 +16,7 @@
 // /* */ comments. Postgres dollar quoting is not read here (its migrations are not replayed).
 
 const BREAKPOINT = /--> statement-breakpoint/g
-const TRIGGER = /^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b/i
+const TOKEN = /"(?:[^"]|"")*"|`[^`]*`|\[[^\]]*\]|[A-Za-z_][\w$]*|;/g // what decides where a statement ends
 const DDL = /^(?:CREATE\s+(?:(?:TEMP|TEMPORARY|VIRTUAL)\s+)?TABLE|ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX)\b/i
 
 export function blank(text) {
@@ -40,27 +43,33 @@ export function blank(text) {
 
 export function split(text) {
   const code = blank(text)
-  const cuts = []
-  for (let i = code.indexOf(';'); i >= 0; i = code.indexOf(';', i + 1)) cuts.push([i, 'semi'])
-  for (const m of text.matchAll(BREAKPOINT)) if (code[m.index] === ' ') cuts.push([m.index, 'break'])
-  cuts.sort((a, b) => a[0] - b[0])
-  cuts.push([text.length, 'end'])
+  const breaks = [...text.matchAll(BREAKPOINT)].map((m) => m.index).filter((i) => code[i] === ' ')
   const out = []
-  let start = 0, line = 1, scanned = 0
+  let start = 0, line = 1, scanned = 0, b = 0
   // positions only grow, so the newlines are counted once in all
   const lineAt = (pos) => { for (let k = text.indexOf('\n', scanned); k >= 0 && k < pos; k = text.indexOf('\n', k + 1)) { line++; scanned = k + 1 } return line }
-  for (const [at, kind] of cuts) {
-    if (at < start) continue
-    const body = code.slice(start, at)
-    const lead = body.search(/\S/)
-    if (kind === 'semi' && lead >= 0 && TRIGGER.test(body.slice(lead)) && !/\bEND\s*$/i.test(body)) continue // inside a trigger's body
-    if (lead >= 0) {
-      const s = start + lead
-      const end = start + body.trimEnd().length
-      out.push({ line: lineAt(s), text: text.slice(s, end) })
-    }
+  // The statement being read: its first words (CREATE [TEMP] TRIGGER?), whether its BEGIN … END
+  // body is open, the CASE … END depth inside that body, and whether the body's END was seen.
+  let words = [], trigger = false, body = false, depth = 0, closed = false
+  const cut = (at) => {
+    const seg = code.slice(start, at)
+    const lead = seg.search(/\S/)
+    if (lead >= 0) out.push({ line: lineAt(start + lead), text: text.slice(start + lead, start + seg.trimEnd().length) })
     start = at + 1
+    words = []; trigger = body = closed = false; depth = 0
   }
+  for (const m of code.matchAll(TOKEN)) {
+    while (b < breaks.length && breaks[b] < m.index) cut(breaks[b++])
+    const t = m[0]
+    if (t === ';') { if (!body || closed) cut(m.index); continue }
+    if (/^["`[]/.test(t)) continue // a quoted identifier: never a keyword
+    const w = t.toUpperCase()
+    if (words.length < 3) { words.push(w); trigger = words[0] === 'CREATE' && (words[1] === 'TRIGGER' || (/^TEMP(ORARY)?$/.test(words[1]) && words[2] === 'TRIGGER')) }
+    else if (trigger && !body) body = w === 'BEGIN'
+    else if (body && !closed) { if (w === 'CASE') depth++; else if (w === 'END') { if (depth) depth--; else closed = true } }
+  }
+  while (b < breaks.length) cut(breaks[b++])
+  cut(text.length)
   return out
 }
 
