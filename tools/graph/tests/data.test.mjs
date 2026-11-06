@@ -8,6 +8,8 @@
 //   1. splitting SQL into statements (Drizzle breakpoints, `;` outside quotes and comments, triggers)
 //   2. sniffing a dialect from the SQL itself
 //   3. replaying SQLite migrations into node:sqlite, each element mapped to the file:line behind it
+//   4. reading Drizzle snapshots: the legacy `meta/NNNN_snapshot.json` (`tables{}`) and v1's `ddl[]`
+//   5. reconciling the declarations of one store: merged sources, conflicts kept with both sides
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
@@ -17,6 +19,8 @@ const { split, hasDDL } = await import('../lib/data/readers/sql-split.mjs')
 const { sniffDialect } = await import('../lib/data/readers/sql-dialect.mjs')
 const { replay } = await import('../lib/data/readers/sqlite-replay.mjs')
 const { driver } = await import('../lib/store.mjs')
+const { default: drizzleSnapshot } = await import('../lib/data/extractors/drizzle-snapshot.mjs')
+const { reconcile } = await import('../lib/data/reconcile.mjs')
 const { DatabaseSync } = await driver()
 
 let PASS = 0, FAIL = 0
@@ -115,6 +119,138 @@ ALTER TABLE books RENAME COLUMN title TO heading;
   eq([p.entities.map((e) => e.name), p.entities[1].fields.map((f) => `${f.name}@${f.line}`)], [['authors', 'books'], ['id@7', 'author_id@8', 'title@9', 'pages@1']], 'the facts replayed so far are kept')
   const attach = replay([{ path: 'db/0001_x.sql', text: "ATTACH DATABASE 'elsewhere.db' AS other;\nCREATE TABLE t (x);\nVACUUM INTO 'copy.db';" }], DatabaseSync)
   eq([attach.statements, attach.notes], [1, ['skipped ATTACH at db/0001_x.sql:1 (never run: it reaches files outside the replay)', 'skipped VACUUM at db/0001_x.sql:3 (never run: it reaches files outside the replay)']], 'statements that write files are never run')
+}
+
+// ── 4 · Drizzle snapshots ──
+console.log('\n4 · Drizzle snapshots')
+const LEGACY = `{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "00000000-0000-4000-8000-000000000002",
+  "prevId": "00000000-0000-4000-8000-000000000001",
+  "tables": {
+    "books": {
+      "name": "books",
+      "columns": {
+        "id": { "name": "id", "type": "text", "primaryKey": true, "notNull": true, "autoincrement": false },
+        "author_id": { "name": "author_id", "type": "integer", "primaryKey": false, "notNull": true, "autoincrement": false },
+        "title": { "name": "title", "type": "text", "primaryKey": false, "notNull": true, "autoincrement": false, "default": "'untitled'" }
+      },
+      "indexes": { "books_author_idx": { "name": "books_author_idx", "columns": ["author_id"], "isUnique": false } },
+      "foreignKeys": { "books_author_id_authors_id_fk": { "name": "books_author_id_authors_id_fk", "tableFrom": "books", "tableTo": "authors", "columnsFrom": ["author_id"], "columnsTo": ["id"], "onDelete": "cascade", "onUpdate": "no action" } },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": { "books_title_author_id_unique": { "name": "books_title_author_id_unique", "columns": ["title", "author_id"] } },
+      "checkConstraints": {}
+    },
+    "shelf_books": {
+      "name": "shelf_books",
+      "columns": {
+        "shelf_id": { "name": "shelf_id", "type": "text", "primaryKey": false, "notNull": true, "autoincrement": false },
+        "book_id": { "name": "book_id", "type": "text", "primaryKey": false, "notNull": true, "autoincrement": false }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": { "shelf_books_shelf_id_book_id_pk": { "columns": ["shelf_id", "book_id"], "name": "shelf_books_shelf_id_book_id_pk" } },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": { "schemas": {}, "tables": {}, "columns": {} },
+  "internal": { "indexes": {} }
+}
+`
+const V1 = `{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "00000000-0000-4000-8000-000000000013",
+  "prevIds": ["00000000-0000-4000-8000-000000000012"],
+  "ddl": [
+    { "entityType": "tables", "name": "books" },
+    { "entityType": "columns", "table": "books", "name": "id", "type": "text", "notNull": true, "autoincrement": false, "default": null, "generated": null },
+    { "entityType": "columns", "table": "books", "name": "title", "type": "text", "notNull": true, "autoincrement": false, "default": "'untitled'", "generated": null },
+    { "entityType": "pks", "table": "books", "name": "books_pk", "columns": ["id"], "nameExplicit": false },
+    { "entityType": "indexes", "table": "books", "name": "books_title_idx", "columns": [{ "value": "title", "isExpression": false }], "isUnique": true, "where": null, "origin": "manual" },
+    { "entityType": "fks", "table": "books", "name": "books_shelf_fk", "columns": ["id"], "tableTo": "shelf_books", "columnsTo": ["book_id"], "onUpdate": "NO ACTION", "onDelete": "CASCADE", "nameExplicit": true },
+    { "entityType": "uniques", "table": "books", "name": "books_title_unique", "columns": ["title"], "nameExplicit": false },
+    { "entityType": "checks", "table": "books", "name": "books_title_check", "value": "length(title) > 0" }
+  ],
+  "renames": []
+}
+`
+{
+  const jobs = drizzleSnapshot.discover(new Map(['db/meta/0002_snapshot.json', 'db/meta/0010_snapshot.json', 'db/meta/0009_snapshot.json', 'db/meta/_journal.json', 'next/20240101000000_init/snapshot.json', 'next/20240101000000_init/migration.sql', 'other/snapshot.json'].map((p) => [p, {}])))
+  eq(jobs.map((j) => j.key).sort(), ['db/meta/0010_snapshot.json', 'next/20240101000000_init/snapshot.json'], "the newest legacy snapshot of each meta/ folder (numerically), and every v1 snapshot beside its migration.sql")
+  const [d] = drizzleSnapshot.extract(LEGACY, 'db/meta/0010_snapshot.json').declarations
+  eq([d.store, d.dialect, d.dialectFrom, d.complete, d.source], ['db', 'sqlite', 'db/meta/0010_snapshot.json:3', true, { path: 'db/meta/0010_snapshot.json', line: 1, kind: 'artifact', confidence: 'declared' }], 'legacy: the store is the folder holding meta/, its dialect where the snapshot states it')
+  eq(d.entities.map(brief), [
+    ['books table @db/meta/0010_snapshot.json:7',
+      '  id text not null @db/meta/0010_snapshot.json:10', '  author_id integer not null @db/meta/0010_snapshot.json:11', "  title text not null default 'untitled' @db/meta/0010_snapshot.json:12",
+      '  primary (id) @db/meta/0010_snapshot.json:10', '  unique (title, author_id) @db/meta/0010_snapshot.json:17',
+      '  index books_author_idx (author_id) @db/meta/0010_snapshot.json:14',
+      '  fk (author_id) -> authors(id) delete cascade update no action @db/meta/0010_snapshot.json:15'],
+    ['shelf_books table @db/meta/0010_snapshot.json:20',
+      '  shelf_id text not null @db/meta/0010_snapshot.json:23', '  book_id text not null @db/meta/0010_snapshot.json:24',
+      '  primary (shelf_id, book_id) @db/meta/0010_snapshot.json:28'],
+  ], 'legacy: tables, columns, the primary key (one column, or composite), unique constraints, indexes, foreign keys, each at its JSON line')
+  const [v] = drizzleSnapshot.extract(V1, 'next/20240101000000_init/snapshot.json').declarations
+  eq([v.store, v.snapshot], ['next', { id: '00000000-0000-4000-8000-000000000013', prevIds: ['00000000-0000-4000-8000-000000000012'] }], 'v1: the store is the folder of the migration folders; the snapshot keeps its place in the DAG')
+  eq(v.entities.map(brief), [
+    ['books table @next/20240101000000_init/snapshot.json:7',
+      '  id text not null @next/20240101000000_init/snapshot.json:8', "  title text not null default 'untitled' @next/20240101000000_init/snapshot.json:9",
+      '  primary (id) @next/20240101000000_init/snapshot.json:10', '  unique (title) @next/20240101000000_init/snapshot.json:13',
+      '  index books_title_idx unique (title) @next/20240101000000_init/snapshot.json:11',
+      '  fk (id) -> shelf_books(book_id) delete cascade update no action @next/20240101000000_init/snapshot.json:12'],
+  ], 'v1: ddl[] entries by entityType (checks are not part of the model yet)')
+  let threw = null
+  try { drizzleSnapshot.extract('{"version": "6", "tables": ', 'db/meta/0011_snapshot.json') } catch (e) { threw = e.message }
+  ok(!!threw, `a snapshot that does not parse throws (the index reports it): ${threw}`)
+}
+
+// ── 5 · reconciling declarations ──
+console.log('\n5 · reconciling declarations')
+const srcs = (x) => x.sources.map((s) => `${s.path}:${s.line} ${s.kind} ${s.extractor}`)
+const confl = (x) => x.conflicts.map((c) => `${c.attr}: ${c.values.map((v) => `${v.value} @ ${v.sources.map((s) => `${s.path}:${s.line}`).join(' ')}`).join(' | ')}`)
+const everyConflict = (store) => store.entities.flatMap((e) => [[e.name, e], ...e.fields.map((f) => [`${e.name}.${f.name}`, f]), ...e.keys.map((k) => [`${e.name} ${k.role} (${k.parts.join(', ')})`, k]), ...e.indexes.map((i) => [`${e.name} index ${i.name}`, i]), ...e.relations.map((r) => [`${e.name} fk (${r.columns.join(', ')})`, r])]
+  .flatMap(([label, x]) => confl(x).map((c) => `${label} ${c}`)))
+{
+  const migration = (text, extra = {}) => ({ declarations: [{ store: 'db', dialect: 'sqlite', dialectFrom: 'db/0001_init.sql:1', source: { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', label: 'replayed', notes: [], ...extra, entities: replay([{ path: 'db/0001_init.sql', text }], DatabaseSync).entities }] })
+  const AGREES = `CREATE TABLE \`books\` (
+\t\`id\` text PRIMARY KEY NOT NULL,
+\t\`author_id\` integer NOT NULL,
+\t\`title\` text DEFAULT 'untitled' NOT NULL,
+\tFOREIGN KEY (\`author_id\`) REFERENCES \`authors\`(\`id\`) ON UPDATE no action ON DELETE cascade,
+\tCONSTRAINT books_title_author_id_unique UNIQUE(\`title\`, \`author_id\`)
+);
+CREATE INDEX \`books_author_idx\` ON \`books\` (\`author_id\`);
+CREATE TABLE \`shelf_books\` (
+\t\`shelf_id\` text NOT NULL,
+\t\`book_id\` text NOT NULL,
+\tPRIMARY KEY(\`shelf_id\`, \`book_id\`)
+);`
+  const snapshot = { repo: 'app', extractor: 'drizzle-snapshot@1', facts: drizzleSnapshot.extract(LEGACY, 'db/meta/0010_snapshot.json') }
+  const model = reconcile([{ repo: 'app', extractor: 'sql-migrations@1', facts: migration(AGREES) }, snapshot])
+  const [st] = model.stores
+  eq([model.stores.length, st.id, st.dialect, st.entities.map((e) => e.id)], [1, 'app:db', 'sqlite', ['app:db/books', 'app:db/shelf_books']], 'a replay and a snapshot of one folder are two declarations of one store')
+  eq(everyConflict(st), [], 'replay and snapshot agree element for element: no conflict')
+  const books = st.entities[0]
+  eq(srcs(books.fields.find((f) => f.name === 'title')), ['db/meta/0010_snapshot.json:12 artifact drizzle-snapshot@1', 'db/0001_init.sql:4 migration sql-migrations@1'], 'each element keeps both sources, most trusted first')
+  eq(st.entities[1].keys.map((k) => [k.role, k.parts, srcs(k)]), [['primary', ['shelf_id', 'book_id'], ['db/meta/0010_snapshot.json:28 artifact drizzle-snapshot@1', 'db/0001_init.sql:12 migration sql-migrations@1']]], "a composite primary key is compared as a key: the snapshot's compositePrimaryKeys and the columns PRAGMA marks are one element")
+
+  const edited = AGREES.replace("\`title\` text DEFAULT 'untitled' NOT NULL", "\`title\` varchar(80) DEFAULT 'untitled' NOT NULL").replace('CREATE INDEX', 'ALTER TABLE \`books\` ADD \`isbn\` text;\nCREATE INDEX')
+  const drift = reconcile([{ repo: 'app', extractor: 'sql-migrations@1', facts: migration(edited) }, snapshot]).stores[0]
+  eq(everyConflict(drift), [
+    'books.title type: text @ db/meta/0010_snapshot.json:12 | varchar(80) @ db/0001_init.sql:4',
+    'books.isbn presence: declared @ db/0001_init.sql:8 | absent @ db/meta/0010_snapshot.json:7',
+  ], 'a hand-edited migration disagreeing with the snapshot: each conflict carries both sources, none resolved')
+
+  const partial = reconcile([{ repo: 'app', extractor: 'sql-migrations@1', facts: migration(edited, { complete: false, partial: true, status: 'partial' }) }, snapshot]).stores[0]
+  eq([everyConflict(partial), srcs(partial.entities[0].fields.find((f) => f.name === 'isbn'))], [[], ['db/0001_init.sql:8 migration sql-migrations@1']], 'a replay that stopped early is shown, but compared with nothing')
+
+  const v1 = (id, prevIds, text) => ({ repo: 'app', extractor: 'drizzle-snapshot@1', facts: drizzleSnapshot.extract(text.replace(/"id": "[^"]+"/, `"id": "${id}"`).replace(/"prevIds": \[[^\]]*\]/, `"prevIds": ${JSON.stringify(prevIds)}`), `next/${id.slice(-2)}_x/snapshot.json`) })
+  const dag = reconcile([v1('00000000-0000-4000-8000-000000000012', [], V1.replace('"name": "title"', '"name": "subtitle"')), v1('00000000-0000-4000-8000-000000000013', ['00000000-0000-4000-8000-000000000012'], V1)]).stores[0]
+  eq(dag.entities[0].fields.map((f) => [f.name, srcs(f)]), [['id', ['next/13_x/snapshot.json:8 artifact drizzle-snapshot@1']], ['title', ['next/13_x/snapshot.json:9 artifact drizzle-snapshot@1']]], 'Drizzle v1: only the leaves of the snapshot DAG declare the store')
 }
 
 console.log(`\n${PASS} passed, ${FAIL} failed`)
