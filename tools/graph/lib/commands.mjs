@@ -14,7 +14,8 @@ import { openStore, SCHEMA_VERSION } from './store.mjs'
 import { runIndex } from './run.mjs'
 import { seed } from './freshness.mjs'
 import { candidates } from './data/registry.mjs'
-import { Graph, sql, FOOTER, DATA_FOOTER } from './query.mjs'
+import { resolveBase, modelAt } from './data/base.mjs'
+import { Graph, sql, FOOTER, DATA_FOOTER, CHANGES_FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
 let lastFresh = 0
@@ -101,6 +102,17 @@ export const TOOLS = [
     footer: DATA_FOOTER,
   },
   {
+    name: 'graph_changes',
+    description: 'The data model of this branch against its base, element by element: stores, tables, columns, keys, indexes and foreign keys added, removed or modified (before → after), each with the path:line that declares it on its side, and possible renames (a removed and an added element of the same shape), flagged and never decided. The base is read through git at its commit, nothing checked out: `base` when given, else baseBranch in grimoire.config.json, else the branch the index is based on, else main, compared at its merge base with HEAD. The branch side is the working tree as indexed.',
+    params: { base: { type: 'string', description: 'A branch, tag or commit to compare against (default: baseBranch, else the base branch, else main).' }, repo: repoParam },
+    run: async (g, a, ctx) => {
+      const base = resolveBase(ctx.project, { explicit: a.base || null, repo: a.repo || null })
+      if (base.error) throw new Error(base.error)
+      return g.changes(base, await modelAt(ctx.project, base))
+    },
+    footer: CHANGES_FOOTER,
+  },
+  {
     name: 'graph_sql',
     description: 'A read-only SELECT over the graph for questions the other tools do not answer. Tables: files(id, repo, path, lang, is_test, node_id), nodes(id, file_id, kind, name, qualname, parent_id, line, end_line, signature, is_test), edges(src, dst, kind CALLS|IMPORTS|EXTENDS|IMPLEMENTS, confidence, line), imports(file_id, source, names, resolved), cochange(repo, a, b, n), churn(repo, path, n: recent commits touching the file), repos(name, root, head, indexed_at).',
     params: { sql: { type: 'string', description: 'One SELECT or WITH … SELECT statement.' } },
@@ -168,6 +180,6 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
     if (tool.raw) return sql(db, args.sql)
     const g = new Graph(db)
     const fresh = name === 'graph_status' ? staleness(project, db) : null
-    return `${note}${tool.run(g, args, { fresh })}\n\n${tool.footer || FOOTER}`
+    return `${note}${await tool.run(g, args, { fresh, project })}\n\n${tool.footer || FOOTER}`
   } finally { db.close() }
 }

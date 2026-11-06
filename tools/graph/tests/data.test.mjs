@@ -685,7 +685,70 @@ CREATE INDEX books_author_idx ON books (author_id);
     const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(page)[1]
     eq(csp, `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${createHash('sha256').update(script, 'utf8').digest('base64')}'; img-src 'none'; base-uri 'none'; form-action 'none'`, 'the CSP is unchanged: the page\'s own script by its hash, nothing else')
     ok(!/<!--|<script/i.test(script) && !/https?:\/\//.test(page) && ['dataClient', 'layoutErd', 'erdBox'].every((f) => script.includes(`function ${f}(`)), 'the page script carries the Data tab and its layout, opens no HTML comment or script element, and names no URL')
+    const bare = await stubPage(page, '#data-0')
+    ok(!bare.ctl('data-changes') && bare.text().includes('No change overlay: no repository to compare.'), 'with no base to compare against, the change overlay\'s toggle is absent and the tab says why')
   } catch (e) { ok(false, `the Data tab renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
+}
+
+// the change overlay: a branch against its base (git), over an index built from the working tree
+console.log('\n9 · the Data tab\'s change overlay, against a git base')
+{
+  const { openStore } = await import('../lib/store.mjs')
+  const { renderGraph } = await import('../lib/render.mjs')
+  const { extractAll } = await import('../lib/data/registry.mjs')
+  const { loadProject, listPaths } = await import('../lib/project.mjs')
+  const DIR = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-overlay-')))
+  const put = (rel, text) => { mkdirSync(path.dirname(path.join(DIR, rel)), { recursive: true }); writeFileSync(path.join(DIR, rel), text) }
+  const BAD = '"><img src=x onerror=alert(1)></title><script>x</script><!--', quoted = (n) => `"${n.replace(/"/g, '""')}"`
+  try {
+    put('grimoire.config.json', JSON.stringify({ repos: [{ name: 'app', path: '.' }] }))
+    put('db/0001_init.sql', ['CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, bio TEXT);', 'CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES authors(id), title TEXT NOT NULL);',
+      'CREATE INDEX books_title_idx ON books (title);', 'CREATE TABLE tags (id INTEGER PRIMARY KEY, label TEXT NOT NULL);', `CREATE TABLE ${quoted(`h${BAD}`)} (id INTEGER PRIMARY KEY, ${quoted(`c${BAD}`)} TEXT);`, ''].join('\n'))
+    git(DIR, 'init', '-q', '-b', 'main')
+    commit(DIR, 'base')
+    git(DIR, 'switch', '-q', '-c', 'feat')
+    put('db/0002_branch.sql', ["CREATE TABLE __new_authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, bio TEXT NOT NULL DEFAULT '', email TEXT);", "INSERT INTO __new_authors SELECT id, name, coalesce(bio, ''), NULL FROM authors;", 'DROP TABLE authors;', 'ALTER TABLE __new_authors RENAME TO authors;',
+      'DROP INDEX books_title_idx;', 'ALTER TABLE books RENAME COLUMN title TO heading;', 'ALTER TABLE tags RENAME TO labels;', `DROP TABLE ${quoted(`h${BAD}`)};`, `CREATE TABLE ${quoted(`n${BAD}`)} (${quoted(`c${BAD}`)} TEXT);`, ''].join('\n'))
+    commit(DIR, 'branch')
+    const project = loadProject(DIR)
+    const db = await openStore(project.dbPath)
+    db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES (?, ?, ?, ?)').run('app', '.', '', '')
+    for (const r of extractAll({ paths: listPaths(DIR), size: (p) => statSync(path.join(DIR, p)).size, read: (p) => readFileSync(path.join(DIR, p), 'utf8') }, project, [], { DatabaseSync }))
+      db.prepare('INSERT INTO data_facts(repo, scope, key, extractor, sig, facts, error) VALUES (?, ?, ?, ?, ?, ?, ?)').run('app', r.scope, r.key, r.extractor, 'sig', r.facts ? JSON.stringify(r.facts) : null, r.error || null)
+    db.close()
+
+    const page = await renderGraph(project)
+    const D = dataOf(page), s = D.data.stores[0]
+    eq([D.data.changes.base.ref, s.ch.n, s.ch.renames.map((r) => r.text)], ['main', { added: 4, removed: 4, modified: 1, renames: 2 }, ['possible rename, not decided: column title → heading in books (same type and position)', 'possible rename, not decided: table tags → labels (same columns)']],
+      'packed in Node at render time, against the default base (main): the counts and the rename candidates in words')
+    const pg = await stubPage(page, '#data-0')
+    const tgl = pg.ctl('data-changes')
+    ok(!!tgl && tgl.attrs['aria-pressed'] === 'false' && tgl.kids[0] === 'Changes vs main' && !/class="tbl[^"]* (add|del|mod)\b|class="ren/.test(pg.erd().html) && !pg.text().includes('Changes since main:'), 'the toggle "Changes vs main" is there, off by default: the ERD as the branch has it')
+    pg.press('data-changes')
+    const svg = pg.erd().html
+    const tblClass = (name) => (new RegExp(`<g class="(tbl[^"]*)" data-tbl="\\d+" tabindex="0" role="button" aria-label="${name},`).exec(svg) || [])[1]
+    const rowClass = (col) => (new RegExp(`<g class="(row[^"]*)" data-col="${col}"`).exec(svg) || [])[1]
+    eq([pg.ctl('data-changes').attrs['aria-pressed'], tblClass('labels'), tblClass('tags'), tblClass('authors'), tblClass('books')], ['true', 'tbl add', 'tbl del ghost', 'tbl mod', 'tbl mod'], 'on: an added table green, a removed one drawn as a ghost where it stood, the modified ones amber')
+    eq([rowClass('email'), rowClass('bio'), rowClass('heading'), rowClass('title')], ['row add', 'row mod', 'row add', 'row del'], '… and their columns: added, modified, removed')
+    ok(svg.includes(">nullable: nullable → not null; default: none → ''</text><title>was: nullable: nullable → not null; default: none → '' (at the base: db/0001_init.sql:1)</title>"), 'a modified column says before → after on its row, and where it stood at the base')
+    ok(/<g class="row del" data-col="title"><title>title TEXT · not null\nremoved since main \(at the base: db\/0001_init\.sql:2\)\n[^<]*<\/title>[^]*?<line class="strike"[^>]*\/><\/g>/.test(svg) && /<g class="xr del"><title>index books_title_idx \(title\) — not in the branch\nremoved since main \(at the base: db\/0001_init\.sql:3\)<\/title>[^]*?<line class="strike"/.test(svg), 'a removed column and a removed index are struck through, with where they were')
+    ok(/<path class="ren tren" data-ren="1" d="M[^"]+"><title>possible rename, not decided: table tags → labels \(same columns\)<\/title><\/path>/.test(svg) && /<path class="ren" data-ren="0" d="M[^"]+"><title>possible rename, not decided: column title → heading in books \(same type and position\)<\/title><\/path>/.test(svg),
+      'rename candidates are paired by a link: tables by a dashed line between their boxes, columns by a bracket beside their rows')
+    const text = pg.text()
+    ok(['Changes since main:', 'added', 'removed', 'modified: before → after', 'possible rename, linked, never decided'].every((w) => text.includes(w)) && text.includes('4 added · 4 removed · 1 modified · 2 possible renames, against main (the index\'s base branch) at ') && text.includes('+4 −4 ~1 · 2 possible renames'), 'a legend, the totals against the base, and the counts on the store picker')
+    const escd = BAD.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    ok(!/<img|<script|<!--/i.test(svg) && svg.includes(`aria-label="h${escd}, table, 2 columns, removed since main: open its passport"`) && svg.includes(`aria-label="n${escd}, table, 1 column, added since main: open its passport"`) && svg.includes(`data-col="c${escd}"`), 'the overlay escapes a removed and an added table holding markup, and their columns')
+
+    pg.click(s.ch.tables.findIndex((t) => typeof t === 'object' && t.name === 'authors'))
+    ok(pg.text().includes('Changes since main (2)') && pg.lines('LI').includes("bio TEXT · not null · default ''modified since maindb/0002_branch.sql:1was: nullable: nullable → not null · default: none → '' — at the base: db/0001_init.sql:1") && !!pg.find((n) => n.tagName === 'CODE' && n.kids[0] === 'db/0001_init.sql:1' && /at the base/.test(n.attrs.title)),
+      "the passport lists the table's changes, before → after, citing the base's line as text (it is the base's, not the working tree's)")
+    pg.click(s.ch.tables.findIndex((t) => typeof t === 'object' && t.name === `h${BAD}`))
+    const markup = pg.all((n) => typeof n.html === 'string' && /<img|<script/i.test(n.html)).length + pg.all((n) => n.tagName === 'IMG' || n.tagName === 'SCRIPT').length
+    ok(markup === 0 && !!pg.find((n) => n.tagName === 'SPAN' && n.attrs.class === 'struck' && n.kids[0] === `h${BAD}`) && !!pg.find((n) => n.tagName === 'CODE' && n.kids[0] === 'db/0001_init.sql:5'), "a ghost's passport: its name struck, as text, never markup; declared at the base's line")
+    pg.press('data-changes')
+    ok(!/class="tbl[^"]* (add|del|mod)\b|class="ren/.test(pg.erd().html), 'off again: the ERD as the branch has it')
+    ok(!/https?:\/\//.test(page) && !/<!--|<script/i.test(scriptOf(page)), 'the page stays static: no URL, nothing fetched')
+  } catch (e) { ok(false, `the change overlay renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
 }
 
 // ════ Part 2 · through call(), on an indexed project ════
@@ -808,6 +871,54 @@ async function indexed() {
     has(cli('data', 'list'), 'kiosk:storage/schema-changes  sqlite  2 tables · 1 view · 0 foreign keys · 0 indexes (+1 implicit, for keys) · no conflicts', 'graph.mjs data list')
     has(cli('data', 'list', 'web:db/legacy'), '  sessions  table  3 fields · primary (id) · foreign keys → accounts  web/db/legacy/0002_sessions.sql:1', 'graph.mjs data list <store>')
     has(cli('data', 'show', 'Loan'), 'api:prisma/migrations/Loan  table  (sqlite)\n  declared at api/prisma/migrations/20240212143000_loan_notes/migration.sql:3 [migration sql-migrations@1]', 'graph.mjs data show <entity>')
+
+    // ── 13 · a branch against its base ──
+    console.log('\n13 · a branch against its base (graph_changes), on a copy with two commits')
+    const BR = path.join(SANDBOX, 'branch')
+    const fixture = (keep) => cpSync(path.join(HERE, 'fixtures', 'data'), BR, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') && keep(path.relative(path.join(HERE, 'fixtures', 'data'), src)) })
+    fixture((rel) => !rel.startsWith(path.join('kiosk', 'storage')))
+    git(BR, 'init', '-q', '-b', 'main')
+    const beforeKiosk = commit(BR, 'every store but the kiosk one')
+    fixture(() => true)
+    commit(BR, 'the kiosk store')
+    git(BR, 'switch', '-q', '-c', 'feat')
+    mkdirSync(path.join(BR, 'api/prisma/migrations/20240401090000_branch_changes'))
+    writeFileSync(path.join(BR, 'api/prisma/migrations/20240401090000_branch_changes/migration.sql'), '-- AlterTable\nALTER TABLE "Loan" ADD COLUMN "returnedOn" DATETIME;\n\n-- DropIndex\nDROP INDEX "Member_email_key";\n\n-- RenameTable\nALTER TABLE "Tag" RENAME TO "Label";\n')
+    commit(BR, 'add a column, drop an index, rename a table')
+    const br = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: BR })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    await br('index')
+    const facts = await br('sql', { sql: 'SELECT count(*) AS n FROM data_facts' })
+    const changes = await br('changes')
+    const [head] = changes.split('\n')
+    ok(/^Data model against main \(the index's base branch\) at [0-9a-f]{10}: 1 store changed · 2 added · 2 removed · 0 modified · 1 possible rename$/.test(head), `graph_changes: one line to sum it up, against the branch the index is based on (${head})`)
+    eq(changes.split('\n').slice(1), [
+      'api:prisma/migrations  sqlite  modified',
+      '  + Label  table, 2 columns  — api/prisma/migrations/20240401090000_branch_changes/migration.sql:8',
+      '  + Loan.returnedOn  column DATETIME, nullable  — api/prisma/migrations/20240401090000_branch_changes/migration.sql:2',
+      '  - Member index Member_email_key unique (email)  — was api/prisma/migrations/20240105090000_init/migration.sql:19',
+      '  - Tag  table, 2 columns  — was api/prisma/migrations/20240301080000_tags/migration.sql:2',
+      '  possible rename, not decided: table Tag → Label (same columns)',
+    ], 'the column added, the index dropped, the table renamed (a candidate, never decided: Tag removed, Label added), each with path:line on its side')
+    has(await call('graph_changes', {}, { root: BR }), '\n\nLeads, not facts: both sides are read from migrations and generated files', '… with the footer graph_data has')
+    eq(await br('sql', { sql: 'SELECT count(*) AS n FROM data_facts' }), facts, "the base's facts never enter the index")
+    const missing = await call('graph_changes', { base: 'no-such-branch' }, { root: BR }).then(() => 'answered', (e) => e.message)
+    eq(missing, 'the base "no-such-branch" does not resolve to a commit in mobile, api, kiosk, web (give a branch, a tag or a commit)', 'a ref that does not resolve: a clear error')
+    const older = await br('changes', { base: beforeKiosk })
+    has(older, 'kiosk:storage/schema-changes  sqlite  added (absent at the base)\n  + badge_holders  view  — kiosk/storage/schema-changes/0003_tidy.up.sql:3\n  + badges  table, 2 columns  — kiosk/storage/schema-changes/0002_badges.up.sql:1\n  + visits  table, 3 columns  — kiosk/storage/schema-changes/0001_visits.up.sql:1', 'a base where the migrations folder did not exist: an added store and its tables, not an error')
+    ok(older.startsWith(`Data model against ${beforeKiosk.slice(0, 10)} (given): 2 stores changed`), `… against the commit given, named once by its first 10 digits (${older.split('\n')[0]})`)
+    has(await br('changes', { base: 'main', repo: 'mobile' }), 'Data model against main (given) at ', '`repo` limits the comparison to one repository')
+    ok((await br('changes', { base: 'main', repo: 'mobile' })).endsWith(': no change.'), '… mobile did not change')
+
+    const run = (...a) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), ...a, '--root', BR], { encoding: 'utf8' })
+    has(run('changes', '--base', 'main').stdout, '  possible rename, not decided: table Tag → Label (same columns)', 'graph.mjs changes --base <ref>')
+    const bad = run('changes', '--base', 'no-such-branch')
+    ok(bad.status === 1 && bad.stderr.includes('the base "no-such-branch" does not resolve'), `graph.mjs changes with a ref that does not resolve exits 1 and says why (${bad.stderr.trim()})`)
+    const outFile = path.join(SANDBOX, 'branch.html')
+    const rendered = run('render', '--base', 'main', '--out', outFile)
+    const RD = rendered.status === 0 ? dataOf(readFileSync(outFile, 'utf8')).data : null
+    eq(RD && [RD.changes.base.ref, RD.stores.filter((s) => s.ch).map((s) => `${s.id} +${s.ch.n.added} -${s.ch.n.removed} ~${s.ch.n.modified} ?${s.ch.n.renames}`)], ['main', ['api:prisma/migrations +2 -2 ~0 ?1']], `graph.mjs render --base <ref>: the page carries the overlay against it (${rendered.stderr.trim()})`)
+    const badRender = run('render', '--base', 'no-such-branch', '--out', outFile)
+    ok(badRender.status === 1 && badRender.stderr.includes('does not resolve'), 'graph.mjs render with a base that does not resolve exits 1 and says why')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

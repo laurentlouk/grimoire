@@ -27,8 +27,9 @@
 //   Change     { kind: entity | field | key | index | relation, change: added | removed | modified,
 //                entity: the entity's name (as the branch names it, else the base), name: the
 //                element's, key: its identity, pos: { before, after } (its index in its list on each
-//                side, null where absent), before: element | null, after: element | null,
-//                attrs: [Attr], rename: index into renames | null }
+//                side, null where absent), owner: { before, after } (its entity's index in the
+//                store's entities on each side; null for an entity), before: element | null,
+//                after: element | null, attrs: [Attr], rename: index into renames | null }
 //   Attr       { attr, before, after }   (values as declared)
 //   Rename     { kind, entity: null for entities, shape: 'same columns' | 'same type and position',
 //                from: [index into changes], to: [index into changes], ambiguous }
@@ -83,7 +84,7 @@ function diffStore(b, a) {
   const fold = CASELESS.has(dialect) ? (x) => String(x).toLowerCase() : (x) => String(x)
   const out = { id: s.id, repo: s.repo, name: s.name, dialect, change: !b ? 'added' : !a ? 'removed' : null, attrs: [], before: b, after: a, changes: [], renames: [] }
   if (b && a && (b.dialect ?? null) !== (a.dialect ?? null)) out.attrs.push({ attr: 'dialect', before: b.dialect ?? null, after: a.dialect ?? null })
-  const push = (kind, change, entity, x, y, pos, attrs = []) => out.changes.push({ kind, change, entity, name: NAME[kind](y || x), key: KEY[kind](y || x, fold), pos, before: x, after: y, attrs, rename: null })
+  const push = (kind, change, entity, x, y, pos, attrs = [], owner = null) => out.changes.push({ kind, change, entity, name: NAME[kind](y || x), key: KEY[kind](y || x, fold), pos, owner, before: x, after: y, attrs, rename: null })
   const byName = (p, q) => { const m = KEY.entity(p[0] || p[1], fold), n = KEY.entity(q[0] || q[1], fold); return m < n ? -1 : m > n ? 1 : 0 }
   for (const [x, y, px, py] of pairs(b?.entities || [], a?.entities || [], (e) => KEY.entity(e, fold)).sort(byName)) {
     const name = (y || x).name
@@ -91,11 +92,12 @@ function diffStore(b, a) {
     if (!y) { push('entity', 'removed', name, x, null, { before: px, after: null }); continue }
     const attrs = changed('entity', x, y, fold)
     if (attrs.length) push('entity', 'modified', name, x, y, { before: px, after: py }, attrs)
+    const owner = { before: px, after: py }
     for (const [kind, list] of LISTS) {
       for (const [u, v, pu, pv] of pairs(x[list] || [], y[list] || [], (el) => KEY[kind](el, fold))) {
-        if (!u) push(kind, 'added', name, null, v, { before: null, after: pv })
-        else if (!v) push(kind, 'removed', name, u, null, { before: pu, after: null })
-        else { const d = changed(kind, u, v, fold); if (d.length) push(kind, 'modified', name, u, v, { before: pu, after: pv }, d) }
+        if (!u) push(kind, 'added', name, null, v, { before: null, after: pv }, [], owner)
+        else if (!v) push(kind, 'removed', name, u, null, { before: pu, after: null }, [], owner)
+        else { const d = changed(kind, u, v, fold); if (d.length) push(kind, 'modified', name, u, v, { before: pu, after: pv }, d, owner) }
       }
     }
   }

@@ -5,8 +5,11 @@
 //             callees <s> · impact <target> · file <path> · hierarchy <s> · path <from> <to> · sql <select>
 //             data [list [<store>] | show <entity>]: the data model (graph_data): the stores, one
 //             store's entities, or one entity with its sources and conflicts
-//             render [--out <file>]: refresh, then write the browsable HTML page (default
-//             <graph dir>/graph.html) and print its path. Local only: never publish it.
+//             changes [--base <ref>] [--repo r]: the data model against a base (graph_changes):
+//             added, removed, modified, possible renames; the base read through git
+//             render [--out <file>] [--base <ref>]: refresh, then write the browsable HTML page
+//             (default <graph dir>/graph.html) and print its path; its Data tab's change overlay is
+//             against --base, else the default base (graph_changes'). Local only: never publish it.
 //             refresh: what the SubagentStop hook runs. Seeds a checkout from its base checkout's
 //             index (re-basing onto it when that saves parsing), then indexes incrementally; builds the first index only when grimoire.config.json
 //             has a `graph` block. Silent no-op when the graph is disabled or was never set up.
@@ -40,7 +43,7 @@ if (cmd === 'render') {
     if (r.error) console.error(`graph: refresh failed, rendering the previous index: ${r.error}`)
     const out = path.resolve(opt('out') || path.join(path.dirname(project.dbPath), 'graph.html'))
     mkdirSync(path.dirname(out), { recursive: true })
-    writeFileSync(out, await renderGraph(project))
+    writeFileSync(out, await renderGraph(project, { base: opt('base') }))
     console.log(out)
     process.exit(0)
   } catch (e) {
