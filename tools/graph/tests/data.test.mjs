@@ -64,7 +64,7 @@ const eq = (got, want, m) => { const g = JSON.stringify(got), w = JSON.stringify
 const blobOf = (page) => /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page)[1]
 const dataOf = (page) => JSON.parse(blobOf(page).replace(/\\u003c/g, '<'))
 const scriptOf = (page) => (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(page) || [])[1] || ''
-async function stubPage(page, hash) {
+async function stubPage(page, hash, globals = {}) {
   const vm = await import('node:vm')
   const blob = blobOf(page), listeners = {}
   class El {
@@ -83,7 +83,7 @@ async function stubPage(page, hash) {
   const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null }
   doc.querySelector = ctlQuery(() => ({ kids: doc.body.kids || [] }))
   const loc = { hash }
-  vm.runInNewContext(scriptOf(page), { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
+  vm.runInNewContext(scriptOf(page), { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }), ...globals })
   const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
   const find = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = find(k, pred); if (f) return f } return null }
   const all = (n, pred, out = []) => { if (n && typeof n === 'object') { if (pred(n)) out.push(n); for (const k of n.kids || []) all(k, pred, out) } return out }
@@ -98,6 +98,8 @@ async function stubPage(page, hash) {
     all: (pred) => all(body(), pred),
     ctl: (c) => find(body(), (n) => n.attrs && n.attrs['data-ctl'] === c),
     press: (c) => (pg.ctl(c).on.click || []).forEach((f) => f({})),
+    pressed: (c) => Promise.all((pg.ctl(c).on.click || []).map((f) => f({}))), // and wait for what it started (a save)
+    ctls: (re) => pg.all((n) => n.attrs && re.test(n.attrs['data-ctl'] || '')).map((n) => n.attrs['data-ctl']),
     search: (q) => pg.ctl('search').on.input[0]({ target: { value: q } }),
     erd: () => find(body(), (n) => n.attrs && n.attrs.id === 'data-box'), // the drawing: its svg markup is .html
     click: (i) => pg.erd().firstChild.on.click[0]({ target: { closest: (sel) => (/data-tbl/.test(sel) ? { dataset: { tbl: String(i) } } : null) } }),
@@ -931,6 +933,115 @@ CREATE VIEW recent AS SELECT id FROM books;`
   ok(!/[^\r]\n/.test(crlf) && JSON.parse(crlf).data[0].ack.by === 'Cy', 'CRLF line ends are kept')
   const odd = setAcks('{"schema":1,"spec":"s","data":[{"id":"a","op":"remove","target":"app:db/t","why":"w","origin":"planned","ack":{"by":"1","at":"1","hash":"1"},"ack":{"by":"2","at":"2","hash":"2"}}],"architecture":[]}', new Map([[0, null]]))
   ok(JSON.parse(odd).data[0].ack === undefined, 'a layout the in-place edit cannot handle (a duplicated key) is written whole, and still right')
+}
+
+// ── 11 · the Data tab draws a delta ──
+console.log('\n11 · the Data tab draws a delta over the model, against a git base')
+{
+  const { openStore } = await import('../lib/store.mjs')
+  const { renderGraph } = await import('../lib/render.mjs')
+  const { extractAll } = await import('../lib/data/registry.mjs')
+  const { loadProject, listPaths } = await import('../lib/project.mjs')
+  const DIR = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-delta-page-')))
+  const put = (rel, text) => { mkdirSync(path.dirname(path.join(DIR, rel)), { recursive: true }); writeFileSync(path.join(DIR, rel), text) }
+  const BAD = '"><img src=x onerror=alert(1)></title><script>x</script><!--', NOSLASH = '"><img src=x onerror=alert(1)>'
+  const escd = (x) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const plan = (id, op, target, extra) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
+  const withAck = (c, by, edit = {}) => ({ ...c, ...edit, ack: { by, at: '2026-11-06T10:00:00.000Z', hash: changeHash(c) } })
+  try {
+    put('grimoire.config.json', JSON.stringify({ repos: [{ name: 'app', path: '.' }] }))
+    put('db/0001_init.sql', ['CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, bio TEXT);', 'CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES authors(id), title TEXT NOT NULL);',
+      'CREATE INDEX books_title_idx ON books (title);', 'CREATE TABLE legacy (id INTEGER PRIMARY KEY, body TEXT);', ''].join('\n'))
+    git(DIR, 'init', '-q', '-b', 'main')
+    commit(DIR, 'base')
+    git(DIR, 'switch', '-q', '-c', 'feat')
+    put('db/0002_branch.sql', ['ALTER TABLE authors ADD COLUMN email TEXT;', 'ALTER TABLE books ADD COLUMN isbn INTEGER;', 'DROP INDEX books_title_idx;', 'CREATE TABLE stats (day TEXT PRIMARY KEY, n INTEGER);', ''].join('\n'))
+    commit(DIR, 'branch')
+    const DELTA = { schema: 1, spec: 'docs/specs/2026-11-06-reading-design.md', data: [
+      withAck(plan('email', 'add', 'app:db/authors.email', { after: { type: 'TEXT', nullable: true }, slice: 1 }), 'Ann'),
+      plan('isbn', 'add', 'app:db/books.isbn', { after: { type: 'TEXT', nullable: true }, slice: 1 }),
+      plan('loans', 'add', 'app:db/loans', { after: { fields: [{ name: 'id', type: 'INTEGER', nullable: false }, { name: 'book_id', type: 'INTEGER', nullable: true }], keys: [{ role: 'primary', parts: ['id'] }], relations: [{ columns: ['book_id'], to: 'Books', toColumns: ['id'] }] }, slice: 2 }),
+      withAck(plan('due', 'add', 'app:db/books.due_on', { after: { type: 'TEXT', nullable: false }, slice: 2 }), 'Ann', { why: 'loans come back by a date, reworded after the acknowledgement' }),
+      plan('legacy', 'remove', 'app:db/legacy'),
+      { ...plan('hostile', 'add', `app:db/books.c${NOSLASH}`, { after: { type: `text${BAD}`, nullable: true } }), why: `w${BAD}` },
+      plan('elsewhere', 'add', 'app:cache/entries', { after: { fields: [{ name: 'k', type: 'TEXT', nullable: false }] } }),
+    ], architecture: [] }
+    put('docs/specs/2026-11-06-reading.delta.json', JSON.stringify(DELTA, null, 2) + '\n')
+    put('docs/specs/2026-10-01-old.delta.json', JSON.stringify({ schema: 1, spec: 'docs/specs/2026-10-01-old-design.md', data: [plan('bad', 'add', `app:t${NOSLASH}`, { after: { type: 'TEXT', nullable: true } })], architecture: [] }, null, 2) + '\n')
+    const project = loadProject(DIR)
+    const db = await openStore(project.dbPath)
+    db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES (?, ?, ?, ?)').run('app', '.', '', '')
+    for (const r of extractAll({ paths: listPaths(DIR), size: (p) => statSync(path.join(DIR, p)).size, read: (p) => readFileSync(path.join(DIR, p), 'utf8') }, project, [], { DatabaseSync }))
+      db.prepare('INSERT INTO data_facts(repo, scope, key, extractor, sig, facts, error) VALUES (?, ?, ?, ?, ?, ?, ?)').run('app', r.scope, r.key, r.extractor, 'sig', r.facts ? JSON.stringify(r.facts) : null, r.error || null)
+    db.close()
+
+    const page = await renderGraph(project)
+    const D = dataOf(page), dl = D.data.deltas
+    eq([dl.map((d) => `${d.shown} ${d.repo}:${d.path} ${d.ackable} ${d.errors.length}`), D.data.delta], [['docs/specs/2026-11-06-reading.delta.json app:docs/specs/2026-11-06-reading.delta.json true 0', 'docs/specs/2026-10-01-old.delta.json app:docs/specs/2026-10-01-old.delta.json true 1'], 0],
+      'every delta beside the specs is packed, newest first (the first shown), each saying where the server may write it')
+    eq(dl[0].changes.map((c) => `${c.id} ${c.state}${c.ack ? ` ${c.ack}` : ''} store ${c.store} tbl ${c.tbl}`), ['email planned-built acked store 0 tbl 0', 'isbn built-differently store 0 tbl 1', 'loans pending store 0 tbl 4', 'due pending stale store 0 tbl 1', 'legacy pending store 0 tbl 2', 'hostile pending store 0 tbl 1', 'elsewhere pending store -1 tbl -1'],
+      'each change\'s state and acknowledgement, computed in Node at render time, and the table it is drawn on (a proposed table after the store\'s own; one in a store not in the model, nowhere)')
+    const pg = await stubPage(page, '#data-0')
+    const btn = pg.ctl('data-delta'), pick = pg.ctl('data-delta-file')
+    ok(!!btn && btn.attrs['aria-pressed'] === 'false' && !/ d-(prop|rm|pend|built|diff|unpl)\b/.test(pg.erd().html) && pick.kids.map((o) => o.kids[0]).join(' ') === 'docs/specs/2026-11-06-reading.delta.json docs/specs/2026-10-01-old.delta.json' && pick.kids[0].attrs.selected === 'selected',
+      'a "Delta" toggle, off by default, beside "Changes vs main"; a picker naming every delta, the newest chosen')
+    pg.press('data-delta')
+    const svg = pg.erd().html
+    const tbl = (name) => (new RegExp(`<g class="(tbl[^"]*)" data-tbl="\\d+" tabindex="0" role="button" aria-label="${name},`).exec(svg) || [])[1]
+    const row = (col) => (new RegExp(`<g class="(row[^"]*)" data-col="${col}"`).exec(svg) || [])[1]
+    eq([btn.attrs && pg.ctl('data-delta').attrs['aria-pressed'], pg.ctl('data-changes').attrs['aria-pressed'], tbl('loans'), tbl('legacy'), tbl('stats'), tbl('books'), row('email'), row('isbn'), row('due_on'), row('book_id')],
+      ['true', 'false', 'tbl d-prop', 'tbl d-rm', 'tbl d-unpl', 'tbl', 'row d-built', 'row d-diff', 'row d-prop stale', 'row d-prop'],
+      'on: a proposed table dashed among the others, a proposed removal, a table the branch added outside the plan, a column planned and built, one built differently, a proposed column (its acknowledgement stale)')
+    ok(/<g class="xr d-unpl gone"><title>index books_title_idx \(title\) — not in the branch\nremoved, not in the plan\nat the base: db\/0001_init\.sql:3<\/title>[^]*?<line class="strike d-unpl"/.test(svg), 'an index the branch dropped outside the plan: struck in its own colour, cited at the base')
+    ok(/<line class="strike d-rm" x1/.test(svg) && svg.includes('>planned → built: type: TEXT → INTEGER</text>') && /<path class="fk d-prop" data-fk="\d+:0" d="M[^"]+" marker-start="url\(#erd-many\)" marker-end="url\(#erd-one\)"><title>loans \(book_id\) → Books \(id\)/.test(svg) === false && /<path class="fk d-prop"[^>]*><title>loans \(book_id\) → books \(id\)/.test(svg),
+      'a proposed removal struck in amber dashes; built differently says planned → built on its row; a proposed foreign key drawn dashed to the table as the store names it')
+    eq((svg.match(/<g class="stalemk">/g) || []).length, 1, 'a stale acknowledgement is badged beside its row')
+    const text = pg.text()
+    ok(['Delta:', 'proposed (dashed)', 'proposed removal', 'proposed change: now → planned', 'planned and built', 'built differently: planned → built', 'not in the plan', 'acknowledgement stale'].every((w) => text.includes(w)), 'a legend for each state')
+    const ps = pg.lines('P')
+    ok(ps.includes('For docs/specs/2026-11-06-reading-design.md: 7 changes · 1 planned and built · 5 pending · 1 built differently · 2 not in the plan · 1 acknowledged · 1 stale') && ps.includes('Read-only snapshot. To acknowledge changes, serve the page: graph.mjs serve'), 'the delta named with its design and counts; a static page says it is read-only')
+    const lis = pg.lines('LI')
+    ok(lis.some((l) => l.startsWith('add app:db/authors.emailplanned and builtas: TEXT, nullablein the code: db/0002_branch.sql:1why: because emailslice 1 · acknowledged by Ann at 2026-11-06T10:00:00.000Z'))
+      && lis.some((l) => l.startsWith('add app:db/books.due_onpendingstaleas: TEXT, not nullwhy: loans come back by a date, reworded after the acknowledgementslice 2 · stale: acknowledged by Ann at 2026-11-06T10:00:00.000Z, edited since'))
+      && lis.some((l) => l === 'app:db/statsnot in the plantable stats added') && lis.some((l) => l.startsWith('add app:cache/entriespending') && l.includes('⚠ the store is not in the model')),
+      'every change listed with its state, shape, where it is in the code, why, slice and acknowledgement (who, when; stale once edited); what is not in the plan; a change whose store is not in the model, apart')
+    eq(pg.ctls(/^delta-ack-/), [], 'the static page offers no acknowledgement: it stays read-only')
+    pg.click(dl[0].stores[0].tables.findIndex((t) => typeof t !== 'number' ? t.name === 'books' : D.data.stores[0].tables[t].name === 'books'))
+    ok(pg.text().includes('Delta: 3 changes, 1 not in the plan') && pg.lines('LI').some((l) => l.includes('app:db/books.isbnbuilt differently') && l.includes('planned → built: type: TEXT → INTEGER')) && pg.lines('LI').some((l) => l === 'app:db/books/index:books_title_idxnot in the planindex books · books_title_idx removed'),
+      "a table's passport lists the delta's changes to it, with what differs, and the branch's changes to it outside the plan")
+    // markup in a delta's target, after and why is text, in the drawing and in the lists
+    ok(!/<img|<script|<!--/i.test(svg) && svg.includes(`data-col="c${escd(NOSLASH)}"`) && svg.includes(escd(`text${BAD}`).slice(0, 20)) && svg.includes(escd(`why: w${BAD}`)), 'the ERD escapes a delta\'s target, after and why')
+    const markup = pg.all((n) => typeof n.html === 'string' && /<img|<script/i.test(n.html)).length + pg.all((n) => n.tagName === 'IMG' || n.tagName === 'SCRIPT').length
+    ok(markup === 0 && pg.lines('LI').some((l) => l.includes(`why: w${BAD}`)), '… and the lists carry them as text nodes, never markup')
+    pick.on.change[0]({ target: { value: '1' } })
+    const old = pg.text()
+    ok(old.includes('docs/specs/2026-10-01-old.delta.json does not validate (1 problem): nothing drawn') && pg.lines('LI').includes(`data[0] (bad): target: ${JSON.stringify(`app:t${NOSLASH}`)} names no store and entity: <repo>:<store>/<entity>`) && !/ d-(prop|rm|built|diff|unpl)\b/.test(pg.erd().html) && !pg.all((n) => n.tagName === 'IMG' || n.tagName === 'SCRIPT').length,
+      'the picker switches deltas; one that does not validate shows its problems (as text) and draws nothing')
+    pick.on.change[0]({ target: { value: '0' } })
+    pg.press('data-changes')
+    ok(pg.ctl('data-delta').attrs['aria-pressed'] === 'false' && /class="tbl[^"]* add\b/.test(pg.erd().html) && !/ d-prop\b/.test(pg.erd().html), 'one overlay at a time: Changes turns the delta off')
+
+    // served: each change can be acknowledged; the server answers with what it wrote
+    const calls = []
+    let answer = (body) => ({ status: 200, j: { hash: 'h2', changes: body.ids.map((id) => ({ id, ack: { by: 'Cy', at: '2026-11-07T08:00:00.000Z', hash: 'x' } })) } })
+    const fetch = async (url, o) => { calls.push({ url, method: o.method, headers: o.headers, body: JSON.parse(o.body) }); const a = answer(JSON.parse(o.body)); return { ok: a.status < 300, status: a.status, json: async () => a.j } }
+    const served = await renderGraph(project, { serve: { token: 'page-token' } })
+    const sp = await stubPage(served, '#data-0', { fetch })
+    sp.press('data-delta')
+    const acks = sp.ctls(/^delta-ack-l/)
+    ok(acks.join(' ') === 'delta-ack-l0 delta-ack-l1 delta-ack-l2 delta-ack-l3 delta-ack-l4 delta-ack-l5' && sp.ctl('delta-ack-l3').kids[0] === 'Acknowledge again' && sp.ctl('delta-ack-l0').kids[0] === 'Unacknowledge' && sp.ctl('delta-ack-sall').kids[0] === 'Acknowledge all 5 changes not acknowledged in this store',
+      `served: each change has its control (Acknowledge, Acknowledge again when stale, Unacknowledge), and the store one for all not acknowledged (${acks})`)
+    await sp.pressed('delta-ack-l3')
+    eq(calls.map((c) => [c.url, c.method, c.headers['x-grimoire-token'], c.body]), [['/api/delta', 'PUT', 'page-token', { repo: 'app', path: 'docs/specs/2026-11-06-reading.delta.json', base: dl[0].hash, ids: ['due'], ack: true }]],
+      'acknowledging sends the delta, the hash it was loaded with, the change\'s id and nothing else: who, when and the hash are the server\'s to write')
+    ok(sp.lines('LI').some((l) => l.includes('app:db/books.due_on') && l.includes('acknowledged by Cy at 2026-11-07T08:00:00.000Z')) && !/stalemk/.test(sp.erd().html) && sp.text().includes('Acknowledged: 1 change, written to docs/specs/2026-11-06-reading.delta.json'),
+      '… and the page shows what the server wrote: the stale badge is gone')
+    answer = () => ({ status: 409, j: { error: 'changed on disk since it was loaded', text: '{}', hash: 'h3' } })
+    await sp.pressed('delta-ack-sall')
+    ok(calls[1].body.base === 'h2' && calls[1].body.ids.join(',') === 'isbn,loans,legacy,hostile' && sp.text().includes('The delta changed on disk since this page was loaded') && !!sp.ctl('delta-reload'), 'a refused write (the file changed since): the page says so and offers to reload; the store control sends every change not acknowledged')
+    const scr = scriptOf(served)
+    ok(!/<!--|<script/i.test(scr) && /connect-src 'self'/.test(served) && !/connect-src/.test(page), 'the page script stays clean; only the served page may connect back to its server')
+  } catch (e) { ok(false, `the delta overlay renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
 }
 
 // ════ Part 2 · through call(), on an indexed project ════

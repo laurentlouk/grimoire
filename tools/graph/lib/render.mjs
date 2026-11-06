@@ -13,8 +13,9 @@
 //   architecture  the diagrams in docs/architecture (arch.mjs: checked against the index, laid out
 //              here) and one drafted from the graph on every render; drawn by arch-view.mjs
 //   data       the data model (lib/data, reconciled as graph_data answers): an ERD per SQL store,
-//              laid out here (data/layout.mjs), with the folders found but not read; drawn by
-//              data-view.mjs
+//              laid out here (data/layout.mjs), with the folders found but not read, and two
+//              overlays packed here: the branch against its base, and a design's delta (the
+//              changes it proposes, each with its state against the code); drawn by data-view.mjs
 //   docs       the project's Markdown notes (docs.mjs), rendered in the page (md.mjs) as an
 //              Obsidian-like vault: tree, reading view, outline, backlinks, code they mention;
 //              editable only when the page is served (serve.mjs), which adds connect-src 'self'
@@ -27,12 +28,13 @@
 // The helpers below the data section are pure, exported for the tests, and injected into the page.
 // Like every graph answer, the page is a map: read the code at the path:line it points to.
 import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import { openStore } from './store.mjs'
 import { layoutMap } from './layout.mjs'
 import { systemMap } from './modules.mjs'
 import { analyze, draftArch, loadIndex, readDiagrams } from './arch.mjs'
-import { scanDocs, docRoots } from './docs.mjs'
+import { scanDocs, docRoots, scanDeltas, readDelta } from './docs.mjs'
 import { mdSlug, mdFront, mdToHtml } from './md.mjs'
 import { archClient } from './arch-view.mjs'
 import { docsClient } from './docs-view.mjs'
@@ -40,7 +42,8 @@ import { reconcile, storeSummary } from './data/reconcile.mjs'
 import { layoutErd, erdBox } from './data/layout.mjs'
 import { diffModels } from './data/diff.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
-import { changeVal, renameText, baseText, refName } from './query.mjs'
+import { parseDelta, deltaStates, findTarget, changeText } from './data/delta.mjs'
+import { changeVal, renameText, baseText, refName, CHANGE_KIND } from './query.mjs'
 import { dataClient } from './data-view.mjs'
 import { stageClient } from './stage-view.mjs'
 
@@ -48,12 +51,16 @@ const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
 const MAP_MAX_FILES = 1500 // the file map keeps the most connected production files; the other tabs keep everything
 export const DATA_COLLAPSE = 60 // a store with more tables starts collapsed: names only, until focused or searched
 
-// opts.serve = { token }: the page is served by serve.mjs and may save notes back to it
+// opts.serve = { token }: the page is served by serve.mjs and may save notes back to it, and
+// acknowledge a delta's changes
 // opts.base: the ref the Data tab's change overlay compares against (else the default base,
 // data/base.mjs); one given that does not resolve is an error, a default that does not resolve
 // leaves the overlay out and the tab says why
+// opts.delta: the delta the Data tab shows first (a path from the project root, or absolute; it is
+// an error when it cannot be read), else the newest beside the specs (docs.mjs scanDeltas)
 export async function renderGraph(project, opts = {}) {
   const changes = await baseFor(project, opts.base || null)
+  const deltas = project.root ? deltaFiles(project, opts.delta || null) : []
   const db = await openStore(project.dbPath, { readOnly: true })
   try {
     const repos = db.prepare('SELECT name, root, head, indexed_at FROM repos ORDER BY name').all()
@@ -84,7 +91,7 @@ export async function renderGraph(project, opts = {}) {
       edges: edges.map((e) => [e.src, e.dst, KINDS.indexOf(e.kind), confs.indexOf(e.confidence || '')]),
       cochange: cochange.map((c) => [c.repo, c.a, c.b, c.n]),
       arch: archData(project, loadIndex(db)),
-      data: dataData(db, files, repos, changes),
+      data: dataData(db, files, repos, changes, deltas),
       docs: project.root ? scanDocs(project).map((d) => [d.repo, d.root, d.path, d.text, d.hash, d.big ? 1 : 0]) : [],
       ...(opts.serve ? { serve: { token: opts.serve.token } } : {}),
     }
@@ -134,17 +141,22 @@ function packArch(doc, r, extra) {
 // removed elements put back where they stood, removed tables (ghosts) last; laid out here once, as
 // the ERD is, so a removed table is drawn among its foreign key neighbours. A store gone from the
 // branch, or with no table read in it any more, is listed in changes.removed.
-export function dataData(db, files, repos, changes = null) {
+//
+// The deltas (deltas: [{ repo, path, shown, text, hash, selected }], docs.mjs): each one's changes
+// with their states against the model and the base (data/delta.mjs), packed by packDelta below;
+// `delta` is the one shown first.
+export function dataData(db, files, repos, changes = null, deltas = []) {
   const out = { stores: [], unread: [], failed: [], changes: { base: null, why: changes?.why || 'no base was resolved' } }
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'data_facts'").get()) return out // an index built before the data model
   const root = new Map(repos.map((r) => [r.name, r.root]))
   const shown = (repo, p) => { const r = root.get(repo); return r && r !== '.' ? (p === '.' ? r : `${r}/${p}`) : p }
   const fileId = new Map(files.map((f) => [`${f.repo}\0${f.path}`, f.id]))
   const model = reconcile(db.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
-  let diff = null
+  let diff = null, whole = null
   if (changes?.base) {
     const compared = new Set(changes.base.repos.map((r) => r.name))
     const d = diffModels(changes.at.model, { stores: model.stores.filter((s) => compared.has(s.repo)) })
+    whole = d
     diff = new Map(d.stores.map((s) => [s.id, s]))
     out.changes = { base: { ref: refName(changes.base.ref), text: baseText(changes.base) }, n: d.counts, removed: [], skipped: changes.base.skipped,
       failed: changes.at.failed.map((f) => ({ extractor: f.extractor, at: shown(f.repo, f.key), error: f.error })) }
@@ -165,7 +177,173 @@ export function dataData(db, files, repos, changes = null) {
   }
   out.failed = db.prepare('SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL ORDER BY repo, key').all()
     .map((f) => ({ repo: f.repo, extractor: f.extractor, at: shown(f.repo, f.key), file: fileId.get(`${f.repo}\0${f.key}`) ?? -1, error: f.error }))
+  const packedAt = new Map(out.stores.map((s, i) => [s.id, i]))
+  out.deltas = deltas.map((d) => packDelta(d, { model, base: changes?.base ? changes.at.model : null, diff: whole, why: changes?.why || null, stores: out.stores, packedAt, shown }))
+  out.delta = Math.max(0, deltas.findIndex((d) => d.selected))
   return out
+}
+
+// The deltas a page shows: every one beside the specs, newest first, and the one asked for (shown
+// first, read wherever it is). [{ repo, path, shown, text, hash, selected }]
+function deltaFiles(project, explicit) {
+  const list = scanDeltas(project)
+  if (!explicit) return list.map((d, i) => ({ ...d, selected: i === 0 }))
+  const one = readDelta(project, explicit)
+  let real = one.abs
+  try { real = realpathSync(one.abs) } catch {}
+  const k = list.findIndex((d) => d.abs === real)
+  return k >= 0 ? list.map((d, i) => ({ ...d, selected: i === k })) : [{ ...one, selected: true }, ...list]
+}
+
+// One delta as the Data tab draws it. Its changes (by their index in `data`), each with its state,
+// acknowledgement, why, slice, origin, what differs (planned → built) or what it proposes (now →
+// planned), and where it is drawn: `store` (a packed store's index, -1 for a store not in the model)
+// and `tbl` (the table it concerns in that store's overlay, -1 when nothing can be drawn); then the
+// branch's changes no change covers (unplanned), when a base resolved. Per store with either, the
+// overlay (packDeltaStore). ackable: the delta sits beside the specs of a root, so the served page
+// may acknowledge its changes (serve.mjs).
+const DLIST = { field: 'fields', key: 'keys', index: 'indexes', relation: 'rels' }
+const MLIST = { field: 'fields', key: 'keys', index: 'indexes', relation: 'relations' }
+function packDelta(file, { model, base, diff, why, stores, packedAt, shown }) {
+  const head = { name: path.basename(file.shown), shown: file.shown, repo: file.repo || null, path: file.path || null, hash: file.hash, ackable: !!(file.repo && file.path) }
+  const { delta, errors } = parseDelta(file.text)
+  if (errors.length) return { ...head, errors }
+  const s = deltaStates(delta, model, { base, diff })
+  const at = (repo, list) => list.map((x) => `${shown(repo, x.path)}${x.line ? `:${x.line}` : ''}`)
+  const changes = s.changes.map((r) => ({
+    id: r.id, text: changeText(r.change), op: r.change.op, kind: r.t.kind, state: r.state, ack: r.ack, by: r.change.ack?.by ?? null, at: r.change.ack?.at ?? null,
+    why: r.change.why, slice: r.change.slice ?? null, origin: r.change.origin, after: afterText(r.t.kind, r.change),
+    diffs: r.diffs.map((x) => x.text), proposed: r.proposed.map((x) => x.text), warn: r.warn,
+    src: r.el && r.el.sources && r.state !== 'pending' ? at(r.st.repo, r.el.sources) : [], store: r.st && packedAt.has(r.st.id) ? packedAt.get(r.st.id) : -1, tbl: -1,
+  }))
+  const unplanned = s.unplanned.map((u) => ({ text: describeChange(u.c), change: u.c.change, target: u.target, store: packedAt.has(u.st.id) ? packedAt.get(u.st.id) : -1, tbl: -1,
+    was: u.c.attrs.map((a) => `${a.attr === 'onDelete' ? 'on delete' : a.attr === 'onUpdate' ? 'on update' : a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`) }))
+  const byStore = new Map()
+  const slot = (n) => { if (!byStore.has(n)) byStore.set(n, { rs: [], us: [] }); return byStore.get(n) }
+  s.changes.forEach((r, k) => { if (changes[k].store >= 0) slot(changes[k].store).rs.push([r, k]) })
+  s.unplanned.forEach((u, j) => { if (unplanned[j].store >= 0) slot(unplanned[j].store).us.push([u, j]) })
+  const overlay = stores.map((ps, n) => (byStore.has(n) ? packDeltaStore(ps, model.stores.find((x) => x.id === ps.id), byStore.get(n), { base, diff, changes, unplanned, shown }) : null))
+  return { ...head, errors: [], spec: delta.spec, changes, unplanned, stores: overlay, unplWhy: diff ? null : why || 'no base was resolved' }
+}
+const describeChange = (c) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${CHANGE_KIND[c.kind]} ${c.entity} · ${c.name} ${c.change}`)
+// What `after` states, in a line (shown as text in the passport).
+function afterText(kind, c) {
+  const a = c.after
+  if (!a || c.op === 'remove') return null
+  if (c.op === 'rename') return `named ${a.name}`
+  const f = (x) => [x.type, 'nullable' in x ? (x.nullable ? 'nullable' : 'not null') : null, 'default' in x ? `default ${x.default === null ? 'none' : x.default}` : null, 'generated' in x ? `generated ${x.generated}` : null].filter(Boolean).join(', ')
+  if (kind === 'field') return f(a)
+  if (kind === 'index') return [a.columns ? `(${a.columns.join(', ')})` : null, 'unique' in a ? (a.unique ? 'unique' : 'not unique') : null, 'partial' in a ? (a.partial ? 'partial' : 'whole') : null].filter(Boolean).join(' ')
+  if (kind === 'relation') return [a.onDelete ? `on delete ${a.onDelete}` : null, a.onUpdate ? `on update ${a.onUpdate}` : null].filter(Boolean).join(' · ') || null
+  if (kind === 'entity') return a.fields ? `${a.kind || 'table'}: ${a.fields.map((x) => `${x.name} ${f(x)}`).join('; ')}` : a.kind
+  return null
+}
+// One store's delta overlay: its tables, each an index into the store's own when untouched, else a
+// copy marked `dl: { s, c, gone }` on the table or an element: s one of prop (a proposed addition,
+// drawn dashed), rm (a proposed removal, struck), pend (a proposed change or rename, with what it
+// proposes), built (planned and built), diff (built differently, with planned → built) and unpl (in
+// the branch, in no change: not in the plan); `c` the change indexes it carries; `gone` an element
+// drawn from the base (a removal built, or one not in the plan, cited as the base's: `bpaths`).
+// Proposed tables and the base's removed ones (ghosts) come after the store's tables, laid out with
+// them here, once, as the ERD is. ks: the store's change indexes, us: its unplanned ones.
+function packDeltaStore(ps, st, { rs, us }, { base, diff, changes, unplanned, shown }) {
+  const tables = ps.tables, lower = (x) => String(x).toLowerCase()
+  const sd = diff?.stores.find((x) => x.id === ps.id) || null
+  const bst = sd?.before || base?.stores.find((x) => x.id === ps.id) || null
+  const bpaths = [], bat = new Map()
+  const bsrc = (list) => list.map((x) => { if (!bat.has(x.path)) { bat.set(x.path, bpaths.length); bpaths.push(shown(ps.repo, x.path)) } return [bat.get(x.path), x.line ?? null] })
+  const packBase = bst ? packer(bst.entities, () => [], () => [], bsrc) : null
+  const based = new Map()
+  const baseTable = (i) => { if (!based.has(i)) based.set(i, packBase(bst.entities[i])); return based.get(i) }
+  const marked = new Map()
+  const mark = (i) => {
+    if (!marked.has(i)) { const t = tables[i]; marked.set(i, { ...t, fields: t.fields.map((x) => ({ ...x })), keys: t.keys.map((x) => ({ ...x })), indexes: t.indexes.map((x) => ({ ...x })), rels: t.rels.map((x) => ({ ...x })), gone: { fields: [], keys: [], indexes: [], rels: [] }, extra: { fields: [], keys: [], indexes: [], rels: [] } }) }
+    return marked.get(i)
+  }
+  const set = (x, s, c, line) => { x.dl = { s, c: [...(x.dl?.c || []), ...c], gone: !!x.dl?.gone }; if (line) x.was = [...(x.was || []), line] }
+  const ghosts = [], proposed = [], where = [] // where: [the info, the table object it concerns]
+  const entityAt = (e) => st.entities.indexOf(e)
+  // a proposed table, from `after`, in the page's packed shape (no source: it is not in the code yet)
+  const ghostOf = (name, a, c) => {
+    const P = { s: 'prop', c }
+    const keys = (a.keys || []).map((k) => ({ role: k.role, parts: k.parts, src: [], cf: [], dl: P }))
+    const pk = new Set(keys.filter((k) => k.role === 'primary').flatMap((k) => k.parts.map(lower))), fk = new Set((a.relations || []).flatMap((r) => r.columns.map(lower)))
+    return { name, kind: a.kind || 'table', src: [], cf: [], dl: P,
+      fields: a.fields.map((f) => ({ name: f.name, type: f.type, nullable: f.nullable, def: f.default ?? null, gen: f.generated ?? null, pk: pk.has(lower(f.name)) ? 1 : 0, fk: fk.has(lower(f.name)) ? 1 : 0, src: [], cf: [], dl: P })),
+      keys, indexes: (a.indexes || []).map((x) => ({ name: x.name, unique: !!x.unique, columns: x.columns, partial: !!x.partial, src: [], cf: [], dl: P })),
+      rels: (a.relations || []).map((r) => ({ columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: r.onDelete || 'no action', onUpdate: r.onUpdate || 'no action', src: [], cf: [], dl: P })) }
+  }
+  const proposedEl = (kind, t, a, c) => {
+    const P = { s: 'prop', c }
+    if (kind === 'field') return { name: t.el.name, type: a.type, nullable: a.nullable, def: a.default ?? null, gen: a.generated ?? null, pk: 0, fk: 0, src: [], cf: [], dl: P }
+    if (kind === 'index') return { name: t.el.name, unique: !!a.unique, columns: a.columns, partial: !!a.partial, src: [], cf: [], dl: P }
+    if (kind === 'key') return { role: t.el.role, parts: t.el.parts, src: [], cf: [], dl: P }
+    return { columns: t.el.columns, to: t.el.to, toColumns: t.el.toColumns, onDelete: a?.onDelete || 'no action', onUpdate: a?.onUpdate || 'no action', src: [], cf: [], dl: P }
+  }
+  // an element of the base put back where it stood there (a removal built, or one not in the plan);
+  // a table gone from the branch comes back as a ghost
+  const fromBase = (kind, t, s, c) => {
+    const found = bst ? findTarget({ stores: [bst] }, { ...t, storeId: bst.id }) : null
+    if (!found || !found.e) return null
+    const bi = bst.entities.indexOf(found.e)
+    if (kind === 'entity') { const g = { ...baseTable(bi), dl: { s, c, gone: true } }; ghosts.push(g); return g }
+    if (!found.el) return null
+    const cur = st.entities.findIndex((x) => found.fold(x.name) === found.fold(found.e.name))
+    if (cur < 0) return null // the table itself is gone: its ghost carries it
+    const k = found.e[MLIST[kind]].indexOf(found.el), host = mark(cur)
+    host.gone[DLIST[kind]].push([k, { ...baseTable(bi)[DLIST[kind]][k], dl: { s, c, gone: true } }])
+    return host
+  }
+  // the delta's changes, its tables first, so a column can join a proposed table
+  const sorted = rs.slice().sort(([a], [b]) => (a.t.kind === 'entity' ? 0 : 1) - (b.t.kind === 'entity' ? 0 : 1))
+  for (const [r, k] of sorted) {
+    const c = [k], info = changes[k], kind = r.t.kind
+    const line = r.state === 'built-differently' ? `planned → built: ${r.diffs.map((x) => x.text).join('; ')}` : r.proposed.length ? `proposed: ${r.proposed.map((x) => x.text).join('; ')}` : null
+    const s = r.state === 'planned-built' ? 'built' : r.state === 'built-differently' ? 'diff' : r.change.op === 'add' ? 'prop' : r.change.op === 'remove' ? 'rm' : 'pend'
+    const place = (t) => { if (t) where.push([info, t]) }
+    if (s === 'built' && r.change.op === 'remove') { place(fromBase(kind, r.t, 'built', c)); continue }
+    if (kind === 'entity') {
+      if (r.e) { const t = mark(entityAt(r.e)); set(t, s, c, line); place(t) } else if (s === 'prop') { const g = ghostOf(r.t.entity, r.change.after, c); proposed.push(g); place(g) }
+      continue
+    }
+    if (s === 'prop') {
+      const host = r.e ? mark(entityAt(r.e)) : proposed.find((g) => lower(g.name) === lower(r.t.entity)) || null
+      if (!host) continue
+      ;(host.extra ? host.extra[DLIST[kind]] : host[DLIST[kind]]).push(proposedEl(kind, r.t, r.change.after, c))
+      place(host)
+      continue
+    }
+    if (!r.e || !r.el) continue
+    const t = mark(entityAt(r.e))
+    set(t[DLIST[kind]][r.e[MLIST[kind]].indexOf(r.el)], s, c, line)
+    place(t)
+  }
+  // what the branch changed and no change covers: not in the plan
+  for (const [u, j] of us) {
+    const c = u.c, info = unplanned[j]
+    if (c.change === 'removed') { const t = fromBase(c.kind, { entity: c.entity, kind: c.kind, el: c.before }, 'unpl', []); if (t) where.push([info, t]); continue }
+    const t = mark(c.kind === 'entity' ? c.pos.after : c.owner.after)
+    const el = c.kind === 'entity' ? t : t[DLIST[c.kind]][c.pos.after]
+    el.dl = { s: 'unpl', c: [], gone: false }
+    if (info.was.length) el.was = [...(el.was || []), `not in the plan: ${info.was.join('; ')}`]
+    where.push([info, t])
+  }
+  const index = new Map()
+  const list = tables.map((t, i) => {
+    if (!marked.has(i)) return i
+    const { gone, extra, ...m } = marked.get(i)
+    for (const L of Object.values(DLIST)) { for (const [p, x] of gone[L].sort((a, b) => a[0] - b[0])) m[L].splice(Math.min(p, m[L].length), 0, x); m[L].push(...extra[L]) }
+    index.set(marked.get(i), i)
+    return m
+  })
+  ghosts.forEach((g, j) => index.set(g, tables.length + j))
+  proposed.forEach((g, j) => index.set(g, tables.length + ghosts.length + j))
+  for (const [info, t] of where) if (info.tbl < 0) info.tbl = index.get(t) ?? -1
+  // a proposed foreign key names its table as the store does (SQLite: in any letter case)
+  const drawn = [...list.map((t) => (typeof t === 'number' ? tables[t] : t)), ...ghosts, ...proposed]
+  const names = new Map(drawn.map((t) => [lower(t.name), t.name]))
+  for (const t of drawn) for (const r of t.rels) if (r.dl && r.dl.s === 'prop' && names.has(lower(r.to))) r.to = names.get(lower(r.to))
+  return { tables: [...list, ...ghosts, ...proposed], layout: layoutErd(drawn, { collapsed: ps.collapsed }), ks: rs.map(([, k]) => k).sort((a, b) => a - b), us: us.map(([, j]) => j).sort((a, b) => a - b), bpaths }
 }
 
 // The base the overlay compares against, and its model: { base, at }, or { why } when there is none.
@@ -306,7 +484,7 @@ export function mapData(files, nodes, edges) {
 // ── pure helpers: exported for the tests, injected into the page as they are ──
 export const INITIAL = { tab: 'overview', repo: '', q: '', tests: false, guesses: false, mapMode: 'modules', module: null,
   arch: 0, archSel: null, archTrace: null, archTo: null, archGhosts: false, archZoom: null, archScroll: null, sysZoom: null, full: null, doc: null, docMode: 'read', docAnchor: null, focusEditor: false, editorCaret: null,
-  data: 0, dataSel: null, dataAll: false, dataZoom: null, dataScroll: null, dataChanges: false }
+  data: 0, dataSel: null, dataAll: false, dataZoom: null, dataScroll: null, dataChanges: false, dataDelta: false, deltaSel: null, dlStatus: null, dlOpen: null }
 export const LANE_MAX = 14 // modules drawn per lane on the system map, the largest
 export const MAXCOL = 12 // items per column of a neighbourhood
 
@@ -507,6 +685,23 @@ svg.erd .ren{fill:none;stroke:var(--accent);stroke-width:1.7;stroke-dasharray:2 
 .pill.add{color:var(--ok);border-color:currentColor}.pill.del{color:var(--err);border-color:currentColor}.pill.mod{color:var(--warn);border-color:currentColor}.struck{text-decoration:line-through;color:var(--err)}
 .chlegend .chsw{display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:2px}.chsw.add{background:var(--ok)}.chsw.del{background:var(--err)}.chsw.mod{background:var(--warn)}.chsw.ren{height:0;border-radius:0;border-top:2px dashed var(--accent)}.chlegend s{color:var(--err)}
 .dstore .dchg{font:600 11.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--warn)}ul.renames{margin:0 0 10px;font-size:13px;color:var(--accent)}
+svg.erd .tbl.d-prop .tframe{fill:color-mix(in srgb,var(--ok) 4%,var(--panel));stroke:var(--ok);stroke-width:1.8;stroke-dasharray:7 4}svg.erd .tbl.d-prop .thead{fill:color-mix(in srgb,var(--ok) 9%,var(--panel))}svg.erd .tbl.d-prop .tname{fill:var(--ok)}
+svg.erd .tbl.d-built .tframe{stroke:var(--ok);stroke-width:2.4}svg.erd .tbl.d-built .thead{fill:color-mix(in srgb,var(--ok) 12%,var(--panel))}svg.erd .tbl.d-diff .tframe{stroke:var(--warn);stroke-width:2.2}
+svg.erd .tbl.d-pend .tframe,svg.erd .tbl.d-rm .tframe{stroke:var(--warn);stroke-width:1.8;stroke-dasharray:7 4}svg.erd .tbl.d-rm .tname{fill:var(--warn)}
+svg.erd .tbl.d-unpl .tframe{stroke:var(--t-worker);stroke-width:2.2}svg.erd .tbl.d-unpl .thead{fill:color-mix(in srgb,var(--t-worker) 10%,var(--panel))}svg.erd .tbl.gone{opacity:.8}svg.erd .tbl.gone .tframe{stroke-dasharray:6 4}
+svg.erd .row.d-prop .rowbg{fill:color-mix(in srgb,var(--ok) 9%,transparent);stroke:var(--ok);stroke-dasharray:4 3}svg.erd .row.d-built .rowbg{fill:color-mix(in srgb,var(--ok) 14%,transparent)}
+svg.erd .row.d-diff .rowbg{fill:color-mix(in srgb,var(--warn) 14%,transparent)}svg.erd .row.d-pend .rowbg,svg.erd .row.d-rm .rowbg{fill:color-mix(in srgb,var(--warn) 7%,transparent);stroke:var(--warn);stroke-dasharray:4 3}
+svg.erd .row.d-unpl .rowbg{fill:color-mix(in srgb,var(--t-worker) 12%,transparent)}svg.erd .row.d-prop .cname,svg.erd .xr.d-prop .xrow{fill:var(--ok)}svg.erd .row.d-rm .cname,svg.erd .xr.d-rm .xrow{fill:var(--warn)}svg.erd .row.d-unpl .cname,svg.erd .xr.d-unpl .xrow{fill:var(--t-worker)}
+svg.erd .chbar.d-prop,svg.erd .chbar.d-built{fill:var(--ok)}svg.erd .chbar.d-diff,svg.erd .chbar.d-pend,svg.erd .chbar.d-rm{fill:var(--warn)}svg.erd .chbar.d-unpl{fill:var(--t-worker)}
+svg.erd .strike.d-rm{stroke:var(--warn);stroke-dasharray:4 3}svg.erd .strike.d-built{stroke:var(--ok)}svg.erd .strike.d-unpl{stroke:var(--t-worker)}
+svg.erd .chg.d-unpl .chgbg{fill:color-mix(in srgb,var(--t-worker) 9%,var(--panel));stroke:color-mix(in srgb,var(--t-worker) 45%,transparent)}svg.erd .chg.d-unpl .chgt{fill:var(--t-worker)}svg.erd .chg.d-pend .chgbg{stroke-dasharray:4 3}
+svg.erd .fk.d-prop{stroke:var(--ok);stroke-width:2;stroke-dasharray:6 4}svg.erd .fk.d-built{stroke:var(--ok);stroke-width:2}svg.erd .fk.d-diff{stroke:var(--warn);stroke-width:2}svg.erd .fk.d-rm,svg.erd .fk.d-pend{stroke:var(--warn);stroke-dasharray:5 4}svg.erd .fk.d-unpl{stroke:var(--t-worker);stroke-width:2}
+svg.erd .stalemk circle{fill:var(--warn)}svg.erd .stalemk text{font:700 10px ui-sans-serif,system-ui,sans-serif;fill:var(--panel)}
+.pill.d-prop,.pill.dl-pending{color:var(--ok);border-color:currentColor;border-style:dashed}.pill.d-built,.pill.dl-built{color:var(--ok);border-color:currentColor}.pill.d-diff,.pill.dl-diff{color:var(--warn);border-color:currentColor}
+.pill.d-rm,.pill.d-pend{color:var(--warn);border-color:currentColor;border-style:dashed}.pill.d-unpl{color:var(--t-worker);border-color:currentColor}.pill.dl-stale{color:var(--on-accent);background:var(--warn);border-color:var(--warn)}
+.chsw.d-prop{background:none;border:2px dashed var(--ok)}.chsw.d-built{background:var(--ok)}.chsw.d-diff{background:var(--warn)}.chsw.d-pend,.chsw.d-rm{background:none;border:2px dashed var(--warn)}.chsw.d-unpl{background:var(--t-worker)}.chsw.dl-stale{border-radius:50%;width:11px;height:11px;background:var(--warn)}
+ul.dlist li.dl-built,ul.dlist li.d-built{box-shadow:inset 3px 0 0 var(--ok);padding-left:8px}ul.dlist li.dl-pending,ul.dlist li.dl-prop{box-shadow:inset 3px 0 0 color-mix(in srgb,var(--ok) 45%,transparent);padding-left:8px}ul.dlist li.dl-diff,ul.dlist li.dl-rm,ul.dlist li.dl-pend{box-shadow:inset 3px 0 0 var(--warn);padding-left:8px}ul.dlist li.dl-unpl{box-shadow:inset 3px 0 0 var(--t-worker);padding-left:8px}
+.dlbtn{margin-left:10px;font-size:12px}.dlack{color:var(--warn)}.dlhead p{margin:.3em 0}details.dlchanges ul.dlist{padding-left:0;font-size:13px}
 ul.dlist li.ch-add{box-shadow:inset 3px 0 0 var(--ok);padding-left:8px}ul.dlist li.ch-del{box-shadow:inset 3px 0 0 var(--err);padding-left:8px}ul.dlist li.ch-mod{box-shadow:inset 3px 0 0 var(--warn);padding-left:8px}ul.dlist li.ch-ren{color:var(--accent)}.chgline{color:var(--warn)}
 .arch-cards{grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:14px}.acard{--c:var(--t-external)}.acard.c-cyan{--c:var(--t-cloud)}.acard.c-emerald{--c:var(--t-database)}.acard.c-violet{--c:var(--t-backend)}.acard.c-amber{--c:var(--t-messagebus)}.acard.c-rose{--c:var(--t-security)}.acard.c-orange{--c:var(--t-cli)}
 .acard-title{font-weight:600;display:flex;gap:8px;align-items:center}.acard-title i{width:9px;height:9px;border-radius:50%;background:var(--c)}.acard ul{margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted)}
