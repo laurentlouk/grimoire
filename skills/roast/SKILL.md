@@ -45,6 +45,18 @@ When a design's value rests on how work will be sorted (a router, a threshold, a
 
 Write the approved design to a short spec, for example `docs/specs/YYYY-MM-DD-topic-design.md`, with: the problem, goals and non-goals; numbered decisions, each with the alternative rejected and why; the vertical slices; edge cases and failure modes; the questions still owned by the user. Add three short sections that make the roast auditable: **Sources consulted** (docs read, scouts sent, code that settled a question), **Self-answered questions** (question, answer, source), **Docs drift fixed** (document, what it said, what the code does, where it was fixed), and **Reference projects** if any (repository, path, pattern adopted, what was deliberately not adopted).
 
+## The delta: what the design changes in stored data
+
+When the design changes stored data (a table, a column, a key, an index, a foreign key) or the architecture, draft its delta beside the spec, `docs/specs/YYYY-MM-DD-topic.delta.json`, so the user can see the change drawn over today's model before anything is built. Every change counts, not only the destructive ones.
+
+- The file: `{ "schema": 1, "spec": "<the spec's path>", "data": [ … ], "architecture": [] }`, 2-space JSON. One change per element: `{ "id", "op": "add" | "change" | "remove" | "rename", "target", "after", "why", "origin": "planned" }`. Leave `slice` out: `to-plan` gives it.
+- `target` names the element as the code graph does (`graph_data` lists the stores as `repo:folder`): `<repo>:<store>/<entity>` for a table, `<repo>:<store>/<entity>.<column>` for a column, then `…/<entity>/index:<name>`, `…/<entity>/key:<role>(<columns>)`, `…/<entity>/fk:(<columns>)-><table>(<columns>)`.
+- `after` is the element as it will be, in the model's words: a column `{ "type", "nullable" }`, an index `{ "columns" }`, a table `{ "fields": [{ "name", "type", "nullable" }] }`, a rename `{ "name" }`; a `change` states only what changes, a `remove` has none. `why` says why in one sentence.
+- Architecture changes (`component:<id>`, `connection:<from>-><to>`, `boundary:<label>`) go in `architecture`.
+- Check it: `node <plugin root>/tools/graph/graph.mjs changes --delta <file>` validates it and gives each change its state against the code. At design time each one should be pending; one already built, or a warning that a target is not in the model, is a finding to settle before approval.
+- Ask the user to validate it visually and acknowledge it change by change: `node <plugin root>/tools/graph/graph.mjs serve`, the Data tab, **Delta**. An acknowledgement records who and when, and goes stale when the change is edited afterwards: a change re-roasted is acknowledged again.
+- List the delta in the spec (its path, beside the decisions that make each change).
+
 ## Loop, do not run once
 
 When planning or building later surfaces a design question the spec did not settle, come back here, roast the gap, update the spec, and revise the plan. Leave the loop only when it stops producing new design questions. Then pass the spec to `to-plan`.

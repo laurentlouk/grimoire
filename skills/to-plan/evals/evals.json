@@ -72,5 +72,33 @@
         "evidence": ""
       }
     ]
+  },
+  {
+    "id": 4,
+    "query": "Plan docs/specs/2026-11-06-loan-reminders-design.md. Beside it, docs/specs/2026-11-06-loan-reminders.delta.json lists four data changes the user has acknowledged in the Data tab.",
+    "should_trigger": true,
+    "expected_output": "Writes the plan with its slices, then gives every change of the delta a slice (the number of the plan slice that builds it), changing nothing else in the file (op, target, after, why and ack stay, so the acknowledgements hold: the slice is not part of the hash). Each slice that touches stored data names the delta changes it builds; a change no slice builds, or a data change missing from the delta, goes back to roast as a design gap. Checks the file with graph.mjs changes --delta.",
+    "expectations": [
+      {
+        "text": "Gives each change of the delta a slice that matches a slice of the plan, every change in exactly one slice",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Leaves every other field of the delta untouched (op, target, after, why, origin, ack), so the acknowledgements do not go stale",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "The plan's slices that touch stored data name the delta changes they build",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Treats a change no slice builds, or a data change the delta does not list, as a design gap for roast rather than editing the delta's content",
+        "passed": null,
+        "evidence": ""
+      }
+    ]
   }
 ]
