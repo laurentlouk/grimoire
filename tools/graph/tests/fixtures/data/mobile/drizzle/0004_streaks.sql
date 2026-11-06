@@ -5,5 +5,6 @@ CREATE TABLE `reading_goals` (
 --> statement-breakpoint
 CREATE TABLE `streaks` (
 	`day` text PRIMARY KEY NOT NULL,
-	`pages` integer DEFAULT 0 NOT NULL
+	`pages` integer DEFAULT 0 NOT NULL,
+	`logged_at` integer DEFAULT (unixepoch()) NOT NULL
 );

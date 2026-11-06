@@ -22,10 +22,27 @@
 // declarations of a store disagree, the element keeps a conflict { attr, values: [{ value, sources }] }
 // with every side: never resolved by precedence (the disagreement is the finding).
 
+import { blank } from './readers/sql-split.mjs'
+
 // Trust, highest first: the order sources are listed in.
 export const KINDS = ['artifact', 'migration', 'infra', 'code', 'inferred']
 
 export const normType = (raw) => String(raw ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+
+// A default as compared (shown as declared): SQLite reports `DEFAULT (unixepoch())` as
+// `unixepoch()`, while a snapshot keeps the text as written, so one balanced outer pair of
+// parentheses is set aside (`(1) + (2)` is no outer pair and stays whole).
+export function normDefault(raw) {
+  if (raw === null || raw === undefined) return null
+  const s = String(raw).trim()
+  if (s[0] !== '(' || s[s.length - 1] !== ')') return s
+  const code = blank(s) // parentheses inside a string literal do not count
+  for (let i = 0, depth = 0; i < code.length - 1; i++) {
+    if (code[i] === '(') depth++
+    else if (code[i] === ')' && --depth === 0) return s // the first pair closes before the end
+  }
+  return s.slice(1, -1).trim()
+}
 
 const DIALECTS = { sqlite: 'sqlite', turso: 'sqlite', libsql: 'sqlite', d1: 'sqlite', postgres: 'postgres', postgresql: 'postgres', pg: 'postgres', mysql: 'mysql', mysql2: 'mysql', mariadb: 'mysql' }
 export const normDialect = (d) => (d ? DIALECTS[String(d).toLowerCase()] || String(d).toLowerCase() : null)

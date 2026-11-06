@@ -3,7 +3,8 @@
 // merged element by element (model.mjs keyOf): every element keeps the source of each declaration
 // that states it, most trusted first, and a conflict wherever they disagree:
 //   - an attribute (a field's type, nullability, default; an index's columns; a foreign key's
-//     actions) with two values: both are kept, each with its sources;
+//     actions) with two values: both are kept, each with its sources. Types compare lower-cased,
+//     defaults without one outer pair of parentheses (model.mjs normDefault);
 //   - presence: an element one complete declaration states and another, describing the same
 //     entity, lacks (`absent` cites where that declaration describes the entity).
 // Nothing is resolved by precedence: the disagreement is the finding. A replay that stopped early
@@ -11,11 +12,11 @@
 // it was partway. Drizzle v1 snapshots form a DAG through prevIds: only its leaves declare a store.
 //
 //   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store] }   (model.mjs)
-import { KINDS, keyOf, normType } from './model.mjs'
+import { KINDS, keyOf, normType, normDefault } from './model.mjs'
 
 const ATTRS = {
   entity: (e) => ({ kind: e.kind }),
-  field: (f) => ({ type: normType(f.type), nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null }),
+  field: (f) => ({ type: normType(f.type), nullable: f.nullable, default: normDefault(f.default), generated: f.generated ?? null }),
   key: () => ({}),
   index: (i) => ({ unique: !!i.unique, columns: i.columns.join(', '), partial: !!i.partial }),
   relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate }),

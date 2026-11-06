@@ -269,6 +269,12 @@ CREATE TABLE \`shelf_books\` (
   const partial = reconcile([{ repo: 'app', extractor: 'sql-migrations@1', facts: migration(edited, { complete: false, partial: true, status: 'partial' }) }, snapshot]).stores[0]
   eq([everyConflict(partial), srcs(partial.entities[0].fields.find((f) => f.name === 'isbn'))], [[], ['db/0001_init.sql:8 migration sql-migrations@1']], 'a replay that stopped early is shown, but compared with nothing')
 
+  const declaring = (kind, path, entities) => ({ repo: 'app', extractor: `${kind}@1`, facts: { declarations: [{ store: 'db', dialect: 'sqlite', source: { path, line: 1, kind, confidence: 'declared' }, complete: true, partial: false, status: 'read', notes: [], entities }] } })
+  const replayed = replay([{ path: 'db/0001_t.sql', text: 'CREATE TABLE t (\n  at integer DEFAULT (unixepoch()) NOT NULL,\n  total integer DEFAULT ((1) + (2))\n);' }], DatabaseSync).entities
+  const written = [{ name: 't', kind: 'table', line: 2, fields: [{ name: 'at', type: 'integer', nullable: false, default: '(unixepoch())', line: 3 }, { name: 'total', type: 'integer', nullable: true, default: '((1) + (2))', line: 4 }], keys: [], indexes: [], relations: [] }]
+  const defaults = reconcile([declaring('migration', 'db/0001_t.sql', replayed), declaring('artifact', 'db/meta/0001_snapshot.json', written)]).stores[0]
+  eq([everyConflict(defaults), defaults.entities[0].fields.map((f) => f.default)], [[], ['(unixepoch())', '((1) + (2))']], 'an expression default: SQLite reports it without its outer parentheses, a snapshot as written; they compare without one balanced outer pair (never `1) + (2`), and show as declared')
+
   const v1 = (id, prevIds, text) => ({ repo: 'app', extractor: 'drizzle-snapshot@1', facts: drizzleSnapshot.extract(text.replace(/"id": "[^"]+"/, `"id": "${id}"`).replace(/"prevIds": \[[^\]]*\]/, `"prevIds": ${JSON.stringify(prevIds)}`), `next/${id.slice(-2)}_x/snapshot.json`) })
   const dag = reconcile([v1('00000000-0000-4000-8000-000000000012', [], V1.replace('"name": "title"', '"name": "subtitle"')), v1('00000000-0000-4000-8000-000000000013', ['00000000-0000-4000-8000-000000000012'], V1)]).stores[0]
   eq(dag.entities[0].fields.map((f) => [f.name, srcs(f)]), [['id', ['next/13_x/snapshot.json:8 artifact drizzle-snapshot@1']], ['title', ['next/13_x/snapshot.json:9 artifact drizzle-snapshot@1']]], 'Drizzle v1: only the leaves of the snapshot DAG declare the store')
@@ -359,9 +365,11 @@ async function indexed() {
       '  books  table  5 fields · primary (id) · 2 indexes · foreign keys → authors  mobile/drizzle/meta/0005_snapshot.json:39 · mobile/drizzle/0002_book_isbn.sql:1',
       '  shelf_books  table  3 fields · primary (shelf_id, book_id) · foreign keys → shelves, books  mobile/drizzle/meta/0005_snapshot.json:113 · mobile/drizzle/0001_shelves.sql:6',
       '  shelves  table  2 fields · primary (id)  mobile/drizzle/meta/0005_snapshot.json:180 · mobile/drizzle/0001_shelves.sql:1',
-      '  streaks  table  2 fields · primary (day)  mobile/drizzle/meta/0005_snapshot.json:205 · mobile/drizzle/0004_streaks.sql:6',
+      '  streaks  table  3 fields · primary (day)  mobile/drizzle/meta/0005_snapshot.json:205 · mobile/drizzle/0004_streaks.sql:6',
     ].join('\n'), 'graph_data store: each table cites its snapshot entry and the migration line that created or last altered it (authors: rebuilt and renamed in 0003)')
     has(await q('data', { entity: 'shelf_books' }), 'Keys (1):\n  primary (shelf_id, book_id)  — mobile/drizzle/meta/0005_snapshot.json:169 · mobile/drizzle/0001_shelves.sql:10', 'a composite primary key: one key, both sources, no conflict')
+    const streaks = await q('data', { entity: 'streaks' })
+    ok(streaks.includes('  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9') && streaks.endsWith('Conflicts: none'), `Drizzle's timestamp idiom, DEFAULT (unixepoch()): replay and snapshot agree, the default shown as written${streaks.endsWith('Conflicts: none') ? '' : `\n${streaks}`}`)
 
     // ── 8 · incremental ──
     console.log('\n8 · incremental refresh')
