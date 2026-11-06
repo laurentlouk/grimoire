@@ -1101,6 +1101,42 @@ async function indexed() {
     eq(RD && [RD.changes.base.ref, RD.stores.filter((s) => s.ch).map((s) => `${s.id} +${s.ch.n.added} -${s.ch.n.removed} ~${s.ch.n.modified} ?${s.ch.n.renames}`)], ['main', ['api:prisma/migrations +2 -2 ~0 ?1']], `graph.mjs render --base <ref>: the page carries the overlay against it (${rendered.stderr.trim()})`)
     const badRender = run('render', '--base', 'no-such-branch', '--out', outFile)
     ok(badRender.status === 1 && badRender.stderr.includes('does not resolve'), 'graph.mjs render with a base that does not resolve exits 1 and says why')
+
+    // ── the branch against a design's delta ──
+    console.log('\n15 · the branch against a design\'s delta (graph_changes --delta)')
+    const plan = (id, op, target, extra) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
+    const acked = (c, edit = {}) => ({ ...c, ...edit, ack: { by: 'Ann', at: '2026-11-06T10:00:00.000Z', hash: changeHash(c) } })
+    const DELTA = { schema: 1, spec: 'docs/specs/2026-11-06-loans-design.md', data: [
+      plan('returned-on', 'add', 'api:prisma/migrations/Loan.returnedOn', { after: { type: 'DATETIME', nullable: false }, slice: 1 }),
+      acked(plan('labels', 'rename', 'api:prisma/migrations/Tag', { after: { name: 'Label' }, slice: 1 })),
+      acked(plan('returned-idx', 'add', 'api:prisma/migrations/Loan/index:Loan_returnedOn_idx', { after: { columns: ['returnedOn'] } }), { why: 'list the loans still out, edited after the acknowledgement' }),
+      plan('bio', 'add', 'mobile:drizzle/authors.bio', { after: { type: 'text', nullable: false } }),
+    ], architecture: [] }
+    mkdirSync(path.join(BR, 'docs/specs'), { recursive: true })
+    writeFileSync(path.join(BR, 'docs/specs/2026-11-06-loans.delta.json'), JSON.stringify(DELTA, null, 2) + '\n')
+    const dl = await br('changes', { delta: 'docs/specs/2026-11-06-loans.delta.json' })
+    const migration = 'api/prisma/migrations/20240401090000_branch_changes/migration.sql'
+    ok(/^Delta docs\/specs\/2026-11-06-loans\.delta\.json \(the design: docs\/specs\/2026-11-06-loans-design\.md\), against the model and the branch against main \(the index's base branch\) at [0-9a-f]{10}: 4 data changes$/.test(dl.split('\n')[0]), `graph_changes --delta: which delta, for which design, against what (${dl.split('\n')[0]})`)
+    eq(dl.split('\n').slice(1), [
+      `  built differently  returned-on  add api:prisma/migrations/Loan.returnedOn  — ${migration}:2`,
+      '    planned → built: nullable: not null → nullable',
+      '    why: because returned-on · slice 1 · not acknowledged',
+      `  planned and built  labels  rename api:prisma/migrations/Tag → Label  — ${migration}:8`,
+      '    why: because labels · slice 1 · acknowledged by Ann at 2026-11-06T10:00:00.000Z',
+      '  pending  returned-idx  add api:prisma/migrations/Loan/index:Loan_returnedOn_idx',
+      '    why: list the loans still out, edited after the acknowledgement · stale: acknowledged by Ann at 2026-11-06T10:00:00.000Z, edited since',
+      '  planned and built  bio  add mobile:drizzle/authors.bio  — mobile/drizzle/meta/0005_snapshot.json:24 · mobile/drizzle/0003_author_bio_required.sql:5',
+      '    why: because bio · not acknowledged',
+      'Unplanned (1): in the branch, in no change of the delta',
+      '  - api:prisma/migrations/Member/index:Member_email_key  Member index Member_email_key unique (email)  — was api/prisma/migrations/20240105090000_init/migration.sql:19',
+      'Summary: 2 planned and built · 1 pending · 1 built differently · 1 unplanned · 1 acknowledged · 1 stale · 2 not acknowledged',
+    ], 'each change\'s state against the code: a column built in another shape (planned → built), a rename built, an index pending, a column that was there already; its why, slice and acknowledgement (stale once edited); then the branch\'s change no delta change covers, then the summary')
+    has(await call('graph_changes', { delta: 'docs/specs/2026-11-06-loans.delta.json' }, { root: BR }), '\n\nLeads, not facts: the states are computed from migrations', '… with its own footer: states are computed, never written')
+    has(run('changes', '--delta', 'docs/specs/2026-11-06-loans.delta.json').stdout, '  pending  returned-idx  add api:prisma/migrations/Loan/index:Loan_returnedOn_idx', 'graph.mjs changes --delta <file>')
+    writeFileSync(path.join(BR, 'docs/specs/broken.delta.json'), JSON.stringify({ ...DELTA, data: [{ ...DELTA.data[0], op: 'grow' }] }))
+    eq(await br('changes', { delta: 'docs/specs/broken.delta.json' }), 'Delta docs/specs/broken.delta.json does not validate (1 problem):\n  data[0] (returned-on): op "grow" is not one of add, change, remove, rename', 'a delta that does not validate: its problems, nothing computed')
+    const gone = await call('graph_changes', { delta: 'docs/specs/none.delta.json' }, { root: BR }).then(() => 'answered', (e) => e.message)
+    ok(/^the delta docs\/specs\/none\.delta\.json cannot be read \(ENOENT\)$/.test(gone), `a delta that is not there: a clear error (${gone})`)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 
