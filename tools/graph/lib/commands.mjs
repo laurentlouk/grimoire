@@ -7,12 +7,14 @@
 // can take a while on a large tree. A checkout with no index is seeded from its base checkout's
 // (the branch it is based on, else the main checkout: freshness.mjs), and every index run re-bases
 // onto it when that saves parsing, so a worktree only re-parses what its branch changed.
-import { existsSync } from 'node:fs'
-import { loadProject, scanRepo } from './project.mjs'
+import { existsSync, statSync } from 'node:fs'
+import path from 'node:path'
+import { loadProject, scanRepo, listPaths } from './project.mjs'
 import { openStore, SCHEMA_VERSION } from './store.mjs'
 import { runIndex } from './run.mjs'
 import { seed } from './freshness.mjs'
-import { Graph, sql, FOOTER } from './query.mjs'
+import { candidates } from './data/registry.mjs'
+import { Graph, sql, FOOTER, DATA_FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
 let lastFresh = 0
@@ -92,6 +94,13 @@ export const TOOLS = [
     run: (g, a) => g.path(a),
   },
   {
+    name: 'graph_data',
+    description: 'The data model, read from SQL migrations and schema snapshots, never from a database. No argument: every store (a migration folder, found by its DDL whatever its name: its dialect and how that is known, how it was read, its tables, foreign keys, indexes and conflicts). `store`: its entities. `entity`: one table with its fields, keys, indexes and foreign keys, each citing the migration or snapshot path:line that declares it, and the conflicts where two declarations of the store disagree (both sides kept).',
+    params: { store: { type: 'string', description: 'A store: its folder (`drizzle`) or `repo:folder`. Lists its entities.' }, entity: { type: 'string', description: 'One entity: `books`, `drizzle/books` or `repo:drizzle/books`.' }, repo: repoParam },
+    run: (g, a) => g.data(a),
+    footer: DATA_FOOTER,
+  },
+  {
     name: 'graph_sql',
     description: 'A read-only SELECT over the graph for questions the other tools do not answer. Tables: files(id, repo, path, lang, is_test, node_id), nodes(id, file_id, kind, name, qualname, parent_id, line, end_line, signature, is_test), edges(src, dst, kind CALLS|IMPORTS|EXTENDS|IMPLEMENTS, confidence, line), imports(file_id, source, names, resolved), cochange(repo, a, b, n), churn(repo, path, n: recent commits touching the file), repos(name, root, head, indexed_at).',
     params: { sql: { type: 'string', description: 'One SELECT or WITH … SELECT statement.' } },
@@ -100,17 +109,28 @@ export const TOOLS = [
   },
 ]
 
-// Files that moved since the last index, per repo (cheap: stat only, no parsing). An index built by
-// another grimoire version is stale as a whole: the next refresh rebuilds it with the current rules.
+// Files that moved since the last index, per repo (cheap: stat only, no parsing): code files, and the
+// files data extractors read. An index built by another grimoire version is stale as a whole: the
+// next refresh rebuilds it with the current rules.
 function staleness(project, db) {
   const out = {}
   const schema = (() => { try { return db.prepare("SELECT value FROM meta WHERE key = 'schema'").get()?.value } catch { return null } })()
   if (schema && schema !== SCHEMA_VERSION) { for (const repo of project.repos) out[repo.name] = 'built by another grimoire version: rebuilt on the next query'; return out }
   for (const repo of project.repos) {
+    const rels = listPaths(repo.abs)
     const known = new Map(db.prepare('SELECT path, size, mtime FROM files WHERE repo = ?').all(repo.name).map((f) => [f.path, f]))
     let changed = 0
-    for (const f of scanRepo(repo, project)) { const k = known.get(f.path); if (!k || k.size !== f.size || k.mtime !== f.mtime) changed++; known.delete(f.path) }
+    for (const f of scanRepo(repo, project, rels)) { const k = known.get(f.path); if (!k || k.size !== f.size || k.mtime !== f.mtime) changed++; known.delete(f.path) }
     changed += known.size
+    const inputs = new Map(db.prepare('SELECT path, size, mtime FROM data_inputs WHERE repo = ?').all(repo.name).map((f) => [f.path, f]))
+    for (const p of candidates(rels, project)) {
+      let st
+      try { st = statSync(path.join(repo.abs, p)) } catch { continue }
+      const k = inputs.get(p)
+      if (!k || k.size !== st.size || k.mtime !== Math.floor(st.mtimeMs)) changed++
+      inputs.delete(p)
+    }
+    changed += inputs.size
     if (changed) out[repo.name] = `${changed} file(s) changed since`
   }
   return out
@@ -128,7 +148,7 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
     lastFresh = Date.now()
     if (r.error) return `Index failed: ${r.error}`
     if (r.busy) return 'Another index of this project is running; it will pick up the current changes before it finishes.'
-    return [`Indexed in ${(r.ms / 1000).toFixed(1)}s.`, ...r.repos.map((x) => `  ${x.repo}: ${x.files} files, ${x.parsed} parsed, ${x.removed} removed${x.failed.length ? `, ${x.failed.length} failed to parse (${x.failed.slice(0, 3).join('; ')})` : ''}`)].join('\n')
+    return [`Indexed in ${(r.ms / 1000).toFixed(1)}s.`, ...r.repos.map((x) => `  ${x.repo}: ${x.files} files, ${x.parsed} parsed, ${x.removed} removed${x.failed.length ? `, ${x.failed.length} failed to parse (${x.failed.slice(0, 3).join('; ')})` : ''}${x.data?.failed.length ? `, ${x.data.failed.length} data extractor failure(s) (${x.data.failed.slice(0, 3).join('; ')})` : ''}`)].join('\n')
   }
 
   if (!existsSync(project.dbPath)) return 'The code graph has not been built for this project yet: call graph_index first (or answer with Grep/Glob/Read).'
@@ -148,6 +168,6 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
     if (tool.raw) return sql(db, args.sql)
     const g = new Graph(db)
     const fresh = name === 'graph_status' ? staleness(project, db) : null
-    return `${note}${tool.run(g, args, { fresh })}\n\n${FOOTER}`
+    return `${note}${tool.run(g, args, { fresh })}\n\n${tool.footer || FOOTER}`
   } finally { db.close() }
 }

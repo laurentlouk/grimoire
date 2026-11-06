@@ -12,6 +12,7 @@ A local index of every repository in the project: definitions and how they relat
 | **Edges** | `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, plus co-change pairs from git history |
 | **History** | per-file churn: how many of the last 400 non-merge commits touched the file (commits touching more than 25 indexed files skipped) |
 | **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL, HCL / Terraform (file nodes only, searchable by path) |
+| **Data models** | the stores the migrations and schema snapshots declare: tables, fields, keys, indexes and foreign keys, each with the `path:line` of every declaration, and where two declarations disagree ([Data models](#data-models)) |
 | **Storage** | one SQLite file, `.grimoire/graph/graph.db` (gitignored with the rest of `.grimoire/`) |
 
 Parsing is [tree-sitter](https://tree-sitter.github.io/) (WASM grammars); storage is Node's built-in `node:sqlite`, so it needs **Node ≥ 22.5**.
@@ -49,6 +50,7 @@ As MCP tools (the plugin declares the server in `.mcp.json`; agents see `mcp__pl
 | `graph_file` | outline, imports (resolved or external), importers, co-change |
 | `graph_hierarchy` | supertypes and subtypes / implementors |
 | `graph_path` | the shortest call chain from A to B |
+| `graph_data` | the data model: every store, one store's entities, or one entity with its sources and conflicts |
 | `graph_sql` | a read-only `SELECT` for anything else |
 
 Symbols are named as `area`, `Circle.area` / `Circle::area`, `path/to/file.ts:42` (the innermost definition there) or `#id` from an earlier answer. A name matching several definitions answers for each (up to five) and says how to narrow.
@@ -60,6 +62,8 @@ node tools/graph/graph.mjs index                 # or: npm run graph -- index
 node tools/graph/graph.mjs impact src/auth/session.ts --depth 2
 node tools/graph/graph.mjs callers Session.refresh --strict
 node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
+node tools/graph/graph.mjs data list [<store>]        # the stores, or one store's entities
+node tools/graph/graph.mjs data show books            # one entity: books, drizzle/books or repo:drizzle/books
 ```
 
 `--root <dir>` points it at another project; otherwise it serves `$GRIMOIRE_PROJECT_DIR`, `$CLAUDE_PROJECT_DIR` or the current directory.
@@ -88,9 +92,23 @@ node tools/graph/graph.mjs architecture check [<file>…]                       
 
 `lib/arch.mjs` drafts deterministically (one component per module of the system map, typed by folder names and the frameworks it imports, external services from imports of known client libraries, a line per module link resolved by syntax) and checks: the schema, every `paths` glob matching indexed production files, every source existing with its lines, each line between two code components counted in file pairs linked by syntax (or in files importing a component's `imports`), lines the code shows only the other way, code links no line draws, files in two components, and the share of production files covered. It lays a diagram out by flow (a column per step, top-level boundaries as bands, rows ordered to cut crossings, free components placed beside their neighbours outside the bands), unless every component gives its `col` and `row`.
 
+## Data models
+
+The index also reads the project's data model from what declares it in the repositories, never from a database and never by running the project's code (`lib/data/`). Each extractor names a format, not a project (`lib/data/registry.mjs`), and its facts are stored per file or per folder (`data_inputs`, `data_facts` in `graph.db`); `lib/data/reconcile.mjs` merges them when asked.
+
+- **SQL migration folders** (`extractors/sql-migrations.mjs`), found by content: any folder with a `.sql` file that creates or alters a table or an index, whatever it is called (`drizzle/`, `prisma/migrations/`, `db/sql/`, `storage/schema-changes/`…), with one migration per file or per versioned subfolder (`<version>_<name>/migration.sql` or `up.sql`). Once found, every file of it holding a schema statement (`CREATE`, `ALTER`, `DROP`: a file with only a `DROP` or a view included) is part of it. Down migrations (`down.sql`, `*.down.sql`, a `-- migrate:down` or `-- +goose Down` section) and files with no schema statement (seeds, queries) are left out, and so are test-support folders.
+  - *Order*: Drizzle's `meta/_journal.json` when there is one, else the numeric or timestamp prefix of the names, compared as numbers (`V2` before `V10`). Names without one prefix scheme, or two sharing a version, leave the order unknown: the folder is listed, not replayed.
+  - *Dialect*: `graph.data.migrations` in `grimoire.config.json`, a `drizzle.config.*` whose `out` is the folder, Drizzle's journal, Prisma's `migration_lock.toml` or `schema.prisma` datasource, Supabase (Postgres); else sniffed from the SQL's own markers (`readers/sql-dialect.mjs`: `AUTOINCREMENT`, `WITHOUT ROWID`, `PRAGMA`, `STRICT` for SQLite; `SERIAL`, `::`, `$$`, `JSONB`, `TIMESTAMPTZ`… for Postgres; `ENGINE=`, `AUTO_INCREMENT`, `UNSIGNED`, backticks for MySQL). No marker, or markers of two dialects, is *unknown*: listed, never replayed as SQLite by assumption.
+  - *SQLite* folders are replayed into an in-memory `node:sqlite` database, statement by statement (`readers/sql-split.mjs`: Drizzle's `--> statement-breakpoint`, `;` outside quotes and comments), and read back with `PRAGMA table_xinfo`, `index_list`, `index_info`, `foreign_key_list`: exactly what a fresh database gets. Each table, column, key, index and foreign key cites the migration line that created or last altered it. A statement SQLite rejects stops the replay there: the facts so far are kept, labelled *replayed to `file:line`*, with the error. `ATTACH`, `DETACH` and `VACUUM` are never run. Postgres and MySQL folders are listed as found, not yet read.
+- **Drizzle snapshots** (`extractors/drizzle-snapshot.mjs`): the newest `meta/NNNN_snapshot.json` of a folder (`tables{}`), and drizzle-kit v1's `<version>_<name>/snapshot.json` (`ddl[]`, the leaves of its `prevIds` DAG), each element at its JSON line.
+
+A replay and a snapshot of one folder are two declarations of one store. Elements that agree carry both sources; where they disagree (a hand-edited migration, a schema edited without a migration), the element keeps a **conflict** with every side and its source: nothing is resolved by precedence, since the disagreement is the finding. Composite primary keys compare as keys. A replay that stopped early is shown but compared with nothing. Primary and unique keys are elements of their own; the indexes SQLite builds for them are counted apart (`13 indexes (+21 implicit, for keys)`).
+
+`graph_data` (and `graph.mjs data`) answers with the stores (dialect and how it is known, how each declaration was read, counts, conflicts, extractor failures), one store's entities, or one entity with every field, key, index and foreign key and their `path:line`. An extractor that throws loses that file's or folder's facts and is reported by `graph_status`, `graph_index` and `graph_data`; the index goes on. Like the rest of the graph, these are leads: open the `path:line` before relying on them.
+
 ## Freshness
 
-`graph_index` re-parses only files whose size or mtime moved and whose content hash changed, drops deleted files, and re-resolves the edges of a repository that changed. An index built by another grimoire version (its schema differs) is rebuilt in full, on the next query or index. Every query first checks (stat only) whether files moved and refreshes incrementally if they did, at most every 15 s per process. A project that was never indexed is not indexed implicitly by a query: the first `graph_index` installs the parser runtime and can take a while on a large tree.
+`graph_index` re-parses only files whose size or mtime moved and whose content hash changed, drops deleted files, and re-resolves the edges of a repository that changed. The files the data model reads are tracked the same way, and a data job (a file, or a migration folder) runs again only when one of its inputs changed: an edited or deleted migration re-runs its folder. An index built by another grimoire version (its schema differs) is rebuilt in full, on the next query or index. Every query first checks (stat only) whether files moved and refreshes incrementally if they did, at most every 15 s per process. A project that was never indexed is not indexed implicitly by a query: the first `graph_index` installs the parser runtime and can take a while on a large tree.
 
 Indexing is always this script, never a model. Three things run it:
 
@@ -114,8 +132,11 @@ Measured on this machine: ripgrep (114 Rust files) 0.7 s, FastAPI (1,147 Python 
 ## Configuration (`grimoire.config.json`)
 
 ```json
-"graph": { "enabled": true, "repos": ["api", "web"], "dir": ".grimoire/graph", "exclude": ["generated/**", "fixtures"], "maxFileKB": 512, "architectureDir": "docs/architecture" }
+"graph": { "enabled": true, "repos": ["api", "web"], "dir": ".grimoire/graph", "exclude": ["generated/**", "fixtures"], "maxFileKB": 512, "architectureDir": "docs/architecture",
+           "data": { "migrations": [{ "path": "api:db/sql", "dialect": "sqlite" }] } }
 ```
+
+`data.migrations` states a migration folder's dialect (`sqlite`, `postgres` or `mysql`) when no config of its tool says it and its SQL carries no marker: `path` is the folder, relative to its repository, prefixed with `repo:` in a project of several. It wins over every other source of the dialect.
 
 All optional, and read as every checkout sees it: a linked worktree without its own `grimoire.config.json` uses the main checkout's (`scripts/project-config.mjs`). Without a config the project root is one repository. `repos` defaults to every entry of the top-level `repos[]`; `exclude` adds to the built-in skips (dependencies, build output, caches, minified and generated files, `.d.ts`). `enabled: false` turns every tool into a pointer back to grep.
 
@@ -140,8 +161,14 @@ tools/graph/
   lib/arch.mjs · arch-view.mjs architecture diagrams: draft, check, layout · the Architecture tab
   lib/docs.mjs · md.mjs · docs-view.mjs        the notes and what may be written · Markdown · the Docs tab
   lib/serve.mjs                the page on 127.0.0.1, saving notes
+  lib/data/model.mjs · registry.mjs · reconcile.mjs   the data model: its shape, the extractors, merging declarations
+  lib/data/readers/            sql-split · sql-dialect · sqlite-replay · json-lines
+  lib/data/extractors/         sql-migrations · drizzle-snapshot
   tests/graph.test.mjs         node tools/graph/tests/graph.test.mjs
   tests/arch-docs.test.mjs     node tools/graph/tests/arch-docs.test.mjs (no parser runtime needed)
+  tests/data.test.mjs          node tools/graph/tests/data.test.mjs (part 1 needs no parser runtime)
 ```
+
+Adding a data extractor: a file in `lib/data/extractors/` (`id`, `version`, `kind`, `scope`, `wants`, `discover`, `extract`, as `registry.mjs` describes), its entry in `EXTRACTORS`, and fixtures from two ecosystems in `tests/fixtures/data/` with their expected facts in `tests/data.test.mjs`. Bump its `version` whenever what it extracts changes, so stored facts are extracted again.
 
 Adding a language: a spec in `lib/langs.mjs` (dump a sample's tree with web-tree-sitter to find the node types), a sample in `tests/fixtures/langs/` with its expected facts in the test.

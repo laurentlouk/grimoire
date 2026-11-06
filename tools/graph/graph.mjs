@@ -3,6 +3,8 @@
 //   node tools/graph/graph.mjs <command> [value] [--key value …] [--root <project>]
 //   commands: status · index [--full] · search <q> · symbol <s> · callers <s> [--depth n] ·
 //             callees <s> · impact <target> · file <path> · hierarchy <s> · path <from> <to> · sql <select>
+//             data [list [<store>] | show <entity>]: the data model (graph_data): the stores, one
+//             store's entities, or one entity with its sources and conflicts
 //             render [--out <file>]: refresh, then write the browsable HTML page (default
 //             <graph dir>/graph.html) and print its path. Local only: never publish it.
 //             refresh: what the SubagentStop hook runs. Seeds a checkout from its base checkout's
@@ -134,6 +136,12 @@ if (cmd === 'serve') {
     console.error(`graph refresh: ${e.message}`)
     process.exit(1)
   }
+}
+// `data list [<store>]` and `data show <entity>`: graph_data's two questions, as subcommands.
+if (cmd === 'data' && ['list', 'show'].includes(argv[0])) {
+  const sub = argv.shift()
+  if (argv[0] && !argv[0].startsWith('--')) argv.push(sub === 'show' ? '--entity' : '--store', argv.shift())
+  else if (sub === 'show') { console.error('usage: graph data show <entity>  (books, drizzle/books or repo:drizzle/books)'); process.exit(1) }
 }
 const tool = cmd && cmd !== 'serve' && cmd !== 'architecture' && TOOLS.find((t) => t.name === `graph_${cmd}`)
 if (!tool) {

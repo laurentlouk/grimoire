@@ -8,6 +8,8 @@
 //   graph.dir      index location (default .grimoire/graph, next to the loop's telemetry)
 //   graph.exclude  extra path globs to skip; graph.maxFileKB (default 512)
 //   graph.architectureDir  where the architecture diagrams live (default docs/architecture)
+//   graph.data.migrations  [{ path, dialect }]: a migration folder's dialect, stated (path is
+//                  repo-relative, `repo:path` to name one repository of several)
 //   baseBranch     the branch a worktree's index is based on first (freshness.mjs)
 import { readdirSync, statSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -32,6 +34,7 @@ export function loadProject(rootArg) {
   // so a worktree's rows match the index it was seeded from (a name per folder re-parsed it all).
   if (!repos.length) repos = [{ name: path.basename(mainCheckout(root) || root), path: '.' }]
   repos = repos.map((r) => ({ ...r, abs: path.resolve(root, r.path) })).filter((r) => existsSync(r.abs))
+  const names = new Set(repos.map((r) => r.name))
   return {
     root,
     enabled: g.enabled !== false,
@@ -42,6 +45,14 @@ export function loadProject(rootArg) {
     exclude: compileGlobs(g.exclude || []),
     maxBytes: (Number(g.maxFileKB) || 512) * 1024,
     architectureDir: path.resolve(root, g.architectureDir || 'docs/architecture'),
+    dataMigrations: (Array.isArray(g.data?.migrations) ? g.data.migrations : [])
+      .filter((m) => m && typeof m.path === 'string' && m.path.trim() && typeof m.dialect === 'string')
+      .map((m) => {
+        const i = m.path.indexOf(':')
+        const repo = i > 0 && names.has(m.path.slice(0, i)) ? m.path.slice(0, i) : null
+        const rel = path.posix.normalize((repo ? m.path.slice(i + 1) : m.path).trim().replace(/^\.\//, '')).replace(/\/+$/, '') || '.'
+        return { repo, path: rel, dialect: m.dialect }
+      }),
   }
 }
 
@@ -79,9 +90,8 @@ export function listPaths(abs) {
   return rels
 }
 
-// Every indexable file of a repository.
-export function scanRepo(repo, project) {
-  const rels = listPaths(repo.abs)
+// Every indexable file of a repository (rels: its file list, when the caller has it already).
+export function scanRepo(repo, project, rels = listPaths(repo.abs)) {
   const out = []
   for (const rel of rels) {
     const lang = langOf(rel)
