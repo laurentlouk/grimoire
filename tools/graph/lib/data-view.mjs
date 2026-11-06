@@ -14,7 +14,7 @@
 // before → after on their row and in the passport, possible renames linked (tables by a dashed line,
 // columns and indexes by a bracket beside their rows), never decided. Base sources are cited as text.
 export function dataClient(ctx) {
-  const { D, h, st, render, activate, stage } = ctx
+  const { D, h, st, render, activate, stage, nav } = ctx
   const DD = D.data || { stores: [], unread: [], failed: [] }
   const S = DD.stores || []
   const CH = DD.changes || { base: null, why: null }
@@ -79,8 +79,6 @@ export function dataClient(ctx) {
     }
     return Math.min(1, Math.max(ZMIN, ((document.getElementById('data-box') || {}).clientWidth || 1100) / (L.W + 8)))
   }
-  let pan = null, moved = false // a drag on the background pans the drawing; one listener ends it
-  window.addEventListener('mouseup', () => { pan = null })
   function rerender(keep = true) {
     const b = document.getElementById('data-box')
     st.dataScroll = keep && b ? [b.scrollLeft, b.scrollTop] : null
@@ -180,32 +178,15 @@ export function dataClient(ctx) {
     })
     sc.list.forEach((ti, j) => parts.push(table(s, ti, L.boxes[j], erdBox(s.tables[ti], sc.names), cls(ti), sc)))
     parts.push('</svg>')
-    const box = h('div', { class: 'svgbox archbox', id: 'data-box' })
+    const box = h('div', { class: 'svgbox archbox', id: 'data-box', ...nav.attrs('data', `ERD of ${s.id}`) })
     box.innerHTML = parts.join('')
     const svg = box.firstChild
     const key = `${n}|${sc.mode}|${sc.list.length}`
     if (st.dataScroll && st.dataScrollKey === key) { const [x, y] = st.dataScroll; requestAnimationFrame(() => { box.scrollLeft = x; box.scrollTop = y }) }
     st.dataScroll = null; st.dataScrollKey = key
-    box.addEventListener('mousedown', (e) => { if (e.button !== 0 || e.target.closest('[data-tbl]')) return; pan = [e.clientX, e.clientY, box.scrollLeft, box.scrollTop]; moved = false })
-    box.addEventListener('mousemove', (e) => { if (!pan) return; const dx = e.clientX - pan[0], dy = e.clientY - pan[1]; if (Math.abs(dx) + Math.abs(dy) > 3) moved = true; box.scrollLeft = pan[2] - dx; box.scrollTop = pan[3] - dy })
-    // the wheel (a trackpad pinch arrives as a wheel with ctrlKey) zooms around the pointer, in place
-    box.addEventListener('wheel', (e) => {
-      e.preventDefault()
-      const zz = zoomOf(L), r = svg.getBoundingClientRect()
-      const ux = (e.clientX - r.left) / zz, uy = (e.clientY - r.top) / zz
-      const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1)
-      const nz = Math.min(ZMAX, Math.max(ZMIN, zz * Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.002))))
-      if (Math.abs(nz - zz) < 1e-4) return
-      st.dataZoom = nz
-      svg.setAttribute('width', String(Math.round(L.W * nz))); svg.setAttribute('height', String(Math.round(L.H * nz)))
-      const nr = svg.getBoundingClientRect()
-      box.scrollLeft += nr.left + ux * nz - e.clientX; box.scrollTop += nr.top + uy * nz - e.clientY
-      const pct = document.querySelector('[data-ctl="data-100"]'), fit = document.querySelector('[data-ctl="data-fit"]')
-      if (pct) { pct.textContent = `${Math.round(nz * 100)}%`; pct.setAttribute('aria-pressed', String(Math.abs(nz - 1) < 0.005)) }
-      if (fit) fit.setAttribute('aria-pressed', 'false')
-    }, { passive: false })
+    // drag the background or use the arrow keys to pan; the wheel, + and − zoom in place (stage-view.mjs)
+    nav.scroller(box, svg, { item: '[data-tbl]', W: L.W, H: L.H, min: ZMIN, max: ZMAX, zoom: () => zoomOf(L), set: (z) => { st.dataZoom = z }, ctl: 'data', fit: () => { st.dataZoom = 'fit'; rerender() } })
     const open = (e) => {
-      if (moved) { moved = false; return }
       const g = e.target.closest('[data-tbl]')
       if (!g) { if (st.dataSel !== null) { st.dataSel = null; rerender(!s.collapsed) } return }
       const name = s.tables[Number(g.dataset.tbl)].name
@@ -263,12 +244,12 @@ export function dataClient(ctx) {
     const sc = scene(s, n)
     const cur = st.dataZoom === 'fit' ? 'fit' : st.dataZoom || 1
     const zoom = (z) => { st.dataZoom = z; rerender() }
-    const step = (d) => zoom(Math.min(ZMAX, Math.max(ZMIN, Math.round(((cur === 'fit' ? zoomOf(sc.L) : cur) + d) * 100) / 100)))
+    const by = (d) => () => zoom(nav.step(zoomOf(sc.L), d, ZMIN, ZMAX)) // from the zoom as it is now: the wheel or a key may have changed it
     const zoomSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Zoom' },
-      h('button', { 'data-ctl': 'data-fit', 'aria-pressed': String(cur === 'fit'), title: 'Fit the drawing to the page', onclick: () => zoom('fit') }, 'Fit'),
-      h('button', { 'data-ctl': 'data-out', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => step(-0.15) }, '−'),
+      h('button', { 'data-ctl': 'data-fit', 'aria-pressed': String(cur === 'fit'), title: 'Fit the drawing to the page (0)', onclick: () => zoom('fit') }, 'Fit'),
+      h('button', { 'data-ctl': 'data-out', title: 'Zoom out (−)', 'aria-label': 'Zoom out', onclick: by(-1) }, '−'),
       h('button', { 'data-ctl': 'data-100', 'aria-pressed': String(cur === 1), title: 'Natural size', onclick: () => zoom(1) }, `${Math.round((cur === 'fit' ? zoomOf(sc.L) : cur) * 100)}%`),
-      h('button', { 'data-ctl': 'data-in', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => step(0.15) }, '+'))
+      h('button', { 'data-ctl': 'data-in', title: 'Zoom in (+)', 'aria-label': 'Zoom in', onclick: by(1) }, '+'))
     const total = s.tables.length
     const back = (label) => h('button', { class: 'linkbtn', 'data-ctl': 'data-all-tables', onclick: () => { st.dataSel = null; rerender(false) } }, label)
     const what = sc.mode === 'focus' ? h('span', null, h('b', { class: 'mono' }, st.dataSel), ` and its ${plural(sc.near.size, 'foreign key neighbour')}, of ${plural(total, 'table')} · `, back('all tables'))
@@ -300,7 +281,7 @@ export function dataClient(ctx) {
       h('details', { class: 'problems' }, h('summary', null, `Read from ${plural(s.decls.length, 'declaration')} · dialect: `, ...how), decls),
       legend, overlay,
       sel && st.full !== 'data' ? h('section', { class: 'split rev' }, h('div', null, draw), h('aside', { class: 'side' }, sel)) : draw,
-      h('p', { class: 'note' }, 'Read from migrations and schema snapshots, never from a database. Scroll to zoom, drag to pan. Click a table for its passport: every column with the files that declare it, and its foreign keys both ways. Search names tables and columns. A map, not the database: read the code at the path:line.'))
+      h('p', { class: 'note' }, 'Read from migrations and schema snapshots, never from a database. Scroll to zoom, drag to pan; with the drawing focused, the arrow keys pan (Shift: a page), + and − zoom, 0 fits. Click a table for its passport: every column with the files that declare it, and its foreign keys both ways. Search names tables and columns. A map, not the database: read the code at the path:line.'))
   }
   function view() {
     const inRepo = (id) => !st.repo || id.startsWith(`${st.repo}:`)

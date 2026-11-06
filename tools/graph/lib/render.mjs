@@ -18,6 +18,8 @@
 //   docs       the project's Markdown notes (docs.mjs), rendered in the page (md.mjs) as an
 //              Obsidian-like vault: tree, reading view, outline, backlinks, code they mention;
 //              editable only when the page is served (serve.mjs), which adds connect-src 'self'
+// The file map and the Architecture and Data diagrams share one way to move around (stage-view.mjs):
+// drag the background (it never selects the page) or focus the stage and use the arrow keys, + − 0.
 // Test code and ambiguous links are hidden until asked for; unique-name matches are drawn dashed.
 // Views have plain anchors (#sym-12, #file-3, #mod-4, #arch-0, #data-1, #doc-7): they hold for the
 // index the page was rendered from (a re-parsed file gets new ids; module, diagram, store and note
@@ -40,6 +42,7 @@ import { diffModels } from './data/diff.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
 import { changeVal, renameText, baseText, refName } from './query.mjs'
 import { dataClient } from './data-view.mjs'
+import { stageClient } from './stage-view.mjs'
 
 const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
 const MAP_MAX_FILES = 1500 // the file map keeps the most connected production files; the other tabs keep everything
@@ -367,7 +370,7 @@ export function lanePick(mods, max) {
   return { shown: mods.filter((m) => keep.has(m)), rest: mods.length - keep.size }
 }
 
-const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands, squarify, fitOf, lanePick, mdSlug, mdFront, mdToHtml, archClient, docsClient, erdBox, layoutErd, dataClient]
+const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands, squarify, fitOf, lanePick, mdSlug, mdFront, mdToHtml, archClient, docsClient, erdBox, layoutErd, dataClient, stageClient]
 
 function html(data, served) {
   // Every "<" becomes \\u003c, so no data string can close the <script> element.
@@ -415,7 +418,7 @@ h2{font-size:15px;margin:22px 0 10px}.muted{color:var(--muted)}.grid2{display:gr
 @media (max-width:1100px){.split{grid-template-columns:1fr}.split>.side{position:static;max-height:none;order:-1}}
 @media (max-width:900px){.grid2{grid-template-columns:1fr}}
 #map{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:12px;height:72vh;overflow:hidden}
-#map canvas{width:100%;height:100%;display:block;cursor:grab}#tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);padding:4px 8px;border-radius:6px;font-size:12px;display:none;white-space:nowrap}
+#map canvas{width:100%;height:100%;display:block;cursor:grab;touch-action:none}#map canvas:focus-visible{outline-offset:-3px}#tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);padding:4px 8px;border-radius:6px;font-size:12px;display:none;white-space:nowrap}
 .legend{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0;align-items:center}.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
 .pill{display:inline-block;padding:1px 7px;border-radius:999px;border:1px solid var(--line);font-size:11px;color:var(--muted);margin-left:6px}
 .detail{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:20px}.detail h3{margin:0 0 6px;font-size:15px;overflow-wrap:anywhere}
@@ -446,7 +449,8 @@ details.problems{background:var(--panel);border:1px solid var(--line);border-rad
 .stage.full{position:fixed;inset:0;z-index:50;background:var(--bg);padding:12px;overscroll-behavior:contain}.stage.full .stagebody>:first-child{height:100%;max-height:none;margin:0}
 .stage.full>.stageside{width:min(420px,38vw);flex:none;overflow:auto;max-height:100%}.stage.full>.stageside>.detail{margin:0}
 .stage.full .sysbox:not(.zoomed) svg{width:100%;height:100%;min-width:0}.stage.full #map{height:100%}.stage.full .archbox{display:flex}.stage.full .archbox svg{margin:auto;flex:none}.svgbox.zoomed{overflow:auto}.svgbox.zoomed svg{width:auto;min-width:0;max-width:none}
-.archbox{padding:6px;overflow:auto;max-height:78vh;cursor:grab}.archbox:active{cursor:grabbing}.archbox svg{width:auto;min-width:0;max-width:none;height:auto;margin:0 auto}
+.archbox{padding:6px;overflow:auto;max-height:78vh;cursor:grab;touch-action:none}.archbox:active{cursor:grabbing}.archbox svg{width:auto;min-width:0;max-width:none;height:auto;margin:0 auto}
+.panning{-webkit-user-select:none;user-select:none}.archbox.panning,#map canvas.panning{cursor:grabbing}
 svg.arch text{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
 svg.arch .bound rect{fill:color-mix(in srgb,var(--hover) 60%,transparent);stroke:var(--line);stroke-width:1.3;stroke-dasharray:7 5}
 svg.arch .bound.k-trust rect{stroke:var(--t-security)}svg.arch .bound.k-region rect{stroke:var(--t-cloud)}svg.arch .bound.k-deploy rect{stroke:var(--t-backend)}svg.arch .bound.k-network rect{stroke:var(--t-messagebus)}svg.arch .bound.k-repo rect{stroke-dasharray:none}
@@ -558,6 +562,7 @@ function client() {
   const GUESS = new Set(['ambiguous', 'unique-name'])
   const confRank = (c) => (c === 'ambiguous' ? 2 : c === 'unique-name' ? 1 : 0)
   const activate = (e) => e.key === 'Enter' || e.key === ' ' // a role=button answers both
+  const nav = stageClient() // drag and keys on the stages: the file map, the Architecture and Data tabs (stage-view.mjs)
 
   // ── the stage: a diagram with its controls inside it, and full size ──
   // Full size is a page state, not one element's fullscreen: every click re-renders the page, and
@@ -941,8 +946,6 @@ function client() {
   }
 
   // ── map: files (laid out once, drawn on a canvas) ──
-  let drag = null
-  window.addEventListener('mouseup', () => { drag = null })
   const M = D.map
   const mapFiles = M.files.map((id, i) => ({ f: files.get(id), x: M.pos[i][0], y: M.pos[i][1], deg: M.deg[i], r: 2.5 + Math.min(9, Math.sqrt(M.deg[i])), nb: new Map() }))
   for (const [a, b, , amb] of M.links) if (mapFiles[a] && mapFiles[b]) { mapFiles[a].nb.set(b, !!amb); mapFiles[b].nb.set(a, !!amb) }
@@ -960,20 +963,20 @@ function client() {
     const mod = st.module !== null ? modules[st.module] : null
     const core = mod ? new Set(mod.list.map((f) => f.id)) : null
     const onMap = core ? mapFiles.filter((m) => core.has(m.f.id)).length : 0
-    const wrap = h('div', { id: 'map' }), canvas = h('canvas', { role: 'img', 'aria-label': mod ? `File map of ${mod.key} and its neighbours` : 'File map' }), tip = h('div', { id: 'tip' })
+    const wrap = h('div', { id: 'map' }), canvas = h('canvas', nav.attrs('files', mod ? `File map of ${mod.key} and its neighbours` : 'File map')), tip = h('div', { id: 'tip' })
     wrap.append(canvas, tip)
     const legend = h('div', { class: 'legend' }, D.repos.filter((r) => !st.repo || r.name === st.repo).map((r) => h('span', null, h('i', { style: `background:${repoColor.get(r.name)}` }), r.name)))
     const head = h('div', { class: 'toolbar' }, seg, mod
       ? h('span', null, 'Files of ', h('b', { class: 'mono' }, mod.key), ` (${mod.repo}, ${onMap === 0 ? `none of its ${plural(mod.files, 'file')} is among the ${D.mapMax.toLocaleString()} most connected the map holds` : onMap < mod.files ? `${onMap} of its ${plural(mod.files, 'file')} on the map, the most connected; the map holds ${D.mapMax.toLocaleString()} at most` : plural(mod.files, 'file')}) and the files they link to by syntax · `, h('button', { class: 'linkbtn', 'data-ctl': 'all-files', onclick: () => { st.module = null; render() } }, 'all files'))
       : h('span', { class: 'muted' }, `${prod.toLocaleString()} of ${plural(st.repo ? M.totals[st.repo] || 0 : M.total, 'production file')}${tests ? `, and ${plural(tests, 'test file')} where room was left` : ''} · the ${D.mapMax.toLocaleString()} most connected at most`))
-    const note = h('p', { class: 'note' }, `Grouped by directory · the biggest are named, hover for the rest · lines are imports and calls between files${st.guesses ? '' : ', ambiguous-only links hidden'} · drag to pan, scroll to zoom, click to open, double-click to reset`)
+    const note = h('p', { class: 'note' }, `Grouped by directory · the biggest are named, hover for the rest · lines are imports and calls between files${st.guesses ? '' : ', ambiguous-only links hidden'} · drag to pan, scroll to zoom, click to open, double-click to reset · focused, the arrow keys pan (Shift: a page), + and − zoom, 0 fits`)
     // the buttons drive the canvas's own view, which drawMap holds: it fills `mz` once it has drawn
     const mz = {}
     const pct = h('button', { 'data-ctl': 'files-100', title: 'Zoom, as a share of the fitted view: click to fit again', onclick: () => mz.fit && mz.fit() }, '100%')
     const zoomSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Zoom' },
-      h('button', { 'data-ctl': 'files-fit', title: 'Fit the selection to the map', onclick: () => mz.fit && mz.fit() }, 'Fit'),
-      h('button', { 'data-ctl': 'files-out', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => mz.zoom && mz.zoom(1 / 1.25) }, '−'), pct,
-      h('button', { 'data-ctl': 'files-in', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => mz.zoom && mz.zoom(1.25) }, '+'))
+      h('button', { 'data-ctl': 'files-fit', title: 'Fit the selection to the map (0)', onclick: () => mz.fit && mz.fit() }, 'Fit'),
+      h('button', { 'data-ctl': 'files-out', title: 'Zoom out (−)', 'aria-label': 'Zoom out', onclick: () => mz.zoom && mz.zoom(1 / 1.25) }, '−'), pct,
+      h('button', { 'data-ctl': 'files-in', title: 'Zoom in (+)', 'aria-label': 'Zoom in', onclick: () => mz.zoom && mz.zoom(1.25) }, '+'))
     mz.label = pct
     requestAnimationFrame(() => drawMap(canvas, tip, vis, core ? (m) => core.has(m.f.id) : vis, mz))
     return h('section', null, head, legend, stage('files', 'File map', wrap, zoomSeg), note)
@@ -1067,17 +1070,7 @@ function client() {
       for (let i = 0; i < mapFiles.length; i++) { const m = mapFiles[i]; if (!vis(m)) continue; const d = (sx(m.x) - x) ** 2 + (sy(m.y) - y) ** 2; if (d < bd && d < (m.r * zr + 5) ** 2) { bd = d; best = i } }
       return best
     }
-    let moved = false
-    canvas.addEventListener('mousedown', (e) => { drag = [e.clientX, e.clientY, view.x, view.y]; moved = false })
-    canvas.addEventListener('mousemove', (e) => {
-      if (drag) { view.x = drag[2] + e.clientX - drag[0]; view.y = drag[3] + e.clientY - drag[1]; moved = moved || Math.abs(e.clientX - drag[0]) + Math.abs(e.clientY - drag[1]) > 3; redraw(); return }
-      const i = hit(e), b = canvas.getBoundingClientRect()
-      if (i !== hover) { hover = i; redraw() }
-      if (i >= 0) { const m = mapFiles[i]; tip.textContent = `${m.f.shown} · used by ${resolvedOf(m.f.in).length} · uses ${resolvedOf(m.f.out).length} (linked by syntax)`; tip.style.display = 'block'; tip.style.left = `${Math.min(e.clientX - b.left + 14, W - tip.offsetWidth - 8)}px`; tip.style.top = `${e.clientY - b.top + 14}px` } else tip.style.display = 'none'
-    })
-    canvas.addEventListener('mouseleave', () => { if (hover !== -1) { hover = -1; redraw() } tip.style.display = 'none' })
-    canvas.addEventListener('click', (e) => { if (moved) return; const i = hit(e); if (i >= 0) select({ file: mapFiles[i].f }) })
-    // zoom about a point (the pointer, or the centre for the buttons); the % is relative to the fit
+    // zoom about a point (the pointer, or the centre for the buttons and keys); the % is relative to the fit
     const label = () => { if (mz.label) mz.label.textContent = `${Math.round((view.k / fitK) * 100)}%` }
     const zoomAt = (mx, my, k0) => {
       const k = Math.min(fitK * 30, Math.max(fitK * 0.5, k0))
@@ -1086,12 +1079,24 @@ function client() {
     }
     mz.zoom = (f) => zoomAt(W / 2, H / 2, view.k * f)
     mz.fit = () => { Object.assign(view, fit()); label(); redraw() }
+    // a drag anywhere or the arrow keys pan, the wheel, + and − zoom, 0 fits (stage-view.mjs). Attached
+    // before the click below: the click that ends a pan never reaches it.
+    const pan = nav.view(canvas, {
+      at: () => [view.x, view.y],
+      pan: ([x, y], dx, dy) => { view.x = x + dx; view.y = y + dy; redraw() },
+      zoom: (d) => mz.zoom(d > 0 ? 1.25 : 1 / 1.25),
+      fit: () => mz.fit(),
+      wheel: (e) => { const b = canvas.getBoundingClientRect(); zoomAt(e.clientX - b.left, e.clientY - b.top, view.k * (e.deltaY < 0 ? 1.18 : 1 / 1.18)) },
+    })
+    canvas.addEventListener('mousemove', (e) => {
+      if (pan.panning()) return
+      const i = hit(e), b = canvas.getBoundingClientRect()
+      if (i !== hover) { hover = i; redraw() }
+      if (i >= 0) { const m = mapFiles[i]; tip.textContent = `${m.f.shown} · used by ${resolvedOf(m.f.in).length} · uses ${resolvedOf(m.f.out).length} (linked by syntax)`; tip.style.display = 'block'; tip.style.left = `${Math.min(e.clientX - b.left + 14, W - tip.offsetWidth - 8)}px`; tip.style.top = `${e.clientY - b.top + 14}px` } else tip.style.display = 'none'
+    })
+    canvas.addEventListener('mouseleave', () => { if (hover !== -1) { hover = -1; redraw() } tip.style.display = 'none' })
+    canvas.addEventListener('click', (e) => { const i = hit(e); if (i >= 0) select({ file: mapFiles[i].f }) })
     canvas.addEventListener('dblclick', () => mz.fit())
-    canvas.addEventListener('wheel', (e) => {
-      e.preventDefault()
-      const b = canvas.getBoundingClientRect()
-      zoomAt(e.clientX - b.left, e.clientY - b.top, view.k * (e.deltaY < 0 ? 1.18 : 1 / 1.18))
-    }, { passive: false })
   }
 
   // ── shell ──
@@ -1127,7 +1132,7 @@ function client() {
     }
     st.focusMain = false
   }
-  const ctx = { D, h, st, files, render, jumpFile, activate, plural, stage }
+  const ctx = { D, h, st, files, render, jumpFile, activate, plural, stage, nav }
   ARCH = archClient(ctx)
   DATA = dataClient(ctx)
   DOCS = docsClient(ctx)

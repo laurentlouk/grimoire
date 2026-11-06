@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.29.1 — the graph page: a drag never selects the page, and the arrow keys pan (#92)
+
+Dragging a diagram used to stop at the edge of its box, and the browser's text selection then took over and spread over the page around it. The Architecture and Data tabs and the file map now move the same way, through one helper shared by all three (`tools/graph/lib/stage-view.mjs`, injected into the page like the tabs). It replaces the pan, wheel and release code the Data tab had copied from the Architecture tab.
+
+- **A drag never selects the page.** The press that starts a pan is cancelled, so no text selection or image drag begins, and the drawing stays unselectable until the release. Past 3 px the pointer is captured: the pan follows it out of the box and past the scroll ends until the button is released, anywhere. A press on a table, a component or a file that moves 3 px or less is still a click and opens it; the click that ends a pan opens nothing. On a touch screen, a drag on a drawing pans it.
+- **The keyboard pans and zooms.** Each drawing is focusable (its label names the keys), and a click on its background focuses it without scrolling the page. With the focus on it, or on a table or component inside it: the arrow keys pan by 60 px and Shift + an arrow by most of the visible size, stopping cleanly at the edges; `+` (or `=`) and `−` zoom about the visible centre by the zoom buttons' step; `0` fits. The keys never act with Ctrl, ⌘ or Alt held, nor from the search box, the passport or any other field, and they scroll instantly. Enter and Space still open a table or component; Escape still leaves full size.
+- The wheel zooms as before. The zoom buttons of the Architecture and Data tabs now step from the zoom as it is, after the wheel or a key changed it, not from the zoom of the last render. The page still fetches nothing, and its CSP still admits only its own script, by hash.
+
 ## 0.29.0 — the data model map shows a branch against its base: `graph_changes` (data model map slice 3, #77)
 
 A branch's data model can now be read as a model change, not as lines of SQL: what it adds, removes and modifies against its base, drawn over the Data tab.
