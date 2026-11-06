@@ -557,7 +557,9 @@ try {
     const mod = await import(SCRIPT)
     const RUNS10 = join(ROOT, 'closing', '.grimoire', 'runs')
     const meta10 = { grimoireVersion: '0.18.1', briefsHash: 'cccc999', personasHash: 'p9', configHash: 'c9' }
-    const NOW10 = Date.parse('2026-11-04T12:00:00.000Z')
+    // Anchored on the real clock: the `summary` CLI below reads Date.now(), so a fixed date ages
+    // the "live" run into a stale one 12 h later
+    const NOW10 = Date.now()
     const at10 = (h) => new Date(NOW10 + h * 3600000).toISOString()
     const write10 = (runId, run, events) => {
       mkdirSync(join(RUNS10, runId, 'events'), { recursive: true })
