@@ -1288,6 +1288,7 @@ const deltaChangesOf = (task) =>
     .map((c) => ({ id: trim(c.id, 80), op: MODEL_OPS.includes(c.op) ? c.op : 'change', target: trim(c.target, 200), why: str(c.why) ? trim(c.why, 300) : '' }))
 const noTick = (s) => String(s).replace(/`/g, "'")
 function modelBlock(task) {
+  if (/:final$/.test(String(task.id))) return '' // a terminal sweep's fix: its findings only, no task of its own to report on
   if (!hasDelta)
     return `
 ## Data model changes — this design has no delta (brief: "Data model changes")
