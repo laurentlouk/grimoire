@@ -865,6 +865,9 @@ CREATE VIEW recent AS SELECT id FROM books;`
     ch('case', 'add', 'app:db/Books.ISBN', { after: { type: 'text', nullable: true } }),
     ch('typo', 'remove', 'app:db/ghosts'),
     ch('elsewhere', 'add', 'app:cache/entries', { after: { fields: [{ name: 'k', type: 'TEXT', nullable: false }] } }),
+    ch('reviews', 'add', 'app:db/reviews', { after: { fields: [{ name: 'id', type: 'INTEGER', nullable: true }] } }),
+    ch('reviews-stars', 'add', 'app:db/Reviews.stars', { after: { type: 'INTEGER', nullable: false } }),
+    ch('stray', 'add', 'app:db/nowhere.x', { after: { type: 'TEXT', nullable: true } }),
   ] }
   eq(parseDelta(JSON.stringify(delta)).errors, [], 'the delta under test validates')
   const line = (r) => `${r.id} ${r.state}${r.ack ? ` ${r.ack}` : ''}${r.diffs.length ? ` [${r.diffs.map((x) => x.text).join('; ')}]` : ''}${r.proposed.length ? ` {${r.proposed.map((x) => x.text).join('; ')}}` : ''}${r.warn ? ` (${r.warn})` : ''}`
@@ -884,10 +887,13 @@ CREATE VIEW recent AS SELECT id FROM books;`
     'case planned-built',
     'typo planned-built (not in the model, nor at the base: check the target)',
     'elsewhere pending (the store is not in the model)',
-  ], 'each change\'s state: built in the intended shape, pending, or built differently (planned → built); a change the branch has not touched is pending (now → planned), one it touched another way is built differently; a removal is built once its target is gone, a rename once only the new name is there; a target in another letter case resolves; the acknowledgement apart, stale once the change was edited')
+    'reviews pending',
+    'reviews-stars pending',
+    'stray pending (the table nowhere is not in the model)',
+  ], 'each change\'s state: built in the intended shape, pending, or built differently (planned → built); a change the branch has not touched is pending (now → planned), one it touched another way is built differently; a removal is built once its target is gone, a rename once only the new name is there; a target in another letter case resolves; the acknowledgement apart, stale once the change was edited; a column for a table the delta adds is pending, one for a table nowhere is flagged')
   eq(s.unplanned.map((u) => `${u.c.change} ${u.target}`), ['removed app:db/books/key:unique(isbn)', 'removed app:db/books/index:books_title_idx', 'modified app:db/books/fk:(author_id)->authors(id)', 'added app:db/recent'],
     'unplanned: what the branch changed against its base that no change of the delta covers, each named as a target (a change built another way, a rename\'s two names and a table added whole count as covered)')
-  eq(s.counts, { changes: 14, 'planned-built': 7, pending: 5, 'built-differently': 2, acked: 1, stale: 1, unacked: 12, unplanned: 4 }, '… counted')
+  eq(s.counts, { changes: 17, 'planned-built': 7, pending: 8, 'built-differently': 2, acked: 1, stale: 1, unacked: 15, unplanned: 4 }, '… counted')
   eq(deltaStates(delta, base, { base, diff: diffModels(base, base) }).changes.map(line).slice(2, 11),
     ['index pending', 'loans pending', 'title-default pending {default: \'untitled\' → \'draft\'}', 'name-type pending {type: TEXT → VARCHAR(120)}', 'bio-default pending {default: none → \'none\'}', 'drop-notes pending', 'drop-key planned-built (not in the model, nor at the base: check the target)', 'tags pending {rename to labels}', 'writers pending {rename to writers}'],
     'at design time (the branch is its base): every change not in the code yet is pending, with what it proposes; a removal whose target was never there reads as done, with a warning')

@@ -269,6 +269,8 @@ export function deltaStates(delta, model, { base = null, diff = null } = {}) {
   const key = (storeId, kind, entity, k, fold) => `${storeId}\0${kind}\0${fold(entity)}\0${k}`
   for (const sd of diff?.stores || []) { const fold = foldOf(sd.dialect); for (const c of sd.changes) touched.add(key(sd.id, c.kind, c.entity, c.key, fold)) }
   const keyOfT = (r, t) => { const fold = r.st ? foldOf(r.st.dialect) : foldOf(null); return key(r.st ? r.st.id : t.storeId, t.kind, t.entity, KEY[t.kind](t.el, fold), fold) }
+  // the tables the delta itself adds: a column or an index for one of them is no stray target
+  const adds = new Set((delta.data || []).filter((c) => c.op === 'add').map((c) => parseTarget(c.target)).filter((t) => t.kind === 'entity').map((t) => `${t.storeId}\0${t.entity.toLowerCase()}`))
   const changes = (delta.data || []).map((c, i) => {
     const hash = changeHash(c)
     const t = parseTarget(c.target)
@@ -276,7 +278,7 @@ export function deltaStates(delta, model, { base = null, diff = null } = {}) {
     const out = { i, change: c, id: c.id, hash, t, state: 'pending', ack: c.ack ? (c.ack.hash === hash ? 'acked' : 'stale') : null, diffs: [], proposed: [], warn: null, st: cur.st, e: cur.e, el: cur.el, touched: false, keys: [keyOfT(cur, t)] }
     const branchTouched = (k) => touched.has(k)
     if (!cur.st && !(was && was.st)) out.warn = 'the store is not in the model'
-    else if (t.kind !== 'entity' && !cur.e && !(c.op === 'remove' && was && was.e)) out.warn = `the table ${t.entity} is not in the model`
+    else if (t.kind !== 'entity' && !cur.e && !(c.op === 'remove' && was && was.e) && !(c.op === 'add' && adds.has(`${t.storeId}\0${t.entity.toLowerCase()}`))) out.warn = `the table ${t.entity} is not in the model`
     if (c.op === 'add') {
       if (cur.el) { out.diffs = shapeDiffs(t.kind, c.after || {}, cur.el, cur.fold, true); out.state = out.diffs.length ? 'built-differently' : 'planned-built' }
     } else if (c.op === 'remove') {
