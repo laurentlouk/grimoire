@@ -8,14 +8,18 @@
 // A table is the page's packed shape (render.mjs dataData): { name, kind, fields: [{ name, type,
 // nullable, pk, fk, cf }], keys: [{ role, parts, cf }], indexes: [{ name, unique, columns, partial,
 // cf }], rels: [{ columns, to, toColumns, cf }], cf }, every cf a conflict { attr, values: [{ value }] }.
+// In the change overlay, the table and each element may also carry ch (added | removed | modified)
+// and was: ['attr: before → after'] for a modified one.
 
 // One table's box: its size and, unless collapsed (a name only), the rows it draws: a row per column,
 // then a row per unique key and per declared index, each followed by a conflict badge line when the
-// declarations disagree about it (the badge names both values). Offsets are from the box's top left.
-//   → { w, h, collapsed, name, view, sub?, conflicts, head: badge | null, rows: [{ kind: field | unique |
-//       index, i, y, name?, type?, text?, pk?, fk?, nullable?, badge }], fieldY: [y], divider: y | null }
-//   a badge: { y, text, cf: [[prefix, conflict]] }   (names and texts cut to fit; the full ones stay in
-//   the table, and the page's tooltips cite each conflict's sources)
+// declarations disagree about it (the badge names both values), and a change line when the overlay
+// says what it was before. Offsets are from the box's top left.
+//   → { w, h, collapsed, name, view, sub?, conflicts, head: badge | null, headChg: change | null,
+//       rows: [{ kind: field | unique | index, i, y, name?, type?, text?, pk?, fk?, nullable?, ch,
+//       badge, chg: change | null }], fieldY: [y], divider: y | null }
+//   a badge: { y, text, cf: [[prefix, conflict]] }   a change: { y, text, full }   (names and texts cut
+//   to fit; the full ones stay in the table, and the page's tooltips cite each conflict's sources)
 export function erdBox(t, collapsed) {
   const CW = 7.2, TW = 6.6, XW = 6.6, BW = 6.3, HW = 7.6, HEAD = 30, ROW = 20, XROW = 18, BADGE = 17, MIN = 200, MAX = 460
   const cutS = (s, n) => (s.length > n ? `${s.slice(0, Math.max(1, n - 1))}…` : s)
@@ -40,38 +44,43 @@ export function erdBox(t, collapsed) {
   const attach = (col, pre, list) => { if (!list || !list.length) return; const i = byField.get(col); (i === undefined ? head : onRow[i]).push(...list.map((c) => [pre, c])) }
   for (const k of keys) if (k.role === 'primary') attach(k.parts[0], 'primary key: ', k.cf)
   for (const r of rels) attach(r.columns[0], `foreign key → ${r.to}: `, r.cf)
+  const was = (x) => (x && x.was && x.was.length ? x.was.join('; ') : null) // the overlay's before → after
   const extra = [
-    ...keys.map((k, i) => [k, i]).filter(([k]) => k.role !== 'primary').map(([k, i]) => ({ kind: 'unique', i, text: `${k.role} (${k.parts.join(', ')})`, badge: own(k.cf) })),
-    ...indexes.map((x, i) => ({ kind: 'index', i, text: `${x.unique ? 'unique index' : 'index'} ${x.name} (${x.columns.join(', ')})${x.partial ? ' partial' : ''}`, badge: own(x.cf) })),
+    ...keys.map((k, i) => [k, i]).filter(([k]) => k.role !== 'primary').map(([k, i]) => ({ kind: 'unique', i, text: `${k.role} (${k.parts.join(', ')})`, badge: own(k.cf), ch: k.ch || null, was: was(k) })),
+    ...indexes.map((x, i) => ({ kind: 'index', i, text: `${x.unique ? 'unique index' : 'index'} ${x.name} (${x.columns.join(', ')})${x.partial ? ' partial' : ''}`, badge: own(x.cf), ch: x.ch || null, was: was(x) })),
   ]
   const typeMax = Math.min(24, Math.max(0, ...fields.map((f) => String(f.type || '').length)))
   const nameMax = Math.min(30, Math.max(0, ...fields.map((f) => f.name.length)))
   const badges = [head, ...onRow, ...extra.map((x) => x.badge)].filter((b) => b.length).map((b) => b.map(say).join('; '))
+  const changes = [was(t), ...fields.map(was), ...extra.map((x) => x.was)].filter(Boolean)
   const w = Math.ceil(Math.min(MAX, Math.max(MIN,
     40 + Math.min(40, t.name.length) * HW + (view ? 50 : 0),
     43 + nameMax * CW + 16 + typeMax * TW + 26,
     42 + Math.min(52, Math.max(0, ...extra.map((x) => x.text.length))) * XW,
-    48 + Math.min(60, Math.max(0, ...badges.map((b) => b.length))) * BW)))
+    48 + Math.min(60, Math.max(0, ...badges.map((b) => b.length), ...changes.map((c) => c.length))) * BW)))
   const badge = (list, y) => (list.length ? { y, text: cutS(list.map(say).join('; '), Math.floor((w - 48) / BW)), cf: list } : null)
+  const change = (text, y) => (text ? { y, text: cutS(text, Math.floor((w - 48) / BW)), full: text } : null)
   let y = HEAD
   const hb = badge(head, y)
   if (hb) y += BADGE
+  const hc = change(was(t), y)
+  if (hc) y += BADGE
   const rows = [], fieldY = []
   fields.forEach((f, i) => {
     const type = cutS(String(f.type || ''), 24)
-    const b = badge(onRow[i], y + ROW)
-    rows.push({ kind: 'field', i, y, name: cutS(f.name, Math.max(4, Math.floor((w - 43 - 16 - type.length * TW - 26) / CW))), type, pk: !!f.pk, fk: !!f.fk, nullable: f.nullable, badge: b })
+    const b = badge(onRow[i], y + ROW), c = change(was(f), y + ROW + (b ? BADGE : 0))
+    rows.push({ kind: 'field', i, y, name: cutS(f.name, Math.max(4, Math.floor((w - 43 - 16 - type.length * TW - 26) / CW))), type, pk: !!f.pk, fk: !!f.fk, nullable: f.nullable, ch: f.ch || null, badge: b, chg: c })
     fieldY.push(y + ROW / 2)
-    y += ROW + (b ? BADGE : 0)
+    y += ROW + (b ? BADGE : 0) + (c ? BADGE : 0)
   })
   const divider = extra.length ? y + 3 : null
   if (extra.length) y += 6
   for (const x of extra) {
-    const b = badge(x.badge, y + XROW)
-    rows.push({ kind: x.kind, i: x.i, y, text: cutS(x.text, Math.floor((w - 42) / XW)), badge: b })
-    y += XROW + (b ? BADGE : 0)
+    const b = badge(x.badge, y + XROW), c = change(x.was, y + XROW + (b ? BADGE : 0))
+    rows.push({ kind: x.kind, i: x.i, y, text: cutS(x.text, Math.floor((w - 42) / XW)), ch: x.ch, badge: b, chg: c })
+    y += XROW + (b ? BADGE : 0) + (c ? BADGE : 0)
   }
-  return { w, h: y + 6, collapsed: false, name: cutS(t.name, Math.floor((w - 40 - (view ? 50 : 0)) / HW)), view, conflicts: all.length, head: hb, rows, fieldY, divider }
+  return { w, h: y + 6, collapsed: false, name: cutS(t.name, Math.floor((w - 40 - (view ? 50 : 0)) / HW)), view, conflicts: all.length, head: hb, headChg: hc, rows, fieldY, divider }
 }
 
 // Every table of a store placed, every foreign key routed. Tables linked by foreign keys form a

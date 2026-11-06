@@ -4,9 +4,42 @@
 // the source of truth for what code does: that is read in the code, at the path:line given here.
 import { langOf } from './langs.mjs'
 import { reconcile, elementsOf, storeSummary } from './data/reconcile.mjs'
+import { diffModels } from './data/diff.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files, never from a database. Open path:line before relying on any of it.'
+export const CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate. Open path:line before relying on any of it.'
+
+// How a data model change reads, shared by graph_changes and the page (render.mjs packs the same words).
+const plural = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+export const changeVal = (attr, v) => (attr === 'nullable' ? (v ? 'nullable' : 'not null') : attr === 'unique' ? (v ? 'unique' : 'not unique') : attr === 'partial' ? (v ? 'partial' : 'whole') : v === null || v === undefined || v === '' ? 'none' : String(v))
+export const CHANGE_KIND = { field: 'column', key: 'key', index: 'index', relation: 'foreign key' }
+const typeOf = (x) => x.type?.raw ?? x.type
+// One element of a change, as graph_changes lists it.
+export function describe(c, el) {
+  if (c.kind === 'entity') return `${el.name}  ${el.kind}${el.kind === 'table' || el.fields.length ? `, ${plural(el.fields.length, 'column')}` : ''}`
+  if (c.kind === 'field') return `${c.entity}.${el.name}  column ${typeOf(el)}, ${el.nullable ? 'nullable' : 'not null'}${el.default !== null && el.default !== undefined ? `, default ${el.default}` : ''}${el.generated ? `, generated ${el.generated}` : ''}`
+  if (c.kind === 'key') return `${c.entity} ${el.role} key (${el.parts.join(', ')})`
+  if (c.kind === 'index') return `${c.entity} index ${el.name}${el.unique ? ' unique' : ''} (${el.columns.join(', ')})${el.partial ? ' partial' : ''}`
+  return `${c.entity} foreign key (${el.columns.join(', ')}) → ${el.to}(${el.toColumns.join(', ')})`
+}
+export const renameText = (s, r) => {
+  const word = r.kind === 'entity' ? (s.changes[r.from[0]].before.kind || 'table') : CHANGE_KIND[r.kind]
+  const names = (list) => list.map((i) => s.changes[i].name).join(', ')
+  return r.ambiguous ? `possible renames, ambiguous, not decided: ${word}s ${names(r.from)} → ${names(r.to)}${r.entity ? ` in ${r.entity}` : ''} (each with the ${r.shape.replace('same ', '')}: any may pair)`
+    : `possible rename, not decided: ${word} ${names(r.from)} → ${names(r.to)}${r.entity ? ` in ${r.entity}` : ''} (${r.shape})`
+}
+// The base in words: `main (baseBranch in grimoire.config.json) at 1a2b3c4d5e, its merge base with
+// HEAD`. A commit given as the base is named by its first 10 digits, and not again after "at".
+export const refName = (ref) => (/^[0-9a-f]{40}$/i.test(ref) ? ref.slice(0, 10) : ref)
+export function baseText(base) {
+  const ats = [...new Set(base.repos.map((r) => r.at))]
+  const merged = base.repos.some((r) => r.at !== r.commit)
+  const isCommit = /^[0-9a-f]{7,40}$/i.test(base.ref) && base.repos.every((r) => r.commit.startsWith(base.ref.toLowerCase()))
+  const at = ats.length > 1 ? ` at ${base.repos.map((r) => `${r.at.slice(0, 10)} in ${r.name}`).join(', ')} (each repository's merge base with its HEAD)`
+    : isCommit && !merged ? '' : ` at ${ats[0].slice(0, 10)}${merged ? ', its merge base with HEAD' : ''}`
+  return `${refName(base.ref)} (${base.from})${at}`
+}
 const CLASSY = "'class','struct','interface','trait','enum','protocol','module','object','type','namespace'"
 const MAX_TARGETS = 5
 
@@ -322,6 +355,33 @@ export class Graph {
     section('Foreign keys', e.relations, (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
     const conflicts = elementsOf(e).flatMap(([label, x]) => x.conflicts.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${v.value} — ${v.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
     out.push(conflicts.length ? `Conflicts (${conflicts.length}): the declarations disagree; each side is kept` : 'Conflicts: none', ...conflicts)
+    return out.join('\n')
+  }
+
+  // ── the data model against a base (data/base.mjs reads the base, data/diff.mjs compares) ──
+  // The branch side is the index (the working tree, uncommitted edits included), limited to the
+  // repositories the base resolved in.
+  currentModel(repos) {
+    const list = [...repos]
+    return reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL AND repo IN (${list.map(() => '?').join(',')}) ORDER BY repo, key, extractor`, ...list).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+  }
+  changes(base, at) {
+    const d = diffModels(at.model, this.currentModel(base.repos.map((r) => r.name)))
+    const k = d.counts
+    const out = [`Data model against ${baseText(base)}: ${d.stores.length ? `${plural(k.stores, 'store')} changed · ${k.added} added · ${k.removed} removed · ${k.modified} modified · ${plural(k.renames, 'possible rename')}` : 'no change.'}`]
+    for (const s of d.stores) {
+      out.push(`${s.id}  ${s.dialect || 'dialect unknown'}  ${s.change === 'added' ? 'added (absent at the base)' : s.change === 'removed' ? 'removed (absent from the branch)' : 'modified'}`)
+      for (const a of s.attrs) out.push(`  ~ ${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`)
+      for (const c of s.changes) {
+        const was = c.before && `was ${this.sources(s.repo, c.before.sources)}`, now = c.after && this.sources(s.repo, c.after.sources)
+        if (c.change === 'added') out.push(`  + ${describe(c, c.after)}  — ${now}`)
+        else if (c.change === 'removed') out.push(`  - ${describe(c, c.before)}  — ${was}`)
+        else out.push(`  ~ ${describe(c, c.after)}  ${c.attrs.map((a) => `${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`).join('; ')}  — ${was}; now ${now}`)
+      }
+      for (const r of s.renames) out.push(`  ${renameText(s, r)}`)
+    }
+    for (const x of base.skipped) out.push(`Not compared: ${x.name} (${x.why}).`)
+    if (at.failed.length) out.push(`At the base, extractor failures (${at.failed.length}), their facts are missing from the comparison:`, ...at.failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
     return out.join('\n')
   }
 

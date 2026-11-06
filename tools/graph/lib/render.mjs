@@ -36,6 +36,9 @@ import { archClient } from './arch-view.mjs'
 import { docsClient } from './docs-view.mjs'
 import { reconcile, storeSummary } from './data/reconcile.mjs'
 import { layoutErd, erdBox } from './data/layout.mjs'
+import { diffModels } from './data/diff.mjs'
+import { resolveBase, modelAt } from './data/base.mjs'
+import { changeVal, renameText, baseText, refName } from './query.mjs'
 import { dataClient } from './data-view.mjs'
 
 const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
@@ -43,7 +46,11 @@ const MAP_MAX_FILES = 1500 // the file map keeps the most connected production f
 export const DATA_COLLAPSE = 60 // a store with more tables starts collapsed: names only, until focused or searched
 
 // opts.serve = { token }: the page is served by serve.mjs and may save notes back to it
+// opts.base: the ref the Data tab's change overlay compares against (else the default base,
+// data/base.mjs); one given that does not resolve is an error, a default that does not resolve
+// leaves the overlay out and the tab says why
 export async function renderGraph(project, opts = {}) {
+  const changes = await baseFor(project, opts.base || null)
   const db = await openStore(project.dbPath, { readOnly: true })
   try {
     const repos = db.prepare('SELECT name, root, head, indexed_at FROM repos ORDER BY name').all()
@@ -74,7 +81,7 @@ export async function renderGraph(project, opts = {}) {
       edges: edges.map((e) => [e.src, e.dst, KINDS.indexOf(e.kind), confs.indexOf(e.confidence || '')]),
       cochange: cochange.map((c) => [c.repo, c.a, c.b, c.n]),
       arch: archData(project, loadIndex(db)),
-      data: dataData(db, files, repos),
+      data: dataData(db, files, repos, changes),
       docs: project.root ? scanDocs(project).map((d) => [d.repo, d.root, d.path, d.text, d.hash, d.big ? 1 : 0]) : [],
       ...(opts.serve ? { serve: { token: opts.serve.token } } : {}),
     }
@@ -114,27 +121,84 @@ function packArch(doc, r, extra) {
 // as shown, its file id in the index or -1, the declaration's kind]. What was found but not drawn (a
 // folder of unknown dialect or order, a dialect with no reader yet, a replay that read no table) is
 // listed with its reason, and so is every extractor that failed: the map never pretends to be complete.
-export function dataData(db, files, repos) {
-  const out = { stores: [], unread: [], failed: [] }
+//
+// The change overlay (changes: { base, at } from baseFor, else { why }): the model against the base,
+// diffed (data/diff.mjs) for the repositories the base resolved in. A store that changed carries
+// `ch`: its counts, the rename candidates in words, the base's paths (`bpaths`; a base source is
+// [bp, line], cited as text: those lines are the base's, not the working tree's), and its tables as
+// the overlay draws them, each an index into `tables` when unchanged, else the table with its marks
+// (ch: added | removed | modified, was: ['attr: before → after'], ren: a rename group) and the base's
+// removed elements put back where they stood, removed tables (ghosts) last; laid out here once, as
+// the ERD is, so a removed table is drawn among its foreign key neighbours. A store gone from the
+// branch, or with no table read in it any more, is listed in changes.removed.
+export function dataData(db, files, repos, changes = null) {
+  const out = { stores: [], unread: [], failed: [], changes: { base: null, why: changes?.why || 'no base was resolved' } }
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'data_facts'").get()) return out // an index built before the data model
   const root = new Map(repos.map((r) => [r.name, r.root]))
   const shown = (repo, p) => { const r = root.get(repo); return r && r !== '.' ? (p === '.' ? r : `${r}/${p}`) : p }
   const fileId = new Map(files.map((f) => [`${f.repo}\0${f.path}`, f.id]))
   const model = reconcile(db.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+  let diff = null
+  if (changes?.base) {
+    const compared = new Set(changes.base.repos.map((r) => r.name))
+    const d = diffModels(changes.at.model, { stores: model.stores.filter((s) => compared.has(s.repo)) })
+    diff = new Map(d.stores.map((s) => [s.id, s]))
+    out.changes = { base: { ref: refName(changes.base.ref), text: baseText(changes.base) }, n: d.counts, removed: [], skipped: changes.base.skipped,
+      failed: changes.at.failed.map((f) => ({ extractor: f.extractor, at: shown(f.repo, f.key), error: f.error })) }
+  }
   for (const st of model.stores) {
     const n = st.entities.length ? out.stores.length : -1
-    if (n >= 0) out.stores.push(packStore(st, shown, fileId))
+    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null))
     for (const d of st.declarations) {
       if (n >= 0 && d.status !== 'not-read') continue
       const reason = d.status === 'not-read' ? d.label : d.stopped ? `replayed to ${shown(st.repo, d.stopped.path)}:${d.stopped.line}: ${d.error}` : `${d.label}: no table`
       out.unread.push({ store: st.id, n, dialect: d.dialect ?? st.dialect ?? null, reason, files: d.files ?? null, at: shown(st.repo, d.path), file: fileId.get(`${st.repo}\0${d.path}`) ?? -1 })
     }
   }
+  const drawn = new Set(out.stores.map((s) => s.id))
+  for (const [id, sd] of diff || []) {
+    const gone = sd.changes.filter((c) => c.kind === 'entity' && c.change === 'removed')
+    if (!drawn.has(id) && gone.length) out.changes.removed.push({ id, dialect: sd.dialect, why: sd.change === 'removed' ? 'absent from the branch' : 'no table read in the branch', tables: gone.map((c) => [c.name, shown(sd.repo, c.before.sources[0]?.path ?? sd.name), c.before.sources[0]?.line ?? null]) })
+  }
   out.failed = db.prepare('SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL ORDER BY repo, key').all()
     .map((f) => ({ repo: f.repo, extractor: f.extractor, at: shown(f.repo, f.key), file: fileId.get(`${f.repo}\0${f.key}`) ?? -1, error: f.error }))
   return out
 }
-function packStore(st, shown, fileId) {
+
+// The base the overlay compares against, and its model: { base, at }, or { why } when there is none.
+// A base given that does not resolve throws (the caller asked for it); a failure reading it is a why.
+async function baseFor(project, explicit) {
+  const base = resolveBase(project, { explicit })
+  if (base.error) { if (explicit) throw new Error(base.error); return { why: base.error } }
+  try { return { base, at: await modelAt(project, base) } } catch (e) { if (explicit) throw e; return { why: `the base could not be read: ${e.message}` } }
+}
+
+// A store's entities packed as the page draws them. src(sources) and cf(conflicts) pack what each
+// element cites; bsrc, when given, packs its sources as the base's instead.
+// SQLite resolves table and column names in any letter case, and keeps a foreign key's as written
+// (`REFERENCES Authors(ID)` for `authors.id`): each is resolved here, once, to the name the store
+// declares, so the layout and the page match names exactly. One that names nothing stays as written.
+function packer(entities, src, cf, bsrc = null) {
+  const lower = (s) => String(s).toLowerCase()
+  const byName = new Map(), byLower = new Map()
+  for (const e of entities) { byName.set(e.name, e); if (!byLower.has(lower(e.name))) byLower.set(lower(e.name), e) }
+  const entity = (name) => byName.get(name) || byLower.get(lower(name)) || null
+  const column = (e, c) => { if (!e || c === null || c === undefined) return c; const f = e.fields.find((x) => x.name === c) || e.fields.find((x) => lower(x.name) === lower(c)); return f ? f.name : c }
+  const cite = (x) => ({ src: src(x.sources), cf: cf(x.conflicts), ...(bsrc ? { bsrc: bsrc(x.sources) } : {}) })
+  return (e) => {
+    const rels = e.relations.map((r) => { const to = entity(r.to); return { r, columns: r.columns.map((c) => column(e, c)), to: to ? to.name : r.to, toColumns: r.toColumns.map((c) => column(to, c)) } })
+    const keys = e.keys.map((k) => ({ k, parts: k.parts.map((c) => column(e, c)) }))
+    const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
+    return {
+      name: e.name, kind: e.kind, ...cite(e),
+      fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, ...cite(f) })),
+      keys: keys.map(({ k, parts }) => ({ role: k.role, parts, ...cite(k) })),
+      indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, ...cite(x) })),
+      rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, ...cite(r) })),
+    }
+  }
+}
+function packStore(st, shown, fileId, sd = null) {
   const paths = [], at = new Map()
   const P = (p, kind = null) => {
     if (!at.has(p)) { at.set(p, paths.length); paths.push([shown(st.repo, p), fileId.get(`${st.repo}\0${p}`) ?? -1, kind]) } else if (kind && !paths[at.get(p)][2]) paths[at.get(p)][2] = kind
@@ -142,32 +206,56 @@ function packStore(st, shown, fileId) {
   }
   const src = (list) => list.map((s) => [P(s.path, s.kind), s.line ?? null])
   const cf = (list) => list.map((c) => ({ attr: c.attr, values: c.values.map((v) => ({ value: v.value, src: src(v.sources) })) }))
-  // SQLite resolves table and column names in any letter case, and keeps a foreign key's as written
-  // (`REFERENCES Authors(ID)` for `authors.id`): each is resolved here, once, to the name the store
-  // declares, so the layout and the page match names exactly. One that names nothing stays as written.
-  const lower = (s) => String(s).toLowerCase()
-  const byName = new Map(), byLower = new Map()
-  for (const e of st.entities) { byName.set(e.name, e); if (!byLower.has(lower(e.name))) byLower.set(lower(e.name), e) }
-  const entity = (name) => byName.get(name) || byLower.get(lower(name)) || null
-  const column = (e, c) => { if (!e || c === null || c === undefined) return c; const f = e.fields.find((x) => x.name === c) || e.fields.find((x) => lower(x.name) === lower(c)); return f ? f.name : c }
-  const tables = st.entities.map((e) => {
-    const rels = e.relations.map((r) => { const to = entity(r.to); return { r, columns: r.columns.map((c) => column(e, c)), to: to ? to.name : r.to, toColumns: r.toColumns.map((c) => column(to, c)) } })
-    const keys = e.keys.map((k) => ({ k, parts: k.parts.map((c) => column(e, c)) }))
-    const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
-    return {
-      name: e.name, kind: e.kind, src: src(e.sources), cf: cf(e.conflicts),
-      fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, src: src(f.sources), cf: cf(f.conflicts) })),
-      keys: keys.map(({ k, parts }) => ({ role: k.role, parts, src: src(k.sources), cf: cf(k.conflicts) })),
-      indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, src: src(x.sources), cf: cf(x.conflicts) })),
-      rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, src: src(r.sources), cf: cf(r.conflicts) })),
-    }
-  })
+  const tables = st.entities.map(packer(st.entities, src, cf))
   const f = st.dialectFrom, collapsed = tables.length > DATA_COLLAPSE
   return {
     id: st.id, repo: st.repo, name: st.name, dialect: st.dialect, summary: storeSummary(st),
     how: f ? { how: f.how, marker: f.marker ?? null, at: f.path ? [P(f.path), f.line ?? null] : null } : null,
     decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: [P(d.path, d.kind), null], stopped: d.stopped ? [P(d.stopped.path, d.kind), d.stopped.line] : null, error: d.error, notes: d.notes })),
     paths, tables, collapsed, layout: layoutErd(tables, { collapsed }),
+    ...(sd ? { ch: packChanges(sd, tables, collapsed, shown) } : {}),
+  }
+}
+
+// One store's overlay (see dataData). The marks sit on copies: the ERD's own tables stay as they are.
+const LIST = { field: 'fields', key: 'keys', index: 'indexes', relation: 'rels' }
+function packChanges(sd, tables, collapsed, shown) {
+  const bpaths = [], bat = new Map()
+  const bsrc = (list) => list.map((s) => { if (!bat.has(s.path)) { bat.set(s.path, bpaths.length); bpaths.push(shown(sd.repo, s.path)) } return [bat.get(s.path), s.line ?? null] })
+  const packBase = sd.before ? packer(sd.before.entities, () => [], () => [], bsrc) : null
+  const based = new Map() // base entity index → its packed table, citing the base
+  const base = (i) => { if (!based.has(i)) based.set(i, packBase(sd.before.entities[i])); return based.get(i) }
+  const marked = new Map() // table index → its marked copy, with the base's removed elements aside
+  const mark = (i) => {
+    if (!marked.has(i)) { const t = tables[i]; marked.set(i, { ...t, ch: 'modified', fields: t.fields.map((x) => ({ ...x })), keys: t.keys.map((x) => ({ ...x })), indexes: t.indexes.map((x) => ({ ...x })), rels: t.rels.map((x) => ({ ...x })), gone: { fields: [], keys: [], indexes: [], rels: [] } }) }
+    return marked.get(i)
+  }
+  const was = (c) => c.attrs.map((a) => `${a.attr === 'onDelete' ? 'on delete' : a.attr === 'onUpdate' ? 'on update' : a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`)
+  const ghosts = []
+  for (const c of sd.changes) {
+    const ren = c.rename ?? null
+    if (c.kind === 'entity') {
+      if (c.change === 'removed') ghosts.push({ ...base(c.pos.before), ch: 'removed', ren })
+      else Object.assign(mark(c.pos.after), { ch: c.change, ren, ...(c.change === 'modified' ? { was: was(c), bsrc: base(c.pos.before).bsrc } : {}) })
+      continue
+    }
+    const t = mark(c.owner.after), L = LIST[c.kind]
+    if (c.change === 'removed') t.gone[L].push([c.pos.before, { ...base(c.owner.before)[L][c.pos.before], ch: 'removed', ren }])
+    else Object.assign(t[L][c.pos.after], { ch: c.change, ren, ...(c.change === 'modified' ? { was: was(c), bsrc: base(c.owner.before)[L][c.pos.before].bsrc } : {}) })
+  }
+  const list = tables.map((t, i) => {
+    if (!marked.has(i)) return i
+    const { gone, ...m } = marked.get(i)
+    for (const L of Object.values(LIST)) for (const [p, x] of gone[L].sort((a, b) => a[0] - b[0])) m[L].splice(Math.min(p, m[L].length), 0, x) // where it stood in the base
+    return m
+  })
+  const drawn = [...list.map((t) => (typeof t === 'number' ? tables[t] : t)), ...ghosts]
+  const n = (k) => sd.changes.filter((c) => c.change === k).length
+  return {
+    store: sd.change, n: { added: n('added'), removed: n('removed'), modified: n('modified'), renames: sd.renames.length },
+    attrs: sd.attrs.map((a) => `${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`),
+    renames: sd.renames.map((r) => ({ kind: r.kind, ambiguous: r.ambiguous, text: renameText(sd, r) })),
+    bpaths, tables: [...list, ...ghosts], layout: layoutErd(drawn, { collapsed }),
   }
 }
 
@@ -215,7 +303,7 @@ export function mapData(files, nodes, edges) {
 // ── pure helpers: exported for the tests, injected into the page as they are ──
 export const INITIAL = { tab: 'overview', repo: '', q: '', tests: false, guesses: false, mapMode: 'modules', module: null,
   arch: 0, archSel: null, archTrace: null, archTo: null, archGhosts: false, archZoom: null, archScroll: null, sysZoom: null, full: null, doc: null, docMode: 'read', docAnchor: null, focusEditor: false, editorCaret: null,
-  data: 0, dataSel: null, dataAll: false, dataZoom: null, dataScroll: null }
+  data: 0, dataSel: null, dataAll: false, dataZoom: null, dataScroll: null, dataChanges: false }
 export const LANE_MAX = 14 // modules drawn per lane on the system map, the largest
 export const MAXCOL = 12 // items per column of a neighbourhood
 
@@ -404,6 +492,18 @@ svg.erd .tbl:hover .tframe,svg.erd [tabindex]:focus-visible .tframe{stroke:var(-
 svg.erd .tbl.sel .tframe{stroke:var(--accent);stroke-width:2.4}svg.erd .tbl.sel .thead{fill:var(--accent-soft)}svg.erd .tbl.on .tframe{stroke:var(--accent);stroke-width:1.6}
 svg.erd .tbl.hit .tframe{stroke:var(--accent);stroke-width:2}svg.erd .dim{opacity:.22}svg.erd.q .tbl:not(.hit){opacity:.3}svg.erd.q .fk{opacity:.3}
 @media (prefers-reduced-motion:reduce){svg.erd .fk.on{animation:none}svg.erd .tbl,svg.erd .fk{transition:none}}
+svg.erd .tbl.add .tframe{stroke:var(--ok);stroke-width:2.2}svg.erd .tbl.add .thead{fill:color-mix(in srgb,var(--ok) 12%,var(--panel))}svg.erd .tbl.mod .tframe{stroke:var(--warn);stroke-width:1.8}
+svg.erd .tbl.del{opacity:.8}svg.erd .tbl.del .tframe{fill:color-mix(in srgb,var(--err) 4%,var(--panel));stroke:var(--err);stroke-width:1.6;stroke-dasharray:6 4}svg.erd .tbl.del .thead{fill:color-mix(in srgb,var(--err) 9%,var(--panel))}svg.erd .tbl.del .tname,svg.erd .tbl.del .tglyph{fill:var(--err);stroke:var(--err)}svg.erd .tbl.del .tglyph{fill:none}
+svg.erd .row.add .rowbg{fill:color-mix(in srgb,var(--ok) 13%,transparent)}svg.erd .row.del .rowbg{fill:color-mix(in srgb,var(--err) 10%,transparent)}svg.erd .row.mod .rowbg{fill:color-mix(in srgb,var(--warn) 13%,transparent)}
+svg.erd .row.del .cname,svg.erd .row.del .ctype,svg.erd .xr.del .xrow{fill:var(--err)}svg.erd .xr.add .xrow{fill:var(--ok)}svg.erd .xr.mod .xrow{fill:var(--warn)}
+svg.erd .chbar.add{fill:var(--ok)}svg.erd .chbar.del{fill:var(--err)}svg.erd .chbar.mod{fill:var(--warn)}svg.erd .strike{stroke:var(--err);stroke-width:1.4}
+svg.erd .chgbg{fill:color-mix(in srgb,var(--warn) 9%,var(--panel));stroke:color-mix(in srgb,var(--warn) 45%,transparent)}svg.erd .chgt{font-size:10.5px;fill:var(--warn)}
+svg.erd .fk.add{stroke:var(--ok);stroke-width:2}svg.erd .fk.del{stroke:var(--err);stroke-dasharray:5 4}svg.erd .fk.mod{stroke:var(--warn);stroke-width:2}
+svg.erd .ren{fill:none;stroke:var(--accent);stroke-width:1.7;stroke-dasharray:2 4;stroke-linecap:round}svg.erd .ren.tren{stroke-width:2}
+.pill.add{color:var(--ok);border-color:currentColor}.pill.del{color:var(--err);border-color:currentColor}.pill.mod{color:var(--warn);border-color:currentColor}.struck{text-decoration:line-through;color:var(--err)}
+.chlegend .chsw{display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:2px}.chsw.add{background:var(--ok)}.chsw.del{background:var(--err)}.chsw.mod{background:var(--warn)}.chsw.ren{height:0;border-radius:0;border-top:2px dashed var(--accent)}.chlegend s{color:var(--err)}
+.dstore .dchg{font:600 11.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--warn)}ul.renames{margin:0 0 10px;font-size:13px;color:var(--accent)}
+ul.dlist li.ch-add{box-shadow:inset 3px 0 0 var(--ok);padding-left:8px}ul.dlist li.ch-del{box-shadow:inset 3px 0 0 var(--err);padding-left:8px}ul.dlist li.ch-mod{box-shadow:inset 3px 0 0 var(--warn);padding-left:8px}ul.dlist li.ch-ren{color:var(--accent)}.chgline{color:var(--warn)}
 .arch-cards{grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:14px}.acard{--c:var(--t-external)}.acard.c-cyan{--c:var(--t-cloud)}.acard.c-emerald{--c:var(--t-database)}.acard.c-violet{--c:var(--t-backend)}.acard.c-amber{--c:var(--t-messagebus)}.acard.c-rose{--c:var(--t-security)}.acard.c-orange{--c:var(--t-cli)}
 .acard-title{font-weight:600;display:flex;gap:8px;align-items:center}.acard-title i{width:9px;height:9px;border-radius:50%;background:var(--c)}.acard ul{margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted)}
 .callout{border:1px solid color-mix(in srgb,var(--c,var(--accent)) 35%,var(--line));background:color-mix(in srgb,var(--c,var(--accent)) 7%,var(--panel));border-radius:10px;padding:8px 14px;margin:.8em 0}
