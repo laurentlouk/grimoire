@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.26.1 — the `/grimoire:logs` test no longer ages out
+
+`scripts/render-logs.test.mjs` pinned its run-closing fixture to 2026-11-04 12:00 UTC, while the `summary` command it spawns reads the real clock. Twelve hours later, the fixture's "live" run read as stale and the outcome line failed, on `main` and on every pull request. The fixture is now anchored on the real clock, like the file's other fixtures. Test-only: nothing changes for a project.
+
 ## 0.26.0 — the stuck watch acts, under `loopGuard: "on"` (token economy slice 5, #51)
 
 The stuck watch (0.22.0, 0.23.0) can now tell a looping agent, once `economy.loopGuard` is `"on"`. The default stays `"shadow"`, which records what it would do and sends nothing. Spike S1 confirmed that a `PostToolUse` hook's `additionalContext` reaches the subagent's own context, not its parent's. The same answer to a `PostToolUseFailure` was not part of the spike: if the client ignores it there, that call's redirect is lost, and the next verdict comes on a later call.
