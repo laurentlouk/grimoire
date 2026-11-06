@@ -50,7 +50,7 @@ export const KEY = {
   index: (i, f) => f(i.name),
   relation: (r, f) => `(${r.columns.map(f).join(',')})->${f(r.to)}(${r.toColumns.map(f).join(',')})`,
 }
-const NAME = {
+export const NAME = {
   entity: (e) => e.name,
   field: (x) => x.name,
   key: (k) => `${k.role} (${k.parts.join(', ')})`,

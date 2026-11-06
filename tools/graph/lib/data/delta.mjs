@@ -31,10 +31,14 @@
 //   a foreign key { onDelete?, onUpdate? }                      a key: nothing (its target is its shape)
 //   a rename      { name }: the new name (a table, a column or an index; a key has none)
 // `add` describes the whole element: what it states is compared (an index's unique and partial are
-// false unless stated; a table's columns as a set, so a column built and not planned is a
-// difference). `change` states only what changes: a column's or an index's attributes, a table's
-// kind, a foreign key's actions. `remove` has no `after`. `before` is optional: the element as the
-// design saw it, which decides pending from built differently when no base resolves.
+// false unless stated; a table's columns, keys, indexes and foreign keys each as a set: one planned
+// and not built, or built in another shape, is a difference). What the branch builds on a table it
+// adds and the change does not state (a column beyond `fields`, a key, an index, a foreign key) is
+// unplanned, a change of its own like the branch's others outside the delta (spec D4: never a
+// failure, always reported), unless another change of the delta covers it. `change` states only
+// what changes: a column's or an index's attributes, a table's kind, a foreign key's actions.
+// `remove` has no `after`. `before` is optional: the element as the design saw it, which decides
+// pending from built differently when no base resolves.
 //
 // The hash of a change: the first 16 hex digits of the SHA-256 of its canonical JSON (object keys
 // sorted at every level), without `ack` and without `slice`: editing what changes or why invalidates
@@ -47,10 +51,16 @@
 //   built-differently  the target is there in another shape (`diffs`, planned → built), or the branch
 //                      touched it another way (a change whose target it removed)
 //   the acknowledgement, apart: acked (its hash is the change's), stale (edited since), or none
-//   unplanned          a change of the branch against its base (diff.mjs) that no change covers
+//   unplanned          a change of the branch against its base (diff.mjs) that no change covers,
+//                      and what the branch built on a table the delta adds beyond what its `add`
+//                      states (a table added whole is one change in the diff: its parts are listed
+//                      here one by one, as the diff lists the parts of a table it modifies)
+//
+// The loop's ship step appends the unplanned changes implementers kept (appendChanges), with
+// origin `unplanned` and the implementer's reason as `why`, never acknowledged: the user does that.
 import { createHash } from 'node:crypto'
 import { normType, normDefault } from './model.mjs'
-import { KEY, foldOf } from './diff.mjs'
+import { KEY, NAME, foldOf } from './diff.mjs'
 
 export const OPS = ['add', 'change', 'remove', 'rename']
 export const ORIGINS = ['planned', 'unplanned']
@@ -218,7 +228,8 @@ const fieldText = (f) => `${typeOf(f)}, ${f.nullable ? 'nullable' : 'not null'}$
 const lower = (v) => (v === null || v === undefined ? v : String(v).trim().toLowerCase())
 
 // What differs between what `after` states and an element of the model: [{ attr, planned, built, text }].
-// `whole`: an addition (the whole element), else a change (only what it states).
+// `whole`: an addition (the whole element), else a change (only what it states). A table's parts
+// built and not stated are not differences: they are unplanned (extrasOf).
 function shapeDiffs(kind, after, el, fold, whole, pre = '') {
   const out = []
   if (kind === 'field') {
@@ -233,25 +244,28 @@ function shapeDiffs(kind, after, el, fold, whole, pre = '') {
     for (const [a, w] of [['onDelete', 'on delete'], ['onUpdate', 'on update']]) if (a in after && lower(after[a]) !== lower(el[a])) out.push(d(`${pre}${w}`, after[a], el[a]))
   } else if (kind === 'entity') {
     if (('kind' in after || whole) && (after.kind || 'table') !== el.kind) out.push(d('kind', after.kind || 'table', el.kind))
-    if (after.fields) {
-      const planned = new Map(after.fields.map((f) => [fold(f.name), f]))
-      for (const f of after.fields) {
-        const b = el.fields.find((x) => fold(x.name) === fold(f.name))
-        if (!b) out.push(d(`column ${f.name}`, fieldText(f), 'absent'))
-        else out.push(...shapeDiffs('field', f, b, fold, true, `column ${f.name} `))
-      }
-      for (const b of el.fields) if (!planned.has(fold(b.name))) out.push(d(`column ${b.name}`, 'absent', fieldText(b)))
+    for (const f of after.fields || []) {
+      const b = el.fields.find((x) => fold(x.name) === fold(f.name))
+      if (!b) out.push(d(`column ${f.name}`, fieldText(f), 'absent'))
+      else out.push(...shapeDiffs('field', f, b, fold, true, `column ${f.name} `))
     }
     for (const [k, list, label] of [['key', 'keys', (x) => `${x.role} key (${x.parts.join(', ')})`], ['index', 'indexes', (x) => `index ${x.name}`], ['relation', 'relations', (x) => `foreign key (${x.columns.join(', ')}) → ${x.to}`]]) {
-      if (!after[list]) continue
       const id = (x) => KEY[k](x, fold), built = new Map(el[list].map((x) => [id(x), x]))
-      for (const p of after[list]) {
+      for (const p of after[list] || []) {
         const b = built.get(id(p))
         if (!b) out.push(d(label(p), 'planned', 'absent'))
-        else { out.push(...shapeDiffs(k, (({ name, columns, to, toColumns, role, parts, ...x }) => (k === 'index' ? { columns, ...x } : x))(p), b, fold, true, `${label(p)} `)); built.delete(id(p)) }
+        else out.push(...shapeDiffs(k, (({ name, columns, to, toColumns, role, parts, ...x }) => (k === 'index' ? { columns, ...x } : x))(p), b, fold, true, `${label(p)} `))
       }
-      for (const b of built.values()) out.push(d(label(b), 'absent', 'built'))
     }
+  }
+  return out
+}
+// The parts of a built table its `add` does not state: [{ kind, el, pos }] (pos: its index in its list).
+export function extrasOf(after, el, fold) {
+  const out = []
+  for (const [kind, list] of Object.entries(LIST)) {
+    const stated = new Set((after?.[list] || []).map((x) => KEY[kind](x, fold)))
+    el[list].forEach((x, pos) => { if (!stated.has(KEY[kind](x, fold))) out.push({ kind, el: x, pos }) })
   }
   return out
 }
@@ -263,7 +277,8 @@ function shapeDiffs(kind, after, el, fold, whole, pre = '') {
 //                [{ attr, planned, built, text }] (built differently: planned → built), proposed: same
 //                shape (pending: now → planned), warn, st, e, el: the store, entity and element as
 //                drawn (a rename's new one once built), touched: the branch changed it }
-//   Unplanned  { st: the diff's store, c: its change, target }
+//   Unplanned  { st: the diff's store, c: its change, target, on?: the id of the change that adds its
+//                table, when it is a part built on that table beyond what the change states }
 export function deltaStates(delta, model, { base = null, diff = null } = {}) {
   const touched = new Set()
   const key = (storeId, kind, entity, k, fold) => `${storeId}\0${kind}\0${fold(entity)}\0${k}`
@@ -309,7 +324,18 @@ export function deltaStates(delta, model, { base = null, diff = null } = {}) {
   const unplanned = []
   for (const sd of diff?.stores || []) {
     const fold = foldOf(sd.dialect)
-    for (const c of sd.changes) if (!covered.has(key(sd.id, c.kind, c.entity, c.key, fold))) unplanned.push({ st: sd, c, target: targetOf(sd.id, c.entity, c.kind, c.after || c.before) })
+    for (const c of sd.changes) {
+      if (!covered.has(key(sd.id, c.kind, c.entity, c.key, fold))) { unplanned.push({ st: sd, c, target: targetOf(sd.id, c.entity, c.kind, c.after || c.before) }); continue }
+      // a table the branch adds and a change of the delta adds: what it built there beyond that change
+      const r = c.kind === 'entity' && c.change === 'added' ? changes.find((x) => x.change.op === 'add' && x.t.kind === 'entity' && x.el && x.st?.id === sd.id && fold(x.el.name) === fold(c.after.name)) : null
+      if (!r) continue
+      for (const x of extrasOf(r.change.after, c.after, fold)) {
+        const k = KEY[x.kind](x.el, fold)
+        if (covered.has(key(sd.id, x.kind, c.entity, k, fold))) continue
+        const part = { kind: x.kind, change: 'added', entity: c.entity, name: NAME[x.kind](x.el), key: k, pos: { before: null, after: x.pos }, owner: { before: null, after: c.pos.after }, before: null, after: x.el, attrs: [], rename: null }
+        unplanned.push({ st: sd, c: part, target: targetOf(sd.id, c.entity, x.kind, x.el), on: r.id })
+      }
+    }
   }
   const n = (f) => changes.filter(f).length
   return { changes, unplanned, counts: { changes: changes.length, 'planned-built': n((r) => r.state === 'planned-built'), pending: n((r) => r.state === 'pending'), 'built-differently': n((r) => r.state === 'built-differently'), acked: n((r) => r.ack === 'acked'), stale: n((r) => r.ack === 'stale'), unacked: n((r) => !r.ack), unplanned: unplanned.length } }
@@ -354,6 +380,60 @@ export function setAcks(text, edits) {
   } catch {}
   return (JSON.stringify(doc, null, unit) + (/\r?\n$/.test(text) ? '\n' : '')).split('\n').join(nl)
 }
+
+// ── appending: the unplanned changes an implementer kept (the loop's ship step, spec D4) ──
+// appendChanges(text, entries) → { text, added: [id], already: [id], refused: [{ id, errors }], errors }
+//   entries: changes { id, op, target, before?, after?, why, slice?, origin: 'unplanned' }, never
+//   acknowledged (the user does that). One whose id the file holds already is left out (a ship sent
+//   again writes nothing twice); one that would not validate is refused with its problems, and the
+//   others still go in. `errors`: the file itself does not validate (nothing is written, text null).
+//   `text` is the file with the added changes after its last one, every other byte kept: one per line
+//   when its changes are written on one line each, else spread in its own indentation. A layout the
+//   edit cannot handle is written whole, after the same check (setAcks' fallback).
+export function appendChanges(text, entries) {
+  const { errors } = parseDelta(text)
+  if (errors.length) return { text: null, added: [], already: [], refused: [], errors }
+  const doc = JSON.parse(text)
+  const have = new Set(doc.data.map((c) => c.id))
+  const added = [], already = [], refused = []
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (!isObj(e) || !str(e.id)) { refused.push({ id: isObj(e) && typeof e.id === 'string' ? e.id : null, errors: ['id: a non-empty string, unique in the file'] }); continue }
+    if (have.has(e.id)) { already.push(e.id); continue }
+    const errs = e.origin !== 'unplanned' ? [`origin ${q(e.origin)}: only an unplanned change is appended`] : e.ack !== undefined ? ['ack: an appended change is not acknowledged yet'] : changeErrors(e)
+    if (errs.length) { refused.push({ id: e.id, errors: errs }); continue }
+    have.add(e.id)
+    added.push(e)
+  }
+  if (!added.length) return { text, added: [], already, refused, errors: [] }
+  const want = { ...doc, data: [...doc.data, ...added] }
+  const nl = text.includes('\r\n') ? '\r\n' : '\n'
+  const unit = (/\n([ \t]+)"/.exec(text) || [, '  '])[1]
+  const lineInd = (at) => /^[ \t]*/.exec(text.slice(text.lastIndexOf('\n', at - 1) + 1, at))[0]
+  const spread = (x, ind) => JSON.stringify(x, null, unit).split('\n').join(nl + ind)
+  const flat = (x) => JSON.stringify(x, null, 1).replace(/\n\s*/g, ' ')
+  try {
+    const root = spans(text)
+    const data = [...root.members].reverse().find((m) => m.key === 'data')
+    const node = data.node, items = node.items
+    let out
+    if (items.length) {
+      const last = items[items.length - 1]
+      const own = /^[ \t]*$/.test(text.slice(text.lastIndexOf('\n', last.start - 1) + 1, last.start)) // the last change starts its line
+      const multi = text.slice(node.start, node.end).includes('\n') && own
+      const ind = multi ? lineInd(last.start) : ''
+      const one = !text.slice(last.start, last.end).includes('\n')
+      const put = added.map((x) => (multi ? `,${nl}${ind}${one ? flat(x) : spread(x, ind)}` : `, ${flat(x)}`)).join('')
+      out = text.slice(0, last.end) + put + text.slice(last.end)
+    } else {
+      const ind = lineInd(data.kstart)
+      out = `${text.slice(0, node.start)}[${nl}${added.map((x) => `${ind}${unit}${spread(x, ind + unit)}`).join(`,${nl}`)}${nl}${ind}]${text.slice(node.end)}`
+    }
+    if (JSON.stringify(JSON.parse(out)) === JSON.stringify(want)) return { text: out, added: added.map((x) => x.id), already, refused, errors: [] }
+  } catch {}
+  const whole = (JSON.stringify(want, null, unit) + (/\r?\n$/.test(text) ? '\n' : '')).split('\n').join(nl)
+  return { text: whole, added: added.map((x) => x.id), already, refused, errors: [] }
+}
+
 // Where each value of a JSON text starts and ends (the text is valid JSON: JSON.parse read it).
 //   → { start, end, members?: [{ key, kstart, node }], items?: [node] }
 function spans(text) {
