@@ -22,18 +22,26 @@
 //      found but not read, a 200-table store collapsed and searchable, the CSP; then the change
 //      overlay against a git base: off by default, added / removed / modified / renamed, its legend,
 //      absent without a base, escaping
+//  10. proposals (data/delta.mjs): the delta file's validation, the hash of a change, the target
+//      grammar against the diff's identity, each computed state on hand-built models, the unplanned
+//      changes, acknowledgements edited into the file in place
+//  11. the Data tab draws a delta over the model against a git base: each state's marks, the legend,
+//      the lists and passports (why, slice, acknowledgement), the picker, escaping; read-only when
+//      static, acknowledging through the server when served
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
 //  without it, except under CI, where a missing runtime fails.
-//  10. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
+//  12. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
 //      undeclared dialect and one stated in grimoire.config.json → graph_data and graph.mjs data
-//  11. the Data tab of that project: its stores, ERD and links to the indexed migration files
-//  12. incremental: a hand-edited migration (a conflict, badged in the Data tab), a rejected
+//  13. the Data tab of that project: its stores, ERD and links to the indexed migration files
+//  14. incremental: a hand-edited migration (a conflict, badged in the Data tab), a rejected
 //      statement, a deleted migration, a snapshot that no longer parses (reported by graph_status,
 //      the index goes on)
-//  13. a branch against its base (two commits): a column added, an index dropped, a table renamed →
+//  15. a branch against its base (two commits): a column added, an index dropped, a table renamed →
 //      graph_changes and graph.mjs changes; a ref that does not resolve; a base without the folder
+//  16. that branch against a design's delta: graph_changes --delta (each change's state, the
+//      unplanned, the summary), graph.mjs changes and render --delta
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync } from 'node:fs'
@@ -1060,8 +1068,8 @@ async function indexed() {
   const edit = (rel, fn) => { const f = path.join(PROJ, rel); writeFileSync(f, fn(readFileSync(f, 'utf8'))); const t = new Date(Date.now() + ++tick * 2000); utimesSync(f, t, t) }
   const cli = (...a) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), ...a, '--root', PROJ], { encoding: 'utf8' }).stdout
   try {
-    // ── 10 · the stores ──
-    console.log('\n10 · a project of four repositories (fixtures/data)')
+    // ── 12 · the stores ──
+    console.log('\n12 · a project of four repositories (fixtures/data)')
     const idx = await q('index')
     ok(/mobile: 7 files/.test(idx) && !idx.includes('failure'), 'index: every repository, no extractor failure')
     const list = await q('data')
@@ -1109,8 +1117,8 @@ async function indexed() {
     const streaks = await q('data', { entity: 'streaks' })
     ok(streaks.includes('  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9') && streaks.endsWith('Conflicts: none'), `Drizzle's timestamp idiom, DEFAULT (unixepoch()): replay and snapshot agree, the default shown as written${streaks.endsWith('Conflicts: none') ? '' : `\n${streaks}`}`)
 
-    // ── 11 · the Data tab ──
-    console.log('\n11 · the Data tab of that project')
+    // ── 13 · the Data tab ──
+    console.log('\n13 · the Data tab of that project')
     const { renderGraph } = await import('../lib/render.mjs')
     const { loadProject } = await import('../lib/project.mjs')
     const page = await renderGraph(loadProject(PROJ))
@@ -1135,8 +1143,8 @@ async function indexed() {
     ok(!!pg.find((n) => n.tagName === 'A' && n.attrs.href === `#file-${init}` && n.kids[0] === 'mobile/drizzle/0000_init.sql:8') && !!pg.find((n) => n.tagName === 'CODE' && n.kids[0] === 'mobile/drizzle/meta/0005_snapshot.json:42'),
       "a column's sources: the migration line links to its file in the Files tab, the snapshot (not an indexed file) is cited as path:line")
 
-    // ── 12 · incremental ──
-    console.log('\n12 · incremental refresh')
+    // ── 14 · incremental ──
+    console.log('\n14 · incremental refresh')
     edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` integer,', '`published_at` text,'))
     await q('index')
     has(await q('data', { entity: 'books' }), 'Conflicts (1): the declarations disagree; each side is kept\n  books.published_at  type: integer — mobile/drizzle/meta/0005_snapshot.json:63 [artifact] | text — mobile/drizzle/0000_init.sql:11 [migration]', 'a hand-edited migration disagreeing with the snapshot: a conflict carrying both sources')
@@ -1165,8 +1173,8 @@ async function indexed() {
     has(cli('data', 'list', 'web:db/legacy'), '  sessions  table  3 fields · primary (id) · foreign keys → accounts  web/db/legacy/0002_sessions.sql:1', 'graph.mjs data list <store>')
     has(cli('data', 'show', 'Loan'), 'api:prisma/migrations/Loan  table  (sqlite)\n  declared at api/prisma/migrations/20240212143000_loan_notes/migration.sql:3 [migration sql-migrations@1]', 'graph.mjs data show <entity>')
 
-    // ── 13 · a branch against its base ──
-    console.log('\n13 · a branch against its base (graph_changes), on a copy with two commits')
+    // ── 15 · a branch against its base ──
+    console.log('\n15 · a branch against its base (graph_changes), on a copy with two commits')
     const BR = path.join(SANDBOX, 'branch')
     const fixture = (keep) => cpSync(path.join(HERE, 'fixtures', 'data'), BR, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') && keep(path.relative(path.join(HERE, 'fixtures', 'data'), src)) })
     fixture((rel) => !rel.startsWith(path.join('kiosk', 'storage')))
@@ -1213,8 +1221,8 @@ async function indexed() {
     const badRender = run('render', '--base', 'no-such-branch', '--out', outFile)
     ok(badRender.status === 1 && badRender.stderr.includes('does not resolve'), 'graph.mjs render with a base that does not resolve exits 1 and says why')
 
-    // ── the branch against a design's delta ──
-    console.log('\n15 · the branch against a design\'s delta (graph_changes --delta)')
+    // ── 16 · the branch against a design's delta ──
+    console.log('\n16 · the branch against a design\'s delta (graph_changes --delta, render --delta)')
     const plan = (id, op, target, extra) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
     const acked = (c, edit = {}) => ({ ...c, ...edit, ack: { by: 'Ann', at: '2026-11-06T10:00:00.000Z', hash: changeHash(c) } })
     const DELTA = { schema: 1, spec: 'docs/specs/2026-11-06-loans-design.md', data: [
@@ -1248,6 +1256,16 @@ async function indexed() {
     eq(await br('changes', { delta: 'docs/specs/broken.delta.json' }), 'Delta docs/specs/broken.delta.json does not validate (1 problem):\n  data[0] (returned-on): op "grow" is not one of add, change, remove, rename', 'a delta that does not validate: its problems, nothing computed')
     const gone = await call('graph_changes', { delta: 'docs/specs/none.delta.json' }, { root: BR }).then(() => 'answered', (e) => e.message)
     ok(/^the delta docs\/specs\/none\.delta\.json cannot be read \(ENOENT\)$/.test(gone), `a delta that is not there: a clear error (${gone})`)
+    // the page: the newest delta beside the specs first, or the one --delta names, read wherever it is
+    const pageWith = (...a) => { const x = run('render', ...a, '--out', outFile); return x.status === 0 ? dataOf(readFileSync(outFile, 'utf8')).data : x.stderr.trim() }
+    const P1 = pageWith()
+    eq([P1.deltas.map((d) => d.shown), P1.delta, P1.deltas[1].changes.map((c) => `${c.id} ${c.state}`), P1.deltas[1].unplanned.map((u) => u.target)], [['docs/specs/broken.delta.json', 'docs/specs/2026-11-06-loans.delta.json'], 0, ['returned-on built-differently', 'labels planned-built', 'returned-idx pending', 'bio planned-built'], ['api:prisma/migrations/Member/index:Member_email_key']],
+      'graph.mjs render: every delta beside the specs, the newest by name first; each change in the same state graph_changes gives, and the same unplanned change')
+    writeFileSync(path.join(SANDBOX, 'elsewhere.delta.json'), JSON.stringify(DELTA))
+    const P2 = pageWith('--delta', 'docs/specs/2026-11-06-loans.delta.json'), P3 = pageWith('--delta', path.join(SANDBOX, 'elsewhere.delta.json'))
+    eq([P2.delta, P2.deltas[P2.delta].shown, P3.delta, P3.deltas.length, P3.deltas[0].shown === path.join(SANDBOX, 'elsewhere.delta.json'), P3.deltas[0].ackable, P3.deltas[1].ackable], [1, 'docs/specs/2026-11-06-loans.delta.json', 0, 3, true, false, true],
+      'graph.mjs render --delta <file>: that delta shown first; one outside the specs is drawn too, never written (not ackable)')
+    ok(/graph render: the delta nowhere\.delta\.json cannot be read \(ENOENT\)/.test(pageWith('--delta', 'nowhere.delta.json')), 'graph.mjs render --delta with a file that cannot be read exits 1 and says why')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

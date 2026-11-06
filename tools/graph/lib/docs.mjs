@@ -10,7 +10,8 @@
 // repository of a hub. So a tracked symlink can neither carry a file into the page (a secret outside
 // the repository, .git/config or .env inside it) nor take a write to one, and a note symlinked to
 // another note is saved through to its real file, so the link stays. The server (serve.mjs) writes
-// through resolveDoc only.
+// through resolveDoc, and through resolveDelta for the one other file it writes: a design delta's
+// acknowledgements (docs/specs/<name>.delta.json, below).
 import { readFileSync, readdirSync, statSync, lstatSync, realpathSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'

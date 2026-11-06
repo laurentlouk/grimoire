@@ -6,15 +6,19 @@
 //             data [list [<store>] | show <entity>]: the data model (graph_data): the stores, one
 //             store's entities, or one entity with its sources and conflicts
 //             changes [--base <ref>] [--repo r]: the data model against a base (graph_changes):
-//             added, removed, modified, possible renames; the base read through git
-//             render [--out <file>] [--base <ref>]: refresh, then write the browsable HTML page
-//             (default <graph dir>/graph.html) and print its path; its Data tab's change overlay is
-//             against --base, else the default base (graph_changes'). Local only: never publish it.
+//             added, removed, modified, possible renames; the base read through git.
+//             --delta <file> (docs/specs/<date>-<topic>.delta.json): a design's changes, each with
+//             its state against the code, then the branch's changes outside them
+//             render [--out <file>] [--base <ref>] [--delta <file>]: refresh, then write the browsable
+//             HTML page (default <graph dir>/graph.html) and print its path; its Data tab's change
+//             overlay is against --base, else the default base (graph_changes'), and its delta
+//             overlay shows --delta first, else the newest beside the specs. Local only: never publish it.
 //             refresh: what the SubagentStop hook runs. Seeds a checkout from its base checkout's
 //             index (re-basing onto it when that saves parsing), then indexes incrementally; builds the first index only when grimoire.config.json
 //             has a `graph` block. Silent no-op when the graph is disabled or was never set up.
-//             serve [--port n]: the same page on http://127.0.0.1, with the Docs tab able to save
-//             notes; prints the address (it carries an access token) and runs until stopped.
+//             serve [--port n] [--delta <file>]: the same page on http://127.0.0.1, with the Docs tab
+//             able to save notes and the Data tab to acknowledge a delta's changes; prints the
+//             address (it carries an access token) and runs until stopped.
 //             architecture draft [--out <file>] [--title t] [--force]: write a diagram drafted from
 //             the graph (default <architectureDir>/system.architecture.json; never overwrites
 //             without --force). architecture check [<file>…]: check diagrams against the index
@@ -29,6 +33,7 @@ import { renderGraph } from './lib/render.mjs'
 import { serve } from './lib/serve.mjs'
 import { analyze, draftArch, loadIndex, readDiagrams, docRoots, SUFFIX } from './lib/arch.mjs'
 import { openStore } from './lib/store.mjs'
+import { readDelta } from './lib/docs.mjs'
 
 const argv = process.argv.slice(2)
 const cmd = argv.shift()
@@ -43,7 +48,7 @@ if (cmd === 'render') {
     if (r.error) console.error(`graph: refresh failed, rendering the previous index: ${r.error}`)
     const out = path.resolve(opt('out') || path.join(path.dirname(project.dbPath), 'graph.html'))
     mkdirSync(path.dirname(out), { recursive: true })
-    writeFileSync(out, await renderGraph(project, { base: opt('base') }))
+    writeFileSync(out, await renderGraph(project, { base: opt('base'), delta: opt('delta') }))
     console.log(out)
     process.exit(0)
   } catch (e) {
@@ -60,7 +65,8 @@ if (cmd === 'serve') {
     if (!existsSync(project.dbPath)) { console.error('graph: no index yet; build it first: node tools/graph/graph.mjs index'); process.exit(1) }
     const port = opt('port') === null ? 0 : Number(opt('port'))
     if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error(`graph serve: --port takes a number from 0 to 65535, not ${JSON.stringify(opt('port'))}`); process.exit(1) }
-    const s = await serve(project, { port, log: (m) => process.stderr.write(`graph serve: ${m}\n`) })
+    if (opt('delta')) readDelta(project, opt('delta')) // a delta that cannot be read stops it here, not on every load
+    const s = await serve(project, { port, delta: opt('delta'), log: (m) => process.stderr.write(`graph serve: ${m}\n`) })
     console.log(s.url)
     console.error('graph serve: local only (127.0.0.1); the address carries its access token. Ctrl-C stops it.')
     const stop = () => s.close().then(() => process.exit(0))
@@ -150,7 +156,7 @@ const tool = cmd && cmd !== 'serve' && cmd !== 'architecture' && TOOLS.find((t) 
 if (!tool) {
   console.log(`usage: graph <command> [value] [--key value]\n\n${TOOLS.map((t) => `  ${t.name.slice(6).padEnd(12)} ${t.description.split('. ')[0]}.`).join('\n')}
   ${'render'.padEnd(12)} Refresh, then write the browsable page and print its path.
-  ${'serve'.padEnd(12)} Serve the page on 127.0.0.1, with notes editable in its Docs tab.
+  ${'serve'.padEnd(12)} Serve the page on 127.0.0.1, with notes editable in its Docs tab and a delta's changes acknowledged in its Data tab.
   ${'architecture'.padEnd(12)} draft: write a diagram drafted from the graph · check: check diagrams against the index.`)
   process.exit(cmd ? 1 : 0)
 }
