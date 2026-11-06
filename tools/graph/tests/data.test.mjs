@@ -764,6 +764,175 @@ console.log('\n9 · the Data tab\'s change overlay, against a git base')
   } catch (e) { ok(false, `the change overlay renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
 }
 
+// ── 10 · proposals: the delta file and its states ──
+console.log('\n10 · proposals: the delta file, its targets and its computed states (delta.mjs)')
+const { parseDelta, parseTarget, targetOf, changeHash, deltaStates, findTarget, setAcks, changeText, STATE_TEXT } = await import('../lib/data/delta.mjs')
+{
+  const ch = (id, op, target, extra = {}) => ({ id, op, target, why: `why ${id}`, origin: 'planned', ...extra })
+  const errs = (doc) => parseDelta(JSON.stringify(doc)).errors
+  const ok1 = { schema: 1, spec: 'docs/specs/2026-11-06-x-design.md', data: [ch('a', 'add', 'app:db/books.isbn', { after: { type: 'TEXT', nullable: true } })], architecture: [] }
+  eq(errs(ok1), [], 'a well-formed delta validates')
+  eq(parseDelta('{ "schema": 1, ').errors.map((e) => e.slice(0, 9)), ['not JSON:'], 'a file that is not JSON says so')
+  eq(errs({ schema: 2, data: {}, extra: 1 }), ['unknown key "extra" (a delta has schema, spec, data, architecture)', 'schema 2 is not one this grimoire reads (schema 1)', 'spec: the design this delta belongs to (docs/specs/<date>-<topic>-design.md)', 'data: an array of changes to the data model ([] when none)', 'architecture: an array of changes to the architecture ([] when none)'],
+    'the file: its schema version, its spec, data and architecture as arrays, no unknown key')
+  const bad = errs({ ...ok1, data: [
+    ch('a', 'grow', 'app:db/books.isbn'),
+    ch('b', 'add', 'books.isbn', { after: { type: 'TEXT', nullable: true } }),
+    ch('c', 'add', 'app:db/books.isbn'),
+    ch('a', 'remove', 'app:db/books'),
+    { ...ch('d', 'add', 'app:db/books.isbn', { after: { type: 'TEXT' }, afer: 1 }), why: '' },
+    ch('e', 'change', 'app:db/books/key:unique(isbn)', { after: {} }),
+    ch('f', 'rename', 'app:db/books/fk:(author_id)->authors(id)', { after: { name: 'x' } }),
+    ch('g', 'add', 'app:db/books/key:secondary(isbn)'),
+    ch('h', 'remove', 'app:db/books', { origin: 'guessed', after: { kind: 'table' } }),
+    ch('i', 'add', 'app:db/loans', { after: { fields: [{ name: 'id', type: 'INTEGER' }] } }),
+  ] })
+  eq(bad, [
+    'data[0] (a): op "grow" is not one of add, change, remove, rename',
+    'data[1] (b): target: "books.isbn" names no repository: <repo>:<store>/<entity>',
+    'data[2] (c): an addition needs after: the column it adds',
+    'data[3] (a): the id "a" is data[0]\'s too: ids are unique',
+    'data[4] (d): unknown key "afer" (a change has id, op, target, before, after, why, slice, origin, ack)',
+    'data[4] (d): why: say why it changes',
+    'data[4] (d): after: a column needs its nullable',
+    'data[5] (e): a key has nothing to change: its columns are what it is (remove it and add the new one)',
+    'data[6] (f): a foreign key has no name to rename: remove it and add the new one',
+    'data[7] (g): target: "app:db/books/key:secondary(isbn)": key:<role>(<col>,…), the role one of primary, unique, partition, sort, ttl',
+    'data[8] (h): origin "guessed" is not one of planned, unplanned',
+    'data[8] (h): a removal has no after',
+    'data[9] (i): after: column id needs its nullable',
+  ], 'each change: a known op, a target in the grammar, after where the op needs it and in the element\'s own attributes, a why, an origin, a unique id; every error at once, each naming its change')
+
+  // the hash: canonical, so key order is no change; what changes or why is; ack and slice are not
+  const c0 = ch('a', 'add', 'app:db/books.isbn', { after: { type: 'TEXT', nullable: true }, before: { x: { b: 1, a: 2 } } })
+  const reordered = { before: { x: { a: 2, b: 1 } }, why: c0.why, after: { nullable: true, type: 'TEXT' }, origin: 'planned', target: c0.target, op: 'add', id: 'a' }
+  eq([changeHash(c0) === changeHash(reordered), changeHash(c0) === changeHash({ ...c0, slice: 3, ack: { by: 'x', at: 'y', hash: 'z' } }), changeHash(c0) === changeHash({ ...c0, why: 'another reason' }), changeHash(c0) === changeHash({ ...c0, after: { type: 'TEXT', nullable: false } }), /^[0-9a-f]{16}$/.test(changeHash(c0))],
+    [true, true, false, false, true], 'a change\'s hash: the same whatever the key order, and with or without its ack or slice; another when its why or its after is edited')
+
+  // targets: the grammar, round-tripped through the model, resolving where the diff matches
+  eq(['app:db/books', 'app:db/books.meta.isbn', 'app:prisma/migrations/Loan/index:Loan_due_idx', 'app:db/books/key:unique(isbn, title)', 'app:./books/fk:(author_id)->authors(id)'].map((t) => { const p = parseTarget(t); return `${p.storeId} ${p.entity} ${p.kind} ${JSON.stringify(p.el)}` }),
+    ['app:db books entity {"name":"books"}', 'app:db books field {"name":"meta.isbn"}', 'app:prisma/migrations Loan index {"name":"Loan_due_idx"}', 'app:db books key {"role":"unique","parts":["isbn","title"]}', 'app:. books relation {"columns":["author_id"],"to":"authors","toColumns":["id"]}'],
+    'the target grammar: a store id that may hold "/", a table, a column (dotted when nested), an index, a key by role and columns, a foreign key by its columns on both sides')
+  const M = modelOf(`CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE, title TEXT NOT NULL, isbn TEXT, UNIQUE (isbn, title));
+CREATE INDEX books_title_idx ON books (title);`)
+  const st = M.stores[0], all = st.entities.flatMap((e) => [['entity', e, e], ...e.fields.map((x) => ['field', e, x]), ...e.keys.map((x) => ['key', e, x]), ...e.indexes.map((x) => ['index', e, x]), ...e.relations.map((x) => ['relation', e, x])])
+  const round = all.map(([kind, e, x]) => { const t = targetOf(st.id, e.name, kind, x); return findTarget(M, parseTarget(t)).el === x ? 'ok' : `lost ${t}` })
+  ok(round.length === 13 && round.every((r) => r === 'ok'), `every element of a model named by targetOf resolves back to itself through parseTarget (${round.filter((r) => r !== 'ok').join(', ') || `${round.length} elements`})`)
+  eq(['app:db/Books.TITLE', 'app:db/BOOKS/key:UNIQUE(ISBN,Title)', 'app:db/books/fk:(Author_ID)->AUTHORS(ID)', 'app:db/books/index:BOOKS_TITLE_IDX'].map((t) => !!findTarget(M, parseTarget(t)).el), [true, false, true, true],
+    'SQLite names resolve in any letter case, as the diff matches them (a key\'s role is part of the grammar, lower case)')
+  const pgm = modelOf('CREATE TABLE books (id INTEGER PRIMARY KEY);', { dialect: 'postgres' })
+  eq([!!findTarget(pgm, parseTarget('app:db/books')).el, !!findTarget(pgm, parseTarget('app:db/Books')).el], [true, false], 'where the dialect\'s names are case-sensitive, another case is another table')
+
+  // the states, against a base and a branch
+  const BASE = `CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, bio TEXT);
+CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE, title TEXT NOT NULL DEFAULT 'untitled', isbn TEXT, UNIQUE (isbn));
+CREATE INDEX books_title_idx ON books (title);
+CREATE TABLE legacy_notes (id INTEGER PRIMARY KEY, body TEXT);
+CREATE TABLE tags (id INTEGER PRIMARY KEY, label TEXT NOT NULL);`
+  const BRANCH = `CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, bio TEXT NOT NULL DEFAULT '', email TEXT);
+CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE SET NULL, title TEXT NOT NULL DEFAULT 'draft', isbn TEXT, UNIQUE (isbn, title));
+CREATE INDEX books_author_idx ON books (author_id);
+CREATE TABLE loans (id INTEGER PRIMARY KEY, book_id INTEGER REFERENCES books(id));
+CREATE TABLE labels (id INTEGER PRIMARY KEY, label TEXT NOT NULL);
+CREATE VIEW recent AS SELECT id FROM books;`
+  const base = modelOf(BASE), branch = modelOf(BRANCH)
+  const acked = ch('acked', 'add', 'app:db/authors.email', { after: { type: 'TEXT', nullable: true }, slice: 1 })
+  acked.ack = { by: 'Ann', at: '2026-11-06T10:00:00.000Z', hash: changeHash(acked) }
+  const edited = ch('stale', 'add', 'app:db/authors.phone', { after: { type: 'TEXT', nullable: true } })
+  edited.ack = { by: 'Ann', at: '2026-11-06T10:00:00.000Z', hash: changeHash({ ...edited, why: 'the reason before the edit' }) }
+  const delta = { schema: 1, spec: 'docs/specs/x-design.md', architecture: [], data: [
+    acked, edited,
+    ch('index', 'add', 'app:db/books/index:books_author_idx', { after: { columns: ['author_id'] } }),
+    ch('loans', 'add', 'app:db/loans', { after: { fields: [{ name: 'id', type: 'INTEGER', nullable: true }, { name: 'book_id', type: 'TEXT', nullable: true }, { name: 'due_on', type: 'TEXT', nullable: false }] } }),
+    ch('title-default', 'change', 'app:db/books.title', { after: { default: "'draft'" } }),
+    ch('name-type', 'change', 'app:db/authors.name', { after: { type: 'VARCHAR(120)' } }),
+    ch('bio-default', 'change', 'app:db/authors.bio', { after: { default: "'none'" } }),
+    ch('drop-notes', 'remove', 'app:db/legacy_notes'),
+    ch('drop-key', 'remove', 'app:db/books/key:unique(isbn,title)'),
+    ch('tags', 'rename', 'app:db/tags', { after: { name: 'labels' } }),
+    ch('writers', 'rename', 'app:db/authors', { after: { name: 'writers' } }),
+    ch('case', 'add', 'app:db/Books.ISBN', { after: { type: 'text', nullable: true } }),
+    ch('typo', 'remove', 'app:db/ghosts'),
+    ch('elsewhere', 'add', 'app:cache/entries', { after: { fields: [{ name: 'k', type: 'TEXT', nullable: false }] } }),
+  ] }
+  eq(parseDelta(JSON.stringify(delta)).errors, [], 'the delta under test validates')
+  const line = (r) => `${r.id} ${r.state}${r.ack ? ` ${r.ack}` : ''}${r.diffs.length ? ` [${r.diffs.map((x) => x.text).join('; ')}]` : ''}${r.proposed.length ? ` {${r.proposed.map((x) => x.text).join('; ')}}` : ''}${r.warn ? ` (${r.warn})` : ''}`
+  const s = deltaStates(delta, branch, { base, diff: diffModels(base, branch) })
+  eq(s.changes.map(line), [
+    'acked planned-built acked',
+    'stale pending stale',
+    'index planned-built',
+    'loans built-differently [column book_id type: TEXT → INTEGER; column due_on: TEXT, not null → absent]',
+    'title-default planned-built',
+    'name-type pending {type: TEXT → VARCHAR(120)}',
+    "bio-default built-differently [default: 'none' → '']",
+    'drop-notes planned-built',
+    'drop-key pending',
+    'tags planned-built',
+    'writers pending {rename to writers}',
+    'case planned-built',
+    'typo planned-built (not in the model, nor at the base: check the target)',
+    'elsewhere pending (the store is not in the model)',
+  ], 'each change\'s state: built in the intended shape, pending, or built differently (planned → built); a change the branch has not touched is pending (now → planned), one it touched another way is built differently; a removal is built once its target is gone, a rename once only the new name is there; a target in another letter case resolves; the acknowledgement apart, stale once the change was edited')
+  eq(s.unplanned.map((u) => `${u.c.change} ${u.target}`), ['removed app:db/books/key:unique(isbn)', 'removed app:db/books/index:books_title_idx', 'modified app:db/books/fk:(author_id)->authors(id)', 'added app:db/recent'],
+    'unplanned: what the branch changed against its base that no change of the delta covers, each named as a target (a change built another way, a rename\'s two names and a table added whole count as covered)')
+  eq(s.counts, { changes: 14, 'planned-built': 7, pending: 5, 'built-differently': 2, acked: 1, stale: 1, unacked: 12, unplanned: 4 }, '… counted')
+  eq(deltaStates(delta, base, { base, diff: diffModels(base, base) }).changes.map(line).slice(2, 11),
+    ['index pending', 'loans pending', 'title-default pending {default: \'untitled\' → \'draft\'}', 'name-type pending {type: TEXT → VARCHAR(120)}', 'bio-default pending {default: none → \'none\'}', 'drop-notes pending', 'drop-key planned-built (not in the model, nor at the base: check the target)', 'tags pending {rename to labels}', 'writers pending {rename to writers}'],
+    'at design time (the branch is its base): every change not in the code yet is pending, with what it proposes; a removal whose target was never there reads as done, with a warning')
+  const noBase = deltaStates({ ...delta, data: [ch('b', 'change', 'app:db/authors.bio', { after: { default: "'none'" }, before: { nullable: true } }), ch('n', 'change', 'app:db/authors.name', { after: { type: 'VARCHAR(120)' }, before: { type: 'TEXT' } })] }, branch)
+  eq([noBase.changes.map(line), noBase.unplanned], [["b built-differently [default: 'none' → '']", 'n pending {type: TEXT → VARCHAR(120)}'], []], 'with no base, `before` tells a change not made yet from one made another way; nothing is unplanned (there is no branch to compare)')
+  eq([changeText(delta.data[9]), STATE_TEXT['built-differently']], ['rename app:db/tags → labels', 'built differently'], 'a change and a state in words')
+
+  // acknowledging: the file edited in place, every other byte kept
+  const FILE = `{
+  "schema": 1,
+  "spec": "docs/specs/x-design.md",
+  "data": [
+    {
+      "id": "one",
+      "op": "add",
+      "target": "app:db/books.isbn",
+      "after": { "type": "TEXT", "nullable": true },
+      "why": "search by isbn",
+      "origin": "planned"
+    },
+    {
+      "id": "two",
+      "op": "remove",
+      "target": "app:db/legacy",
+      "why": "unused",
+      "origin": "planned",
+      "ack": {
+        "by": "Ann",
+        "at": "2026-11-05T09:00:00.000Z",
+        "hash": "0000000000000000"
+      }
+    },
+    { "id": "three", "op": "remove", "target": "app:db/old", "why": "gone", "origin": "planned", "ack": { "by": "Bo", "at": "x", "hash": "y" } },
+    {"id": "four", "op": "remove", "target": "app:db/older", "why": "gone too", "origin": "planned"}
+  ],
+  "architecture": []
+}
+`
+  const A = { by: 'Cy', at: '2026-11-06T12:00:00.000Z', hash: 'abcdef0123456789' }
+  const edited2 = setAcks(FILE, new Map([[0, A], [1, A], [2, null], [3, A]]))
+  const doc = JSON.parse(edited2)
+  eq(doc.data.map((c) => c.ack || null), [A, A, null, A], 'acknowledgements set, replaced and removed')
+  const lines = edited2.split('\n')
+  eq(lines.slice(4, 18), ['    {', '      "id": "one",', '      "op": "add",', '      "target": "app:db/books.isbn",', '      "after": { "type": "TEXT", "nullable": true },', '      "why": "search by isbn",', '      "origin": "planned",', '      "ack": {', '        "by": "Cy",', '        "at": "2026-11-06T12:00:00.000Z",', '        "hash": "abcdef0123456789"', '      }', '    },', '    {'],
+    'a new ack goes last in its change, in the file\'s 2-space style; the rest of the change keeps its own layout')
+  ok(edited2.includes('    { "id": "three", "op": "remove", "target": "app:db/old", "why": "gone", "origin": "planned" },\n') && edited2.includes('{"id": "four", "op": "remove", "target": "app:db/older", "why": "gone too", "origin": "planned", "ack": { "by": "Cy", "at": "2026-11-06T12:00:00.000Z", "hash": "abcdef0123456789" }}') && edited2.endsWith('  "architecture": []\n}\n'),
+    'a change written on one line stays on one line; removing an ack takes its comma with it; the final newline stays')
+  const unchanged = setAcks(FILE, new Map([[1, null]]))
+  eq(unchanged.split('\n').filter((l, k) => !FILE.split('\n').includes(l) || k > 30).length, 0, 'removing one ack changes only its lines: every other line of the file is kept as it was')
+  const crlf = setAcks(FILE.replace(/\n/g, '\r\n'), new Map([[0, A]]))
+  ok(!/[^\r]\n/.test(crlf) && JSON.parse(crlf).data[0].ack.by === 'Cy', 'CRLF line ends are kept')
+  const odd = setAcks('{"schema":1,"spec":"s","data":[{"id":"a","op":"remove","target":"app:db/t","why":"w","origin":"planned","ack":{"by":"1","at":"1","hash":"1"},"ack":{"by":"2","at":"2","hash":"2"}}],"architecture":[]}', new Map([[0, null]]))
+  ok(JSON.parse(odd).data[0].ack === undefined, 'a layout the in-place edit cannot handle (a duplicated key) is written whole, and still right')
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()
