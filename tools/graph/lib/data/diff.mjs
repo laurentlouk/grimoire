@@ -37,9 +37,13 @@ import { normType, normDefault } from './model.mjs'
 
 // Dialects whose identifiers compare in any letter case.
 const CASELESS = new Set(['sqlite'])
+// How a dialect's names compare: lower-cased where they are caseless, as written elsewhere.
+export const foldOf = (dialect) => (CASELESS.has(dialect) ? (x) => String(x).toLowerCase() : (x) => String(x))
 const LISTS = [['field', 'fields'], ['key', 'keys'], ['index', 'indexes'], ['relation', 'relations']]
 
-const KEY = {
+// An element's identity within its entity (an entity's within its store), names folded by `f`:
+// what the diff matches on, and what a delta's target resolves to (delta.mjs).
+export const KEY = {
   entity: (e, f) => f(e.name),
   field: (x, f) => f(x.name),
   key: (k, f) => `${k.role}(${k.parts.map(f).join(',')})`,
@@ -81,7 +85,7 @@ export function diffModels(before, after) {
 function diffStore(b, a) {
   const s = a || b
   const dialect = a?.dialect ?? b?.dialect ?? null
-  const fold = CASELESS.has(dialect) ? (x) => String(x).toLowerCase() : (x) => String(x)
+  const fold = foldOf(dialect)
   const out = { id: s.id, repo: s.repo, name: s.name, dialect, change: !b ? 'added' : !a ? 'removed' : null, attrs: [], before: b, after: a, changes: [], renames: [] }
   if (b && a && (b.dialect ?? null) !== (a.dialect ?? null)) out.attrs.push({ attr: 'dialect', before: b.dialect ?? null, after: a.dialect ?? null })
   const push = (kind, change, entity, x, y, pos, attrs = [], owner = null) => out.changes.push({ kind, change, entity, name: NAME[kind](y || x), key: KEY[kind](y || x, fold), pos, owner, before: x, after: y, attrs, rename: null })

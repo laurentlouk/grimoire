@@ -8,13 +8,14 @@
 //  2. architecture (arch.mjs): the schema check, globs, imports, binding to an index, the layout,
 //     the draft, and the check's warnings
 //  3. notes (docs.mjs): what is listed, and which paths the server may write
-//  4. the server (serve.mjs): host, origin and token checks, reading, saving, conflicts, creating
+//  4. the server (serve.mjs): host, origin and token checks, reading, saving, conflicts, creating;
+//     acknowledging a design delta's changes (the one other file it writes)
 //  5. the page: both tabs rendered by the page's own script in a stub DOM
 //
 //  Needs no parser runtime: indexes here are built by hand (sections 2) or empty (4, 5).
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, readdirSync, lstatSync, chmodSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
 import path from 'node:path'
 
 const { mdToHtml, mdFront, mdSlug } = await import('../lib/md.mjs')
@@ -286,6 +287,85 @@ else {
     ok((await req(`/api/doc?repo=${hub}&path=docs/huge.md`)).status === 413, 'a note past the size limit is not served for editing')
     ok(readdirTmp(HUB).length === 0, 'no temporary file is left behind')
   } finally { await s.close() }
+
+  // acknowledging a design delta's changes: PUT /api/delta, the one other file the server writes
+  const { changeHash } = await import('../lib/data/delta.mjs')
+  const DH = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-delta-srv-')))
+  const w = (p, t) => { mkdirSync(path.dirname(path.join(DH, p)), { recursive: true }); writeFileSync(path.join(DH, p), t) }
+  const at = (p) => path.join(DH, p)
+  w('grimoire.config.json', JSON.stringify({ repos: [{ name: 'api', path: 'repos/api' }] }))
+  const DELTA = { schema: 1, spec: 'docs/specs/2026-11-06-loans-design.md', data: [
+    { id: 'one', op: 'add', target: 'api:db/books.isbn', after: { type: 'TEXT', nullable: true }, why: 'search by isbn', origin: 'planned' },
+    { id: 'two', op: 'remove', target: 'api:db/legacy', why: 'nothing reads it', slice: 2, origin: 'planned', ack: { by: 'Old Hand', at: '2026-01-01T00:00:00.000Z', hash: '0000000000000000' } },
+    { id: 'three', op: 'add', target: 'api:db/loans/index:loans_due_idx', after: { columns: ['due_on'] }, why: 'list what is due', origin: 'planned' },
+  ], architecture: [] }
+  const TEXT = JSON.stringify(DELTA, null, 2) + '\n', REL = 'docs/specs/2026-11-06-loans.delta.json'
+  w(`repos/api/${REL}`, TEXT); w(REL, TEXT); w('repos/api/package.json', '{}\n'); w('outside/stolen.delta.json', TEXT)
+  w('repos/api/docs/specs/notes.json', '{}'); w('repos/api/docs/specs/notes.md', '# n\n'); w(`repos/api/docs/plans/2026-11-06-loans.delta.json`, TEXT); w('repos/api/docs/specs/broken.delta.json', '{ "schema": 1, "spec": "s", "data": [{ "id": "x" }], "architecture": [] }\n')
+  symlinkSync(at('outside/stolen.delta.json'), at('repos/api/docs/specs/out.delta.json'))
+  symlinkSync('../../package.json', at('repos/api/docs/specs/pkg.delta.json'))
+  const gitOk = spawnSync('git', ['init', '-q'], { cwd: at('repos/api') }).status === 0 && spawnSync('git', ['config', 'user.name', 'Delta Tester'], { cwd: at('repos/api') }).status === 0
+  const dproj = loadProject(DH)
+  ;(await openStore(dproj.dbPath)).close()
+  const s2 = await serve(dproj, { refresh: false })
+  const dput = (o, headers = {}, method = 'PUT') => fetch(`http://127.0.0.1:${s2.port}/api/delta`, { method, headers: { 'x-grimoire-token': s2.token, 'content-type': 'application/json', ...headers }, body: method === 'PUT' ? JSON.stringify(o) : undefined }).then(async (r) => ({ status: r.status, j: await r.json().catch(() => ({})) }))
+  const disk = (p = `repos/api/${REL}`) => readFileSync(at(p), 'utf8')
+  const ackBlock = /,\n {6}"ack": \{\n {8}"by": "[^"\n]*",\n {8}"at": "[^"\n]*",\n {8}"hash": "[0-9a-f]{16}"\n {6}\}/g
+  try {
+    const t0 = Date.now()
+    let r = await dput({ repo: 'api', path: REL, base: docHash(TEXT), ids: ['one'], ack: true, by: 'Mallory', at: '1999-01-01T00:00:00.000Z', hash: 'ffffffffffffffff' })
+    const after = JSON.parse(disk()), a1 = after.data[0].ack
+    const expectBy = gitOk ? 'Delta Tester' : null
+    ok(r.status === 200 && a1 && (!expectBy || a1.by === expectBy) && a1.hash === changeHash(DELTA.data[0]) && Date.parse(a1.at) >= t0 - 1000 && Date.parse(a1.at) <= Date.now() + 1000 && r.j.hash === docHash(disk()) && JSON.stringify(r.j.changes) === JSON.stringify([{ id: 'one', ack: a1 }]),
+      `acknowledging writes ack into the delta: by the repository's git user.name, at now, the change's hash, all set by the server whatever the request says (${JSON.stringify(a1)})`)
+    const oldAck = TEXT.slice(TEXT.indexOf(',\n      "ack": {\n        "by": "Old Hand"'), TEXT.indexOf('}', TEXT.indexOf('"by": "Old Hand"')) + 1)
+    ok(disk().replace(ackBlock, '') === TEXT.replace(ackBlock, '') && disk().includes(oldAck) && disk().split('\n').length === TEXT.split('\n').length + 5 && disk().endsWith('\n') && /\n {2}"schema": 1,\n/.test(disk()), '… in the file\'s 2-space style with its final newline; every other change and every other line untouched')
+    r = await dput({ repo: 'api', path: REL, base: r.j.hash, ids: ['two'], ack: false })
+    const two = JSON.parse(disk()).data[1]
+    ok(r.status === 200 && two.ack === undefined && JSON.stringify(r.j.changes) === JSON.stringify([{ id: 'two', ack: null }]) && disk().replace(ackBlock, '') === TEXT.replace(ackBlock, ''), 'unacknowledging removes ack, and nothing else')
+    const before = disk()
+    r = await dput({ repo: 'api', path: REL, base: docHash(TEXT), ids: ['three'], ack: true })
+    ok(r.status === 409 && r.j.text === before && r.j.hash === docHash(before) && disk() === before, 'a write against a delta that changed since it was loaded is refused, with the disk text, and nothing is written')
+    r = await dput({ repo: 'api', path: REL, base: docHash(before), ids: ['three', 'nope'], ack: true })
+    ok(r.status === 400 && r.j.error === 'no data change with the id "nope"' && disk() === before, 'an id the delta does not hold: refused, nothing written (not even the ids it does hold)')
+    r = await dput({ repo: 'api', path: 'docs/specs/broken.delta.json', base: docHash(disk('repos/api/docs/specs/broken.delta.json')), ids: ['x'], ack: true })
+    ok(r.status === 422 && r.j.error.startsWith('the delta does not validate: data[0] (x): op undefined') && disk('repos/api/docs/specs/broken.delta.json').includes('"id": "x" }'), 'a delta that does not validate is never written: its problems say why')
+    const refused = [['api', '../docs/specs/x.delta.json'], ['api', 'docs/specs/../specs/2026-11-06-loans.delta.json'], ['api', `${at('repos/api')}/${REL}`], ['api', 'docs/specs/notes.json'], ['api', 'docs/specs/notes.md'], ['api', 'docs/plans/2026-11-06-loans.delta.json'], ['api', 'docs/specs/out.delta.json'], ['api', 'docs/specs/pkg.delta.json'], ['api', 'docs/specs/none.delta.json'], [path.basename(DH), `repos/api/${REL}`], ['nope', REL], ['api', 'docs/specs/%2e%2e/%2e%2e/package.json'], ['api', 'docs/specs/%2e%2e%2f%2e%2e%2fpackage.delta.json'], ['api', REL.replace('.delta.json', '.DELTA.JSON')]]
+    const got = []
+    for (const [repo, p] of refused) got.push((await dput({ repo, path: p, base: 'x', ids: ['one'], ack: true })).status)
+    ok(got.every((x) => x === 400) && disk('outside/stolen.delta.json') === TEXT && disk('repos/api/package.json') === '{}\n' && disk(`repos/api/docs/plans/2026-11-06-loans.delta.json`) === TEXT,
+      `only docs/specs/<name>.delta.json in a root is written: refused a parent path, a path not plain, an absolute path, another extension, another folder, a symlink out, a symlink to a file that is not a delta, a missing delta, another repository's delta from the hub, an unknown repository, %2e%2e (never decoded), an extension in another case (${got.join(' ')})`)
+    const hubBy = (spawnSync('git', ['-C', DH, 'config', 'user.name'], { encoding: 'utf8' }).stdout || '').trim() || userInfo().username
+    r = await dput({ repo: path.basename(DH), path: REL, base: docHash(disk(REL)), ids: ['three'], ack: true })
+    ok(r.status === 200 && JSON.parse(disk(REL)).data[2].ack.by === hubBy, `a delta beside the hub's own specs is written too, by the git user.name its folder sees, else the system user (${hubBy})`)
+    ok((await dput({ repo: 'api', path: REL, base: 'x', ids: ['one'], ack: true }, { 'x-grimoire-token': 'wrong' })).status === 403 && (await dput({ repo: 'api', path: REL, base: 'x', ids: ['one'], ack: true }, { origin: 'http://evil.example' })).status === 403 && (await dput({ repo: 'api', path: REL, base: 'x', ids: ['one'], ack: true }, { 'content-type': 'text/plain' })).status === 415,
+      'the notes\' rules hold: the token, no cross-origin write, JSON only')
+    const rawHost = await new Promise(async (resolve) => { const q = (await import('node:http')).request({ host: '127.0.0.1', port: s2.port, path: '/api/delta', method: 'PUT', headers: { host: 'evil.example', 'x-grimoire-token': s2.token, 'content-type': 'application/json' } }, (x) => { x.resume(); resolve(x.statusCode) }); q.end('{}') })
+    ok(rawHost === 403 && (await dput(null, {}, 'GET')).status === 405, 'a request naming another host is refused; only PUT is answered')
+    for (const bad of [{ repo: 'api', path: REL, ids: ['one'], ack: true }, { repo: 'api', path: REL, base: 'x', ids: [], ack: true }, { repo: 'api', path: REL, base: 'x', ids: ['one'] }]) ok((await dput(bad)).status === 400, `a request must name the hash it loaded, the ids, and ack true or false (${JSON.stringify(Object.keys(bad))})`)
+    if (!(process.getuid && process.getuid() === 0)) {
+      chmodSync(at(`repos/api/${REL}`), 0o444)
+      ok((await dput({ repo: 'api', path: REL, base: docHash(disk()), ids: ['three'], ack: true })).status === 403, 'a read-only delta is refused')
+      chmodSync(at(`repos/api/${REL}`), 0o644)
+    }
+    if (gitOk) {
+      const logged = []
+      const s3 = await serve(dproj, { refresh: false, log: (m) => logged.push(m) })
+      try {
+        spawnSync('git', ['config', 'user.name', `Line one\nLine\ttwo ${'x'.repeat(500)}`], { cwd: at('repos/api') })
+        const r3 = await fetch(`http://127.0.0.1:${s3.port}/api/delta`, { method: 'PUT', headers: { 'x-grimoire-token': s3.token, 'content-type': 'application/json' }, body: JSON.stringify({ repo: 'api', path: REL, base: docHash(disk()), ids: ['three'], ack: true }) })
+        const by = JSON.parse(disk()).data[2].ack.by
+        ok(r3.status === 200 && by.length <= 120 && !/[\u0000-\u001f\u007f]/.test(by) && by.startsWith('Line one Line two xxx'), `a git user.name is written capped and on one line (${JSON.stringify(by.slice(0, 30))}…, ${by.length} chars)`)
+        writeFileSync(at(`repos/api/${REL}`), JSON.stringify({ ...DELTA, data: [...DELTA.data, { id: 'four\u001b[2Jfive', op: 'remove', target: 'api:db/old', why: 'w', origin: 'planned' }] }, null, 2) + '\n')
+        await fetch(`http://127.0.0.1:${s3.port}/api/delta`, { method: 'PUT', headers: { 'x-grimoire-token': s3.token, 'content-type': 'application/json' }, body: JSON.stringify({ repo: 'api', path: REL, base: docHash(disk()), ids: ['four\u001b[2Jfive'], ack: true }) })
+        ok(logged.length === 2 && logged.every((m) => !/[\u0000-\u001f\u007f]/.test(m)) && logged[1].includes('"four\\u001b[2Jfive"'), `the server's log never prints a control character from a request (${JSON.stringify(logged[1])})`)
+      } finally { spawnSync('git', ['config', 'user.name', 'Delta Tester'], { cwd: at('repos/api') }); await s3.close() }
+    }
+    ok(readdirTmp(DH).length === 0, 'no temporary file is left behind')
+    const pageD = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec((await fetch(`http://127.0.0.1:${s2.port}/?t=${s2.token}`).then((x) => x.text())))[1].replace(/\\u003c/g, '<')).data
+    ok(pageD.deltas.map((d) => `${d.repo}:${d.path}:${d.ackable}:${d.hash === docHash(disk(d.repo === 'api' ? `repos/api/${d.path}` : d.path))}`).sort().join(' ') === `api:${REL}:true:true api:docs/specs/broken.delta.json:true:true ${path.basename(DH)}:${REL}:true:true`,
+      'the served page carries every delta beside the specs, with the hash each was loaded with and where it may be written (symlinks out and links to other files are not listed)')
+  } finally { await s2.close() }
 }
 function readdirTmp(dir) { const out = []; const walk = (d) => { for (const e of readdirSyncSafe(d)) { const p = path.join(d, e.name); if (e.isDirectory() && e.name !== 'outside') walk(p); else if (/\.tmp$/.test(e.name)) out.push(p) } }; walk(dir); return out }
 function readdirSyncSafe(d) { try { return readdirSync(d, { withFileTypes: true }) } catch { return [] } }

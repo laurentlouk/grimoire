@@ -5,10 +5,12 @@
 import { langOf } from './langs.mjs'
 import { reconcile, elementsOf, storeSummary } from './data/reconcile.mjs'
 import { diffModels } from './data/diff.mjs'
+import { parseDelta, parseTarget, deltaStates, changeText, STATE_TEXT } from './data/delta.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files, never from a database. Open path:line before relying on any of it.'
 export const CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate. Open path:line before relying on any of it.'
+export const DELTA_FOOTER = 'Leads, not facts: the states are computed from migrations and generated files (the base through git at its commit), never from a database, and never written into the delta. Open path:line before relying on any of it.'
 
 // How a data model change reads, shared by graph_changes and the page (render.mjs packs the same words).
 const plural = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
@@ -382,6 +384,41 @@ export class Graph {
     }
     for (const x of base.skipped) out.push(`Not compared: ${x.name} (${x.why}).`)
     if (at.failed.length) out.push(`At the base, extractor failures (${at.failed.length}), their facts are missing from the comparison:`, ...at.failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
+    return out.join('\n')
+  }
+
+  // ── a design's delta against the code (data/delta.mjs): each change's state, then the unplanned ──
+  // against: { base, at } when a base resolved (the branch's diff gives the unplanned changes), else
+  // { why }. The model is the index's, every repository (or `repo`).
+  delta(file, against, repo = null) {
+    const { delta, errors } = parseDelta(file.text)
+    if (errors.length) return [`Delta ${file.shown} does not validate (${plural(errors.length, 'problem')}):`, ...errors.map((e) => `  ${e}`)].join('\n')
+    const names = this.q('SELECT name FROM repos ORDER BY name').map((r) => r.name).filter((n) => !repo || n === repo)
+    const model = this.currentModel(names)
+    const base = against.base ? against.at.model : null
+    const diff = against.base ? diffModels(base, this.currentModel(against.base.repos.map((r) => r.name).filter((n) => !repo || n === repo))) : null
+    const s = deltaStates({ ...delta, data: delta.data.filter((c) => !repo || parseTarget(c.target).repo === repo) }, model, { base, diff })
+    const ackText = (r) => (r.ack === 'acked' ? `acknowledged by ${r.change.ack.by} at ${r.change.ack.at}` : r.ack === 'stale' ? `stale: acknowledged by ${r.change.ack.by} at ${r.change.ack.at}, edited since` : 'not acknowledged')
+    const out = [`Delta ${file.shown} (the design: ${delta.spec}), against the model${against.base ? ` and the branch against ${baseText(against.base)}` : ` (no base: ${against.why}; unplanned changes not listed)`}: ${plural(s.changes.length, 'data change')}`]
+    for (const r of s.changes) {
+      out.push(`  ${STATE_TEXT[r.state]}  ${r.id}  ${changeText(r.change)}${r.el && r.state !== 'pending' && r.el.sources ? `  — ${this.sources(r.st.repo, r.el.sources)}` : ''}`)
+      if (r.diffs.length) out.push(`    planned → built: ${r.diffs.map((x) => x.text).join('; ')}`)
+      if (r.proposed.length) out.push(`    proposed: ${r.proposed.map((x) => x.text).join('; ')}`)
+      if (r.warn) out.push(`    ⚠ ${r.warn}`)
+      out.push(`    why: ${r.change.why}${r.change.slice !== undefined ? ` · slice ${r.change.slice}` : ''}${r.change.origin === 'unplanned' ? ' · unplanned, kept by the implementer' : ''} · ${ackText(r)}`)
+    }
+    if (against.base) {
+      out.push(s.unplanned.length ? `Unplanned (${s.unplanned.length}): in the branch, in no change of the delta` : 'Unplanned: none, every change of the branch is in the delta')
+      for (const { st, c, target } of s.unplanned) {
+        const was = c.before && `was ${this.sources(st.repo, c.before.sources)}`, now = c.after && this.sources(st.repo, c.after.sources)
+        if (c.change === 'added') out.push(`  + ${target}  ${describe(c, c.after)}  — ${now}`)
+        else if (c.change === 'removed') out.push(`  - ${target}  ${describe(c, c.before)}  — ${was}`)
+        else out.push(`  ~ ${target}  ${c.attrs.map((a) => `${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`).join('; ')}  — ${was}; now ${now}`)
+      }
+      for (const x of against.base.skipped) out.push(`Not compared: ${x.name} (${x.why}).`)
+    }
+    const k = s.counts
+    out.push(`Summary: ${k['planned-built']} planned and built · ${k.pending} pending · ${k['built-differently']} built differently${against.base ? ` · ${k.unplanned} unplanned` : ''} · ${k.acked} acknowledged · ${k.stale} stale · ${k.unacked} not acknowledged`)
     return out.join('\n')
   }
 

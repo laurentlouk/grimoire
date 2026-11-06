@@ -10,8 +10,9 @@
 // repository of a hub. So a tracked symlink can neither carry a file into the page (a secret outside
 // the repository, .git/config or .env inside it) nor take a write to one, and a note symlinked to
 // another note is saved through to its real file, so the link stays. The server (serve.mjs) writes
-// through resolveDoc only.
-import { readFileSync, statSync, lstatSync, realpathSync, existsSync } from 'node:fs'
+// through resolveDoc, and through resolveDelta for the one other file it writes: a design delta's
+// acknowledgements (docs/specs/<name>.delta.json, below).
+import { readFileSync, readdirSync, statSync, lstatSync, realpathSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { listPaths, skipped, SKIP_DIRS } from './project.mjs'
@@ -106,4 +107,76 @@ export function resolveDoc(project, repo, rel, { create = false } = {}) {
   const bad = rule.whyReal(target)
   if (bad) return { error: `its folder links to somewhere notes are not written (${bad})` }
   return { abs: target, root, created: true }
+}
+
+// ── the design deltas (data/delta.mjs) beside the specs ──
+// The one other file the server writes: a design's delta, docs/specs/<name>.delta.json in a root,
+// and only to set or remove an acknowledgement. The path asked for and the real file behind it must
+// both be one: a plain relative path (no `..`, no absolute path), a file that exists (never created
+// here), and, when it is a symlink, one to another delta beside the specs of the same root.
+export const DELTA_PATH = /^docs\/specs\/[^/]+\.delta\.json$/
+export function resolveDelta(project, repo, rel) {
+  const root = docRoots(project).find((r) => r.name === repo)
+  if (!root) return { error: `unknown repository ${JSON.stringify(repo)}` }
+  if (typeof rel !== 'string' || !rel || rel.length > 1024 || rel.includes('\0') || rel.includes('\\') || path.isAbsolute(rel)) return { error: 'not a relative path' }
+  if (path.posix.normalize(rel) !== rel || rel.split('/').some((s) => s === '' || s === '.' || s === '..')) return { error: 'not a plain relative path' }
+  if (!DELTA_PATH.test(rel)) return { error: 'only a design delta is written here: docs/specs/<name>.delta.json' }
+  let realRoot, real
+  try { realRoot = realpathSync(root.abs) } catch { return { error: 'the repository folder is missing' } }
+  const abs = path.join(root.abs, rel)
+  try { real = realpathSync(abs) } catch { let link = null; try { link = lstatSync(abs) } catch {} return { error: link ? 'a symlink that points nowhere' : 'no such delta' } }
+  if (!real.startsWith(realRoot + path.sep)) return { error: 'the delta resolves outside its repository' }
+  if (!DELTA_PATH.test(path.relative(realRoot, real).split(path.sep).join('/'))) return { error: 'it is a link to something that is not a design delta' }
+  if (!statSync(real).isFile()) return { error: 'not a file' }
+  return { abs: real, root }
+}
+// Every delta beside the specs of each root, newest first (by name: specs start with their date):
+// [{ repo, path, shown, abs, text, hash }]. One past the size limit is left out.
+export function scanDeltas(project) {
+  const out = []
+  for (const r of docRoots(project)) {
+    let names = []
+    try { names = readdirSync(path.join(r.abs, 'docs', 'specs')).filter((n) => n.endsWith('.delta.json')) } catch { continue }
+    for (const n of names) {
+      const rel = `docs/specs/${n}`, x = resolveDelta(project, r.name, rel)
+      if (x.error || statSync(x.abs).size > project.maxBytes) continue
+      const text = readFileSync(x.abs, 'utf8')
+      out.push({ repo: r.name, path: rel, shown: r.rel === '.' ? rel : `${r.rel}/${rel}`, abs: x.abs, text, hash: docHash(text) })
+    }
+  }
+  return out.sort((a, b) => (path.basename(a.path) < path.basename(b.path) ? 1 : path.basename(a.path) > path.basename(b.path) ? -1 : a.shown < b.shown ? -1 : 1))
+}
+// The delta graph_changes reads (an MCP tool: its path is whatever the model asks for). Only a
+// delta beside the specs of a root, as the server writes them (resolveDelta: the real file, symlinks
+// resolved, is docs/specs/<name>.delta.json inside that root), named by a plain path relative to the
+// project root (`docs/specs/x.delta.json` in the hub or a repository at the root, `<repo
+// folder>/docs/specs/x.delta.json` in a repository). Anything else, a file that is missing, outside,
+// another file, too large or unreadable, gets one refusal that says nothing about it: the path is
+// never a way to read a file, nor to learn whether one exists.
+export const DELTA_REFUSED = 'delta: give a docs/specs/<name>.delta.json path inside the project, relative to its root'
+export function confinedDelta(project, file) {
+  const plain = typeof file === 'string' && file && file.length <= 1024 && !file.includes('\0') && !file.includes('\\') && !path.isAbsolute(file) && path.posix.normalize(file) === file && !file.split('/').some((s) => s === '' || s === '.' || s === '..')
+  for (const r of plain ? docRoots(project) : []) {
+    const rel = r.rel === '.' ? file : file.startsWith(`${r.rel}/`) ? file.slice(r.rel.length + 1) : null
+    if (!rel || !DELTA_PATH.test(rel) || resolveDelta(project, r.name, rel).error) continue
+    const { abs } = resolveDelta(project, r.name, rel)
+    try {
+      if (statSync(abs).size > project.maxBytes) continue
+      const text = readFileSync(abs, 'utf8')
+      return { repo: r.name, path: rel, shown: file, abs, text, hash: docHash(text) }
+    } catch { continue }
+  }
+  throw new Error(DELTA_REFUSED)
+}
+// One delta the user names on the command line (graph.mjs render and serve --delta): a path
+// relative to the project root, or absolute, read wherever it is (the user's own shell could read it
+// too); `repo` and `path` say where the server may write its acknowledgements, when it is beside the
+// specs of a root. Throws when it cannot be read.
+export function readDelta(project, file) {
+  const abs = path.resolve(project.root, file)
+  let text
+  try { if (statSync(abs).size > project.maxBytes) throw new Error('too large'); text = readFileSync(abs, 'utf8') } catch (e) { throw new Error(`the delta ${file} cannot be read (${e.code || e.message})`) }
+  const rel = path.relative(project.root, abs).split(path.sep).join('/')
+  const at = docRoots(project).map((r) => ({ r, rel: path.relative(r.abs, abs).split(path.sep).join('/') })).find((x) => DELTA_PATH.test(x.rel) && !resolveDelta(project, x.r.name, x.rel).error)
+  return { repo: at ? at.r.name : null, path: at ? at.rel : null, shown: rel && !rel.startsWith('..') ? rel : abs, abs, text, hash: docHash(text) }
 }

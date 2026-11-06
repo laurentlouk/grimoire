@@ -22,21 +22,29 @@
 //      found but not read, a 200-table store collapsed and searchable, the CSP; then the change
 //      overlay against a git base: off by default, added / removed / modified / renamed, its legend,
 //      absent without a base, escaping
+//  10. proposals (data/delta.mjs): the delta file's validation, the hash of a change, the target
+//      grammar against the diff's identity, each computed state on hand-built models, the unplanned
+//      changes, acknowledgements edited into the file in place
+//  11. the Data tab draws a delta over the model against a git base: each state's marks, the legend,
+//      the lists and passports (why, slice, acknowledgement), the picker, escaping; read-only when
+//      static, acknowledging through the server when served
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
 //  without it, except under CI, where a missing runtime fails.
-//  10. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
+//  12. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
 //      undeclared dialect and one stated in grimoire.config.json → graph_data and graph.mjs data
-//  11. the Data tab of that project: its stores, ERD and links to the indexed migration files
-//  12. incremental: a hand-edited migration (a conflict, badged in the Data tab), a rejected
+//  13. the Data tab of that project: its stores, ERD and links to the indexed migration files
+//  14. incremental: a hand-edited migration (a conflict, badged in the Data tab), a rejected
 //      statement, a deleted migration, a snapshot that no longer parses (reported by graph_status,
 //      the index goes on)
-//  13. a branch against its base (two commits): a column added, an index dropped, a table renamed →
+//  15. a branch against its base (two commits): a column added, an index dropped, a table renamed →
 //      graph_changes and graph.mjs changes; a ref that does not resolve; a base without the folder
+//  16. that branch against a design's delta: graph_changes --delta (each change's state, the
+//      unplanned, the summary), graph.mjs changes and render --delta
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync } from 'node:fs'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -64,7 +72,7 @@ const eq = (got, want, m) => { const g = JSON.stringify(got), w = JSON.stringify
 const blobOf = (page) => /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page)[1]
 const dataOf = (page) => JSON.parse(blobOf(page).replace(/\\u003c/g, '<'))
 const scriptOf = (page) => (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(page) || [])[1] || ''
-async function stubPage(page, hash) {
+async function stubPage(page, hash, globals = {}) {
   const vm = await import('node:vm')
   const blob = blobOf(page), listeners = {}
   class El {
@@ -82,8 +90,8 @@ async function stubPage(page, hash) {
   const { ctlQuery } = await import('./stage-kit.mjs')
   const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null }
   doc.querySelector = ctlQuery(() => ({ kids: doc.body.kids || [] }))
-  const loc = { hash }
-  vm.runInNewContext(scriptOf(page), { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
+  const loc = { hash, reload: () => { loc.reloads = (loc.reloads || 0) + 1 } }
+  vm.runInNewContext(scriptOf(page), { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }), ...globals })
   const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
   const find = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = find(k, pred); if (f) return f } return null }
   const all = (n, pred, out = []) => { if (n && typeof n === 'object') { if (pred(n)) out.push(n); for (const k of n.kids || []) all(k, pred, out) } return out }
@@ -93,11 +101,15 @@ async function stubPage(page, hash) {
     text: () => dump(body()),
     lines: (tag) => all(body(), (n) => n.tagName === tag).map(flat), // each element's text as read, e.g. every LI
     hash: () => loc.hash,
+    reloads: () => loc.reloads || 0,
+    textOf: (n) => flat(n),
     go: (h) => { loc.hash = h; listeners.hashchange() },
     find: (pred) => find(body(), pred),
     all: (pred) => all(body(), pred),
     ctl: (c) => find(body(), (n) => n.attrs && n.attrs['data-ctl'] === c),
     press: (c) => (pg.ctl(c).on.click || []).forEach((f) => f({})),
+    pressed: (c) => Promise.all((pg.ctl(c).on.click || []).map((f) => f({}))), // and wait for what it started (a save)
+    ctls: (re) => pg.all((n) => n.attrs && re.test(n.attrs['data-ctl'] || '')).map((n) => n.attrs['data-ctl']),
     search: (q) => pg.ctl('search').on.input[0]({ target: { value: q } }),
     erd: () => find(body(), (n) => n.attrs && n.attrs.id === 'data-box'), // the drawing: its svg markup is .html
     click: (i) => pg.erd().firstChild.on.click[0]({ target: { closest: (sel) => (/data-tbl/.test(sel) ? { dataset: { tbl: String(i) } } : null) } }),
@@ -764,6 +776,312 @@ console.log('\n9 · the Data tab\'s change overlay, against a git base')
   } catch (e) { ok(false, `the change overlay renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
 }
 
+// ── 10 · proposals: the delta file and its states ──
+console.log('\n10 · proposals: the delta file, its targets and its computed states (delta.mjs)')
+const { parseDelta, parseTarget, targetOf, changeHash, deltaStates, findTarget, setAcks, changeText, STATE_TEXT } = await import('../lib/data/delta.mjs')
+{
+  const ch = (id, op, target, extra = {}) => ({ id, op, target, why: `why ${id}`, origin: 'planned', ...extra })
+  const errs = (doc) => parseDelta(JSON.stringify(doc)).errors
+  const ok1 = { schema: 1, spec: 'docs/specs/2026-11-06-x-design.md', data: [ch('a', 'add', 'app:db/books.isbn', { after: { type: 'TEXT', nullable: true } })], architecture: [] }
+  eq(errs(ok1), [], 'a well-formed delta validates')
+  eq(parseDelta('{ "schema": 1, ').errors.map((e) => e.slice(0, 9)), ['not JSON:'], 'a file that is not JSON says so')
+  eq(errs({ schema: 2, data: {}, extra: 1 }), ['unknown key "extra" (a delta has schema, spec, data, architecture)', 'schema 2 is not one this grimoire reads (schema 1)', 'spec: the design this delta belongs to (docs/specs/<date>-<topic>-design.md)', 'data: an array of changes to the data model ([] when none)', 'architecture: an array of changes to the architecture ([] when none)'],
+    'the file: its schema version, its spec, data and architecture as arrays, no unknown key')
+  const bad = errs({ ...ok1, data: [
+    ch('a', 'grow', 'app:db/books.isbn'),
+    ch('b', 'add', 'books.isbn', { after: { type: 'TEXT', nullable: true } }),
+    ch('c', 'add', 'app:db/books.isbn'),
+    ch('a', 'remove', 'app:db/books'),
+    { ...ch('d', 'add', 'app:db/books.isbn', { after: { type: 'TEXT' }, afer: 1 }), why: '' },
+    ch('e', 'change', 'app:db/books/key:unique(isbn)', { after: {} }),
+    ch('f', 'rename', 'app:db/books/fk:(author_id)->authors(id)', { after: { name: 'x' } }),
+    ch('g', 'add', 'app:db/books/key:secondary(isbn)'),
+    ch('h', 'remove', 'app:db/books', { origin: 'guessed', after: { kind: 'table' } }),
+    ch('i', 'add', 'app:db/loans', { after: { fields: [{ name: 'id', type: 'INTEGER' }] } }),
+  ] })
+  eq(bad, [
+    'data[0] (a): op "grow" is not one of add, change, remove, rename',
+    'data[1] (b): target: "books.isbn" names no repository: <repo>:<store>/<entity>',
+    'data[2] (c): an addition needs after: the column it adds',
+    'data[3] (a): the id "a" is data[0]\'s too: ids are unique',
+    'data[4] (d): unknown key "afer" (a change has id, op, target, before, after, why, slice, origin, ack)',
+    'data[4] (d): why: say why it changes',
+    'data[4] (d): after: a column needs its nullable',
+    'data[5] (e): a key has nothing to change: its columns are what it is (remove it and add the new one)',
+    'data[6] (f): a foreign key has no name to rename: remove it and add the new one',
+    'data[7] (g): target: "app:db/books/key:secondary(isbn)": key:<role>(<col>,…), the role one of primary, unique, partition, sort, ttl',
+    'data[8] (h): origin "guessed" is not one of planned, unplanned',
+    'data[8] (h): a removal has no after',
+    'data[9] (i): after: column id needs its nullable',
+  ], 'each change: a known op, a target in the grammar, after where the op needs it and in the element\'s own attributes, a why, an origin, a unique id; every error at once, each naming its change')
+
+  // the hash: canonical, so key order is no change; what changes or why is; ack and slice are not
+  const c0 = ch('a', 'add', 'app:db/books.isbn', { after: { type: 'TEXT', nullable: true }, before: { x: { b: 1, a: 2 } } })
+  const reordered = { before: { x: { a: 2, b: 1 } }, why: c0.why, after: { nullable: true, type: 'TEXT' }, origin: 'planned', target: c0.target, op: 'add', id: 'a' }
+  eq([changeHash(c0) === changeHash(reordered), changeHash(c0) === changeHash({ ...c0, slice: 3, ack: { by: 'x', at: 'y', hash: 'z' } }), changeHash(c0) === changeHash({ ...c0, why: 'another reason' }), changeHash(c0) === changeHash({ ...c0, after: { type: 'TEXT', nullable: false } }), /^[0-9a-f]{16}$/.test(changeHash(c0))],
+    [true, true, false, false, true], 'a change\'s hash: the same whatever the key order, and with or without its ack or slice; another when its why or its after is edited')
+
+  // targets: the grammar, round-tripped through the model, resolving where the diff matches
+  eq(['app:db/books', 'app:db/books.meta.isbn', 'app:prisma/migrations/Loan/index:Loan_due_idx', 'app:db/books/key:unique(isbn, title)', 'app:./books/fk:(author_id)->authors(id)'].map((t) => { const p = parseTarget(t); return `${p.storeId} ${p.entity} ${p.kind} ${JSON.stringify(p.el)}` }),
+    ['app:db books entity {"name":"books"}', 'app:db books field {"name":"meta.isbn"}', 'app:prisma/migrations Loan index {"name":"Loan_due_idx"}', 'app:db books key {"role":"unique","parts":["isbn","title"]}', 'app:. books relation {"columns":["author_id"],"to":"authors","toColumns":["id"]}'],
+    'the target grammar: a store id that may hold "/", a table, a column (dotted when nested), an index, a key by role and columns, a foreign key by its columns on both sides')
+  const M = modelOf(`CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE, title TEXT NOT NULL, isbn TEXT, UNIQUE (isbn, title));
+CREATE INDEX books_title_idx ON books (title);`)
+  const st = M.stores[0], all = st.entities.flatMap((e) => [['entity', e, e], ...e.fields.map((x) => ['field', e, x]), ...e.keys.map((x) => ['key', e, x]), ...e.indexes.map((x) => ['index', e, x]), ...e.relations.map((x) => ['relation', e, x])])
+  const round = all.map(([kind, e, x]) => { const t = targetOf(st.id, e.name, kind, x); return findTarget(M, parseTarget(t)).el === x ? 'ok' : `lost ${t}` })
+  ok(round.length === 13 && round.every((r) => r === 'ok'), `every element of a model named by targetOf resolves back to itself through parseTarget (${round.filter((r) => r !== 'ok').join(', ') || `${round.length} elements`})`)
+  eq(['app:db/Books.TITLE', 'app:db/BOOKS/key:UNIQUE(ISBN,Title)', 'app:db/books/fk:(Author_ID)->AUTHORS(ID)', 'app:db/books/index:BOOKS_TITLE_IDX'].map((t) => !!findTarget(M, parseTarget(t)).el), [true, false, true, true],
+    'SQLite names resolve in any letter case, as the diff matches them (a key\'s role is part of the grammar, lower case)')
+  const pgm = modelOf('CREATE TABLE books (id INTEGER PRIMARY KEY);', { dialect: 'postgres' })
+  eq([!!findTarget(pgm, parseTarget('app:db/books')).el, !!findTarget(pgm, parseTarget('app:db/Books')).el], [true, false], 'where the dialect\'s names are case-sensitive, another case is another table')
+
+  // the states, against a base and a branch
+  const BASE = `CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, bio TEXT);
+CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE, title TEXT NOT NULL DEFAULT 'untitled', isbn TEXT, UNIQUE (isbn));
+CREATE INDEX books_title_idx ON books (title);
+CREATE TABLE legacy_notes (id INTEGER PRIMARY KEY, body TEXT);
+CREATE TABLE tags (id INTEGER PRIMARY KEY, label TEXT NOT NULL);`
+  const BRANCH = `CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, bio TEXT NOT NULL DEFAULT '', email TEXT);
+CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE SET NULL, title TEXT NOT NULL DEFAULT 'draft', isbn TEXT, UNIQUE (isbn, title));
+CREATE INDEX books_author_idx ON books (author_id);
+CREATE TABLE loans (id INTEGER PRIMARY KEY, book_id INTEGER REFERENCES books(id));
+CREATE TABLE labels (id INTEGER PRIMARY KEY, label TEXT NOT NULL);
+CREATE VIEW recent AS SELECT id FROM books;`
+  const base = modelOf(BASE), branch = modelOf(BRANCH)
+  const acked = ch('acked', 'add', 'app:db/authors.email', { after: { type: 'TEXT', nullable: true }, slice: 1 })
+  acked.ack = { by: 'Ann', at: '2026-11-06T10:00:00.000Z', hash: changeHash(acked) }
+  const edited = ch('stale', 'add', 'app:db/authors.phone', { after: { type: 'TEXT', nullable: true } })
+  edited.ack = { by: 'Ann', at: '2026-11-06T10:00:00.000Z', hash: changeHash({ ...edited, why: 'the reason before the edit' }) }
+  const delta = { schema: 1, spec: 'docs/specs/x-design.md', architecture: [], data: [
+    acked, edited,
+    ch('index', 'add', 'app:db/books/index:books_author_idx', { after: { columns: ['author_id'] } }),
+    ch('loans', 'add', 'app:db/loans', { after: { fields: [{ name: 'id', type: 'INTEGER', nullable: true }, { name: 'book_id', type: 'TEXT', nullable: true }, { name: 'due_on', type: 'TEXT', nullable: false }] } }),
+    ch('title-default', 'change', 'app:db/books.title', { after: { default: "'draft'" } }),
+    ch('name-type', 'change', 'app:db/authors.name', { after: { type: 'VARCHAR(120)' } }),
+    ch('bio-default', 'change', 'app:db/authors.bio', { after: { default: "'none'" } }),
+    ch('drop-notes', 'remove', 'app:db/legacy_notes'),
+    ch('drop-key', 'remove', 'app:db/books/key:unique(isbn,title)'),
+    ch('tags', 'rename', 'app:db/tags', { after: { name: 'labels' } }),
+    ch('writers', 'rename', 'app:db/authors', { after: { name: 'writers' } }),
+    ch('case', 'add', 'app:db/Books.ISBN', { after: { type: 'text', nullable: true } }),
+    ch('typo', 'remove', 'app:db/ghosts'),
+    ch('elsewhere', 'add', 'app:cache/entries', { after: { fields: [{ name: 'k', type: 'TEXT', nullable: false }] } }),
+    ch('reviews', 'add', 'app:db/reviews', { after: { fields: [{ name: 'id', type: 'INTEGER', nullable: true }] } }),
+    ch('reviews-stars', 'add', 'app:db/Reviews.stars', { after: { type: 'INTEGER', nullable: false } }),
+    ch('stray', 'add', 'app:db/nowhere.x', { after: { type: 'TEXT', nullable: true } }),
+  ] }
+  eq(parseDelta(JSON.stringify(delta)).errors, [], 'the delta under test validates')
+  const line = (r) => `${r.id} ${r.state}${r.ack ? ` ${r.ack}` : ''}${r.diffs.length ? ` [${r.diffs.map((x) => x.text).join('; ')}]` : ''}${r.proposed.length ? ` {${r.proposed.map((x) => x.text).join('; ')}}` : ''}${r.warn ? ` (${r.warn})` : ''}`
+  const s = deltaStates(delta, branch, { base, diff: diffModels(base, branch) })
+  eq(s.changes.map(line), [
+    'acked planned-built acked',
+    'stale pending stale',
+    'index planned-built',
+    'loans built-differently [column book_id type: TEXT → INTEGER; column due_on: TEXT, not null → absent]',
+    'title-default planned-built',
+    'name-type pending {type: TEXT → VARCHAR(120)}',
+    "bio-default built-differently [default: 'none' → '']",
+    'drop-notes planned-built',
+    'drop-key pending',
+    'tags planned-built',
+    'writers pending {rename to writers}',
+    'case planned-built',
+    'typo planned-built (not in the model, nor at the base: check the target)',
+    'elsewhere pending (the store is not in the model)',
+    'reviews pending',
+    'reviews-stars pending',
+    'stray pending (the table nowhere is not in the model)',
+  ], 'each change\'s state: built in the intended shape, pending, or built differently (planned → built); a change the branch has not touched is pending (now → planned), one it touched another way is built differently; a removal is built once its target is gone, a rename once only the new name is there; a target in another letter case resolves; the acknowledgement apart, stale once the change was edited; a column for a table the delta adds is pending, one for a table nowhere is flagged')
+  eq(s.unplanned.map((u) => `${u.c.change} ${u.target}`), ['removed app:db/books/key:unique(isbn)', 'removed app:db/books/index:books_title_idx', 'modified app:db/books/fk:(author_id)->authors(id)', 'added app:db/recent'],
+    'unplanned: what the branch changed against its base that no change of the delta covers, each named as a target (a change built another way, a rename\'s two names and a table added whole count as covered)')
+  eq(s.counts, { changes: 17, 'planned-built': 7, pending: 8, 'built-differently': 2, acked: 1, stale: 1, unacked: 15, unplanned: 4 }, '… counted')
+  eq(deltaStates(delta, base, { base, diff: diffModels(base, base) }).changes.map(line).slice(2, 11),
+    ['index pending', 'loans pending', 'title-default pending {default: \'untitled\' → \'draft\'}', 'name-type pending {type: TEXT → VARCHAR(120)}', 'bio-default pending {default: none → \'none\'}', 'drop-notes pending', 'drop-key planned-built (not in the model, nor at the base: check the target)', 'tags pending {rename to labels}', 'writers pending {rename to writers}'],
+    'at design time (the branch is its base): every change not in the code yet is pending, with what it proposes; a removal whose target was never there reads as done, with a warning')
+  const noBase = deltaStates({ ...delta, data: [ch('b', 'change', 'app:db/authors.bio', { after: { default: "'none'" }, before: { nullable: true } }), ch('n', 'change', 'app:db/authors.name', { after: { type: 'VARCHAR(120)' }, before: { type: 'TEXT' } })] }, branch)
+  eq([noBase.changes.map(line), noBase.unplanned], [["b built-differently [default: 'none' → '']", 'n pending {type: TEXT → VARCHAR(120)}'], []], 'with no base, `before` tells a change not made yet from one made another way; nothing is unplanned (there is no branch to compare)')
+  eq([changeText(delta.data[9]), STATE_TEXT['built-differently']], ['rename app:db/tags → labels', 'built differently'], 'a change and a state in words')
+
+  // acknowledging: the file edited in place, every other byte kept
+  const FILE = `{
+  "schema": 1,
+  "spec": "docs/specs/x-design.md",
+  "data": [
+    {
+      "id": "one",
+      "op": "add",
+      "target": "app:db/books.isbn",
+      "after": { "type": "TEXT", "nullable": true },
+      "why": "search by isbn",
+      "origin": "planned"
+    },
+    {
+      "id": "two",
+      "op": "remove",
+      "target": "app:db/legacy",
+      "why": "unused",
+      "origin": "planned",
+      "ack": {
+        "by": "Ann",
+        "at": "2026-11-05T09:00:00.000Z",
+        "hash": "0000000000000000"
+      }
+    },
+    { "id": "three", "op": "remove", "target": "app:db/old", "why": "gone", "origin": "planned", "ack": { "by": "Bo", "at": "x", "hash": "y" } },
+    {"id": "four", "op": "remove", "target": "app:db/older", "why": "gone too", "origin": "planned"}
+  ],
+  "architecture": []
+}
+`
+  const A = { by: 'Cy', at: '2026-11-06T12:00:00.000Z', hash: 'abcdef0123456789' }
+  const edited2 = setAcks(FILE, new Map([[0, A], [1, A], [2, null], [3, A]]))
+  const doc = JSON.parse(edited2)
+  eq(doc.data.map((c) => c.ack || null), [A, A, null, A], 'acknowledgements set, replaced and removed')
+  const lines = edited2.split('\n')
+  eq(lines.slice(4, 18), ['    {', '      "id": "one",', '      "op": "add",', '      "target": "app:db/books.isbn",', '      "after": { "type": "TEXT", "nullable": true },', '      "why": "search by isbn",', '      "origin": "planned",', '      "ack": {', '        "by": "Cy",', '        "at": "2026-11-06T12:00:00.000Z",', '        "hash": "abcdef0123456789"', '      }', '    },', '    {'],
+    'a new ack goes last in its change, in the file\'s 2-space style; the rest of the change keeps its own layout')
+  ok(edited2.includes('    { "id": "three", "op": "remove", "target": "app:db/old", "why": "gone", "origin": "planned" },\n') && edited2.includes('{"id": "four", "op": "remove", "target": "app:db/older", "why": "gone too", "origin": "planned", "ack": { "by": "Cy", "at": "2026-11-06T12:00:00.000Z", "hash": "abcdef0123456789" }}') && edited2.endsWith('  "architecture": []\n}\n'),
+    'a change written on one line stays on one line; removing an ack takes its comma with it; the final newline stays')
+  const unchanged = setAcks(FILE, new Map([[1, null]]))
+  eq(unchanged.split('\n').filter((l, k) => !FILE.split('\n').includes(l) || k > 30).length, 0, 'removing one ack changes only its lines: every other line of the file is kept as it was')
+  const crlf = setAcks(FILE.replace(/\n/g, '\r\n'), new Map([[0, A]]))
+  ok(!/[^\r]\n/.test(crlf) && JSON.parse(crlf).data[0].ack.by === 'Cy', 'CRLF line ends are kept')
+  const odd = setAcks('{"schema":1,"spec":"s","data":[{"id":"a","op":"remove","target":"app:db/t","why":"w","origin":"planned","ack":{"by":"1","at":"1","hash":"1"},"ack":{"by":"2","at":"2","hash":"2"}}],"architecture":[]}', new Map([[0, null]]))
+  ok(JSON.parse(odd).data[0].ack === undefined, 'a layout the in-place edit cannot handle (a duplicated key) is written whole, and still right')
+  const SHARED = '{\n  "schema": 1, "spec": "docs/specs/x-design.md",\n  "data": [\n    {\n      "id": "one", "op": "remove",\n      "target": "app:db/old",\n      "why": "gone", "origin": "planned"\n    }\n  ],\n  "architecture": []\n}\n'
+  const shared = setAcks(SHARED, new Map([[0, A]]))
+  eq(shared.split('\n'), ['{', '  "schema": 1, "spec": "docs/specs/x-design.md",', '  "data": [', '    {', '      "id": "one", "op": "remove",', '      "target": "app:db/old",', '      "why": "gone", "origin": "planned",', '      "ack": {', '        "by": "Cy",', '        "at": "2026-11-06T12:00:00.000Z",', '        "hash": "abcdef0123456789"', '      }', '    }', '  ],', '  "architecture": []', '}', ''],
+    'members sharing a line: the ack goes in at that line\'s indentation, every other line kept byte for byte')
+  const long = parseDelta(JSON.stringify({ schema: 1, spec: 's', data: [{ id: 'a', op: `grow\n${'x'.repeat(500)}`, target: 'app:db/t', why: 'w', origin: 'planned' }], architecture: [] })).errors[0]
+  ok(long.length < 200 && !long.includes('\n') && long.startsWith('data[0] (a): op "grow\\n'), `a value echoed in a problem is cut short and shown escaped (${long})`)
+}
+
+// ── 11 · the Data tab draws a delta ──
+console.log('\n11 · the Data tab draws a delta over the model, against a git base')
+{
+  const { openStore } = await import('../lib/store.mjs')
+  const { renderGraph } = await import('../lib/render.mjs')
+  const { extractAll } = await import('../lib/data/registry.mjs')
+  const { loadProject, listPaths } = await import('../lib/project.mjs')
+  const DIR = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-delta-page-')))
+  const put = (rel, text) => { mkdirSync(path.dirname(path.join(DIR, rel)), { recursive: true }); writeFileSync(path.join(DIR, rel), text) }
+  const BAD = '"><img src=x onerror=alert(1)></title><script>x</script><!--', NOSLASH = '"><img src=x onerror=alert(1)>'
+  const escd = (x) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const plan = (id, op, target, extra) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
+  const withAck = (c, by, edit = {}) => ({ ...c, ...edit, ack: { by, at: '2026-11-06T10:00:00.000Z', hash: changeHash(c) } })
+  try {
+    put('grimoire.config.json', JSON.stringify({ repos: [{ name: 'app', path: '.' }] }))
+    put('db/0001_init.sql', ['CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, bio TEXT);', 'CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES authors(id), title TEXT NOT NULL);',
+      'CREATE INDEX books_title_idx ON books (title);', 'CREATE TABLE legacy (id INTEGER PRIMARY KEY, body TEXT);', ''].join('\n'))
+    git(DIR, 'init', '-q', '-b', 'main')
+    commit(DIR, 'base')
+    git(DIR, 'switch', '-q', '-c', 'feat')
+    put('db/0002_branch.sql', ['ALTER TABLE authors ADD COLUMN email TEXT;', 'ALTER TABLE books ADD COLUMN isbn INTEGER;', 'DROP INDEX books_title_idx;', 'CREATE TABLE stats (day TEXT PRIMARY KEY, n INTEGER);', ''].join('\n'))
+    commit(DIR, 'branch')
+    const DELTA = { schema: 1, spec: 'docs/specs/2026-11-06-reading-design.md', data: [
+      withAck(plan('email', 'add', 'app:db/authors.email', { after: { type: 'TEXT', nullable: true }, slice: 1 }), 'Ann'),
+      plan('isbn', 'add', 'app:db/books.isbn', { after: { type: 'TEXT', nullable: true }, slice: 1 }),
+      plan('loans', 'add', 'app:db/loans', { after: { fields: [{ name: 'id', type: 'INTEGER', nullable: false }, { name: 'book_id', type: 'INTEGER', nullable: true }], keys: [{ role: 'primary', parts: ['id'] }], relations: [{ columns: ['book_id'], to: 'Books', toColumns: ['id'] }] }, slice: 2 }),
+      withAck(plan('due', 'add', 'app:db/books.due_on', { after: { type: 'TEXT', nullable: false }, slice: 2 }), 'Ann', { why: 'loans come back by a date, reworded after the acknowledgement' }),
+      plan('legacy', 'remove', 'app:db/legacy'),
+      { ...plan('hostile', 'add', `app:db/books.c${NOSLASH}`, { after: { type: `text${BAD}`, nullable: true } }), why: `w${BAD}` },
+      plan('elsewhere', 'add', 'app:cache/entries', { after: { fields: [{ name: 'k', type: 'TEXT', nullable: false }] } }),
+    ], architecture: [] }
+    put('docs/specs/2026-11-06-reading.delta.json', JSON.stringify(DELTA, null, 2) + '\n')
+    put('docs/specs/2026-10-01-old.delta.json', JSON.stringify({ schema: 1, spec: 'docs/specs/2026-10-01-old-design.md', data: [plan('bad', 'add', `app:t${NOSLASH}`, { after: { type: 'TEXT', nullable: true } })], architecture: [] }, null, 2) + '\n')
+    const project = loadProject(DIR)
+    const db = await openStore(project.dbPath)
+    db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES (?, ?, ?, ?)').run('app', '.', '', '')
+    for (const r of extractAll({ paths: listPaths(DIR), size: (p) => statSync(path.join(DIR, p)).size, read: (p) => readFileSync(path.join(DIR, p), 'utf8') }, project, [], { DatabaseSync }))
+      db.prepare('INSERT INTO data_facts(repo, scope, key, extractor, sig, facts, error) VALUES (?, ?, ?, ?, ?, ?, ?)').run('app', r.scope, r.key, r.extractor, 'sig', r.facts ? JSON.stringify(r.facts) : null, r.error || null)
+    db.close()
+
+    const page = await renderGraph(project)
+    const D = dataOf(page), dl = D.data.deltas
+    eq([dl.map((d) => `${d.shown} ${d.repo}:${d.path} ${d.ackable} ${d.errors.length}`), D.data.delta], [['docs/specs/2026-11-06-reading.delta.json app:docs/specs/2026-11-06-reading.delta.json true 0', 'docs/specs/2026-10-01-old.delta.json app:docs/specs/2026-10-01-old.delta.json true 1'], 0],
+      'every delta beside the specs is packed, newest first (the first shown), each saying where the server may write it')
+    eq(dl[0].changes.map((c) => `${c.id} ${c.state}${c.ack ? ` ${c.ack}` : ''} store ${c.store} tbl ${c.tbl}`), ['email planned-built acked store 0 tbl 0', 'isbn built-differently store 0 tbl 1', 'loans pending store 0 tbl 4', 'due pending stale store 0 tbl 1', 'legacy pending store 0 tbl 2', 'hostile pending store 0 tbl 1', 'elsewhere pending store -1 tbl -1'],
+      'each change\'s state and acknowledgement, computed in Node at render time, and the table it is drawn on (a proposed table after the store\'s own; one in a store not in the model, nowhere)')
+    const pg = await stubPage(page, '#data-0')
+    const btn = pg.ctl('data-delta'), pick = pg.ctl('data-delta-file')
+    ok(!!btn && btn.attrs['aria-pressed'] === 'false' && !/ d-(prop|rm|pend|built|diff|unpl)\b/.test(pg.erd().html) && pick.kids.map((o) => o.kids[0]).join(' ') === 'docs/specs/2026-11-06-reading.delta.json docs/specs/2026-10-01-old.delta.json' && pick.kids[0].attrs.selected === 'selected',
+      'a "Delta" toggle, off by default, beside "Changes vs main"; a picker naming every delta, the newest chosen')
+    pg.press('data-delta')
+    const svg = pg.erd().html
+    const tbl = (name) => (new RegExp(`<g class="(tbl[^"]*)" data-tbl="\\d+" tabindex="0" role="button" aria-label="${name},`).exec(svg) || [])[1]
+    const row = (col) => (new RegExp(`<g class="(row[^"]*)" data-col="${col}"`).exec(svg) || [])[1]
+    eq([btn.attrs && pg.ctl('data-delta').attrs['aria-pressed'], pg.ctl('data-changes').attrs['aria-pressed'], tbl('loans'), tbl('legacy'), tbl('stats'), tbl('books'), row('email'), row('isbn'), row('due_on'), row('book_id')],
+      ['true', 'false', 'tbl d-prop', 'tbl d-rm', 'tbl d-unpl', 'tbl', 'row d-built', 'row d-diff', 'row d-prop stale', 'row d-prop'],
+      'on: a proposed table dashed among the others, a proposed removal, a table the branch added outside the plan, a column planned and built, one built differently, a proposed column (its acknowledgement stale)')
+    ok(/<g class="xr d-unpl gone"><title>index books_title_idx \(title\) — not in the branch\nremoved, not in the plan\nat the base: db\/0001_init\.sql:3<\/title>[^]*?<line class="strike d-unpl"/.test(svg), 'an index the branch dropped outside the plan: struck in its own colour, cited at the base')
+    ok(/<line class="strike d-rm" x1/.test(svg) && svg.includes('>planned → built: type: TEXT → INTEGER</text>') && /<path class="fk d-prop" data-fk="\d+:0" d="M[^"]+" marker-start="url\(#erd-many\)" marker-end="url\(#erd-one\)"><title>loans \(book_id\) → Books \(id\)/.test(svg) === false && /<path class="fk d-prop"[^>]*><title>loans \(book_id\) → books \(id\)/.test(svg),
+      'a proposed removal struck in amber dashes; built differently says planned → built on its row; a proposed foreign key drawn dashed to the table as the store names it')
+    eq((svg.match(/<g class="stalemk">/g) || []).length, 1, 'a stale acknowledgement is badged beside its row')
+    const text = pg.text()
+    ok(['Delta:', 'proposed (dashed)', 'proposed removal', 'proposed change: now → planned', 'planned and built', 'built differently: planned → built', 'not in the plan', 'acknowledgement stale'].every((w) => text.includes(w)), 'a legend for each state')
+    const ps = pg.lines('P')
+    ok(ps.includes('For docs/specs/2026-11-06-reading-design.md: 7 changes · 1 planned and built · 5 pending · 1 built differently · 2 not in the plan · 1 acknowledged · 1 stale') && ps.includes('Read-only snapshot. To acknowledge changes, serve the page: graph.mjs serve'), 'the delta named with its design and counts; a static page says it is read-only')
+    const lis = pg.lines('LI')
+    ok(lis.some((l) => l.startsWith('add app:db/authors.emailplanned and builtas: TEXT, nullablein the code: db/0002_branch.sql:1why: because emailslice 1 · acknowledged by Ann at 2026-11-06T10:00:00.000Z'))
+      && lis.some((l) => l.startsWith('add app:db/books.due_onpendingstaleas: TEXT, not nullwhy: loans come back by a date, reworded after the acknowledgementslice 2 · stale: acknowledged by Ann at 2026-11-06T10:00:00.000Z, edited since'))
+      && lis.some((l) => l === 'app:db/statsnot in the plantable stats added') && lis.some((l) => l.startsWith('add app:cache/entriespending') && l.includes('⚠ the store is not in the model')),
+      'every change listed with its state, shape, where it is in the code, why, slice and acknowledgement (who, when; stale once edited); what is not in the plan; a change whose store is not in the model, apart')
+    eq(pg.ctls(/^delta-ack-/), [], 'the static page offers no acknowledgement: it stays read-only')
+    pg.click(dl[0].stores[0].tables.findIndex((t) => typeof t !== 'number' ? t.name === 'books' : D.data.stores[0].tables[t].name === 'books'))
+    ok(pg.text().includes('Delta: 3 changes, 1 not in the plan') && pg.lines('LI').some((l) => l.includes('app:db/books.isbnbuilt differently') && l.includes('planned → built: type: TEXT → INTEGER')) && pg.lines('LI').some((l) => l === 'app:db/books/index:books_title_idxnot in the planindex books · books_title_idx removed'),
+      "a table's passport lists the delta's changes to it, with what differs, and the branch's changes to it outside the plan")
+    // markup in a delta's target, after and why is text, in the drawing and in the lists
+    ok(!/<img|<script|<!--/i.test(svg) && svg.includes(`data-col="c${escd(NOSLASH)}"`) && svg.includes(escd(`text${BAD}`).slice(0, 20)) && svg.includes(escd(`why: w${BAD}`)), 'the ERD escapes a delta\'s target, after and why')
+    const markup = pg.all((n) => typeof n.html === 'string' && /<img|<script/i.test(n.html)).length + pg.all((n) => n.tagName === 'IMG' || n.tagName === 'SCRIPT').length
+    ok(markup === 0 && pg.lines('LI').some((l) => l.includes(`why: w${BAD}`)), '… and the lists carry them as text nodes, never markup')
+    pick.on.change[0]({ target: { value: '1' } })
+    const old = pg.text()
+    ok(old.includes('docs/specs/2026-10-01-old.delta.json does not validate (1 problem): nothing drawn') && pg.lines('LI').includes(`data[0] (bad): target: ${JSON.stringify(`app:t${NOSLASH}`)} names no store and entity: <repo>:<store>/<entity>`) && !/ d-(prop|rm|built|diff|unpl)\b/.test(pg.erd().html) && !pg.all((n) => n.tagName === 'IMG' || n.tagName === 'SCRIPT').length,
+      'the picker switches deltas; one that does not validate shows its problems (as text) and draws nothing')
+    pick.on.change[0]({ target: { value: '0' } })
+    pg.press('data-changes')
+    ok(pg.ctl('data-delta').attrs['aria-pressed'] === 'false' && /class="tbl[^"]* add\b/.test(pg.erd().html) && !/ d-prop\b/.test(pg.erd().html), 'one overlay at a time: Changes turns the delta off')
+
+    // served: each change can be acknowledged; the server answers with what it wrote
+    const calls = []
+    let answer = (body) => ({ status: 200, j: { hash: 'h2', changes: body.ids.map((id) => ({ id, ack: { by: 'Cy', at: '2026-11-07T08:00:00.000Z', hash: 'x' } })) } })
+    const fetch = async (url, o) => { calls.push({ url, method: o.method, headers: o.headers, body: JSON.parse(o.body) }); const a = answer(JSON.parse(o.body)); return { ok: a.status < 300, status: a.status, json: async () => a.j } }
+    const served = await renderGraph(project, { serve: { token: 'page-token' } })
+    const sp = await stubPage(served, '#data-0', { fetch })
+    sp.press('data-delta')
+    const acks = sp.ctls(/^delta-ack-l/)
+    ok(acks.join(' ') === 'delta-ack-l0 delta-ack-l1 delta-ack-l2 delta-ack-l3 delta-ack-l4 delta-ack-l5' && sp.ctl('delta-ack-l3').kids[0] === 'Acknowledge again' && sp.ctl('delta-ack-l0').kids[0] === 'Unacknowledge' && sp.ctl('delta-ack-sall').kids[0] === 'Acknowledge all 5 changes not acknowledged in this store',
+      `served: each change has its control (Acknowledge, Acknowledge again when stale, Unacknowledge), and the store one for all not acknowledged (${acks})`)
+    await sp.pressed('delta-ack-l3')
+    eq(calls.map((c) => [c.url, c.method, c.headers['x-grimoire-token'], c.body]), [['/api/delta', 'PUT', 'page-token', { repo: 'app', path: 'docs/specs/2026-11-06-reading.delta.json', base: dl[0].hash, ids: ['due'], ack: true }]],
+      'acknowledging sends the delta, the hash it was loaded with, the change\'s id and nothing else: who, when and the hash are the server\'s to write')
+    ok(sp.lines('LI').some((l) => l.includes('app:db/books.due_on') && l.includes('acknowledged by Cy at 2026-11-07T08:00:00.000Z')) && !/stalemk/.test(sp.erd().html) && sp.text().includes('Acknowledged: 1 change, written to docs/specs/2026-11-06-reading.delta.json'),
+      '… and the page shows what the server wrote: the stale badge is gone')
+    answer = () => ({ status: 409, j: { error: 'changed on disk since it was loaded', text: '{}', hash: 'h3' } })
+    await sp.pressed('delta-ack-sall')
+    const said = sp.find((n) => n.attrs && n.attrs['data-status-for'] === 'delta-ack-sall')
+    ok(calls[1].body.base === 'h2' && calls[1].body.ids.join(',') === 'isbn,loans,legacy,hostile' && !!said && sp.textOf(said).startsWith('Not saved: the delta changed on disk since this page was loaded') && !!sp.ctl('delta-reload') && !sp.all((n) => n.attrs && /callout/.test(n.attrs.class || '') && sp.textOf(n).includes('changed on disk')).length,
+      'a refused write (the file changed since): said beside the control pressed, with a Reload, not as a banner over the tab; the store control sends every change not acknowledged')
+    const store = new Map(), session = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) }
+    const sr = await stubPage(served, '#data-0', { fetch, sessionStorage: session })
+    sr.press('data-delta')
+    answer = () => ({ status: 409, j: { error: 'changed on disk since it was loaded', text: '{}', hash: 'h3' } })
+    await sr.pressed('delta-ack-l3')
+    sr.press('delta-reload')
+    const kept = store.get('grimoire-delta')
+    ok(sr.reloads() === 1 && JSON.parse(kept).dataDelta === true && JSON.parse(kept).delta === 'docs/specs/2026-11-06-reading.delta.json' && JSON.parse(kept).store === 0, `Reload keeps the overlay, the delta and the store for the page it reloads (${kept})`)
+    store.set('grimoire-delta', JSON.stringify({ dataDelta: true, deltaSel: 1, delta: 'docs/specs/2026-10-01-old.delta.json', store: 0 }))
+    const again = await stubPage(served, '#data-0', { fetch, sessionStorage: session })
+    ok(again.ctl('data-delta').attrs['aria-pressed'] === 'true' && again.ctl('data-delta-file').kids[1].attrs.selected === 'selected' && again.text().includes('docs/specs/2026-10-01-old.delta.json does not validate') && !store.has('grimoire-delta'),
+      '… and the reloaded page opens with the Delta overlay on and the same delta chosen, once')
+    const plain = await stubPage(served, '#data-0', { fetch, sessionStorage: { getItem() { throw new Error('blocked') }, setItem() { throw new Error('blocked') }, removeItem() {} } })
+    ok(plain.ctl('data-delta').attrs['aria-pressed'] === 'false', 'a session store that throws changes nothing')
+    const scr = scriptOf(served)
+    ok(!/<!--|<script/i.test(scr) && /connect-src 'self'/.test(served) && !/connect-src/.test(page), 'the page script stays clean; only the served page may connect back to its server')
+  } catch (e) { ok(false, `the delta overlay renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()
@@ -780,8 +1098,8 @@ async function indexed() {
   const edit = (rel, fn) => { const f = path.join(PROJ, rel); writeFileSync(f, fn(readFileSync(f, 'utf8'))); const t = new Date(Date.now() + ++tick * 2000); utimesSync(f, t, t) }
   const cli = (...a) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), ...a, '--root', PROJ], { encoding: 'utf8' }).stdout
   try {
-    // ── 10 · the stores ──
-    console.log('\n10 · a project of four repositories (fixtures/data)')
+    // ── 12 · the stores ──
+    console.log('\n12 · a project of four repositories (fixtures/data)')
     const idx = await q('index')
     ok(/mobile: 7 files/.test(idx) && !idx.includes('failure'), 'index: every repository, no extractor failure')
     const list = await q('data')
@@ -829,8 +1147,8 @@ async function indexed() {
     const streaks = await q('data', { entity: 'streaks' })
     ok(streaks.includes('  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9') && streaks.endsWith('Conflicts: none'), `Drizzle's timestamp idiom, DEFAULT (unixepoch()): replay and snapshot agree, the default shown as written${streaks.endsWith('Conflicts: none') ? '' : `\n${streaks}`}`)
 
-    // ── 11 · the Data tab ──
-    console.log('\n11 · the Data tab of that project')
+    // ── 13 · the Data tab ──
+    console.log('\n13 · the Data tab of that project')
     const { renderGraph } = await import('../lib/render.mjs')
     const { loadProject } = await import('../lib/project.mjs')
     const page = await renderGraph(loadProject(PROJ))
@@ -855,8 +1173,8 @@ async function indexed() {
     ok(!!pg.find((n) => n.tagName === 'A' && n.attrs.href === `#file-${init}` && n.kids[0] === 'mobile/drizzle/0000_init.sql:8') && !!pg.find((n) => n.tagName === 'CODE' && n.kids[0] === 'mobile/drizzle/meta/0005_snapshot.json:42'),
       "a column's sources: the migration line links to its file in the Files tab, the snapshot (not an indexed file) is cited as path:line")
 
-    // ── 12 · incremental ──
-    console.log('\n12 · incremental refresh')
+    // ── 14 · incremental ──
+    console.log('\n14 · incremental refresh')
     edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` integer,', '`published_at` text,'))
     await q('index')
     has(await q('data', { entity: 'books' }), 'Conflicts (1): the declarations disagree; each side is kept\n  books.published_at  type: integer — mobile/drizzle/meta/0005_snapshot.json:63 [artifact] | text — mobile/drizzle/0000_init.sql:11 [migration]', 'a hand-edited migration disagreeing with the snapshot: a conflict carrying both sources')
@@ -885,8 +1203,8 @@ async function indexed() {
     has(cli('data', 'list', 'web:db/legacy'), '  sessions  table  3 fields · primary (id) · foreign keys → accounts  web/db/legacy/0002_sessions.sql:1', 'graph.mjs data list <store>')
     has(cli('data', 'show', 'Loan'), 'api:prisma/migrations/Loan  table  (sqlite)\n  declared at api/prisma/migrations/20240212143000_loan_notes/migration.sql:3 [migration sql-migrations@1]', 'graph.mjs data show <entity>')
 
-    // ── 13 · a branch against its base ──
-    console.log('\n13 · a branch against its base (graph_changes), on a copy with two commits')
+    // ── 15 · a branch against its base ──
+    console.log('\n15 · a branch against its base (graph_changes), on a copy with two commits')
     const BR = path.join(SANDBOX, 'branch')
     const fixture = (keep) => cpSync(path.join(HERE, 'fixtures', 'data'), BR, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') && keep(path.relative(path.join(HERE, 'fixtures', 'data'), src)) })
     fixture((rel) => !rel.startsWith(path.join('kiosk', 'storage')))
@@ -932,6 +1250,64 @@ async function indexed() {
     eq(RD && [RD.changes.base.ref, RD.stores.filter((s) => s.ch).map((s) => `${s.id} +${s.ch.n.added} -${s.ch.n.removed} ~${s.ch.n.modified} ?${s.ch.n.renames}`)], ['main', ['api:prisma/migrations +2 -2 ~0 ?1']], `graph.mjs render --base <ref>: the page carries the overlay against it (${rendered.stderr.trim()})`)
     const badRender = run('render', '--base', 'no-such-branch', '--out', outFile)
     ok(badRender.status === 1 && badRender.stderr.includes('does not resolve'), 'graph.mjs render with a base that does not resolve exits 1 and says why')
+
+    // ── 16 · the branch against a design's delta ──
+    console.log('\n16 · the branch against a design\'s delta (graph_changes --delta, render --delta)')
+    const plan = (id, op, target, extra) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
+    const acked = (c, edit = {}) => ({ ...c, ...edit, ack: { by: 'Ann', at: '2026-11-06T10:00:00.000Z', hash: changeHash(c) } })
+    const DELTA = { schema: 1, spec: 'docs/specs/2026-11-06-loans-design.md', data: [
+      plan('returned-on', 'add', 'api:prisma/migrations/Loan.returnedOn', { after: { type: 'DATETIME', nullable: false }, slice: 1 }),
+      acked(plan('labels', 'rename', 'api:prisma/migrations/Tag', { after: { name: 'Label' }, slice: 1 })),
+      acked(plan('returned-idx', 'add', 'api:prisma/migrations/Loan/index:Loan_returnedOn_idx', { after: { columns: ['returnedOn'] } }), { why: 'list the loans still out, edited after the acknowledgement' }),
+      plan('bio', 'add', 'mobile:drizzle/authors.bio', { after: { type: 'text', nullable: false } }),
+    ], architecture: [] }
+    mkdirSync(path.join(BR, 'docs/specs'), { recursive: true })
+    writeFileSync(path.join(BR, 'docs/specs/2026-11-06-loans.delta.json'), JSON.stringify(DELTA, null, 2) + '\n')
+    const dl = await br('changes', { delta: 'docs/specs/2026-11-06-loans.delta.json' })
+    const migration = 'api/prisma/migrations/20240401090000_branch_changes/migration.sql'
+    ok(/^Delta docs\/specs\/2026-11-06-loans\.delta\.json \(the design: docs\/specs\/2026-11-06-loans-design\.md\), against the model and the branch against main \(the index's base branch\) at [0-9a-f]{10}: 4 data changes$/.test(dl.split('\n')[0]), `graph_changes --delta: which delta, for which design, against what (${dl.split('\n')[0]})`)
+    eq(dl.split('\n').slice(1), [
+      `  built differently  returned-on  add api:prisma/migrations/Loan.returnedOn  — ${migration}:2`,
+      '    planned → built: nullable: not null → nullable',
+      '    why: because returned-on · slice 1 · not acknowledged',
+      `  planned and built  labels  rename api:prisma/migrations/Tag → Label  — ${migration}:8`,
+      '    why: because labels · slice 1 · acknowledged by Ann at 2026-11-06T10:00:00.000Z',
+      '  pending  returned-idx  add api:prisma/migrations/Loan/index:Loan_returnedOn_idx',
+      '    why: list the loans still out, edited after the acknowledgement · stale: acknowledged by Ann at 2026-11-06T10:00:00.000Z, edited since',
+      '  planned and built  bio  add mobile:drizzle/authors.bio  — mobile/drizzle/meta/0005_snapshot.json:24 · mobile/drizzle/0003_author_bio_required.sql:5',
+      '    why: because bio · not acknowledged',
+      'Unplanned (1): in the branch, in no change of the delta',
+      '  - api:prisma/migrations/Member/index:Member_email_key  Member index Member_email_key unique (email)  — was api/prisma/migrations/20240105090000_init/migration.sql:19',
+      'Summary: 2 planned and built · 1 pending · 1 built differently · 1 unplanned · 1 acknowledged · 1 stale · 2 not acknowledged',
+    ], 'each change\'s state against the code: a column built in another shape (planned → built), a rename built, an index pending, a column that was there already; its why, slice and acknowledgement (stale once edited); then the branch\'s change no delta change covers, then the summary')
+    has(await call('graph_changes', { delta: 'docs/specs/2026-11-06-loans.delta.json' }, { root: BR }), '\n\nLeads, not facts: the states are computed from migrations', '… with its own footer: states are computed, never written')
+    has(run('changes', '--delta', 'docs/specs/2026-11-06-loans.delta.json').stdout, '  pending  returned-idx  add api:prisma/migrations/Loan/index:Loan_returnedOn_idx', 'graph.mjs changes --delta <file>')
+    writeFileSync(path.join(BR, 'docs/specs/broken.delta.json'), JSON.stringify({ ...DELTA, data: [{ ...DELTA.data[0], op: 'grow' }] }))
+    eq(await br('changes', { delta: 'docs/specs/broken.delta.json' }), 'Delta docs/specs/broken.delta.json does not validate (1 problem):\n  data[0] (returned-on): op "grow" is not one of add, change, remove, rename', 'a delta that does not validate: its problems, nothing computed')
+    // the page: the newest delta beside the specs first, or the one --delta names, read wherever it is
+    const pageWith = (...a) => { const x = run('render', ...a, '--out', outFile); return x.status === 0 ? dataOf(readFileSync(outFile, 'utf8')).data : x.stderr.trim() }
+    const P1 = pageWith()
+    eq([P1.deltas.map((d) => d.shown), P1.delta, P1.deltas[1].changes.map((c) => `${c.id} ${c.state}`), P1.deltas[1].unplanned.map((u) => u.target)], [['docs/specs/broken.delta.json', 'docs/specs/2026-11-06-loans.delta.json'], 0, ['returned-on built-differently', 'labels planned-built', 'returned-idx pending', 'bio planned-built'], ['api:prisma/migrations/Member/index:Member_email_key']],
+      'graph.mjs render: every delta beside the specs, the newest by name first; each change in the same state graph_changes gives, and the same unplanned change')
+    writeFileSync(path.join(SANDBOX, 'elsewhere.delta.json'), JSON.stringify(DELTA))
+    const P2 = pageWith('--delta', 'docs/specs/2026-11-06-loans.delta.json'), P3 = pageWith('--delta', path.join(SANDBOX, 'elsewhere.delta.json'))
+    eq([P2.delta, P2.deltas[P2.delta].shown, P3.delta, P3.deltas.length, P3.deltas[0].shown === path.join(SANDBOX, 'elsewhere.delta.json'), P3.deltas[0].ackable, P3.deltas[1].ackable], [1, 'docs/specs/2026-11-06-loans.delta.json', 0, 3, true, false, true],
+      'graph.mjs render --delta <file>: that delta shown first; one outside the specs is drawn too, never written (not ackable)')
+    ok(/graph render: the delta nowhere\.delta\.json cannot be read \(ENOENT\)/.test(pageWith('--delta', 'nowhere.delta.json')), 'graph.mjs render --delta with a file that cannot be read exits 1 and says why')
+    // graph_changes reads only a delta beside the specs of a project root: a model-chosen path is
+    // never a way to read another file, nor to learn whether one exists
+    const REFUSAL = 'delta: give a docs/specs/<name>.delta.json path inside the project, relative to its root'
+    writeFileSync(path.join(SANDBOX, 'x.delta.json'), 'SECRET_VALUE=not-a-real-one\n')
+    writeFileSync(path.join(SANDBOX, 'dotenv'), 'SECRET_VALUE=not-a-real-one\n')
+    symlinkSync(path.join(SANDBOX, 'x.delta.json'), path.join(BR, 'docs/specs/linked.delta.json'))
+    writeFileSync(path.join(BR, 'docs/specs/x.json'), JSON.stringify(DELTA))
+    writeFileSync(path.join(BR, 'docs/specs/huge.delta.json'), JSON.stringify({ ...DELTA, spec: 'x'.repeat(600 * 1024) }))
+    const probes = ['/etc/hosts', '../x.delta.json', '../dotenv', path.join(SANDBOX, 'x.delta.json'), 'docs/specs/linked.delta.json', 'docs/specs/x.json', 'docs/specs/nope.delta.json', 'docs/specs/../../x.delta.json', './docs/specs/2026-11-06-loans.delta.json', 'docs/specs/huge.delta.json', 'docs\\specs\\2026-11-06-loans.delta.json']
+    const answers = []
+    for (const delta of probes) answers.push(await call('graph_changes', { delta }, { root: BR }).then((x) => `answered: ${x.slice(0, 60)}`, (e) => e.message))
+    ok(answers.every((a) => a === REFUSAL), `graph_changes refuses, in one message that says nothing of the file, an absolute path, a path out of the project, a symlink out, another extension, a missing delta, a path not plain, one past the size limit (${[...new Set(answers)].join(' | ')})`)
+    ok((await br('changes', { delta: 'docs/specs/2026-11-06-loans.delta.json' })).includes('  pending  returned-idx'), '… and a delta beside the specs still answers')
+    eq(run('changes', '--delta', '../dotenv').stderr.trim(), `graph: ${REFUSAL}`, 'graph.mjs changes --delta is the same tool, under the same rule')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 
