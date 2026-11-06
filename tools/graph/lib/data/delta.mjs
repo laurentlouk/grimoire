@@ -63,13 +63,13 @@ const TOP = ['schema', 'spec', 'data', 'architecture']
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x)
 const str = (x) => typeof x === 'string' && x.trim() !== ''
-const q = (x) => JSON.stringify(x)
+const q = (x) => { const s = JSON.stringify(x) ?? String(x); return s.length > 80 ? `${s.slice(0, 79)}…` : s } // a value echoed in a problem: escaped, cut short
 
 // ── the hash ──
 export function canonical(x) {
   if (Array.isArray(x)) return `[${x.map((v) => (v === undefined ? 'null' : canonical(v))).join(',')}]`
-  if (isObj(x)) return `{${Object.keys(x).sort().filter((k) => x[k] !== undefined).map((k) => `${q(k)}:${canonical(x[k])}`).join(',')}}`
-  return q(x)
+  if (isObj(x)) return `{${Object.keys(x).sort().filter((k) => x[k] !== undefined).map((k) => `${JSON.stringify(k)}:${canonical(x[k])}`).join(',')}}`
+  return JSON.stringify(x)
 }
 export function changeHash(c) {
   const { ack, slice, ...rest } = c
@@ -321,7 +321,8 @@ export const changeText = (c) => `${c.op} ${c.target}${c.op === 'rename' && c.af
 // The acknowledgements set (an object) or removed (null) by change index in `data`, written into the
 // text itself: only the edited `ack` members move, every other byte stays as it was (the file's
 // indentation, line ends, final newline, key order and the other changes). Checked by parsing the
-// result; a file whose layout defeats the edit is written whole instead, in its indentation.
+// result; a file whose layout defeats the edit (a key written twice) is written whole instead, after
+// the same check, in its own indentation unit (2 spaces when it has none).
 export function setAcks(text, edits) {
   const doc = JSON.parse(text)
   for (const [i, ack] of edits) { if (ack) doc.data[i].ack = ack; else delete doc.data[i].ack }
@@ -337,7 +338,7 @@ export function setAcks(text, edits) {
       const multi = text.slice(obj.start, obj.end).includes('\n')
       const at = [...obj.members].reverse().find((m) => m.key === 'ack') || null
       const last = obj.members[obj.members.length - 1]
-      const indent = (m) => { const s = text.lastIndexOf('\n', m.kstart) + 1; return text.slice(s, m.kstart) }
+      const indent = (m) => /^[ \t]*/.exec(text.slice(text.lastIndexOf('\n', m.kstart) + 1, m.kstart))[0] // its line's leading blanks, whatever shares the line
       const fmt = (ind) => (multi ? JSON.stringify(ack, null, unit).split('\n').join(nl + ind) : JSON.stringify(ack, null, 1).replace(/\n\s*/g, ' '))
       if (ack && at) ops.push({ from: at.node.start, to: at.node.end, put: fmt(indent(at)) })
       else if (ack) ops.push({ from: last.node.end, to: last.node.end, put: multi ? `,${nl}${indent(last)}"ack": ${fmt(indent(last))}` : `, "ack": ${fmt('')}` })

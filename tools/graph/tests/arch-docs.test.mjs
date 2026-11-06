@@ -330,11 +330,11 @@ else {
     ok(r.status === 400 && r.j.error === 'no data change with the id "nope"' && disk() === before, 'an id the delta does not hold: refused, nothing written (not even the ids it does hold)')
     r = await dput({ repo: 'api', path: 'docs/specs/broken.delta.json', base: docHash(disk('repos/api/docs/specs/broken.delta.json')), ids: ['x'], ack: true })
     ok(r.status === 422 && r.j.error.startsWith('the delta does not validate: data[0] (x): op undefined') && disk('repos/api/docs/specs/broken.delta.json').includes('"id": "x" }'), 'a delta that does not validate is never written: its problems say why')
-    const refused = [['api', '../docs/specs/x.delta.json'], ['api', 'docs/specs/../specs/2026-11-06-loans.delta.json'], ['api', `${at('repos/api')}/${REL}`], ['api', 'docs/specs/notes.json'], ['api', 'docs/specs/notes.md'], ['api', 'docs/plans/2026-11-06-loans.delta.json'], ['api', 'docs/specs/out.delta.json'], ['api', 'docs/specs/pkg.delta.json'], ['api', 'docs/specs/none.delta.json'], [path.basename(DH), `repos/api/${REL}`], ['nope', REL]]
+    const refused = [['api', '../docs/specs/x.delta.json'], ['api', 'docs/specs/../specs/2026-11-06-loans.delta.json'], ['api', `${at('repos/api')}/${REL}`], ['api', 'docs/specs/notes.json'], ['api', 'docs/specs/notes.md'], ['api', 'docs/plans/2026-11-06-loans.delta.json'], ['api', 'docs/specs/out.delta.json'], ['api', 'docs/specs/pkg.delta.json'], ['api', 'docs/specs/none.delta.json'], [path.basename(DH), `repos/api/${REL}`], ['nope', REL], ['api', 'docs/specs/%2e%2e/%2e%2e/package.json'], ['api', 'docs/specs/%2e%2e%2f%2e%2e%2fpackage.delta.json'], ['api', REL.replace('.delta.json', '.DELTA.JSON')]]
     const got = []
     for (const [repo, p] of refused) got.push((await dput({ repo, path: p, base: 'x', ids: ['one'], ack: true })).status)
     ok(got.every((x) => x === 400) && disk('outside/stolen.delta.json') === TEXT && disk('repos/api/package.json') === '{}\n' && disk(`repos/api/docs/plans/2026-11-06-loans.delta.json`) === TEXT,
-      `only docs/specs/<name>.delta.json in a root is written: refused a parent path, a path not plain, an absolute path, another extension, another folder, a symlink out, a symlink to a file that is not a delta, a missing delta, another repository's delta from the hub, an unknown repository (${got.join(' ')})`)
+      `only docs/specs/<name>.delta.json in a root is written: refused a parent path, a path not plain, an absolute path, another extension, another folder, a symlink out, a symlink to a file that is not a delta, a missing delta, another repository's delta from the hub, an unknown repository, %2e%2e (never decoded), an extension in another case (${got.join(' ')})`)
     const hubBy = (spawnSync('git', ['-C', DH, 'config', 'user.name'], { encoding: 'utf8' }).stdout || '').trim() || userInfo().username
     r = await dput({ repo: path.basename(DH), path: REL, base: docHash(disk(REL)), ids: ['three'], ack: true })
     ok(r.status === 200 && JSON.parse(disk(REL)).data[2].ack.by === hubBy, `a delta beside the hub's own specs is written too, by the git user.name its folder sees, else the system user (${hubBy})`)
@@ -347,6 +347,19 @@ else {
       chmodSync(at(`repos/api/${REL}`), 0o444)
       ok((await dput({ repo: 'api', path: REL, base: docHash(disk()), ids: ['three'], ack: true })).status === 403, 'a read-only delta is refused')
       chmodSync(at(`repos/api/${REL}`), 0o644)
+    }
+    if (gitOk) {
+      const logged = []
+      const s3 = await serve(dproj, { refresh: false, log: (m) => logged.push(m) })
+      try {
+        spawnSync('git', ['config', 'user.name', `Line one\nLine\ttwo ${'x'.repeat(500)}`], { cwd: at('repos/api') })
+        const r3 = await fetch(`http://127.0.0.1:${s3.port}/api/delta`, { method: 'PUT', headers: { 'x-grimoire-token': s3.token, 'content-type': 'application/json' }, body: JSON.stringify({ repo: 'api', path: REL, base: docHash(disk()), ids: ['three'], ack: true }) })
+        const by = JSON.parse(disk()).data[2].ack.by
+        ok(r3.status === 200 && by.length <= 120 && !/[\u0000-\u001f\u007f]/.test(by) && by.startsWith('Line one Line two xxx'), `a git user.name is written capped and on one line (${JSON.stringify(by.slice(0, 30))}…, ${by.length} chars)`)
+        writeFileSync(at(`repos/api/${REL}`), JSON.stringify({ ...DELTA, data: [...DELTA.data, { id: 'four\u001b[2Jfive', op: 'remove', target: 'api:db/old', why: 'w', origin: 'planned' }] }, null, 2) + '\n')
+        await fetch(`http://127.0.0.1:${s3.port}/api/delta`, { method: 'PUT', headers: { 'x-grimoire-token': s3.token, 'content-type': 'application/json' }, body: JSON.stringify({ repo: 'api', path: REL, base: docHash(disk()), ids: ['four\u001b[2Jfive'], ack: true }) })
+        ok(logged.length === 2 && logged.every((m) => !/[\u0000-\u001f\u007f]/.test(m)) && logged[1].includes('"four\\u001b[2Jfive"'), `the server's log never prints a control character from a request (${JSON.stringify(logged[1])})`)
+      } finally { spawnSync('git', ['config', 'user.name', 'Delta Tester'], { cwd: at('repos/api') }); await s3.close() }
     }
     ok(readdirTmp(DH).length === 0, 'no temporary file is left behind')
     const pageD = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec((await fetch(`http://127.0.0.1:${s2.port}/?t=${s2.token}`).then((x) => x.text())))[1].replace(/\\u003c/g, '<')).data

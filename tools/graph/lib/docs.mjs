@@ -146,9 +146,32 @@ export function scanDeltas(project) {
   }
   return out.sort((a, b) => (path.basename(a.path) < path.basename(b.path) ? 1 : path.basename(a.path) > path.basename(b.path) ? -1 : a.shown < b.shown ? -1 : 1))
 }
-// One delta named by the user (graph_changes `delta`, graph.mjs --delta): a path relative to the
-// project root, or absolute. Read wherever it is; `repo` and `path` say where the server may write
-// its acknowledgements, when it is beside the specs of a root. Throws when it cannot be read.
+// The delta graph_changes reads (an MCP tool: its path is whatever the model asks for). Only a
+// delta beside the specs of a root, as the server writes them (resolveDelta: the real file, symlinks
+// resolved, is docs/specs/<name>.delta.json inside that root), named by a plain path relative to the
+// project root (`docs/specs/x.delta.json` in the hub or a repository at the root, `<repo
+// folder>/docs/specs/x.delta.json` in a repository). Anything else, a file that is missing, outside,
+// another file, too large or unreadable, gets one refusal that says nothing about it: the path is
+// never a way to read a file, nor to learn whether one exists.
+export const DELTA_REFUSED = 'delta: give a docs/specs/<name>.delta.json path inside the project, relative to its root'
+export function confinedDelta(project, file) {
+  const plain = typeof file === 'string' && file && file.length <= 1024 && !file.includes('\0') && !file.includes('\\') && !path.isAbsolute(file) && path.posix.normalize(file) === file && !file.split('/').some((s) => s === '' || s === '.' || s === '..')
+  for (const r of plain ? docRoots(project) : []) {
+    const rel = r.rel === '.' ? file : file.startsWith(`${r.rel}/`) ? file.slice(r.rel.length + 1) : null
+    if (!rel || !DELTA_PATH.test(rel) || resolveDelta(project, r.name, rel).error) continue
+    const { abs } = resolveDelta(project, r.name, rel)
+    try {
+      if (statSync(abs).size > project.maxBytes) continue
+      const text = readFileSync(abs, 'utf8')
+      return { repo: r.name, path: rel, shown: file, abs, text, hash: docHash(text) }
+    } catch { continue }
+  }
+  throw new Error(DELTA_REFUSED)
+}
+// One delta the user names on the command line (graph.mjs render and serve --delta): a path
+// relative to the project root, or absolute, read wherever it is (the user's own shell could read it
+// too); `repo` and `path` say where the server may write its acknowledgements, when it is beside the
+// specs of a root. Throws when it cannot be read.
 export function readDelta(project, file) {
   const abs = path.resolve(project.root, file)
   let text

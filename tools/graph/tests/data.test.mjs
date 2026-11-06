@@ -44,7 +44,7 @@
 //      unplanned, the summary), graph.mjs changes and render --delta
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync } from 'node:fs'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -90,7 +90,7 @@ async function stubPage(page, hash, globals = {}) {
   const { ctlQuery } = await import('./stage-kit.mjs')
   const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null }
   doc.querySelector = ctlQuery(() => ({ kids: doc.body.kids || [] }))
-  const loc = { hash }
+  const loc = { hash, reload: () => { loc.reloads = (loc.reloads || 0) + 1 } }
   vm.runInNewContext(scriptOf(page), { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }), ...globals })
   const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
   const find = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = find(k, pred); if (f) return f } return null }
@@ -101,6 +101,8 @@ async function stubPage(page, hash, globals = {}) {
     text: () => dump(body()),
     lines: (tag) => all(body(), (n) => n.tagName === tag).map(flat), // each element's text as read, e.g. every LI
     hash: () => loc.hash,
+    reloads: () => loc.reloads || 0,
+    textOf: (n) => flat(n),
     go: (h) => { loc.hash = h; listeners.hashchange() },
     find: (pred) => find(body(), pred),
     all: (pred) => all(body(), pred),
@@ -947,6 +949,12 @@ CREATE VIEW recent AS SELECT id FROM books;`
   ok(!/[^\r]\n/.test(crlf) && JSON.parse(crlf).data[0].ack.by === 'Cy', 'CRLF line ends are kept')
   const odd = setAcks('{"schema":1,"spec":"s","data":[{"id":"a","op":"remove","target":"app:db/t","why":"w","origin":"planned","ack":{"by":"1","at":"1","hash":"1"},"ack":{"by":"2","at":"2","hash":"2"}}],"architecture":[]}', new Map([[0, null]]))
   ok(JSON.parse(odd).data[0].ack === undefined, 'a layout the in-place edit cannot handle (a duplicated key) is written whole, and still right')
+  const SHARED = '{\n  "schema": 1, "spec": "docs/specs/x-design.md",\n  "data": [\n    {\n      "id": "one", "op": "remove",\n      "target": "app:db/old",\n      "why": "gone", "origin": "planned"\n    }\n  ],\n  "architecture": []\n}\n'
+  const shared = setAcks(SHARED, new Map([[0, A]]))
+  eq(shared.split('\n'), ['{', '  "schema": 1, "spec": "docs/specs/x-design.md",', '  "data": [', '    {', '      "id": "one", "op": "remove",', '      "target": "app:db/old",', '      "why": "gone", "origin": "planned",', '      "ack": {', '        "by": "Cy",', '        "at": "2026-11-06T12:00:00.000Z",', '        "hash": "abcdef0123456789"', '      }', '    }', '  ],', '  "architecture": []', '}', ''],
+    'members sharing a line: the ack goes in at that line\'s indentation, every other line kept byte for byte')
+  const long = parseDelta(JSON.stringify({ schema: 1, spec: 's', data: [{ id: 'a', op: `grow\n${'x'.repeat(500)}`, target: 'app:db/t', why: 'w', origin: 'planned' }], architecture: [] })).errors[0]
+  ok(long.length < 200 && !long.includes('\n') && long.startsWith('data[0] (a): op "grow\\n'), `a value echoed in a problem is cut short and shown escaped (${long})`)
 }
 
 // ── 11 · the Data tab draws a delta ──
@@ -1052,7 +1060,23 @@ console.log('\n11 · the Data tab draws a delta over the model, against a git ba
       '… and the page shows what the server wrote: the stale badge is gone')
     answer = () => ({ status: 409, j: { error: 'changed on disk since it was loaded', text: '{}', hash: 'h3' } })
     await sp.pressed('delta-ack-sall')
-    ok(calls[1].body.base === 'h2' && calls[1].body.ids.join(',') === 'isbn,loans,legacy,hostile' && sp.text().includes('The delta changed on disk since this page was loaded') && !!sp.ctl('delta-reload'), 'a refused write (the file changed since): the page says so and offers to reload; the store control sends every change not acknowledged')
+    const said = sp.find((n) => n.attrs && n.attrs['data-status-for'] === 'delta-ack-sall')
+    ok(calls[1].body.base === 'h2' && calls[1].body.ids.join(',') === 'isbn,loans,legacy,hostile' && !!said && sp.textOf(said).startsWith('Not saved: the delta changed on disk since this page was loaded') && !!sp.ctl('delta-reload') && !sp.all((n) => n.attrs && /callout/.test(n.attrs.class || '') && sp.textOf(n).includes('changed on disk')).length,
+      'a refused write (the file changed since): said beside the control pressed, with a Reload, not as a banner over the tab; the store control sends every change not acknowledged')
+    const store = new Map(), session = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) }
+    const sr = await stubPage(served, '#data-0', { fetch, sessionStorage: session })
+    sr.press('data-delta')
+    answer = () => ({ status: 409, j: { error: 'changed on disk since it was loaded', text: '{}', hash: 'h3' } })
+    await sr.pressed('delta-ack-l3')
+    sr.press('delta-reload')
+    const kept = store.get('grimoire-delta')
+    ok(sr.reloads() === 1 && JSON.parse(kept).dataDelta === true && JSON.parse(kept).delta === 'docs/specs/2026-11-06-reading.delta.json' && JSON.parse(kept).store === 0, `Reload keeps the overlay, the delta and the store for the page it reloads (${kept})`)
+    store.set('grimoire-delta', JSON.stringify({ dataDelta: true, deltaSel: 1, delta: 'docs/specs/2026-10-01-old.delta.json', store: 0 }))
+    const again = await stubPage(served, '#data-0', { fetch, sessionStorage: session })
+    ok(again.ctl('data-delta').attrs['aria-pressed'] === 'true' && again.ctl('data-delta-file').kids[1].attrs.selected === 'selected' && again.text().includes('docs/specs/2026-10-01-old.delta.json does not validate') && !store.has('grimoire-delta'),
+      '… and the reloaded page opens with the Delta overlay on and the same delta chosen, once')
+    const plain = await stubPage(served, '#data-0', { fetch, sessionStorage: { getItem() { throw new Error('blocked') }, setItem() { throw new Error('blocked') }, removeItem() {} } })
+    ok(plain.ctl('data-delta').attrs['aria-pressed'] === 'false', 'a session store that throws changes nothing')
     const scr = scriptOf(served)
     ok(!/<!--|<script/i.test(scr) && /connect-src 'self'/.test(served) && !/connect-src/.test(page), 'the page script stays clean; only the served page may connect back to its server')
   } catch (e) { ok(false, `the delta overlay renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
@@ -1260,8 +1284,6 @@ async function indexed() {
     has(run('changes', '--delta', 'docs/specs/2026-11-06-loans.delta.json').stdout, '  pending  returned-idx  add api:prisma/migrations/Loan/index:Loan_returnedOn_idx', 'graph.mjs changes --delta <file>')
     writeFileSync(path.join(BR, 'docs/specs/broken.delta.json'), JSON.stringify({ ...DELTA, data: [{ ...DELTA.data[0], op: 'grow' }] }))
     eq(await br('changes', { delta: 'docs/specs/broken.delta.json' }), 'Delta docs/specs/broken.delta.json does not validate (1 problem):\n  data[0] (returned-on): op "grow" is not one of add, change, remove, rename', 'a delta that does not validate: its problems, nothing computed')
-    const gone = await call('graph_changes', { delta: 'docs/specs/none.delta.json' }, { root: BR }).then(() => 'answered', (e) => e.message)
-    ok(/^the delta docs\/specs\/none\.delta\.json cannot be read \(ENOENT\)$/.test(gone), `a delta that is not there: a clear error (${gone})`)
     // the page: the newest delta beside the specs first, or the one --delta names, read wherever it is
     const pageWith = (...a) => { const x = run('render', ...a, '--out', outFile); return x.status === 0 ? dataOf(readFileSync(outFile, 'utf8')).data : x.stderr.trim() }
     const P1 = pageWith()
@@ -1272,6 +1294,20 @@ async function indexed() {
     eq([P2.delta, P2.deltas[P2.delta].shown, P3.delta, P3.deltas.length, P3.deltas[0].shown === path.join(SANDBOX, 'elsewhere.delta.json'), P3.deltas[0].ackable, P3.deltas[1].ackable], [1, 'docs/specs/2026-11-06-loans.delta.json', 0, 3, true, false, true],
       'graph.mjs render --delta <file>: that delta shown first; one outside the specs is drawn too, never written (not ackable)')
     ok(/graph render: the delta nowhere\.delta\.json cannot be read \(ENOENT\)/.test(pageWith('--delta', 'nowhere.delta.json')), 'graph.mjs render --delta with a file that cannot be read exits 1 and says why')
+    // graph_changes reads only a delta beside the specs of a project root: a model-chosen path is
+    // never a way to read another file, nor to learn whether one exists
+    const REFUSAL = 'delta: give a docs/specs/<name>.delta.json path inside the project, relative to its root'
+    writeFileSync(path.join(SANDBOX, 'x.delta.json'), 'SECRET_VALUE=not-a-real-one\n')
+    writeFileSync(path.join(SANDBOX, 'dotenv'), 'SECRET_VALUE=not-a-real-one\n')
+    symlinkSync(path.join(SANDBOX, 'x.delta.json'), path.join(BR, 'docs/specs/linked.delta.json'))
+    writeFileSync(path.join(BR, 'docs/specs/x.json'), JSON.stringify(DELTA))
+    writeFileSync(path.join(BR, 'docs/specs/huge.delta.json'), JSON.stringify({ ...DELTA, spec: 'x'.repeat(600 * 1024) }))
+    const probes = ['/etc/hosts', '../x.delta.json', '../dotenv', path.join(SANDBOX, 'x.delta.json'), 'docs/specs/linked.delta.json', 'docs/specs/x.json', 'docs/specs/nope.delta.json', 'docs/specs/../../x.delta.json', './docs/specs/2026-11-06-loans.delta.json', 'docs/specs/huge.delta.json', 'docs\\specs\\2026-11-06-loans.delta.json']
+    const answers = []
+    for (const delta of probes) answers.push(await call('graph_changes', { delta }, { root: BR }).then((x) => `answered: ${x.slice(0, 60)}`, (e) => e.message))
+    ok(answers.every((a) => a === REFUSAL), `graph_changes refuses, in one message that says nothing of the file, an absolute path, a path out of the project, a symlink out, another extension, a missing delta, a path not plain, one past the size limit (${[...new Set(answers)].join(' | ')})`)
+    ok((await br('changes', { delta: 'docs/specs/2026-11-06-loans.delta.json' })).includes('  pending  returned-idx'), '… and a delta beside the specs still answers')
+    eq(run('changes', '--delta', '../dotenv').stderr.trim(), `graph: ${REFUSAL}`, 'graph.mjs changes --delta is the same tool, under the same rule')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

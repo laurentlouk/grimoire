@@ -31,7 +31,22 @@ export function dataClient(ctx) {
   const CH = DD.changes || { base: null, why: null }
   const REF = CH.base ? CH.base.ref : ''
   const DL = DD.deltas || [], SERVE = D.serve || null
+  // a page reloaded after a refused acknowledgement opens as it was: the overlay, the delta, the store
+  try {
+    const kept = JSON.parse(sessionStorage.getItem('grimoire-delta') || 'null')
+    sessionStorage.removeItem('grimoire-delta')
+    if (kept) {
+      const i = DL.findIndex((d) => d.shown === kept.delta)
+      st.deltaSel = i >= 0 ? i : DL[kept.deltaSel] ? kept.deltaSel : null
+      st.dataDelta = !!kept.dataDelta && st.deltaSel !== null
+      if (Number.isInteger(kept.store) && S[kept.store]) st.data = kept.store
+    }
+  } catch {}
   if (st.deltaSel === null || st.deltaSel === undefined || !DL[st.deltaSel]) st.deltaSel = DL[DD.delta] ? DD.delta : 0
+  function reload() {
+    try { sessionStorage.setItem('grimoire-delta', JSON.stringify({ dataDelta: !!st.dataDelta, deltaSel: st.deltaSel, delta: DL[st.deltaSel] ? DL[st.deltaSel].shown : null, store: st.data })) } catch {}
+    location.reload()
+  }
   const delta = () => (st.dataDelta && DL[st.deltaSel] && !DL[st.deltaSel].errors.length ? DL[st.deltaSel] : null)
   // what a delta mark says: its legend word, and the class of a change's state
   const DSAY = { prop: 'proposed', rm: 'proposed removal', pend: 'proposed change', built: 'planned and built', diff: 'built differently', unpl: 'not in the plan' }
@@ -294,21 +309,26 @@ export function dataClient(ctx) {
   }
   const unplItem = (d, j) => { const u = d.unplanned[j]; return h('li', { class: 'dl-unpl' }, h('div', null, h('span', { class: 'mono' }, u.target), h('span', { class: 'pill d-unpl' }, 'not in the plan')), h('div', { class: 'srcline' }, u.text), u.was.length ? h('div', { class: 'srcline' }, u.was.join('; ')) : null) }
   // served only, and only for a delta beside the specs: the server writes the acknowledgement
+  // its answer is said beside it: what was written, or why not (with a Reload when the file changed)
   function ackBtn(d, ks, on, where, label) {
     if (!SERVE || !d.ackable || !ks.length) return null
-    return h('button', { class: 'linkbtn dlbtn', 'data-ctl': `delta-ack-${where}${ks.length === 1 ? ks[0] : 'all'}`, title: on ? 'Write an acknowledgement into the delta: who, when, and the hash of the change as it is now' : 'Remove the acknowledgement from the delta', onclick: () => ack(d, ks, on) }, label)
+    const ctl = `delta-ack-${where}${ks.length === 1 ? ks[0] : 'all'}`, said = st.dlStatus && st.dlStatus.ctl === ctl ? st.dlStatus : null
+    return [h('button', { class: 'linkbtn dlbtn', 'data-ctl': ctl, title: on ? 'Write an acknowledgement into the delta: who, when, and the hash of the change as it is now' : 'Remove the acknowledgement from the delta', onclick: () => ack(d, ks, on, ctl) }, label),
+      said ? h('span', { class: `dlstatus${said.conflict ? ' err' : ''}`, role: 'status', 'data-status-for': ctl }, said.text, said.conflict ? [' ', h('button', { class: 'linkbtn', 'data-ctl': 'delta-reload', title: 'Load the page again, with the delta as it is on disk now', onclick: reload }, 'Reload')] : null) : null]
   }
-  async function ack(d, ks, on) {
-    st.dlStatus = 'Saving…'
+  async function ack(d, ks, on, ctl) {
+    const say = (text, conflict = false) => { st.dlStatus = { ctl, text, conflict } }
+    say('Saving…')
     try {
       const r = await fetch('/api/delta', { method: 'PUT', headers: { 'content-type': 'application/json', 'x-grimoire-token': SERVE.token }, body: JSON.stringify({ repo: d.repo, path: d.path, base: d.hash, ids: ks.map((k) => d.changes[k].id), ack: on }) })
       const j = await r.json().catch(() => ({}))
       if (r.ok) {
         d.hash = j.hash
         for (const x of j.changes || []) { const c = d.changes.find((y) => y.id === x.id); if (c) Object.assign(c, { ack: x.ack ? 'acked' : null, by: x.ack ? x.ack.by : null, at: x.ack ? x.ack.at : null }) }
-        st.dlStatus = `${on ? 'Acknowledged' : 'Acknowledgement removed'}: ${plural(ks.length, 'change')}, written to ${d.shown}`
-      } else if (r.status === 409) { d.conflict = true; st.dlStatus = null } else st.dlStatus = `Not saved: ${j.error || `HTTP ${r.status}`}`
-    } catch (e) { st.dlStatus = `Not saved: the server is not answering (${e.message})` }
+        say(`${on ? 'Acknowledged' : 'Acknowledgement removed'}: ${plural(ks.length, 'change')}, written to ${d.shown}`)
+      } else if (r.status === 409) say('Not saved: the delta changed on disk since this page was loaded. Reload it to see it as it is now, then acknowledge again.', true)
+      else say(`Not saved: ${j.error || `HTTP ${r.status}`}`)
+    } catch (e) { say(`Not saved: the server is not answering (${e.message})`) }
     rerender()
   }
   // the delta in a store: its legend, its counts, every change it carries here, acknowledging them all
@@ -336,8 +356,6 @@ export function dataClient(ctx) {
       h('p', null, 'For ', h('code', null, d.spec), `: ${plural(d.changes.length, 'change')} · ${k((c) => c.state === 'planned-built')} planned and built · ${k((c) => c.state === 'pending')} pending · ${k((c) => c.state === 'built-differently')} built differently${d.unplWhy ? '' : ` · ${d.unplanned.length} not in the plan`} · ${k((c) => c.ack === 'acked')} acknowledged · ${k((c) => c.ack === 'stale')} stale`),
       d.unplWhy ? h('p', { class: 'note' }, `Not in the plan: not listed, ${d.unplWhy}.`) : null,
       !SERVE ? h('p', { class: 'note' }, 'Read-only snapshot. To acknowledge changes, serve the page: ', h('code', null, 'graph.mjs serve')) : !d.ackable ? h('p', { class: 'note' }, 'This delta is not beside the specs of a repository (docs/specs/<name>.delta.json): acknowledge it by editing the file.') : null,
-      d.conflict ? h('div', { class: 'callout callout-warning' }, h('div', { class: 'callout-title' }, 'The delta changed on disk since this page was loaded'), h('p', null, 'Nothing was written. Reload the page to see it as it is now, then acknowledge again. '), h('button', { class: 'linkbtn', 'data-ctl': 'delta-reload', onclick: () => location.reload() }, 'Reload')) : null,
-      st.dlStatus ? h('p', { class: 'note', role: 'status' }, st.dlStatus) : null,
       outside.length ? [h('p', { class: 'note' }, `Not drawn: their store is not in the model (${outside.length})`), h('ul', { class: 'links dlist' }, outside.map(([, i]) => deltaItem(d, i, 'o')))] : null)
   }
 

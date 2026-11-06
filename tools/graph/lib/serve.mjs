@@ -46,11 +46,14 @@ function writeAtomic(abs, text, mode) {
   } finally { if (existsSync(tmp)) unlinkSync(tmp) }
 }
 // Who acknowledges: the git user.name the root sees (its own config, else the global one), else the
-// system user.
+// system user; on one line (control characters as blanks), 120 characters at most: a repository's
+// own .git/config is not to be trusted with what the delta holds.
+const oneLine = (s, max) => String(s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max).trim()
 function whoAcks(dir) {
   const r = spawnSync('git', ['-C', dir, 'config', 'user.name'], { encoding: 'utf8', timeout: 5000 })
-  if (r.status === 0 && r.stdout.trim()) return r.stdout.trim()
-  try { return userInfo().username || 'unknown' } catch { return 'unknown' }
+  const name = r.status === 0 ? oneLine(r.stdout, 120) : ''
+  if (name) return name
+  try { return oneLine(userInfo().username, 120) || 'unknown' } catch { return 'unknown' }
 }
 
 // opts.delta: the delta the Data tab shows first (graph.mjs serve --delta), as render.mjs takes it
@@ -138,7 +141,7 @@ export async function serve(project, { port = 0, log = () => {}, refresh = true,
         const edits = new Map(body.ids.map((id) => [at.get(id), body.ack ? { by, at: when, hash: changeHash(doc.data[at.get(id)]) } : null]))
         const text = setAcks(disk, edits)
         writeAtomic(r.abs, text, statSync(r.abs).mode & 0o777)
-        log(`${body.ack ? 'acknowledged' : 'removed the acknowledgement of'} ${body.ids.join(', ')} in ${path.relative(project.root, r.abs)}`)
+        log(`${body.ack ? 'acknowledged' : 'removed the acknowledgement of'} ${body.ids.slice(0, 20).map((x) => JSON.stringify(x.slice(0, 80))).join(', ')}${body.ids.length > 20 ? ` and ${body.ids.length - 20} more` : ''} in ${JSON.stringify(path.relative(project.root, r.abs)).slice(1, -1)}`)
         return send(res, 200, { hash: docHash(text), changes: [...new Set(body.ids)].map((id) => ({ id, ack: edits.get(at.get(id)) })) })
       }
       return send(res, 404, { error: 'not found' })

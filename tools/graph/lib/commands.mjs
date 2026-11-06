@@ -15,7 +15,7 @@ import { runIndex } from './run.mjs'
 import { seed } from './freshness.mjs'
 import { candidates } from './data/registry.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
-import { readDelta } from './docs.mjs'
+import { confinedDelta } from './docs.mjs'
 import { Graph, sql, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
@@ -105,14 +105,14 @@ export const TOOLS = [
   {
     name: 'graph_changes',
     description: 'The data model of this branch against its base, element by element: stores, tables, columns, keys, indexes and foreign keys added, removed or modified (before → after), each with the path:line that declares it on its side, and possible renames (a removed and an added element of the same shape), flagged and never decided. The base is read through git at its commit, nothing checked out: `base` when given, else baseBranch in grimoire.config.json, else the branch the index is based on, else main, compared at its merge base with HEAD. The branch side is the working tree as indexed. With `delta` (a design\'s docs/specs/<date>-<topic>.delta.json): each change it proposes with its state against the code (planned and built, pending, built differently: planned → built), its acknowledgement (acknowledged, stale once edited since, or not), then the branch\'s changes no change of the delta covers (unplanned), and a summary.',
-    params: { base: { type: 'string', description: 'A branch, tag or commit to compare against (default: baseBranch, else the base branch, else main).' }, delta: { type: 'string', description: 'A delta file, relative to the project root (docs/specs/<date>-<topic>.delta.json): its changes\' states instead of the plain diff.' }, repo: repoParam },
+    params: { base: { type: 'string', description: 'A branch, tag or commit to compare against (default: baseBranch, else the base branch, else main).' }, delta: { type: 'string', description: 'A design\'s delta beside the specs, as a path relative to the project root: docs/specs/<date>-<topic>.delta.json (or <repo folder>/docs/specs/… for a repository\'s own). Only such a file is read.' }, repo: repoParam },
     run: async (g, a, ctx) => {
       const base = resolveBase(ctx.project, { explicit: a.base || null, repo: a.repo || null })
       if (!a.delta) {
         if (base.error) throw new Error(base.error)
         return g.changes(base, await modelAt(ctx.project, base))
       }
-      const file = readDelta(ctx.project, String(a.delta))
+      const file = confinedDelta(ctx.project, String(a.delta))
       if (base.error && a.base) throw new Error(base.error)
       return g.delta(file, base.error ? { why: base.error } : { base, at: await modelAt(ctx.project, base) }, a.repo || null)
     },

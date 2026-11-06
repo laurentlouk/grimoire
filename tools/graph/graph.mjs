@@ -7,12 +7,14 @@
 //             store's entities, or one entity with its sources and conflicts
 //             changes [--base <ref>] [--repo r]: the data model against a base (graph_changes):
 //             added, removed, modified, possible renames; the base read through git.
-//             --delta <file> (docs/specs/<date>-<topic>.delta.json): a design's changes, each with
-//             its state against the code, then the branch's changes outside them
+//             --delta <file>: a design's changes, each with its state against the code, then the
+//             branch's changes outside them; only a delta beside the specs of a project root
+//             (docs/specs/<name>.delta.json, relative to the project root), as the MCP tool reads it
 //             render [--out <file>] [--base <ref>] [--delta <file>]: refresh, then write the browsable
 //             HTML page (default <graph dir>/graph.html) and print its path; its Data tab's change
 //             overlay is against --base, else the default base (graph_changes'), and its delta
-//             overlay shows --delta first, else the newest beside the specs. Local only: never publish it.
+//             overlay shows --delta first (read wherever it is), else the newest beside the specs.
+//             Local only: never publish it.
 //             refresh: what the SubagentStop hook runs. Seeds a checkout from its base checkout's
 //             index (re-basing onto it when that saves parsing), then indexes incrementally; builds the first index only when grimoire.config.json
 //             has a `graph` block. Silent no-op when the graph is disabled or was never set up.
