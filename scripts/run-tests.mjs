@@ -21,6 +21,7 @@ const ALL = [...tests('workflows/tests'), ...['hooks/scripts/guard.test.mjs', 'h
 const SERIAL = new Set([
   ...['run-durability-final', 'run-durability-concurrency', 'run-durability-journal'].map((n) => `workflows/tests/${n}.test.mjs`),
   'tools/graph/tests/arch-docs.test.mjs', // bounds rendering time in milliseconds: a loaded machine overruns it
+  'tools/graph/tests/data.test.mjs', // the same: a 200-table store's page, in milliseconds
 ])
 // The loop-durability files that drive real git sandboxes and shells for most of the suite's time.
 // `--fast` leaves them out for quick local iteration; CI and `npm test` always run them.

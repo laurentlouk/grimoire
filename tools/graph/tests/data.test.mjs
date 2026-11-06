@@ -11,15 +11,22 @@
 //   4. reading Drizzle snapshots: the legacy `meta/NNNN_snapshot.json` (`tables{}`) and v1's `ddl[]`
 //   5. reconciling the declarations of one store: merged sources, conflicts kept with both sides
 //   6. finding migration folders by content, whatever tool wrote them, and ordering them
+//   7. the Data tab: the ERD layout (data/layout.mjs), then a page rendered from a hand-built index
+//      and its own script run in a stub DOM (as graph.test.mjs §5 and arch-docs.test.mjs §5 do):
+//      anchors, tables, columns, foreign key lines, a conflict badge, source links, the folders
+//      found but not read, a 200-table store collapsed and searchable, the CSP
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
 //  without it, except under CI, where a missing runtime fails.
-//   7. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
+//   8. four repositories: Drizzle with its snapshots, Prisma, a folder no tool named, Supabase, an
 //      undeclared dialect and one stated in grimoire.config.json → graph_data and graph.mjs data
-//   8. incremental: a hand-edited migration (a conflict), a rejected statement, a deleted migration,
-//      a snapshot that no longer parses (reported by graph_status, the index goes on)
+//   9. the Data tab of that project: its stores, ERD and links to the indexed migration files
+//  10. incremental: a hand-edited migration (a conflict, badged in the Data tab), a rejected
+//      statement, a deleted migration, a snapshot that no longer parses (reported by graph_status,
+//      the index goes on)
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -43,6 +50,52 @@ let PASS = 0, FAIL = 0
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
 const has = (hay, needle, m) => ok(hay.includes(needle), `${m}${hay.includes(needle) ? '' : `\n       expected to find: ${needle}\n       in:\n${hay.split('\n').map((l) => '         ' + l).join('\n')}`}`)
 const eq = (got, want, m) => { const g = JSON.stringify(got), w = JSON.stringify(want); ok(g === w, `${m}${g === w ? '' : `\n       want: ${w}\n       got:  ${g}`}`) }
+
+// The page: its data, and its own script run against a small stub DOM (graph.test.mjs §5's).
+const blobOf = (page) => /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page)[1]
+const dataOf = (page) => JSON.parse(blobOf(page).replace(/\\u003c/g, '<'))
+const scriptOf = (page) => (/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(page) || [])[1] || ''
+async function stubPage(page, hash) {
+  const vm = await import('node:vm')
+  const blob = blobOf(page), listeners = {}
+  class El {
+    constructor(tag) { this.tagName = tag.toUpperCase(); this.nodeType = 1; this.kids = []; this.attrs = {}; this.on = {}; this.dataset = {}; this.html = ''; this.value = ''; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} } }
+    setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-(.)/g, (_, c) => c.toUpperCase())] = String(v) }
+    getAttribute(k) { return this.attrs[k] ?? null }
+    append(...c) { this.kids.push(...c) }
+    addEventListener(t, f) { (this.on[t] = this.on[t] || []).push(f) }
+    set innerHTML(v) { this.html = v; this.firstChild = new El('svg') }
+    get innerHTML() { return this.html }
+    querySelectorAll() { return [] }
+    focus() {} setSelectionRange() {}
+    get offsetHeight() { return 0 }
+  }
+  const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null, querySelector: () => null }
+  const loc = { hash }
+  vm.runInNewContext(scriptOf(page), { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }) })
+  const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
+  const find = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = find(k, pred); if (f) return f } return null }
+  const all = (n, pred, out = []) => { if (n && typeof n === 'object') { if (pred(n)) out.push(n); for (const k of n.kids || []) all(k, pred, out) } return out }
+  const body = () => ({ kids: doc.body.kids || [] })
+  const flat = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : (n.kids || []).map(flat).join(''))
+  const pg = {
+    text: () => dump(body()),
+    lines: (tag) => all(body(), (n) => n.tagName === tag).map(flat), // each element's text as read, e.g. every LI
+    hash: () => loc.hash,
+    go: (h) => { loc.hash = h; listeners.hashchange() },
+    find: (pred) => find(body(), pred),
+    all: (pred) => all(body(), pred),
+    ctl: (c) => find(body(), (n) => n.attrs && n.attrs['data-ctl'] === c),
+    press: (c) => (pg.ctl(c).on.click || []).forEach((f) => f({})),
+    search: (q) => pg.ctl('search').on.input[0]({ target: { value: q } }),
+    erd: () => find(body(), (n) => n.attrs && n.attrs.id === 'data-box'), // the drawing: its svg markup is .html
+    click: (i) => pg.erd().firstChild.on.click[0]({ target: { closest: (sel) => (/data-tbl/.test(sel) ? { dataset: { tbl: String(i) } } : null) } }),
+  }
+  return pg
+}
+// what an ERD draws: each table's columns in order, and each foreign key line's first title line
+const tablesIn = (svg) => Object.fromEntries(svg.split('<g class="tbl').slice(1).map((seg) => [/aria-label="([^",]+),/.exec(seg)[1], [...seg.matchAll(/data-col="([^"]+)"/g)].map((m) => m[1])]))
+const fksIn = (svg) => [...svg.matchAll(/<path class="fk[^"]*"[^>]*><title>([^\n<]*)/g)].map((m) => m[1]).sort()
 
 // ── 1 · splitting SQL ──
 console.log('\n1 · splitting SQL into statements')
@@ -338,6 +391,163 @@ console.log('\n6 · finding and ordering migration folders')
   eq(dbmate.entities.map((e) => e.name), ['t'], "a file's down section is never replayed")
 }
 
+// ── 7 · the Data tab ──
+console.log('\n7 · the Data tab: the ERD layout, and a page from a hand-built index')
+{
+  const { layoutErd } = await import('../lib/data/layout.mjs')
+  // tables in the page's packed shape (render.mjs dataData)
+  const T = (name, cols, rels = []) => ({ name, kind: 'table', cf: [], keys: [], indexes: [], rels: rels.map(([col, to]) => ({ columns: [col], to, toColumns: ['id'], cf: [] })),
+    fields: cols.map((c) => ({ name: c, type: c === 'id' ? 'integer' : 'text', nullable: false, pk: c === 'id' ? 1 : 0, fk: rels.some(([col]) => col === c) ? 1 : 0, cf: [] })) })
+  const shop = [T('authors', ['id', 'name']), T('books', ['id', 'author_id', 'title'], [['author_id', 'authors']]), T('shelf_books', ['shelf_id', 'book_id'], [['shelf_id', 'shelves'], ['book_id', 'books']]), T('shelves', ['id', 'label']), T('streaks', ['day', 'pages'])]
+  const L = layoutErd(shop)
+  const box = Object.fromEntries(shop.map((t, i) => [t.name, L.boxes[i]]))
+  const mid = (b) => b.x + b.w / 2
+  ok(box.authors.x + box.authors.w < box.books.x && mid(box.books) === mid(box.shelves) && box.books.x + box.books.w < box.shelf_books.x && box.shelves.x + box.shelves.w < box.shelf_books.x,
+    `a table sits left of the tables referencing it, and one only referenced (shelves) moves next to its referrer (${JSON.stringify(box)})`)
+  const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+  ok(L.boxes.every((a, i) => L.boxes.every((b, j) => i === j || !overlap(a, b))) && L.boxes.every((b) => b.x >= 0 && b.y >= 0 && b.x + b.w <= L.W && b.y + b.h <= L.H), 'no two tables overlap, and all of them fit the drawing')
+  const ends = L.links.map((l) => { const [, x1, y1, x2, y2] = /^M([\d.]+),([\d.]+) C.* ([\d.]+),([\d.]+)$/.exec(l.d).map(Number); const A = L.boxes[l.from], B = L.boxes[l.to]; return `${shop[l.from].name}.${shop[l.from].rels[l.k].columns[0]}>${shop[l.to].name} ${x1 === A.x && y1 > A.y + 30 && y1 < A.y + A.h ? 'from its row' : 'off'} ${x2 === B.x + B.w && y2 > B.y + 30 && y2 < B.y + B.h ? 'to the id row' : 'off'}` })
+  eq(ends, ['books.author_id>authors from its row to the id row', 'shelf_books.shelf_id>shelves from its row to the id row', 'shelf_books.book_id>books from its row to the id row'],
+    'a foreign key line runs from the referencing column, on its table\'s left edge, to the referenced column on the right edge of its table')
+  const again = layoutErd(shop), rev = layoutErd(shop.slice().reverse())
+  ok(JSON.stringify(again) === JSON.stringify(L) && shop.every((t, i) => JSON.stringify(rev.boxes[shop.length - 1 - i]) === JSON.stringify(L.boxes[i])),
+    'deterministic: the same tables give the same coordinates, in whatever order they come')
+  // the zoom toolbar sits 8 px from the drawing box's top, about 37 px tall, over a 6 px padding
+  const TOOLBAR = 8 + 37 + 6
+  ok(Math.min(...L.boxes.map((b) => b.y)) > TOOLBAR && Math.min(...layoutErd(shop, { collapsed: true }).boxes.map((b) => b.y)) > TOOLBAR, `no table starts under the zoom toolbar (top-most at y ${Math.min(...L.boxes.map((b) => b.y))})`)
+
+  // a hand-built index: one store whose snapshot and migration disagree on a column's type, a
+  // Postgres folder found but not read, a store of 200 tables, a snapshot that failed to parse
+  const { openStore } = await import('../lib/store.mjs')
+  const { renderGraph } = await import('../lib/render.mjs')
+  const DIR = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-datapage-')))
+  try {
+    const dbPath = path.join(DIR, 'graph.db')
+    const db = await openStore(dbPath)
+    db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES (?, ?, ?, ?)').run('app', 'app', '', '')
+    db.prepare("INSERT INTO files(id, repo, path, lang, size, is_test, node_id) VALUES (7, 'app', 'db/0001_init.sql', 'sql', 400, 0, 70)").run()
+    db.prepare("INSERT INTO nodes(id, file_id, kind, name, line, is_test) VALUES (70, 7, 'file', 'db/0001_init.sql', 1, 0)").run()
+    const fact = (key, extractor, facts, error = null) => db.prepare('INSERT INTO data_facts(repo, scope, key, extractor, sig, facts, error) VALUES (?, ?, ?, ?, ?, ?, ?)').run('app', 'unit', key, extractor, 'sig', facts ? JSON.stringify(facts) : null, error)
+    const decl = (store, source, extra) => ({ store, dialect: 'sqlite', dialectFrom: { how: 'override' }, source, complete: true, partial: false, status: 'read', notes: [], ...extra })
+    const INIT = `CREATE TABLE authors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+  name TEXT NOT NULL,
+  bio TEXT
+);
+CREATE TABLE books (
+  id TEXT PRIMARY KEY NOT NULL,
+  author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE,
+  title varchar(80) NOT NULL,
+  UNIQUE (title, author_id)
+);
+CREATE INDEX books_author_idx ON books (author_id);
+`
+    const replayed = replay([{ path: 'db/0001_init.sql', text: INIT }], DatabaseSync)
+    fact('db', 'sql-migrations@1', { declarations: [decl('db', { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 3 statements', files: 1, implicitIndexes: replayed.implicit, entities: replayed.entities })] })
+    let line = 100
+    const SNAP = 'db/meta/0001_snapshot.json'
+    const cite = (x) => ({ ...x, path: SNAP, line: line++ })
+    const snapshot = replayed.entities.map((e) => ({ ...cite(e), fields: e.fields.map((f) => cite(e.name === 'books' && f.name === 'title' ? { ...f, type: 'text' } : f)), keys: e.keys.map(cite), indexes: e.indexes.map(cite), relations: e.relations.map(cite) }))
+    fact(SNAP, 'drizzle-snapshot@1', { declarations: [decl('db', { path: SNAP, line: 1, kind: 'artifact', confidence: 'declared' }, { label: 'snapshot', entities: snapshot })] })
+    fact('db/pg', 'sql-migrations@1', { declarations: [{ ...decl('db/pg', { path: 'db/pg/0001_a.sql', line: 1, kind: 'migration', confidence: 'exact' }, { status: 'not-read', complete: false, label: 'no reader for postgres migrations yet', files: 2, entities: [] }), dialect: 'postgres', dialectFrom: { how: 'supabase' } }] })
+    const name = (i) => `t${String(i).padStart(3, '0')}`
+    const wide = Array.from({ length: 200 }, (_, i) => {
+      const cols = ['id', 'name', 'parent_id', 'created_at', ...(i % 50 ? [] : ['audit_note'])]
+      return { name: name(i), kind: 'table', line: i + 1,
+        fields: cols.map((c) => ({ name: c, type: c === 'name' || c === 'audit_note' ? 'text' : 'integer', nullable: c === 'parent_id' || c === 'audit_note', default: null, generated: null, line: i + 1 })),
+        keys: [{ role: 'primary', parts: ['id'], line: i + 1 }], indexes: [{ name: `${name(i)}_name_idx`, unique: false, columns: ['name'], partial: false, line: i + 1 }],
+        relations: i < 190 && i % 5 ? [{ columns: ['parent_id'], to: name(i - (i % 5)), toColumns: ['id'], onDelete: 'no action', onUpdate: 'no action', line: i + 1 }] : [] }
+    })
+    fact('warehouse', 'sql-migrations@1', { declarations: [decl('warehouse', { path: 'warehouse/0001_all.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 400 statements', files: 1, entities: wide })] })
+    fact('db/meta/0002_snapshot.json', 'drizzle-snapshot@1', null, 'Unexpected end of JSON input')
+    // foreign keys naming their target in another letter case, as SQLite accepts and keeps them
+    const MIXED = 'CREATE TABLE authors(id INTEGER PRIMARY KEY); CREATE TABLE books(id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES Authors(id)); CREATE TABLE "Loans"(id INTEGER PRIMARY KEY); CREATE TABLE reviews(id INTEGER PRIMARY KEY, loan_id INTEGER REFERENCES loans(id));\nCREATE TABLE ratings(id INTEGER PRIMARY KEY, book_id INTEGER REFERENCES BOOKS(ID));\n'
+    const mixed = replay([{ path: 'x/legacy/0001_init.sql', text: MIXED }], DatabaseSync)
+    fact('x/legacy', 'sql-migrations@1', { declarations: [decl('x/legacy', { path: 'x/legacy/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 5 statements', files: 1, entities: mixed.entities })] })
+    // every name and path a hostile repository could choose, holding markup
+    const BAD = '"><img src=x onerror=alert(1)></title><script>x</script><!--', HOSTILE = `y/${BAD}.sql`
+    const at1 = (line) => ({ path: HOSTILE, line })
+    fact('y/hostile', 'sql-migrations@1', { declarations: [decl('y/hostile', { path: HOSTILE, line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 1 statement', files: 1, entities: [{ name: `t${BAD}`, kind: 'table', ...at1(1),
+      fields: [{ name: `c${BAD}`, type: `text${BAD}`, nullable: true, default: null, generated: null, ...at1(2) }], keys: [], indexes: [{ name: `i${BAD}`, unique: false, columns: [`c${BAD}`], partial: false, ...at1(3) }],
+      relations: [{ columns: [`c${BAD}`], to: `r${BAD}`, toColumns: ['id'], onDelete: 'no action', onUpdate: 'no action', ...at1(4) }] }] })] })
+    db.close()
+
+    const t0 = Date.now()
+    const page = await renderGraph({ dbPath })
+    const D = dataOf(page)
+    eq(D.data.stores.map((s) => `${s.id} ${s.dialect} ${s.tables.length}${s.collapsed ? ' collapsed' : ''} · ${s.summary}`), [
+      'app:db sqlite 2 · 2 tables · 1 foreign key · 1 index (+2 implicit, for keys) · 1 conflict',
+      'app:warehouse sqlite 200 collapsed · 200 tables · 152 foreign keys · 200 indexes · no conflicts',
+      'app:x/legacy sqlite 5 · 5 tables · 3 foreign keys · 0 indexes · no conflicts',
+      'app:y/hostile sqlite 1 · 1 table · 1 foreign key · 1 index · no conflicts',
+    ],'one ERD per SQL store that has tables, in graph_data\'s order, with its counts; a store of more than 60 tables starts collapsed')
+    const pg = await stubPage(page, '#data-0')
+    eq(pg.find((n) => n.tagName === 'NAV').kids.map((b) => b.attrs['data-ctl']), ['tab-overview', 'tab-architecture', 'tab-data', 'tab-map', 'tab-files', 'tab-symbols', 'tab-hotspots', 'tab-docs'], 'the Data tab sits after Architecture')
+    const svg = pg.erd().html
+    eq([pg.hash(), tablesIn(svg), fksIn(svg)], ['#data-0', { authors: ['id', 'name', 'bio'], books: ['id', 'author_id', 'title'] }, ['books (author_id) → authors (id)']], '#data-0 opens the first store: its tables, their columns in order, its foreign key line')
+    ok(/class="row" data-col="id"><title>id INTEGER · not null · primary key<\/title>/.test(svg) && /data-col="bio"><title>bio TEXT · nullable<\/title>/.test(svg) && /data-col="author_id"><title>author_id INTEGER · not null · foreign key → authors \(id\)<\/title>/.test(svg)
+      && />PK<\/text>/.test(svg) && />FK<\/text>/.test(svg) && /<text class="xrow"[^>]*>unique \(title, author_id\)<\/text>/.test(svg) && /<text class="xrow"[^>]*>index books_author_idx \(author_id\)<\/text>/.test(svg),
+    'each column with its type, nullability and keys (PK, FK); unique keys and declared indexes listed under the columns')
+    const titleLine = snapshot[1].fields.find((f) => f.name === 'title').line
+    ok(svg.includes(`<text class="cft" x="`) && new RegExp(`>text ≠ varchar\\(80\\)</text><title>type: text — app/db/meta/0001_snapshot\\.json:${titleLine} \\[artifact\\] \\| varchar\\(80\\) — app/db/0001_init\\.sql:9 \\[migration\\]</title>`).test(svg),
+      'a conflict is badged on its column, the badge naming both values and the tooltip both sources')
+    const text = pg.text()
+    ok(text.includes('app:db/pg') && text.includes('no reader for postgres migrations yet') && text.includes('2 files') && text.includes('Found, not read (1)'), 'a folder found but not read is listed under the store picker, with its reason')
+    ok(pg.lines('LI').includes('drizzle-snapshot@1 on app/db/meta/0002_snapshot.json: Unexpected end of JSON input'), 'an extractor failure is listed too: the map never pretends to be complete')
+    pg.click(D.data.stores[0].tables.findIndex((t) => t.name === 'books'))
+    const link = pg.find((n) => n.tagName === 'A' && n.attrs.href === '#file-7' && n.kids[0] === 'app/db/0001_init.sql:6')
+    const plain = pg.find((n) => n.tagName === 'CODE' && n.kids[0] === `app/db/meta/0001_snapshot.json:${snapshot[1].line}`)
+    ok(!!link && !!plain && /class="tbl sel"[^>]*aria-label="books,/.test(pg.erd().html) && /class="tbl on"[^>]*aria-label="authors,/.test(pg.erd().html),
+      'focusing a table highlights it and its foreign key neighbours; its passport links each source to the indexed file (#file-<id>), and cites one not in the index as plain path:line')
+    ok(pg.text().includes('Columns (3)') && pg.text().includes('Conflicts (1)'), 'the passport lists every column with its sources, and the conflicts')
+    pg.go('#data-1')
+    const big = pg.erd().html, drawn = tablesIn(big)
+    ok(/class="erd collapsed/.test(big) && Object.keys(drawn).length === 200 && Object.values(drawn).every((c) => c.length === 0) && pg.text().includes('200 tables, drawn as names'), '#data-1: 200 tables start collapsed, names only')
+    pg.search('audit')
+    const hits = tablesIn(pg.erd().html)
+    eq(hits, Object.fromEntries(['t000', 't050', 't100', 't150'].map((t) => [t, ['id', 'name', 'parent_id', 'created_at', 'audit_note']])), 'a search names tables or columns: the matching tables drawn with their columns')
+    ok(/class="row hit" data-col="audit_note"/.test(pg.erd().html), '… the matching column marked')
+    const ms = Date.now() - t0
+    ok(ms < 1500, `a 200-table store renders, opens and answers a search within the page's render-time bound (${ms} ms)`)
+    pg.search('')
+    pg.click(137)
+    eq([Object.keys(tablesIn(pg.erd().html)).sort(), fksIn(pg.erd().html)], [['t135', 't137'], ['t137 (parent_id) → t135 (id)']], 'focusing a table of a collapsed store draws it with its foreign key neighbours, columns and all')
+
+    // a foreign key naming its table or column in another case is drawn, linked and counted
+    pg.go('#data-2')
+    const ms2 = D.data.stores[2], mx = pg.erd().html
+    eq([/aria-label="app:x\/legacy: 5 tables, 3 foreign key lines"/.test(mx), fksIn(mx)], [true, ['books (author_id) → authors (id)', 'ratings (book_id) → books (id)', 'reviews (loan_id) → Loans (id)']],
+      'SQLite resolves table and column names in any case: every foreign key gets its line, to the table as it is named')
+    const rowsAt = ms2.layout.links.map((l) => {
+      const [, x1, y1, x2, y2] = /^M([\d.]+),([\d.]+) C.* ([\d.]+),([\d.]+)$/.exec(l.d).map(Number), A = ms2.layout.boxes[l.from], B = ms2.layout.boxes[l.to], T = ms2.tables[l.from], r = T.rels[l.k]
+      const rowY = (t, b, col) => b.y + 30 + 20 * t.fields.findIndex((f) => f.name === col) + 10
+      return `${T.name}.${r.columns[0]} ${x1 === A.x && y1 === rowY(T, A, r.columns[0]) ? 'from its row' : 'off'} ${x2 === B.x + B.w && y2 === rowY(ms2.tables[l.to], B, 'id') ? 'to the id row' : 'off'}`
+    })
+    eq(rowsAt, ['books.author_id from its row to the id row', 'ratings.book_id from its row to the id row', 'reviews.loan_id from its row to the id row'], '… from the referencing column\'s row to the referenced column\'s row (ID matches id), never the header')
+    pg.click(ms2.tables.findIndex((t) => t.name === 'authors'))
+    const refd = pg.text().includes('Referenced by (1)') && !!pg.find((n) => n.tagName === 'BUTTON' && n.kids[0] === 'books')
+    pg.click(ms2.tables.findIndex((t) => t.name === 'reviews'))
+    ok(refd && !!pg.find((n) => n.tagName === 'BUTTON' && n.kids[0] === 'Loans') && /class="tbl on"[^>]*aria-label="Loans,/.test(pg.erd().html),
+      '… and the passports agree: authors is referenced by books, reviews links to Loans, which focus lights')
+
+    // markup in any name, type, target or path is text, in the drawing and in the passport
+    pg.go('#data-3')
+    const escd = BAD.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'), hx = pg.erd().html
+    ok(!/<img|<script|<!--/i.test(hx) && [`t${escd}`, `c${escd}`, `text${escd}`, `r${escd}`, `app/y/${escd}.sql:3`].every((s) => hx.includes(s)),
+      'the ERD escapes a table name, a column name, a type, a foreign key target and a source path holding markup')
+    pg.click(0)
+    const markup = pg.all((n) => typeof n.html === 'string' && /<img|<script/i.test(n.html)).length + pg.all((n) => n.tagName === 'IMG' || n.tagName === 'SCRIPT').length
+    ok(markup === 0 && !!pg.find((n) => n.tagName === 'H3' && n.kids.includes(`t${BAD}`)) && !!pg.find((n) => n.tagName === 'CODE' && n.kids[0] === `app/y/${BAD}.sql:2`) && pg.text().includes(`r${BAD}`),
+      '… and the passport carries them as text nodes, never as markup')
+    const D2 = dataOf(await renderGraph({ dbPath }))
+    ok(JSON.stringify(D2.data.stores.map((s) => s.layout)) === JSON.stringify(D.data.stores.map((s) => s.layout)), 'the layout is computed once, in Node: the same model renders the same coordinates')
+    const script = scriptOf(page)
+    const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(page)[1]
+    eq(csp, `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${createHash('sha256').update(script, 'utf8').digest('base64')}'; img-src 'none'; base-uri 'none'; form-action 'none'`, 'the CSP is unchanged: the page\'s own script by its hash, nothing else')
+    ok(!/<!--|<script/i.test(script) && !/https?:\/\//.test(page) && ['dataClient', 'layoutErd', 'erdBox'].every((f) => script.includes(`function ${f}(`)), 'the page script carries the Data tab and its layout, opens no HTML comment or script element, and names no URL')
+  } catch (e) { ok(false, `the Data tab renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()
@@ -354,8 +564,8 @@ async function indexed() {
   const edit = (rel, fn) => { const f = path.join(PROJ, rel); writeFileSync(f, fn(readFileSync(f, 'utf8'))); const t = new Date(Date.now() + ++tick * 2000); utimesSync(f, t, t) }
   const cli = (...a) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), ...a, '--root', PROJ], { encoding: 'utf8' }).stdout
   try {
-    // ── 7 · the stores ──
-    console.log('\n7 · a project of four repositories (fixtures/data)')
+    // ── 8 · the stores ──
+    console.log('\n8 · a project of four repositories (fixtures/data)')
     const idx = await q('index')
     ok(/mobile: 7 files/.test(idx) && !idx.includes('failure'), 'index: every repository, no extractor failure')
     const list = await q('data')
@@ -403,11 +613,39 @@ async function indexed() {
     const streaks = await q('data', { entity: 'streaks' })
     ok(streaks.includes('  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9') && streaks.endsWith('Conflicts: none'), `Drizzle's timestamp idiom, DEFAULT (unixepoch()): replay and snapshot agree, the default shown as written${streaks.endsWith('Conflicts: none') ? '' : `\n${streaks}`}`)
 
-    // ── 8 · incremental ──
-    console.log('\n8 · incremental refresh')
+    // ── 9 · the Data tab ──
+    console.log('\n9 · the Data tab of that project')
+    const { renderGraph } = await import('../lib/render.mjs')
+    const { loadProject } = await import('../lib/project.mjs')
+    const page = await renderGraph(loadProject(PROJ))
+    const D = dataOf(page)
+    eq(D.data.stores.map((s) => `${s.id}  ${s.dialect}  ${s.summary}`), list.split('\n').filter((l) => /^\w+:/.test(l) && !l.includes('found, not read')),
+      'an ERD per SQL store read, in graph_data\'s order and with its counts')
+    eq(D.data.unread.map((u) => `${u.store}  ${u.dialect || 'dialect unknown'}  ${u.reason}  ${u.at}`), [
+      'web:db/changes  dialect unknown  dialect unknown (no config states it, and no dialect marker in the SQL)  web/db/changes/0001_events.sql',
+      'web:supabase/migrations  postgres  no reader for postgres migrations yet  web/supabase/migrations/20240110120000_profiles.sql',
+    ], 'the folders found but not read, each with its reason')
+    const pg = await stubPage(page, '#data-0')
+    ok(pg.hash() === '#data-0' && Object.keys(tablesIn(pg.erd().html)).join(' ') === 'Loan Member Tag', `#data-0 opens the first store (${Object.keys(tablesIn(pg.erd().html))})`)
+    ok(pg.text().includes('Found, not read (2)') && pg.text().includes('no reader for postgres migrations yet'), '… with the folders found but not read under the store picker')
+    pg.go('#data-2')
+    const svg = pg.erd().html
+    eq([tablesIn(svg), fksIn(svg)], [
+      { authors: ['id', 'name', 'bio'], books: ['id', 'title', 'author_id', 'published_at', 'isbn'], shelf_books: ['shelf_id', 'book_id', 'position'], shelves: ['id', 'label'], streaks: ['day', 'pages', 'logged_at'] },
+      ['books (author_id) → authors (id)', 'shelf_books (book_id) → books (id)', 'shelf_books (shelf_id) → shelves (id)'],
+    ], "#data-2: the Drizzle store's tables, columns and foreign key lines, exactly")
+    pg.click(D.data.stores[2].tables.findIndex((t) => t.name === 'books'))
+    const init = D.files.find((f) => f[1] === 'mobile' && f[2] === 'drizzle/0000_init.sql')[0]
+    ok(!!pg.find((n) => n.tagName === 'A' && n.attrs.href === `#file-${init}` && n.kids[0] === 'mobile/drizzle/0000_init.sql:8') && !!pg.find((n) => n.tagName === 'CODE' && n.kids[0] === 'mobile/drizzle/meta/0005_snapshot.json:42'),
+      "a column's sources: the migration line links to its file in the Files tab, the snapshot (not an indexed file) is cited as path:line")
+
+    // ── 10 · incremental ──
+    console.log('\n10 · incremental refresh')
     edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` integer,', '`published_at` text,'))
     await q('index')
     has(await q('data', { entity: 'books' }), 'Conflicts (1): the declarations disagree; each side is kept\n  books.published_at  type: integer — mobile/drizzle/meta/0005_snapshot.json:63 [artifact] | text — mobile/drizzle/0000_init.sql:11 [migration]', 'a hand-edited migration disagreeing with the snapshot: a conflict carrying both sources')
+    const badged = (await stubPage(await renderGraph(loadProject(PROJ)), '#data-2')).erd().html
+    ok(badged.includes('>integer ≠ text</text><title>type: integer — mobile/drizzle/meta/0005_snapshot.json:63 [artifact] | text — mobile/drizzle/0000_init.sql:11 [migration]</title>'), '… badged in the Data tab on its column, with both values and both sources')
     edit('mobile/drizzle/0002_book_isbn.sql', (t) => t.replace('ALTER TABLE `books`', 'ALTER TABLE `bookz`'))
     await q('index')
     has(await q('data'), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@1  replayed to mobile/drizzle/0002_book_isbn.sql:1: no such table: bookz  mobile/drizzle/0000_init.sql', 'a rejected statement stops the replay there: labelled, with the error')

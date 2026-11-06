@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.28.0 — the data model map gets its Data tab (data model map slice 2, #76)
+
+The graph page (`graph.mjs render`, and `serve` unchanged) gains a **Data** tab after Architecture: the data model `graph_data` reads, drawn as an entity-relationship diagram per SQL store, every fact linked to the code that declares it.
+
+- **An ERD per store.** A store picker names each store with tables (`repo:folder`, dialect, counts as `graph_data` gives them); `#data-<n>` opens the nth. Each table lists its columns with their type, primary and foreign key markers and nullability (a filled diamond for `NOT NULL`, a hollow one for nullable), then its unique keys and declared indexes; the indexes SQLite builds for keys stay a count on the store. A line runs from a foreign key's column (many) to the column it references (one).
+- **Laid out in Node, deterministically** (`tools/graph/lib/data/layout.mjs`), once per render, as the architecture diagrams are: a table sits left of the tables referencing it, linked tables are grouped and their order swept to cut crossings, tables with no foreign key come last. The same tables always get the same coordinates, whatever order they come in. The same function is injected into the page for the subsets below.
+- **Search and focus.** The header's search names tables and columns. A click lights a table and its foreign key neighbours and opens its passport: every column, key, index and foreign key (both ways) with the `path:line` of each declaration, a link to the file in the Files tab when the file is indexed (migration `.sql` files are), plain text otherwise. The zoom and full-size controls are the Architecture tab's.
+- **Conflicts are badged** on the column or table they concern, the badge naming both values (`integer ≠ text`) and its tooltip both sources; the passport lists each side.
+- **Large stores start collapsed.** A store of more than 60 tables is drawn as names only. A focus draws the table with its neighbours, a search the matching tables (40 at most), each with its columns; *Columns* draws them all. A 200-table store renders and answers a search within the page's existing time bound.
+- **Never pretends to be complete.** Under the store picker, the folders found but not read (dialect unknown, order unknown, a dialect with no reader yet) are listed with their reason, and so are the extractors that failed.
+- No network and no CDN: the page's CSP still admits only its own script, by hash. The store summary `graph_data` prints now lives beside the model (`reconcile.mjs`), so the tool and the page say the same.
+
 ## 0.27.1 — SQLite keeps the migration replay off the disk
 
 The data model's replay runs a repository's own SQL in an in-memory database. Until now, a text filter alone kept `ATTACH`, `DETACH` and `VACUUM` out. A crafted migration could slip one past it and write a file on the machine that indexes the repository. The review of this fix showed it with a trigger whose body uses an identifier such as `éCASE`: SQLite reads it as one name, the splitter read a `CASE` keyword in it, so the trigger never closed and swallowed the `ATTACH` that followed.

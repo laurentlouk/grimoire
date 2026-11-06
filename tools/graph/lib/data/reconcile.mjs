@@ -77,6 +77,20 @@ function merge(id, ds) {
   }
 }
 
+// An entity and each of its elements, labelled as a conflict line names them.
+export const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name}.${f.name}`, f]), ...e.keys.map((k) => [`${e.name} ${k.role} (${k.parts.join(', ')})`, k]), ...e.indexes.map((i) => [`${e.name} index ${i.name}`, i]), ...e.relations.map((r) => [`${e.name} foreign key (${r.columns.join(', ')})`, r])]
+
+// A merged store in one line: its counts, or how it was found when nothing was read
+// (graph_data and the page's Data tab say the same).
+export function storeSummary(st) {
+  const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+  const tables = st.entities.filter((e) => e.kind === 'table'), views = st.entities.length - tables.length
+  if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
+  const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0)
+  const implicit = Math.max(0, ...st.declarations.map((d) => d.implicitIndexes)) // the indexes SQLite builds for keys, beside the declared ones
+  return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), `${n(tables.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
+}
+
 // An element's conflicts. presence: the complete declarations expected to state it; absent(d): what
 // to cite for a declaration that does not.
 function conflicts(el, compared, presence, absent) {

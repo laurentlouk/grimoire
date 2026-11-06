@@ -12,13 +12,16 @@
 //              only), strongest co-change
 //   architecture  the diagrams in docs/architecture (arch.mjs: checked against the index, laid out
 //              here) and one drafted from the graph on every render; drawn by arch-view.mjs
+//   data       the data model (lib/data, reconciled as graph_data answers): an ERD per SQL store,
+//              laid out here (data/layout.mjs), with the folders found but not read; drawn by
+//              data-view.mjs
 //   docs       the project's Markdown notes (docs.mjs), rendered in the page (md.mjs) as an
 //              Obsidian-like vault: tree, reading view, outline, backlinks, code they mention;
 //              editable only when the page is served (serve.mjs), which adds connect-src 'self'
 // Test code and ambiguous links are hidden until asked for; unique-name matches are drawn dashed.
-// Views have plain anchors (#sym-12, #file-3, #mod-4, #arch-0, #doc-7): they hold for the index the
-// page was rendered from (a re-parsed file gets new ids; module, diagram and note numbers shift as
-// those change).
+// Views have plain anchors (#sym-12, #file-3, #mod-4, #arch-0, #data-1, #doc-7): they hold for the
+// index the page was rendered from (a re-parsed file gets new ids; module, diagram, store and note
+// numbers shift as those change).
 // The helpers below the data section are pure, exported for the tests, and injected into the page.
 // Like every graph answer, the page is a map: read the code at the path:line it points to.
 import { createHash } from 'node:crypto'
@@ -31,9 +34,13 @@ import { scanDocs, docRoots } from './docs.mjs'
 import { mdSlug, mdFront, mdToHtml } from './md.mjs'
 import { archClient } from './arch-view.mjs'
 import { docsClient } from './docs-view.mjs'
+import { reconcile, storeSummary } from './data/reconcile.mjs'
+import { layoutErd, erdBox } from './data/layout.mjs'
+import { dataClient } from './data-view.mjs'
 
 const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
 const MAP_MAX_FILES = 1500 // the file map keeps the most connected production files; the other tabs keep everything
+export const DATA_COLLAPSE = 60 // a store with more tables starts collapsed: names only, until focused or searched
 
 // opts.serve = { token }: the page is served by serve.mjs and may save notes back to it
 export async function renderGraph(project, opts = {}) {
@@ -67,6 +74,7 @@ export async function renderGraph(project, opts = {}) {
       edges: edges.map((e) => [e.src, e.dst, KINDS.indexOf(e.kind), confs.indexOf(e.confidence || '')]),
       cochange: cochange.map((c) => [c.repo, c.a, c.b, c.n]),
       arch: archData(project, loadIndex(db)),
+      data: dataData(db, files, repos),
       docs: project.root ? scanDocs(project).map((d) => [d.repo, d.root, d.path, d.text, d.hash, d.big ? 1 : 0]) : [],
       ...(opts.serve ? { serve: { token: opts.serve.token } } : {}),
     }
@@ -97,6 +105,69 @@ function packArch(doc, r, extra) {
     conns: (doc.connections || []).map((e) => pick(e, ['from', 'to', 'label', 'variant', 'via', 'note'])),
     cards: doc.cards || [], layout, members: r.code.members, evidence: r.code.evidence, checkable: r.checkable, ghosts: r.code.ghosts,
     errors: r.errors, warnings: r.warnings, info: r.info, checked: r.checked,
+  }
+}
+
+// The Data tab: every store the data extractors read (lib/data), reconciled as graph_data does and
+// in its order. A store with tables carries them in the page's packed shape and its ERD, laid out
+// here once (data/layout.mjs). A source is [p, line], p indexing the store's `paths`, each [the path
+// as shown, its file id in the index or -1, the declaration's kind]. What was found but not drawn (a
+// folder of unknown dialect or order, a dialect with no reader yet, a replay that read no table) is
+// listed with its reason, and so is every extractor that failed: the map never pretends to be complete.
+export function dataData(db, files, repos) {
+  const out = { stores: [], unread: [], failed: [] }
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'data_facts'").get()) return out // an index built before the data model
+  const root = new Map(repos.map((r) => [r.name, r.root]))
+  const shown = (repo, p) => { const r = root.get(repo); return r && r !== '.' ? (p === '.' ? r : `${r}/${p}`) : p }
+  const fileId = new Map(files.map((f) => [`${f.repo}\0${f.path}`, f.id]))
+  const model = reconcile(db.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+  for (const st of model.stores) {
+    const n = st.entities.length ? out.stores.length : -1
+    if (n >= 0) out.stores.push(packStore(st, shown, fileId))
+    for (const d of st.declarations) {
+      if (n >= 0 && d.status !== 'not-read') continue
+      const reason = d.status === 'not-read' ? d.label : d.stopped ? `replayed to ${shown(st.repo, d.stopped.path)}:${d.stopped.line}: ${d.error}` : `${d.label}: no table`
+      out.unread.push({ store: st.id, n, dialect: d.dialect ?? st.dialect ?? null, reason, files: d.files ?? null, at: shown(st.repo, d.path), file: fileId.get(`${st.repo}\0${d.path}`) ?? -1 })
+    }
+  }
+  out.failed = db.prepare('SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL ORDER BY repo, key').all()
+    .map((f) => ({ repo: f.repo, extractor: f.extractor, at: shown(f.repo, f.key), file: fileId.get(`${f.repo}\0${f.key}`) ?? -1, error: f.error }))
+  return out
+}
+function packStore(st, shown, fileId) {
+  const paths = [], at = new Map()
+  const P = (p, kind = null) => {
+    if (!at.has(p)) { at.set(p, paths.length); paths.push([shown(st.repo, p), fileId.get(`${st.repo}\0${p}`) ?? -1, kind]) } else if (kind && !paths[at.get(p)][2]) paths[at.get(p)][2] = kind
+    return at.get(p)
+  }
+  const src = (list) => list.map((s) => [P(s.path, s.kind), s.line ?? null])
+  const cf = (list) => list.map((c) => ({ attr: c.attr, values: c.values.map((v) => ({ value: v.value, src: src(v.sources) })) }))
+  // SQLite resolves table and column names in any letter case, and keeps a foreign key's as written
+  // (`REFERENCES Authors(ID)` for `authors.id`): each is resolved here, once, to the name the store
+  // declares, so the layout and the page match names exactly. One that names nothing stays as written.
+  const lower = (s) => String(s).toLowerCase()
+  const byName = new Map(), byLower = new Map()
+  for (const e of st.entities) { byName.set(e.name, e); if (!byLower.has(lower(e.name))) byLower.set(lower(e.name), e) }
+  const entity = (name) => byName.get(name) || byLower.get(lower(name)) || null
+  const column = (e, c) => { if (!e || c === null || c === undefined) return c; const f = e.fields.find((x) => x.name === c) || e.fields.find((x) => lower(x.name) === lower(c)); return f ? f.name : c }
+  const tables = st.entities.map((e) => {
+    const rels = e.relations.map((r) => { const to = entity(r.to); return { r, columns: r.columns.map((c) => column(e, c)), to: to ? to.name : r.to, toColumns: r.toColumns.map((c) => column(to, c)) } })
+    const keys = e.keys.map((k) => ({ k, parts: k.parts.map((c) => column(e, c)) }))
+    const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
+    return {
+      name: e.name, kind: e.kind, src: src(e.sources), cf: cf(e.conflicts),
+      fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, src: src(f.sources), cf: cf(f.conflicts) })),
+      keys: keys.map(({ k, parts }) => ({ role: k.role, parts, src: src(k.sources), cf: cf(k.conflicts) })),
+      indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, src: src(x.sources), cf: cf(x.conflicts) })),
+      rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, src: src(r.sources), cf: cf(r.conflicts) })),
+    }
+  })
+  const f = st.dialectFrom, collapsed = tables.length > DATA_COLLAPSE
+  return {
+    id: st.id, repo: st.repo, name: st.name, dialect: st.dialect, summary: storeSummary(st),
+    how: f ? { how: f.how, marker: f.marker ?? null, at: f.path ? [P(f.path), f.line ?? null] : null } : null,
+    decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: [P(d.path, d.kind), null], stopped: d.stopped ? [P(d.stopped.path, d.kind), d.stopped.line] : null, error: d.error, notes: d.notes })),
+    paths, tables, collapsed, layout: layoutErd(tables, { collapsed }),
   }
 }
 
@@ -143,7 +214,8 @@ export function mapData(files, nodes, edges) {
 
 // ── pure helpers: exported for the tests, injected into the page as they are ──
 export const INITIAL = { tab: 'overview', repo: '', q: '', tests: false, guesses: false, mapMode: 'modules', module: null,
-  arch: 0, archSel: null, archTrace: null, archTo: null, archGhosts: false, archZoom: null, archScroll: null, sysZoom: null, full: null, doc: null, docMode: 'read', docAnchor: null, focusEditor: false, editorCaret: null }
+  arch: 0, archSel: null, archTrace: null, archTo: null, archGhosts: false, archZoom: null, archScroll: null, sysZoom: null, full: null, doc: null, docMode: 'read', docAnchor: null, focusEditor: false, editorCaret: null,
+  data: 0, dataSel: null, dataAll: false, dataZoom: null, dataScroll: null }
 export const LANE_MAX = 14 // modules drawn per lane on the system map, the largest
 export const MAXCOL = 12 // items per column of a neighbourhood
 
@@ -154,9 +226,9 @@ export function cutL(s, n) { return s.length > n ? '…' + s.slice(-(n - 1)) : s
 export function plural(n, word) { return `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}` }
 
 // '#sym-12' → { kind: 'sym', id: 12 }, '#map' → { kind: 'tab', tab: 'map' }, anything else → null
-// (#arch-N opens a diagram, #doc-N a note)
+// (#arch-N opens a diagram, #data-N a data store, #doc-N a note)
 export function parseHash(hash, tabs) {
-  const m = /^#(sym|file|mod|arch|doc)-(\d+)$/.exec(hash || '')
+  const m = /^#(sym|file|mod|arch|data|doc)-(\d+)$/.exec(hash || '')
   if (m) return { kind: m[1], id: Number(m[2]) }
   const t = (hash || '').slice(1)
   return tabs.includes(t) ? { kind: 'tab', tab: t } : null
@@ -207,7 +279,7 @@ export function lanePick(mods, max) {
   return { shown: mods.filter((m) => keep.has(m)), rest: mods.length - keep.size }
 }
 
-const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands, squarify, fitOf, lanePick, mdSlug, mdFront, mdToHtml, archClient, docsClient]
+const HELPERS = [esc, cut, cutL, plural, parseHash, pairConf, heatOf, heatBands, squarify, fitOf, lanePick, mdSlug, mdFront, mdToHtml, archClient, docsClient, erdBox, layoutErd, dataClient]
 
 function html(data, served) {
   // Every "<" becomes \\u003c, so no data string can close the <script> element.
@@ -305,6 +377,33 @@ svg.arch .ctag rect{fill:var(--panel);stroke:color-mix(in srgb,var(--c) 55%,var(
 svg.arch .comp:hover .cbox,svg.arch .comp.sel .cbox,svg.arch [tabindex]:focus-visible .cbox{stroke:var(--c);stroke-width:2.4}svg.arch .comp.sel .cbox{fill:color-mix(in srgb,var(--c) 14%,var(--panel))}
 svg.arch .dim{opacity:.22}svg.arch.hover .comp:not(.hov){opacity:.35}svg.arch.hover .conn:not(.hov),svg.arch.hover .clab{opacity:.25}
 @media (prefers-reduced-motion:reduce){svg.arch .conn.on{animation:none}svg.arch .conn,svg.arch .comp{transition:none}}
+.dstores{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-bottom:14px}
+.dstore{font:inherit;color:inherit;text-align:left;cursor:pointer;background:var(--panel);border:1px solid var(--line);border-left:4px solid color-mix(in srgb,var(--t-database) 55%,var(--line));border-radius:12px;padding:9px 12px;display:flex;flex-direction:column;gap:3px}
+.dstore:hover{border-color:color-mix(in srgb,var(--t-database) 55%,var(--line))}.dstore b{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}.dstore span{color:var(--muted);font-size:12px}
+.dstore[aria-pressed=true]{border-color:var(--t-database);background:color-mix(in srgb,var(--t-database) 7%,var(--panel));box-shadow:0 0 0 1px var(--t-database) inset}
+.banner ul.links{margin:4px 0}.banner li .pill{margin:0 6px}.err{color:var(--err)}ul.decls{margin:8px 0 2px}ul.decls .pill{margin:0}
+.mkl{display:inline-block;font:700 9.5px ui-sans-serif,system-ui,sans-serif;letter-spacing:.04em;padding:1px 4px;border-radius:4px;margin-right:5px;vertical-align:1px}
+.mkl.pk{color:var(--accent);background:var(--accent-soft)}.mkl.fk{color:var(--t-frontend);background:color-mix(in srgb,var(--t-frontend) 12%,var(--panel))}
+.dlegend>span{display:inline-flex;align-items:center;gap:4px}.dia{display:inline-block;width:8px;height:8px;transform:rotate(45deg);border:1.5px solid var(--muted);margin:0 3px}.dia.nn{background:var(--muted)}
+ul.dlist li{padding:5px 0;border-bottom:1px solid var(--line)}ul.dlist li:last-child{border-bottom:0}.srcline{font-size:12px;color:var(--muted);margin-top:2px}.srcline .pill{margin:0 4px 0 0}
+svg.erd text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+svg.erd .tbl{cursor:pointer;transition:opacity .15s}svg.erd .tframe{fill:var(--panel);stroke:color-mix(in srgb,var(--t-database) 40%,var(--line));stroke-width:1.3}
+svg.erd .thead{fill:color-mix(in srgb,var(--t-database) 10%,var(--panel))}svg.erd .tsep{stroke:color-mix(in srgb,var(--t-database) 22%,var(--line))}
+svg.erd .tglyph{fill:none;stroke:var(--t-database);stroke-width:1.3;stroke-linejoin:round}
+svg.erd .tview .tframe{stroke-dasharray:6 4}svg.erd .tpill rect{fill:var(--panel);stroke:color-mix(in srgb,var(--t-cloud) 55%,var(--line))}svg.erd .tpill text{font:600 10px ui-sans-serif,system-ui,sans-serif;fill:var(--t-cloud)}
+svg.erd .tname{font:600 13px ui-sans-serif,system-ui,-apple-system,sans-serif;fill:var(--ink)}svg.erd .tcount{font-size:10.5px;fill:var(--muted)}
+svg.erd .cname{font-size:12px;fill:var(--ink)}svg.erd .cname.key{font-weight:600}svg.erd .ctype{font-size:11px;fill:var(--muted)}
+svg.erd .mk{font:700 9px ui-sans-serif,system-ui,sans-serif;letter-spacing:.03em}svg.erd .mk.mpk{fill:var(--accent)}svg.erd .mk.mfk{fill:var(--t-frontend)}
+svg.erd .nn{fill:var(--muted);stroke:var(--muted);stroke-width:1}svg.erd .nul{fill:var(--panel);stroke:var(--muted);stroke-width:1.2}
+svg.erd .rowbg{fill:transparent}svg.erd .row:hover .rowbg{fill:var(--hover)}svg.erd .row.hit .rowbg{fill:var(--accent-soft)}svg.erd .row.hit .cname{fill:var(--accent);font-weight:600}
+svg.erd .xrow{font-size:10.5px;fill:var(--muted)}
+svg.erd .cfbg{fill:color-mix(in srgb,var(--warn) 12%,var(--panel));stroke:color-mix(in srgb,var(--warn) 50%,transparent)}svg.erd .cft{font-size:10.5px;font-weight:600;fill:var(--warn)}
+svg.erd .fk{fill:none;stroke:var(--link);stroke-width:1.5;transition:opacity .15s}svg.erd .mkr{fill:none;stroke:var(--link);stroke-width:1.4;stroke-linecap:round}
+svg.erd .fk.on{stroke:var(--accent);stroke-width:2.3;stroke-dasharray:9 6;animation:archflow .9s linear infinite}svg.erd .mkr.on{stroke:var(--accent);stroke-width:1.8}
+svg.erd .tbl:hover .tframe,svg.erd [tabindex]:focus-visible .tframe{stroke:var(--t-database);stroke-width:2.2}
+svg.erd .tbl.sel .tframe{stroke:var(--accent);stroke-width:2.4}svg.erd .tbl.sel .thead{fill:var(--accent-soft)}svg.erd .tbl.on .tframe{stroke:var(--accent);stroke-width:1.6}
+svg.erd .tbl.hit .tframe{stroke:var(--accent);stroke-width:2}svg.erd .dim{opacity:.22}svg.erd.q .tbl:not(.hit){opacity:.3}svg.erd.q .fk{opacity:.3}
+@media (prefers-reduced-motion:reduce){svg.erd .fk.on{animation:none}svg.erd .tbl,svg.erd .fk{transition:none}}
 .arch-cards{grid-template-columns:repeat(auto-fill,minmax(250px,1fr));margin-top:14px}.acard{--c:var(--t-external)}.acard.c-cyan{--c:var(--t-cloud)}.acard.c-emerald{--c:var(--t-database)}.acard.c-violet{--c:var(--t-backend)}.acard.c-amber{--c:var(--t-messagebus)}.acard.c-rose{--c:var(--t-security)}.acard.c-orange{--c:var(--t-cli)}
 .acard-title{font-weight:600;display:flex;gap:8px;align-items:center}.acard-title i{width:9px;height:9px;border-radius:50%;background:var(--c)}.acard ul{margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted)}
 .callout{border:1px solid color-mix(in srgb,var(--c,var(--accent)) 35%,var(--line));background:color-mix(in srgb,var(--c,var(--accent)) 7%,var(--panel));border-radius:10px;padding:8px 14px;margin:.8em 0}
@@ -427,16 +526,16 @@ function client() {
   for (const m of modules) if (perRepo.has(m.repo)) perRepo.get(m.repo).modules++
 
   // ── state ──
-  const TABS = [['overview', 'Overview'], ['architecture', 'Architecture'], ['map', 'Map'], ['files', 'Files'], ['symbols', 'Symbols'], ['hotspots', 'Hotspots'], ['docs', 'Docs']]
+  const TABS = [['overview', 'Overview'], ['architecture', 'Architecture'], ['data', 'Data'], ['map', 'Map'], ['files', 'Files'], ['symbols', 'Symbols'], ['hotspots', 'Hotspots'], ['docs', 'Docs']]
   const st = { ...INITIAL, sel: null, docOpen: new Set() }
-  let ARCH = null, DOCS = null // the Architecture and Docs tabs (arch-view.mjs, docs-view.mjs), made once the shell exists
+  let ARCH = null, DATA = null, DOCS = null // the Architecture, Data and Docs tabs (arch-view.mjs, data-view.mjs, docs-view.mjs), made once the shell exists
   const inRepo = (f) => !st.repo || (f && f.repo === st.repo)
   const showFile = (f) => !!f && inRepo(f) && (st.tests || !f.test)
   const showSym = (n) => !!n.file && showFile(n.file) && (st.tests || !n.test)
   const resolvedOf = (m) => [...m].filter(([g, v]) => showFile(g) && v[1] > 0)
   const openModule = (i) => { if (!modules[i]) return; if (st.repo && modules[i].repo !== st.repo) st.repo = ''; st.tab = 'map'; st.mapMode = 'files'; st.module = i }
 
-  // Plain anchors only: #overview, #map, #sym-12, #file-3, #mod-4, #arch-0, #doc-7.
+  // Plain anchors only: #overview, #map, #sym-12, #file-3, #mod-4, #arch-0, #data-1, #doc-7.
   function readHash() {
     const p = parseHash(location.hash, TABS.map(([id]) => id))
     if (!p) return
@@ -444,6 +543,7 @@ function client() {
     else if (p.kind === 'file' && files.has(p.id)) { st.sel = { file: files.get(p.id) }; st.tab = 'files' }
     else if (p.kind === 'mod') openModule(p.id)
     else if (p.kind === 'arch' && (D.arch || [])[p.id]) { if (st.arch !== p.id) { st.archSel = null; st.archTrace = null } st.arch = p.id; st.tab = 'architecture' }
+    else if (p.kind === 'data' && DATA && DATA.has(p.id)) { DATA.open(p.id); st.tab = 'data' }
     else if (p.kind === 'doc' && DOCS && DOCS.has(p.id)) { st.doc = p.id; st.tab = 'docs' }
     else if (p.kind === 'tab') { st.tab = p.tab; if (p.tab === 'map') { st.mapMode = 'modules'; st.module = null } if (p.tab === 'docs') st.doc = null }
   }
@@ -452,7 +552,8 @@ function client() {
       : st.tab === 'symbols' && st.sel && st.sel.sym ? `#sym-${st.sel.sym.id}`
         : st.tab === 'files' && st.sel && st.sel.file ? `#file-${st.sel.file.id}`
           : st.tab === 'architecture' && (D.arch || []).length ? `#arch-${Math.min(st.arch, D.arch.length - 1)}`
-            : st.tab === 'docs' && st.doc !== null ? `#doc-${st.doc}` : `#${st.tab}`
+            : st.tab === 'data' && DATA.has(st.data) ? `#data-${st.data}`
+              : st.tab === 'docs' && st.doc !== null ? `#doc-${st.doc}` : `#${st.tab}`
     if (location.hash !== want) { try { history.replaceState(null, '', want) } catch {} }
   }
   window.addEventListener('hashchange', () => { const before = st.tab === 'docs' ? st.doc : -1; readHash(); st.focusMain = true; render(); if (window.innerWidth <= 1100 || (st.tab === 'docs' && st.doc !== before && !st.docAnchor)) window.scrollTo({ top: 0 }) })
@@ -896,8 +997,8 @@ function client() {
   // ── shell ──
   let search = null
   function header() {
-    search = search || h('input', { type: 'search', 'data-ctl': 'search', oninput: (e) => { st.q = e.target.value; if (st.tab !== 'files' && st.tab !== 'symbols' && st.tab !== 'docs') st.tab = 'symbols'; render(true) } })
-    const what = st.tab === 'docs' ? 'Search notes…' : 'Search files or symbols…'
+    search = search || h('input', { type: 'search', 'data-ctl': 'search', oninput: (e) => { st.q = e.target.value; if (st.tab !== 'files' && st.tab !== 'symbols' && st.tab !== 'docs' && st.tab !== 'data') st.tab = 'symbols'; render(true) } })
+    const what = st.tab === 'docs' ? 'Search notes…' : st.tab === 'data' ? 'Search tables or columns…' : 'Search files or symbols…'
     search.setAttribute('placeholder', what); search.setAttribute('aria-label', what.slice(0, -1))
     const repoSel = h('select', { 'data-ctl': 'repo', 'aria-label': 'Repository', onchange: (e) => { st.repo = e.target.value; st.sel = null; st.module = null; render() } }, h('option', { value: '' }, 'all repositories'), D.repos.map((r) => h('option', { value: r.name }, r.name)))
     repoSel.value = st.repo
@@ -912,7 +1013,7 @@ function client() {
     const ctl = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.ctl : null
     const caret = search ? [search.selectionStart, search.selectionEnd] : null
     staged = null
-    const view = { overview, architecture: ARCH.view, map: mapView, files: filesView, symbols, hotspots, docs: DOCS.view }[st.tab]()
+    const view = { overview, architecture: ARCH.view, data: DATA.view, map: mapView, files: filesView, symbols, hotspots, docs: DOCS.view }[st.tab]()
     if (st.full && staged !== st.full) { st.full = null; screen(false) }
     const hd = header()
     document.body.replaceChildren(hd, h('main', null, view))
@@ -928,6 +1029,7 @@ function client() {
   }
   const ctx = { D, h, st, files, render, jumpFile, activate, plural, stage }
   ARCH = archClient(ctx)
+  DATA = dataClient(ctx)
   DOCS = docsClient(ctx)
   readHash()
   render()
