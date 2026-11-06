@@ -1,11 +1,12 @@
 // grimoire graph · data · extractor: folders of SQL migrations, whatever tool wrote them. Per unit:
 // one folder, re-run when any of its files or the configs naming its dialect change.
 //
-// Found by content, not by name: a folder is a migration folder when its .sql files (beside each
-// other, or one per versioned subfolder: <version>_<name>/migration.sql or up.sql, as Prisma, Drizzle
-// v1 and Diesel write them) create or alter tables or indexes. Down migrations (down.sql, *.down.sql)
-// and files with no DDL (seeds, queries) are not part of it; a `-- migrate:down` or `-- +goose Down`
-// section is cut off a file before it is read.
+// Found by content, not by name: a folder is a migration folder when one of its .sql files (beside
+// each other, or one per versioned subfolder: <version>_<name>/migration.sql or up.sql, as Prisma,
+// Drizzle v1 and Diesel write them) creates or alters a table or an index. Once found, every file of
+// it holding a schema statement belongs to it, a DROP or a view alone included. Down migrations
+// (down.sql, *.down.sql) and files with no schema statement (seeds, queries) are not part of it; a
+// `-- migrate:down` or `-- +goose Down` section is cut off a file before it is read.
 //
 // Order: the tool's journal when there is one (Drizzle's meta/_journal.json: only the migrations it
 // lists are ever applied), else the numeric or timestamp prefix of the file or subfolder names,
@@ -44,18 +45,21 @@ export default {
   kind: 'migration',
   scope: 'unit',
   wants: (p) => (SQL.test(p) && !DOWN.test(p)) || CONFIG.test(p),
-  // info: Map(path → { ddl }) of the candidate files; overrides: [{ path, dialect }] for this repository.
+  // info: Map(path → { ddl }) of the candidate files, ddl the file's schemaLevel (2: creates or alters
+  // a table or an index, 1: other schema statements only); overrides: [{ path, dialect }] for this repository.
   discover(info, { overrides = [] } = {}) {
-    const folders = new Map()
+    const folders = new Map() // folder → { members, found }
     for (const [p, i] of info) {
       if (!SQL.test(p) || !i.ddl) continue
       const dir = P.dirname(p)
       const folder = STEP.test(P.basename(p)) && dir !== '.' && VERSIONED.test(P.basename(dir)) ? P.dirname(dir) : dir
-      if (!folders.has(folder)) folders.set(folder, [])
-      folders.get(folder).push(p)
+      if (!folders.has(folder)) folders.set(folder, { members: [], found: false })
+      const f = folders.get(folder)
+      f.members.push(p)
+      f.found ||= i.ddl === 2
     }
     const configs = [...info.keys()].filter((p) => CONFIG.test(p))
-    return [...folders].map(([folder, members]) => {
+    return [...folders].filter(([, f]) => f.found).map(([folder, { members }]) => {
       const inside = (rel) => (folder === '.' ? rel : `${folder}/${rel}`)
       const mine = configs.filter((c) => {
         const d = P.dirname(c)

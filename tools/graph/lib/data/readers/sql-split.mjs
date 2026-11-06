@@ -9,8 +9,10 @@
 //                without BEGIN (Postgres' EXECUTE FUNCTION, MySQL's single statement) ends at its
 //                `;`. Text with no code left (comments only) is no statement. One pass over the
 //                text's words: linear, however long the file.
-//   hasDDL(text) whether a statement creates or alters a table or an index: what tells a migration
-//                from a seed or a query file
+//   schemaLevel(text)  2 when a statement creates or alters a table or an index (what finds a
+//                migration folder), 1 when the schema statements are others only (DROP, CREATE
+//                VIEW or TRIGGER…: such a file belongs to a folder once found), 0 when there is
+//                none (a seed, a query file)
 //
 // SQLite's lexical rules: '…' strings ('' escapes a quote), "…", `…` and […] identifiers, -- and
 // /* */ comments. Postgres dollar quoting is not read here (its migrations are not replayed).
@@ -18,6 +20,7 @@
 const BREAKPOINT = /--> statement-breakpoint/g
 const TOKEN = /"(?:[^"]|"")*"|`[^`]*`|\[[^\]]*\]|[A-Za-z_][\w$]*|;/g // what decides where a statement ends
 const DDL = /^(?:CREATE\s+(?:(?:TEMP|TEMPORARY|VIRTUAL)\s+)?TABLE|ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX)\b/i
+const SCHEMA = /^(?:CREATE|DROP|ALTER)\b/i
 
 export function blank(text) {
   const out = []
@@ -73,4 +76,8 @@ export function split(text) {
   return out
 }
 
-export const hasDDL = (text) => split(text).some((s) => DDL.test(s.text))
+export function schemaLevel(text) {
+  let level = 0
+  for (const s of split(text)) { if (DDL.test(s.text)) return 2; if (SCHEMA.test(s.text)) level = 1 }
+  return level
+}

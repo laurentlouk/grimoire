@@ -5,6 +5,8 @@
     { "idx": 0, "version": "6", "when": 1704067200000, "tag": "0000_init", "breakpoints": true },
     { "idx": 1, "version": "6", "when": 1704153600000, "tag": "0001_shelves", "breakpoints": true },
     { "idx": 2, "version": "6", "when": 1704240000000, "tag": "0002_book_isbn", "breakpoints": true },
-    { "idx": 3, "version": "6", "when": 1704326400000, "tag": "0003_author_bio_required", "breakpoints": true }
+    { "idx": 3, "version": "6", "when": 1704326400000, "tag": "0003_author_bio_required", "breakpoints": true },
+    { "idx": 4, "version": "6", "when": 1704412800000, "tag": "0004_streaks", "breakpoints": true },
+    { "idx": 5, "version": "6", "when": 1704499200000, "tag": "0005_drop_reading_goals", "breakpoints": true }
   ]
 }

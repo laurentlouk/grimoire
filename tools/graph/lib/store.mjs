@@ -13,14 +13,15 @@
 //   cochange files that changed in the same commits (from git log), n = commits shared
 //   churn    per file, n = recent commits that touched it (same window as cochange)
 //   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
-//            ddl (1 when a .sql file creates or alters a table or an index)
+//            ddl, a .sql file's schema statements (registry.mjs inspect: 2 creates or alters a table
+//            or an index, 1 other schema statements only, 0 none)
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '4'
+export const SCHEMA_VERSION = '5'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.

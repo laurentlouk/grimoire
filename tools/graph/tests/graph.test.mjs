@@ -438,7 +438,7 @@ has(await q('status'), 'files: python 4', 'status counts follow')
   const old = await openStore(path.join(PROJ, '.grimoire/graph/graph.db'))
   old.prepare("UPDATE meta SET value = '2' WHERE key = 'schema'").run(); old.close()
   await q('search', { query: 'Circle' })
-  has(await q('sql', { sql: "SELECT value FROM meta WHERE key = 'schema'" }), 'value\n4', 'a query on an older schema rebuilds the index first')
+  has(await q('sql', { sql: "SELECT value FROM meta WHERE key = 'schema'" }), 'value\n5', 'a query on an older schema rebuilds the index first')
   has(await q('sql', { sql: 'SELECT count(*) AS n FROM churn' }), 'n\n0', 'the rebuilt index has the churn table (empty: the fixture is not a git repository)')
 }
 

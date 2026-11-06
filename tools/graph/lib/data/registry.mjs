@@ -3,12 +3,12 @@
 //   { id, version, kind: artifact | migration | infra | code | inferred, scope: file | unit,
 //     wants(path): a file it may read (by path only: what the index stats and hashes),
 //     discover(info, { overrides }): its jobs [{ key, inputs: [path], override?, salt? }] from the
-//       candidate files (info: Map(path → { ddl })),
+//       candidate files (info: Map(path → { ddl }), ddl: what inspect() found),
 //     extract(text, path, ctx) (scope file) | extract({ key, files: [{ path, text }], override }, ctx)
 //       (scope unit) → facts: { declarations } (model.mjs) }
 // A job runs again when the hash of any input, the extractor's version or its salt changes. One
 // that throws loses its facts and leaves its error for graph_status; the index goes on.
-import { hasDDL } from './readers/sql-split.mjs'
+import { schemaLevel } from './readers/sql-split.mjs'
 import sqlMigrations, { upOnly } from './extractors/sql-migrations.mjs'
 import drizzleSnapshot from './extractors/drizzle-snapshot.mjs'
 import { skipped } from '../project.mjs'
@@ -24,8 +24,10 @@ const TEST_DIRS = /(^|\/)(tests?|__tests__|spec|specs|testing|__mocks__|mocks?|_
 // The files any extractor may read, from a repository's file list.
 export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some((ex) => ex.wants(p)) && !TEST_DIRS.test(p) && !skipped(p, project))
 
-// What the index keeps about an input's content beside its hash: whether SQL holds DDL.
-export const inspect = (p, text) => (/\.sql$/i.test(p) ? (hasDDL(upOnly(text)) ? 1 : 0) : null)
+// What the index keeps about an input's content beside its hash: for SQL, its schemaLevel (2: it
+// creates or alters a table or an index, 1: other schema statements only, 0: none). A change to
+// what this computes moves the store's SCHEMA_VERSION, so no stale level survives in an index.
+export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : null)
 
 export const plan = (info, opts = {}) => EXTRACTORS.flatMap((ex) => ex.discover(info, opts).map((job) => ({ ...job, extractor: ex })))
 
