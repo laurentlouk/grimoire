@@ -68,7 +68,8 @@ const names = (rs) => rs.map((r) => r.name).join(', ')
 const memo = new Map()
 const MEMO_MAX = 16
 
-export async function modelAt(project, base) {
+// opts.equivalences: a refine file's (data/check.mjs), so the base is grouped as the branch is
+export async function modelAt(project, base, opts = {}) {
   const ctx = { DatabaseSync: (await driver()).DatabaseSync }
   const rows = [], failed = []
   for (const r of base.repos) {
@@ -83,7 +84,7 @@ export async function modelAt(project, base) {
       else failed.push({ repo: r.name, extractor: x.extractor, key: x.key, error: x.error })
     }
   }
-  return { model: reconcile(rows), failed }
+  return { model: reconcile(rows, opts), failed }
 }
 
 function extractAt(abs, commit, project, overrides, ctx) {

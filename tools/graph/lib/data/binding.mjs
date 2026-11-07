@@ -16,6 +16,11 @@
 // reconcile.mjs compares the declarations of a group as it compares one table's: their disagreements
 // are its conflicts. A group is named by its template (else its name), and labelled by the first
 // member's id when another group shares that name.
+// A refine file (check.mjs) may state what no evidence ties: an equivalence, two declarations or more
+// named as written (an exact name, or a template) that are one table (a local-dev `Orders` and the
+// production `{env}-{project}-order`). resolveSide finds each; logicalTables joins them (`joins`), the
+// group then `refined` and its `via` saying so, and an entity it joins loses the note that said it
+// joined none.
 //
 // Item types: the types code converts to or from an item (a conversion: readers/code.mjs), resolved by
 // name among the types of the converting file's language (its own file's, else its repository's one,
@@ -87,8 +92,9 @@ const hasWild = (name) => (parseName(name) || []).some((t) => t.wild)
 const repoOf = (id) => id.slice(0, id.indexOf(':'))
 
 // ── logical tables ──
-// entities: [{ id, name }] → { groups: [{ id, name, label, members: [entity id], via }], notes: Map(entity id → note) }
-export function logicalTables(entities) {
+// entities: [{ id, name }]; joins: [{ ids: [entity id], via: text, ref }] (a refine file's equivalences,
+// resolved) → { groups: [{ id, name, label, members: [entity id], via, refined?: [ref] }], notes: Map(entity id → note) }
+export function logicalTables(entities, joins = []) {
   const parent = new Map(entities.map((e) => [e.id, e.id]))
   const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x) } return x }
   const join = (a, b) => { const x = find(a), y = find(b); if (x !== y) parent.set(y, x) }
@@ -111,18 +117,51 @@ export function logicalTables(entities) {
     if (hits.length === 1) { const t = byName.get(hits[0])[0]; for (const e of list) { join(t.id, e.id); how.set(find(t.id), 'an exact name its template matches') } continue }
     if (hits.length > 1) for (const e of list) notes.set(e.id, `its name matches ${hits.length} name templates (${hits.join(', ')}): grouped with none`)
   }
+  // how the evidence tied each entity's group, before a refine file joins groups
+  const evid = new Map()
+  {
+    const size = new Map()
+    for (const e of entities) size.set(find(e.id), (size.get(find(e.id)) || 0) + 1)
+    for (const e of entities) { const r = find(e.id); if (size.get(r) > 1) evid.set(e.id, how.get(r) || 'the same name template') }
+  }
+  // what a refine file states, beside the evidence: each join's members one table (refined)
+  const refined = new Map() // entity id → [{ via, ref }] of the joins it is in
+  for (const j of joins) {
+    const ids = j.ids.filter((id) => parent.has(id))
+    if (ids.length < 2) continue
+    for (const id of ids.slice(1)) join(ids[0], id)
+    for (const id of ids) { if (!refined.has(id)) refined.set(id, []); refined.get(id).push(j); notes.delete(id) }
+  }
   const groups = new Map()
   for (const e of entities) { const r = find(e.id); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(e) }
   const out = []
-  for (const [root, members] of groups) {
+  for (const [, members] of groups) {
     const name = (members.find((e) => hasWild(e.name)) || members[0]).name
-    out.push({ name, members: members.map((m) => m.id).sort(), via: members.length > 1 ? how.get(root) || 'the same name template' : null })
+    // its joins, once each; the evidence's way first, when members are also tied by it
+    const rj = [...new Set(members.flatMap((m) => refined.get(m.id) || []))]
+    const via = members.length < 2 ? null : [...new Set([...members.map((m) => evid.get(m.id)).filter(Boolean), ...rj.map((j) => j.via)])].join('; ')
+    out.push({ name, members: members.map((m) => m.id).sort(), via, ...(rj.length ? { refined: rj.map((j) => j.ref) } : {}) })
   }
   // a name two groups share (two repositories' tables of one name) is told apart by where it is declared
   const count = new Map()
   for (const g of out) count.set(g.name, (count.get(g.name) || 0) + 1)
   for (const g of out) { g.label = count.get(g.name) > 1 ? g.members[0] : g.name; g.id = `table:${g.label}` }
   return { groups: out.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)), notes }
+}
+
+// One declaration an equivalence names, among the key-value tables (entities: [{ id, name, sources }]):
+// side { repo, store? (default dynamodb), name: an exact name | template: a name template, path?: a
+// file that must declare it } → { entity } or { entity: null, why }. An exact name is never a template's
+// and a template never an exact name: the claim says which, and the model must agree.
+export function resolveSide(side, entities) {
+  const store = `${side.repo}:${side.store || 'dynamodb'}`
+  const want = side.name ?? side.template
+  const e = entities.find((x) => x.id === `${store}/${want}`)
+  if (!e) return { entity: null, why: side.name !== undefined ? `no key-value table named ${side.name} in ${store}` : `no key-value table of the name template ${side.template} in ${store}` }
+  if (side.name !== undefined && hasWild(e.name)) return { entity: null, why: `${e.id} is named by a template, not the exact name the claim states` }
+  if (side.template !== undefined && !hasWild(e.name)) return { entity: null, why: `${e.id} has an exact name, not the template the claim states` }
+  if (side.path && !(e.sources || []).some((s) => s.path === side.path)) return { entity: null, why: `${e.id} is not declared in ${side.path} any more` }
+  return { entity: e }
 }
 
 // ── shapes ──

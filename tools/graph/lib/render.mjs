@@ -16,7 +16,10 @@
 //              laid out here (data/layout.mjs), a key card per table of a key-value store (`cards`, its
 //              access patterns `acc` placed in the code graph's functions; no layout), with the folders found but not read, and two
 //              overlays packed here: the branch against its base, and a design's delta (the
-//              changes it proposes, each with its state against the code); drawn by data-view.mjs
+//              changes it proposes, each with its state against the code); the refine files beside the
+//              diagrams (data/check.mjs), re-checked on every render, refined never extracted: lineage
+//              across stores, stores described by citation, relations and index purposes, drift and
+//              gaps; drawn by data-view.mjs
 //   docs       the project's Markdown notes (docs.mjs), rendered in the page (md.mjs) as an
 //              Obsidian-like vault: tree, reading view, outline, backlinks, code they mention;
 //              editable only when the page is served (serve.mjs), which adds connect-src 'self'
@@ -42,6 +45,7 @@ import { mdSlug, mdFront, mdToHtml } from './md.mjs'
 import { archClient } from './arch-view.mjs'
 import { docsClient } from './docs-view.mjs'
 import { reconcile, storeSummary, schemaDrift } from './data/reconcile.mjs'
+import { readRefines, equivalencesOf, checkRefines } from './data/check.mjs'
 import { bindingHow, dashed } from './data/binding.mjs'
 import { kvIndex, kvTable, projectionText } from './data/model.mjs'
 import { layoutErd, erdBox } from './data/layout.mjs'
@@ -65,7 +69,10 @@ export const DATA_COLLAPSE = 60 // a store with more tables starts collapsed: na
 // opts.delta: the delta the Data tab shows first (a path from the project root, or absolute; it is
 // an error when it cannot be read), else the newest beside the specs (docs.mjs scanDeltas)
 export async function renderGraph(project, opts = {}) {
-  const changes = await baseFor(project, opts.base || null)
+  // the refine files: their equivalences group the model and the base's alike; checked in dataData
+  const refines = project.root ? readRefines(project.architectureDir, project.root) : []
+  const eq = { equivalences: equivalencesOf(refines) }
+  const changes = await baseFor(project, opts.base || null, eq)
   const deltas = project.root ? deltaFiles(project, opts.delta || null) : []
   const db = await openStore(project.dbPath, { readOnly: true })
   try {
@@ -96,7 +103,7 @@ export async function renderGraph(project, opts = {}) {
       confs,
       edges: edges.map((e) => [e.src, e.dst, KINDS.indexOf(e.kind), confs.indexOf(e.confidence || '')]),
       cochange: cochange.map((c) => [c.repo, c.a, c.b, c.n]),
-      ...(await archAndData(project, db, files, repos, changes, deltas)),
+      ...(await archAndData(project, db, files, repos, changes, deltas, refines)),
       docs: project.root ? scanDocs(project).map((d) => [d.repo, d.root, d.path, d.text, d.hash, d.big ? 1 : 0]) : [],
       ...(opts.serve ? { serve: { token: opts.serve.token } } : {}),
     }
@@ -113,14 +120,16 @@ export async function renderGraph(project, opts = {}) {
 // repositories only), and the diagrams the branch removed. Nothing here names a path outside the
 // project (whyPage): a rendered page may be shared. A project that draws no diagram and proposes no
 // architecture change loads no second index (archScope).
-async function archAndData(project, db, files, repos, changes, deltas) {
+async function archAndData(project, db, files, repos, changes, deltas, refines = []) {
   const idx = loadIndex(db)
   let impact = null, why = changes?.why || 'no base was resolved'
   const proposed = deltas.some((f) => { const { delta } = parseDelta(f.text); return !!(delta && delta.architecture.length) })
   const scope = changes?.base && project.root ? archScope(project, changes.base, proposed) : null
   if (scope && scope.has) { try { impact = await archImpact(project, changes.base, { idx, scope }) } catch { why = 'the base\'s diagrams could not be read' } }
   const arch = archData(project, idx, impact)
-  const data = dataData(db, files, repos, changes, deltas)
+  const byId = new Map(idx.files.map((f) => [f.id, f]))
+  const imports = idx.imports.map((im) => [byId.get(im.file_id), im.source]).filter(([f]) => f && !f.is_test).map(([f, source]) => ({ repo: f.repo, path: f.path, source }))
+  const data = dataData(db, files, repos, changes, deltas, { refines, roots: project.root ? docRoots(project) : [], imports })
   const saved = arch.map((a, k) => ({ k, a, file: a.file, doc: a.doc })).filter((x) => x.doc)
   const current = impact ? impact.current : scope ? scope.current : project.root ? currentDiagrams(project) : []
   deltas.forEach((f, i) => {
@@ -189,13 +198,22 @@ function packArch(doc, r, extra) {
 // The deltas (deltas: [{ repo, path, shown, text, hash, selected }], docs.mjs): each one's changes
 // with their states against the model and the base (data/delta.mjs), packed by packDelta below;
 // `delta` is the one shown first.
-export function dataData(db, files, repos, changes = null, deltas = []) {
-  const out = { stores: [], unread: [], failed: [], changes: { base: null, why: changes?.why || 'no base was resolved' } }
+// The refine files (refined: { refines, roots, imports }, data/check.mjs): their equivalences group the
+// model, their claims are re-checked against it, and `refine` packs what holds, the drift and the gaps
+// (packRefine); a refined relation within a SQL store is drawn on its ERD as a dashed line, and an
+// index's refined purpose under its row.
+export function dataData(db, files, repos, changes = null, deltas = [], refined = null) {
+  const out = { stores: [], unread: [], failed: [], refine: null, changes: { base: null, why: changes?.why || 'no base was resolved' } }
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'data_facts'").get()) return out // an index built before the data model
   const root = new Map(repos.map((r) => [r.name, r.root]))
   const shown = (repo, p) => { const r = root.get(repo); return r && r !== '.' ? (p === '.' ? r : `${r}/${p}`) : p }
   const fileId = new Map(files.map((f) => [`${f.repo}\0${f.path}`, f.id]))
-  const model = reconcile(db.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+  const refines = refined?.refines || []
+  const model = reconcile(db.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })), { equivalences: equivalencesOf(refines) })
+  const R = checkRefines(refines, model, { roots: refined?.roots || [], imports: refined?.imports || [] })
+  // a refined relation between two tables of one store: drawn on its ERD
+  const rrel = new Map()
+  for (const c of R.claims) if (c.kind === 'relation' && c.ok && c.store && c.to.startsWith(`${c.store}/`)) { if (!rrel.has(c.store)) rrel.set(c.store, []); rrel.get(c.store).push({ from: c.from.slice(c.store.length + 1), columns: c.columns, to: c.to.slice(c.store.length + 1), toColumns: c.toColumns, why: c.why, at: c.sources.filter((x) => x.ok).map((x) => `${shown(x.repo, x.path)}:${x.start}`) }) }
   // the access patterns (data/access.mjs), their calls placed in the code graph's functions
   // (how each call reached its table, each text once in the page: the cards index it)
   const how = [], howAt = new Map()
@@ -213,7 +231,7 @@ export function dataData(db, files, repos, changes = null, deltas = []) {
   }
   for (const st of model.stores) {
     const n = st.entities.length ? out.stores.length : -1
-    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc))
+    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc, rrel.get(st.id) || []))
     for (const d of st.declarations) {
       if (n >= 0 && d.status !== 'not-read') continue
       const reason = d.status === 'not-read' ? d.label : d.stopped ? `replayed to ${shown(st.repo, d.stopped.path)}:${d.stopped.line}: ${d.error}` : `${d.label}: no table`
@@ -237,6 +255,13 @@ export function dataData(db, files, repos, changes = null, deltas = []) {
   })
   out.itemsError = model.itemsError || null
   const packedAt = new Map(out.stores.map((s, i) => [s.id, i]))
+  // an index's refined purpose, under its row
+  for (const c of R.claims) {
+    if (c.kind !== 'index' || !c.ok || !packedAt.has(c.store)) continue
+    const t = out.stores[packedAt.get(c.store)].tables.find((x) => `${c.store}/${x.name}` === c.entity), x = t && t.indexes.find((i) => i.name === c.index)
+    if (x) (x.pur ||= []).push([c.purpose, c.sources.filter((y) => y.ok).map((y) => `${shown(y.repo, y.path)}:${y.start}`).join(' · ')])
+  }
+  out.refine = R.files.length || R.gaps.length ? packRefine(R, shown, fileId, packedAt) : null
   out.deltas = deltas.map((d) => packDelta(d, { model, base: changes?.base ? changes.at.model : null, diff: whole, why: changes?.why || null, stores: out.stores, packedAt, shown }))
   out.delta = Math.max(0, deltas.findIndex((d) => d.selected))
   return out
@@ -414,10 +439,37 @@ function packDeltaStore(ps, st, { rs, us }, { base, diff, changes, unplanned, sh
 
 // The base the overlay compares against, and its model: { base, at }, or { why } when there is none.
 // A base given that does not resolve throws (the caller asked for it); a failure reading it is a why.
-async function baseFor(project, explicit) {
+// opts.equivalences: the refine files', grouping the base as they group the branch.
+async function baseFor(project, explicit, opts = {}) {
   const base = resolveBase(project, { explicit })
   if (base.error) { if (explicit) throw new Error(base.error); return { why: base.error } }
-  try { return { base, at: await modelAt(project, base) } } catch (e) { if (explicit) throw e; return { why: `the base could not be read: ${e.message}` } }
+  try { return { base, at: await modelAt(project, base, opts) } } catch (e) { if (explicit) throw e; return { why: `the base could not be read: ${e.message}` } }
+}
+
+// The refine files' check (data/check.mjs), as the Data tab draws it: refined, never extracted. A
+// citation is [p, start, end], p indexing the refine's own `paths` ([the path as shown, its file id or
+// -1]). What holds is drawn: lineage across stores (each end's packed store, `fs` / `ts`, -1 when it
+// has none; `fr` / `tr` an end in a refined store), the refined stores' entities and fields whose
+// citation holds, relations, index purposes, bindings, equivalences. What fails is drift: listed with
+// why, never drawn. Gaps: the datastores client imports reach that nothing covers.
+function packRefine(R, shown, fileId, packedAt) {
+  const paths = [], at = new Map()
+  const src = (s) => { if (!s || !s.repo || !s.ok) return null; const k = `${s.repo}\0${s.path}`; if (!at.has(k)) { at.set(k, paths.length); paths.push([shown(s.repo, s.path), fileId.get(k) ?? -1]) } return [at.get(k), s.start, s.end] }
+  const holds = (kind) => R.claims.filter((c) => c.kind === kind && c.ok)
+  const sto = (id) => (id && packedAt.has(id) ? packedAt.get(id) : -1)
+  return {
+    files: R.files.map((f) => ({ file: f.file, title: f.title, errors: f.errors, n: f.claims.length, drift: R.drift.filter((d) => d.file === f.file).length })),
+    paths,
+    lineage: holds('lineage').map((c) => ({ from: c.from, to: c.to, fs: sto(c.fromStore), ts: sto(c.toStore), fst: c.fromStore, tst: c.toStore, fr: c.fromRefined ? 1 : 0, tr: c.toRefined ? 1 : 0, fields: c.fields.map((f) => [f.from, f.to]), why: c.why, src: c.sources.map(src) })),
+    relations: holds('relation').map((c) => ({ text: c.text, store: sto(c.store), why: c.why, notes: c.notes, src: c.sources.map(src) })),
+    indexes: holds('index').map((c) => ({ entity: c.entity, index: c.index, purpose: c.purpose, store: sto(c.store), src: c.sources.map(src) })),
+    bindings: holds('binding').map((c) => ({ text: c.text, why: c.why, notes: c.notes, src: c.sources.map(src) })),
+    equivalences: holds('equivalence').map((c) => ({ text: c.text, group: c.group, conflicts: c.conflicts, why: c.why, src: c.sources.map(src) })),
+    stores: R.stores.filter((s) => !s.reasons.length).map((s) => ({ id: s.id, kind: s.storeKind, label: s.label, why: s.why, imports: s.imports, file: s.file,
+      entities: s.entities.filter((e) => e.ok).map((e) => ({ name: e.name, kind: e.kind, note: e.note, src: src(e.source), fields: e.fields.filter((f) => f.ok).map((f) => ({ name: f.name, type: f.type, note: f.note, src: src(f.source) })) })) })),
+    drift: R.drift.map((d) => ({ file: d.file, at: d.at, line: d.line ?? null, kind: d.kind, text: d.text, why: d.why })),
+    gaps: R.gaps.map((g) => ({ label: g.label, sources: g.sources, files: g.files.map((f) => [shown(f.repo, f.path), fileId.get(`${f.repo}\0${f.path}`) ?? -1]), n: g.n })),
+  }
 }
 
 // A store's entities packed as the page draws them. src(sources) and cf(conflicts) pack what each
@@ -459,8 +511,9 @@ function packItems(e, src, cf) {
   const one = (x) => src([x])[0]
   return {
     ...(e.bound ? { bound: e.bound.map((b) => ({ type: b.type, conf: b.confidence, how: bindingHow(b), dash: dashed(b.confidence) ? 1 : 0, sites: b.sites, at: one(b), ev: b.evidence.map((x) => ({ what: x.what, text: x.text, src: one(x), ...(x.test ? { test: 1 } : {}) })), riv: b.rivals.map((r) => ({ table: r.table, conf: r.confidence, how: bindingHow(r) })) })) } : {}),
-    ...(e.logical ? { lg: { name: e.logical.name, via: e.logical.via, members: e.logical.members, cf: e.logical.conflicts.map((c) => ({ label: c.label, ...cf([c])[0] })) } } : {}),
+    ...(e.logical ? { lg: { name: e.logical.name, via: e.logical.via, members: e.logical.members, cf: e.logical.conflicts.map((c) => ({ label: c.label, ...cf([c])[0] })), ...(e.logical.refined ? { rf: 1 } : {}) } } : {}),
     ...(e.logicalNote ? { lnote: e.logicalNote } : {}),
+    ...(e.unused ? { un: e.unused } : {}),
   }
 }
 // A key-value table's access patterns (data/access.mjs), as its key card draws them, each list its
@@ -490,7 +543,10 @@ function packAccess(e, src, cf, acc) {
 // A store drawn as key cards rather than an ERD: a key-value one (its tables have no foreign key to
 // draw, and keys, indexes, TTL and stream to show).
 const CARDS = new Set(['dynamodb'])
-function packStore(st, shown, fileId, sd = null, acc = null) {
+// rr: the refined relations between two of its tables (dataData), drawn as lines no foreign key states
+// (`rf`: dashed, labelled refined, its why and citations), after the store's own, so the overlays'
+// positions hold.
+function packStore(st, shown, fileId, sd = null, acc = null, rr = []) {
   const paths = [], at = new Map()
   // a path of the store's repository, or of another (the code an item type is bound from)
   const P = (p, kind = null, repo = st.repo) => {
@@ -505,6 +561,7 @@ function packStore(st, shown, fileId, sd = null, acc = null) {
   // a key-value table's item types (data/binding.mjs): its bindings with their evidence and rivals,
   // the logical table it is one declaration of with the conflicts across it
   if (CARDS.has(st.dialect)) st.entities.forEach((e, i) => Object.assign(tables[i], packItems(e, src, cf), packAccess(e, src, cf, acc)))
+  else for (const r of rr) { const t = tables.find((x) => x.name === r.from); if (t) t.rels.push({ columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: null, onUpdate: null, src: [], cf: [], rf: 1, why: r.why, at: r.at }) }
   const f = st.dialectFrom, cards = CARDS.has(st.dialect), collapsed = !cards && tables.length > DATA_COLLAPSE
   return {
     id: st.id, repo: st.repo, name: st.name, dialect: st.dialect, summary: storeSummary(st),
@@ -792,6 +849,9 @@ ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4
 .mkl.k-gsi,.mkl.k-lsi,.mkl.k-idx{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 12%,var(--panel))}.mkl.k-a{color:var(--muted);background:var(--hover)}
 .mkl.k-i{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 10%,var(--panel))}ul.kitem .krow.d1{padding-left:20px}ul.kitem .krow.d2{padding-left:34px}ul.kitem .krow.d3{padding-left:48px}ul.kitem .krow.d4,ul.kitem .krow.d5,ul.kitem .krow.d6{padding-left:62px}
 .krow .kacc{margin:1px 0 2px 30px;font-size:12px}.krow .kacc .pill{margin:0 4px 0 0}.kfn{overflow-wrap:anywhere}.mkl.k-r{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,var(--panel))}.mkl.k-w{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel))}.mkl.k-u{color:var(--muted);background:var(--hover)}ul.kaccess .krow.test{opacity:.8}
+.pill.refined{color:var(--t-worker);border-color:currentColor;border-style:dashed}.krow .kpur{margin:1px 0 2px 30px}.note.unused{color:var(--warn)}svg.erd .fk.rf{stroke:var(--t-worker);stroke-dasharray:4 4}
+details.refine{margin:0 0 14px}details.refine h2{font-size:14px;margin:14px 0 6px}.lineagebox{margin:6px 0}.lineagebox svg{min-width:640px;max-width:900px}svg.lineage .lbox rect{fill:var(--panel);stroke:color-mix(in srgb,var(--t-database) 55%,var(--line));stroke-width:1.3}svg.lineage .lbox.rf rect{stroke:var(--t-worker);stroke-dasharray:5 4}svg.lineage .lbox.go{cursor:pointer}
+svg.lineage .ln{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink)}svg.lineage .ls,svg.lineage .lt{font-size:11px;fill:var(--muted)}svg.lineage .lf{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink)}svg.lineage .lin{fill:none;stroke:var(--t-worker);stroke-width:1.8;stroke-dasharray:7 4}svg.lineage .linm{fill:var(--t-worker)}
 .kbind{border:1px solid var(--border);border-radius:8px;padding:6px 8px;margin:4px 0}.kbind.dash{border-style:dashed}.kbind .srcline{margin:2px 0 0}.pill.c-declared,.pill.c-convention{color:var(--ok);border-color:currentColor}.pill.c-name-match,.pill.c-ambiguous{color:var(--warn);border-color:currentColor;border-style:dashed}
 .kcard.ch-add,.kcard.dl-built{border:2px solid var(--ok)}.kcard.ch-del{border:2px dashed var(--err);opacity:.85}.kcard.ch-mod,.kcard.dl-diff{border:2px solid var(--warn)}
 .kcard.dl-prop{border:2px dashed var(--ok)}.kcard.dl-pend,.kcard.dl-rm{border:2px dashed var(--warn)}.kcard.dl-unpl{border:2px solid var(--t-worker)}.kcard.gone{opacity:.85}

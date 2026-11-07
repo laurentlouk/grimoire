@@ -1,0 +1,6 @@
+{
+  "TableName": "Sessions",
+  "KeySchema": [{ "AttributeName": "sid", "KeyType": "HASH" }],
+  "AttributeDefinitions": [{ "AttributeName": "sid", "AttributeType": "S" }],
+  "BillingMode": "PAY_PER_REQUEST"
+}

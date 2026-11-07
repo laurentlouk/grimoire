@@ -129,6 +129,25 @@
 //      never) beside the engine's own dump, up and down files, goose and dbmate sections, a dump the
 //      database's dump tool wrote beside its migrations (agreeing, then a migration it lacks: a
 //      conflict), a folder whose order cannot be decided
+//
+//  (Part 1, continued) 32. the refine file (data/check.mjs): its format (good, bad, hostile: a
+//      __proto__ key, a file past 1 MB, nesting 100 000 deep, past the claims cap, text that is no
+//      JSON: refused by position, never echoing the text), what a citation must name, each claim kind
+//      checked on files written to disk against a model reconciled from facts (a lineage across two
+//      stores, a relation no foreign key states, an index's purpose, a binding the script left
+//      ambiguous, an equivalence, a store described by citation), each way one drifts (a line past the
+//      end, a line naming something else, a field, entity, index, item or table the model lacks, a
+//      foreign key contradicting a relation, an equivalence's missing side, a link or a path out of
+//      its repository); the equivalence grouping a local table with its production template, their
+//      differences conflicts; the note on a table no code uses; the gaps; the files read beside the
+//      diagrams
+//
+//  (Part 2, continued) 33. the refine file through call() (fixtures/refine): graph_data's refined
+//      facts, drift and gaps, a described store and entity, the equivalence's conflicts, the note;
+//      graph.mjs data check (exit 1 on drift, 0 once fixed, a file that does not validate); a branch
+//      breaking a citation, re-checked by graph_changes (the equivalence grouping the base alike); the
+//      Data tab: the lineage drawn, the described store's card, the relation on the ERD, drift as a
+//      badge and a list never drawn as fact, the gap, everything escaped
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -3271,6 +3290,152 @@ CREATE TABLE g (qty int, price int, INDEX ((qty * price)), KEY ((qty + 1)));` }]
   ok(took5 < 8000, `… in bounded time (${took5} ms for six replays of 40 000 to 60 000 statements)`)
 }
 
+// ── 32 · the refine file and its check ──
+console.log('\n32 · the refine file (data/check.mjs): its format, each claim re-checked against the code and the model, drift never trusted; equivalences grouping declarations; the note on a table no code uses; gaps')
+{
+  const { validateRefine, parseRefine, readRefines, checkRefines, equivalencesOf, citeNames, named, gapsOf, MAX_BYTES, MAX_CLAIMS } = await import('../lib/data/check.mjs')
+  const { UNUSED } = await import('../lib/data/reconcile.mjs')
+  const errs = (doc) => validateRefine(doc).map((p) => `${p.at.join('.')}: ${p.msg}`)
+  const W = 'why it holds'
+  const good = {
+    schema: 1, title: 'The shop data map',
+    lineage: [{ from: 'app:db/events', to: 'api:dynamodb/{env}-{project}-event', fields: [{ from: 'id', to: 'eventId' }], why: W, sources: ['app:src/sync.ts:3'] }],
+    relations: [{ from: 'app:db/event_participants', columns: ['event_id'], to: 'app:db/events', toColumns: ['id'], why: W, sources: ['app:src/participants.ts:1'] }],
+    indexes: [{ entity: 'api:dynamodb/{env}-{project}-event', index: 'ByOwner', purpose: 'a user\'s events', sources: ['api:src/events.rs:4'] }],
+    bindings: [{ item: 'api:Cart', table: '{env}-{project}-carts', why: W, sources: ['api:src/carts.rs:2'] }],
+    equivalences: [{ tables: [{ repo: 'api', name: 'Orders', path: 'dynamodb/tables/orders.json' }, { repo: 'api', template: '{env}-{project}-order' }], why: W }],
+    stores: [{ repo: 'api', id: 'docs', kind: 'mongodb', imports: ['mongoose'], entities: [{ name: 'Note', kind: 'collection', source: 'api:src/note.ts:3', fields: [{ name: 'title', type: 'String', source: 'api:src/note.ts:4' }] }] }],
+  }
+  eq(errs(good), [], 'a refine file with each claim kind validates')
+  eq(errs({ ...good, schema: 2, extra: 1, lineage: [{ from: 'events', to: 'api:dynamodb/x', why: W, sources: ['api:src/sync.ts'] }] }), [
+    ': a key that is not part of the format (allowed: schema, title, summary, bindings, lineage, relations, indexes, equivalences, stores)',
+    'schema: must be 1',
+    'lineage.0.from: must name an entity as repo:store/entity (as graph_data prints its id)',
+    'lineage.0.sources.0: must cite repo:path:line or repo:path:start-end',
+  ], 'bad: a key the format does not name, a schema, an entity not named by its id, a citation with no line')
+  eq(errs({ schema: 1, equivalences: [{ tables: [{ repo: 'api', name: '{env}-x', template: '{env}-x' }, { repo: 'api', name: '{env}-y' }, { repo: 'api', template: 'plain' }, { repo: 'api', template: 'plain' }], why: W }] }), [
+    'equivalences.0.tables.0: give one of name (an exact name) or template (a name template)',
+    'equivalences.0.tables.1.name: an exact name holds no {…}: give it as template',
+    'equivalences.0.tables.2.template: a template holds an unknown part {…}: give an exact name as name',
+    'equivalences.0.tables.3.template: a template holds an unknown part {…}: give an exact name as name',
+    'equivalences.0.tables.3: names a declaration another side names',
+  ], 'an equivalence names each declaration as written: an exact name or a template, never both, each once')
+  eq(errs({ schema: 1, relations: [{ from: 'app:db/a', columns: ['x', 'y'], to: 'app:db/b', toColumns: ['id'], sources: ['app:a.ts:1'] }], stores: [{ repo: 'app', id: 'Bad Id', kind: 'redis', entities: [{ name: 'k', source: 'app:a.ts:1', fields: [{ name: 'f', source: 'app:a.ts:1' }, { name: 'f', source: 'app:a.ts:2' }] }] }] }), [
+    'relations.0.toColumns: must name as many columns as columns',
+    'relations.0.why: required',
+    'stores.0.id: must match /^[a-z0-9][a-z0-9._-]{0,63}$/ (lower case, digits, . _ -)',
+    'stores.0.entities.0.fields.1.name: another field of this entity has this name',
+  ], 'a relation\'s columns pair up, a why is required, a store id is an id, a field is described once')
+  eq(errs({ schema: 1 }), [': no claim: give at least one of bindings, lineage, relations, indexes, equivalences, stores'], 'a file with no claim says so')
+  // hostile: a __proto__ key, a huge file, deep nesting, too many claims, text that is no JSON
+  const proto = parseRefine('{ "schema": 1, "__proto__": { "polluted": true }, "lineage": [{ "from": "a:b/c", "to": "a:b/d", "why": "w", "sources": ["a:x:1"], "constructor": 1 }] }')
+  eq([proto.doc, proto.errors, ({}).polluted], [null, ['(the file): a key that is not part of the format (allowed: schema, title, summary, bindings, lineage, relations, indexes, equivalences, stores)', 'lineage[0] (line 1): a key that is not part of the format (allowed: from, to, fields, why, sources)'], undefined], 'a __proto__ or constructor key is refused as a key the format does not name, never followed (no prototype touched)')
+  const SECRET = ['tok', 'en-', 'shh'].join('')
+  const notJson = parseRefine(`{\n  "schema": 1,\n  "lineage": [ ${SECRET} ]\n}`)
+  eq([notJson.doc, notJson.errors], [null, ['not valid JSON at line 3']], 'text that is no JSON: its line, never its text')
+  ok(!JSON.stringify(notJson).includes(SECRET), '… the secret-shaped text appears nowhere in the answer')
+  let t0 = Date.now()
+  const deep = parseRefine(`{"schema":1,"x":${'['.repeat(100000)}${']'.repeat(100000)}}`)
+  const huge = parseRefine(`{"schema":1,"title":"${'x'.repeat(MAX_BYTES + 10)}"}`)
+  const many = parseRefine(JSON.stringify({ schema: 1, indexes: Array.from({ length: MAX_CLAIMS + 1 }, () => ({ entity: 'a:b/c', index: 'i', purpose: 'p', sources: ['a:x:1'] })) }))
+  const tookH = Date.now() - t0
+  eq([deep.errors, huge.errors, many.errors], [['the JSON nests deeper than 16 levels at line 1: not read'], ['the file is larger than 1024 KB: not read'], [`(the file): ${MAX_CLAIMS + 1} claims: at most ${MAX_CLAIMS} per file`]], 'hostile: nested 100 000 deep, past 1 MB, past the claims cap: each refused before it is walked')
+  ok(tookH < 3000, `… in bounded time (${tookH} ms)`)
+  eq([citeNames('{env}-{project}-event'), citeNames('lines[].sku'), citeNames('Note'), named('const T = "events_v2"', ['events']), named('let eventId = x', ['id']), named('KEY: "eventId"', ['eventid'])], [['event'], ['lines[].sku', 'sku'], ['Note'], null, null, 'eventid'],
+    'what a citation must name: a template by its longest literal part, a field path by its last part; a name not inside a longer identifier, letter case aside')
+
+  // the check, on a project of two repositories written to disk, its model reconciled from facts
+  const RD = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-refine-')))
+  const put = (rel, text) => { mkdirSync(path.dirname(path.join(RD, rel)), { recursive: true }); writeFileSync(path.join(RD, rel), text) }
+  put('app/src/sync.ts', '// mirror each device row to the backend\nexport function push(e: Ev) {\n  return { eventId: e.id, title: e.title }\n}\n')
+  put('app/src/participants.ts', 'export const byEvent = (p) => p.event_id\n')
+  put('api/src/events.rs', 'fn by_owner() {\n    // the index of a user\n    let q = 1;\n    query.index_name("ByOwner");\n}\n')
+  put('api/src/carts.rs', 'fn save() {\n    let t = format!("{}-shop-carts", env);\n}\n')
+  put('api/src/note.ts', "import mongoose from 'mongoose'\n\nconst Note = new mongoose.Schema({\n  title: String,\n  body: String,\n})\n")
+  put('outside.ts', 'title\n')
+  symlinkSync(path.join(RD, 'outside.ts'), path.join(RD, 'api/src/escape.ts'))
+  const roots = [{ name: 'app', rel: 'app', abs: path.join(RD, 'app') }, { name: 'api', rel: 'api', abs: path.join(RD, 'api') }]
+  const sqlRow = (text) => ({ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: [{ store: 'db', dialect: 'sqlite', source: { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', label: 'replayed', notes: [], entities: replay([{ path: 'db/0001_init.sql', text }], DatabaseSync).entities }] } })
+  const SQL = 'CREATE TABLE events (id text PRIMARY KEY, title text, owner_id text);\nCREATE TABLE event_participants (event_id text, user_id text);\nCREATE TABLE tags (id text PRIMARY KEY, event_id text REFERENCES events(id));'
+  const tpl = (name, attr, extra = {}) => ({ name, nameTemplate: name, kind: 'table', path: 'infra/main.tf', line: 3, whole: true, billing: 'PAY_PER_REQUEST', stream: null, fields: [{ name: attr, type: 'S', nullable: false, default: null, generated: null, path: 'infra/main.tf', line: 5 }], keys: [{ role: 'partition', parts: [attr], path: 'infra/main.tf', line: 6 }], indexes: [], relations: [], ...extra })
+  const infra = { repo: 'api', extractor: 'terraform@1', facts: { declarations: [{ store: 'dynamodb', dialect: 'dynamodb', source: { path: 'infra/main.tf', line: 1, kind: 'infra', confidence: 'exact' }, complete: false, partial: false, status: 'read', label: 'a Terraform module', notes: [], entities: [
+    tpl('{env}-{project}-event', 'eventId', { indexes: [{ name: 'ByOwner', kind: 'gsi', partition: ['ownerId'], sort: [], projection: 'ALL', include: [], columns: ['ownerId'], unique: false, partial: false, path: 'infra/main.tf', line: 9 }] }),
+    tpl('{env}-{project}-order', 'orderId'), tpl('{env}-{project}-carts', 'id'), tpl('{env}-{project}-saved_carts', 'id')] }] } }
+  const local = (name, attr, billing) => ({ repo: 'api', extractor: 'dynamodb-table@1', facts: dynamodbTable.extract(JSON.stringify({ TableName: name, KeySchema: [{ AttributeName: attr, KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: attr, AttributeType: 'S' }], BillingMode: billing }), `dynamodb/tables/${name.toLowerCase()}.json`) })
+  const fnc = (name, line, x = {}) => ({ name, line, end: line + 5, converts: [], names: [], env: [], uses: [], ...x })
+  const code = { repo: 'api', extractor: 'serde@1', facts: { declarations: [], code: { path: 'src/carts.rs', lang: 'rust', notes: [], consts: [],
+    types: [{ name: 'Cart', kind: 'struct', line: 1, end: 3, serde: true, fields: [{ name: 'id', raw: 'String', t: { k: 'string' }, nullable: false, default: null, line: 2 }] }],
+    fns: [fnc('save', 1, { converts: [{ type: 'Cart', line: 2, how: 'to_item' }], names: [{ text: '{}-shop-carts', line: 2 }, { text: '{}-shop-saved_carts', line: 2 }] })] } } }
+  const rows = [sqlRow(SQL), infra, local('Orders', 'orderId', 'PROVISIONED'), local('Sessions', 'sid', 'PAY_PER_REQUEST'), code]
+  const FILE = 'docs/architecture/shop.data.json'
+  const refine = (doc) => [{ file: FILE, ...parseRefine(JSON.stringify(doc, null, 2)) }]
+  const run = (doc, imports = []) => { const refines = refine(doc); const model = reconcile(rows, { equivalences: equivalencesOf(refines) }); return { model, r: checkRefines(refines, model, { roots, imports }) } }
+  const { model, r } = run(good)
+  eq(r.files[0].errors, [], 'the good file validates')
+  eq(r.claims.map((c) => [c.kind, c.at, c.ok]), [['lineage', 'lineage[0]', true], ['relation', 'relations[0]', true], ['index', 'indexes[0]', true], ['binding', 'bindings[0]', true], ['equivalence', 'equivalences[0]', true], ['store', 'stores[0]', true]], 'each claim kind holds: its citations name what it states, its entities, fields, index and item exist, its declarations resolve')
+  eq(r.drift, [], 'no drift')
+  eq(r.claims.find((c) => c.kind === 'lineage').sources.map((s) => [s.repo, s.path, s.start, s.ok]), [['app', 'src/sync.ts', 3, true]], 'a citation resolved to its repository, path and line')
+  eq(r.claims.find((c) => c.kind === 'binding').notes, ['the code binds it so too (ambiguous)'], 'a binding the script left ambiguous: the refined one picks one of its tables, and says the code binds it so too')
+  // equivalences group the declarations, so their differences are conflicts
+  const ord = model.logical.find((g) => g.name === '{env}-{project}-order')
+  eq([ord.members, ord.via, ord.refined], [['api:dynamodb/Orders', 'api:dynamodb/{env}-{project}-order'], `refined: ${FILE} equivalences[0]`, [`${FILE} equivalences[0]`]], 'an equivalence groups the local Orders with the production template: one logical table, refined, saying so')
+  eq(ord.conflicts.map((c) => [c.label, c.attr, c.values.map((v) => `${v.value} @ ${v.sources.map((s) => s.path).join(' ')}`)]), [['{env}-{project}-order', 'billing', ['PROVISIONED @ dynamodb/tables/orders.json', 'PAY_PER_REQUEST @ infra/main.tf']]], '… their differences are conflicts, each value with the declaration that states it')
+  eq(r.claims.find((c) => c.kind === 'equivalence').conflicts, 1, '… and the claim says how many')
+  const without = reconcile(rows)
+  eq([without.logical.some((g) => g.members.includes('api:dynamodb/Orders')), without.stores.flatMap((s) => s.entities).find((e) => e.id === 'api:dynamodb/Orders').unused], [false, UNUSED], 'without the claim, Orders stays apart, and as no code binds it, it says so: declared, no code uses this name (never paired by a guess)')
+  const ents = new Map(model.stores.flatMap((s) => s.entities).map((e) => [e.id, e]))
+  eq([ents.get('api:dynamodb/Sessions').unused, ents.get('api:dynamodb/{env}-{project}-carts').unused, ents.get('api:dynamodb/Orders').unused === UNUSED], [UNUSED, undefined, true], 'a local table no code binds or reaches says so; a table code binds does not (Orders, grouped with a template no code uses either, still says so)')
+  eq(reconcile(rows.filter((x) => x !== code)).stores.flatMap((s) => s.entities).filter((e) => e.unused).length, 0, 'with no code read, no table is said unused (nothing to say it from)')
+
+  // drift: each way a claim stops holding, and what the check says
+  const drifted = (doc) => run(doc).r.drift.map((d) => [d.at, d.why])
+  eq(drifted({ schema: 1, lineage: [{ ...good.lineage[0], sources: ['app:src/sync.ts:9'] }, { ...good.lineage[0], sources: ['app:src/sync.ts:1'] }] }), [
+    ['lineage[0]', ['app/src/sync.ts has 4 lines: line 9 is past its end']],
+    ['lineage[1]', ['app/src/sync.ts line 1 names none of: events, event, id, eventId']],
+  ], 'a stale citation: a line past the file\'s end, a line that no longer names what the claim states (never the file\'s text)')
+  eq(drifted({ schema: 1, lineage: [{ from: 'app:db/events', to: 'api:dynamodb/{env}-{project}-event', fields: [{ from: 'title', to: 'headline' }], why: W, sources: ['app:src/sync.ts:3'] }, { from: 'app:db/gone', to: 'api:dynamodb/{env}-{project}-event', why: W, sources: ['app:src/sync.ts:3'] }] }), [
+    ['lineage[0]', ['the field headline is not in api:dynamodb/{env}-{project}-event']],
+    ['lineage[1]', ['app:db/gone: no such entity in the extracted model or a refined store', 'app/src/sync.ts line 3 names none of: gone, event']],
+  ], 'a lineage whose field or entity the model no longer has (and its citation, which names neither side now)')
+  eq(drifted({ schema: 1, relations: [{ from: 'app:db/tags', columns: ['event_id'], to: 'app:db/event_participants', toColumns: ['event_id'], why: W, sources: ['app:src/participants.ts:1'] }], indexes: [{ ...good.indexes[0], index: 'ByTitle' }] }), [
+    ['relations[0]', ['a foreign key on (event_id) references events(id): the claim disagrees with it']],
+    ['indexes[0]', ['no index ByTitle on api:dynamodb/{env}-{project}-event', 'api/src/events.rs line 4 names none of: ByTitle']],
+  ], 'a relation a foreign key contradicts; an index the table does not declare')
+  eq(run({ schema: 1, relations: [{ from: 'app:db/tags', columns: ['event_id'], to: 'app:db/events', toColumns: ['id'], why: W, sources: ['app:src/participants.ts:1'] }] }).r.claims[0].notes, ['a foreign key now states it'], 'a relation a foreign key now states: it holds, and says so')
+  eq(drifted({ schema: 1, equivalences: [{ tables: [{ repo: 'api', name: 'Orderz' }, { repo: 'api', template: '{env}-{project}-order' }], why: W }, { tables: [{ repo: 'api', name: 'Orders', path: 'dynamodb/tables/old.json' }, { repo: 'api', name: '{env}-{project}-order'.replace(/[{}]/g, '') }], why: W }] }), [
+    ['equivalences[0]', ['no key-value table named Orderz in api:dynamodb']],
+    ['equivalences[1]', ['api:dynamodb/Orders is not declared in dynamodb/tables/old.json any more', 'no key-value table named env-project-order in api:dynamodb']],
+  ], 'an equivalence with a missing side, or a side no longer in the file it names: drift, and nothing is grouped')
+  eq(run({ schema: 1, equivalences: [{ tables: [{ repo: 'api', name: 'Orderz' }, { repo: 'api', template: '{env}-{project}-order' }], why: W }] }).model.logical.some((g) => g.members.includes('api:dynamodb/Orders')), false, '… a drifting equivalence groups nothing')
+  const strong = run({ schema: 1, bindings: [{ item: 'api:Nope', table: '{env}-{project}-carts', why: W, sources: ['api:src/carts.rs:2'] }, { item: 'api:Cart', table: 'nothing', why: W, sources: ['api:src/carts.rs:2'] }] }).r.drift.map((d) => [d.at, d.why])
+  eq(strong, [['bindings[0]', ['no item type api:Nope (the types code converts to or from an item)']], ['bindings[1]', ['no key-value table nothing', 'api/src/carts.rs line 2 names none of: Cart, nothing']]], 'a binding of an item type or to a table the model does not have')
+  const st = run({ schema: 1, stores: [{ ...good.stores[0], entities: [{ ...good.stores[0].entities[0], fields: [{ name: 'title', source: 'api:src/note.ts:4' }, { name: 'author', source: 'api:src/note.ts:5' }, { name: 'body', source: 'api:src/escape.ts:1' }, { name: 'tags', source: 'api:../outside.ts:1' }] }] }, { repo: 'app', id: 'db', kind: 'sqlite', entities: [{ name: 'x', source: 'app:src/sync.ts:1', fields: [] }] }] }).r
+  eq(st.drift.map((d) => [d.at, d.kind, d.text, d.why]), [
+    ['stores[0].entities[0].fields[1]', 'store field', 'api:docs/Note.author', ['api/src/note.ts line 5 names none of: author']],
+    ['stores[0].entities[0].fields[2]', 'store field', 'api:docs/Note.body', ['api/src/escape.ts: no such file in api']],
+    ['stores[0].entities[0].fields[3]', 'store field', 'api:docs/Note.tags', ['api/../outside.ts: no such file in api']],
+    ['stores[1]', 'store', 'app:db (sqlite): 1 entity, 0 fields described by citation', ['an extractor reads app:db now: its facts are extracted, drop the refined description or give it another id']],
+    ['stores[1].entities[0]', 'store entity', 'app:db/x', ['app/src/sync.ts line 1 names none of: x']],
+  ], 'a described store: each field that fails is drift on its own (a line that names something else, a link or a path out of its repository, never followed); a store an extractor reads is drift')
+  eq(st.stores[0].entities[0].fields.map((f) => [f.name, f.ok]), [['title', true], ['author', false], ['body', false], ['tags', false]], '… the rest of the store holds')
+
+  // gaps: a datastore the code reaches through a client import, no extractor, no refine entry
+  const im = (repo, p, source) => ({ repo, path: p, source })
+  const imports = [im('api', 'src/cache.ts', 'ioredis'), im('api', 'src/note.ts', 'mongoose'), im('app', 'src/db.ts', 'drizzle-orm/sqlite-core'), im('api', 'src/pay.ts', 'pg'), im('api', 'src/orders.ts', '@aws-sdk/lib-dynamodb')]
+  eq(run(good, imports).r.gaps, [
+    { id: 'postgres', label: 'PostgreSQL', sources: ['pg'], files: [{ repo: 'api', path: 'src/pay.ts' }], n: 1 },
+    { id: 'redis', label: 'Redis', sources: ['ioredis'], files: [{ repo: 'api', path: 'src/cache.ts' }], n: 1 },
+  ], 'gaps: Redis and PostgreSQL, imported, with no extractor and no refine entry; MongoDB is covered by the refined store, the ORM by the SQLite store, DynamoDB by its tables')
+  eq(gapsOf({ stores: [] }, [], [im('api', 'a.ts', 'mongoose')]).map((g) => g.id), ['mongodb'], '… and with no refined store, MongoDB too')
+
+  // read from the architecture folder, beside the diagrams
+  put('docs/architecture/shop.data.json', JSON.stringify(good))
+  put('docs/architecture/broken.data.json', '{ "schema": 1, ')
+  put('docs/architecture/system.architecture.json', '{}')
+  eq(readRefines(path.join(RD, 'docs/architecture'), RD).map((x) => [x.file, !!x.doc, x.errors]), [['docs/architecture/broken.data.json', false, ['not valid JSON at line 1']], ['docs/architecture/shop.data.json', true, []]], 'readRefines: every *.data.json under the folder, named from the project root, a broken one with its error')
+  rmSync(RD, { recursive: true, force: true })
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()
@@ -4308,6 +4473,112 @@ async function indexed() {
     writeFileSync(path.join(DD, 'dbm/db/migrations/20240301000000_isbn.sql'), '-- migrate:up\nALTER TABLE books ADD COLUMN isbn varchar(20);\n-- migrate:down\nALTER TABLE books DROP COLUMN isbn;\n')
     await dq('index')
     has(await dq('data', { entity: 'books' }), 'Conflicts (1): the declarations disagree; each side is kept\n  books.isbn  presence: declared — dbm/db/migrations/20240301000000_isbn.sql:2 [migration] | absent — dbm/db/schema.sql:', 'a migration the dump does not show yet: a conflict, both sides cited, never resolved by precedence')
+
+    // ── 33 · the refine file through call(), the CLI and the page ──
+    console.log('\n33 · the refine file through call() (fixtures/refine): a lineage across two stores, a stale citation as drift, a store described by citation, a local table one with its production template, a gap; graph.mjs data check; the Data tab')
+    const RP = path.join(SANDBOX, 'refine')
+    cpSync(path.join(HERE, 'fixtures', 'refine'), RP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const rq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: RP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const rcli = (...a) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), ...a, '--root', RP], { encoding: 'utf8' })
+    const ridx = await rq('index')
+    ok(/app: 3 files/.test(ridx) && /backend: 6 files/.test(ridx) && !ridx.includes('failure'), `index: both repositories, no extractor failure (${ridx.replace(/\n/g, ' | ')})`)
+    const rlist = await rq('data')
+    const rsect = (text, head) => { const ls = text.split('\n'), i = ls.findIndex((l) => l.startsWith(head)); return i < 0 ? [] : [ls[i], ...ls.slice(i + 1).filter((l, k, all) => all.slice(0, k + 1).every((x) => x.startsWith(' ')))] }
+    eq(rsect(rlist, 'Refined ('), [
+      'Refined (1 refine file beside the diagrams, re-checked now; refined, never extracted): 4 claims hold · 1 drift',
+      "  docs/architecture/shop.data.json  The shop's data map, refined  5 claims",
+      '  lineage  app:db/events mirrors backend:dynamodb/{env}-{project}-event (id → eventId, owner_id → ownerId)  refined  — app/src/sync.ts:5',
+      '  relation  app:db/event_participants(event_id) → app:db/events(id)  refined  — app/src/participants.ts:3',
+      '  equivalence  backend:dynamodb/Orders ≡ backend:dynamodb/{env}-{project}-order  refined: one logical table ({env}-{project}-order), 3 conflicts across its declarations',
+      '  store  backend:notes (mongodb): 1 entity, 3 fields described by citation  refined (graph_data with the store lists them)',
+    ], 'graph_data: the claims that hold, each labelled refined, with its citation (the lineage across two stores, a relation no foreign key states, the equivalence, the described store)')
+    eq(rsect(rlist, 'Drift ('), [
+      'Drift (1): claims the code no longer supports, never trusted (fix the refine file: /grimoire:data-model):',
+      "  docs/architecture/shop.data.json indexes[0] (line 25)  index  backend:dynamodb/{env}-{project}-event index ByOwner: list a user's events, the newest first: backend/src/events.ts line 3 names none of: ByOwner",
+    ], 'the stale citation: drift, with where it is in the refine file and why, never listed among the refined facts')
+    eq(rsect(rlist, 'Gaps ('), [
+      'Gaps (1): datastores the code reaches through client imports, with no extractor and no refine entry (the map is not complete):',
+      '  Redis  ioredis  backend/src/cache.ts',
+    ], 'the gap: a Redis client imported, no extractor and no refine entry (the Mongoose import is covered by the described store)')
+    has(rlist, '  {env}-{project}-order  backend:dynamodb/Orders + backend:dynamodb/{env}-{project}-order  (refined: docs/architecture/shop.data.json equivalences[0])  [3 conflicts across them]', 'the logical tables: the local Orders and the production template, one table by the refine file\'s equivalence, saying so')
+    eq(await rq('data', { store: 'backend:notes' }), [
+      'backend:notes  mongodb  refined: described by citation in docs/architecture/shop.data.json (stores[0]), no extractor reads it  Notes, a document collection',
+      '  why: no extractor reads Mongoose schemas yet',
+      '  reached through: mongoose',
+      '  Note  collection  refined  — backend/src/notes/model.ts:9',
+      '    title  String (required)  — backend/src/notes/model.ts:4',
+      '    body  String  — backend/src/notes/model.ts:5',
+      '    authorId  String (indexed)  — backend/src/notes/model.ts:6',
+    ].join('\n'), 'graph_data store: the Mongoose store, refined, each field at the line that shows it')
+    has(await rq('data', { entity: 'Note' }), 'backend:notes/Note  collection  (mongodb; refined: described by citation in docs/architecture/shop.data.json, no extractor reads it)\n  described at backend/src/notes/model.ts:9 [refined]\nFields (3), each at the line that shows it:', 'graph_data entity: a described entity, refined')
+    const rorders = await rq('data', { entity: 'backend:dynamodb/Orders' })
+    has(rorders, 'One logical table: backend:dynamodb/Orders + backend:dynamodb/{env}-{project}-order (refined: docs/architecture/shop.data.json equivalences[0]); their differences are conflicts\nConflicts across them (3): each declaration kept\n' +
+      '  {env}-{project}-order  billing: PROVISIONED — backend/dynamodb/tables/orders.json:2 [infra] | PAY_PER_REQUEST — backend/infra/tables/main.tf:24 [infra]\n' +
+      '  {env}-{project}-order.status  presence: declared — backend/dynamodb/tables/orders.json:6 [infra] | absent — backend/infra/tables/main.tf:24 [infra]\n' +
+      '  {env}-{project}-order index ByStatus  presence: declared — backend/dynamodb/tables/orders.json:9 [infra] | absent — backend/infra/tables/main.tf:24 [infra]',
+      'the equivalence\'s differences are conflicts, each value with the declaration that states it (the local file, the Terraform table)')
+    has(rorders, 'Bound item types (1)', '… one table: the item type the code binds to the production template is bound to the local declaration too')
+    has(await rq('data', { entity: 'Sessions' }), '  PAY_PER_REQUEST · no stream\n  declared, no code uses this name: in the indexed code no item type is bound to it, no key-value call reaches it, nothing builds its name, and the infra sets no variable to it (it may be stale, or used by code not indexed)', 'a local table no code binds or reaches: declared, no code uses this name')
+    has(await rq('data', { entity: 'app:db/events' }), 'Refined (2), from the refine files, re-checked now (refined, never extracted):\n  lineage  app:db/events mirrors backend:dynamodb/{env}-{project}-event', 'an entity lists the refined facts about it')
+    has(await rq('data', { entity: 'backend:dynamodb/{env}-{project}-event' }), "Drift (1): refined claims about it the code no longer supports, never trusted:\n  docs/architecture/shop.data.json indexes[0] (line 25)  index", '… and the drift about it')
+    // graph.mjs data check: exit 1 on drift, 0 once the citation holds again
+    const c1 = rcli('data', 'check')
+    eq([c1.status, c1.stdout.trim().split('\n')], [1, [
+      'docs/architecture/shop.data.json: 1 drift, 4 of 5 claim(s) hold',
+      "  drift: indexes[0] (line 25) index backend:dynamodb/{env}-{project}-event index ByOwner: list a user's events, the newest first: backend/src/events.ts line 3 names none of: ByOwner",
+      'gap: Redis (ioredis) is imported in backend/src/cache.ts: no extractor reads it and no refine file describes it',
+    ]], 'graph.mjs data check: the drift, the gap, and exit 1')
+    const SHOP = path.join(RP, 'docs/architecture/shop.data.json')
+    writeFileSync(SHOP, readFileSync(SHOP, 'utf8').replace('backend:src/events.ts:3', 'backend:src/events.ts:7'))
+    const c2 = rcli('data', 'check')
+    eq([c2.status, c2.stdout.split('\n')[0]], [0, 'docs/architecture/shop.data.json: passes, 5 of 5 claim(s) hold'], '… the citation fixed: passes, exit 0 (a gap is never an error)')
+    has(await rq('data'), "  index  backend:dynamodb/{env}-{project}-event index ByOwner: list a user's events, the newest first  refined  — backend/src/events.ts:7", '… and graph_data now lists the index purpose as refined')
+    const c3 = rcli('data', 'check', path.join(RP, 'app/src/sync.ts'))
+    eq([c3.status, c3.stdout.split('\n')[0]], [1, 'app/src/sync.ts: does not validate, 1 error(s)'], 'a file that is no refine file: does not validate, exit 1')
+    // a branch that breaks a citation: graph_changes re-checks the claims on the branch, and the base is
+    // grouped as the branch is (the equivalence adds no change of its own)
+    git(RP, 'init', '-q', '-b', 'main')
+    writeFileSync(path.join(RP, '.gitignore'), '.grimoire/\n')
+    commit(RP, 'the shop')
+    git(RP, 'switch', '-q', '-c', 'feat')
+    const SYNC = path.join(RP, 'app/src/sync.ts')
+    writeFileSync(SYNC, readFileSync(SYNC, 'utf8').replace('eventId: e.id, ownerId: e.owner_id, ', 'key: e.title, '))
+    commit(RP, 'sync: send the title only')
+    await rq('index')
+    const rch = (await rq('changes')).split('\n')
+    ok(/: no change\.$/.test(rch[0]), `graph_changes: the data model unchanged, the equivalence grouping the base as the branch (${rch[0]})`)
+    eq(rch.slice(1, 4), [
+      '',
+      'Refined (1 refine file beside the diagrams), re-checked on this branch: 4 claims hold · 1 drift (refined, never extracted)',
+      '  What a claim cites changed: update the refine file in the same pull request (/grimoire:data-model).',
+    ], '… then the refine file re-checked on the branch')
+    has(rch.join('\n'), '  docs/architecture/shop.data.json lineage[0] (line 6)  lineage  app:db/events mirrors backend:dynamodb/{env}-{project}-event (id → eventId, owner_id → ownerId): app/src/sync.ts line 5 names none of: events, event, id, eventId, owner_id, ownerId', '… the lineage its line no longer supports: drift, why said')
+    has(await rq('data'), 'Drift (1)', 'graph_data says the same')
+    writeFileSync(SYNC, readFileSync(path.join(HERE, 'fixtures', 'refine', 'app/src/sync.ts'), 'utf8'))
+
+    // the page: the refined section, drift as a badge and a list, the gaps, the lineage drawn, the store as a card
+    const { renderGraph: renderRf } = await import('../lib/render.mjs')
+    const { loadProject: loadRf } = await import('../lib/project.mjs')
+    const rpage = await renderRf(loadRf(RP))
+    const RFD = dataOf(rpage).data.refine
+    eq([RFD.files.map((f) => [f.file, f.n, f.drift]), RFD.lineage.map((l) => [l.from, l.to, l.fs >= 0, l.ts >= 0, l.fields]), RFD.stores.map((s) => [s.id, s.entities.map((e) => [e.name, e.fields.map((f) => f.name)])]), RFD.drift.length, RFD.gaps.map((g) => g.label)],
+      [[['docs/architecture/shop.data.json', 5, 0]], [['app:db/events', 'backend:dynamodb/{env}-{project}-event', true, true, [['id', 'eventId'], ['owner_id', 'ownerId']]]], [['backend:notes', [['Note', ['title', 'body', 'authorId']]]]], 0, ['Redis']],
+      'the page packs what holds: the lineage with both stores drawn, the described store, no drift, the gap')
+    const rpg = await stubPage(rpage, '#data-0')
+    const rtext = rpg.text()
+    ok(rtext.includes('Lineage across stores (1)') && rtext.includes('mirrors · refined') && rtext.includes('id → eventId') && rtext.includes('owner_id → ownerId'), 'the Data tab draws the lineage across stores: a line from the device table to the backend table, its field pairs, refined')
+    ok(rtext.includes('Stores described by citation (1)') && rtext.includes('backend:notes') && rtext.includes('authorId') && rtext.includes('backend/src/notes/model.ts:6'), '… the described store as a card, each field at its line')
+    ok(rtext.includes('Gaps (1)') && rtext.includes('ioredis') && !!rpg.ctl('data-refine') && !rpg.ctl('data-drift'), '… the gap listed, and no drift list while every claim holds')
+    ok(/class="fk rf[^"]*"[^>]*><title>refined: event_participants \(event_id\) → events \(id\), no foreign key states it/.test(rpg.erd().html), '… the relation no foreign key states: a dashed line on the ERD, labelled refined')
+    // drift on the page: a badge and a list, the claim never drawn
+    writeFileSync(SHOP, readFileSync(SHOP, 'utf8').replace('backend:src/events.ts:7', 'backend:src/events.ts:3').replace('"why": "the device pushes', '"why": "<img src=x onerror=alert(1)> the device pushes'))
+    const dpg = await stubPage(await renderRf(loadRf(RP)), '#data-0')
+    const dtext = dpg.text()
+    ok(!!dpg.ctl('data-drift') && !!dpg.ctl('data-drift-badge') && dtext.includes('⚠ 1 drift') && dtext.includes('backend/src/events.ts line 3 names none of: ByOwner'), 'drift: a badge and a list, with why')
+    ok(!dtext.includes('What indexes are for'), '… the drifting index purpose never drawn as a fact')
+    const lin = dpg.find((n) => n.attrs && n.attrs.id === 'data-lineage').html
+    ok(lin.includes('&lt;img src=x onerror=alert(1)&gt;') && !lin.includes('<img'), 'everything escaped: a why holding markup is text in the lineage drawing')
+    ok(!dpg.find((n) => n.tagName === 'IMG') && dtext.includes('<img src=x onerror=alert(1)> the device pushes'), '… and in the lists, a text node, never an element')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 
