@@ -16,7 +16,10 @@
 // path (each field as each bound type stores it, the keys marked), each binding with its confidence,
 // evidence and rivals (dashed below convention), and the logical table it is one declaration of with
 // the conflicts across its declarations; above the cards, the item types per repository, the unbound
-// badged. Search narrows the cards. Everything goes through h(): text, never markup.
+// badged. With access patterns (data/access.mjs, inferred: `acc`), each index shows the functions that
+// query it or a lead pill, a list marks the functions reading and writing the table, and a write the
+// bound item does not state joins the card's conflicts. Search narrows the cards (a function's name
+// too). Everything goes through h(): text, never markup.
 //
 // The change overlay (render.mjs dataData packs it against the base, in Node): a toggle "Changes vs
 // <base>", off by default and absent when no base resolved (the tab says why). On, a store that

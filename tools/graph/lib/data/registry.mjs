@@ -8,7 +8,7 @@
 //       (scope unit) → facts: { declarations } (model.mjs) }
 // ctx: { DatabaseSync (node:sqlite, for the SQL replay), yaml(text) → readers/yaml.mjs documents (the
 // index's parser; for a base, its YAML parsed aside: data/base.mjs), absent where no YAML is read,
-// tree(lang, text) → a tree-sitter tree (the code extractors: the index's grammars), or, for a base,
+// tree(lang, text) → a tree-sitter tree (the code and inferred extractors: the index's grammars), or, for a base,
 // aside(id, path, text) → the code extractor's facts, read in a process of its own (readers/code-aside.mjs) }
 // A job runs again when the hash of any input, the extractor's version or its salt changes. One
 // that throws loses its facts and leaves its error for graph_status; the index goes on. The text

@@ -258,7 +258,7 @@ function readRustAccess(tree) {
   const consts = new Map() // a string constant of this file → { value, line }
   each(root, (n) => {
     if ((n.type === 'const_item' || n.type === 'static_item') && field(n, 'name')) { const v = field(n, 'value'); if (v && isStr(v)) { const s = strOf(v); if (s !== null && !consts.has(field(n, 'name').text)) consts.set(field(n, 'name').text, { value: s, line: lineOf(n) }) } return false }
-    return n.type !== 'function_item'
+    return true
   })
   const fns = base.fns.map(({ name, line, end, test, names, env, uses }) => ({ name, line, end, ...(test ? { test: true } : {}), names, env, uses }))
   const sites = []
@@ -324,7 +324,7 @@ function tsValue(n, consts, depth = 0) {
     const key = n.text.replace(/\s+/g, '').replace(/^this\./, ''), c = consts.get(key)
     if (c) return { lit: c.value, const: key, at: c.line }
     const name = n.type === 'identifier' ? n.text : field(n, 'property')?.text
-    return name && (CONST_NAME.test(name) || n.type === 'identifier') ? { const: name } : { expr: n.text }
+    return name && (CONST_NAME.test(name) || (n.type === 'identifier' && consts.known?.has(name))) ? { const: name } : { expr: n.text }
   }
   return { expr: n.text }
 }
@@ -345,8 +345,10 @@ function readTsAccess(tree, file, lang) {
   const test = TEST_TS.test(file)
   const known = knownOf(root)
   for (const c of base.consts) known.add(c.name)
-  // the file's string constants: `const X = 'x'`, an object's (`Obj.key`), an enum's (`E.Member`)
+  // the file's string constants: `const X = 'x'`, an object's (`Obj.key`), an enum's (`E.Member`);
+  // another name of the file (an import) is a constant to resolve elsewhere, a parameter is not
   const consts = new Map()
+  consts.known = known
   for (const top of named(root)) {
     const c = decls(top)
     if (!c) continue
@@ -520,7 +522,7 @@ function pyValue(n, consts) {
     const name = n.type === 'identifier' ? n.text : field(n, 'attribute')?.text
     const c = consts.get(name)
     if (c) return { lit: c.value, const: name, at: c.line }
-    return name && (CONST_NAME.test(name) || n.type === 'identifier') ? { const: name } : { expr: n.text }
+    return name && (CONST_NAME.test(name) || (n.type === 'identifier' && consts.known?.has(name))) ? { const: name } : { expr: n.text }
   }
   return { expr: n.text }
 }
@@ -537,6 +539,7 @@ function readPython(tree, file) {
   const root = tree.rootNode
   const fileTest = TEST_PY.test(file)
   const known = new Set(), consts = new Map(), constList = []
+  consts.known = known
   // module-level and class-level assignments: constants by name, and what a Table is bound to
   const tables = new Map() // an assignment's target, as written (`table`, `self.table`) → the Table(…) argument
   const assigns = (scope, cls) => {
@@ -643,7 +646,7 @@ const goValue = (n, consts) => {
   if (!n) return null
   const s = goLit(n)
   if (s !== null) return { lit: s }
-  if (n.type === 'identifier') { const c = consts.get(n.text); return c ? { lit: c.value, const: n.text, at: c.line } : { const: n.text } }
+  if (n.type === 'identifier') { const c = consts.get(n.text); return c ? { lit: c.value, const: n.text, at: c.line } : consts.known?.has(n.text) || CONST_NAME.test(n.text) ? { const: n.text } : { expr: n.text } }
   return { expr: n.text }
 }
 // a literal_value's fields: Map(key → value node)
@@ -663,6 +666,7 @@ function readGo(tree, file) {
   const root = tree.rootNode
   const fileTest = /_test\.go$/i.test(file)
   const known = new Set(), consts = new Map(), constList = []
+  consts.known = known
   for (const d of named(root)) {
     if (d.type !== 'const_declaration' && d.type !== 'var_declaration') continue
     each(d, (s) => {

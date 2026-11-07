@@ -40,7 +40,7 @@ const OP_TEXT = { 'batch-get': 'batch get', 'batch-write': 'batch write', 'trans
 export const opText = (s) => (s.op ? OP_TEXT[s.op] || s.op : s.index ? 'query or scan' : 'call')
 export const isRead = (s) => READS.has(s.op) || (!s.op && !!s.index)
 // How a call reached its table, in words: its pairing, test code, the rivals of an ambiguous one.
-export const siteHow = (s) => [PAIRING_TEXT[s.pairing] || 'no table found', s.testOnly ? 'named only in test code' : null, s.ambiguous ? `ambiguous: ${s.labels.join(' | ')}` : null].filter(Boolean).join('; ')
+export const siteHow = (s) => [PAIRING_TEXT[s.pairing] || 'no table found', s.testOnly ? 'named only in test code' : null, s.ambiguous ? `ambiguous: ${s.labels.join(' | ')}` : null, s.mismatch ? `its table declares no index ${s.index}` : null].filter(Boolean).join('; ')
 
 // The functions holding a list of calls, one entry per function: `sym(site)` → the code graph's
 // symbol around it, { key, name, line } (lib/query.mjs symbolAt), else the extractor's name for it.

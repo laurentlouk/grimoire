@@ -13,8 +13,8 @@
 //   architecture  the diagrams in docs/architecture (arch.mjs: checked against the index, laid out
 //              here) and one drafted from the graph on every render; drawn by arch-view.mjs
 //   data       the data model (lib/data, reconciled as graph_data answers): an ERD per SQL store,
-//              laid out here (data/layout.mjs), a key card per table of a key-value store (`cards`,
-//              no layout), with the folders found but not read, and two
+//              laid out here (data/layout.mjs), a key card per table of a key-value store (`cards`, its
+//              access patterns `acc` placed in the code graph's functions; no layout), with the folders found but not read, and two
 //              overlays packed here: the branch against its base, and a design's delta (the
 //              changes it proposes, each with its state against the code); drawn by data-view.mjs
 //   docs       the project's Markdown notes (docs.mjs), rendered in the page (md.mjs) as an

@@ -2324,9 +2324,12 @@ console.log('\n26 · access patterns: key-value SDK calls read per language (ext
   ok(ord.fields.every((f) => f.name !== 'flagged') && M.stores[0].entities.every((e) => e.fields.every((f) => f.sources.every((s) => s.kind !== 'inferred'))), 'the inferred write never becomes a field: the declared shape is never overridden')
   eq(storeSummary(M.stores[0]), '2 tables · 5 GSIs · 1 item type bound · 1 conflict', 'the store counts it with its conflicts')
   // an index declared on two tables, the call's own table naming one: narrowed to it, the other's lead says where it was named
-  const M3 = reconcile([...rows.slice(0, 3), { repo: 'api', extractor: 'dynamo-access@1', facts: { declarations: [], access: { lang: 'rust', path: 'src/carts.rs', notes: [], consts: [], fns: [{ name: 'mine', line: 1, end: 4, ...sink() }], sites: [s0(2, { table: sink(['{}-shop-carts']), index: 'ByOwner' })] } } }])
+  const M3 = reconcile([...rows.slice(0, 3), { repo: 'api', extractor: 'dynamo-access@1', facts: { declarations: [], access: { lang: 'rust', path: 'src/carts.rs', notes: [], consts: [], fns: [{ name: 'mine', line: 1, end: 4, ...sink() }], sites: [s0(2, { table: sink(['{}-shop-carts']), index: 'ByOwner' }), s0(3, { table: sink(['{}-shop-carts']), index: 'ByStatus' })] } } }])
   eq([M3.access.sites[0].labels, M3.stores[0].entities.find((e) => e.name === 'local-shop-orders').access.indexes.find((i) => i.name === 'ByOwner').lead], [['local-shop-carts'], 'no access found on this table (lead): 1 call names an index ByOwner of another table (local-shop-carts); it may be reached through a constant built elsewhere, another repository, or a script'],
     'a call naming its table and an index both tables declare: that table only; the other\'s index is a lead saying the name was queried elsewhere')
+  const { siteHow } = await import('../lib/data/access.mjs')
+  eq([M3.access.sites[1].labels, M3.access.sites[1].mismatch, siteHow(M3.access.sites[1]), M3.stores[0].entities.find((e) => e.name === 'local-shop-orders').access.indexes.find((i) => i.name === 'ByStatus').sites], [['local-shop-carts'], true, 'the table named at the call; its table declares no index ByStatus', []],
+    'a call whose own table declares no index of the name it queries: kept on its table, said, and credited to no other table\'s index')
   // a failure while resolving leaves the binding answered
   const broken = reconcile([...rows.slice(0, 3), { repo: 'api', extractor: 'dynamo-access@1', facts: { declarations: [], access: { lang: 'rust', path: 'src/x.rs', notes: [], consts: [], fns: null, sites: [s0(1, { fn: 0 })] } } }])
   ok(/^the access patterns were not resolved: /.test(broken.accessError) && broken.bindings.length === 1 && !broken.access, `a failure while resolving: said, and the binding stands (${broken.accessError})`)
@@ -2396,6 +2399,8 @@ console.log('\n26 · access patterns: key-value SDK calls read per language (ext
     ], 'TypeScript: a v3 command\'s input, one declared with its input type, one given to a DocumentClient method by name, a transaction\'s legs; constants, an object\'s and an enum\'s members followed; a class field naming the table kept for the binding')
     const js = read('lambda/handler.mjs', ["const docClient = new AWS.DynamoDB.DocumentClient()", "export const handler = async (e) => docClient.query({ TableName: process.env.EVENTS_TABLE, IndexName: 'ByDay', KeyConditionExpression: 'day = :d' }).promise()"])
     eq(brief(js), [['handler', 'query', 'ByDay', ['$EVENTS_TABLE'], ['day'], [], null, false]], 'JavaScript: the DocumentClient (SDK v2), its table from the environment')
+    const prm = read('src/by.ts', ["import { BY_DAY, byWeek } from './indexes'", 'export const q = (doc: Doc, indexName: string) => Promise.all([doc.query({ TableName: T, IndexName: indexName }), doc.query({ TableName: T, IndexName: byWeek }), doc.query({ TableName: T, IndexName: BY_DAY })])'])
+    eq(prm.sites.map((x) => [x.index, x.indexConst ?? null, x.indexExpr ?? null]), [[null, null, 'indexName'], [null, 'byWeek', null], [null, 'BY_DAY', null]], 'a parameter is no constant (unknown, never resolved by its name elsewhere); an imported name and a SCREAMING_CASE one are, resolved through the binding\'s constants')
     const py = read('reports/orders.py', [
       'import os',
       'import boto3',
