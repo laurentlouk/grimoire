@@ -24,14 +24,17 @@
 // ties into one logical table, so their differences are conflicts too; each is answered in
 // model.equivalences, resolved or not, and why. When code was read, a key-value table no item type is
 // bound to and no call reaches says so (`unused`): declared, no code uses this name (never paired by a
-// guess).
+// guess). Last, the SQL the code sends (queries.mjs, inferred): per repository, attached to the store
+// that declares its tables (an `[inferred]` conflict where the code names what the declarations lack,
+// and its access sites), or deduced into a store of its own, `<repo>:sql (inferred, <dialect>)`.
 //
 //   reconcile([{ repo, extractor: 'id@version', facts }], { equivalences? }) → { stores: [Store],
-//     logical, items, bindings, unresolved, equivalences, access?, accessError? }   (model.mjs,
-//     binding.mjs, access.mjs)
+//     logical, items, bindings, unresolved, equivalences, access?, accessError?, queries?,
+//     queriesError? }   (model.mjs, binding.mjs, access.mjs, queries.mjs)
 import { KINDS, keyOf, normType, normDefault, normColumn, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
 import { logicalTables, bindItems, itemField, itemOf, tableResolver, resolveSide } from './binding.mjs'
 import { resolveAccess } from './access.mjs'
+import { resolveQueries, inferredSummary, queryConflicts } from './queries.mjs'
 
 // What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
 // an LSI's kind, key attributes and projection, beside what a SQL element says. A key-value
@@ -73,7 +76,23 @@ export function reconcile(rows, opts = {}) {
   for (const d of decls) { const id = `${d.repo}:${d.store}`; if (!stores.has(id)) stores.set(id, []); stores.get(id).push(d) }
   const model = { stores: [...stores].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, ds]) => merge(id, ds)) }
   items(model, rows, decls, opts.equivalences || [])
+  inferred(model, rows)
   return model
+}
+
+// ── the SQL code sends (queries.mjs): attached to the store that declares its tables, or deduced into
+// a store of its own (`<repo>:sql (inferred, <dialect>)`), inferred, never overriding a declaration.
+// A failure leaves the model as declared, with `queriesError` saying why.
+function inferred(model, rows) {
+  if (!rows.some((r) => r.facts?.queries?.sites?.length)) return // client imports alone: no query read
+  try {
+    const r = resolveQueries(rows, model)
+    model.stores = [...model.stores, ...r.stores].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    model.queries = r.queries
+  } catch (e) {
+    for (const s of model.stores) { delete s.queries; for (const x of s.entities) delete x.queries }
+    model.queriesError = `the queries in code were not read into the model: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`
+  }
 }
 
 // what the note on a key-value table no code reaches says
@@ -270,13 +289,15 @@ export const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name
 // (graph_data and the page's Data tab say the same).
 export function storeSummary(st) {
   const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+  if (st.inferred) return inferredSummary(st) // deduced from the queries in code (queries.mjs)
   const tables = st.entities.filter((e) => e.kind === 'table' && !e.bookkeeping), views = st.entities.filter((e) => e.kind === 'view').length
   if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
   // the conflicts of its elements, and those across the declarations of a logical table it holds a
   // member of (binding.mjs), counted once
   const groups = new Map(st.entities.filter((e) => e.logical).map((e) => [e.logical.id, e.logical]))
-  // and what a call writes that the item bound to its table does not state (access.mjs: inferred)
-  const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0) + (e.access ? e.access.conflicts.length + (e.access.moreConflicts || 0) : 0), 0) + [...groups.values()].reduce((a, g) => a + g.conflicts.length, 0)
+  // and what a call writes that the item bound to its table does not state (access.mjs: inferred), and
+  // what the queries in code name that the declarations lack (queries.mjs: inferred)
+  const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0) + (e.access ? e.access.conflicts.length + (e.access.moreConflicts || 0) : 0), 0) + [...groups.values()].reduce((a, g) => a + g.conflicts.length, 0) + queryConflicts(st)
   if (st.dialect === 'dynamodb') {
     const k = (kind) => tables.reduce((a, e) => a + e.indexes.filter((i) => i.kind === kind).length, 0)
     const items = new Set(tables.flatMap((e) => (e.bound || []).map((b) => b.item))).size

@@ -494,6 +494,7 @@ function driftOf(c) {
 // ── gaps ───────────────────────────────────────────────────────────────────────────────────
 // The datastores a client import reaches (arch.mjs KNOWN's databases, and DynamoDB's own clients),
 // each with the dialects of the extracted stores that cover it; none: only a refined store covers it.
+// A client of a repository whose queries the code sends are read (queries.mjs) is no gap either.
 const COVERS = { postgres: ['postgres'], mysql: ['mysql'], sqlite: ['sqlite'], 'sql-db': ['sqlite', 'postgres', 'mysql'], dynamodb: ['dynamodb'] }
 export const DATASTORES = [
   ...KNOWN.filter((k) => k.type === 'database').map((k) => ({ id: k.id, label: k.label, imports: k.imports })),
@@ -507,7 +508,9 @@ export function gapsOf(model, stores, imports) {
     if (!seen.length) continue
     const dialects = COVERS[d.id] || []
     if (model.stores.some((s) => dialects.includes(s.dialect) && s.entities.length)) continue
-    const open = seen.filter((im) => !stores.some((s) => s.imports.some((p) => importMatches(im.source, p))))
+    // an import a refined store names, or a client of a repository whose queries are read (queries.mjs)
+    const read = model.queries?.clients || []
+    const open = seen.filter((im) => !stores.some((s) => s.imports.some((p) => importMatches(im.source, p))) && !read.some((c) => c.repo === im.repo && c.source === im.source))
     if (!open.length) continue
     const files = [...new Set(open.map((im) => `${im.repo}\0${im.path}`))].sort()
     out.push({ id: d.id, label: d.label, sources: [...new Set(open.map((im) => im.source))].sort(), files: files.slice(0, FILES_SHOWN).map((k) => ({ repo: k.slice(0, k.indexOf('\0')), path: k.slice(k.indexOf('\0') + 1) })), n: files.length })

@@ -36,7 +36,8 @@ export function erdBox(t, collapsed) {
   // row of its element (a primary key's or a foreign key's on its first column), else the header's
   const val = (attr, v) => (attr === 'nullable' ? (v ? 'null' : 'not null') : attr === 'unique' ? (v ? 'unique' : 'not unique') : attr === 'partial' ? (v ? 'partial' : 'whole') : v === null || v === undefined || v === '' ? 'none' : String(v))
   const LABEL = { default: 'default', generated: 'generated', columns: 'columns', onDelete: 'on delete', onUpdate: 'on update' }
-  const say = ([pre, c]) => `${pre}${LABEL[c.attr] ? `${LABEL[c.attr]}: ` : ''}${c.values.map((v) => val(c.attr, v.value)).join(' ≠ ')}`
+  // (a conflict naming its own subject, `label`: a column only the queries in code name)
+  const say = ([pre, c]) => `${pre}${c.label ? `${c.label}: ` : LABEL[c.attr] ? `${LABEL[c.attr]}: ` : ''}${c.values.map((v) => val(c.attr, v.value)).join(' ≠ ')}`
   const own = (list) => (list || []).map((c) => ['', c])
   const head = own(t.cf)
   const byField = new Map(fields.map((f, i) => [f.name, i]))

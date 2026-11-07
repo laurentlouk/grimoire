@@ -29,11 +29,12 @@ import tsTypes from './extractors/ts-types.mjs'
 import dynamoAccess from './extractors/dynamo-access.mjs'
 import drizzleTs from './extractors/drizzle-ts.mjs'
 import prisma from './extractors/prisma.mjs'
+import sqlQueries from './extractors/sql-queries.mjs'
 import { DOC } from './readers/documents.mjs'
 import { tableLevel } from './readers/dynamodb.mjs'
 import { skipped } from '../project.mjs'
 
-export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma]
+export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma, sqlQueries]
 // the code and inferred extractors: their files are source (code, or a schema language), inspected by level
 export const SOURCE = EXTRACTORS.filter((ex) => ex.kind === 'code' || ex.kind === 'inferred')
 // those parsing source through the pinned grammars (ctx.tree), and the ones of them a base reads
@@ -45,7 +46,8 @@ export const asideOf = (p, text) => ASIDE.filter((ex) => ex.wants(p) && (ex.pars
 // A source file's level, bits: 1 what the item binding reads (its code extractor's level), 2 a
 // key-value SDK call shape (extractors/dynamo-access.mjs), 4 a table-builder schema and 8 a barrel
 // re-exporting relative modules (extractors/drizzle-ts.mjs), 16 a model, view or enum block and 32 a
-// datasource block of a schema-language file (extractors/prisma.mjs).
+// datasource block of a schema-language file (extractors/prisma.mjs), 64 a query call beside SQL text,
+// or a SQL client import (extractors/sql-queries.mjs).
 export const sourceLevel = (p, text) => { let l = 0; for (const ex of SOURCE) if (ex.wants(p)) l |= ex.level(p, text); return l }
 const isSource = (p) => SOURCE.some((ex) => ex.wants(p))
 export const MAX_BYTES = 8 << 20 // an input past this is not read (its job reports it)
@@ -67,7 +69,8 @@ export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some(
 // source file (.rs, .ts, .js, .py, .go, .prisma), sourceLevel's bits (1: what the item binding reads:
 // a serde derive, a type declaration, a conversion, an environment read, a string constant; 2: a
 // key-value SDK call shape; 4, 8: a table-builder schema, a barrel; 16, 32: a schema-language file's
-// models, its datasource; 0: none). A change to what this computes moves the store's SCHEMA_VERSION, so no
+// models, its datasource; 64: a query call beside SQL text, a SQL client import; 0: none). A change to
+// what this computes moves the store's SCHEMA_VERSION, so no
 // stale level survives in an index.
 export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : wantsTf(p) ? tfLevel(p, text) : DOC.test(p) ? tableLevel(text) : isSource(p) ? sourceLevel(p, text) : null)
 // A text worth keeping once inspected (an extractor may read it): every JSON and YAML file is a
