@@ -17,11 +17,12 @@ import sqlMigrations, { upOnly } from './extractors/sql-migrations.mjs'
 import drizzleSnapshot from './extractors/drizzle-snapshot.mjs'
 import dynamodbTable from './extractors/dynamodb-table.mjs'
 import cloudformation from './extractors/cloudformation.mjs'
+import terraform, { wantsTf, tfLevel } from './extractors/terraform.mjs'
 import { DOC } from './readers/documents.mjs'
 import { tableLevel } from './readers/dynamodb.mjs'
 import { skipped } from '../project.mjs'
 
-export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation]
+export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform]
 export const MAX_BYTES = 8 << 20 // an input past this is not read (its job reports it)
 export const idOf = (ex) => `${ex.id}@${ex.version}`
 
@@ -35,9 +36,11 @@ export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some(
 // What the index keeps about an input's content beside its hash, so discovery goes by content: for
 // SQL, its schemaLevel (2: it creates or alters a table or an index, 1: other schema statements
 // only, 0: none); for JSON and YAML, its tableLevel (3: it names a table resource of a template, 2:
-// it holds a key schema, a CreateTable input; 0: neither). A change to what this computes moves the
-// store's SCHEMA_VERSION, so no stale level survives in an index.
-export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : DOC.test(p) ? tableLevel(text) : null)
+// it holds a key schema, a CreateTable input; 0: neither); for Terraform and Terragrunt files
+// (.tf, .tfvars, .tfvars.json, .hcl), extractors/terraform.mjs tfLevel (4: a module declaring a
+// table resource, 5: a terragrunt.hcl Terragrunt runs, 6: a module out of reach, 1: other). A change
+// to what this computes moves the store's SCHEMA_VERSION, so no stale level survives in an index.
+export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : wantsTf(p) ? tfLevel(p, text) : DOC.test(p) ? tableLevel(text) : null)
 // A text worth keeping once inspected (an extractor may read it): every JSON and YAML file is a
 // candidate, but one only the table extractors want and that declares no table is never read again,
 // so the index and a base keep no copy of it.

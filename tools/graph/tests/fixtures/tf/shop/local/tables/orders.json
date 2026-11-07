@@ -1,0 +1,29 @@
+{
+  "TableName": "prod-shop-orders",
+  "BillingMode": "PAY_PER_REQUEST",
+  "AttributeDefinitions": [
+    { "AttributeName": "customer_id", "AttributeType": "S" },
+    { "AttributeName": "order_id", "AttributeType": "S" },
+    { "AttributeName": "status", "AttributeType": "S" },
+    { "AttributeName": "placed_at", "AttributeType": "N" },
+    { "AttributeName": "sku", "AttributeType": "S" }
+  ],
+  "KeySchema": [
+    { "AttributeName": "customer_id", "KeyType": "HASH" },
+    { "AttributeName": "order_id", "KeyType": "RANGE" }
+  ],
+  "GlobalSecondaryIndexes": [
+    {
+      "IndexName": "ByStatus",
+      "KeySchema": [{ "AttributeName": "status", "KeyType": "HASH" }, { "AttributeName": "placed_at", "KeyType": "RANGE" }],
+      "Projection": { "ProjectionType": "KEYS_ONLY" }
+    },
+    {
+      "IndexName": "BySku",
+      "KeySchema": [{ "AttributeName": "sku", "KeyType": "HASH" }],
+      "Projection": { "ProjectionType": "ALL" }
+    }
+  ],
+  "StreamSpecification": { "StreamEnabled": true, "StreamViewType": "NEW_AND_OLD_IMAGES" },
+  "TimeToLiveSpecification": { "AttributeName": "expires_at", "Enabled": true }
+}
