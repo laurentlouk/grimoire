@@ -1426,6 +1426,22 @@ async function indexed() {
     has((await ft('changes')).split('\n\nArchitecture')[1] || '', `${DIAGRAM}  modified\n  + connection web → store  "reads stock"`, 'without the delta: the diagram\'s new line, against the base')
     has(spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'changes', '--delta', DREL, '--root', FEAT], { encoding: 'utf8' }).stdout, '  planned and built  unplanned-PROJ-1-stock  add connection:web->store', 'graph.mjs changes --delta prints the same')
     ok(!(await ft('changes', { repo: 'shop' })).includes('Architecture'), '`repo` leaves the architecture out')
+    // the base checkout's index not at the fork point: main gains a module (its index not refreshed),
+    // the branch merges main and changes nothing more. Its code is not compared, and graph_changes says
+    // why, naming the checkout to refresh: what main did is never reported as the branch's impact
+    const staleAt = git(MAIN, 'rev-parse', 'HEAD').stdout.trim()
+    put(MAIN, 'src/extra/z.js', 'export const z = 3\n')
+    const forkAt = commit(MAIN, 'a module on main')
+    ok(git(FEAT, 'merge', '-q', '--ff-only', 'main').status === 0, 'the branch merges main')
+    const staleOut = await ft('changes')
+    const staleLine = staleOut.slice(staleOut.indexOf('\n\nArchitecture') + 2).split('\n')[0]
+    eq(staleLine.split('; in the code: ')[1], `diagram files only, the code not compared (base index not at the fork point): the base checkout's index is at ${staleAt.slice(0, 7)}, the branch forked from ${forkAt.slice(0, 7)}: refresh it (\`graph.mjs index\` in ${realpathSync(MAIN)}) to compare what the code did`,
+      'a base index not at the fork point: the code is not compared, the reason said with the checkout to refresh')
+    ok(!staleOut.includes('src/extra') && !staleOut.includes('is in no component'), "main's new module is not reported as the branch's impact")
+    const staleDelta = await archOf()
+    ok(staleDelta.some((l) => l.startsWith('Unplanned: none in what was compared (diagram files only, the code not compared (base index not at the fork point): ')), `with the delta too: nothing unplanned is claimed from the code (${staleDelta.find((l) => l.startsWith('Unplanned'))})`)
+    // a data-only project pays for no architecture and reads as on main: the data footer, untouched
+    ok((await call('graph_changes', {}, { root: BR })).endsWith('\n\nLeads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate. Open path:line before relying on any of it.'), 'a project with no diagram: no architecture part, and the footer as before')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

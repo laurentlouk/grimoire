@@ -19,7 +19,7 @@
 //   links    [[from, to, text, unplanned index | -1]]: a code link no line draws, new on the branch
 import { layoutArch } from './arch.mjs'
 import { parseArchTarget } from './data/delta.mjs'
-import { shown, describeEl, archChangeText } from './arch-change.mjs'
+import { shown, describeEl, archChangeText, KIND_WORD } from './arch-change.mjs'
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x)
 const comps = (doc) => (isObj(doc) && Array.isArray(doc.components) ? doc.components : []).filter((c) => isObj(c) && typeof c.id === 'string')
@@ -69,7 +69,7 @@ export function packArchChanges(file, doc, a, impact) {
   const n = (k) => (f ? f.changes.filter((c) => c.change === k).length : 0)
   return { change: f ? f.change : null, n: { added: n('added'), removed: n('removed'), modified: n('modified'), findings: finds.length },
     list: (f ? f.changes : []).map((c) => ({ change: c.change, kind: c.kind, target: c.target, text: `${describeEl(c.kind, c.after || c.before)}${c.attrs.length ? `: ${c.attrs.map(attrLine).join('; ')}` : ''}` })),
-    findings: finds.map((x) => ({ kind: x.kind, target: x.target, text: x.text })), ...ov.done() }
+    findings: finds.map((x) => ({ kind: x.kind, target: x.target, text: x.text, word: KIND_WORD[x.kind] })), ...ov.done() }
 }
 
 // What a delta's `after` states, in a line (the page's change list).
@@ -92,7 +92,7 @@ export function packArchDelta(s, { saved, before, why }) {
     why: r.change.why, slice: r.change.slice ?? null, origin: r.change.origin, after: archAfterText(r.change), diffs: r.diffs.map((x) => x.text), proposed: r.proposed.map((x) => x.text), warn: r.warn,
     src: r.state !== 'pending' ? [...new Set(r.hits.map((h) => h.file))] : [], drawn: [],
   }))
-  const unplanned = s.unplanned.map((u) => ({ source: u.source, built: u.built, kind: u.kind, change: u.change || null, target: u.target, text: u.text, file: u.file, drawn: -1 }))
+  const unplanned = s.unplanned.map((u) => ({ source: u.source, built: u.built, kind: u.kind, change: u.change || null, target: u.target, text: u.text, file: u.file, word: u.source === 'diagram' ? 'drawn in the branch' : KIND_WORD[u.kind], drawn: -1 }))
   const diagrams = []
   const K = { component: 0, connection: 1, boundary: 2 }
   for (const { k, file, doc, a } of saved) {

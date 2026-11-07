@@ -850,6 +850,9 @@ told.
   does not plan, the parts built on a table the delta adds beyond what its `add` states included,
   and per architectural impact `graph_changes` lists (an architecture target: `component:<id>`,
   `connection:<from>-><to>`, `boundary:<label>`; a kept one has the diagram updated in the branch).
+  When `graph_changes` compared the diagram files only (its base checkout's index is not at the
+  fork point, or there is none), it returns `architectureCompared: "diagrams-only"` with the reason
+  (`architectureWhy`), and the PR section says "architecture: diagram files only (<reason>)".
   It keeps each one with a reason or reverts it; neither is a question, a pause or a failure.
   With no delta it reports every change its commits made to stored data. A later dispatch of the
   task (a fix round, a retry after a replan) is told the task's own start as the base (its first

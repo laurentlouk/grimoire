@@ -25,6 +25,9 @@
 //    M8  the architecture (slice 6, #80): a planned component and an unplanned line kept with the
 //        diagram updated: the brief carries both, the PR lists them under the same heading, and the
 //        ship appends the line to the delta's `architecture` list
+//    M9  graph_changes compared the diagram files only (the base checkout's index not at the fork
+//        point): the implementer says so (architectureCompared, architectureWhy), and the PR does;
+//        then the engine's isArchTarget against delta.mjs's
 //  Same stubbed runtime as the other loop tests (support/script-harness.mjs).
 import { run, by, T, impl, BLOCKED, QUIET, sandbox, scriptOf, realRepo, receipt, heredocs, PR_URL, tick, spawn, existsSync, readFileSync, writeFileSync, mkdirSync, join } from './support/script-harness.mjs'
 
@@ -285,6 +288,31 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
     'the ship appends the kept line to the delta\'s architecture list (origin unplanned, the reason as why), never to its data')
   ok(/^DELTA ok added=1 already=0 refused=0$/m.test(ships.out[0]) && !result.halt && result.dataModel.changes.map((m) => `${m.target} ${m.delta}`).join() === 'connection:web->store added', 'written under the ship lock; nothing blocked; the run\'s result says it reached the delta')
   X.done()
+}
+
+// ══════════════ M9 · the code's architectural impact not compared: said in the brief and the PR ══════════════
+{
+  const { prompt } = await run('M9 · graph_changes compared the diagram files only (the base index not at the fork point)', [T('PROJ-1')], by({
+    'impl:PROJ-1': { ...impl('aaaaaaa'), modelChanges: [], architectureCompared: 'diagrams-only', architectureWhy: 'base index not at the fork point' },
+  }), { args: ARGS, index: { deltaFound: false } })
+  ok(prompt('impl:PROJ-1').includes('If its Architecture part says "diagram files only, the code not compared", return `architectureCompared: "diagrams-only"`'), 'the brief asks the implementer to say when the code was not compared')
+  eq(section(heredocs(prompt('ship:api#1'))[0]), [
+    '### Data model and architecture changes',
+    `No delta beside the design (\`${DELTA_PATH}\`): the changes this branch makes to stored data, as its implementers reported them against their base.`,
+    "- architecture: diagram files only (base index not at the fork point): the code's impact on it was not compared · PROJ-1",
+  ], 'the PR says the architecture was compared on the diagram files only, and why: never read as no impact')
+}
+
+// ══════════════ the engine and the graph tell an architecture target alike ══════════════
+// (the engine imports nothing: its one-line isArchTarget, matched in its own source, is evaluated here)
+{
+  const { isArchTarget } = await import('../../tools/graph/lib/data/delta.mjs')
+  const src = readFileSync(join(REPO, 'workflows/orchestrate-loop.js'), 'utf8')
+  const line = /^const isArchTarget = (\(t\) => .+)$/m.exec(src)
+  const engine = line ? new Function(`return ${line[1]}`)() : () => null
+  const cases = ['component:x', 'connection:a->b', 'connection:a->b#l', 'boundary:Edge', 'components:x', 'component', 'connector:a->b', 'Component:x', '', 'api:db/books.isbn']
+  eq([!!line, cases.map((t) => engine(t)), cases.map((t) => engine(t) === isArchTarget(t)).every(Boolean)], [true, [true, true, true, true, false, false, false, false, false, false], true],
+    "the engine's isArchTarget (it imports nothing) agrees with delta.mjs's on targets and near-misses")
 }
 
 // ══════════════ the briefs and the return contract say it ══════════════

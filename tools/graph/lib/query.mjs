@@ -9,8 +9,11 @@ import { parseDelta, parseTarget, deltaStates, changeText, STATE_TEXT } from './
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files, never from a database. Open path:line before relying on any of it.'
-export const CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate; the architecture from the saved diagrams and the check, by name. Open path:line before relying on any of it.'
-export const DELTA_FOOTER = 'Leads, not facts: the states are computed from migrations and generated files (the base through git at its commit), never from a database (the architecture\'s from the saved diagrams), and never written into the delta. Open path:line before relying on any of it.'
+export const CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate. Open path:line before relying on any of it.'
+// with an architecture part (arch-change.mjs): what it reads, said too
+export const ARCH_CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate; the architecture from the saved diagrams and the check, by name. Open path:line before relying on any of it.'
+export const DELTA_FOOTER = 'Leads, not facts: the states are computed from migrations and generated files (the base through git at its commit), never from a database, and never written into the delta. Open path:line before relying on any of it.'
+export const ARCH_DELTA_FOOTER = 'Leads, not facts: the states are computed from migrations and generated files (the base through git at its commit), never from a database (the architecture\'s from the saved diagrams), and never written into the delta. Open path:line before relying on any of it.'
 
 // How a data model change reads, shared by graph_changes and the page (render.mjs packs the same words).
 const plural = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`

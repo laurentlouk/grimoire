@@ -34,7 +34,7 @@ import { openStore } from './store.mjs'
 import { layoutMap } from './layout.mjs'
 import { systemMap } from './modules.mjs'
 import { analyze, draftArch, loadIndex, readDiagrams } from './arch.mjs'
-import { archImpact, archDeltaStates, currentDiagrams } from './arch-change.mjs'
+import { archScope, archImpact, archDeltaStates, currentDiagrams } from './arch-change.mjs'
 import { packArchChanges, packArchDelta } from './arch-pack.mjs'
 import { scanDocs, docRoots, scanDeltas, readDelta } from './docs.mjs'
 import { mdSlug, mdFront, mdToHtml } from './md.mjs'
@@ -105,26 +105,31 @@ export async function renderGraph(project, opts = {}) {
 // when that base resolved), drawn per saved diagram (`ch`, the Changes overlay), and each delta's
 // architecture changes (`arch` on the Data tab's packed delta: one delta object, so an
 // acknowledgement written from either tab updates the hash both send). archCh: the base, why the code
-// was not compared (no base index: only the diagram files were), and the diagrams the branch removed.
+// was not compared (codeWhy: no base index, or one not at the fork point; codePart: compared in some
+// repositories only), and the diagrams the branch removed. Nothing here names a path outside the
+// project (whyPage): a rendered page may be shared. A project that draws no diagram and proposes no
+// architecture change loads no second index (archScope).
 async function archAndData(project, db, files, repos, changes, deltas) {
   const idx = loadIndex(db)
   let impact = null, why = changes?.why || 'no base was resolved'
-  if (changes?.base && project.root) { try { impact = await archImpact(project, changes.base, { idx }) } catch (e) { why = `the base's architecture could not be read: ${e.message}` } }
+  const proposed = deltas.some((f) => { const { delta } = parseDelta(f.text); return !!(delta && delta.architecture.length) })
+  const scope = changes?.base && project.root ? archScope(project, changes.base, proposed) : null
+  if (scope && scope.has) { try { impact = await archImpact(project, changes.base, { idx, scope }) } catch { why = 'the base\'s diagrams could not be read' } }
   const arch = archData(project, idx, impact)
   const data = dataData(db, files, repos, changes, deltas)
   const saved = arch.map((a, k) => ({ k, a, file: a.file, doc: a.doc })).filter((x) => x.doc)
-  const current = impact ? impact.current : project.root ? currentDiagrams(project) : []
+  const current = impact ? impact.current : scope ? scope.current : project.root ? currentDiagrams(project) : []
   deltas.forEach((f, i) => {
     const p = (data.deltas || [])[i]
     const { delta } = p && !p.errors.length ? parseDelta(f.text) : {}
     if (!delta) return
     const st = archDeltaStates(delta.architecture, current, { base: impact ? impact.before : null, impact })
     p.arch = packArchDelta(st, { saved, before: impact ? impact.before : null, why: impact ? null : why })
-    if (impact && impact.why) p.arch.codeWhy = impact.why
+    if (impact && impact.why) Object.assign(p.arch, { codeWhy: impact.whyPage, codePart: impact.findings !== null })
   })
   for (const a of arch) delete a.doc
   const removed = impact && impact.diagrams ? impact.diagrams.files.filter((f) => f.change === 'removed').map((f) => ({ file: f.file, title: f.title, n: f.changes.length })) : []
-  const archCh = impact ? { base: { ref: refName(changes.base.ref), text: baseText(changes.base) }, diagramsWhy: impact.diagramsWhy, codeWhy: impact.why, removed, skipped: impact.diagrams ? impact.diagrams.skipped : [] } : { base: null, why }
+  const archCh = impact ? { base: { ref: refName(changes.base.ref), text: baseText(changes.base) }, diagramsWhy: impact.diagramsWhy, codeWhy: impact.whyPage, codePart: impact.findings !== null, removed, skipped: impact.diagrams ? impact.diagrams.skipped : [] } : { base: null, why }
   return { arch, archCh, data }
 }
 

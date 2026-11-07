@@ -64,7 +64,8 @@ export function currentDiagrams(project) {
 }
 // The saved diagrams at the base: the folder read through git at the base's merge base with HEAD
 // (the repository's own `at` when the folder is in one of base.repos, else the same ref resolved in
-// the git work tree that holds it), nothing checked out. → { list, at } | { why }
+// the git work tree that holds it), nothing checked out; git lists that folder alone. → { list, at }
+// | { why } (a reason with no path in it: the page carries it)
 export function diagramsAt(project, base) {
   if (!project.root) return { why: 'no project root' }
   const dir = realish(project.architectureDir)
@@ -79,11 +80,11 @@ export function diagramsAt(project, base) {
   let at = repo ? repo.at : null
   if (!at) {
     const commit = git(realTop, ['rev-parse', '--verify', '-q', `${base.ref}^{commit}`])
-    if (!commit) return { why: `${base.ref} is not a commit in ${realTop}` }
+    if (!commit) return { why: `${base.ref} is not a commit in the repository that holds the diagrams` }
     const head = git(realTop, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])
     at = (head && git(realTop, ['merge-base', commit, head])) || commit
   }
-  const files = treeAt(realTop, at)
+  const files = treeAt(realTop, at, inDir ? [inDir] : null)
   const want = [...files.keys()].filter((p) => (inDir === '' || p.startsWith(`${inDir}/`)) && p.endsWith(SUFFIX) && !p.slice(inDir ? inDir.length + 1 : 0).split('/').slice(0, -1).some((s) => s.startsWith('.'))).sort()
   const text = blobs(realTop, want.map((p) => files.get(p)))
   const list = want.map((p) => {
@@ -172,23 +173,70 @@ function diffDoc(b, a) {
 }
 
 // ── a branch's architectural impact ──
-// → { diagrams: diffDiagrams' answer | null, diagramsWhy, findings: [{ file, kind, key, target, text,
-//   … }] | null, why: null | why the code was not compared, where: { root, branch } (the base
-//   checkout read) | null, current }. idx: the branch's index (arch.mjs loadIndex).
-export async function archImpact(project, base, { idx, current = currentDiagrams(project) } = {}) {
+// Is there anything for the architecture to say, found before any index is loaded: a saved diagram
+// now (the folder's listing), one at the base (git lists that folder alone), or a change the delta
+// proposes. A project that draws no diagram pays for nothing more. → { has, current, at }
+export function archScope(project, base, proposed = false) {
+  const current = currentDiagrams(project)
   const at = base ? diagramsAt(project, base) : { why: 'no base' }
-  const out = { diagrams: at.why ? null : diffDiagrams(at.list, current), diagramsWhy: at.why || null, before: at.why ? null : at.list, findings: null, why: null, where: null, current }
+  return { has: current.length > 0 || (!at.why && at.list.length > 0) || !!proposed, current, at }
+}
+const short7 = (sha) => String(sha || 'none').slice(0, 7)
+// The code is compared only where the base checkout's index is the code the branch forked from: for
+// each repository, the head that index recorded (repos.head) must be the merge base the diagrams are
+// read at (base.repos[].at), with no re-parse pending there (freshness.mjs withLock's marker). A base
+// index behind or ahead of the fork point would report what the base did as the branch's impact, or
+// hide what the branch still has; implementers act on these findings, so a repository whose index is
+// not at the fork point is left out of the comparison, and the reason is said: `why` with the base
+// checkout's path (graph_changes, run locally), `whyPage` without it (the page may be shared), `short`
+// (what the implementer reports and the PR says).
+//   archImpact(project, base, { idx, scope }) → { diagrams: diffDiagrams' answer | null, diagramsWhy,
+//     before, current, findings: [{ file, kind, key, target, text, … }] | null (null: no repository
+//     compared), compared: [repo], why, whyPage, short (null when every repository was compared), where:
+//     { root, branch } | null }. idx: the branch's index, or a function that loads it (called only when
+//     a repository is compared). scope: archScope's answer, when the caller has it.
+export async function archImpact(project, base, { idx, scope = null } = {}) {
+  const { current, at } = scope || archScope(project, base)
+  const out = { diagrams: at.why ? null : diffDiagrams(at.list, current), diagramsWhy: at.why || null, before: at.why ? null : at.list, findings: null, compared: [], why: null, whyPage: null, short: null, where: null, current }
+  const say = (short, why, whyPage = why) => Object.assign(out, { short, why, whyPage })
+  if (!base) return say('no base', 'no base was resolved')
   const bi = await baseIndex(project)
-  if (bi.why) { out.why = bi.why; return out }
-  let baseIdx
-  try { const db = await openStore(bi.dbPath, { readOnly: true }); try { baseIdx = loadIndex(db) } finally { db.close() } } catch (e) { out.why = `the base checkout's index cannot be read (${e.message})`; return out }
+  if (bi.why) return say(bi.short, bi.why, bi.page)
+  let baseIdx, heads
+  try {
+    const db = await openStore(bi.dbPath, { readOnly: true })
+    try { baseIdx = loadIndex(db); heads = new Map(db.prepare('SELECT name, head FROM repos').all().map((r) => [r.name, r.head])) } finally { db.close() }
+  } catch (e) { return say('base index unreadable', `the base checkout's index cannot be read (${e.message})`, 'the base checkout\'s index cannot be read') }
   out.where = { root: bi.root, branch: bi.branch }
+  const off = []
+  for (const r of base.repos) {
+    const h = heads.get(r.name)
+    if (bi.pending) off.push({ repo: r.name, why: 'the base checkout\'s index has a re-parse pending' })
+    else if (h !== r.at) off.push({ repo: r.name, why: `the base checkout's index is at ${short7(h)}${base.repos.length > 1 ? ` in ${r.name}` : ''}, the branch forked from ${short7(r.at)}` })
+  }
+  // (a repository the base did not resolve in is in neither: the data part says "Not compared")
+  const compared = base.repos.map((r) => r.name).filter((n) => !off.some((o) => o.repo === n))
+  if (off.length) {
+    const what = off.map((o) => o.why).join('; ')
+    say('base index not at the fork point', `${what}: refresh it (\`graph.mjs index\` in ${bi.root}) to compare what the code did`, `${what}: refresh it (\`graph.mjs index\` in that checkout) to compare what the code did`)
+  }
+  out.compared = compared
+  if (!compared.length) return out
+  const mine = typeof idx === 'function' ? idx() : idx
+  const keep = new Set(compared)
+  const a = onlyRepos(mine, keep), b = onlyRepos(baseIdx, keep)
   out.findings = []
-  for (const d of current) if (d.doc && !validate(d.doc).errors.length) for (const f of newFindings(d.doc, idx, baseIdx)) out.findings.push({ file: d.file, ...f })
+  for (const d of current) if (d.doc && !validate(d.doc).errors.length) for (const f of newFindings(d.doc, a, b)) out.findings.push({ file: d.file, ...f })
   return out
 }
-// Is there anything for the architecture to say? A diagram now or at the base, or a change proposed.
-export const archHas = (impact, delta = null) => !!(impact && (impact.current.length || (impact.before && impact.before.length))) || !!(delta && delta.architecture && delta.architecture.length)
+// An index limited to some repositories' files (and the symbols, links and imports between them);
+// its list of repositories stays whole, so names and module keys read as they do on the whole index.
+function onlyRepos(idx, keep) {
+  if (idx.repos.every((r) => keep.has(r))) return idx
+  const files = idx.files.filter((f) => keep.has(f.repo)), ids = new Set(files.map((f) => f.id))
+  const nodes = idx.nodes.filter((n) => ids.has(n.file_id)), nids = new Set([...nodes.map((n) => n.id), ...files.map((f) => f.node_id)])
+  return { repos: idx.repos, files, nodes, edges: idx.edges.filter((e) => nids.has(e.src) && nids.has(e.dst)), imports: idx.imports.filter((im) => ids.has(im.file_id)) }
+}
 
 // ── the delta's architecture changes against the diagrams ──
 // Where a target is drawn: [{ file, doc, el, amb }] across the diagrams (amb: a connection named by its
@@ -306,9 +354,12 @@ export function archDeltaStates(list, current, { base = null, impact = null } = 
 }
 
 // ── graph_changes' architecture part ──
-const KIND_WORD = { undrawn: 'in the code, not drawn', unseen: 'drawn, not in the code', uncovered: 'in no component', service: 'a service no component reaches' }
+export const KIND_WORD = { undrawn: 'in the code, not drawn', unseen: 'drawn, the code no longer shows it', uncovered: 'in no component', service: 'a service no component reaches' }
 const elLine = (c) => `  ${c.change === 'added' ? '+' : c.change === 'removed' ? '-' : '~'} ${describeEl(c.kind, c.after || c.before)}${c.attrs.length ? `  ${c.attrs.map((a) => `${a.attr}: ${shown(a.before)} → ${shown(a.after)}`).join('; ')}` : ''}`
-const codeWhy = (impact) => (impact.why ? `not compared (${impact.why}): only the diagram files were compared` : `${plural(impact.findings.length, 'finding')} on the branch's index and not on the base checkout's (${impact.where.branch || 'the main checkout'}, ${impact.where.root})`)
+// what the code part says: its findings, or "diagram files only" with the short reason and the why
+// (the implementer reports the short reason as architectureWhy, and the PR says it)
+const codeWhy = (impact) => (impact.findings === null ? `diagram files only, the code not compared (${impact.short}): ${impact.why}`
+  : `${plural(impact.findings.length, 'finding')} on the branch's index and not on the base checkout's (${impact.where.branch || 'the main checkout'}, ${impact.where.root})${impact.why ? `; elsewhere diagram files only (${impact.short}): ${impact.why}` : ''}`)
 // Without a delta: the diagrams against the base, then what the code did. [lines]
 export function archLines(impact, baseText) {
   const out = []
@@ -339,7 +390,8 @@ export function archDeltaLines(s, { against, impact, baseText, why }) {
     out.push(`    why: ${r.change.why}${r.change.slice !== undefined ? ` · slice ${r.change.slice}` : ''}${r.change.origin === 'unplanned' ? ' · unplanned, kept by the implementer' : ''} · ${ackText(r)}`)
   }
   if (against) {
-    out.push(s.unplanned.length ? `Unplanned (${s.unplanned.length}): in the branch, in no change of the delta${impact.why ? ` (the code not compared: ${impact.why}; only the diagram files were)` : ''}` : `Unplanned: none${impact.why ? ` in the diagram files (the code not compared: ${impact.why})` : ', every architectural change of the branch is in the delta'}`)
+    const only = impact.why ? ` (diagram files only${impact.findings === null ? '' : ' in part'}, the code not compared (${impact.short}): ${impact.why})` : ''
+    out.push(s.unplanned.length ? `Unplanned (${s.unplanned.length}): in the branch, in no change of the delta${only}` : `Unplanned: none${impact.why ? ` in what was compared${only}` : ', every architectural change of the branch is in the delta'}`)
     for (const u of s.unplanned) out.push(`  ${u.source === 'diagram' ? (u.change === 'added' ? '+' : u.change === 'removed' ? '-' : '~') : '+'} ${u.target || '(no target)'}  ${u.text}  — ${u.file}${u.source === 'diagram' ? ' (drawn in the branch)' : ` (${KIND_WORD[u.kind]}: update the diagram)`}`)
     for (const x of impact.diagrams ? impact.diagrams.skipped : []) out.push(`Not compared: ${x.file} (${x.why}).`)
   }

@@ -520,6 +520,8 @@ const IMPL_SCHEMA = {
       description: "the state graph_changes gives each of this task's PLANNED changes (the header's list), after your last commit; [] when it lists none",
       items: { type: 'object', required: ['id', 'state'], properties: { id: { type: 'string' }, state: { type: 'string', enum: ['planned-built', 'pending', 'built-differently'] }, note: { type: 'string', description: 'built differently: planned → built, as graph_changes says it' } } },
     },
+    architectureCompared: { type: 'string', enum: ['code', 'diagrams-only'], description: "what graph_changes' Architecture part compared: 'diagrams-only' when it says \"diagram files only, the code not compared\" (the code's architectural impact was not read: not the same as none); omit when it has no Architecture part" },
+    architectureWhy: { type: 'string', description: "with diagrams-only: the reason in parentheses after it, as graph_changes gives it (e.g. 'base index not at the fork point')" },
   },
 }
 
@@ -1340,15 +1342,18 @@ function modelBlock(task) {
   if (!hasDelta)
     return `
 ## Data model changes — this design has no delta (brief: "Data model changes")
-${earlier}Before you return, run \`graph_changes\` with ${base}, and list in \`modelChanges\` every change to stored data ${again ? 'the task made' : 'your commits made'}, and every architectural impact its Architecture part lists: kept with the reason (an architectural one with the diagram updated in your commits), or reverted.${whole} Nothing waits on it.
+${earlier}Before you return, run \`graph_changes\` with ${base}, and list in \`modelChanges\` every change to stored data ${again ? 'the task made' : 'your commits made'}, and every architectural impact its Architecture part lists: kept with the reason (an architectural one with the diagram updated in your commits), or reverted.${whole}${ARCH_SCOPE} Nothing waits on it.
 `
   const planned = deltaChangesOf(task)
   return `
 ## Data model changes — the design's delta \`${deltaPath}\` (brief: "Data model changes")
 ${planned.length ? `Planned for this task (from the delta, verbatim):\n${planned.map((c) => `- \`${noTick(c.id)}\` · ${c.op} \`${noTick(c.target)}\`${c.why ? ` — ${c.why}` : ''}`).join('\n')}` : 'This task plans no change to stored data or to the architecture.'}
-${earlier}Before you return, run \`graph_changes\` with \`delta: "${deltaPath}"\` and ${base}: return \`deltaStates\` for the ids above, and in \`modelChanges\` each change of its Unplanned lists (the data model's and the architecture's), kept with the reason (an architectural one with the diagram updated in your commits) or reverted.${whole} Nothing waits on it.
+${earlier}Before you return, run \`graph_changes\` with \`delta: "${deltaPath}"\` and ${base}: return \`deltaStates\` for the ids above, and in \`modelChanges\` each change of its Unplanned lists (the data model's and the architecture's), kept with the reason (an architectural one with the diagram updated in your commits) or reverted.${whole}${ARCH_SCOPE} Nothing waits on it.
 `
 }
+// When graph_changes could not read the code's architectural impact (its base checkout's index is not
+// at the fork point, or there is none), the implementer says so, and the PR does (modelLines).
+const ARCH_SCOPE = ' If its Architecture part says "diagram files only, the code not compared", return `architectureCompared: "diagrams-only"` and the reason in parentheses after it as `architectureWhy`: the code\'s impact was not read, which is not the same as none.'
 // The task's report so far, as the next dispatch's brief lists it (implementer text: data, trimmed).
 function earlierReport(rec) {
   const ch = [...rec.changes.values()].map((m) => `- ${m.kept ? 'kept' : 'reverted'} \`${noTick(m.target)}\`${m.op ? ` (${m.op})` : ''} — ${m.reason ? trim(m.reason, 200) : 'no reason given'}`)
@@ -5797,6 +5802,9 @@ function noteModel(task, out) {
   }
   const states = (Array.isArray(out.deltaStates) ? out.deltaStates.slice(0, 60) : []).filter((x) => isPlain(x) && str(x.id) && MODEL_STATES.includes(x.state))
   if (states.length) rec.states = new Map(states.map((x) => [trim(x.id, 80), { state: x.state, note: str(x.note) ? trim(x.note, 300) : '' }]))
+  // what graph_changes compared for the architecture: a later report that says it replaces the earlier
+  if (out.architectureCompared === 'diagrams-only') rec.archOnly = str(out.architectureWhy) ? trim(out.architectureWhy, 160) : 'reason not given'
+  else if (out.architectureCompared === 'code') rec.archOnly = null
   modelById.set(task.id, rec)
 }
 // A task landed: its model record for doneTasks, its kept changes queued for the delta, each said in
@@ -5823,7 +5831,7 @@ function landModel(r, t) {
   if (changes.length) log(`◎ ${r.id}: data model — ${hasDelta ? 'unplanned ⚠ ' : ''}${[kept.length && `kept ${kept.map((m) => m.target).join(', ')}`, reverted.length && `reverted ${reverted.map((m) => m.target).join(', ')}`].filter(Boolean).join(' · ')}${hasDelta && kept.some((m) => m.delta === 'pending') ? ' — the kept ones go to the delta with the next ship' : ''}; nothing waits on it`)
   for (const m of kept.filter((x) => x.delta === 'no reason given' || x.delta === 'no op given')) log(`⚠ ${r.id}: the unplanned change ${m.target} was kept with ${m.delta} — listed in the PR, not added to the delta`)
   if (rec.malformed) log(`⚠ ${r.id}: ${rec.malformed} modelChanges entr${rec.malformed === 1 ? 'y' : 'ies'} named no target — dropped`)
-  return { changes, states: Object.fromEntries(rec.states) }
+  return { changes, states: Object.fromEntries(rec.states), ...(rec.archOnly ? { archOnly: rec.archOnly } : {}) }
 }
 // The delta step a ship or seal carries: this repo's kept changes not confirmed yet (null: none).
 const deltaPlan = (repo) => (hasDelta && (deltaPending[repo] || []).length ? { path: deltaPath, entries: deltaPending[repo].slice(0, 40) } : null)
@@ -6260,7 +6268,12 @@ function modelLines(repo) {
       planned.push({ c, task: t.id, state: 'pending', open: true })
     }
   const reported = landedHere.flatMap((d) => (d.model ? d.model.changes : []).map((m) => ({ m, task: d.id })))
-  if (!hasDelta && !reported.length) return []
+  // the tasks whose graph_changes compared the diagram files only: their code's architectural impact
+  // was not read (the base checkout's index not at the fork point, or none), said as such, per reason
+  const only = new Map()
+  for (const d of landedHere) if (d.model && d.model.archOnly) only.set(d.model.archOnly, [...(only.get(d.model.archOnly) || []), d.id])
+  const onlyLines = [...only].map(([w, ts]) => `- architecture: diagram files only (${unclose(trim(w, 160))}): the code's impact on it was not compared · ${ts.join(', ')}`)
+  if (!hasDelta && !reported.length && !onlyLines.length) return []
   const tk = (s) => `\`${noTick(s)}\``
   const why = (s) => unclose(trim(s, 300))
   const WORD = { 'planned-built': 'planned ✓', 'built-differently': 'built differently', pending: 'pending' }
@@ -6270,11 +6283,12 @@ function modelLines(repo) {
     `- ${hasDelta ? 'unplanned ⚠ ' : ''}${m.kept ? 'kept' : 'reverted'} ${tk(m.target)}${m.op ? ` (${m.op})` : ''} — ${m.reason ? why(m.reason) : 'no reason given'} · ${task}${m.delta === 'added' ? ' · added to the delta' : m.delta === REVERTED_ADDED ? ' · reverted after it was added to the delta: remove it in the Data tab' : m.delta && m.delta !== 'pending' ? ` · not added to the delta (${why(m.delta)})` : ''}`
   const archKept = reported.some(({ m }) => m.kept && isArchTarget(m.target)), dataKept = reported.some(({ m }) => m.kept && !isArchTarget(m.target))
   if (!hasDelta)
-    return [`No delta beside the design (\`${noTick(deltaPath || 'none')}\`): the changes this branch makes to stored data${reported.some(({ m }) => isArchTarget(m.target)) ? ' and to the architecture' : ''}, as its implementers reported them against their base.`, ...reported.map(changeLine)]
+    return [`No delta beside the design (\`${noTick(deltaPath || 'none')}\`): the changes this branch makes to stored data${reported.some(({ m }) => isArchTarget(m.target)) ? ' and to the architecture' : ''}, as its implementers reported them against their base.`, ...reported.map(changeLine), ...onlyLines]
   return [
     `Against the design's delta \`${noTick(deltaPath)}\`, each state as its task's implementer read it with \`graph_changes\`:`,
     ...(planned.length ? planned.map(plannedLine) : ["- no planned change recorded in this session's tasks"]),
     ...reported.map(changeLine),
+    ...onlyLines,
     ...(dataKept || archKept ? ['', `Each kept unplanned change is added to the delta (\`origin: unplanned\`, its reason as \`why\`)${archKept ? ', a kept architectural one with the diagram updated in this branch,' : ''} for you to acknowledge in the graph page's ${dataKept && archKept ? 'Data and Architecture tabs' : archKept ? 'Architecture tab' : 'Data tab'} (\`graph.mjs serve\`). Nothing here blocks the run.`] : []),
   ]
 }

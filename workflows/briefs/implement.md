@@ -115,7 +115,11 @@ before you return, read what your commits did to stored data and to the architec
   architecture change has its state and the impact no change covers is listed as Unplanned. An
   architectural impact you keep is drawn: update the diagram in this branch (the line, the
   component, its `paths`) and run `graph.mjs architecture check`, then report it like a data change,
-  `target` as `graph_changes` names it (`connection:web->store`, `component:search`).
+  `target` as `graph_changes` names it (`connection:web->store`, `component:search`). The code is
+  compared only where the base checkout's index is at the commit the branch forked from; otherwise
+  the part says "diagram files only, the code not compared (<reason>)": return
+  `architectureCompared: "diagrams-only"` and that reason as `architectureWhy`, since the code's
+  impact was not read, which is not the same as none.
 - `modelChanges`: one `{target, op, kept, reason, after}` per unplanned change, of the data model or
   the architecture (with no delta: per change your commits made to stored data, and per
   architectural impact), `target` as `graph_changes` names it. You decide

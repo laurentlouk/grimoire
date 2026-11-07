@@ -18,8 +18,8 @@ import { resolveBase, modelAt } from './data/base.mjs'
 import { confinedDelta } from './docs.mjs'
 import { parseDelta } from './data/delta.mjs'
 import { loadIndex } from './arch.mjs'
-import { archImpact, archHas, archLines, archDeltaStates, archDeltaLines } from './arch-change.mjs'
-import { Graph, sql, baseText, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER } from './query.mjs'
+import { archScope, archImpact, archLines, archDeltaStates, archDeltaLines } from './arch-change.mjs'
+import { Graph, sql, baseText, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER, ARCH_CHANGES_FOOTER, ARCH_DELTA_FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
 let lastFresh = 0
@@ -112,12 +112,15 @@ export const TOOLS = [
     run: async (g, a, ctx) => {
       const base = resolveBase(ctx.project, { explicit: a.base || null, repo: a.repo || null })
       // the architecture's part (arch-change.mjs), after the data model's, when there is anything to
-      // say: a saved diagram now or at the base, or a change the delta proposes. Diagrams span the
-      // repositories: `repo` leaves it out.
+      // say: a saved diagram now or at the base, or a change the delta proposes, found before any
+      // index is loaded (archScope), so a data-only answer costs and reads as it did. Diagrams span
+      // the repositories: `repo` leaves it out. ctx.arch tells call() which footer to give.
       const arch = async (delta) => {
         if (a.repo) return ''
-        const impact = await archImpact(ctx.project, base.error ? null : base, { idx: loadIndex(g.db) })
-        if (!archHas(impact, delta)) return ''
+        const scope = archScope(ctx.project, base.error ? null : base, !!(delta && delta.architecture.length))
+        if (!scope.has) return ''
+        ctx.arch = true
+        const impact = await archImpact(ctx.project, base.error ? null : base, { idx: () => loadIndex(g.db), scope })
         if (!delta) return `\n\n${archLines(impact, baseText(base)).join('\n')}`
         const s = archDeltaStates(delta.architecture, impact.current, { base: impact.before, impact: base.error ? null : impact })
         return `\n\n${archDeltaLines(s, { against: !base.error, impact, baseText: base.error ? '' : baseText(base), why: base.error }).join('\n')}`
@@ -201,7 +204,9 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
     if (tool.raw) return sql(db, args.sql)
     const g = new Graph(db)
     const fresh = name === 'graph_status' ? staleness(project, db) : null
-    const footer = name === 'graph_changes' && args.delta ? DELTA_FOOTER : tool.footer || FOOTER
-    return `${note}${await tool.run(g, args, { fresh, project })}\n\n${footer}`
+    const ctx = { fresh, project, arch: false }
+    const text = await tool.run(g, args, ctx)
+    const footer = name === 'graph_changes' ? (args.delta ? (ctx.arch ? ARCH_DELTA_FOOTER : DELTA_FOOTER) : ctx.arch ? ARCH_CHANGES_FOOTER : CHANGES_FOOTER) : tool.footer || FOOTER
+    return `${note}${text}\n\n${footer}`
   } finally { db.close() }
 }

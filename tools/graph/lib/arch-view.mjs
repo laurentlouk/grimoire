@@ -283,7 +283,7 @@ export function archClient(ctx) {
     return null
   }
   const chItem = (x) => h('li', { class: `ch-${CLS[x.change]}` }, h('div', null, h('span', { class: 'mono' }, x.target), h('span', { class: `pill ${CLS[x.change]}` }, SINCE[x.change])), h('div', { class: 'srcline' }, x.text))
-  const findItem = (x) => h('li', { class: 'ch-add' }, h('div', null, h('span', { class: 'mono' }, x.target || x.kind), h('span', { class: 'pill add' }, 'in the code, new')), h('div', { class: 'srcline' }, x.text))
+  const findItem = (x) => h('li', { class: 'ch-add' }, h('div', null, h('span', { class: 'mono' }, x.target || x.kind), h('span', { class: 'pill add' }, `new in the code: ${x.word}`)), h('div', { class: 'srcline' }, x.text))
 
   // ── the delta's changes: one item each, its state, why, slice and acknowledgement (as the Data tab) ──
   const ackText = (c) => (c.ack === 'acked' ? `acknowledged by ${c.by} at ${c.at}` : c.ack === 'stale' ? `stale: acknowledged by ${c.by} at ${c.at}, edited since` : 'not acknowledged')
@@ -299,7 +299,7 @@ export function archClient(ctx) {
       h('div', { class: 'srcline' }, `why: ${c.why}`),
       h('div', { class: 'srcline' }, c.slice !== null ? `slice ${c.slice} · ` : 'no slice yet · ', h('span', { class: c.ack === 'acked' ? null : 'dlack' }, ackText(c)), ackBtn(d, [k], c.ack !== 'acked', where, c.ack === 'acked' ? 'Unacknowledge' : c.ack === 'stale' ? 'Acknowledge again' : 'Acknowledge')))
   }
-  const unplItem = (d, j) => { const u = d.arch.unplanned[j]; return h('li', { class: 'dl-unpl' }, h('div', null, h('span', { class: 'mono' }, u.target || u.kind), h('span', { class: 'pill d-unpl' }, 'not in the plan'), h('span', { class: 'pill' }, u.built ? 'drawn in the branch' : 'in the code, not drawn')), h('div', { class: 'srcline' }, u.text), h('div', { class: 'srcline muted' }, u.file)) }
+  const unplItem = (d, j) => { const u = d.arch.unplanned[j]; return h('li', { class: 'dl-unpl' }, h('div', null, h('span', { class: 'mono' }, u.target || u.kind), h('span', { class: 'pill d-unpl' }, 'not in the plan'), h('span', { class: 'pill' }, u.word)), h('div', { class: 'srcline' }, u.text), h('div', { class: 'srcline muted' }, u.file)) }
   // served only, and only for a delta beside the specs: the server writes the acknowledgement; its
   // answer is said beside the control (with a Reload when the file changed since the page loaded)
   function ackBtn(d, ks, on, where, label) {
@@ -334,7 +334,7 @@ export function archClient(ctx) {
     return h('div', { class: 'callout banner dlhead' },
       h('div', { class: 'callout-title' }, 'Delta ', h('span', { class: 'mono' }, d.shown)),
       h('p', null, 'For ', h('code', null, d.spec), `: ${plural(cs.length, 'architecture change')} · ${k((c) => c.state === 'planned-built')} planned and built · ${k((c) => c.state === 'pending')} pending · ${k((c) => c.state === 'built-differently')} built differently${d.arch.unplWhy ? '' : ` · ${d.arch.unplanned.length} not in the plan`} · ${k((c) => c.ack === 'acked')} acknowledged · ${k((c) => c.ack === 'stale')} stale`),
-      d.arch.unplWhy ? h('p', { class: 'note' }, `Not in the plan: not listed, ${d.arch.unplWhy}.`) : d.arch.codeWhy ? h('p', { class: 'note' }, `Only the diagram files were compared: the code was not (${d.arch.codeWhy}).`) : null,
+      d.arch.unplWhy ? h('p', { class: 'note' }, `Not in the plan: not listed, ${d.arch.unplWhy}.`) : d.arch.codeWhy ? h('p', { class: 'note' }, `${d.arch.codePart ? 'In part, only' : 'Only'} the diagram files were compared: the code was not (${d.arch.codeWhy}).`) : null,
       !SERVE ? h('p', { class: 'note' }, 'Read-only snapshot. To acknowledge changes, serve the page: ', h('code', null, 'graph.mjs serve')) : !d.ackable ? h('p', { class: 'note' }, 'This delta is not beside the specs of a repository (docs/specs/<name>.delta.json): acknowledge it by editing the file.') : null,
       d.arch.outside.length ? [h('p', { class: 'note' }, `Not drawn: no saved diagram holds what they concern (${d.arch.outside.length})`), h('ul', { class: 'links dlist' }, d.arch.outside.map((i) => deltaItem(d, i, 'o')))] : null)
   }
@@ -347,7 +347,7 @@ export function archClient(ctx) {
       h('div', { class: 'legend dlegend chlegend', role: 'note', 'aria-label': 'Delta legend' }, h('b', null, 'Delta:'),
         h('span', null, h('i', { class: 'chsw d-prop' }), 'proposed (dashed)'), h('span', null, h('i', { class: 'chsw d-rm' }), h('s', null, 'proposed removal')), h('span', null, h('i', { class: 'chsw d-pend' }), 'proposed change: now → planned'),
         h('span', null, h('i', { class: 'chsw d-built' }), 'planned and built'), h('span', null, h('i', { class: 'chsw d-diff' }), 'built differently: planned → built'),
-        h('span', null, h('i', { class: 'chsw d-unpl' }), 'not in the plan (dotted: in the code, not drawn yet)'), h('span', null, h('i', { class: 'chsw dl-stale' }), 'acknowledgement stale')),
+        h('span', null, h('i', { class: 'chsw d-unpl' }), 'not in the plan (dotted: a link in the code no line draws)'), h('span', null, h('i', { class: 'chsw dl-stale' }), 'acknowledgement stale')),
       h('div', { class: 'toolbar' }, h('span', { class: 'muted' }, ks.length || us.length ? `${n('planned-built')} planned and built · ${n('pending')} pending · ${n('built-differently')} built differently${d.arch.unplWhy ? '' : ` · ${us.length} not in the plan`} · ${ks.length - open.length} of ${ks.length} acknowledged` : 'The delta changes nothing on this diagram.'),
         open.length ? ackBtn(d, open, true, 'd', `Acknowledge all ${plural(open.length, 'change')} not acknowledged on this diagram`) : null),
       ks.length || us.length ? h('details', { class: 'problems dlchanges', open: st.dlOpen === false ? null : 'open', ontoggle: (e) => { st.dlOpen = e.target.open } }, h('summary', null, `Changes on this diagram (${ks.length})${us.length ? `, and ${us.length} not in the plan` : ''}`),
@@ -360,8 +360,8 @@ export function archClient(ctx) {
       h('div', { class: 'legend dlegend chlegend', role: 'note', 'aria-label': 'Change overlay legend' }, h('b', null, `Changes since ${REF}:`),
         h('span', null, h('i', { class: 'chsw add' }), 'added'), h('span', null, h('i', { class: 'chsw del' }), h('s', null, 'removed'), ' (drawn where it stood)'),
         h('span', null, h('i', { class: 'chsw mod' }), 'modified: before → after'), h('span', null, h('i', { class: 'chsw newl' }), 'in the code, not drawn: a new link (dotted)')),
-      h('div', { class: 'toolbar' }, a.change === 'added' ? h('span', { class: 'pill add' }, `diagram added since ${REF}`) : null, h('span', { class: 'muted' }, `${k.added} added · ${k.removed} removed · ${k.modified} modified · ${CH.codeWhy ? 'the code not compared' : `${plural(k.findings, 'new finding')} in the code`}`)),
-      CH.codeWhy ? h('p', { class: 'note' }, `Only the diagram files were compared: the code was not (${CH.codeWhy}).`) : null,
+      h('div', { class: 'toolbar' }, a.change === 'added' ? h('span', { class: 'pill add' }, `diagram added since ${REF}`) : null, h('span', { class: 'muted' }, `${k.added} added · ${k.removed} removed · ${k.modified} modified · ${CH.codeWhy && !CH.codePart ? 'the code not compared' : `${plural(k.findings, 'new finding')} in the code`}`)),
+      CH.codeWhy ? h('p', { class: 'note' }, `${CH.codePart ? 'In part, only' : 'Only'} the diagram files were compared: the code was not (${CH.codeWhy}).`) : null,
       a.list.length || a.findings.length ? h('ul', { class: 'links dlist' }, a.list.map(chItem), a.findings.map(findItem)) : h('p', { class: 'muted' }, `No change to this diagram, nor in the code it draws, since ${REF}.`)]
   }
 

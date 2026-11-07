@@ -640,9 +640,11 @@ else {
   const shop = { schema: 1, title: 'Shop', summary: 'A shop.', components: [{ id: 'web', label: 'Web', type: 'frontend', paths: ['src/web'] }, { id: 'api', label: 'API', type: 'backend', paths: ['src/api'] }, { id: 'store', label: 'Store', type: 'database', paths: ['src/store'] }],
     connections: [{ from: 'web', to: 'api', label: 'HTTP' }, { from: 'api', to: 'store', label: 'SQL' }], boundaries: [{ label: 'Backend', kind: 'deploy', wraps: ['api', 'store'] }] }
   // an index built by hand, as the code would give it: one function per file, the links between files
+  // (it records the checkout's HEAD, as an index run does: the base's is compared with the fork point)
   const handIndex = async (dir, files, links) => {
+    rmSync(path.join(dir, '.grimoire'), { recursive: true, force: true })
     const db = await openStore(path.join(dir, '.grimoire/graph/graph.db'))
-    db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES (?, ?, ?, ?)').run('shop', '.', '', '')
+    db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES (?, ?, ?, ?)').run('shop', '.', git(dir, 'rev-parse', 'HEAD').stdout.trim(), '')
     files.forEach((p, i) => {
       db.prepare('INSERT INTO files(id, repo, path, lang, size, mtime, hash, is_test, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(i + 1, 'shop', p, 'javascript', 10, 0, '', 0, 100 + i + 1)
       db.prepare("INSERT INTO nodes(id, file_id, kind, name, qualname, line, is_test) VALUES (?, ?, 'file', ?, ?, 1, 0)").run(100 + i + 1, i + 1, p, p)
@@ -735,13 +737,13 @@ else {
     let svg = pg.svg()
     ok(/<g class="comp t-backend ch-add" data-comp="search"/.test(svg) && /<g class="bound k-deploy ch-mod">/.test(svg) && /<path class="newlink ch-add" d="M[^"]+"><title>web uses store \(1 file pair in the graph\), but no line is drawn between them\nnew since main: in the code, not drawn yet<\/title>/.test(svg),
       'Changes: the component added green, the boundary that wraps it amber, the new code link dotted')
-    ok(['Changes since main:', 'added', 'modified: before → after', 'in the code, not drawn: a new link (dotted)'].every((w) => pg.text().includes(w)) && pg.lines('LI').some((l) => l.startsWith('component:searchadded since maincomponent search  "Search" (backend)')) && pg.lines('LI').some((l) => l.startsWith('connection:web->storein the code, new')),
+    ok(['Changes since main:', 'added', 'modified: before → after', 'in the code, not drawn: a new link (dotted)'].every((w) => pg.text().includes(w)) && pg.lines('LI').some((l) => l.startsWith('component:searchadded since maincomponent search  "Search" (backend)')) && pg.lines('LI').some((l) => l.startsWith('connection:web->storenew in the code: in the code, not drawn')),
       '… with its legend and its list: what the diagram changed, what the code did')
     pg.press('arch-delta')
     svg = pg.svg()
     ok(pg.ctl('arch-changes').attrs['aria-pressed'] === 'false' && /<g class="comp t-database d-prop" data-comp="cache"/.test(svg) && /<path class="conn v-default d-prop" data-k="\d+" d="M[^"]+" marker-end="url\(#ar-arrow\)"><title>api → cache: reads/.test(svg) && /<g class="comp t-backend d-built" data-comp="search"/.test(svg) && /<g class="comp t-backend d-pend stale" data-comp="api"/.test(svg) && /<g class="stalemk">/.test(svg) && /<path class="newlink d-unpl"/.test(svg),
       'Delta (one overlay at a time): the proposed cache a dashed ghost with its proposed line, the search planned and built, the api\'s proposed relabel badged stale, the undrawn link not in the plan')
-    ok(['Delta:', 'proposed (dashed)', 'proposed removal', 'proposed change: now → planned', 'planned and built', 'built differently: planned → built', 'not in the plan (dotted: in the code, not drawn yet)', 'acknowledgement stale'].every((w) => pg.text().includes(w)), 'a legend for each state')
+    ok(['Delta:', 'proposed (dashed)', 'proposed removal', 'proposed change: now → planned', 'planned and built', 'built differently: planned → built', 'not in the plan (dotted: a link in the code no line draws)', 'acknowledgement stale'].every((w) => pg.text().includes(w)), 'a legend for each state')
     const ps = pg.lines('P'), lis = pg.lines('LI')
     ok(ps.includes('For docs/specs/2026-11-07-search-design.md: 4 architecture changes · 1 planned and built · 3 pending · 0 built differently · 1 not in the plan · 1 acknowledged · 1 stale') && ps.includes('Read-only snapshot. To acknowledge changes, serve the page: graph.mjs serve')
       && lis.some((l) => l.startsWith('add component:searchplanned and builtas: label Search, type backenddrawn in: docs/architecture/shop.architecture.jsonwhy: because searchslice 1 · acknowledged by Ann at 2026-11-07T08:00:00.000Z'))
@@ -787,6 +789,39 @@ else {
     eq(await state(), ['pending', [], ['connection:web->store']], 'kept and appended to the delta, the undrawn link is planned now: pending until the diagram draws it')
     put(FEAT, DIAGRAM, JSON.stringify(drawn({ connections: [...shop.connections, { from: 'web', to: 'store', label: 'stock' }] }), null, 2) + '\n')
     eq(await state(), ['planned-built', [], []], 'the diagram updated in the branch draws it: planned and built, and the check finds nothing new in the code')
+    // a drawn line the code no longer shows is said as such, never "in the code, not drawn"
+    await handIndex(FEAT, BR_CODE, [['src/web/page.js', 'src/api/orders.js'], ['src/web/page.js', 'src/store/db.js']])
+    const unseenPage = await renderGraph(project)
+    const up = await stubPage(unseenPage, '#arch-0')
+    up.press('arch-delta')
+    const unseenLine = up.lines('LI').find((l) => l.startsWith('connection:api->storenot in the plan')) || ''
+    ok(unseenLine.startsWith('connection:api->storenot in the plandrawn, the code no longer shows itapi → store is drawn, and the code does not show it') && !unseenLine.includes('in the code, not drawn'), `an unseen line: "drawn, the code no longer shows it" (${unseenLine})`)
+    up.press('arch-changes')
+    ok(up.lines('LI').some((l) => l.startsWith('connection:api->storenew in the code: drawn, the code no longer shows it')), '… in the Changes list too')
+    const pageOf = (html) => JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(html)[1].replace(/\\u003c/g, '<'))
+    // the base checkout's index not at the fork point: main gains a commit (its index not refreshed),
+    // the branch merges main and changes nothing more: no code finding, the reason said, no path
+    const staleHead = git(MAIN, 'rev-parse', 'HEAD').stdout.trim()
+    put(MAIN, 'src/extra/z.js', 'export const z = 3\n')
+    git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'more on main')
+    const fork = git(MAIN, 'rev-parse', 'HEAD').stdout.trim()
+    const merged = git(FEAT, '-c', 'user.email=t@t', '-c', 'user.name=t', 'merge', '-q', '--ff-only', 'main')
+    await handIndex(FEAT, [...BR_CODE, 'src/extra/z.js'], [['src/web/page.js', 'src/api/orders.js'], ['src/web/page.js', 'src/store/db.js']])
+    const stale = await renderGraph(project), S = pageOf(stale)
+    const sp2 = await stubPage(stale, '#arch-0')
+    sp2.press('arch-changes')
+    const reason = `the base checkout's index is at ${staleHead.slice(0, 7)}, the branch forked from ${fork.slice(0, 7)}: refresh it (\`graph.mjs index\` in that checkout) to compare what the code did`
+    eq([merged.status, S.archCh.codeWhy, S.archCh.codePart, S.arch[0].ch.findings, S.data.deltas[0].arch.unplanned.filter((u) => u.source === 'code'), S.data.deltas[0].arch.codeWhy],
+      [0, reason, false, [], [], reason], 'a base index not at the fork point: no code finding at all (not the base\'s new module, not the unseen line), the reason said')
+    ok(sp2.text().includes(`Only the diagram files were compared: the code was not (${reason}).`) && !stale.includes(MAIN) && !stale.includes(ROOT7), 'the page says why, and names no path of the base checkout')
+    // an index built by another grimoire version: the reason, no path
+    await handIndex(MAIN, [...CODE, 'src/extra/z.js'], [['src/web/page.js', 'src/api/orders.js'], ['src/api/orders.js', 'src/store/db.js']])
+    const { driver } = await import('../lib/store.mjs')
+    const raw = new (await driver()).DatabaseSync(path.join(MAIN, '.grimoire/graph/graph.db'))
+    raw.prepare("UPDATE meta SET value = '0' WHERE key = 'schema'").run(); raw.close()
+    const old = await renderGraph(project), O = pageOf(old)
+    eq([O.archCh.codeWhy, O.arch[0].ch.findings], ['the base checkout\'s index was built by another grimoire version: index it there first', []], 'a base index from another grimoire version: no code finding, the reason said')
+    ok(!old.includes(MAIN) && !old.includes(ROOT7), '… and the page names no path of the base checkout')
     // without a base index: only the diagram files are compared, and the view says so
     rmSync(path.join(MAIN, '.grimoire'), { recursive: true, force: true })
     const bare = await renderGraph(project)

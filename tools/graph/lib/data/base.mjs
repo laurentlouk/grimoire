@@ -93,8 +93,9 @@ function extractAt(abs, commit, project, overrides, ctx) {
 
 // A commit's files under a directory, relative to it (git lists them so when run from inside it):
 // Map(path → { oid, size }). Symbolic links are left out: their blob is a target path, not a text.
-export function treeAt(abs, commit) {
-  const r = git(abs, ['ls-tree', '-r', '-l', '-z', commit])
+// `paths`: only those folders (relative to it), listed alone (the architecture's diagrams folder).
+export function treeAt(abs, commit, paths = null) {
+  const r = git(abs, ['ls-tree', '-r', '-l', '-z', commit, ...(paths && paths.length ? ['--', ...paths] : [])])
   if (r.status !== 0) throw new Error(`git ls-tree ${commit.slice(0, 10)} failed in ${abs}: ${(r.stderr || '').trim().split('\n')[0]}`)
   const files = new Map()
   for (const entry of r.stdout.split('\0')) {
