@@ -1,0 +1,4 @@
+{
+  "repos": [{ "name": "app", "path": "app" }, { "name": "backend", "path": "backend" }],
+  "graph": { "dir": ".grimoire/graph", "data": { "migrations": [{ "path": "app:db", "dialect": "sqlite" }] } }
+}

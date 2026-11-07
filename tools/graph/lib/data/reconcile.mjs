@@ -19,12 +19,18 @@
 // places grouped into logical tables (their disagreements across declarations its conflicts), and the
 // item types code converts bound to them, their fields on the tables; then the access patterns
 // (access.mjs): the key-value calls code makes, resolved to those tables, each index with the calls
-// that query it or a lead, and what a call writes that the bound item does not state.
+// that query it or a lead, and what a call writes that the bound item does not state. A refine file's
+// equivalences (check.mjs; opts.equivalences: [{ ref, file, sides }]) join declarations no evidence
+// ties into one logical table, so their differences are conflicts too; each is answered in
+// model.equivalences, resolved or not, and why. When code was read, a key-value table no item type is
+// bound to and no call reaches says so (`unused`): declared, no code uses this name (never paired by a
+// guess).
 //
-//   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store], logical, items,
-//     bindings, unresolved, access?, accessError? }   (model.mjs, binding.mjs, access.mjs)
+//   reconcile([{ repo, extractor: 'id@version', facts }], { equivalences? }) → { stores: [Store],
+//     logical, items, bindings, unresolved, equivalences, access?, accessError? }   (model.mjs,
+//     binding.mjs, access.mjs)
 import { KINDS, keyOf, normType, normDefault, normColumn, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
-import { logicalTables, bindItems, itemField, itemOf, tableResolver } from './binding.mjs'
+import { logicalTables, bindItems, itemField, itemOf, tableResolver, resolveSide } from './binding.mjs'
 import { resolveAccess } from './access.mjs'
 
 // What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
@@ -60,15 +66,18 @@ function uniqueKeys(e) {
 }
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 
-export function reconcile(rows) {
+export function reconcile(rows, opts = {}) {
   const decls = leaves(rows.flatMap((r) => (r.facts?.declarations || []).map((d) => ({ ...d, repo: r.repo, extractor: r.extractor }))))
     .sort((a, b) => KINDS.indexOf(a.source.kind) - KINDS.indexOf(b.source.kind) || (a.source.path < b.source.path ? -1 : 1))
   const stores = new Map()
   for (const d of decls) { const id = `${d.repo}:${d.store}`; if (!stores.has(id)) stores.set(id, []); stores.get(id).push(d) }
   const model = { stores: [...stores].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, ds]) => merge(id, ds)) }
-  items(model, rows, decls)
+  items(model, rows, decls, opts.equivalences || [])
   return model
 }
+
+// what the note on a key-value table no code reaches says
+export const UNUSED = 'declared, no code uses this name: in the indexed code no item type is bound to it, no key-value call reaches it, nothing builds its name, and the infra sets no variable to it (it may be stale, or used by code the data extractors do not read)'
 
 // ── key-value tables across stores, and the item shapes bound to them (binding.mjs) ──
 // model gains: logical (the groups of two declarations or more, each with its conflicts across them),
@@ -76,21 +85,30 @@ export function reconcile(rows) {
 // `bound` (its bindings) and its bound item types' fields (binding.mjs says how). Whatever a project's
 // code holds, the stores are answered: the whole computation is planned first, without touching the
 // model, and a failure in it leaves the model as merged, with `itemsError` saying why.
-function items(model, rows, decls) {
-  Object.assign(model, { logical: [], items: [], bindings: [], unresolved: [] })
+function items(model, rows, decls, equivalences) {
+  Object.assign(model, { logical: [], items: [], bindings: [], unresolved: [], equivalences: [] })
   let p
-  try { p = plan(model, rows, decls) } catch (e) { model.itemsError = `the item shapes were not bound: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`; return }
+  try { p = plan(model, rows, decls, equivalences) } catch (e) { model.itemsError = `the item shapes were not bound: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`; return }
   for (const [e, patch] of p.entities) Object.assign(e, patch)
   Object.assign(model, p.model)
 }
-function plan(model, rows, decls) {
+function plan(model, rows, decls, equivalences) {
   const kv = model.stores.filter((s) => KV_DIALECTS.has(s.dialect))
   const entities = new Map(kv.flatMap((s) => s.entities.map((e) => [e.id, e])))
   const patches = new Map() // entity → what it gains
   const patch = (e) => { if (!patches.has(e)) patches.set(e, {}); return patches.get(e) }
-  const { groups, notes } = logicalTables([...entities.values()].map((e) => ({ id: e.id, name: e.name })))
+  // a refine file's equivalences: each side found as the claim names it (an exact name or a template)
+  const list = [...entities.values()]
+  const eqs = equivalences.map((q) => {
+    const r = q.sides.map((s) => resolveSide(s, list))
+    const ids = r.map((x) => (x.entity ? x.entity.id : null))
+    const why = r.filter((x) => !x.entity).map((x) => x.why)
+    if (!why.length && new Set(ids).size < ids.length) why.push('two of its sides name one declaration')
+    return { ref: q.ref, file: q.file, ids, ok: !why.length, why }
+  })
+  const { groups, notes } = logicalTables(list.map((e) => ({ id: e.id, name: e.name })), eqs.filter((x) => x.ok).map((x) => ({ ids: x.ids, via: `refined: ${x.ref}`, ref: x.ref })))
   for (const [id, note] of notes) patch(entities.get(id)).logicalNote = note
-  const out = { logical: [] }
+  const out = { logical: [], equivalences: eqs }
   for (const g of groups.filter((x) => x.members.length > 1)) {
     const members = new Set(g.members)
     // every declaration stating a member, that member renamed to the group's name and marked, merged
@@ -103,7 +121,7 @@ function plan(model, rows, decls) {
     const across = (c) => new Set(c.values.flatMap((v) => v.sources.map((s) => s.member))).size > 1
     const strip = (s) => { const { member, ...rest } = s; return rest }
     const conflicts = merged ? elementsOf(merged).flatMap(([label, x]) => x.conflicts.filter(across).map((c) => ({ label, attr: c.attr, values: c.values.map((v) => ({ value: v.value, sources: v.sources.map(strip) })) }))) : []
-    const logical = { id: g.id, name: g.name, via: g.via, members: g.members, conflicts }
+    const logical = { id: g.id, name: g.name, via: g.via, members: g.members, conflicts, ...(g.refined ? { refined: g.refined } : {}) }
     out.logical.push(logical)
     for (const m of g.members) patch(entities.get(m)).logical = logical
   }
@@ -145,6 +163,21 @@ function plan(model, rows, decls) {
       for (const [id, x] of a.entities) patch(entities.get(id)).access = x
       out.access = a.model
     } catch (e) { out.accessError = `the access patterns were not resolved: ${String(e?.message || e).split('\n')[0].slice(0, 200)}` }
+  }
+  // when code was read, a table nothing in it reaches says so, rather than being paired by a guess:
+  // no item bound to it, no call reaching it, no function or constant naming it (a name it builds, an
+  // environment variable the infra sets to it), and no variable the infra sets to it at all (what a
+  // deployed function's environment holds is used, even where the code read keeps no trace of it)
+  if (code.length || access.some((r) => r.access.sites?.length)) {
+    const named = new Set(wiring.map((w) => R.groupOf.get(w.entity)?.id).filter(Boolean))
+    for (const r of [...code, ...access.map((x) => ({ repo: x.repo, code: { path: x.access.path, consts: x.access.consts } }))]) {
+      const at = { repo: r.repo, path: r.code.path }
+      for (const x of [...(r.code.fns || []), ...(r.code.consts || [])]) for (const ref of R.refsOf(x, at, false)) named.add(ref.group.id)
+    }
+    for (const e of entities.values()) {
+      const pe = patches.get(e), g = R.groupOf.get(e.id)
+      if (!pe?.bound?.length && !pe?.access?.sites?.length && !(g && named.has(g.id))) patch(e).unused = UNUSED
+    }
   }
   return { entities: patches, model: out }
 }

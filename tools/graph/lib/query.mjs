@@ -9,6 +9,8 @@ import { byFunction, siteHow, isRead, isWrite, isUnknown, capList, CAP, LABELS, 
 import { kvIndex, projectionText } from './data/model.mjs'
 import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
+import { refineModel, refineCheck } from './data/check.mjs'
+import { docRoots } from './docs.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files, never from a database. Open path:line before relying on any of it.'
@@ -346,14 +348,32 @@ export class Graph {
 
   // ── the data model (lib/data): stores, entities of one store, one entity ──
   dloc(s) { const root = this.roots.get(s.repo); const p = root && root !== '.' ? (s.path === '.' ? root : `${root}/${s.path}`) : s.path; return s.line ? `${p}:${s.line}` : p }
-  data({ store, entity, repo }) {
+  // the facts of every repository (or one), as reconcile takes them
+  factRows(repo = null) {
     const R = repo ? ' AND repo = ?' : '', ra = repo ? [repo] : []
-    const model = clean(reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL${R} ORDER BY repo, key, extractor`, ...ra).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) }))))
+    return this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL${R} ORDER BY repo, key, extractor`, ...ra).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) }))
+  }
+  // the production code's imports, for the gaps (data/check.mjs)
+  prodImports(repo = null) {
+    const R = repo ? ' AND f.repo = ?' : '', ra = repo ? [repo] : []
+    return this.q(`SELECT f.repo, f.path, i.source FROM imports i JOIN files f ON f.id = i.file_id WHERE f.is_test = 0${R} ORDER BY f.repo, f.path, i.source`, ...ra)
+  }
+  // the model, the project's refine files' equivalences applied, and the refine check (data/check.mjs)
+  refined(project, repo = null) {
+    return refineModel(this.factRows(repo), project, { imports: this.prodImports(repo), roots: project && project.root ? docRoots(project) : [] })
+  }
+  data({ store, entity, repo }, project = null) {
+    const R = repo ? ' AND repo = ?' : '', ra = repo ? [repo] : []
+    const r = this.refined(project, repo || null)
+    // limited to one repository, the refine files' claims (they span the repositories) are not said:
+    // a claim about another would read as drift
+    const model = clean(r.model), refine = r.refine && !repo ? clean(r.refine) : null
     const failed = clean(this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra))
-    if (entity) return this.dataEntity(model, String(entity))
-    if (store) return this.dataStore(model, String(store))
-    if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot, no Drizzle TypeScript schema, no Prisma schema and no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table) in the indexed repositories.'
-    const out = [`Data stores (${model.stores.length}), read from migrations, snapshots, schemas and table declarations:`]
+    if (entity) return this.dataEntity(model, String(entity), refine)
+    if (store) return this.dataStore(model, String(store), refine)
+    const NONE = 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot, no Drizzle TypeScript schema, no Prisma schema and no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table) in the indexed repositories.'
+    if (!model.stores.length && !failed.length && !refine) return NONE
+    const out = model.stores.length || failed.length ? [`Data stores (${model.stores.length}), read from migrations, snapshots, schemas and table declarations:`] : [NONE]
     for (const st of model.stores) {
       out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`)
       for (const d of st.declarations) {
@@ -365,6 +385,60 @@ export class Graph {
     }
     out.push(...this.dataItems(model), ...this.dataAccess(model))
     if (failed.length) out.push(`Extractor failures (${failed.length}), their facts are missing:`, ...failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
+    out.push(...this.dataRefine(refine))
+    return out.join('\n')
+  }
+  // ── what the refine files claim (data/check.mjs), re-checked now: refined, never extracted ──
+  cite(s) { return s.repo ? `${this.dloc({ repo: s.repo, path: s.path, line: s.start })}${s.end && s.end !== s.start ? `-${s.end}` : ''}` : s.cite }
+  claimLine(c) {
+    const src = c.sources.length ? `  — ${c.sources.map((s) => this.cite(s)).join(' · ')}` : ''
+    const note = c.notes.length ? ` (${c.notes.join('; ')})` : ''
+    if (c.kind === 'equivalence') return `  equivalence  ${c.text}  refined: one logical table${c.group ? ` (${c.group})` : ''}, ${plural(c.conflicts, 'conflict')} across its declarations${src}`
+    if (c.kind === 'store') return `  store  ${c.text}  refined (graph_data with the store lists them)`
+    return `  ${c.kind}  ${c.text}  refined${note}${src}`
+  }
+  driftLine(d) { return `  ${d.file} ${d.at}${d.line ? ` (line ${d.line})` : ''}  ${d.kind}  ${d.text}: ${d.why.join('; ')}` }
+  dataRefine(refine) {
+    if (!refine) return []
+    const out = []
+    if (refine.files.length) {
+      const holds = refine.claims.filter((c) => c.ok).length
+      out.push(`Refined (${plural(refine.files.length, 'refine file')} beside the diagrams, re-checked now; refined, never extracted): ${plural(holds, 'claim')} hold${holds === 1 ? 's' : ''} · ${plural(refine.drift.length, 'drift')}`)
+      for (const f of refine.files) {
+        if (f.errors.length) { out.push(`  ${f.file}  does not validate (${plural(f.errors.length, 'error')}), not read:`, ...f.errors.slice(0, 20).map((e) => `    ${e}`)); continue }
+        out.push(`  ${f.file}${f.title ? `  ${f.title}` : ''}  ${plural(f.claims.length, 'claim')}`)
+        // a claim that fails is drift, listed apart and never as a fact; a store holds what it can
+        for (const c of f.claims) if (c.ok || (c.kind === 'store' && !c.reasons.length)) out.push(this.claimLine(c))
+      }
+    }
+    if (refine.drift.length) out.push(`Drift (${refine.drift.length}): claims the code no longer supports, never trusted (fix the refine file: /grimoire:data-model):`, ...refine.drift.map((d) => this.driftLine(d)))
+    if (refine.gaps.length) {
+      out.push(`Gaps (${refine.gaps.length}): datastores the code reaches through client imports, with no extractor and no refine entry (the map is not complete):`)
+      for (const g of refine.gaps) out.push(`  ${g.label}  ${g.sources.join(', ')}  ${g.files.map((f) => this.dloc(f)).join(' · ')}${g.n > g.files.length ? ` and ${g.n - g.files.length} more` : ''}`)
+    }
+    return out
+  }
+  // the refined facts about one entity, and its drift
+  refinedAbout(refine, id) {
+    if (!refine) return []
+    const about = (c) => [c.from, c.to, c.entity].includes(id) || (c.entities || []).includes(id) || (c.members || []).includes(id)
+    const mine = refine.claims.filter((c) => c.kind !== 'store' && about(c))
+    const ok = mine.filter((c) => c.ok), bad = refine.drift.filter((d) => mine.some((c) => !c.ok && c.file === d.file && c.at === d.at))
+    return [...(ok.length ? [`Refined (${ok.length}), from the refine files, re-checked now (refined, never extracted):`, ...ok.map((c) => this.claimLine(c))] : []),
+      ...(bad.length ? [`Drift (${bad.length}): refined claims about it the code no longer supports, never trusted:`, ...bad.map((d) => this.driftLine(d))] : [])]
+  }
+  // a store a refine file describes: its entities and fields with their citations, its drift apart
+  refinedStore(s) {
+    const out = [`${s.id}  ${s.storeKind}  refined: described by citation in ${s.file} (${s.at}), no extractor reads it${s.label ? `  ${s.label}` : ''}`]
+    if (s.why) out.push(`  why: ${s.why}`)
+    if (s.imports.length) out.push(`  reached through: ${s.imports.join(', ')}`)
+    if (s.reasons.length) return [...out, `  Drift: ${s.reasons.join('; ')}: never trusted`].join('\n')
+    for (const e of s.entities.filter((x) => x.ok)) {
+      out.push(`  ${e.name}${e.kind ? `  ${e.kind}` : ''}  refined  — ${this.cite(e.source)}${e.note ? `  (${e.note})` : ''}`)
+      for (const f of e.fields.filter((x) => x.ok)) out.push(`    ${f.name}${f.type ? `  ${f.type}` : ''}  — ${this.cite(f.source)}${f.note ? `  (${f.note})` : ''}`)
+    }
+    const bad = s.entities.flatMap((e) => [...(e.ok ? [] : [[e.name, e.source.why]]), ...e.fields.filter((f) => !f.ok).map((f) => [`${e.name}.${f.name}`, f.source.why])])
+    if (bad.length) out.push(`Drift (${bad.length}): never trusted:`, ...bad.map(([n, why]) => `  ${n}  ${why}`))
     return out.join('\n')
   }
   // the logical tables declared in several places, and the item types code converts, bound or not
@@ -446,9 +520,11 @@ export class Graph {
     const hits = model.stores.filter((s) => s.id === spec || s.name === spec)
     return hits.length ? hits : model.stores.filter((s) => s.id.toLowerCase() === spec.toLowerCase() || s.name.toLowerCase() === spec.toLowerCase())
   }
-  dataStore(model, spec) {
+  dataStore(model, spec, refine = null) {
     const hits = this.findStore(model, spec)
-    if (!hits.length) return `No data store "${spec}". Stores: ${model.stores.map((s) => s.id).join(', ') || 'none'}.`
+    const described = !hits.length && refine ? refine.stores.filter((s) => s.id === spec || s.name === spec) : []
+    if (described.length === 1) return this.refinedStore(described[0])
+    if (!hits.length) return `No data store "${spec}". Stores: ${[...model.stores.map((s) => s.id), ...(refine ? refine.stores.map((s) => `${s.id} (refined)`) : [])].join(', ') || 'none'}.`
     if (hits.length > 1) return `"${spec}" names ${hits.length} stores; give one as repo:folder: ${hits.map((s) => s.id).join(', ')}`
     const [st] = hits
     const out = [`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`]
@@ -467,11 +543,23 @@ export class Graph {
     for (const en of st.enums || []) out.push(`  enum ${en.name}  ${en.values.join(' | ')}  ${this.sources(st.repo, en.sources)}`)
     return out.join('\n')
   }
-  dataEntity(model, spec) {
+  dataEntity(model, spec, refine = null) {
     const all = model.stores.flatMap((st) => st.entities.map((e) => [st, e]))
     const match = (fold) => all.filter(([, e]) => { const id = fold(e.id), s = fold(spec); return id === s || id.endsWith(`:${s}`) || id.endsWith(`/${s}`) })
     let hits = match((x) => x)
     if (!hits.length) hits = match((x) => x.toLowerCase())
+    if (!hits.length && refine) {
+      // an entity of a store a refine file describes
+      const ents = refine.stores.filter((s) => !s.reasons.length).flatMap((s) => s.entities.filter((e) => e.ok).map((e) => [s, e]))
+      const got = ents.filter(([s, e]) => `${s.id}/${e.name}` === spec || `${s.id}/${e.name}`.endsWith(`/${spec}`))
+      if (got.length === 1) {
+        const [[s, e]] = got
+        const fields = e.fields.filter((f) => f.ok)
+        return [`${s.id}/${e.name}  ${e.kind || 'entity'}  (${s.storeKind}; refined: described by citation in ${s.file}, no extractor reads it)`, `  described at ${this.cite(e.source)} [refined]`, ...(e.note ? [`  ${e.note}`] : []),
+          `Fields (${fields.length}), each at the line that shows it:`, ...fields.map((f) => `  ${f.name}${f.type ? `  ${f.type}` : ''}  — ${this.cite(f.source)}`),
+          ...this.refinedAbout(refine, `${s.id}/${e.name}`)].join('\n')
+      }
+    }
     if (!hits.length) return `No entity "${spec}" in the data model. Try graph_data with no argument for the stores, or with a store for its entities.`
     if (hits.length > 1) return `"${spec}" names ${hits.length} entities; give store/entity or repo:store/entity: ${hits.map(([, e]) => e.id).join(', ')}`
     const [[st, e]] = hits
@@ -480,6 +568,7 @@ export class Graph {
     if (kv) out.push(`  ${kvTableText(e)}`)
     if (e.nameTemplate) out.push(`  name template ${e.nameTemplate}: a part of the name is unknown (each {…}), never guessed`)
     if (e.logicalNote) out.push(`  ${e.logicalNote}`)
+    if (e.unused) out.push(`  ${e.unused}`)
     const section = (title, list, line, src = (x) => x.sources) => { if (list.length) out.push(`${title} (${list.length}):`, ...list.map((x) => `  ${line(x)}  — ${this.sources(st.repo, src(x))}`)) }
     // a key-value table's attributes: what its declarations type (the item's fields are listed apart)
     const declared = (f) => f.sources.filter((s) => s.kind !== 'code')
@@ -522,18 +611,21 @@ export class Graph {
       if (g.conflicts.length) out.push(`Conflicts across them (${g.conflicts.length}): each declaration kept`, ...g.conflicts.map((c) => `  ${c.label}  ${c.attr}: ${c.values.map((v) => `${changeVal(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc(s)} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
       else out.push('Conflicts across them: none')
     }
+    out.push(...this.refinedAbout(refine, e.id))
     return out.join('\n')
   }
 
   // ── the data model against a base (data/base.mjs reads the base, data/diff.mjs compares) ──
   // The branch side is the index (the working tree, uncommitted edits included), limited to the
   // repositories the base resolved in.
-  currentModel(repos) {
+  // opts.equivalences: the refine files' (data/check.mjs), applied to the base's model too, so a diff
+  // compares the code and never what a refine file groups
+  currentModel(repos, opts = {}) {
     const list = [...repos]
-    return reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL AND repo IN (${list.map(() => '?').join(',')}) ORDER BY repo, key, extractor`, ...list).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+    return reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL AND repo IN (${list.map(() => '?').join(',')}) ORDER BY repo, key, extractor`, ...list).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })), opts)
   }
-  changes(base, at) {
-    const d = clean(diffModels(at.model, this.currentModel(base.repos.map((r) => r.name))))
+  changes(base, at, opts = {}) {
+    const d = clean(diffModels(at.model, this.currentModel(base.repos.map((r) => r.name), opts)))
     const k = d.counts
     const out = [`Data model against ${baseText(base)}: ${d.stores.length ? `${plural(k.stores, 'store')} changed · ${k.added} added · ${k.removed} removed · ${k.modified} modified · ${plural(k.renames, 'possible rename')}` : 'no change.'}`]
     for (const s of d.stores) {
@@ -553,16 +645,27 @@ export class Graph {
     return out.join('\n')
   }
 
+  // ── the refine files re-checked on this branch (graph_changes): refined claims, what drifts ──
+  refinedChanges(project, refines) {
+    if (!refines.length) return ''
+    const r = clean(refineCheck(this.factRows(), refines, { roots: docRoots(project), imports: this.prodImports() }).refine)
+    const holds = r.claims.filter((c) => c.ok).length, bad = r.files.filter((f) => f.errors.length)
+    const out = [`Refined (${plural(r.files.length, 'refine file')} beside the diagrams), re-checked on this branch: ${plural(holds, 'claim')} hold${holds === 1 ? 's' : ''} · ${plural(r.drift.length, 'drift')}${bad.length ? ` · ${plural(bad.length, 'file')} not validating` : ''} (refined, never extracted)`]
+    for (const f of bad) out.push(`  ${f.file}  does not validate: ${f.errors.slice(0, 3).join('; ')}`)
+    if (r.drift.length) out.push('  What a claim cites changed: update the refine file in the same pull request (/grimoire:data-model).', ...r.drift.map((d) => this.driftLine(d)))
+    return `\n\n${out.join('\n')}`
+  }
+
   // ── a design's delta against the code (data/delta.mjs): each change's state, then the unplanned ──
   // against: { base, at } when a base resolved (the branch's diff gives the unplanned changes), else
   // { why }. The model is the index's, every repository (or `repo`).
-  delta(file, against, repo = null) {
+  delta(file, against, repo = null, opts = {}) {
     const { delta, errors } = parseDelta(file.text)
     if (errors.length) return [`Delta ${file.shown} does not validate (${plural(errors.length, 'problem')}):`, ...errors.map((e) => `  ${e}`)].join('\n')
     const names = this.q('SELECT name FROM repos ORDER BY name').map((r) => r.name).filter((n) => !repo || n === repo)
-    const model = this.currentModel(names)
+    const model = this.currentModel(names, opts)
     const base = against.base ? against.at.model : null
-    const diff = against.base ? diffModels(base, this.currentModel(against.base.repos.map((r) => r.name).filter((n) => !repo || n === repo))) : null
+    const diff = against.base ? diffModels(base, this.currentModel(against.base.repos.map((r) => r.name).filter((n) => !repo || n === repo), opts)) : null
     const s = clean(deltaStates({ ...delta, data: delta.data.filter((c) => !repo || parseTarget(c.target).repo === repo) }, model, { base, diff }))
     const ackText = (r) => (r.ack === 'acked' ? `acknowledged by ${r.change.ack.by} at ${r.change.ack.at}` : r.ack === 'stale' ? `stale: acknowledged by ${r.change.ack.by} at ${r.change.ack.at}, edited since` : 'not acknowledged')
     const out = [`Delta ${file.shown} (the design: ${clean(delta.spec)}), against the model${against.base ? ` and the branch against ${baseText(against.base)}` : ` (no base: ${against.why}; unplanned changes not listed)`}: ${plural(s.changes.length, 'data change')}`]

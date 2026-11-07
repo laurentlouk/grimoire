@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "title": "The shop's data map, refined",
+  "summary": "What no file declares: the device's events mirrored by the backend's event table, a relation no foreign key states, what an index is for, the local Orders table one with its production template, and the notes collection no extractor reads.",
+  "lineage": [
+    {
+      "from": "app:db/events",
+      "to": "backend:dynamodb/{env}-{project}-event",
+      "fields": [{ "from": "id", "to": "eventId" }, { "from": "owner_id", "to": "ownerId" }],
+      "why": "the device pushes each event row to the backend's table, field by field",
+      "sources": ["app:src/sync.ts:5"]
+    }
+  ],
+  "relations": [
+    {
+      "from": "app:db/event_participants",
+      "columns": ["event_id"],
+      "to": "app:db/events",
+      "toColumns": ["id"],
+      "why": "participants are looked up by their event's id; no foreign key states it",
+      "sources": ["app:src/participants.ts:3"]
+    }
+  ],
+  "indexes": [
+    {
+      "entity": "backend:dynamodb/{env}-{project}-event",
+      "index": "ByOwner",
+      "purpose": "list a user's events, the newest first",
+      "sources": ["backend:src/events.ts:3"]
+    }
+  ],
+  "equivalences": [
+    {
+      "tables": [
+        { "repo": "backend", "name": "Orders", "path": "dynamodb/tables/orders.json" },
+        { "repo": "backend", "template": "{env}-{project}-order" }
+      ],
+      "why": "the local-development table file stands for the production order table"
+    }
+  ],
+  "stores": [
+    {
+      "repo": "backend",
+      "id": "notes",
+      "kind": "mongodb",
+      "label": "Notes, a document collection",
+      "imports": ["mongoose"],
+      "why": "no extractor reads Mongoose schemas yet",
+      "entities": [
+        {
+          "name": "Note",
+          "kind": "collection",
+          "source": "backend:src/notes/model.ts:9",
+          "fields": [
+            { "name": "title", "type": "String (required)", "source": "backend:src/notes/model.ts:4" },
+            { "name": "body", "type": "String", "source": "backend:src/notes/model.ts:5" },
+            { "name": "authorId", "type": "String (indexed)", "source": "backend:src/notes/model.ts:6" }
+          ]
+        }
+      ]
+    }
+  ]
+}

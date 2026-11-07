@@ -1,0 +1,17 @@
+{
+  "TableName": "Orders",
+  "KeySchema": [{ "AttributeName": "orderId", "KeyType": "HASH" }],
+  "AttributeDefinitions": [
+    { "AttributeName": "orderId", "AttributeType": "S" },
+    { "AttributeName": "status", "AttributeType": "S" }
+  ],
+  "GlobalSecondaryIndexes": [
+    {
+      "IndexName": "ByStatus",
+      "KeySchema": [{ "AttributeName": "status", "KeyType": "HASH" }],
+      "Projection": { "ProjectionType": "KEYS_ONLY" }
+    }
+  ],
+  "BillingMode": "PROVISIONED",
+  "ProvisionedThroughput": { "ReadCapacityUnits": 1, "WriteCapacityUnits": 1 }
+}
