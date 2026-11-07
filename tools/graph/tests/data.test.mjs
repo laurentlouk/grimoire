@@ -2009,7 +2009,7 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
   const fn = (name, line, x = {}) => ({ name, line, end: line + 5, converts: [], names: [], env: [], uses: [], ...x })
   const row = (path, code) => ({ repo: 'api', extractor: 'serde@1', code: { path, lang: 'rust', types: [], consts: [], fns: [], notes: [], ...code } })
   const code = [
-    row('src/model.rs', { types: [ty('Order', 1), ty('Customer', 5), ty('Cart', 9), ty('Review', 13), ty('Coupon', 17, { converts: 20 }), ty('Promo', 21), ty('Thing', 25)] }),
+    row('src/model.rs', { types: [ty('Order', 1), ty('Customer', 5), ty('Cart', 9), ty('Review', 13), ty('Coupon', 17, { converts: 20 }), ty('Promo', 21), ty('Thing', 25), ty('Ledger', 29)] }),
     row('src/orders.rs', { fns: [fn('put_order', 3, { converts: [{ type: 'Order', line: 4, how: 'to_item' }], names: [{ text: '{}-shop-orders', line: 5 }] })] }),
     row('src/customers.rs', { fns: [fn('load', 3, { converts: [{ type: 'Customer', line: 6, how: 'from_item' }], env: [{ name: 'CUSTOMERS_TABLE', line: 4 }] }), fn('old', 10, { names: [{ text: '{}-shop-orders', line: 11 }] })] }),
     row('src/carts.rs', { fns: [fn('save_for_later', 3, { converts: [{ type: 'Cart', line: 4, how: 'to_item' }], names: [{ text: '{}-shop-saved_carts', line: 5 }, { text: '{}-shop-carts', line: 6 }] })] }),
@@ -2018,6 +2018,7 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
     row('src/admin.rs', { types: [ty('Export', 1), ty('Thing', 4)], fns: [fn('export', 5, { converts: [{ type: 'Export', line: 6, how: 'to_item' }], uses: ['ORDERS'] })] }),
     row('src/local.rs', { fns: [fn('seed', 12, { converts: [{ type: 'Promo', line: 13, how: 'to_item' }], names: [{ text: 'Orders', line: 14 }] })] }),
     row('src/other.rs', { fns: [fn('x', 1, { converts: [{ type: 'Thing', line: 2, how: 'from_item' }] })] }),
+    row('src/ledger.rs', { fns: [fn('put', 3, { converts: [{ type: 'Ledger', line: 4, how: 'to_item' }], names: [{ text: '{}-shop-reviews', line: 5 }] }), fn('tests::seeds_carts', 20, { test: true, converts: [{ type: 'Ledger', line: 21, how: 'to_item' }], names: [{ text: '{}-shop-carts', line: 22 }] })] }),
   ]
   code.push({ repo: 'api', extractor: 'serde@1', code: { path: 'src/mapped.rs', lang: 'rust', types: [ty('Sku', 1)], consts: [], fns: [], notes: [], mappers: [{ type: 'Sku', table: '{env}-{project}-reviews', line: 1 }] } })
   const B = bindItems(code, groups, entities, wiring)
@@ -2032,6 +2033,7 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
     'a constant of another file the function reads counts as its own: the env chain through it, in one function')
   eq(by('api:Promo'), [['Orders', 'name-match', 'nameTemplate', 'function', []]], 'an exact name the code spells binds the table of that name, and only it (Orders, never {env}-{project}-orders)')
   eq(by('api:Sku'), [['{env}-{project}-reviews', 'declared', 'mapper', 'mapper', []]], 'the mapper hook: a binding a mapper declares is declared')
+  eq(by('api:Ledger'), [['{env}-{project}-reviews', 'name-match', 'nameTemplate', 'function', ['{env}-{project}-carts name-match']]], 'a conversion in test code ranks below the code it tests: the test that builds a ledger item for the carts fixture is a rival, not a tie')
   eq(B.items.filter((it) => !it.bound.length).map((it) => [it.id, it.converts.map((c) => c.how)]), [['api:Coupon', ['implements a conversion']]], 'a type implementing a conversion that no table name pairs with is unbound')
   eq(B.unresolved.map((u) => [u.type, u.path]), [['Thing', 'src/other.rs']], 'a conversion of a name with two definitions and none in its file is not resolved, and said')
 

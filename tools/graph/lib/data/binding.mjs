@@ -35,7 +35,9 @@
 //   file         only in one file
 // Confidence: mapper → declared; env in one function → convention; env in one file, or a name in one
 // function or one file → name-match; several tables at the type's best rank → ambiguous, each. Ranks
-// (best first): mapper, env in a function, env in a file, a name in a function, a name in a file.
+// (best first): mapper, env in a function, env in a file, a name in a function, a name in a file;
+// then the same again for a conversion in test code (a test's own item, built for another table's
+// fixture, says less than the code it tests). A name only a test builds still pairs at its rank.
 // Every other table the type pairs with is listed as a rival. A type no table pairs with is unbound.
 //
 // What it adds to the model:
@@ -58,6 +60,7 @@ import { normType } from './model.mjs'
 export const DEPTH = 6
 const MAX_EVIDENCE = 4
 const RANK = { mapper: 5, 'env|function': 4, 'env|file': 3, 'nameTemplate|function': 2, 'nameTemplate|file': 1 }
+const TEST_RANK = 10
 const CONF = (rank) => (rank >= 5 ? 'declared' : rank === 4 ? 'convention' : 'name-match')
 export const CONFIDENCES = ['declared', 'convention', 'name-match', 'ambiguous']
 // below convention: drawn dashed, its rivals listed (spec, Binding mistakes)
@@ -243,13 +246,17 @@ export function bindItems(codeRows, groups, entities, wiring) {
 
   // candidates: item → group id → { rank, via, pairing, evidence, group }
   const cand = new Map()
+  // a conversion in test code ranks below every conversion of the code it tests: a test that builds
+  // an item for another table's fixture says less than the code that writes it (its confidence is
+  // still its way's)
   const offer = (it, ref, pairing, conv) => {
-    const rank = RANK[ref.via === 'mapper' ? 'mapper' : `${ref.via}|${pairing}`]
+    const base = RANK[ref.via === 'mapper' ? 'mapper' : `${ref.via}|${pairing}`]
+    const rank = base - (conv.test ? TEST_RANK : 0)
     if (!cand.has(it)) cand.set(it, new Map())
     const m = cand.get(it), cur = m.get(ref.group.id)
     if (cur && cur.rank > rank) return
     if (cur && cur.rank === rank) { cur.sites++; return }
-    m.set(ref.group.id, { rank, via: ref.via, pairing, group: ref.group, sites: 1, evidence: [conv, ...ref.evidence].slice(0, MAX_EVIDENCE) })
+    m.set(ref.group.id, { rank, base, via: ref.via, pairing, group: ref.group, sites: 1, evidence: [conv, ...ref.evidence].slice(0, MAX_EVIDENCE) })
   }
   for (const r of codeRows) {
     const at = { repo: r.repo, path: r.code.path }
@@ -284,7 +291,7 @@ export function bindItems(codeRows, groups, entities, wiring) {
     const cs = [...(cand.get(it)?.values() || [])].sort((a, b) => b.rank - a.rank || (a.group.name < b.group.name ? -1 : 1))
     if (!cs.length) continue
     const best = cs[0].rank, top = cs.filter((c) => c.rank === best)
-    const conf = (c) => (c.rank === best && top.length > 1 ? 'ambiguous' : CONF(c.rank))
+    const conf = (c) => (c.rank === best && top.length > 1 ? 'ambiguous' : CONF(c.base))
     for (const c of top) {
       const b = {
         item: it.id, type: it.name, repo: it.repo, path: it.path, line: it.line, group: c.group.id, table: c.group.name, entities: c.group.members,
