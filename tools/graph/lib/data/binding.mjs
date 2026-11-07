@@ -212,6 +212,12 @@ export function bindItems(codeRows, groups, entities, wiring) {
   const setBy = new Map() // variable → [wiring]
   for (const w of wiring) addDef(setBy, w.name, w)
   const tables = [...entities.values()]
+  // the logical tables a built name matches, once per name (code repeats its names)
+  const matched = new Map()
+  const matching = (text) => {
+    if (!matched.has(text)) { const hit = new Set(); for (const e of tables) { const g = groupOf.get(e.id); if (g && !hit.has(g) && namesMatch(text, e.name)) hit.add(g) } matched.set(text, [...hit]) }
+    return matched.get(text)
+  }
 
   // what names a table, as refs: [{ group, via, evidence: [Evidence], test }]
   const refsOf = (sink, at, test, via0 = null) => {
@@ -223,9 +229,7 @@ export function bindItems(codeRows, groups, entities, wiring) {
       }
     }
     for (const n of sink.names || []) {
-      const hit = new Set()
-      for (const e of tables) if (!hit.has(groupOf.get(e.id)) && namesMatch(n.text, e.name)) hit.add(groupOf.get(e.id))
-      for (const g of hit) if (g) out.push({ group: g, via: 'nameTemplate', test, evidence: [...(via0 ? [via0] : []), { what: 'builds', repo: at.repo, path: at.path, line: n.line, text: n.text, ...(test ? { test: true } : {}) }] })
+      for (const g of matching(n.text)) out.push({ group: g, via: 'nameTemplate', test, evidence: [...(via0 ? [via0] : []), { what: 'builds', repo: at.repo, path: at.path, line: n.line, text: n.text, ...(test ? { test: true } : {}) }] })
     }
     return out
   }

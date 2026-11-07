@@ -191,9 +191,11 @@ export class Graph {
       if (n) lines.push(`  name guesses: ${Math.round((100 * guessed) / n)}% of ${n} call links (ambiguous + unique-name)`)
       const data = this.q('SELECT key, extractor, facts, error FROM data_facts WHERE repo = ? ORDER BY key', r.name)
       if (data.length) {
-        const decls = data.flatMap((x) => (x.facts ? JSON.parse(x.facts).declarations : []))
+        const facts = data.map((x) => (x.facts ? JSON.parse(x.facts) : null))
+        const decls = facts.flatMap((f) => (f ? f.declarations : []))
+        const code = facts.filter((f) => f && f.code).length // source files read for item shapes (data/binding.mjs)
         const stopped = decls.filter((d) => d.partial).length, failed = data.filter((x) => x.error)
-        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
+        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${code ? `, ${code} source file(s) read for item shapes` : ''}${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
       }
     }
     const base = (() => { try { return JSON.parse(this.one("SELECT value FROM meta WHERE key = 'base'")?.value || 'null') } catch { return null } })()

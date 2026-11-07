@@ -1980,13 +1980,13 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
   // the template's literal parts, its unknown parts wildcards; the code's {} anything it fills in
   eq([['{}-shop-orders', T], ['test-shop-orders', T], ['{}-orders', T], ['{}-{}-orders', '{env}-shop-orders'], ['{}-shop-orders', 'local-shop-orders'], ['Orders', 'Orders']].map(([c, t]) => namesMatch(c, t)), [true, true, true, true, true, true],
     'a name the code builds matches a template on its literal parts (a format! string, a literal, a wildcard holding several parts), and an exact name')
-  eq([['{}-{}', T], ['{}', T], ['orders', T], ['{}-shop-orders-archive', T], ['{}-shop-orders', '{env}-{project}-archived_orders'], ['test-shop-orbit', '{env}-{project}-orbit_participants'], ['test-shop-orbit_participants', '{env}-{project}-orbit'], ['{}', '{name}']].map(([c, t]) => namesMatch(c, t)), [false, false, false, false, false, false, false, false],
+  eq([['{}-{}', T], ['{}', T], ['orders', T], ['{}-shop-orders-archive', T], ['{}-shop-orders', '{env}-{project}-archived_orders'], ['test-shop-cart', '{env}-{project}-cart_items'], ['test-shop-cart_items', '{env}-{project}-cart'], ['{}', '{name}']].map(([c, t]) => namesMatch(c, t)), [false, false, false, false, false, false, false, false],
     'the table\'s last word must be spelt by the code\'s literal characters, the whole name matched: no wildcard alone, no prefix or suffix of another name, a name wholly unknown matches nothing')
   eq([['orders', 'Orders'], ['Order', 'Orders'], ['{}-shop-order', T], ['{}-Shop-Orders', '{env}-shop-orders'], ['{}-shop_orders', T]].map(([c, t]) => namesMatch(c, t)), [false, false, false, false, false],
     'no fuzzy matching: no letter case folded, no plural, no separator swapped')
   eq([codeName([null, '-shop-orders']), codeName(['test-shop-orders']), codeName(['id']), codeName(['a b']), codeName([null]), codeName(['123']), codeName([null, '-', null, '-', null, '-', null, '-', null, '-x'])], ['{}-shop-orders', 'test-shop-orders', null, null, null, null, null],
     'codeName: what could name a table (DynamoDB\'s characters, 3 literal characters and a letter at least, few parts filled in)')
-  eq([lastWord(T), lastWord('Orders'), lastWord('{env}-orbit_participants'), lastWord('{name}')], ['orders', 'Orders', 'participants', null], 'the distinctive part: the last word of the literal text')
+  eq([lastWord(T), lastWord('Orders'), lastWord('{env}-cart_items'), lastWord('{name}')], ['orders', 'Orders', 'items', null], 'the distinctive part: the last word of the literal text')
   // serde's case rules: a field's from snake_case, a variant's from PascalCase
   eq(RULES.map((r) => renameField('created_at_utc', r)), ['created_at_utc', 'CREATED_AT_UTC', 'CreatedAtUtc', 'createdAtUtc', 'created_at_utc', 'CREATED_AT_UTC', 'created-at-utc', 'CREATED-AT-UTC'], 'rename_all on a field: every case style serde knows')
   eq(RULES.map((r) => renameVariant('OnHold', r)), ['onhold', 'ONHOLD', 'OnHold', 'onHold', 'on_hold', 'ON_HOLD', 'on-hold', 'ON-HOLD'], 'rename_all on a variant: every case style serde knows')
