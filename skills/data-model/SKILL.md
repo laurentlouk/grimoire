@@ -5,7 +5,7 @@ description: Refine the project's data model map with what no file declares, in 
 
 # Data model: what the code cannot say, checked
 
-The map of a project's data is extracted by the code graph's index (`graph_data`): SQL migrations, schema snapshots and code-declared schemas, key-value table declarations (CreateTable files, templates, Terraform), item shapes bound to tables, access patterns. Some facts no file declares. They go in one typed JSON file per map, `docs/architecture/<name>.data.json` (beside the architecture diagrams; `graph.architectureDir` in `grimoire.config.json` moves the folder), and the graph page (`/grimoire:graph`) draws them in its **Data** tab, labelled *refined*.
+The map of a project's data is extracted by the code graph's index (`graph_data`): SQL migrations, schema snapshots and code-declared schemas, key-value table declarations (CreateTable files, templates, Terraform), item shapes bound to tables, access patterns, and, for a database nothing declares, the SQL the code sends (a store deduced from queries, labelled inferred). Some facts no file declares. They go in one typed JSON file per map, `docs/architecture/<name>.data.json` (beside the architecture diagrams; `graph.architectureDir` in `grimoire.config.json` moves the folder), and the graph page (`/grimoire:graph`) draws them in its **Data** tab, labelled *refined*.
 
 Three hands, as for the architecture diagrams:
 
@@ -22,6 +22,7 @@ The plugin root is the directory two levels above this `SKILL.md`; commands belo
 - Read `grimoire.config.json`: `graph.enabled` (when `false`, say so and stop), `repos`, `graph.architectureDir`.
 - Is there an index? `node <root>/tools/graph/graph.mjs status`; if not, `graph.mjs index` (the first run installs the parser runtime, ~50 MB, once per machine).
 - Read the map: `graph_data` (or `graph.mjs data`): the stores, the logical tables, the item types bound or not, the access patterns' leads, then its **Refined**, **Drift** and **Gaps** parts. `graph_data` with a store or an entity says the rest (`graph.mjs data show <entity>`).
+- A store labelled inferred, `<repo>:sql (inferred, <dialect>)`, is deduced from the queries the code sends, at the lowest trust: its tables, the columns seen, relations *inferred from a join* (never foreign keys), unique keys from `ON CONFLICT` and lookup columns; types, nullability and defaults unknown. It is read, so it is no gap: never describe it again under `stores`. Its tables are entities like any other (`backend:sql (inferred, postgres)/orders`), so a lineage may name one. Queries attached to a declared store add only `[inferred]` conflicts there: the declaration wins.
 - **Updating** an existing refine file: start from it, never from a blank one, and run `graph.mjs data check` first: its drift is what to fix.
 - Scope comes from the request: the whole project by default, or the stores it names. Ask the user only what the code, config and git history cannot tell you (whether a table no code uses is still deployed, say).
 

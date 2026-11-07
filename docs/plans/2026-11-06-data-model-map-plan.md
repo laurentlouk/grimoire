@@ -1,6 +1,6 @@
 # Data model map: plan
 
-**Spec:** [2026-11-06-data-model-map-design.md](../specs/2026-11-06-data-model-map-design.md) (approved 2026-11-06) · **Research:** [2026-11-06-data-model-map.md](../research/2026-11-06-data-model-map.md)
+**Spec:** [2026-11-06-data-model-map-design.md](../specs/2026-11-06-data-model-map-design.md) (approved 2026-11-06) · **Status:** shipped in 0.27.0–0.41.0, slices 1–13 as planned and slice 14 added by the owner (#106) · **Research:** [2026-11-06-data-model-map.md](../research/2026-11-06-data-model-map.md)
 
 ## The problem, in the user's words
 
@@ -184,6 +184,11 @@ Numbers in brackets are the spec's slice numbers. The spec's slice 1 is split in
 - **Done:** a fixture refine file with one valid lineage, one stale citation (reported as drift) and one Mongoose store described by citation. On the probed project: the device-to-backend `events` lineage and the RediSearch index.
 - **Seams:** A, B, D (evals).
 
+### 14. SQL schemas inferred from the queries in code [spec 13; added by the owner, #106]
+- **What:** `readers/sql-query.mjs` on slice 12's `splitSql` / `lexSql`; `extractors/sql-queries.mjs` (query call sites in TS/JS, Go, Python and Rust, through the pinned grammars); `lib/data/queries.mjs` (attached to a declared store only on evidence, else a deduced store `<repo>:sql (inferred, <dialect>)`). Only identifiers are kept, never a literal's value.
+- **Done:** a fixture's queries deduce its tables, columns, join relations and `ON CONFLICT` keys, checked once against Postgres in Docker at dev time; the same project with migrations attaches them and adds only `[inferred]` conflicts.
+- **Seams:** A, B.
+
 ### After v1
 
 Extractor-only slices on the same model, each with its fixture:
@@ -204,5 +209,6 @@ Each one only adds an extractor; nothing else changes.
 - 1 → 11.
 - 1 → 12.
 - 2 and 9 → 13 (the refine file corrects bindings, so binding must exist).
+- 12 and 13 → 14 (its reader sits on slice 12's splitter; a client whose queries are read leaves slice 13's gaps).
 
 Slices 7–12 can run in parallel with 3–6 once slice 2 exists (they touch extractors and readers, not the change view). Slices 7, 11 and 12 do not depend on each other.

@@ -157,5 +157,16 @@
         "evidence": ""
       }
     ]
+  },
+  {
+    "id": 9,
+    "query": "Review the PR for INDEX-12. It resolved to balanced. The diff adds a reader that replays the migration SQL found in any indexed repository into an in-memory SQLite database, after a text filter drops statements that start with ATTACH or VACUUM, and stores the schema it reads back in the index.",
+    "should_trigger": true,
+    "expected_output": "Treats the repository's SQL as input the code does not control, so the panel has adversarial QA with a security review and the reliability lens whatever the profile. The security side asks whether the engine itself refuses what can write a file (ATTACH, VACUUM INTO, extension loading), since a text filter that splits statements differently from the engine's own lexer guards nothing, and whether the filter runs before every use. The reviewer times hostile shapes (deep nesting, long runs of blanks, very many statements) at a size where quadratic work takes seconds, and follows a planted secret from a migration literal and a malformed file to the index, tool answers and error notes.",
+    "expectations": [
+      { "text": "Adds adversarial QA with a security review and the reliability lens to the balanced panel because the reader takes repository input", "passed": null, "evidence": "" },
+      { "text": "Checks that the engine refuses file writes itself, rather than trusting a text filter that may read statements differently", "passed": null, "evidence": "" },
+      { "text": "Times hostile inputs at a size where quadratic work would show, and follows a planted secret to every output", "passed": null, "evidence": "" }
+    ]
   }
 ]

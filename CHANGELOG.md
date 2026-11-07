@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.41.1 — crystallize: what the data model map (#74) taught
+
+The crystallize pass on the data model map's 20 merged PRs (#73 to #110). Report: `docs/crystallize/2026-11-07-grimoire-data-model-map.md`.
+
+- **`tdd`: input you do not control.** Code that reads what someone else wrote gets two more kinds of test as it is built:
+  - its hostile shapes timed with wide headroom (overlapping quantifiers, deep nesting, a list scanned per item, expansion, a cache keyed by a path's spelling, fan-out);
+  - a planted secret followed to every output, with errors that give a position, never the text.
+
+  Code that models another tool's output takes its expected values from that tool's real output, kept as golden fixtures. Eight of the fourteen slices had a reliability blocker or major that only the reviewer's timing found, and two had false conflicts that only running the tools exposed. New eval case `tdd-5`.
+- **`review`: input the code does not control** always gets adversarial QA with a security review, and the reliability lens, whatever the profile. Adversarial QA also flags a check that runs after what it guards. New eval case `review-9`. The loop's `break-it` persona and `implement` brief carry the same rules.
+- **`data-model`** names the stores deduced from queries (slice 14): already read, never described again, and a lineage may name their tables. New eval case `data-model-6`.
+- **Docs synced to the code:**
+  - grimoire's architecture diagram gains the data model map, and the page server's second write (a delta's acknowledgements);
+  - the data model map's spec and plan say what shipped, slice 14 included.
+- **Upstream:** [#112](https://github.com/laurentlouk/grimoire/issues/112): the loop-durability files' wall-clock assertions fail under a loaded `npm test`, and pass alone.
+
 ## 0.41.0 — the data model map deduces a SQL schema from the queries the code sends, for a database nothing in the repositories declares (data model map slice 14, #106)
 
 A database that lives only in production, with no migrations, dump or schema in the repositories and reached by raw SQL, had nothing for the map's readers: it was only listed as a gap, through its client imports. Yet the statements the code sends state most of its model. The map now reads them, as the least trusted kind of fact, `inferred`: never connecting to a database, never running the code, never overriding a declaration.
