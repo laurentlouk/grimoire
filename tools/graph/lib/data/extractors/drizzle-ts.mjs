@@ -27,7 +27,8 @@
 //     `$defaultFn` / `$default` / `$onUpdate` recorded as computed defaults (the client's, not the
 //     database's), never evaluated; `generatedAlwaysAs`, identity, `.array()`;
 //   - the third argument (an array or an object, from a callback): `index('n').on(t.a, t.b)`,
-//     `uniqueIndex`, `.where(…)` partial, `primaryKey({ columns })`, `unique().on(…)`, `foreignKey({
+//     `uniqueIndex`, `.where(…)` partial, an expression column `sql\`lower(${t.email})\`` as
+//     drizzle-kit writes it (`lower("email")`, backticks in MySQL; another expression `(expression)`), `primaryKey({ columns })`, `unique().on(…)`, `foreignKey({
 //     columns, foreignColumns }).onDelete(…)`; checks and policies are not part of the model;
 //   - columns spread from a shared object (`...timestamps`) and built by a helper (`id: id()`, a
 //     const arrow returning a column) are read through them; one that cannot be read leaves its
@@ -292,8 +293,24 @@ export function readSchemaFile(tree, file) {
     const items = body.type === 'array' ? named(body) : body.type === 'object' ? named(body).filter((p) => p.type === 'pair').map((p) => field(p, 'value')) : null
     if (!items) return { extras: [], opaque: true }
     const keyOf = (n) => {
-      // t.col, t.col.desc(), t['col'], sql`…` → the key, or null for an expression
+      // t.col, t.col.desc(), t['col'] → the key; sql`…${t.col}…` → { sql: its fragments and keys },
+      // the expression drizzle-kit writes; another expression → null
       let x = bare(n)
+      const tpl = x?.type === 'call_expression' && sqlLocal.has(bare(field(x, 'function'))?.text) ? field(x, 'arguments') : null
+      if (tpl?.type === 'template_string') {
+        const parts = []
+        for (const p of named(tpl).slice(0, 64)) {
+          if (p.type === 'string_fragment') parts.push(p.text)
+          else if (p.type === 'escape_sequence') parts.push(p.text.length === 2 ? p.text[1] : p.text)
+          else if (p.type === 'template_substitution') {
+            const s = bare(named(p)[0])
+            const key = s?.type === 'member_expression' && bare(field(s, 'object'))?.text === param ? field(s, 'property')?.text : null
+            if (!key) return null
+            parts.push({ key })
+          }
+        }
+        return { sql: parts }
+      }
       for (let k = 0; x && x.type === 'call_expression' && k < 8; k++) x = bare(field(bare(field(x, 'function')), 'object'))
       if (x?.type === 'member_expression' && bare(field(x, 'object'))?.text === param) return field(x, 'property')?.text ?? null
       if (x?.type === 'subscript_expression' && bare(field(x, 'object'))?.text === param) return str(field(x, 'index'))
@@ -410,7 +427,7 @@ export function readSchemaFile(tree, file) {
 // ── the unit: a config and its schema files, or a folder of them ──
 export default {
   id: 'drizzle-ts',
-  version: 2,
+  version: 3,
   kind: 'code',
   scope: 'unit',
   tree: true,
@@ -749,14 +766,16 @@ function declare(files, store, cfg, configPath) {
       }
       if (c.ref) pending.push([e, { kind: 'ref', cols: [cname], ref: c.ref, line: c.line, file: t.file }])
     }
-    const nameOf = (k) => (k === null ? '(expression)' : names.get(k) ?? casing(k))
+    // an expression column: its text as drizzle-kit writes it, each column quoted as the dialect quotes it
+    const quoted = (n) => (tdialect === 'mysql' ? `\`${n}\`` : `"${n}"`)
+    const nameOf = (k) => (k === null ? '(expression)' : typeof k === 'object' ? k.sql.map((p) => (typeof p === 'string' ? p : quoted(names.get(p.key) ?? casing(p.key)))).join('') : names.get(k) ?? casing(k))
     for (const x of t.extras) {
       const columns = x.cols.map(nameOf)
       if (x.kind === 'index' || x.kind === 'uniqueIndex') e.indexes.push({ name: x.name || `${name}_${columns.join('_')}_index`, unique: x.kind === 'uniqueIndex', columns, partial: x.partial, ...at(x.line) })
       else if (x.kind === 'primaryKey') { e.keys = e.keys.filter((k) => k.role !== 'primary'); e.keys.push({ role: 'primary', parts: columns, ...at(x.line) }) }
       // a table-level unique(): in SQLite, drizzle-kit creates a unique index (its snapshot keeps it among
       // the indexes), named <table>_<builder names>_unique when unnamed; elsewhere a unique constraint
-      else if (x.kind === 'unique' && tdialect === 'sqlite') e.indexes.push({ name: x.name || `${name}_${x.cols.map((k) => (k === null ? 'expression' : built.get(k) ?? k)).join('_')}_unique`, unique: true, columns, partial: false, ...at(x.line) })
+      else if (x.kind === 'unique' && tdialect === 'sqlite') e.indexes.push({ name: x.name || `${name}_${x.cols.map((k) => (k === null || typeof k === 'object' ? 'expression' : built.get(k) ?? k)).join('_')}_unique`, unique: true, columns, partial: false, ...at(x.line) })
       else if (x.kind === 'unique') e.keys.push({ role: 'unique', parts: columns, ...at(x.line) })
       else if (x.kind === 'foreignKey' && x.foreign) pending.push([e, { kind: 'fk', cols: columns, ref: { var: x.foreign.var, keys: x.foreign.keys, onDelete: x.onDelete, onUpdate: x.onUpdate }, line: x.line, file: t.file }])
     }

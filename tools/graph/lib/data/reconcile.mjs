@@ -3,8 +3,10 @@
 // merged element by element (model.mjs keyOf): every element keeps the source of each declaration
 // that states it, most trusted first, and a conflict wherever they disagree:
 //   - an attribute (a field's type, nullability, default; an index's columns; a foreign key's
-//     actions) with two values: both are kept, each with its sources. Types compare lower-cased,
-//     defaults without one outer pair of parentheses (model.mjs normDefault);
+//     actions) with two values: both are kept, each with its sources. Types compare lower-cased (and
+//     a Postgres or MySQL type by the engine's name for it, model.mjs normType), defaults without one
+//     outer pair of parentheses (model.mjs normDefault); in a MySQL store a unique index is the
+//     unique key it is (uniqueKeys);
 //   - presence: an element one complete declaration states and another, describing the same
 //     entity, lacks (`absent` cites where that declaration describes the entity).
 // Nothing is resolved by precedence: the disagreement is the finding. A replay that stopped early
@@ -30,19 +32,30 @@ const ATTRS = {
   entity: (e) => ({ kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}) }),
   // what a declaration cannot state in the store's terms (a code model's custom type, an expression
   // default: model.mjs `unstated`) is undefined, and compared with nothing
-  field: (f, kv) => { const u = f.unstated || []; return { type: u.includes('type') ? undefined : kv ? String(f.type ?? '') : normType(f.type), nullable: u.includes('nullable') ? undefined : f.nullable, default: u.includes('default') ? undefined : normDefault(f.default), generated: f.generated ?? null } },
+  field: (f, kv, dialect) => { const u = f.unstated || []; return { type: u.includes('type') ? undefined : kv ? String(f.type ?? '') : normType(f.type, dialect), nullable: u.includes('nullable') ? undefined : f.nullable, default: u.includes('default') ? undefined : normDefault(f.default, dialect), generated: f.generated ?? null } },
   key: (k) => (k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}),
   index: (i) => (kvIndex(i) ? { kind: i.kind, partition: i.partition.join(', '), sort: i.sort.join(', '), projection: projectionText(i) } : { unique: !!i.unique, columns: i.columns.join(', '), partial: !!i.partial }),
   relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate }),
 }
 const SHAPE = {
   entity: (e) => ({ name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nameTemplate: e.nameTemplate } : {}) }),
-  field: (f) => ({ name: f.name, type: { raw: f.type, norm: normType(f.type) }, nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null, ...(f.unstated ? { unstated: f.unstated } : {}) }),
+  field: (f, dialect) => ({ name: f.name, type: { raw: f.type, norm: normType(f.type, dialect) }, nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null, ...(f.unstated ? { unstated: f.unstated } : {}) }),
   key: (k) => ({ role: k.role, parts: k.parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}) }),
   index: (i) => (kvIndex(i) ? { name: i.name, kind: i.kind, partition: i.partition, sort: i.sort, projection: i.projection ?? null, include: i.include || [], columns: i.columns, unique: false, partial: false } : { name: i.name, unique: !!i.unique, columns: i.columns, partial: !!i.partial }),
   relation: (r) => ({ kind: 'fk', columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate }),
 }
 const PARTS = [['field', 'fields'], ['key', 'keys'], ['index', 'indexes'], ['relation', 'relations']]
+
+// MySQL keeps one object for a unique constraint and a unique index (a migration's `CONSTRAINT x
+// UNIQUE`, a dump's `UNIQUE KEY`, a schema's unique index are the same thing), so in a MySQL store
+// every unique index is compared, and shown, as the unique key it is.
+function uniqueKeys(e) {
+  const uniq = (e.indexes || []).filter((i) => i.unique && !i.partial && !kvIndex(i))
+  if (!uniq.length) return e
+  const keys = [...(e.keys || [])]
+  for (const i of uniq) if (!keys.some((k) => k.role === 'unique' && k.parts.join('\0') === i.columns.join('\0'))) keys.push({ role: 'unique', parts: i.columns, path: i.path, line: i.line })
+  return { ...e, keys, indexes: e.indexes.filter((i) => !uniq.includes(i)) }
+}
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 
 export function reconcile(rows) {
@@ -156,7 +169,8 @@ function merge(id, ds) {
   const kv = KV_DIALECTS.has(store.dialect)
   const entities = new Map()
   for (const d of ds) {
-    for (const e of d.entities || []) {
+    for (const e0 of d.entities || []) {
+      const e = store.dialect === 'mysql' ? uniqueKeys(e0) : e0
       const E = slot(entities, e.name, () => ({ ...SHAPE.entity(e), fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map(), whole: new Set(), part: new Set() }))
       note(E, d, ATTRS.entity(e), source(d, e), e)
       E.at.set(d, source(d, e))
@@ -164,8 +178,8 @@ function merge(id, ds) {
       if (e.part) E.part.add(d) // it states the entity, not all of its parts
       for (const [type, list] of PARTS) {
         for (const x of e[list] || []) {
-          const el = slot(E[list], keyOf[type](x), () => SHAPE[type](x))
-          note(el, d, ATTRS[type](x, kv), source(d, x), x)
+          const el = slot(E[list], keyOf[type](x), () => SHAPE[type](x, store.dialect))
+          note(el, d, ATTRS[type](x, kv, store.dialect), source(d, x), x)
           // what a code model alone says of a column: the default its client computes, its enum
           if (type === 'field') { if (x.computed && !el.computed) el.computed = x.computed; if (x.enum && !el.enum) el.enum = x.enum }
         }

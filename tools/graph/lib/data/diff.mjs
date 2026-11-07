@@ -7,8 +7,9 @@
 // Compared through the same normalisation reconcile uses, so a change of formatting is no change:
 //   - names in any letter case where the dialect's are (SQLite: tables, columns, indexes, a foreign
 //     key's target);
-//   - types lower-cased and blank-collapsed (model.mjs normType), defaults without one outer pair of
-//     parentheses (normDefault);
+//   - types lower-cased and blank-collapsed, a Postgres or MySQL type by the engine's name for it
+//     (model.mjs normType), defaults without one outer pair of parentheses and in the dialect's
+//     terms (normDefault);
 //   - a key by its role and its columns, as a whole (a key whose columns change is another key).
 // An element whose declarations disagree (a reconcile conflict) is compared by its merged value, the
 // most trusted declaration's. In a key-value store (model.mjs KV_DIALECTS: its declarations are files
@@ -77,15 +78,15 @@ const typeOf = (x) => x.type?.raw ?? x.type
 const same = (v) => [v ?? null, v ?? null]
 const ATTRS = {
   entity: (e) => ({ kind: [e.kind, e.kind], ...(kvTable(e) ? { billing: same(e.billing), stream: same(e.stream) } : {}) }),
-  field: (x) => ({ type: [normType(typeOf(x)), typeOf(x)], nullable: [x.nullable, x.nullable], default: [normDefault(x.default), x.default ?? null], generated: [x.generated ?? null, x.generated ?? null] }),
+  field: (x, f) => ({ type: [normType(typeOf(x), f?.dialect), typeOf(x)], nullable: [x.nullable, x.nullable], default: [normDefault(x.default, f?.dialect), x.default ?? null], generated: [x.generated ?? null, x.generated ?? null] }),
   key: (k) => (k.role === 'ttl' ? { enabled: same(k.enabled) } : {}),
   index: (i, f) => (kvIndex(i) ? { kind: same(i.kind), partition: [i.partition.join(','), i.partition.join(', ')], sort: [i.sort.join(','), i.sort.join(', ')], projection: same(projectionText(i)) }
     : { unique: [!!i.unique, !!i.unique], columns: [i.columns.map(f).join(','), i.columns.join(', ')], partial: [!!i.partial, !!i.partial] }),
   relation: (r) => ({ onDelete: [r.onDelete, r.onDelete], onUpdate: [r.onUpdate, r.onUpdate] }),
 }
 const SHAPE = {
-  entity: (e, f) => (e.fields?.length ? [`${e.kind}|${e.fields.map((x) => `${f(x.name)} ${normType(typeOf(x))}`).join(',')}`, 'same columns'] : null),
-  field: (x, f, pos) => [`${normType(typeOf(x))}|${pos}`, 'same type and position'],
+  entity: (e, f) => (e.fields?.length ? [`${e.kind}|${e.fields.map((x) => `${f(x.name)} ${normType(typeOf(x), f.dialect)}`).join(',')}`, 'same columns'] : null),
+  field: (x, f, pos) => [`${normType(typeOf(x), f.dialect)}|${pos}`, 'same type and position'],
   key: () => null,
   index: (i, f) => (kvIndex(i) ? [`${i.kind}|${i.partition.join(',')}|${i.sort.join(',')}|${projectionText(i)}`, 'same keys and projection'] : [`${!!i.unique}|${i.columns.map(f).join(',')}|${!!i.partial}`, 'same columns']),
   relation: (r, f) => [`${r.columns.map(f).join(',')}|${r.toColumns.map(f).join(',')}`, 'same columns'],
@@ -102,7 +103,7 @@ export function diffModels(before, after) {
 function diffStore(b, a) {
   const s = a || b
   const dialect = a?.dialect ?? b?.dialect ?? null
-  const fold = foldOf(dialect)
+  const fold = Object.assign(foldOf(dialect), { dialect }) // names folded; types and defaults compared in the dialect's terms
   const out = { id: s.id, repo: s.repo, name: s.name, dialect, change: !b ? 'added' : !a ? 'removed' : null, attrs: [], before: b, after: a, changes: [], renames: [] }
   if (b && a && (b.dialect ?? null) !== (a.dialect ?? null)) out.attrs.push({ attr: 'dialect', before: b.dialect ?? null, after: a.dialect ?? null })
   const push = (kind, change, entity, x, y, pos, attrs = [], owner = null) => out.changes.push({ kind, change, entity, name: NAME[kind](y || x), key: KEY[kind](y || x, fold), pos, owner, before: x, after: y, attrs, rename: null })

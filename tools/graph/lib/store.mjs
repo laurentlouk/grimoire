@@ -14,8 +14,8 @@
 //   churn    per file, n = recent commits that touched it (same window as cochange)
 //   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
 //            ddl, what its content declares (registry.mjs inspect): for a .sql file its schema
-//            statements (2 creates or alters a table or an index, 1 other schema statements only,
-//            0 none); for a JSON or YAML file its tables (3 a template's table resource, 2 a key
+//            statements (3 a schema dump's header over a table, 2 creates or alters a table or an
+//            index, 1 other schema statements only, 0 none); for a JSON or YAML file its tables (3 a template's table resource, 2 a key
 //            schema, a CreateTable input; 0 none); for a Terraform or Terragrunt file what it
 //            declares (4 a module with a table resource, 5 a terragrunt.hcl Terragrunt runs, 6 a
 //            module out of reach, 1 other); for a source file (.rs, .ts, .js, .py, .go, .prisma),
@@ -29,7 +29,7 @@
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '10'
+export const SCHEMA_VERSION = '11'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.

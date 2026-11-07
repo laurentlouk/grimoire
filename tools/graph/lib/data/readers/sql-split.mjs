@@ -10,12 +10,14 @@
 //                `;`. Text with no code left (comments only) is no statement. One pass over the
 //                text's words: linear, however long the file.
 //   schemaLevel(text)  2 when a statement creates or alters a table or an index (what finds a
-//                migration folder), 1 when the schema statements are others only (DROP, CREATE
-//                VIEW or TRIGGER…: such a file belongs to a folder once found), 0 when there is
-//                none (a seed, a query file)
+//                migration folder), 3 when such a file carries a database dump tool's header (a
+//                schema dump: dumpHeader), 1 when the schema statements are others only (DROP,
+//                CREATE VIEW or TRIGGER…: such a file belongs to a folder once found), 0 when there
+//                is none (a seed, a query file)
 //
 // SQLite's lexical rules: '…' strings ('' escapes a quote), "…", `…` and […] identifiers, -- and
-// /* */ comments. Postgres dollar quoting is not read here (its migrations are not replayed).
+// /* */ comments: enough to find what a file declares, in any dialect. Postgres' and MySQL's own
+// rules ($$ quoting, backslashes, DELIMITER) are readers/ddl.mjs's, which reads their statements.
 
 const BREAKPOINT = /--> statement-breakpoint/g
 const TOKEN = /"(?:[^"]|"")*"|`[^`]*`|\[[^\]]*\]|[A-Za-z_][\w$]*|;/g // what decides where a statement ends
@@ -48,9 +50,10 @@ export function split(text) {
   const code = blank(text)
   const breaks = [...text.matchAll(BREAKPOINT)].map((m) => m.index).filter((i) => code[i] === ' ')
   const out = []
-  let start = 0, line = 1, scanned = 0, b = 0
-  // positions only grow, so the newlines are counted once in all
-  const lineAt = (pos) => { for (let k = text.indexOf('\n', scanned); k >= 0 && k < pos; k = text.indexOf('\n', k + 1)) { line++; scanned = k + 1 } return line }
+  let start = 0, b = 0
+  // positions only grow, so each newline is found once in all (a file of one long line too)
+  let line = 1, next = text.indexOf('\n')
+  const lineAt = (pos) => { while (next >= 0 && next < pos) { line++; next = text.indexOf('\n', next + 1) } return line }
   // The statement being read: its first words (CREATE [TEMP] TRIGGER?), whether its BEGIN … END
   // body is open, the CASE … END depth inside that body, and whether the body's END was seen.
   let words = [], trigger = false, body = false, depth = 0, closed = false
@@ -78,6 +81,10 @@ export function split(text) {
 
 export function schemaLevel(text) {
   let level = 0
-  for (const s of split(text)) { if (DDL.test(s.text)) return 2; if (SCHEMA.test(s.text)) level = 1 }
+  for (const s of split(text)) { if (DDL.test(s.text)) return dumpHeader(text) ? 3 : 2; if (SCHEMA.test(s.text)) level = 1 }
   return level
 }
+
+// The header a database's dump tool writes at the top of a schema dump: [line, the tool's words].
+const DUMP_HEADER = /^-- (PostgreSQL database dump|MySQL dump|MariaDB dump)\b/m
+export const dumpHeader = (text) => DUMP_HEADER.exec(text.slice(0, 4096))

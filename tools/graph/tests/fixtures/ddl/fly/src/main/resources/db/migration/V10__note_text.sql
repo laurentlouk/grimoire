@@ -1,0 +1,3 @@
+ALTER TABLE orders
+  MODIFY COLUMN note TEXT NULL,
+  CHANGE total amount DECIMAL(12,2) NOT NULL;
