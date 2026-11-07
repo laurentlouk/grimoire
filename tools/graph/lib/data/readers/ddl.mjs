@@ -56,10 +56,15 @@
 //   `public` is named `schema.table`; MySQL's are kept as written (compared in any case). Types are
 //   kept as written (a quoted name unquoted, a schema-qualified type by its own name), compared as
 //   model.mjs normType says. In MySQL a unique constraint is a unique index (one engine object):
-//   kept as an index, named as MySQL names it.
-import { normType } from '../model.mjs'
-
-export const LIMITS = { bytes: 8 << 20, statements: 100000, tokens: 200000, depth: 256, items: 5000, notes: 40 }
+//   kept as an index, named as MySQL names it; so is an unnamed functional index (functional_index,
+//   functional_index_2…), and the index MySQL builds for a foreign key no index or primary key leads
+//   with (its index name, else the constraint's, else its first column), marked `implicit: true`, as
+//   a dump's KEY on exactly those columns named that way is. A COLLATE or a character set, qualified
+//   or not (pg_catalog."C"), is read past wherever a column, a type change or an index column has it.
+// bytes a file, statements a replay, tokens and elements a statement, nesting, notes kept; columns,
+// indexes (and keys, foreign keys) a table; the work budget (each scan of a table's columns,
+// indexes or foreign keys counts what it reads); the time a replay may take
+export const LIMITS = { bytes: 8 << 20, statements: 100000, tokens: 200000, depth: 256, items: 5000, notes: 40, columns: 4096, indexes: 4096, work: 50_000_000, ms: 10_000 }
 
 const PG = 'postgres', MY = 'mysql', LITE = 'sqlite'
 
@@ -116,19 +121,19 @@ function scan(text, { dialect = null, bodies = true, onCode, onEnd, onMeta, onEr
   let bol = true, any = false // at a line's start (blanks only so far); any code in this statement
   // a routine's body: the statement's first word, how many words, whether it is a MySQL routine,
   // the BEGIN / CASE depth, an END waiting for the word after it, a BEGIN waiting for ATOMIC
-  let first = null, words = 0, routine = false, decided = false, body = 0, pendingEnd = false, atomicNext = false
+  let first = null, words = 0, routine = false, decided = false, body = 0, pendingEnd = false, atomicNext = false, opened = -1, at = -1
   // a body is still open when its depth, less an END waiting for its word, is not back to 0; a
   // DELIMITER's string ends a statement whatever its body says
-  const end = () => { onEnd(delim === ';' && body - (pendingEnd ? 1 : 0) > 0); any = false; first = null; words = 0; routine = decided = pendingEnd = atomicNext = false; body = 0 }
+  const end = () => { onEnd(delim === ';' && body - (pendingEnd ? 1 : 0) > 0, opened); opened = -1; any = false; first = null; words = 0; routine = decided = pendingEnd = atomicNext = false; body = 0 }
   const word = (w) => {
     words++
     if (pendingEnd) { pendingEnd = false; if (my && LOOPS.has(w)) return; body--; if (w === 'CASE') return } // END IF, END CASE
     if (!first) { first = w; return }
     if (body) { if (w === 'BEGIN' || w === 'CASE') body++; else if (w === 'END') pendingEnd = true; return }
     if (first !== 'CREATE') return
-    if (atomicNext) { atomicNext = false; if (w === 'ATOMIC') { body = 1; return } }
+    if (atomicNext) { atomicNext = false; if (w === 'ATOMIC') { body = 1; opened = at; return } }
     if (my && !decided && words < 12) { if (ROUTINES.has(w)) routine = decided = true; else if (NOT_ROUTINE.has(w)) decided = true }
-    if (w === 'BEGIN') { if (pg) atomicNext = true; else if (routine) body = 1 }
+    if (w === 'BEGIN') { if (pg) atomicNext = true; else if (routine) { body = 1; opened = at } }
   }
   while (i < to) {
     const c = text.charCodeAt(i)
@@ -189,7 +194,7 @@ function scan(text, { dialect = null, bodies = true, onCode, onEnd, onMeta, onEr
       let j = i + 1
       while (j < to && isIdChar(text.charCodeAt(j)) && !(delim !== ';' && text.startsWith(delim, j))) j++
       onCode(i, j)
-      if (bodies && (words < 64 || body || pendingEnd)) word(text.slice(i, j).toUpperCase())
+      if (bodies && (words < 64 || body || pendingEnd)) { at = i; word(text.slice(i, j).toUpperCase()) }
       i = j; continue
     }
     onCode(i, i + 1); i++
@@ -211,7 +216,7 @@ export function lines(text, first = 1) {
 export function splitSql(text, { dialect = null, max = LIMITS.statements } = {}) {
   const run = (bodies) => {
     const statements = [], errors = []
-    let first = -1, last = -1, open = false, capped = false
+    let first = -1, last = -1, open = -1, capped = false
     const lineAt = lines(text)
     const push = (a, b) => {
       if (statements.length >= max) { if (!capped) errors.push({ line: lineAt(a), error: `more than ${max} statements: the rest is not read` }); capped = true; return }
@@ -221,16 +226,16 @@ export function splitSql(text, { dialect = null, max = LIMITS.statements } = {})
       dialect, bodies,
       onCode: (a, b) => { if (first < 0) first = a; last = b },
       onMeta: (a, b) => push(a, b),
-      onEnd: (unclosed) => { if (unclosed) open = true; if (first >= 0) push(first, last); first = -1 },
+      onEnd: (unclosed, from) => { if (unclosed && open < 0) open = from; if (first >= 0) push(first, last); first = -1 },
       onError: (at, error) => errors.push({ line: lineAt(at), error }),
     })
     return { statements, errors, open }
   }
   const r = run(true)
-  if (!r.open) return { statements: r.statements, errors: r.errors }
+  if (r.open < 0) return { statements: r.statements, errors: r.errors }
   // a routine's body that never closed: read again, its `;` ending statements
   const again = run(false)
-  return { statements: again.statements, errors: [...again.errors, { line: 1, error: 'a routine body never closes: its statements were split at each `;`' }] }
+  return { statements: again.statements, errors: [...again.errors, { line: text.slice(0, r.open).split('\n').length, error: 'a routine body never closes: its statements were split at each `;`' }] }
 }
 
 export function lexSql(text, { dialect = null, line = 1, max = LIMITS.tokens } = {}) {
@@ -305,6 +310,8 @@ export function lexSql(text, { dialect = null, line = 1, max = LIMITS.tokens } =
 
 // What the interpreter could not read: why, where (never the statement's text).
 class Unread extends Error { constructor(why, line) { super(why); this.line = line } }
+// A cap, the work budget or the clock reached: the replay stops at the statement (facts so far kept).
+class Stop extends Error {}
 
 // A cursor over a statement's tokens, between `i` and `end`.
 class Cur {
@@ -400,9 +407,11 @@ const defaultStop = (c) => DEFAULT_STOPS.has(c.peek().u) || c.is('NOT', 'NULL') 
 // adds its keys and defaults in ALTERs after all its tables).
 const moved = (db, x, at) => { if (!db.dump) x.at = at }
 
-export function readDdl(files, { dialect = PG, dump = false, limits = LIMITS } = {}) {
-  const db = { dialect, dump, schema: dialect === PG ? 'public' : null, tables: new Map(), views: new Map(), enums: new Map(), seqs: new Map(), indexOwner: new Map() }
+export function readDdl(files, { dialect = PG, dump = false, limits: given = LIMITS } = {}) {
+  const limits = { ...LIMITS, ...given }
+  const db = { dialect, dump, limits, work: 0, schema: dialect === PG ? 'public' : null, tables: new Map(), views: new Map(), enums: new Map(), seqs: new Map(), indexOwner: new Map(), refsTo: new Map(), pgNext: new Map() }
   const notes = [], skipped = []
+  const deadline = Date.now() + limits.ms
   let statements = 0, failed = 0, missing = 0, stopped = null, total = 0, dropped = 0
   const note = (s) => { if (notes.length < limits.notes) notes.push(s); else dropped++ }
   run: for (const f of files) {
@@ -412,9 +421,13 @@ export function readDdl(files, { dialect = PG, dump = false, limits = LIMITS } =
     const kinds = new Map()
     for (const st of split.statements) {
       if (++total > limits.statements) { stopped = { path: f.path, line: st.line, error: `more than ${limits.statements} statements: the replay stops here` }; break run }
+      if (Date.now() > deadline) { stopped = { path: f.path, line: st.line, error: 'the replay took more than its time: it stops here' }; break run }
       const at = { path: f.path, line: st.line }
       let r
-      try { r = statement(db, st, at, limits, note) } catch (e) { r = { failed: e instanceof Unread ? e : new Unread('it could not be read', st.line), kind: null } }
+      try { r = statement(db, st, at, limits, note) } catch (e) {
+        if (e instanceof Stop) { stopped = { path: f.path, line: st.line, error: e.message }; break run }
+        r = { failed: e instanceof Unread ? e : new Unread('it could not be read', st.line), kind: null }
+      }
       if (r.skipped) { kinds.set(r.skipped, (kinds.get(r.skipped) || 0) + 1); continue }
       if (r.failed) { failed++; note(`${f.path}:${st.line}: ${r.kind ? `${r.kind} ` : 'a statement '}not read (${r.failed.message}${r.failed.line && r.failed.line !== st.line ? `, at line ${r.failed.line}` : ''})`); continue }
       if (r.missing) { missing++; note(`${f.path}:${st.line}: ${r.kind} ${r.missing}: no earlier statement creates it (not applied)`); continue }
@@ -537,22 +550,80 @@ function interpret(db, c, kind, ctx) {
 }
 
 // ── names ──
+// A table's state: { key, q, at, cols (in order), colIx Map(name as compared → column), pk, uniques,
+// ix Map(name as compared → index), ixNext, implicit Set (MySQL's foreign-key indexes), fks Set,
+// checks, seqs Set (the sequences its columns own), part }. Every lookup by name is one map read; the
+// foreign keys pointing at a table are kept by its key (db.refsTo), so a drop or a rename touches
+// what it changes, never every table. What is not O(1) is charged to the work budget (cost).
 const qual = (db, parts) => { const p = parts.slice(-2); return p.length === 2 ? { schema: p[0], name: p[1] } : { schema: db.schema, name: p[0] } }
 const keyOf = (q) => (q.schema ? `${q.schema}.${q.name}` : q.name)
 const shown = (db, q) => (!q.schema || (db.dialect === PG && q.schema === 'public') ? q.name : `${q.schema}.${q.name}`)
-const same = (db, a, b) => (db.dialect === MY ? a.toLowerCase() === b.toLowerCase() : a === b)
+// a name as compared: MySQL's in any case, Postgres' as folded
+const cmp = (db, s) => (db.dialect === MY ? String(s).toLowerCase() : String(s))
+const tkey = (db, q) => cmp(db, keyOf(q))
+const same = (db, a, b) => cmp(db, a) === cmp(db, b)
 function findIn(db, map, q) {
-  const k = keyOf(q)
-  if (map.has(k)) return map.get(k)
-  if (db.dialect === PG && q.schema !== 'public' && !q.explicit) { const p = map.get(`public.${q.name}`); if (p) return p }
-  if (db.dialect === MY) { const l = k.toLowerCase(); for (const [kk, v] of map) if (kk.toLowerCase() === l) return v }
+  const v = map.get(tkey(db, q))
+  if (v) return v
+  if (db.dialect === PG && q.schema !== 'public' && !q.explicit) return map.get(`public.${q.name}`) || null
   return null
 }
 const tableOf = (db, parts) => { const q = qual(db, parts); q.explicit = parts.length > 1; return { q, t: findIn(db, db.tables, q) } }
-const colOf = (db, t, name) => t.cols.find((x) => same(db, x.name, name)) || null
+const colOf = (db, t, name) => t.colIx.get(cmp(db, name)) || null
+const ixOf = (db, t, name) => t.ix.get(cmp(db, name)) || null
 const loc = (ctx, line) => ({ path: ctx.at.path, line: line ?? ctx.at.line })
+const cost = (db, n) => { db.work += n; if (db.work > db.limits.work) throw new Stop('the replay took more than its work budget: it stops here') }
 
-function newTable(db, q, at) { return { key: keyOf(q), q, at, cols: [], pk: null, uniques: [], indexes: [], fks: [], checks: [], part: false, n: { fk: 0, chk: 0 } } }
+function newTable(db, q, at) { return { key: tkey(db, q), q, at, cols: [], colIx: new Map(), pk: null, uniques: [], ix: new Map(), ixNext: new Map(), implicit: new Set(), fks: new Set(), checks: [], seqs: new Set(), part: false, n: { fk: 0 } } }
+
+// a column joins its table, placed as MySQL's FIRST / AFTER say, else last
+function placeCol(db, t, col, how) {
+  if (t.cols.length >= db.limits.columns) throw new Stop(`a table of more than ${db.limits.columns} columns: the replay stops here`)
+  if (how.first) { cost(db, t.cols.length); t.cols.unshift(col) }
+  else if (how.after) {
+    const prev = colOf(db, t, how.after)
+    if (!prev) throw new Unread('AFTER names a column the table does not have', col.at.line)
+    cost(db, t.cols.length)
+    t.cols.splice(t.cols.indexOf(prev) + 1, 0, col)
+  } else t.cols.push(col)
+  t.colIx.set(cmp(db, col.name), col)
+  delete col.first; delete col.after
+}
+function unplaceCol(db, t, col) { cost(db, t.cols.length); t.cols.splice(t.cols.indexOf(col), 1); t.colIx.delete(cmp(db, col.name)) }
+
+function addIndex(db, t, ix) {
+  if (t.ix.size >= db.limits.indexes) throw new Stop(`a table of more than ${db.limits.indexes} indexes: the replay stops here`)
+  t.ix.set(cmp(db, ix.name), ix)
+  if (db.dialect === PG) db.indexOwner.set(`${t.q.schema}.${ix.name}`, t)
+  // MySQL drops the index it made for a foreign key once another index serves it (a dump states
+  // the indexes there are: none goes)
+  if (db.dialect === MY && !db.dump && !ix.implicit && t.implicit.size) for (const i of [...t.implicit]) if (leads(db, ix.columns, i.implicit.columns)) removeIndex(db, t, i)
+}
+function removeIndex(db, t, ix) {
+  t.ix.delete(cmp(db, ix.name))
+  t.implicit.delete(ix)
+  if (db.dialect === PG) db.indexOwner.delete(`${t.q.schema}.${ix.name}`)
+}
+// a name not yet taken: base, else base_2, base_3… (as MySQL names a second index of a column)
+function freshIndexName(db, t, base) {
+  if (!t.ix.has(cmp(db, base))) return base
+  const b = cmp(db, base)
+  let k = t.ixNext.get(b) || 2
+  while (t.ix.has(cmp(db, `${base}_${k}`))) k++
+  t.ixNext.set(b, k + 1)
+  return `${base}_${k}`
+}
+// does an index on `cols` lead with `need`, in order?
+const leads = (db, cols, need) => need.length <= cols.length && need.every((c, i) => same(db, c, cols[i]))
+
+const refsOf = (db, key) => { let s = db.refsTo.get(key); if (!s) db.refsTo.set(key, (s = new Set())); return s }
+function addFkTo(db, t, f) { t.fks.add(f); refsOf(db, f.to).add(f) }
+function removeFk(db, f) {
+  f.from.fks.delete(f)
+  db.refsTo.get(f.to)?.delete(f)
+  // the index MySQL made for it stays, an index like any other
+  for (const i of f.from.implicit) if (i.implicit === f) { i.implicit = null; f.from.implicit.delete(i) }
+}
 
 // ── CREATE TABLE ──
 function createTable(db, c, ctx) {
@@ -575,6 +646,7 @@ function createTable(db, c, ctx) {
     els.forEach((e, k) => !cols[k] && element(db, t, e, ctx, shownName))
     for (let j = c.i; j < c.end; j++) if (c.t[j].k === 'w' && c.t[j].u === 'INHERITS') { t.part = true; ctx.note(`${ctx.at.path}:${ctx.at.line}: ${shownName} inherits another table's columns (INHERITS): not followed`); break }
   } else c.fail('( was expected')
+  fkIndexes(db, t)
   db.tables.set(t.key, t)
   return { applied: true }
 }
@@ -589,11 +661,11 @@ function element(db, t, e, ctx, shownName) {
   if (db.dialect === MY && (e.is('INDEX') || e.is('KEY') || e.is('FULLTEXT') || e.is('SPATIAL'))) { mysqlIndex(db, t, e, ctx, false); return }
   const col = column(db, t, e, ctx)
   if (colOf(db, t, col.name)) e.fail('a column is defined twice')
-  t.cols.push(col)
+  placeCol(db, t, col, {})
   afterColumn(db, t, col, ctx)
 }
 
-// A column definition: { name, type, notNull, def, generated, identity, seq, at } (+ what it states
+// A column definition: { name, type, notNull, def, generated, identity, at } (+ what it states
 // inline: pk, unique, refs, position), read up to the end of `e`.
 function column(db, t, e, ctx) {
   const tok = e.peek()
@@ -601,8 +673,8 @@ function column(db, t, e, ctx) {
   const a = e.i
   e.until(typeStop)
   if (e.i === a) e.fail('a type was expected')
-  const col = { name, type: typeText(e, a, e.i), notNull: false, def: null, generated: null, identity: null, seq: null, at: loc(ctx, tok.line), inline: [] }
-  if (db.dialect === PG && SERIALS[col.type.toLowerCase()]) col.serial = true
+  const col = { name, type: typeText(e, a, e.i), notNull: false, def: null, generated: null, identity: null, at: loc(ctx, tok.line), inline: [] }
+  if (db.dialect === PG && SERIALS[lowType(col.type)]) col.serial = true
   let cname = null
   while (!e.done) {
     const line = e.line()
@@ -623,11 +695,11 @@ function column(db, t, e, ctx) {
       continue
     }
     if (db.dialect === MY && e.eat('AS')) { e.group(); col.generated = e.eat('STORED') ? 'stored' : (e.eat('VIRTUAL'), 'virtual'); continue }
-    if (e.eat('COLLATE')) { e.i++; continue }
+    if (e.eat('COLLATE')) { collation(e); continue }
     if (e.eat('AUTO_INCREMENT') || e.eat('AUTOINCREMENT')) { col.autoIncrement = true; continue }
     if (e.eat('COMMENT')) { e.i++; continue }
     if (e.eat('ON', 'UPDATE')) { e.i++; if (e.isOp('(')) e.group(); continue }
-    if (e.eat('CHARACTER', 'SET') || e.eat('CHARSET')) { e.i++; continue }
+    if (e.eat('CHARACTER', 'SET') || e.eat('CHARSET')) { collation(e); continue }
     if (e.eat('VISIBLE') || e.eat('INVISIBLE')) continue
     if (e.eat('STORAGE') || e.eat('COMPRESSION') || e.eat('COLUMN_FORMAT') || e.eat('SRID')) { e.i++; continue }
     if (e.eat('ENGINE_ATTRIBUTE') || e.eat('SECONDARY_ENGINE_ATTRIBUTE')) { e.eatOp('='); e.i++; continue }
@@ -638,12 +710,18 @@ function column(db, t, e, ctx) {
   }
   return col
 }
+// A collation's or a character set's name, qualified or not (pg_catalog."C", utf8mb4_bin, 'latin1')
+function collation(e) {
+  if (!e.isName() && e.peek()?.k !== 's') e.fail('a collation was expected')
+  e.i++
+  for (let k = 0; k < 2 && e.isOp('.') && e.isName(1); k++) e.i += 2
+}
 
 // After a column joins its table: a serial's sequence, and what the column states inline.
 function afterColumn(db, t, col, ctx) {
   if (col.serial) {
     const seq = { schema: t.q.schema, name: `${t.q.name}_${col.name}_seq` }
-    db.seqs.set(keyOf(seq), { q: seq, owner: { table: t.key, column: col.name } })
+    own(db, t, keyOf(seq), seq, col.name)
     col.def = `nextval('${[seq.schema, seq.name].map(ident).join('.').replace(/'/g, "''")}'::regclass)`
     col.notNull = true
   }
@@ -651,10 +729,18 @@ function afterColumn(db, t, col, ctx) {
     const at = loc(ctx, x.line)
     if (x.kind === 'pk') setPk(db, t, [col.name], x.name, at, ctx)
     else if (x.kind === 'unique') addUnique(db, t, [col.name], x.name, at)
-    else if (x.kind === 'fk') addFk(db, t, [col.name], x.ref, x.name, at)
+    else if (x.kind === 'fk') addFk(db, t, [col.name], x.ref, x.name, null, at)
     else if (x.kind === 'check') t.checks.push({ name: x.name || `${t.q.name}_${col.name}_check` })
   }
   delete col.inline
+}
+// a sequence owned by a table's column (a serial's, or one OWNED BY says)
+function own(db, t, key, q, column) {
+  const s = db.seqs.get(key) || { q, owner: null }
+  if (s.owner && s.owner.table !== t) s.owner.table.seqs.delete(key)
+  s.owner = { table: t, column }
+  db.seqs.set(key, s)
+  t.seqs.add(key)
 }
 
 function defaultOf(e) {
@@ -699,13 +785,20 @@ function nameList(db, e) {
 // One part of a key or an index: a column's name, or an expression's text.
 function partOf(db, c, a, b, index) {
   if (a >= b) throw new Unread('an empty column', c.t[Math.max(0, a - 1)]?.line)
-  // trailing modifiers: ASC, DESC, NULLS FIRST/LAST, COLLATE x, an operator class
+  // a COLLATE at the top level (its name qualified or not), and the operator class or order after
+  // it, are no part of the column
   let end = b
+  for (let j = a + 1, depth = 0; j < b; j++) {
+    const z = c.t[j]
+    if (z.k === 'o' && z.v === '(') depth++
+    else if (z.k === 'o' && z.v === ')') depth--
+    else if (!depth && z.k === 'w' && z.u === 'COLLATE') { end = j; break }
+  }
+  // trailing modifiers: ASC, DESC, NULLS FIRST/LAST, an operator class
   for (let k = 0; k < 6 && end > a + 1; k++) {
     const x = c.t[end - 1], y = c.t[end - 2]
     if (x.k === 'w' && (x.u === 'ASC' || x.u === 'DESC')) { end--; continue }
     if (x.k === 'w' && (x.u === 'FIRST' || x.u === 'LAST') && y.k === 'w' && y.u === 'NULLS') { end -= 2; continue }
-    if (y.k === 'w' && y.u === 'COLLATE') { end -= 2; continue }
     break
   }
   const x = c.t[a], y = end > a + 1 ? c.t[a + 1] : null
@@ -722,6 +815,7 @@ function partOf(db, c, a, b, index) {
   }
   return c.text(s, t)
 }
+const isExpr = (col) => /[()\s]/.test(col)
 
 // A table-level constraint (or ADD …): true when `e` holds one.
 function constraint(db, t, e, name, ctx) {
@@ -734,14 +828,14 @@ function constraint(db, t, e, name, ctx) {
   if (e.eat('UNIQUE')) {
     nullsDistinct(e)
     if (e.eat('USING', 'INDEX')) { usingIndex(db, t, e, name, 'unique', at, ctx); return true }
-    if (db.dialect === MY) { const k = e.eat('KEY') || e.eat('INDEX'); const ix = !e.isOp('(') && !e.is('USING') ? e.name() : null; if (e.eat('USING')) e.i++; addUnique(db, t, nameList(db, e), ix || name, at); void k; return true }
+    if (db.dialect === MY) { e.eat('KEY') || e.eat('INDEX'); const ix = !e.isOp('(') && !e.is('USING') ? e.name() : null; if (e.eat('USING')) e.i++; addUnique(db, t, nameList(db, e), ix || name, at); return true }
     addUnique(db, t, nameList(db, e), name, at); return true
   }
   if (e.eat('FOREIGN', 'KEY')) {
     const ix = db.dialect === MY && !e.isOp('(') ? e.name() : null
     const cols = nameList(db, e)
     e.need('REFERENCES')
-    addFk(db, t, cols, references(db, e), name || ix, at)
+    addFk(db, t, cols, references(db, e), name, ix, at)
     return true
   }
   if (e.eat('CHECK')) { e.group(); t.checks.push({ name: name || `${t.q.name}_check${t.checks.length ? t.checks.length : ''}` }); while (!e.done) { if (!deferrable(e) && !e.eat('ENFORCED') && !e.eat('NOT', 'ENFORCED')) e.fail('an unexpected word after a check') } return true }
@@ -755,29 +849,45 @@ function setPk(db, t, parts, name, at, ctx) {
   t.pk = { name: name || (db.dialect === MY ? 'PRIMARY' : `${t.q.name}_pkey`), parts: parts.map((p) => colOf(db, t, p).name), at }
 }
 function addUnique(db, t, parts, name, at) {
-  for (const p of parts) if (!/[()\s]/.test(p) && !colOf(db, t, p)) throw new Unread('a key names a column the table does not have', at.line)
+  for (const p of parts) if (!isExpr(p) && !colOf(db, t, p)) throw new Unread('a key names a column the table does not have', at.line)
   const cols = parts.map((p) => colOf(db, t, p)?.name ?? p)
-  if (db.dialect === MY) { t.indexes.push({ name: freshIndexName(db, t, name || cols[0]), unique: true, columns: cols, partial: false, at }); return }
+  if (db.dialect === MY) { addIndex(db, t, { name: freshIndexName(db, t, name || (isExpr(cols[0]) ? 'functional_index' : cols[0])), unique: true, columns: cols, partial: false, at }); return }
+  if (t.uniques.length >= db.limits.indexes) throw new Stop(`a table of more than ${db.limits.indexes} indexes: the replay stops here`)
   t.uniques.push({ name: name || `${t.q.name}_${cols.join('_')}_key`, parts: cols, at })
 }
-function addFk(db, t, cols, ref, name, at) {
+// name: the constraint's, ix: MySQL's FOREIGN KEY index_name (the index it makes when none serves)
+function addFk(db, t, cols, ref, name, ix, at) {
   for (const p of cols) if (!colOf(db, t, p)) throw new Unread('a foreign key names a column the table does not have', at.line)
+  if (t.fks.size >= db.limits.indexes) throw new Stop(`a table of more than ${db.limits.indexes} foreign keys: the replay stops here`)
   t.n.fk++
-  t.fks.push({ name: name || (db.dialect === MY ? `${t.q.name}_ibfk_${t.n.fk}` : `${t.q.name}_${cols.join('_')}_fkey`), columns: cols.map((p) => colOf(db, t, p).name), to: keyOf(ref.q), toQ: ref.q, toColumns: ref.toColumns, onDelete: ref.onDelete, onUpdate: ref.onUpdate, at })
+  const columns = cols.map((p) => colOf(db, t, p).name)
+  addFkTo(db, t, { from: t, name: name || (db.dialect === MY ? `${t.q.name}_ibfk_${t.n.fk}` : `${t.q.name}_${columns.join('_')}_fkey`), ixName: ix || name || null, columns, to: tkey(db, ref.q), toQ: ref.q, toColumns: ref.toColumns, onDelete: ref.onDelete, onUpdate: ref.onUpdate, at })
 }
-function freshIndexName(db, t, base) {
-  let name = base, k = 2
-  while (t.indexes.some((i) => same(db, i.name, name))) name = `${base}_${k++}`
-  return name
+// MySQL: a foreign key no index (nor the primary key) leads with gets one of its own, named by its
+// index name, else its constraint's, else its first column (run once a statement has added all it adds)
+function fkIndexes(db, t) {
+  if (db.dialect !== MY || !t.fks.size) return
+  cost(db, t.fks.size * (t.ix.size + 1))
+  for (const f of t.fks) {
+    if (t.pk && leads(db, t.pk.parts, f.columns)) continue
+    let served = null
+    for (const i of t.ix.values()) if (!i.fulltext && leads(db, i.columns, f.columns)) { served = i; break }
+    // a dump lists the index MySQL made as a KEY of its own: the one named by the key (or its first
+    // column) on exactly its columns is that index
+    if (served && db.dump && !served.unique && !served.implicit && served.columns.length === f.columns.length && (same(db, served.name, f.ixName || '') || same(db, served.name, f.columns[0]))) { served.implicit = f; t.implicit.add(served) }
+    if (!served) {
+      const ix = { name: freshIndexName(db, t, f.ixName || f.columns[0]), unique: false, columns: [...f.columns], partial: false, at: f.at, implicit: f }
+      addIndex(db, t, ix)
+      t.implicit.add(ix)
+    }
+  }
 }
 // Postgres: ADD CONSTRAINT x UNIQUE / PRIMARY KEY USING INDEX i (the index becomes the constraint's)
 function usingIndex(db, t, e, name, kind, at, ctx) {
   const parts = e.qname()
-  const iname = parts[parts.length - 1]
-  const ix = t.indexes.find((i) => i.name === iname)
+  const ix = ixOf(db, t, parts[parts.length - 1])
   if (!ix) throw new Unread('USING INDEX names an index the table does not have', at.line)
-  t.indexes = t.indexes.filter((i) => i !== ix)
-  db.indexOwner.delete(`${t.q.schema}.${ix.name}`)
+  removeIndex(db, t, ix)
   if (kind === 'pk') setPk(db, t, ix.columns, name || ix.name, at, ctx)
   else addUnique(db, t, ix.columns, name || ix.name, at)
 }
@@ -785,14 +895,15 @@ function usingIndex(db, t, e, name, kind, at, ctx) {
 // MySQL: INDEX | KEY | FULLTEXT [INDEX|KEY] | SPATIAL … [name] [USING x] (cols)
 function mysqlIndex(db, t, e, ctx, unique) {
   const line = e.line()
-  e.eat('FULLTEXT') || e.eat('SPATIAL')
+  const fulltext = e.eat('FULLTEXT') || e.eat('SPATIAL')
   e.eat('INDEX') || e.eat('KEY')
   const name = !e.isOp('(') && !e.is('USING') ? e.name() : null
   if (e.eat('USING')) e.i++
   const [a, b] = e.group()
   const s = e.sub(a, b)
   const columns = s.items().map(([x, y]) => partOf(db, s, x, y, true))
-  t.indexes.push({ name: freshIndexName(db, t, name || columns[0]), unique, columns, partial: false, at: loc(ctx, line) })
+  // an unnamed index is named by its first column, or `functional_index` when that is an expression
+  addIndex(db, t, { name: freshIndexName(db, t, name || (isExpr(columns[0]) ? 'functional_index' : columns[0])), unique, columns, partial: false, at: loc(ctx, line), ...(fulltext ? { fulltext: true } : {}) })
 }
 
 // ── CREATE INDEX ──
@@ -812,10 +923,9 @@ function createIndex(db, c, ctx, unique, fulltext) {
   const columns = s.items().map(([x, y]) => partOf(db, s, x, y, true))
   let partial = false
   for (let depth = 0; !c.done; c.i++) { const x = c.peek(); if (x.k === 'o' && x.v === '(') depth++; else if (x.k === 'o' && x.v === ')') depth--; else if (!depth && x.k === 'w' && x.u === 'WHERE') { partial = true; break } }
-  const name = iname || (db.dialect === MY ? columns[0] : pgIndexName(db, t, columns))
-  if (t.indexes.some((i) => same(db, i.name, name)) || (db.dialect === PG && db.indexOwner.has(`${t.q.schema}.${name}`))) { if (ifNot) return 'CREATE INDEX IF NOT EXISTS (it exists)'; c.fail('the index already exists') }
-  t.indexes.push({ name, unique: unique && !fulltext, columns, partial, at: loc(ctx) })
-  if (db.dialect === PG) db.indexOwner.set(`${t.q.schema}.${name}`, t.key)
+  const name = iname || (db.dialect === MY ? freshIndexName(db, t, isExpr(columns[0]) ? 'functional_index' : columns[0]) : pgIndexName(db, t, columns))
+  if (ixOf(db, t, name) || (db.dialect === PG && db.indexOwner.has(`${t.q.schema}.${name}`))) { if (ifNot) return 'CREATE INDEX IF NOT EXISTS (it exists)'; c.fail('the index already exists') }
+  addIndex(db, t, { name, unique: unique && !fulltext, columns, partial, at: loc(ctx), ...(fulltext ? { fulltext: true } : {}) })
   return { applied: true }
 }
 // Postgres' name for an unnamed index: <table>_<columns>_idx (an expression by its function's name,
@@ -823,8 +933,12 @@ function createIndex(db, c, ctx, unique, fulltext) {
 function pgIndexName(db, t, columns) {
   const part = (x) => (/^[\w$]+$/.test(x) ? x : /^([A-Za-z_][\w$]*)\s*\(/.exec(x)?.[1].toLowerCase() ?? 'expr')
   const base = `${t.q.name}_${columns.map(part).join('_')}_idx`.slice(0, 63)
-  let name = base, k = 1
-  while (db.indexOwner.has(`${t.q.schema}.${name}`)) name = `${base.slice(0, 62 - String(k).length)}${k++}`
+  const has = (n) => db.indexOwner.has(`${t.q.schema}.${n}`)
+  if (!has(base)) return base
+  const k0 = `${t.q.schema}.${base}`
+  let k = db.pgNext.get(k0) || 1, name
+  while (has((name = `${base.slice(0, 62 - String(k).length)}${k}`))) k++
+  db.pgNext.set(k0, k + 1)
   return name
 }
 
@@ -847,6 +961,7 @@ function alterTable(db, c, ctx) {
     else label ||= r
   }
   if (!changed) return label || 'ALTER TABLE … options'
+  fkIndexes(db, t)
   moved(db, t, loc(ctx))
   return { applied: true }
 }
@@ -880,7 +995,7 @@ function alterAction(db, t, a, ctx) {
     if (a.eat('CONSTRAINT')) { const ifE = a.eat('IF', 'EXISTS'); return dropConstraint(db, t, a.name(), ifE, at, ctx) }
     if (db.dialect === MY && a.eat('PRIMARY', 'KEY')) { if (!t.pk) a.fail('the table has no primary key'); t.pk = null; return true }
     if (db.dialect === MY && a.eat('FOREIGN', 'KEY')) return dropConstraint(db, t, a.name(), false, at, ctx)
-    if (db.dialect === MY && (a.eat('INDEX') || a.eat('KEY'))) { const n = a.name(); const i = t.indexes.findIndex((x) => same(db, x.name, n)); if (i < 0) a.fail('no such index'); t.indexes.splice(i, 1); return true }
+    if (db.dialect === MY && (a.eat('INDEX') || a.eat('KEY'))) { const ix = ixOf(db, t, a.name()); if (!ix) a.fail('no such index'); removeIndex(db, t, ix); return true }
     if (db.dialect === MY && a.eat('CHECK')) return dropConstraint(db, t, a.name(), false, at, ctx)
     if (a.is('DEFAULT') || a.is('PARTITION')) return actionLabel(a.sub(a.i - 1, a.end))
     a.eat('COLUMN')
@@ -906,18 +1021,25 @@ function alterAction(db, t, a, ctx) {
     if (!oldCol) a.fail('no such column')
     a.i = save
     const col = column(db, t, a, ctx)
-    if (change && !same(db, old, col.name)) renameColumn(db, t, oldCol, col.name)
-    const keep = t.cols.indexOf(oldCol)
+    if (change && !same(db, old, col.name)) { if (colOf(db, t, col.name)) a.fail('the column already exists'); renameColumn(db, t, oldCol, col.name) }
     // MODIFY and CHANGE restate the column whole: what they leave out is gone
     Object.assign(oldCol, { name: col.name, type: col.type, notNull: col.notNull || (t.pk?.parts.some((p) => same(db, p, col.name)) ?? false), def: col.def, generated: col.generated, identity: null, autoIncrement: col.autoIncrement })
     moved(db, oldCol, col.at)
-    if (col.first || col.after) { t.cols.splice(keep, 1); place(db, t, oldCol, col) }
-    col.inline.forEach((x) => (x.col = oldCol)); oldCol.inline = col.inline; afterColumn(db, t, oldCol, ctx)
+    if (col.first || col.after) { unplaceCol(db, t, oldCol); placeCol(db, t, oldCol, col) }
+    oldCol.inline = col.inline
+    afterColumn(db, t, oldCol, ctx)
     return true
   }
   if (a.eat('RENAME')) {
-    if (a.eat('CONSTRAINT')) { const from = a.name(); a.need('TO'); const to = a.name(); const k = [t.pk, ...t.uniques, ...t.fks, ...t.checks].find((x) => x && x.name === from); if (!k) a.fail('no such constraint'); k.name = to; return 'ALTER TABLE … RENAME CONSTRAINT' }
-    if (a.eat('INDEX') || a.eat('KEY')) { const from = a.name(); a.need('TO'); const to = a.name(); const ix = t.indexes.find((x) => same(db, x.name, from)); if (!ix) a.fail('no such index'); ix.name = to; return true }
+    if (a.eat('CONSTRAINT')) {
+      const from = a.name(); a.need('TO'); const to = a.name()
+      cost(db, t.fks.size + t.uniques.length + t.checks.length)
+      const k = [t.pk, ...t.uniques, ...t.fks, ...t.checks].find((x) => x && same(db, x.name, from))
+      if (!k) a.fail('no such constraint')
+      k.name = to
+      return true
+    }
+    if (a.eat('INDEX') || a.eat('KEY')) { const from = a.name(); a.need('TO'); const to = a.name(); const ix = ixOf(db, t, from); if (!ix) a.fail('no such index'); removeIndex(db, t, ix); ix.name = to; addIndex(db, t, ix); return true }
     // RENAME TO t2 (MySQL: RENAME AS t2, RENAME t2); else a column: RENAME [COLUMN] a TO b
     const column = a.is('COLUMN') || (a.peek(1)?.k === 'w' && a.peek(1).u === 'TO')
     if (a.eat('TO') || a.eat('AS') || !column) {
@@ -943,15 +1065,9 @@ function alterAction(db, t, a, ctx) {
 function addColumn(db, t, a, ctx, ifNot) {
   const col = column(db, t, a, ctx)
   if (colOf(db, t, col.name)) { if (ifNot) return 'ALTER TABLE … ADD COLUMN IF NOT EXISTS (it exists)'; a.fail('the column already exists') }
-  place(db, t, col, col)
+  placeCol(db, t, col, col)
   afterColumn(db, t, col, ctx)
   return true
-}
-function place(db, t, col, how) {
-  if (how.first) t.cols.unshift(col)
-  else if (how.after) { const i = t.cols.findIndex((x) => same(db, x.name, how.after)); if (i < 0) throw new Unread('AFTER names a column the table does not have', col.at.line); t.cols.splice(i + 1, 0, col) }
-  else t.cols.push(col)
-  delete col.first; delete col.after
 }
 
 function alterColumn(db, t, col, a, at, ctx) {
@@ -977,60 +1093,82 @@ function alterColumn(db, t, col, a, at, ctx) {
 }
 
 function dropColumn(db, t, col) {
-  t.cols = t.cols.filter((x) => x !== col)
+  unplaceCol(db, t, col)
   const has = (list) => list.some((p) => same(db, p, col.name))
+  cost(db, t.ix.size + t.uniques.length + t.fks.size)
   if (db.dialect === MY) {
-    for (const i of t.indexes) i.columns = i.columns.filter((p) => !same(db, p, col.name))
-    t.indexes = t.indexes.filter((i) => i.columns.length)
+    for (const i of [...t.ix.values()]) { i.columns = i.columns.filter((p) => !same(db, p, col.name)); if (!i.columns.length) removeIndex(db, t, i) }
     if (t.pk) { t.pk.parts = t.pk.parts.filter((p) => !same(db, p, col.name)); if (!t.pk.parts.length) t.pk = null }
   } else {
     if (t.pk && has(t.pk.parts)) t.pk = null
     t.uniques = t.uniques.filter((u) => !has(u.parts))
-    for (const i of t.indexes.filter((x) => has(x.columns))) db.indexOwner.delete(`${t.q.schema}.${i.name}`)
-    t.indexes = t.indexes.filter((i) => !has(i.columns))
+    for (const i of [...t.ix.values()]) if (has(i.columns)) removeIndex(db, t, i)
   }
-  t.fks = t.fks.filter((f) => !has(f.columns))
+  for (const f of [...t.fks]) if (has(f.columns)) removeFk(db, f)
   // foreign keys elsewhere that pointed at it go with it (Postgres does so with CASCADE and refuses
   // the statement without it: the engine accepted the migrations, so either way they are gone)
-  for (const o of db.tables.values()) o.fks = o.fks.filter((f) => !(f.to === t.key && (f.toColumns.length ? has(f.toColumns) : t.pk === null)))
+  const refs = db.refsTo.get(t.key)
+  if (refs) { cost(db, refs.size); for (const f of [...refs]) if (f.toColumns.length ? has(f.toColumns) : t.pk === null) removeFk(db, f) }
+  for (const k of t.seqs) { const s = db.seqs.get(k); if (s && same(db, s.owner.column, col.name)) { db.seqs.delete(k); t.seqs.delete(k) } }
 }
 function renameColumn(db, t, col, to) {
   const from = col.name
   const r = (p) => (same(db, p, from) ? to : p)
+  t.colIx.delete(cmp(db, from))
   col.name = to
+  t.colIx.set(cmp(db, to), col)
+  cost(db, t.ix.size + t.uniques.length + t.fks.size)
   if (t.pk) t.pk.parts = t.pk.parts.map(r)
   for (const u of t.uniques) u.parts = u.parts.map(r)
-  for (const i of t.indexes) i.columns = i.columns.map(r)
+  for (const i of t.ix.values()) i.columns = i.columns.map(r)
   for (const f of t.fks) f.columns = f.columns.map(r)
-  for (const o of db.tables.values()) for (const f of o.fks) if (f.to === t.key) f.toColumns = f.toColumns.map(r)
-  for (const s of db.seqs.values()) if (s.owner?.table === t.key && same(db, s.owner.column, from)) s.owner.column = to
+  const refs = db.refsTo.get(t.key)
+  if (refs) { cost(db, refs.size); for (const f of refs) f.toColumns = f.toColumns.map(r) }
+  for (const k of t.seqs) { const s = db.seqs.get(k); if (s && same(db, s.owner.column, from)) s.owner.column = to }
 }
 function renameTable(db, t, q) {
-  const old = t.key
-  if (findIn(db, db.tables, q) && findIn(db, db.tables, q) !== t) throw new Unread('a table of that name exists', t.at.line)
+  const old = t.key, key = tkey(db, q)
+  const other = db.tables.get(key)
+  if (other && other !== t) throw new Unread('a table of that name exists', t.at.line)
+  const moveIx = db.dialect === PG && q.schema !== t.q.schema
+  if (moveIx) for (const i of t.ix.values()) db.indexOwner.delete(`${t.q.schema}.${i.name}`)
   db.tables.delete(old)
   t.q = { schema: q.schema, name: q.name }
-  t.key = keyOf(t.q)
-  db.tables.set(t.key, t)
-  for (const o of db.tables.values()) for (const f of o.fks) if (f.to === old) { f.to = t.key; f.toQ = t.q }
-  for (const [k, v] of db.indexOwner) if (v === old) db.indexOwner.set(k, t.key)
-  for (const s of db.seqs.values()) if (s.owner?.table === old) s.owner.table = t.key
+  t.key = key
+  db.tables.set(key, t)
+  if (moveIx) for (const i of t.ix.values()) db.indexOwner.set(`${t.q.schema}.${i.name}`, t)
+  // the foreign keys that pointed at its old name follow it
+  const refs = db.refsTo.get(old)
+  if (refs && old !== key) {
+    cost(db, refs.size)
+    const into = refsOf(db, key)
+    for (const f of refs) { f.to = key; f.toQ = t.q; into.add(f) }
+    db.refsTo.delete(old)
+  }
 }
 
 function dropConstraint(db, t, name, ifExists, at, ctx) {
   if (t.pk && same(db, t.pk.name, name)) { t.pk = null; return true }
+  cost(db, t.uniques.length + t.fks.size + t.checks.length)
   const u = t.uniques.findIndex((x) => same(db, x.name, name))
   if (u >= 0) { t.uniques.splice(u, 1); return true }
-  const f = t.fks.findIndex((x) => same(db, x.name, name))
-  if (f >= 0) { t.fks.splice(f, 1); return true }
+  for (const f of t.fks) if (same(db, f.name, name)) { removeFk(db, f); return true }
   const k = t.checks.findIndex((x) => x.name && same(db, x.name, name))
-  if (k >= 0) { t.checks.splice(k, 1); return 'ALTER TABLE … DROP CONSTRAINT (a check)' }
-  if (db.dialect === MY) { const i = t.indexes.findIndex((x) => x.unique && same(db, x.name, name)); if (i >= 0) { t.indexes.splice(i, 1); return true } }
+  if (k >= 0) { t.checks.splice(k, 1); return true }
+  if (db.dialect === MY) { const i = ixOf(db, t, name); if (i?.unique) { removeIndex(db, t, i); return true } }
   if (!ifExists) ctx.note(`${at.path}:${at.line}: ${shown(db, t.q)} has no constraint ${name} to drop (a check, or one an unread statement made): nothing changed`)
   return 'ALTER TABLE … DROP CONSTRAINT (unknown)'
 }
 
 // ── DROP ──
+function dropTable(db, t) {
+  db.tables.delete(t.key)
+  for (const f of [...t.fks]) removeFk(db, f)
+  const refs = db.refsTo.get(t.key)
+  if (refs) { cost(db, refs.size); for (const f of [...refs]) removeFk(db, f); db.refsTo.delete(t.key) }
+  if (db.dialect === PG) for (const i of t.ix.values()) db.indexOwner.delete(`${t.q.schema}.${i.name}`)
+  for (const k of t.seqs) db.seqs.delete(k)
+}
 function dropTables(db, c, ctx) {
   const ifE = c.eat('IF', 'EXISTS')
   const names = []
@@ -1039,10 +1177,7 @@ function dropTables(db, c, ctx) {
   for (const parts of names) {
     const { q, t } = tableOf(db, parts)
     if (!t) { if (ifE) continue; return { missing: shown(db, q) } }
-    db.tables.delete(t.key)
-    for (const o of db.tables.values()) o.fks = o.fks.filter((f) => f.to !== t.key)
-    for (const [k, v] of [...db.indexOwner]) if (v === t.key) db.indexOwner.delete(k)
-    for (const [k, s] of [...db.seqs]) if (s.owner?.table === t.key) db.seqs.delete(k)
+    dropTable(db, t)
     changed = true
   }
   return changed ? { applied: true } : 'DROP TABLE IF EXISTS (no such table)'
@@ -1054,9 +1189,9 @@ function dropIndex(db, c, ctx) {
     const name = c.name(); c.need('ON')
     const { q, t } = tableOf(db, c.qname())
     if (!t) return { missing: shown(db, q) }
-    const i = t.indexes.findIndex((x) => same(db, x.name, name))
-    if (i < 0) c.fail('no such index')
-    t.indexes.splice(i, 1)
+    const ix = ixOf(db, t, name)
+    if (!ix) c.fail('no such index')
+    removeIndex(db, t, ix)
     return { applied: true }
   }
   let changed = false
@@ -1064,12 +1199,10 @@ function dropIndex(db, c, ctx) {
     const s = c.sub(a, b)
     const parts = s.qname()
     const q = qual(db, parts)
-    let owner = db.indexOwner.get(keyOf(q))
-    if (!owner && parts.length === 1) { const hits = [...db.indexOwner].filter(([k]) => k.endsWith(`.${q.name}`)); if (hits.length === 1) owner = hits[0][1] }
-    const t = owner && db.tables.get(owner)
-    if (!t) { if (ifE) continue; return { missing: q.name } }
-    t.indexes = t.indexes.filter((i) => i.name !== q.name)
-    for (const [k, v] of [...db.indexOwner]) if (v === owner && k.endsWith(`.${q.name}`)) db.indexOwner.delete(k)
+    const t = db.indexOwner.get(keyOf(q)) || (parts.length === 1 && q.schema !== 'public' ? db.indexOwner.get(`public.${q.name}`) : null)
+    const ix = t && ixOf(db, t, q.name)
+    if (!ix) { if (ifE) continue; return { missing: q.name } }
+    removeIndex(db, t, ix)
     changed = true
   }
   return changed ? { applied: true } : 'DROP INDEX IF EXISTS (no such index)'
@@ -1092,24 +1225,30 @@ function dropTypes(db, c, ctx) {
   let changed = false
   for (const [a, b] of c.items()) {
     const s = c.sub(a, b)
-    const q = qual(db, s.qname())
-    if (!findIn(db, db.enums, q)) { if (ifE) continue; return 'DROP TYPE' }
-    db.enums.delete(findIn(db, db.enums, q).key)
+    const en = findIn(db, db.enums, qual(db, s.qname()))
+    if (!en) { if (ifE) continue; return 'DROP TYPE' }
+    db.enums.delete(en.key)
     changed = true
   }
   return changed ? { applied: true } : 'DROP TYPE IF EXISTS (no such type)'
 }
 function dropSequences(db, c, ctx) {
   c.eat('IF', 'EXISTS')
-  for (const [a, b] of c.items()) { const s = c.sub(a, b); db.seqs.delete(keyOf(qual(db, s.qname()))) }
+  for (const [a, b] of c.items()) {
+    const s = c.sub(a, b)
+    const k = keyOf(qual(db, s.qname()))
+    db.seqs.get(k)?.owner?.table.seqs.delete(k)
+    db.seqs.delete(k)
+  }
   return { applied: true }
 }
 function dropSchema(db, c, ctx) {
   c.eat('IF', 'EXISTS')
   const gone = new Set()
   for (const [a, b] of c.items()) { const s = c.sub(a, b); gone.add(s.name()) }
-  for (const m of [db.tables, db.views, db.enums, db.seqs]) for (const [k, v] of [...m]) if (gone.has(v.q?.schema)) m.delete(k)
-  for (const t of db.tables.values()) t.fks = t.fks.filter((f) => db.tables.has(f.to) || !gone.has(f.toQ.schema))
+  cost(db, db.tables.size + db.views.size + db.enums.size + db.seqs.size)
+  for (const t of [...db.tables.values()]) if (gone.has(t.q.schema)) dropTable(db, t)
+  for (const m of [db.views, db.enums, db.seqs]) for (const [k, v] of [...m]) if (gone.has(v.q?.schema)) m.delete(k)
   return { applied: true }
 }
 
@@ -1121,7 +1260,7 @@ function renameTables(db, c, ctx) {
     const from = s.qname(); s.need('TO'); const to = qual(db, s.qname())
     const { q, t } = tableOf(db, from)
     if (t) renameTable(db, t, to)
-    else { const v = findIn(db, db.views, q); if (!v) return { missing: shown(db, q) }; db.views.delete(v.key); v.q = to; v.key = keyOf(to); db.views.set(v.key, v) }
+    else { const v = findIn(db, db.views, q); if (!v) return { missing: shown(db, q) }; db.views.delete(v.key); v.q = to; v.key = tkey(db, to); db.views.set(v.key, v) }
   }
   return { applied: true }
 }
@@ -1134,7 +1273,7 @@ function createType(db, c, ctx) {
   const values = []
   for (let j = a; j < b; j++) { const x = c.t[j]; if (x.k === 's') values.push(unstring(x)); else if (!(x.k === 'o' && x.v === ',')) throw new Unread('an enum value was expected', x.line) }
   if (findIn(db, db.enums, q)) c.fail('the type already exists')
-  db.enums.set(keyOf(q), { key: keyOf(q), q, values, at: loc(ctx) })
+  db.enums.set(tkey(db, q), { key: tkey(db, q), q, values, at: loc(ctx) })
   return { applied: true }
 }
 function alterType(db, c, ctx) {
@@ -1145,6 +1284,7 @@ function alterType(db, c, ctx) {
     const ifNot = c.eat('IF', 'NOT', 'EXISTS')
     const v = c.peek(); if (!v || v.k !== 's') c.fail('a value was expected'); c.i++
     const value = unstring(v)
+    cost(db, en.values.length)
     if (en.values.includes(value)) { if (ifNot) return 'ALTER TYPE … ADD VALUE IF NOT EXISTS (it exists)'; c.fail('the value exists') }
     let at = en.values.length
     if (c.eat('BEFORE') || c.eat('AFTER')) {
@@ -1161,6 +1301,7 @@ function alterType(db, c, ctx) {
     if (!en) return { missing: shown(db, q) }
     const a = c.peek(); c.i++; c.need('TO'); const b = c.peek(); c.i++
     if (a?.k !== 's' || b?.k !== 's') c.fail('a value was expected')
+    cost(db, en.values.length)
     const i = en.values.indexOf(unstring(a)); if (i < 0) c.fail('no such value')
     en.values[i] = unstring(b); moved(db, en, loc(ctx))
     return { applied: true }
@@ -1170,8 +1311,11 @@ function alterType(db, c, ctx) {
     const to = { schema: en.q.schema, name: c.name() }
     db.enums.delete(en.key)
     // the columns of that type follow it
-    for (const t of db.tables.values()) for (const col of t.cols) { const m = /^(.*?)((?:\[\])*)$/.exec(col.type); if (same(db, m[1], en.q.name) || m[1] === shown(db, en.q)) col.type = `${to.name}${m[2]}` }
-    en.q = to; en.key = keyOf(to); moved(db, en, loc(ctx))
+    for (const t of db.tables.values()) {
+      cost(db, t.cols.length)
+      for (const col of t.cols) { const m = /^(.*?)((?:\[\])*)$/.exec(col.type); if (same(db, m[1], en.q.name) || m[1] === shown(db, en.q)) col.type = `${to.name}${m[2]}` }
+    }
+    en.q = to; en.key = tkey(db, to); moved(db, en, loc(ctx))
     db.enums.set(en.key, en)
     return { applied: true }
   }
@@ -1182,7 +1326,7 @@ function alterType(db, c, ctx) {
 function createView(db, c, ctx) {
   c.eat('IF', 'NOT', 'EXISTS')
   const q = qual(db, c.qname())
-  const v = { key: keyOf(q), q, at: loc(ctx) }
+  const v = { key: tkey(db, q), q, at: loc(ctx) }
   if (findIn(db, db.tables, q)) c.fail('a table of that name exists')
   db.views.set(v.key, v)
   return { applied: true }
@@ -1193,7 +1337,7 @@ function alterView(db, c, ctx) {
   if (!c.eat('RENAME', 'TO')) return 'ALTER VIEW'
   const v = findIn(db, db.views, q)
   if (!v) return { missing: shown(db, q) }
-  db.views.delete(v.key); v.q = { schema: v.q.schema, name: c.name() }; v.key = keyOf(v.q); v.at = loc(ctx); db.views.set(v.key, v)
+  db.views.delete(v.key); v.q = { schema: v.q.schema, name: c.name() }; v.key = tkey(db, v.q); v.at = loc(ctx); db.views.set(v.key, v)
   return { applied: true }
 }
 function alterIndex(db, c, ctx) {
@@ -1201,39 +1345,38 @@ function alterIndex(db, c, ctx) {
   const parts = c.qname()
   if (!c.eat('RENAME', 'TO')) return 'ALTER INDEX'
   const q = qual(db, parts), to = c.name()
-  let owner = db.indexOwner.get(keyOf(q))
-  if (!owner && parts.length === 1) { const hits = [...db.indexOwner].filter(([k]) => k.endsWith(`.${q.name}`)); if (hits.length === 1) owner = hits[0][1] }
-  const t = owner && db.tables.get(owner)
+  const t = db.indexOwner.get(keyOf(q)) || (parts.length === 1 && q.schema !== 'public' ? db.indexOwner.get(`public.${q.name}`) : null)
   if (!t) return { missing: q.name }
-  const ix = t.indexes.find((i) => i.name === q.name)
+  const ix = ixOf(db, t, q.name)
   if (!ix) return 'ALTER INDEX … RENAME (a constraint\'s index)'
-  db.indexOwner.delete(`${t.q.schema}.${ix.name}`); ix.name = to; db.indexOwner.set(`${t.q.schema}.${to}`, t.key)
+  removeIndex(db, t, ix); ix.name = to; addIndex(db, t, ix)
   return { applied: true }
 }
 function createSequence(db, c, ctx) {
   c.eat('IF', 'NOT', 'EXISTS')
   const q = qual(db, c.qname())
-  const s = { q, owner: null }
-  db.seqs.set(keyOf(q), s)
-  ownedBy(db, c, s)
+  const k = keyOf(q)
+  if (!db.seqs.has(k)) db.seqs.set(k, { q, owner: null })
+  ownedBy(db, c, k)
   return { applied: true }
 }
 function alterSequence(db, c, ctx) {
   c.eat('IF', 'EXISTS')
-  const q = qual(db, c.qname())
-  const s = db.seqs.get(keyOf(q))
-  if (!s) return 'ALTER SEQUENCE'
-  return ownedBy(db, c, s) ? { applied: true } : 'ALTER SEQUENCE'
+  const k = keyOf(qual(db, c.qname()))
+  if (!db.seqs.has(k)) return 'ALTER SEQUENCE'
+  return ownedBy(db, c, k) ? { applied: true } : 'ALTER SEQUENCE'
 }
-function ownedBy(db, c, s) {
+function ownedBy(db, c, k) {
   for (; !c.done; c.i++) {
     if (!c.is('OWNED', 'BY')) continue
     c.i += 2
-    if (c.eat('NONE')) { s.owner = null; return true }
+    const s = db.seqs.get(k)
+    if (c.eat('NONE')) { s.owner?.table.seqs.delete(k); s.owner = null; return true }
     const parts = c.qname()
     if (parts.length < 2) c.fail('a column was expected')
     const { t } = tableOf(db, parts.slice(0, -1))
-    s.owner = t ? { table: t.key, column: parts[parts.length - 1] } : null
+    if (t) own(db, t, k, s.q, parts[parts.length - 1])
+    else { s.owner?.table.seqs.delete(k); s.owner = null }
     return true
   }
   return false
@@ -1256,6 +1399,7 @@ export function indexParts(text, dialect) {
 
 // ── the model ──
 const NEXTVAL = /^nextval\('((?:[^']|'')+)'(?:::regclass)?\)$/i
+const lowType = (t) => String(t).trim().toLowerCase().replace(/\s+/g, ' ')
 function modelOf(db) {
   const entities = []
   for (const t of db.tables.values()) {
@@ -1265,24 +1409,24 @@ function modelOf(db) {
       // a serial: an integer column whose default is the nextval of the sequence it owns (as a dump
       // writes one); one written as a serial whose default was set or dropped since is the integer
       // it stands for
-      const written = db.dialect === PG ? SERIALS[normType(type)] : null
+      const written = db.dialect === PG ? SERIALS[lowType(type)] : null
       const m = db.dialect === PG && def ? NEXTVAL.exec(def) : null
-      let own = false
+      let owned = false
       if (m) {
         const lx = lexSql(m[1].replace(/''/g, "'"), { dialect: PG, max: 8 }).tokens
         const parts = lx.filter((x) => x.k === 'w' || x.k === 'q').map((x) => fold(x, PG))
         const s = parts.length ? db.seqs.get(keyOf(qual(db, parts))) || (parts.length === 1 ? db.seqs.get(`public.${parts[0]}`) : null) : null
-        own = !!s && s.owner?.table === t.key && same(db, s.owner.column, col.name)
+        owned = !!s && s.owner?.table === t && same(db, s.owner.column, col.name)
       }
-      if (own && INT_SERIAL[normType(type)]) { if (!written) type = INT_SERIAL[normType(type)]; def = null }
+      if (owned && INT_SERIAL[lowType(type)]) { if (!written) type = INT_SERIAL[lowType(type)]; def = null }
       else if (written) type = written
       return { name: col.name, type, nullable: !col.notNull, default: col.identity || col.generated ? null : def, generated: col.generated ?? null, ...at(col) }
     })
     const keys = []
     if (t.pk) keys.push({ role: 'primary', parts: t.pk.parts, ...at(t.pk) })
     for (const u of t.uniques) keys.push({ role: 'unique', parts: u.parts, ...at(u) })
-    const indexes = [...t.indexes].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).map((i) => ({ name: i.name, unique: i.unique, columns: i.columns, partial: i.partial, ...at(i) }))
-    const relations = t.fks.map((f) => {
+    const indexes = [...t.ix.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).map((i) => ({ name: i.name, unique: i.unique, columns: i.columns, partial: i.partial, ...(i.implicit ? { implicit: true } : {}), ...at(i) }))
+    const relations = [...t.fks].map((f) => {
       const target = db.tables.get(f.to)
       return { columns: f.columns, to: target ? shown(db, target.q) : shown(db, f.toQ), toColumns: f.toColumns.length ? f.toColumns : target?.pk?.parts ?? [], onDelete: f.onDelete, onUpdate: f.onUpdate, ...at(f) }
     })

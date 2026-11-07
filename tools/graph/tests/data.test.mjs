@@ -3108,7 +3108,7 @@ DROP INDEX posts_slug ON articles;` }], { dialect: 'mysql' })
   ], 'a dump (structure.sql, schema.sql, or a dump header on a file whose name is not versioned) states the migration folder right under its own (db/schema.sql: db/migrations), else its own folder; a versioned migration that is a dump is a migration')
   const both = run('db/migrations', [['db/migrations/20240101000000_init.sql', 'CREATE TABLE accounts (id serial PRIMARY KEY, email varchar(255) NOT NULL);'], ['db/schema.sql', PG_DUMP]])
   eq(both.map((d) => [d.source.kind, d.source.path, d.dialect, d.dialectFrom, d.label, d.notes]), [
-    ['migration', 'db/migrations/20240101000000_init.sql', 'postgres', { how: 'sniffed', marker: 'SERIAL', path: 'db/migrations/20240101000000_init.sql', line: 1 }, 'replayed 1 file, 1 statement', ['also stated by the schema dump db/schema.sql, listed first (where the two disagree, a conflict)']],
+    ['migration', 'db/migrations/20240101000000_init.sql', 'postgres', { how: 'stated', path: 'db/schema.sql', line: 2 }, 'replayed 1 file, 1 statement', ['also stated by the schema dump db/schema.sql, listed first (where the two disagree, a conflict)']],
     ['artifact', 'db/schema.sql', 'postgres', { how: 'stated', path: 'db/schema.sql', line: 2 }, 'schema dump, 5 statements (1 skipped)', ['a schema dump of db/migrations, preferred over its replay where an element is shown (the replay kept beside it)', 'skipped in db/schema.sql: 1 statement that does not shape the store (SET 1)']],
   ], 'a dump and the migrations of one store: two declarations, the dump an artifact (its dialect from its header), listed first, the replay beside it')
   const merged = reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: both } }]).stores[0]
@@ -3124,10 +3124,151 @@ DROP INDEX posts_slug ON articles;` }], { dialect: 'mysql' })
     ['int', 'int', 'tinyint unsigned', 'tinyint(1)', 'tinyint(1)', 'decimal(10,0)', 'decimal(10,0)', 'double', 'char(1)', 'int'], 'MySQL: the same, display widths dropped (but tinyint(1), a boolean)')
   eq([normType('int4'), normType('INT4', 'sqlite')], ['int4', 'int4'], '… and SQLite types as declared')
   eq([["'member'::public.role", 'postgres'], ["'{}'::integer[]", 'postgres'], ["'-1'::integer", 'postgres'], ['NULL::character varying', 'postgres'], ["now()::text", 'postgres'], ["'0'", 'mysql'], ['true', 'mysql'], ['(now())', 'mysql'], ["'-1'", 'sqlite']].map(([d, x]) => normDefault(d, x)),
-    ["'member'", "'{}'", '-1', null, 'now()::text', '0', '1', 'now()', "'-1'"], "defaults: a Postgres literal without the engine's casts, a quoted number as the number, NULL no default, MySQL's true as 1; SQLite's as written")
+    ["'member'", "'{}'", '-1', null, 'now()', '0', '1', 'now()', "'-1'"], "defaults: a Postgres literal without the engine's casts, a quoted number as the number, NULL no default, MySQL's true as 1; SQLite's as written")
   const myStore = (indexes, keys = []) => ({ repo: 'app', extractor: 'x@1', facts: { declarations: [{ store: 'db', dialect: 'mysql', source: { path: 'a.sql', line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', notes: [], entities: [{ name: 't', kind: 'table', line: 1, fields: [{ name: 'a', type: 'int', nullable: true, default: null, line: 1 }], keys, indexes, relations: [] }] }] } })
   const folded = reconcile([myStore([{ name: 'a_uq', unique: true, columns: ['a'], partial: false, line: 2 }]), { ...myStore([], [{ role: 'unique', parts: ['a'], line: 3 }]), extractor: 'y@1' }]).stores[0]
   eq([everyConflict(folded), folded.entities[0].keys.map((k) => `${k.role} (${k.parts}) ${k.sources.length}`), folded.entities[0].indexes.length], [[], ['unique (a) 2'], 0], 'MySQL: a unique index and a unique key of the same columns are one element (the engine keeps one object): compared as the key')
+}
+
+// ── 30b · a dump and its migrations, as the engines write them (golden cases from postgres:16 and mysql:8) ──
+console.log('\n30b · a dump and the migrations that built it say the same: what the engines write (COLLATE, casts, implicit indexes, the tools\' own tables), each tool\'s order, the dialect a dump states, a planned change, and the replay\'s bounds')
+{
+  const { readDdl, splitSql, LIMITS } = await import('../lib/data/readers/ddl.mjs')
+  const { normType, normDefault } = await import('../lib/data/model.mjs')
+  const { storeSummary } = await import('../lib/data/reconcile.mjs')
+  const run = (key, files, override = null) => sqlMigrations.extract({ key, files: files.map(([p, text]) => ({ path: p, text })), override }, { DatabaseSync }).declarations
+  const merged = (decls) => reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: decls } }]).stores[0]
+
+  // a qualified COLLATE, as pg_dump writes it, in a column, an ALTER … TYPE and an index column
+  const collate = readDdl([{ path: 'db/schema.sql', text: `CREATE TABLE public.customers (
+    id integer NOT NULL,
+    nick character varying COLLATE pg_catalog."C",
+    note text COLLATE pg_catalog."default" NOT NULL,
+    code text COLLATE "C" DEFAULT 'x'::text
+);
+ALTER TABLE ONLY public.customers ALTER COLUMN nick TYPE character varying(40) COLLATE pg_catalog."C";
+CREATE INDEX customers_nick ON public.customers USING btree (nick COLLATE pg_catalog."C" text_pattern_ops DESC, lower(note) COLLATE pg_catalog."C");
+ALTER TABLE ONLY public.customers
+    ADD CONSTRAINT customers_pkey PRIMARY KEY (id);` }], { dialect: 'postgres', dump: true })
+  eq([collate.entities.map(brief), collate.notes, collate.complete], [[[
+    'customers table @db/schema.sql:1',
+    '  id integer not null @db/schema.sql:2', '  nick character varying(40) null @db/schema.sql:3', '  note text not null @db/schema.sql:4', "  code text null default 'x'::text @db/schema.sql:5",
+    '  primary (id) @db/schema.sql:10',
+    '  index customers_nick (nick, lower(note)) @db/schema.sql:8',
+  ]], [], true], 'a qualified COLLATE (pg_catalog."C", pg_catalog."default") in a column, after ALTER … TYPE and in an index column: read past, the table kept')
+
+  // the migration tools' own tables in a dump: noted, not compared with the migrations
+  const own = run('db/migrations', [['db/migrations/20240101000000_a.sql', 'CREATE TABLE a (id int PRIMARY KEY);'], ['db/schema.sql', `--
+-- PostgreSQL database dump
+--
+CREATE TABLE public.a (
+    id integer NOT NULL
+);
+CREATE TABLE public.schema_migrations (
+    version character varying(128) NOT NULL
+);
+CREATE TABLE supabase_migrations.schema_migrations (
+    version text NOT NULL
+);
+CREATE TABLE public.goose_db_version (id integer NOT NULL, version_id bigint NOT NULL);
+CREATE TABLE public.schema_migrations_backup (version text);
+ALTER TABLE ONLY public.a
+    ADD CONSTRAINT a_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.schema_migrations
+    ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+INSERT INTO public.schema_migrations (version) VALUES ('20240101000000');
+`]])
+  const ownStore = merged(own)
+  eq([own[1].notes.filter((n) => n.includes("tool's own")), ownStore.entities.map((e) => `${e.name}${e.bookkeeping ? ' (a migration tool\'s own)' : ''}`), everyConflict(ownStore), storeSummary(ownStore)], [
+    ["db/schema.sql:7: schema_migrations is a migration tool's own record of what it applied: not compared with the migrations", "db/schema.sql:10: supabase_migrations.schema_migrations is a migration tool's own record of what it applied: not compared with the migrations", "db/schema.sql:13: goose_db_version is a migration tool's own record of what it applied: not compared with the migrations"],
+    ['a', 'goose_db_version (a migration tool\'s own)', 'schema_migrations (a migration tool\'s own)', 'schema_migrations_backup', 'supabase_migrations.schema_migrations (a migration tool\'s own)'],
+    ['schema_migrations_backup presence: declared @ db/schema.sql:14 | absent @ db/migrations/20240101000000_a.sql:1'],
+    '2 tables · 0 foreign keys · 0 indexes · 1 conflict',
+  ], "a migration tool's own table, by its exact name (and schema where the tool sets one): kept, noted, never a presence conflict, not counted; a name that only looks like one is compared as any table")
+
+  // MySQL makes an index for a foreign key no index leads with: the constraint's name, else its first column's
+  const fkx = readDdl([{ path: 'db/0001_init.sql', text: `CREATE TABLE p (id int PRIMARY KEY);
+CREATE TABLE a (id int PRIMARY KEY, p_id int, CONSTRAINT fk_a_p FOREIGN KEY (p_id) REFERENCES p (id));
+CREATE TABLE b (id int PRIMARY KEY, p_id int, FOREIGN KEY (p_id) REFERENCES p (id));
+CREATE TABLE c (id int PRIMARY KEY, p_id int, x int, CONSTRAINT fk_c FOREIGN KEY (p_id) REFERENCES p (id), KEY c_px (p_id, x));
+CREATE TABLE d (p_id int, x int, PRIMARY KEY (p_id, x), CONSTRAINT fk_d FOREIGN KEY (p_id) REFERENCES p (id));
+CREATE TABLE e (id int PRIMARY KEY, p_id int, CONSTRAINT fk_e FOREIGN KEY (p_id) REFERENCES p (id));
+CREATE INDEX e_p ON e (p_id);
+CREATE TABLE f (id int PRIMARY KEY, p_id int);
+ALTER TABLE f ADD CONSTRAINT fk_f FOREIGN KEY (p_id) REFERENCES p (id), ADD INDEX f_p (p_id);
+ALTER TABLE b DROP FOREIGN KEY b_ibfk_1;
+CREATE TABLE g (qty int, price int, INDEX ((qty * price)), KEY ((qty + 1)));` }], { dialect: 'mysql' })
+  eq(fkx.entities.map((e) => `${e.name}: ${e.indexes.map((i) => `${i.name}(${i.columns.join(',')})`).join(' ')}`), ['a: fk_a_p(p_id)', 'b: p_id(p_id)', 'c: c_px(p_id,x)', 'd: ', 'e: e_p(p_id)', 'f: f_p(p_id)', 'g: functional_index(qty * price) functional_index_2(qty + 1)', 'p: '],
+    "MySQL: the index the engine adds for a foreign key no index or primary key leads with (named by the constraint, else its first column; one declared in the same statement serves; dropped when a later index serves; kept when the foreign key goes); an unnamed functional index named as the engine names it")
+  const myDump = "-- MySQL dump 10.13\nCREATE TABLE `posts` (\n  `id` int NOT NULL,\n  `qty` int DEFAULT NULL,\n  `price` int DEFAULT NULL,\n  `flag` tinyint(1) NOT NULL DEFAULT '1',\n  PRIMARY KEY (`id`),\n  KEY `functional_index` (((`qty` * `price`)))\n) ENGINE=InnoDB;\nCREATE TABLE `tags` (\n  `id` int NOT NULL,\n  `post_id` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `post_id` (`post_id`),\n  CONSTRAINT `tags_ibfk_1` FOREIGN KEY (`post_id`) REFERENCES `posts` (`id`)\n) ENGINE=InnoDB;\nCREATE TABLE `flyway_schema_history` (\n  `installed_rank` int NOT NULL,\n  PRIMARY KEY (`installed_rank`)\n) ENGINE=InnoDB;\n"
+  const myBoth = merged(run('db/migration', [['db/migration/V1__init.sql', 'CREATE TABLE posts (id INT PRIMARY KEY, qty INT, price INT, flag BOOLEAN NOT NULL DEFAULT TRUE, INDEX ((qty * price)));\nCREATE TABLE tags (id INT PRIMARY KEY, post_id INT, FOREIGN KEY (post_id) REFERENCES posts (id));'], ['db/dump.sql', myDump]], 'mysql'))
+  eq([everyConflict(myBoth), storeSummary(myBoth)], [[], '2 tables · 1 foreign key · 1 index (+1 implicit, for keys) · no conflicts'], "… so a mysqldump and the migrations agree: the implicit index, the functional index and its text, a boolean's default, the tool's history table")
+  const implicitOf = (e) => fkx.entities.find((x) => x.name === e).indexes.map((i) => !!i.implicit)
+  eq([implicitOf('a'), implicitOf('b'), implicitOf('f'), myBoth.entities.find((e) => e.name === 'tags').indexes.map((i) => [i.name, !!i.implicit, i.conflicts.length])], [[true], [false], [false], [['post_id', true, 0]]],
+    "… the engine's index is marked as the engine's (an index like any other once its foreign key goes; a dump's KEY on exactly its columns, named as the engine names it, is that index)")
+  const dumpKeys = readDdl([{ path: 'db/dump.sql', text: 'CREATE TABLE `p` (`id` int NOT NULL, PRIMARY KEY (`id`));\nCREATE TABLE `t` (`id` int NOT NULL, `p_id` int, `x` int, PRIMARY KEY (`id`), KEY `p_id` (`p_id`), CONSTRAINT `t_ibfk_1` FOREIGN KEY (`p_id`) REFERENCES `p` (`id`));\nALTER TABLE `t` ADD KEY `t_px` (`p_id`, `x`);\n' }], { dialect: 'mysql', dump: true })
+  eq(dumpKeys.entities.find((e) => e.name === 't').indexes.map((i) => [i.name, !!i.implicit]), [['p_id', true], ['t_px', false]], "… a dump states the indexes there are: an index added after the engine's keeps it")
+  const myV1 = ['db/migration/V1__a.sql', 'CREATE TABLE posts (id INT PRIMARY KEY);'], myV2 = ['db/migration/V2__b.sql', 'CREATE TABLE tags (id INT PRIMARY KEY, post_id INT, CONSTRAINT tags_post FOREIGN KEY (post_id) REFERENCES posts (id));']
+  const myB0 = { stores: [merged(run('db/migration', [myV1], 'mysql'))] }, myB1 = { stores: [merged(run('db/migration', [myV1, myV2], 'mysql'))] }
+  const tagsAdd = { schema: 1, spec: 'docs/specs/x-design.md', architecture: [], data: [{ id: 't1', op: 'add', target: 'app:db/migration/tags', why: 'w', origin: 'planned', after: { fields: [{ name: 'id', type: 'int', nullable: false }, { name: 'post_id', type: 'int', nullable: true }], keys: [{ role: 'primary', parts: ['id'] }], relations: [{ columns: ['post_id'], to: 'posts', toColumns: ['id'] }] } }] }
+  const tagsState = deltaStates(tagsAdd, myB1, { base: myB0, diff: diffModels(myB0, myB1) })
+  eq([tagsState.changes.map((c) => c.state), tagsState.unplanned.map((u) => u.target), myB1.stores[0].entities.find((e) => e.name === 'tags').indexes.map((i) => [i.name, !!i.implicit])], [['planned-built'], [], [['tags_post', true]]],
+    "… and a design that adds a table with a foreign key never has to state the index the engine builds for it (not unplanned)")
+
+  // the text the engine re-renders compares as the text the migration wrote (shown as written)
+  const alike = (a, b, d = 'postgres') => normDefault(a, d) === normDefault(b, d)
+  eq([
+    ['public.uuid_generate_v4()', 'uuid_generate_v4()'], ["(now() AT TIME ZONE 'utc'::text)", "(now() AT TIME ZONE 'utc')"], ["(now() + '1 day'::interval)", "now() + interval '1 day'"],
+    ["'1000'::numeric", '1e3'], ["'00000001'::\"bit\"", "B'00000001'"], ["'line\nbreak'::text", "E'line\\nbreak'"], ["'-5'::integer", '(-5)'], ["'member'::public.role", "'member'"],
+    ["'{}'::character varying[]", "'{}'::varchar[]"], ['(1 + 2)', '1 + 2'],
+  ].map(([a, b]) => alike(a, b)), Array(10).fill(true), "Postgres defaults: casts, a public. prefix, redundant parentheses, interval '…' and '…'::interval, a number by its value, B'…' and E'…' by their value")
+  eq([["'a'", "'b'"], ['lower("Email")', 'lower(email)'], ["'00000001'", "'1'"], ['now()', "now() + interval '1 day'"], ['(a + b) * c', 'a + b * c'], ["'1'", "'01'"]].map(([a, b]) => alike(a, b)), [false, false, false, false, false, false], '… and what differs still differs (a quoted name is not the folded one, grouping that changes the meaning stays)')
+  eq([alike('true', "'1'", 'mysql'), alike("'0.00'", '0.00', 'mysql'), normType('integer[][]', 'postgres') === normType('integer[]', 'postgres'), normType('int[3]', 'postgres')], [true, true, true, 'integer[]'], "MySQL's true and 1; an array's dimensions are no part of its type")
+  const idx = (cols, dialect = 'postgres') => ({ repo: 'app', extractor: 'x@1', facts: { declarations: [{ store: 'db', dialect, source: { path: `${cols.length}.sql`, line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', notes: [], entities: [{ name: 't', kind: 'table', line: 1, fields: [], keys: [], indexes: [{ name: 'ix', unique: false, columns: cols, partial: false, line: 1 }], relations: [] }] }] } })
+  const twoWays = (a, b, dialect) => reconcile([idx(a, dialect), { ...idx(b, dialect), extractor: 'y@1' }]).stores[0]
+  eq([everyConflict(twoWays(['lower(("Email")::text)'], ['lower("Email")'])), everyConflict(twoWays(['lower((title)::text)', 'slug'], ['lower(title)', 'slug'])), everyConflict(twoWays(['(`qty` * `price`)'], ['qty * price'], 'mysql')), everyConflict(twoWays(['lower(title)'], ['upper(title)']))],
+    [[], [], [], ['t index ix columns: lower(title) @ 1.sql:1 | upper(title) @ 1.sql:1']], "an index's expression columns compare through the same form (a cast, the parentheses the engine adds, backticks); another expression is still a conflict")
+  const before = reconcile([idx(['lower(("Email")::text)'])]), after = reconcile([idx(['lower("Email")'])])
+  eq(diffModels(before, after).stores, [], '… and the branch diff sees no change in it')
+
+  // the dialect a dump's header states is the replay's beside it; MySQL's DELIMITER $$ is no Postgres marker
+  const plainSql = run('db/migrations', [['db/migrations/20240101000000_a.sql', 'CREATE TABLE t (id int PRIMARY KEY, name varchar(20));'], ['db/migrations/20240102000000_b.sql', 'ALTER TABLE t ADD COLUMN n int;'], ['db/schema.sql', '--\n-- PostgreSQL database dump\n--\nCREATE TABLE public.t (\n    id integer NOT NULL,\n    name character varying(20),\n    n integer\n);\nALTER TABLE ONLY public.t\n    ADD CONSTRAINT t_pkey PRIMARY KEY (id);\n']])
+  eq([plainSql.map((d) => [d.source.kind, d.status, d.dialect, d.dialectFrom]), everyConflict(merged(plainSql))], [[
+    ['migration', 'read', 'postgres', { how: 'stated', path: 'db/schema.sql', line: 2 }], ['artifact', 'read', 'postgres', { how: 'stated', path: 'db/schema.sql', line: 2 }],
+  ], []], 'migrations with no dialect marker beside a dump: the dump\'s header states theirs too, and they are read')
+  eq([sniffDialect([{ path: 'm/0001_t.sql', text: 'CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY);\nDELIMITER $$\nCREATE TRIGGER x BEFORE INSERT ON t FOR EACH ROW BEGIN SET NEW.id = 1; END$$\nDELIMITER ;\n' }]), sniffDialect([{ path: 'm/0002_p.sql', text: 'DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END $$\nDELIMITER ;\n' }]).dialect, sniffDialect([{ path: 'm/0003_f.sql', text: 'CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;' }]).dialect],
+    [{ dialect: 'mysql', marker: 'AUTO_INCREMENT', path: 'm/0001_t.sql', line: 1 }, 'mysql', 'postgres'], "MySQL's DELIMITER $$ and END$$ are no Postgres dollar quotes (a DELIMITER line is MySQL's own); a $$ body still is")
+
+  // a planned change compares in the store's dialect too
+  const planned = merged(run('db/migrations', [['db/migrations/20240101000000_a.sql', "CREATE TABLE a (id int PRIMARY KEY, created timestamptz NOT NULL DEFAULT now(), v varchar(20) DEFAULT 'x');"]]))
+  const delta = { schema: 1, spec: 'docs/specs/x-design.md', architecture: [], data: [
+    { id: 'p1', op: 'add', target: 'app:db/migrations/a.id', why: 'w', origin: 'planned', after: { type: 'int4', nullable: false } },
+    { id: 'p2', op: 'add', target: 'app:db/migrations/a.created', why: 'w', origin: 'planned', after: { type: 'timestamp with time zone', nullable: false, default: 'now()' } },
+    { id: 'p3', op: 'add', target: 'app:db/migrations/a.v', why: 'w', origin: 'planned', after: { type: 'character varying(20)', nullable: true, default: "'x'::character varying" } },
+    { id: 'p4', op: 'add', target: 'app:db/migrations/a.id', why: 'w', origin: 'planned', after: { type: 'bigint', nullable: false } },
+  ] }
+  eq(deltaStates(delta, { stores: [planned] }).changes.map((c) => `${c.id} ${c.state}${c.diffs.length ? ` [${c.diffs.map((x) => x.text).join('; ')}]` : ''}`), ['p1 planned-built', 'p2 planned-built', 'p3 planned-built', 'p4 built-differently [type: bigint → int]'],
+    "a delta's planned type and default compare in the store's dialect (int4 is int, timestamp with time zone is timestamptz); a different type is still built differently")
+
+  // each tool's order: Flyway strips a version's trailing zeros
+  eq(run('db/migration', [['db/migration/V1_0_0__c.sql', 'CREATE TABLE c (id int);'], ['db/migration/V1_0__b.sql', 'CREATE TABLE b (id int);'], ['db/migration/V1__a.sql', 'CREATE TABLE a (id int);']], 'postgres')[0].label, 'order unknown (V1_0_0__c.sql and V1_0__b.sql share a version)', "Flyway: V1, V1.0 and V1.0.0 are one version (its trailing zeros dropped)")
+  eq(splitSql('CREATE TABLE a (x int);\nCREATE PROCEDURE p() BEGIN SELECT 1;\nCREATE TABLE y (b int);', { dialect: 'mysql' }).errors, [{ line: 2, error: 'a routine body never closes: its statements were split at each `;`' }], 'a routine body that never closes is reported where it opens')
+  const checks = readDdl([{ path: 'db/0001_c.sql', text: 'CREATE TABLE t (a int CONSTRAINT a_pos CHECK (a > 0), b int);\nALTER TABLE t RENAME CONSTRAINT a_pos TO a_positive;\nALTER TABLE t DROP CONSTRAINT a_positive;' }], { dialect: 'postgres' })
+  eq([checks.statements, checks.skipped, checks.notes], [3, [], []], 'renaming and dropping a check are statements read, not skipped')
+
+  // bounds: a name lookup is one map read, a table's columns and indexes are capped, the work is budgeted
+  const t5 = Date.now()
+  const wide = readDdl([{ path: 'db/0001_w.sql', text: `CREATE TABLE t (id int);\n${Array.from({ length: 40000 }, (_, i) => `ALTER TABLE t ADD COLUMN c${i} int;`).join('\n')}` }], { dialect: 'postgres' })
+  const wideMy = readDdl([{ path: 'db/0001_w.sql', text: `CREATE TABLE t (id int);\n${Array.from({ length: 40000 }, (_, i) => `ALTER TABLE t ADD COLUMN c${i} int;`).join('\n')}` }], { dialect: 'mysql' })
+  const churn = readDdl([{ path: 'db/0001_t.sql', text: `${Array.from({ length: 20000 }, (_, i) => `CREATE TABLE t${i} (id int PRIMARY KEY, p int REFERENCES t${Math.max(0, i - 1)} (id));`).join('\n')}\n${Array.from({ length: 20000 }, (_, i) => `DROP TABLE t${i};`).join('\n')}` }], { dialect: 'postgres' })
+  const many = readDdl([{ path: 'db/0001_i.sql', text: `CREATE TABLE t (id int);\n${Array.from({ length: 20000 }, (_, i) => `CREATE INDEX i${i} ON t (id);`).join('\n')}` }], { dialect: 'postgres' })
+  const shuffle = readDdl([{ path: 'db/0001_s.sql', text: `CREATE TABLE t (${Array.from({ length: 4000 }, (_, i) => `c${i} int`).join(', ')});\n${'ALTER TABLE t ADD COLUMN x int FIRST;\nALTER TABLE t DROP COLUMN x;\n'.repeat(30000)}` }], { dialect: 'mysql' })
+  const late = readDdl([{ path: 'db/0001_l.sql', text: Array.from({ length: 20000 }, (_, i) => `CREATE TABLE l${i} (id int);`).join('\n') }], { dialect: 'postgres', limits: { ...LIMITS, ms: 1 } })
+  const took5 = Date.now() - t5
+  eq([wide.stopped, wide.entities[0].fields.length, wideMy.stopped?.line, churn.entities.length, churn.complete, many.stopped, shuffle.stopped?.error, late.stopped?.error],
+    [{ path: 'db/0001_w.sql', line: 4097, error: 'a table of more than 4096 columns: the replay stops here' }, 4096, 4097, 0, true, { path: 'db/0001_i.sql', line: 4098, error: 'a table of more than 4096 indexes: the replay stops here' }, 'the replay took more than its work budget: it stops here', 'the replay took more than its time: it stops here'],
+    'hostile replays: 40 000 columns added to one table (Postgres and MySQL), 20 000 tables created and dropped, 20 000 indexes on one table, a 4 000-column table shuffled 60 000 times, a deadline: each read in linear time or stopped by a cap, a budget or the clock, with a note')
+  ok(took5 < 8000, `… in bounded time (${took5} ms for six replays of 40 000 to 60 000 statements)`)
 }
 
 // ════ Part 2 · through call(), on an indexed project ════
@@ -4087,7 +4228,7 @@ async function indexed() {
     eq(golden.split('\n').filter((l) => /^\w+:/.test(l)), [
       'lite1:drizzle  sqlite  4 tables · 3 foreign keys · 6 indexes (+1 implicit, for keys) · no conflicts',
       'lite2:drizzle  sqlite  2 tables · 1 foreign key · 3 indexes (+1 implicit, for keys) · no conflicts',
-      'my1:drizzle  mysql  3 tables · 2 foreign keys · 1 index · no conflicts',
+      'my1:drizzle  mysql  3 tables · 2 foreign keys · 1 index (+2 implicit, for keys) · no conflicts',
       'my2:drizzle  mysql  1 table · 0 foreign keys · 1 index · no conflicts',
       'pg1:drizzle  postgres  4 tables · 3 foreign keys · 3 indexes · no conflicts',
       'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts',
@@ -4147,9 +4288,9 @@ async function indexed() {
 
     has(ddl, '  migration  sql-migrations@2  replayed 6 files, 6 statements  fly/src/main/resources/db/migration/V1__init.sql\n    note: also stated by the schema dump src/main/resources/db/dump.sql, listed first (where the two disagree, a conflict)\n    note: src/main/resources/db/migration/U10__note_text.sql is an undo migration: not replayed\n  dialect: stated at fly/src/main/resources/db/dump.sql:1',
       'the versioned-file tool: V1, V2, V9, V10, V11, then R__ (the undo file never)')
-    has(ddl, 'fly:src/main/resources/db/migration  mysql  2 tables · 1 view · 1 foreign key · 2 indexes · no conflicts\n  artifact  sql-migrations@2  schema dump, 5 statements (40 skipped)  fly/src/main/resources/db/dump.sql\n',
+    has(ddl, 'fly:src/main/resources/db/migration  mysql  2 tables · 1 view · 1 foreign key · 2 indexes · no conflicts\n  artifact  sql-migrations@2  schema dump, 6 statements (44 skipped)  fly/src/main/resources/db/dump.sql\n',
       "… and the engine's own dump of what they built (a dump tool's header, whatever the file's name, the folder of migrations right under it), agreeing with them: the engine's answer, kept as a golden expectation")
-    has(await dq('data', { entity: 'orders' }), "Fields (4):\n  id  bigint unsigned  not null  — fly/src/main/resources/db/dump.sql:55 · fly/src/main/resources/db/migration/V2__orders.sql:2\n  customer_id  bigint unsigned  not null  — fly/src/main/resources/db/dump.sql:56 · fly/src/main/resources/db/migration/V2__orders.sql:3\n  amount  decimal(12,2)  not null  — fly/src/main/resources/db/dump.sql:57 · fly/src/main/resources/db/migration/V10__note_text.sql:3\n  note  text  null  — fly/src/main/resources/db/dump.sql:58 · fly/src/main/resources/db/migration/V10__note_text.sql:2",
+    has(await dq('data', { entity: 'orders' }), "Fields (4):\n  id  bigint unsigned  not null  — fly/src/main/resources/db/dump.sql:78 · fly/src/main/resources/db/migration/V2__orders.sql:2\n  customer_id  bigint unsigned  not null  — fly/src/main/resources/db/dump.sql:79 · fly/src/main/resources/db/migration/V2__orders.sql:3\n  amount  decimal(12,2)  not null  — fly/src/main/resources/db/dump.sql:80 · fly/src/main/resources/db/migration/V10__note_text.sql:3\n  note  text  null  — fly/src/main/resources/db/dump.sql:81 · fly/src/main/resources/db/migration/V10__note_text.sql:2",
       '… V10 after V9 (V10 changes the column V9 adds): MODIFY and CHANGE, the column placed AFTER another, as the engine has them (the dump, shown first)')
     has(await dq('data', { entity: 'customers' }), "Keys (2):\n  primary (id)  — fly/src/main/resources/db/dump.sql:29 · fly/src/main/resources/db/migration/V1__init.sql:6\n  unique (email)  — fly/src/main/resources/db/dump.sql:30 · fly/src/main/resources/db/migration/V1__init.sql:7", "MySQL: a UNIQUE KEY is the unique key it is")
     has(ddl, 'gom:migrations  postgres  2 tables · 1 foreign key · 1 index · no conflicts\n  migration  sql-migrations@2  replayed 2 files, 3 statements  gom/migrations/000001_create_users.up.sql', 'up and down files: the up files alone, in version order')
@@ -4159,7 +4300,7 @@ async function indexed() {
 
     // a dump beside its migrations: two declarations of one store, the dump first; then a migration the
     // dump does not show yet (the dump not regenerated): a conflict carrying both sides
-    has(ddl, 'dbm:db/migrations  postgres  3 tables · 2 foreign keys · 1 index · no conflicts\n  artifact  sql-migrations@2  schema dump, 16 statements (14 skipped)  dbm/db/schema.sql\n', 'the dump (as the database\'s dump tool wrote it, its psql meta-commands, SET and SELECT skipped): an artifact, listed first')
+    has(ddl, 'dbm:db/migrations  postgres  3 tables · 2 foreign keys · 1 index · no conflicts\n  artifact  sql-migrations@2  schema dump, 18 statements (15 skipped)  dbm/db/schema.sql\n', 'the dump (as the database\'s dump tool wrote it, its psql meta-commands, SET and SELECT skipped): an artifact, listed first')
     has(ddl, '    note: a schema dump of db/migrations, preferred over its replay where an element is shown (the replay kept beside it)', '… and it says so')
     has(ddl, '  migration  sql-migrations@2  replayed 2 files, 6 statements  dbm/db/migrations/20240101000000_init.sql\n    note: also stated by the schema dump db/schema.sql, listed first (where the two disagree, a conflict)', '… the replay beside it, saying so')
     const books = await dq('data', { entity: 'books' })

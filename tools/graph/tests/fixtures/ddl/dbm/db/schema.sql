@@ -110,6 +110,15 @@ CREATE TABLE public.reviews (
 
 
 --
+-- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.schema_migrations (
+    version character varying NOT NULL
+);
+
+
+--
 -- Name: authors id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -148,6 +157,14 @@ ALTER TABLE ONLY public.reviews
 
 
 --
+-- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.schema_migrations
+    ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+
+
+--
 -- Name: books_author_title; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -176,3 +193,11 @@ ALTER TABLE ONLY public.reviews
 
 \unrestrict fixturekey
 
+
+--
+-- Dbmate schema migrations
+--
+
+INSERT INTO public.schema_migrations (version) VALUES
+    ('20240101000000'),
+    ('20240201000000');

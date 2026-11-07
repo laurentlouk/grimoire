@@ -118,8 +118,10 @@ export default {
     const dumps = sql.filter((f) => isDump(f.path, !!dumpHeader(f.text)) && schemaLevel(upOnly(f.text)) >= 2)
     const members = sql.filter((f) => !dumps.includes(f)).map((f) => ({ path: f.path, text: upSection(f.text) }))
     const journal = readJournal(key, configs)
+    // a dump's header states the dialect of the migrations beside it too
+    const stated = dumps.map((d) => headerDialect(d)).find(Boolean) || null
     const out = []
-    if (members.length) out.push(replayed(key, members, configs, journal, override, DatabaseSync))
+    if (members.length) out.push(replayed(key, members, configs, journal, override, DatabaseSync, stated))
     for (const d of dumps) out.push(dumped(key, d, configs, journal, override, DatabaseSync))
     // the dump states the store as the database has it: listed first, the replay beside it
     if (members.length && dumps.length) {
@@ -132,8 +134,8 @@ export default {
 }
 
 // The folder's migrations, in their order, replayed.
-function replayed(key, members, configs, journal, override, DatabaseSync) {
-  const dialect = dialectOf(key, configs, members, override, journal)
+function replayed(key, members, configs, journal, override, DatabaseSync, stated) {
+  const dialect = dialectOf(key, configs, members, override, journal, false, stated)
   const order = orderOf(key, members, journal)
   const base = {
     store: key, dialect: dialect.dialect, dialectFrom: dialect.from ?? null,
@@ -161,13 +163,38 @@ function replayed(key, members, configs, journal, override, DatabaseSync) {
   return { ...base, ...ddlFacts(readDdl(order.files, { dialect: dialect.dialect }), order.notes, `replayed ${files}`) }
 }
 
+// The dialect a dump's header states (the database's dump tool wrote it), or null.
+function headerDialect(d) {
+  const h = dumpHeader(d.text)
+  return h ? { dialect: /^PostgreSQL/.test(h[1]) ? 'postgres' : 'mysql', from: { how: 'stated', path: d.path, line: lineOf(d.text, /^-- (?:PostgreSQL database dump|MySQL dump|MariaDB dump)/m) } } : null
+}
+
+// The tables a migration tool keeps its record of what it applied in, by their exact name (and the
+// schema the tool sets): a dump of the database holds them, the migrations never create them.
+const BOOKKEEPING = {
+  postgres: new Set(['schema_migrations', 'ar_internal_metadata', 'goose_db_version', 'flyway_schema_history', '_prisma_migrations', '__diesel_schema_migrations', '_sqlx_migrations', 'supabase_migrations.schema_migrations', 'drizzle.__drizzle_migrations']),
+  mysql: new Set(['schema_migrations', 'ar_internal_metadata', 'goose_db_version', 'flyway_schema_history', '_prisma_migrations', '__diesel_schema_migrations', '_sqlx_migrations', '__drizzle_migrations']),
+  sqlite: new Set(['schema_migrations', 'ar_internal_metadata', 'goose_db_version', 'flyway_schema_history', '_prisma_migrations', '__diesel_schema_migrations', '_sqlx_migrations', '__drizzle_migrations']),
+}
+// …marked in a dump's entities (never a presence conflict: reconcile.mjs), each noted at its line
+function bookkeeping(decl, dialect, path) {
+  const names = BOOKKEEPING[dialect]
+  if (!names) return decl
+  const mine = (n) => names.has(dialect === 'postgres' ? n : n.toLowerCase())
+  const own = decl.entities.filter((e) => e.kind === 'table' && mine(e.name))
+  if (!own.length) return decl
+  for (const e of own) e.bookkeeping = true
+  decl.notes = [...decl.notes, ...own.sort((a, b) => a.line - b.line).map((e) => `${path}:${e.line}: ${e.name} is a migration tool's own record of what it applied: not compared with the migrations`)]
+  return decl
+}
+
 // A schema dump, read as its dialect's statements.
 function dumped(key, d, configs, journal, override, DatabaseSync) {
-  const h = dumpHeader(d.text)
+  const h = headerDialect(d)
   const folder = dialectOf(key, configs, [], override, journal, true)
   const sniffed = sniffDialect([d])
   const dialect = override ? folder
-    : h ? { dialect: /^PostgreSQL/.test(h[1]) ? 'postgres' : 'mysql', from: { how: 'stated', path: d.path, line: lineOf(d.text, /^-- (?:PostgreSQL database dump|MySQL dump|MariaDB dump)/m) } }
+    : h ? h
     : folder.dialect ? folder
     : sniffed.dialect ? { dialect: sniffed.dialect, from: { how: 'sniffed', marker: sniffed.marker, path: sniffed.path, line: sniffed.line } }
     : { dialect: null, reason: sniffed.reason }
@@ -179,10 +206,10 @@ function dumped(key, d, configs, journal, override, DatabaseSync) {
   if (!dialect.dialect) return { ...base, status: 'not-read', label: `schema dump, dialect unknown (${dialect.reason})` }
   if (dialect.dialect === 'sqlite') {
     const r = replay([d], DatabaseSync)
-    return { ...base, entities: r.entities, implicitIndexes: r.implicit, notes: r.notes, complete: !r.stopped, partial: !!r.stopped, status: r.stopped ? 'partial' : 'read', label: r.stopped ? 'read to' : `schema dump, ${counted(r.statements, 'statement')}`, ...(r.stopped ? { stopped: { path: r.stopped.path, line: r.stopped.line }, error: r.stopped.error } : {}) }
+    return bookkeeping({ ...base, entities: r.entities, implicitIndexes: r.implicit, notes: r.notes, complete: !r.stopped, partial: !!r.stopped, status: r.stopped ? 'partial' : 'read', label: r.stopped ? 'read to' : `schema dump, ${counted(r.statements, 'statement')}`, ...(r.stopped ? { stopped: { path: r.stopped.path, line: r.stopped.line }, error: r.stopped.error } : {}) }, 'sqlite', d.path)
   }
   if (!['postgres', 'mysql'].includes(dialect.dialect)) return { ...base, status: 'not-read', label: `no reader for ${dialect.dialect} dumps` }
-  return { ...base, ...ddlFacts(readDdl([d], { dialect: dialect.dialect, dump: true }), [], 'schema dump') }
+  return bookkeeping({ ...base, ...ddlFacts(readDdl([d], { dialect: dialect.dialect, dump: true }), [], 'schema dump') }, dialect.dialect, d.path)
 }
 
 // What readers/ddl.mjs read, as a declaration's facts: what it skipped counted per file by kind.
@@ -212,7 +239,7 @@ function readJournal(folder, configs) {
   } catch (e) { return { path: p, error: e.message } }
 }
 
-function dialectOf(folder, configs, members, override, journal, statedOnly = false) {
+function dialectOf(folder, configs, members, override, journal, statedOnly = false, dump = null) {
   if (override) return { dialect: normDialect(override), from: { how: 'override' } }
   for (const [p, text] of configs) {
     if (!DRIZZLE_CONFIG.test(p)) continue
@@ -227,6 +254,7 @@ function dialectOf(folder, configs, members, override, journal, statedOnly = fal
     if (m) return { dialect: normDialect(m[1]), from: { how: 'stated', path: p, line: text.slice(0, block.index + m.index).split('\n').length } }
   }
   if (folder === 'supabase/migrations' || folder.endsWith('/supabase/migrations')) return { dialect: 'postgres', from: { how: 'supabase' } }
+  if (dump) return dump // the header of a dump beside the migrations
   if (statedOnly) return { dialect: null }
   const s = sniffDialect(members)
   return s.dialect ? { dialect: s.dialect, from: { how: 'sniffed', marker: s.marker, path: s.path, line: s.line } } : { dialect: null, reason: s.reason }
@@ -253,7 +281,9 @@ function orderOf(folder, members, journal) {
     const other = fly.find((x) => !x.f)
     if (other) return { error: `the names mix version prefixes (${other.name} beside V<version>__ names)`, notes }
     for (const x of fly.filter((y) => y.f[1] === 'U')) notes.push(`${x.m.path} is an undo migration: not replayed`)
-    const versioned = fly.filter((x) => x.f[1] === 'V').map((x) => ({ ...x, v: parts(x.f[2]) })).sort((a, b) => cmpParts(a.v, b.v))
+    // a version's trailing zeros are no part of it (1, 1.0 and 1.0.0 are one version)
+    const trimmed = (v) => { const p = parts(v); while (p.length > 1 && p[p.length - 1] === 0) p.pop(); return p }
+    const versioned = fly.filter((x) => x.f[1] === 'V').map((x) => ({ ...x, v: trimmed(x.f[2]) })).sort((a, b) => cmpParts(a.v, b.v))
     for (let i = 1; i < versioned.length; i++) if (!cmpParts(versioned[i - 1].v, versioned[i].v)) return { error: `${versioned[i - 1].name} and ${versioned[i].name} share a version`, notes }
     const repeatable = fly.filter((x) => !x.f[1]).sort((a, b) => (a.f[3] < b.f[3] ? -1 : a.f[3] > b.f[3] ? 1 : 0))
     return { files: [...versioned, ...repeatable].map((x) => x.m), notes }

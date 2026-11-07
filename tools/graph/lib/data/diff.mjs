@@ -47,7 +47,7 @@
 //              declaration that changed it)
 //   Rename     { kind, entity: null for entities, shape: 'same columns' | 'same type and position',
 //                from: [index into changes], to: [index into changes], ambiguous }
-import { normType, normDefault, kvIndex, kvTable, projectionText, declPath } from './model.mjs'
+import { normType, normDefault, normColumn, kvIndex, kvTable, projectionText, declPath } from './model.mjs'
 
 // Dialects whose identifiers compare in any letter case.
 const CASELESS = new Set(['sqlite'])
@@ -81,14 +81,14 @@ const ATTRS = {
   field: (x, f) => ({ type: [normType(typeOf(x), f?.dialect), typeOf(x)], nullable: [x.nullable, x.nullable], default: [normDefault(x.default, f?.dialect), x.default ?? null], generated: [x.generated ?? null, x.generated ?? null] }),
   key: (k) => (k.role === 'ttl' ? { enabled: same(k.enabled) } : {}),
   index: (i, f) => (kvIndex(i) ? { kind: same(i.kind), partition: [i.partition.join(','), i.partition.join(', ')], sort: [i.sort.join(','), i.sort.join(', ')], projection: same(projectionText(i)) }
-    : { unique: [!!i.unique, !!i.unique], columns: [i.columns.map(f).join(','), i.columns.join(', ')], partial: [!!i.partial, !!i.partial] }),
+    : { unique: [!!i.unique, !!i.unique], columns: [i.columns.map((c) => f(normColumn(c, f.dialect))).join(','), i.columns.join(', ')], partial: [!!i.partial, !!i.partial] }),
   relation: (r) => ({ onDelete: [r.onDelete, r.onDelete], onUpdate: [r.onUpdate, r.onUpdate] }),
 }
 const SHAPE = {
   entity: (e, f) => (e.fields?.length ? [`${e.kind}|${e.fields.map((x) => `${f(x.name)} ${normType(typeOf(x), f.dialect)}`).join(',')}`, 'same columns'] : null),
   field: (x, f, pos) => [`${normType(typeOf(x), f.dialect)}|${pos}`, 'same type and position'],
   key: () => null,
-  index: (i, f) => (kvIndex(i) ? [`${i.kind}|${i.partition.join(',')}|${i.sort.join(',')}|${projectionText(i)}`, 'same keys and projection'] : [`${!!i.unique}|${i.columns.map(f).join(',')}|${!!i.partial}`, 'same columns']),
+  index: (i, f) => (kvIndex(i) ? [`${i.kind}|${i.partition.join(',')}|${i.sort.join(',')}|${projectionText(i)}`, 'same keys and projection'] : [`${!!i.unique}|${i.columns.map((c) => f(normColumn(c, f.dialect))).join(',')}|${!!i.partial}`, 'same columns']),
   relation: (r, f) => [`${r.columns.map(f).join(',')}|${r.toColumns.map(f).join(',')}`, 'same columns'],
 }
 
