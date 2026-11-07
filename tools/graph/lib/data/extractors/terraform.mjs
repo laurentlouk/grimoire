@@ -196,7 +196,7 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
   const how = inst.kind === 'terragrunt' ? 'through Terragrunt' : inst.kind === 'tfvars' ? `with ${P.basename(inst.path)}` : auto.length ? `with ${auto.map((p) => P.basename(p)).join(', ')}` : 'with its defaults'
   return {
     store: STORE, dialect: 'dynamodb', dialectFrom: null,
-    source: { path: inst.path, line: entities[0]?.line ?? inst.line ?? 1, kind: 'infra', confidence: 'declared' },
+    source: { path: inst.path, line: entities.find((e) => e.path === inst.path)?.line ?? inst.line ?? 1, kind: 'infra', confidence: 'declared' },
     complete: false, partial: false, status: entities.length ? 'read' : 'not-read',
     label: `Terraform module ${dir} ${how}, ${plural(entities.length, 'table')}`,
     files: 1,

@@ -1870,10 +1870,16 @@ resource "aws_dynamodb_table" "events" {
     ['PROVISIONED', ['ByKindRegion gsi kind+region/at INCLUDE(payload)', 'ByKind lsi tenant/kind KEYS_ONLY()'], ['tenant:S:false', 'at:N:false', 'kind:S:true', 'region:S:true']],
     'literal blocks: billing PROVISIONED when not said (the provider\'s default), a GSI keyed by key_schema blocks (a multi-attribute partition key), an LSI on the table\'s partition key')
   eq([sd[0].entities[0].path, sd[0].entities[0].line], ['svc/db/tables.tf', 2], 'with no for_each, a table is at its resource\'s line')
+  const saModel = reconcile(sa.map((r) => ({ repo: 'svc', extractor: r.extractor, facts: r.facts })))
+  eq(saModel.stores[0].entities.find((e) => e.name === 'prod-events').sources.map((s) => `${s.path}:${s.line}`), ['svc/db/tables.tf:2'], '… cited once: its second source would be the same line')
   // never throws past the extractor: a file that does not parse is noted, the others read
   const broken = tfRun({ 'live/prod/other/terragrunt.hcl': 'terraform {\n  source = "../../../modules/kv-tables"\n', 'modules/kv-tables/extra.tf': 'resource "x" {\n' })
   ok(!broken[1].error && broken[1].facts.declarations[0].entities.length === 3 && broken[1].facts.declarations[0].notes.includes('modules/kv-tables/extra.tf does not parse: an unterminated block: no closing } at line 2') && broken[1].facts.declarations[0].notes.some((n) => n.startsWith('live/prod/other/terragrunt.hcl does not parse (an unterminated block')),
     `a module file and a configuration that do not parse: each noted, the tables still read (${broken[1].error || broken[1].facts.declarations[0].notes.slice(0, 3).join(' | ')})`)
+  // module addresses: a folder of the repository, or out of reach, shown without credentials or query
+  const CRED = ['user', 'pw'].join(':')
+  eq([H.moduleDir('../../modules//kv', 'live/prod/x'), H.moduleDir('/modules/kv', 'live/prod/x'), H.moduleDir('../../../../x', 'a/b'), H.moduleDir(`git::https://${CRED}@example.com/m.git//kv?ref=v1`, 'a'), H.repoPath('/.config/a.hcl')],
+    [{ dir: 'live/modules/kv' }, { dir: 'modules/kv' }, { outside: true }, { remote: 'git::https://example.com/m.git//kv' }, '.config/a.hcl'], 'a module source: a local path (its `//` subfolder joined), rooted at the repository, outside it, or remote (credentials and query dropped)')
   // an HCL file past the reader's cap elsewhere in the repository is no input of the module's job
   const bigInfo = new Map([['m/main.tf', { size: 10, ddl: TF_LEVEL.module }], ['live/a/terragrunt.hcl', { size: 10, ddl: TF_LEVEL.unit }], ['gen/huge.hcl', { size: HCL_MAX + 1, ddl: 1 }]])
   eq(terraform.discover(bigInfo).map((j) => [j.key, j.inputs]), [['m', ['m/main.tf', 'live/a/terragrunt.hcl']]], 'an HCL file past the reader\'s cap is left out of a module\'s inputs, so it fails no job')

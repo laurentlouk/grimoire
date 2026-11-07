@@ -830,7 +830,7 @@ export function jsonValues(file, value, lines, keyOf, ev) {
 // ── Terragrunt: a configuration (terragrunt.hcl), its includes, inputs and module source ──
 // fsx: { has(path), body(path) → parsed body (throws when it does not parse) }, repository-relative
 // paths. A virtual absolute path (/a/b) is the repository's a/b.
-export const repoPath = (p) => P.normalize(p.replace(/^\/+/, '')).replace(/^\.\/?/, '') || '.'
+export const repoPath = (p) => P.normalize(p.replace(/^\/+/, '') || '.')
 const virt = (dir) => (dir === '.' ? '/' : `/${dir}`)
 
 export class Terragrunt {

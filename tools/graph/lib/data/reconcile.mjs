@@ -56,7 +56,7 @@ function merge(id, ds) {
   // the module's resource, its `via`) cites both, the line that states it first
   const note = (el, d, attrs, src, x) => {
     el.sources.push(src)
-    if (x?.via) el.sources.push({ repo: d.repo, path: x.via.path, line: x.via.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(x.via.as ? { as: x.via.as } : {}) })
+    if (x?.via && !(x.via.path === src.path && x.via.line === src.line)) el.sources.push({ repo: d.repo, path: x.via.path, line: x.via.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(x.via.as ? { as: x.via.as } : {}) })
     el.by.set(d, { attrs, src })
   }
 
