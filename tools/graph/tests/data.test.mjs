@@ -4501,6 +4501,8 @@ async function indexed() {
       '  Redis  ioredis  backend/src/cache.ts',
     ], 'the gap: a Redis client imported, no extractor and no refine entry (the Mongoose import is covered by the described store)')
     has(rlist, '  {env}-{project}-order  backend:dynamodb/Orders + backend:dynamodb/{env}-{project}-order  (refined: docs/architecture/shop.data.json equivalences[0])  [3 conflicts across them]', 'the logical tables: the local Orders and the production template, one table by the refine file\'s equivalence, saying so')
+    const rone = await rq('data', { repo: 'app' })
+    ok(!rone.includes('Refined (') && !rone.includes('Drift (') && !rone.includes('Gaps ('), 'graph_data limited to one repository says nothing of the refine files (their claims span the repositories: one about another would read as drift)')
     eq(await rq('data', { store: 'backend:notes' }), [
       'backend:notes  mongodb  refined: described by citation in docs/architecture/shop.data.json (stores[0]), no extractor reads it  Notes, a document collection',
       '  why: no extractor reads Mongoose schemas yet',

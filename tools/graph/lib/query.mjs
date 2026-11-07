@@ -365,7 +365,9 @@ export class Graph {
   data({ store, entity, repo }, project = null) {
     const R = repo ? ' AND repo = ?' : '', ra = repo ? [repo] : []
     const r = this.refined(project, repo || null)
-    const model = clean(r.model), refine = r.refine ? clean(r.refine) : null
+    // limited to one repository, the refine files' claims (they span the repositories) are not said:
+    // a claim about another would read as drift
+    const model = clean(r.model), refine = r.refine && !repo ? clean(r.refine) : null
     const failed = clean(this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra))
     if (entity) return this.dataEntity(model, String(entity), refine)
     if (store) return this.dataStore(model, String(store), refine)
