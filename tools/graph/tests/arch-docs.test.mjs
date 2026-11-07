@@ -503,5 +503,103 @@ else {
   ok(/notes/.test(text()) && /At the top/.test(text()), 'the Docs home: counts and the top-level notes')
 }
 
+// ── 6 · the architecture change view ──
+console.log('\n6 · the architecture change view: the delta\'s architecture targets, the diagram diff, the findings on two indexes, the states')
+{
+  const { parseDelta, parseArchTarget, archTargetOf, changeHash, setAcks, appendChanges } = await import('../lib/data/delta.mjs')
+  const AC = await import('../lib/arch-change.mjs')
+  const eq = (got, want, m) => { const g = JSON.stringify(got), w = JSON.stringify(want); ok(g === w, `${m}${g === w ? '' : `\n       want: ${w}\n       got:  ${g}`}`) }
+  // the target grammar
+  eq([parseArchTarget('component:search'), parseArchTarget('connection:web-app->api.v2'), parseArchTarget('connection:a-->b'), parseArchTarget('connection:web->api#HTTPS # json'), parseArchTarget('boundary:Backend / deploy')],
+    [{ kind: 'component', id: 'search' }, { kind: 'connection', from: 'web-app', to: 'api.v2', label: null }, { kind: 'connection', from: 'a-', to: 'b', label: null }, { kind: 'connection', from: 'web', to: 'api', label: 'HTTPS # json' }, { kind: 'boundary', label: 'Backend / deploy' }],
+    'targets: a component by its id, a line by its two ends (an id may hold - and end with it: the one > splits them), one of several lines by #<label>, a boundary by its label')
+  const bad = ['component:Search', 'component:', 'connection:web>api', 'connection:web->', 'connection:web->web', 'connection:web->api#', 'boundary:', 'module:x', 'api:db/books']
+  ok(bad.every((t) => parseArchTarget(t).error), `refused: an id in upper case, no id, a line without ->, an end missing, a loop, an empty #label, no label, another kind, a data target (${bad.filter((t) => !parseArchTarget(t).error)})`)
+  eq([archTargetOf('component', { id: 'x' }), archTargetOf('connection', { from: 'a', to: 'b' }), archTargetOf('connection', { from: 'a', to: 'b' }, 'SQL'), archTargetOf('boundary', { label: 'Edge' })], ['component:x', 'connection:a->b', 'connection:a->b#SQL', 'boundary:Edge'], 'the target of a drawn element, the inverse')
+  // validation: the architecture list is checked now, change by change
+  const ch = (id, op, target, extra = {}) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
+  const errs = (architecture, data = []) => parseDelta(JSON.stringify({ schema: 1, spec: 's', data, architecture })).errors
+  eq(errs([ch('c1', 'add', 'component:search', { after: { label: 'Search', type: 'backend', paths: ['src/search'] } }), ch('c2', 'add', 'connection:web->search'), ch('c3', 'change', 'connection:web->api', { after: { via: 'HTTP' } }),
+    ch('c4', 'add', 'boundary:Edge', { after: { kind: 'trust', wraps: ['web'] } }), ch('c5', 'rename', 'component:api', { after: { id: 'orders' } }), ch('c6', 'rename', 'boundary:Edge', { after: { label: 'Public edge' } }), ch('c7', 'remove', 'component:legacy')]), [],
+    'a component added with its label and type, a line added with no after, a line changed, a boundary added, a component renamed by id, a boundary by label, a removal: valid')
+  eq(errs([ch('a1', 'add', 'component:x', { after: { label: 'X' } }), ch('a2', 'add', 'component:y', { after: { label: 'Y', type: 'server', col: 1 } }), ch('a3', 'rename', 'connection:a->b', { after: { label: 'z' } }),
+    ch('a4', 'rename', 'component:x', { after: { id: 'Bad Id' } }), ch('a5', 'add', 'boundary:B', { after: { kind: 'zone', wraps: [] } }), ch('a6', 'change', 'connection:a->b', { after: {} }), ch('a7', 'remove', 'boundary:B', { after: { wraps: ['x'] } }), ch('a8', 'add', 'nope:x'), ch('a1', 'remove', 'component:z')], [ch('a7', 'remove', 'api:db/t')]),
+  ['architecture[0] (a1): after: a component needs its type', 'architecture[1] (a2): after: a component\'s type "server" is not valid', 'architecture[1] (a2): after: "col" is not an attribute of a component (label, sublabel, type, paths, imports, sources, note, tag, repo)',
+    'architecture[2] (a3): a connection has no name to rename: remove it and add the new one', 'architecture[3] (a4): after: { id }, the new id', 'architecture[4] (a5): after: a boundary\'s kind "zone" is not valid', 'architecture[4] (a5): after: a boundary\'s wraps [] is not valid',
+    'architecture[5] (a6): after: what changes (label, variant, via, note)', 'architecture[6] (a7): a removal has no after', 'architecture[6] (a7): the id "a7" is data[0]\'s too: ids are unique', 'architecture[7] (a8): target: "nope:x" is no architecture target: component:<id>, connection:<from>-><to> or boundary:<label>', 'architecture[8] (a1): the id "a1" is architecture[0]\'s too: ids are unique'],
+    'every problem named: a component without its type, an unknown type, a layout attribute, a line renamed, a bad id, a boundary kind and an empty wraps, a change that states nothing, a removal with after, another kind of target, an id used twice across both lists')
+  // acknowledgements and appended changes find their list
+  const FILE = JSON.stringify({ schema: 1, spec: 's', data: [ch('d1', 'remove', 'api:db/t')], architecture: [ch('a1', 'add', 'component:search', { after: { label: 'Search', type: 'backend' } })] }, null, 2) + '\n'
+  const ACK = { by: 'Ann', at: '2026-11-07T08:00:00.000Z', hash: changeHash(JSON.parse(FILE).architecture[0]) }
+  const acked = setAcks(FILE, new Map([[0, ACK]]), 'architecture')
+  eq([JSON.parse(acked).architecture[0].ack, JSON.parse(acked).data[0].ack, acked.replace(/,\n {6}"ack": \{\n[^}]*\}/, '') === FILE], [ACK, undefined, true], 'setAcks edits an architecture change\'s ack in place, and nothing else')
+  const unpl = (id, target, after) => ({ id, op: 'add', target, ...(after ? { after } : {}), why: 'the export needs it', slice: 1, origin: 'unplanned' })
+  const ap = appendChanges(FILE, [unpl('u1', 'connection:web->store'), unpl('u2', 'api:db/t.x', { type: 'TEXT', nullable: true }), unpl('u3', 'component:Bad'), unpl('a1', 'component:dup', { label: 'D', type: 'cli' })])
+  const after = JSON.parse(ap.text)
+  eq([after.architecture.map((c) => c.id), after.data.map((c) => c.id), ap.refused.map((r) => r.id), ap.already, parseDelta(ap.text).errors], [['a1', 'u1'], ['d1', 'u2'], ['u3'], ['a1'], []],
+    'appendChanges routes an architecture target to `architecture` and a data one to `data`; a bad target is refused; an id held in either list is already there')
+
+  // the diagram diff, base → branch
+  const base = { schema: 1, title: 'Shop', components: [{ id: 'web', label: 'Web', type: 'frontend', paths: ['src/web'] }, { id: 'api', label: 'API', type: 'backend', paths: ['src/api'] }, { id: 'store', label: 'Store', type: 'database', paths: ['src/store'] }, { id: 'old', label: 'Old', type: 'cli' }],
+    connections: [{ from: 'web', to: 'api', label: 'HTTP' }, { from: 'api', to: 'store', label: 'SQL' }, { from: 'api', to: 'store', label: 'cache' }], boundaries: [{ label: 'Backend', kind: 'deploy', wraps: ['api', 'store'] }] }
+  const branch = { ...base, components: [base.components[0], { ...base.components[1], label: 'Order API' }, base.components[2], { id: 'search', label: 'Search', type: 'backend', paths: ['src/search'] }],
+    connections: [base.connections[0], base.connections[1], { from: 'web', to: 'store', label: 'reads' }], boundaries: [{ label: 'Backend', kind: 'deploy', wraps: ['api', 'store', 'search'] }] }
+  const dd = AC.diffDiagrams([{ file: 'docs/architecture/shop.architecture.json', doc: base }, { file: 'docs/architecture/gone.architecture.json', doc: { schema: 1, title: 'Gone', components: [{ id: 'g', label: 'G', type: 'cli' }] } }, { file: 'docs/architecture/broken.architecture.json', error: 'does not parse: x' }],
+    [{ file: 'docs/architecture/shop.architecture.json', doc: branch }, { file: 'docs/architecture/broken.architecture.json', doc: base }])
+  eq(dd.files.map((f) => [f.file, f.change, f.changes.map((c) => `${c.change} ${c.target}${c.attrs.length ? ` ${c.attrs.map((a) => `${a.attr}: ${AC.shown(a.before)} → ${AC.shown(a.after)}`).join('; ')}` : ''}`)]), [
+    ['docs/architecture/gone.architecture.json', 'removed', ['removed component:g']],
+    ['docs/architecture/shop.architecture.json', 'modified', ['modified component:api label: API → Order API', 'removed component:old', 'added component:search', 'removed connection:api->store#cache', 'added connection:web->store', 'modified boundary:Backend wraps: api, store → api, search, store']],
+  ], 'the diff: a component relabelled, removed and added; one of two lines on a pair removed, named by its label; a new line; a boundary that wraps one more; a diagram gone lists what it held')
+  eq([dd.skipped, dd.counts], [[{ file: 'docs/architecture/broken.architecture.json', why: 'at the base, it does not parse: x' }], { files: 2, added: 2, removed: 3, modified: 2 }], 'a diagram that does not parse on a side is not compared, and said; the counts')
+
+  // the findings on two indexes: the same diagram, the base checkout's index and the branch's
+  const F = (files, edges, imports) => {
+    const fs = files.map(([p], i) => ({ id: i + 1, repo: 'shop', path: p, lang: 'javascript', is_test: 0, node_id: 100 + i + 1 }))
+    return { repos: ['shop'], files: fs, nodes: fs.map((f) => ({ id: 200 + f.id, file_id: f.id })), edges: edges.map(([a, b]) => ({ src: 200 + a, dst: 200 + b, kind: 'IMPORTS', confidence: 'import' })), imports: imports.map(([f, s]) => ({ file_id: f, source: s })) }
+  }
+  const shop = { schema: 1, title: 'Shop', components: [{ id: 'web', label: 'Web', type: 'frontend', paths: ['src/web'] }, { id: 'api', label: 'API', type: 'backend', paths: ['src/api'] }, { id: 'store', label: 'Store', type: 'database', paths: ['src/store'] }],
+    connections: [{ from: 'web', to: 'api', label: 'HTTP' }, { from: 'api', to: 'store', label: 'SQL' }] }
+  const BASE_FILES = [['src/web/page.js'], ['src/api/orders.js'], ['src/store/db.js'], ['src/api/cart.js']]
+  const baseIdx = F(BASE_FILES, [[1, 2], [2, 3], [4, 3]], [])
+  const brIdx = F([...BASE_FILES, ['src/jobs/mail.js']], [[1, 2], [1, 3], [4, 3]], [[3, 'redis'], [5, 'nodemailer']])
+  const nf = A.newFindings(shop, brIdx, baseIdx)
+  eq(nf.map((f) => `${f.kind} ${f.target} | ${f.text}`), [
+    'undrawn connection:web->store | web uses store (1 file pair in the graph), but no line is drawn between them',
+    'uncovered null | src/jobs (1 production file) is in no component',
+    'service component:redis | the code imports Redis (redis), and no component reaches it',
+  ], 'the findings new on the branch\'s index: a link no line draws, a module no component covers, an external service by import (a file in no component does not count)')
+  const gone = A.newFindings(shop, F(BASE_FILES, [[1, 2], [4, 3]], []), baseIdx)
+  eq(gone.map((f) => `${f.kind} ${f.target}`), [], 'api → store still seen through another file pair: nothing new')
+  eq(A.newFindings(shop, F(BASE_FILES, [[1, 2]], []), baseIdx).map((f) => `${f.kind} ${f.target} | ${f.text}`), ['unseen connection:api->store | api → store is drawn, and the code does not show it'], 'a drawn line the code no longer shows')
+  ok(A.analyze(shop, brIdx, null).warnings.includes('the code imports Redis (redis), and no component reaches it: draw it with "imports", or name the package in the "imports" of the component that stands for it'), 'the check warns of a service the code imports and no component reaches')
+
+  // the states of the delta's architecture changes, against the diagrams and the branch's impact
+  const cur = [{ file: 'docs/architecture/shop.architecture.json', doc: { ...shop, components: [...shop.components, { id: 'search', label: 'Search', type: 'worker', paths: ['src/search'] }], connections: [...shop.connections, { from: 'web', to: 'search' }] } }]
+  const was = [{ file: 'docs/architecture/shop.architecture.json', doc: shop }]
+  const impact = { diagrams: AC.diffDiagrams(was, cur), findings: nf.map((f) => ({ file: cur[0].file, ...f })), why: null, current: cur, before: was }
+  const ack = (c, edit = {}) => ({ ...c, ...edit, ack: { by: 'Ann', at: '2026-11-07T08:00:00.000Z', hash: changeHash(c) } })
+  const DELTA = [
+    ack(ch('search', 'add', 'component:search', { after: { label: 'Search', type: 'backend' }, slice: 2 })),
+    ch('to-search', 'add', 'connection:web->search'),
+    ack(ch('cache', 'add', 'component:cache', { after: { label: 'Cache', type: 'database', imports: ['redis'] } }), { why: 'edited after the acknowledgement' }),
+    ch('via', 'change', 'connection:web->api', { after: { via: 'HTTPS' } }),
+    ch('legacy', 'remove', 'component:legacy'),
+    ch('jobs', 'add', 'component:jobs', { after: { label: 'Jobs', type: 'worker', paths: ['src/jobs'] } }),
+  ]
+  const s = AC.archDeltaStates(DELTA, cur, { base: was, impact })
+  eq(s.changes.map((r) => `${r.id} ${r.state}${r.ack ? ` ${r.ack}` : ''}${r.diffs.length ? ` [${r.diffs.map((x) => x.text).join('; ')}]` : ''}${r.proposed.length ? ` (${r.proposed.map((x) => x.text).join('; ')})` : ''}${r.warn ? ` ⚠ ${r.warn}` : ''}`), [
+    'search built-differently acked [type: backend → worker]',
+    'to-search planned-built',
+    'cache pending stale',
+    'via pending (via: none → HTTPS)',
+    'legacy planned-built ⚠ not in the diagrams, nor at the base: check the target',
+    'jobs pending',
+  ], 'each state: drawn in another shape (planned → built), drawn as planned, not drawn yet (its acknowledgement stale once edited), a change with what it proposes, a removal gone (and never there: a warning)')
+  eq(s.unplanned.map((u) => `${u.source} ${u.target}`), ['code connection:web->store'], 'unplanned: what the branch did that no change covers (the diagram\'s new component and line are planned; the service is covered by the planned cache\'s imports, the uncovered module by the planned jobs\' paths)')
+  eq([s.counts.changes, s.counts['planned-built'], s.counts.pending, s.counts['built-differently'], s.counts.acked, s.counts.stale, s.counts.unplanned], [6, 2, 3, 1, 1, 1, 1], 'the counts')
+  const renamed = AC.archDeltaStates([ch('ren', 'rename', 'component:api', { after: { id: 'orders' } })], [{ file: 'f', doc: { ...shop, components: shop.components.map((c) => (c.id === 'api' ? { ...c, id: 'orders' } : c)), connections: [{ from: 'web', to: 'orders' }, { from: 'orders', to: 'store' }] } }], { base: [{ file: 'f', doc: shop }], impact: { diagrams: AC.diffDiagrams([{ file: 'f', doc: shop }], [{ file: 'f', doc: { ...shop, components: shop.components.map((c) => (c.id === 'api' ? { ...c, id: 'orders' } : c)), connections: [{ from: 'web', to: 'orders' }, { from: 'orders', to: 'store' }] } }]), findings: [] } })
+  eq([renamed.changes[0].state, renamed.unplanned.map((u) => u.target)], ['planned-built', []], 'a rename built covers the old and the new component and the lines that meet them')
+}
+
 console.log(`\n${PASS} passed, ${FAIL} failed`)
 process.exit(FAIL ? 1 : 0)

@@ -91,7 +91,7 @@ function extractAt(abs, commit, project, overrides, ctx) {
 
 // A commit's files under a directory, relative to it (git lists them so when run from inside it):
 // Map(path → { oid, size }). Symbolic links are left out: their blob is a target path, not a text.
-function treeAt(abs, commit) {
+export function treeAt(abs, commit) {
   const r = git(abs, ['ls-tree', '-r', '-l', '-z', commit])
   if (r.status !== 0) throw new Error(`git ls-tree ${commit.slice(0, 10)} failed in ${abs}: ${(r.stderr || '').trim().split('\n')[0]}`)
   const files = new Map()
@@ -106,7 +106,7 @@ function treeAt(abs, commit) {
 
 // Blobs ([{ oid, size }]) by object id, as bytes, from one `git cat-file --batch`: each answer is
 // "<oid> blob <size>\n<content>\n", or "<oid> missing\n".
-function blobs(abs, list) {
+export function blobs(abs, list) {
   const got = new Map()
   if (!list.length) return got
   const r = spawnSync('git', ['-C', abs, 'cat-file', '--batch'], { input: `${list.map((x) => x.oid).join('\n')}\n`, maxBuffer: list.reduce((a, x) => a + x.size + 128, 4096) })

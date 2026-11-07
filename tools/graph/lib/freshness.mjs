@@ -95,6 +95,20 @@ export function baseOf(project) {
   return m ? { root: m.path, branch: m.branch, dbPath: path.join(m.path, rel) } : null
 }
 
+// The base checkout's index, to read the code as the base has it (the architecture change view:
+// the check's findings on the branch's index and not on the base's). { root, branch, dbPath } of the
+// checkout baseOf names, when its index exists and was built by this grimoire version; else { why }.
+// Read-only, as it is: it is that checkout's to refresh (its own runs and hook), never this one's.
+export async function baseIndex(project) {
+  const base = baseOf(project)
+  if (!base) return { why: 'no other checkout of the repository has an index to read the base from (a worktree of a branch reads its base checkout\'s)' }
+  if (!existsSync(base.dbPath)) return { why: `the base checkout (${base.root}) has no index` }
+  let schema = null
+  try { const db = await openStore(base.dbPath, { readOnly: true }); try { schema = metaOf(db, 'schema') } finally { db.close() } } catch (e) { return { why: `the base checkout's index cannot be read (${e.message})` } }
+  if (schema !== SCHEMA_VERSION) return { why: `the base checkout's index (${base.root}) was built by another grimoire version: index it there first` }
+  return base
+}
+
 export async function seed(project) {
   if (existsSync(project.dbPath)) return false
   const base = baseOf(project)
