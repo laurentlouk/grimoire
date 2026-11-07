@@ -1804,7 +1804,7 @@ resource "aws_dynamodb_table" "c" {
   // a name with an unknown part: its template
   const noStage = tfRun({ 'live/prod/stage.hcl': null })[1].facts.declarations[0]
   eq(noStage.entities.map((e) => [e.name, e.nameTemplate]), [['{stage}-shop-audit', '{stage}-shop-audit'], ['{stage}-shop-carts', '{stage}-shop-carts'], ['{stage}-shop-orders', '{stage}-shop-orders']], 'the include that sets the stage is missing: each name is its template, its literal parts kept')
-  ok(noStage.notes.includes('{stage}-shop-orders: a part of its name is unknown (find_in_parent_folders("stage.hcl"): no such file above live/prod/tables among the repository\'s HCL files): named by its template'), `and noted with why (${noStage.notes.find((n) => n.startsWith('{stage}-shop-orders')) || noStage.notes[0]})`)
+  eq(noStage.notes[0], '3 tables: a part of each name is unknown (find_in_parent_folders("stage.hcl"): no such file above live/prod/tables among the repository\'s HCL files): each named by its template ({stage}-shop-audit, {stage}-shop-carts, {stage}-shop-orders)', 'and noted once per reason, with why')
   // secrets: a tfvars value no table uses never reaches the facts
   const SECRET = ['sk', 'live', Array.from({ length: 24 }, (_, i) => 'abcdef0123456789'[(i * 7) % 16]).join('')].join('_')
   const withSecret = tfRun({ 'modules/kv-tables/terraform.tfvars': `api_token = "${SECRET}"\napp = "store"\n` })
@@ -1874,6 +1874,9 @@ resource "aws_dynamodb_table" "events" {
   const broken = tfRun({ 'live/prod/other/terragrunt.hcl': 'terraform {\n  source = "../../../modules/kv-tables"\n', 'modules/kv-tables/extra.tf': 'resource "x" {\n' })
   ok(!broken[1].error && broken[1].facts.declarations[0].entities.length === 3 && broken[1].facts.declarations[0].notes.includes('modules/kv-tables/extra.tf does not parse: an unterminated block: no closing } at line 2') && broken[1].facts.declarations[0].notes.some((n) => n.startsWith('live/prod/other/terragrunt.hcl does not parse (an unterminated block')),
     `a module file and a configuration that do not parse: each noted, the tables still read (${broken[1].error || broken[1].facts.declarations[0].notes.slice(0, 3).join(' | ')})`)
+  // an HCL file past the reader's cap elsewhere in the repository is no input of the module's job
+  const bigInfo = new Map([['m/main.tf', { size: 10, ddl: TF_LEVEL.module }], ['live/a/terragrunt.hcl', { size: 10, ddl: TF_LEVEL.unit }], ['gen/huge.hcl', { size: HCL_MAX + 1, ddl: 1 }]])
+  eq(terraform.discover(bigInfo).map((j) => [j.key, j.inputs]), [['m', ['m/main.tf', 'live/a/terragrunt.hcl']]], 'an HCL file past the reader\'s cap is left out of a module\'s inputs, so it fails no job')
   // found by content: the levels
   eq([tfLevel('m/main.tf', 'resource "aws_dynamodb_table" "t" {}'), tfLevel('m/x.tf', '# resource "aws_dynamodb_table"\nvariable "a" {}'), tfLevel('a/terragrunt.hcl', 'include "root" {}'), tfLevel('a/root.hcl', 'inputs = {}'), tfLevel('a/terragrunt.hcl', 'terraform {\n  source = "git::https://example.com/m.git//dynamodb"\n}'), tfLevel('a/terragrunt.hcl', 'terraform {\n  source = "../modules/dynamodb"\n}'), tfLevel('m/c.tf', 'module "t" {\n  source = "terraform-aws-modules/dynamodb-table/aws"\n}')],
     [TF_LEVEL.module, 1, TF_LEVEL.unit, 1, TF_LEVEL.remote, TF_LEVEL.unit, TF_LEVEL.remote], 'tfLevel: a module declares a table resource (not in a comment); a terragrunt.hcl is a configuration Terragrunt runs; a remote source naming a table module is out of reach; a local one is no such thing')

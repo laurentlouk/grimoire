@@ -42,7 +42,7 @@
 // names, the TTL attribute, stream, billing); every other value is evaluated in memory, if at all,
 // and dropped with the evaluation. A note names expressions (readers/hcl.mjs refText), never values.
 import path from 'node:path'
-import { parseHcl, HclError, refText } from '../readers/hcl.mjs'
+import { parseHcl, HclError, refText, HCL_MAX } from '../readers/hcl.mjs'
 import {
   Evaluator, BudgetError, Unknown, Partial, isUnk, readModule, moduleScope, instancesOf, attrOf, blocksOf,
   tfvarsValues, jsonValues, Terragrunt, moduleDir, safeAddress, memberAt, isObj, EVAL_MS,
@@ -82,10 +82,11 @@ export default {
   scope: 'unit',
   wants: wantsTf,
   // a job per module folder (its .tf and .tfvars, and every HCL file: a Terragrunt configuration
-  // anywhere may run it, and include or read any other), and one per file whose module is out of reach
+  // anywhere may run it, and include or read any other; one past the reader's cap, which could not
+  // be read, is left out, so it fails no module's job), and one per file whose module is out of reach
   discover(info) {
     const all = [...info.keys()].filter(wantsTf)
-    const hcl = all.filter((p) => HCL.test(p)).sort()
+    const hcl = all.filter((p) => HCL.test(p) && !(info.get(p).size > HCL_MAX)).sort()
     const dirs = [...new Set(all.filter((p) => TF.test(p) && info.get(p).ddl === TF_LEVEL.module).map((p) => P.dirname(p)))].sort()
     const jobs = dirs.map((dir) => {
       const own = all.filter((p) => P.dirname(p) === dir && (TF.test(p) || TFVARS.test(p))).sort()
@@ -161,6 +162,7 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
   const notes = [...base]
   const ev = inst.ev || new Evaluator({ deadline })
   const entities = []
+  const templated = new Map() // why a name has an unknown part → the templates it names
   try {
     const values = new Map()
     if (inst.kind === 'terragrunt') {
@@ -182,12 +184,15 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
         const t = table(res, one, ev, dir)
         entities.push(t.entity)
         notes.push(...t.notes)
+        if (t.named) { if (!templated.has(t.named)) templated.set(t.named, []); templated.get(t.named).push(t.entity.name) }
       }
     }
   } catch (e) {
     if (!(e instanceof BudgetError)) throw e
     notes.push(`the evaluation stopped: ${msg(e)}; the tables read before it are kept`)
   }
+  // one note per reason a name is unknown, not one per table
+  for (const [why, names] of templated) notes.unshift(names.length === 1 ? `${names[0]}: a part of its name is unknown (${why}): named by its template` : `${names.length} tables: a part of each name is unknown (${why}): each named by its template (${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''})`)
   const how = inst.kind === 'terragrunt' ? 'through Terragrunt' : inst.kind === 'tfvars' ? `with ${P.basename(inst.path)}` : auto.length ? `with ${auto.map((p) => P.basename(p)).join(', ')}` : 'with its defaults'
   return {
     store: STORE, dialect: 'dynamodb', dialectFrom: null,
@@ -245,13 +250,12 @@ function table(res, inst, ev, dir) {
 
   // the name, or its template when a part is unknown
   const nm = at(body, 'name')
-  let name, nameTemplate = null
+  let name, nameTemplate = null, named = null
   if (!nm.has) { name = addr; notes.push(`${addr}: no name: named by its address`) } else if (isUnk(nm.v)) {
     const parts = nm.v instanceof Partial ? nm.v.parts : [nm.v]
     nameTemplate = parts.map((p) => (typeof p === 'string' ? p : `{${p.label ?? 'name'}}`)).join('')
     name = nameTemplate
-    const u = parts.find((p) => p instanceof Unknown)
-    notes.push(`${nameTemplate}: a part of its name is unknown (${u.why}): named by its template`)
+    named = parts.find((p) => p instanceof Unknown).why
   } else name = text(nm.v, 'its name') ?? addr
 
   const hk = at(body, 'hash_key'), rk = at(body, 'range_key')
@@ -333,6 +337,7 @@ function table(res, inst, ev, dir) {
       ...entityAt, ...via(res.block.line, `the resource in ${dir}`), fields, keys, indexes, relations: [],
     },
     notes: capNotes(notes),
+    named,
   }
 }
 
