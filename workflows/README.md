@@ -898,7 +898,12 @@ told.
   one. With `deliver: 'end'`, the seal commits them on what the gate pushed and pushes that commit.
   The gate, before its gate command, runs a `SYNC` script that brings the remote's delta commits
   into the checkout's run branch (a fast-forward, or a merge that changes only the delta), so it
-  certifies a tree that holds them and its push stays a fast-forward. A delta outside every
+  certifies a tree that holds them and its push stays a fast-forward. A merge (the ship's or the
+  SYNC's) that stops on the delta alone, changed on both sides (an acknowledgement made in `serve`
+  and committed on the branch, or the design's delta added on both), keeps the branch's version
+  and appends the remote's unplanned changes to it (`delta-append.mjs` takes the other version as
+  its changes: their unplanned entries, an acknowledged one unacknowledged again); any other
+  conflict abandons the merge, and the push says the rest. A delta outside every
   repository the run ships (a hub folder that is not one) is written in place, as before, and the
   PR section says so.
 - **The PR body** gets a **Data model and architecture changes** section, rebuilt with every

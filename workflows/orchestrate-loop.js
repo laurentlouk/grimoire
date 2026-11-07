@@ -2193,6 +2193,19 @@ const deltaMsgOf = (delta) => {
     trailer: runId ? ` -m ${shq(`Grimoire-Run: ${runId}`)}` : '',
   }
 }
+// A merge of the remote run branch that stopped on the delta alone, changed on both sides (an
+// acknowledgement made in `serve` and committed on the branch, or the design's delta added on both):
+// the branch's version is kept and the remote's unplanned changes appended to it by delta-append.mjs
+// (an id already there is skipped; an acknowledged one comes back unacknowledged, never lost), and the
+// merge is committed. Anything else that conflicts, or a step that fails: the merge is abandoned.
+// `dir` is the checkout the merge runs in; `to` the step cap (the gate's SYNC has none).
+function deltaBothSides(dir, rel, to = '') {
+  const f = `"${dir}"/${shq(rel)}`
+  return [
+    `    # the delta changed on both sides: this branch's version, the remote's unplanned changes appended to it`,
+    `    T=$(mktemp); if [ "$(git -C "${dir}" diff --name-only --diff-filter=U)" = ${shq(rel)} ] && git -C "${dir}" show "$R":${shq(rel)} >"$T" 2>/dev/null && git -C "${dir}" checkout -q --ours -- ${shq(rel)} >/dev/null 2>&1 && ${to}node ${shq(deltaCli())} ${f} "$T" 2>/dev/null | grep -q '^DELTA ok' && git -C "${dir}" add -- ${shq(rel)} >/dev/null 2>&1 && GIT_TERMINAL_PROMPT=0 ${to}git -C "${dir}" commit -q --no-edit >/dev/null 2>&1; then MG=1; else git -C "${dir}" merge --abort >/dev/null 2>&1; MG=0; fi; rm -f "$T"`,
+  ]
+}
 function deltaCarry(delta, h, branch) {
   return [
     `# 4a · the design's delta, on the run branch: what the remote holds beyond the landed head, when that is the delta alone, carried forward; then this ship's kept changes`,
@@ -2201,7 +2214,9 @@ function deltaCarry(delta, h, branch) {
     `  git -C "$P" cat-file -e "$R^{commit}" 2>/dev/null || GIT_TERMINAL_PROMPT=0 to 60 git -C "$P" fetch -q origin refs/heads/${branch} >/dev/null 2>&1`,
     `  if git -C "$P" merge-base --is-ancestor ${h} "$R" 2>/dev/null; then git -C "$W" checkout -f --detach -q "$R" >/dev/null 2>&1`,
     `  elif ! git -C "$P" merge-base --is-ancestor "$R" ${h} 2>/dev/null && MB=$(git -C "$P" merge-base ${h} "$R" 2>/dev/null) && [ -z "$(git -C "$P" diff --name-only "$MB" "$R" -- 2>/dev/null | grep -vxF ${shq(delta.rel)})" ]; then`,
-    `    to 60 git -C "$W" merge -q --no-ff -m ${shq(`chore(data): carry ${delta.rel} forward from the run branch`)}${deltaMsgOf(delta).trailer} "$R" >"$O" 2>&1 || git -C "$W" merge --abort >/dev/null 2>&1`,
+    `    if ! to 60 git -C "$W" merge -q --no-ff -m ${shq(`chore(data): carry ${delta.rel} forward from the run branch`)}${deltaMsgOf(delta).trailer} "$R" >"$O" 2>&1; then`,
+    ...deltaBothSides('$W', delta.rel, 'to 60 ').map((l) => `  ${l}`),
+    '    fi',
     '  fi',
     'fi',
   ]
@@ -2249,7 +2264,10 @@ function gateSyncScript(repo) {
     'elif [ "$(git -C "$P" symbolic-ref -q --short HEAD)" != "$B" ]; then echo "SYNC bad step=branch: $B is not the checked-out branch"',
     `elif [ -n "$(git -C "$P" diff --name-only "$(git -C "$P" merge-base "$H" "$R")" "$R" -- | grep -vxF ${shq(rel)})" ]; then echo "SYNC bad step=other: the remote run branch holds more than the delta"`,
     `elif git -C "$P" merge -q -m ${shq(`chore(data): bring the unplanned changes recorded in ${rel} into the run branch`)}${runId ? ` -m ${shq(`Grimoire-Run: ${runId}`)}` : ''} "$R" >/dev/null 2>&1; then echo "SYNC ok head=$(git -C "$P" rev-parse HEAD)"`,
-    'else git -C "$P" merge --abort >/dev/null 2>&1; echo "SYNC bad step=merge"; fi',
+    'else',
+    ...deltaBothSides('$P', rel),
+    '  if [ "$MG" = 1 ]; then echo "SYNC ok head=$(git -C "$P" rev-parse HEAD)"; else echo "SYNC bad step=merge"; fi',
+    'fi',
   ].join('\n')
 }
 function shipPrompt(repo, plan) {
