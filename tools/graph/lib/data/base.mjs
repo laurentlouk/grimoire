@@ -19,12 +19,12 @@
 //     each capped as the index caps it). Memoised in this process per (repository, commit, extractor
 //     versions, the config that steers discovery); nothing is written to graph.db or to disk. Its
 //     YAML that declares a table is parsed in a process of its own (readers/yaml-aside.mjs), with the
-//     indexer's flags, never in this one, and so is its source code the item binding reads
-//     (readers/code-aside.mjs).
+//     indexer's flags, never in this one, and so is its source code the item binding and the
+//     table-builder schemas read (readers/code-aside.mjs).
 //   treeAt(dir, commit), blobs(dir, list): those two git reads, shared with the architecture change
 //     view (arch-change.mjs), which reads the saved diagrams at the base the same way.
 import { spawnSync } from 'node:child_process'
-import { EXTRACTORS, codeOf, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
+import { EXTRACTORS, asideOf, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
 import { reconcile } from './reconcile.mjs'
 import { parseAside } from './readers/yaml-aside.mjs'
 import { extractAside } from './readers/code-aside.mjs'
@@ -103,12 +103,13 @@ function extractAt(abs, commit, project, overrides, ctx) {
   // the YAML a table extractor will read, parsed in a process of its own (readers/yaml-aside.mjs)
   const yaml = parseAside([...new Set(want.filter((p) => YAML.test(p) && text.has(p)).map((p) => stripBom(read(p))).filter((t) => tableLevel(t)))])
   const yamlOf = (t) => { const v = yaml.get(t); if (v instanceof Error) throw v; if (!v) throw new Error('no YAML reader: the text was not parsed'); return v }
-  // the source files a code extractor reads, read in a process of its own too (readers/code-aside.mjs);
-  // the access patterns are not read at a base (graph_changes does not compare them): a file kept
-  // only for them is not parsed
-  const code = want.filter((p) => text.get(p) && codeOf(p) && codeOf(p).level(p, text.get(p)) > 0).map((p) => ({ id: codeOf(p).id, path: p, text: text.get(p) }))
+  // the source files a code extractor parses, read in a process of its own too (readers/code-aside.mjs),
+  // once per extractor reading them (a TypeScript schema is item shapes and tables both); the access
+  // patterns are not read at a base (graph_changes does not compare them): a file kept only for them
+  // is not parsed
+  const code = want.flatMap((p) => { const t = text.get(p); return t ? asideOf(p, t).map((ex) => ({ id: ex.id, path: p, text: t, key: `${ex.id}\0${p}` })) : [] })
   const facts = code.length ? extractAside(code) : new Map()
-  const aside = (id, p) => { const v = facts.get(p); if (v instanceof Error) throw v; if (!v) throw new Error('no code reader: the file was not read'); return v }
+  const aside = (id, p) => { const v = facts.get(`${id}\0${p}`); if (v instanceof Error) throw v; if (!v) throw new Error('no code reader: the file was not read'); return v }
   return extractAll({ paths, size: (p) => files.get(p).size, read }, { exclude: [], ...project }, overrides, { ...ctx, yaml: yamlOf, aside })
 }
 const YAML = /\.(?:ya?ml|template)$/i

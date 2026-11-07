@@ -300,13 +300,15 @@ export function dataClient(ctx) {
       h('h2', null, 'Declared at'), h('div', null, ov(t) && t.ch === 'removed' ? ['at the base: ', bsrcs(s, t.bsrc)] : s.dv && t.dl && t.dl.gone ? ['at the base: ', bsrcs(s, t.bsrc)] : s.dv && t.dl && t.dl.s === 'prop' ? h('span', { class: 'muted' }, 'proposed: not in the code yet') : srcs(s, t.src)),
       section('Columns', t.fields, (f) => item(f,
         f.pk ? h('span', { class: 'mkl pk' }, 'PK') : null, f.fk ? h('span', { class: 'mkl fk' }, 'FK') : null, name(f, 'b', f.name), ' ', h('span', { class: 'mono muted' }, f.type), ' · ', h('span', { class: 'muted' }, f.nullable ? 'nullable' : 'not null'),
-        f.def !== null && f.def !== undefined ? h('span', { class: 'muted' }, ' · default ', h('code', null, String(f.def))) : null, f.gen ? h('span', { class: 'muted' }, ` · generated ${f.gen}`) : null, warn(f))),
+        f.def !== null && f.def !== undefined ? h('span', { class: 'muted' }, ' · default ', h('code', null, String(f.def))) : null, f.gen ? h('span', { class: 'muted' }, ` · generated ${f.gen}`) : null,
+        f.comp ? h('span', { class: 'muted' }, ' · computed ', h('code', null, f.comp)) : null, f.en ? h('span', { class: 'muted' }, ` · enum (${f.en.join(' | ')})`) : null, warn(f))),
       t.keys.length ? section('Keys', t.keys, (k) => item(k, name(k, 'span', `${k.role} (${k.parts.join(', ')})`), warn(k))) : null,
       section('Indexes', t.indexes, (x) => item(x, name(x, 'span', `${x.name}${x.unique ? ' unique' : ''} (${x.columns.join(', ')})${x.partial ? ' partial' : ''}`), warn(x))),
       section('Foreign keys', t.rels, (r) => item(r,
         name(r, 'span', `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), h('span', { class: 'muted' }, ` · on delete ${r.onDelete} · on update ${r.onUpdate}`), warn(r))),
       section('Referenced by', by, ([o, r]) => h('li', null, go(o.name), h('span', { class: 'mono muted' }, ` (${r.columns.join(', ')}) → (${r.toColumns.join(', ')})`))),
       conflicts.length ? [h('h2', null, `Conflicts (${conflicts.length})`), h('p', { class: 'note' }, 'The declarations disagree; each side is kept, none is resolved.'),
+        conflicts.some(([, c]) => c.drift) ? h('p', { class: 'note' }, 'The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.') : null,
         h('ul', { class: 'links dlist' }, conflicts.map(([label, c]) => h('li', null, h('div', null, h('b', null, label), h('span', { class: 'muted' }, ` · ${c.attr}`)),
           c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src))))))] : null)
   }
@@ -379,9 +381,11 @@ export function dataClient(ctx) {
 
   // ── a store's declarations, and the change overlay's head (its legend, its counts), for both drawings ──
   function declList(s) {
-    return h('ul', { class: 'links decls' }, s.decls.map((d) => h('li', null, h('span', { class: 'pill' }, d.kind), ' ', h('span', { class: 'mono muted' }, d.extractor), ' · ',
+    return [h('ul', { class: 'links decls' }, s.decls.map((d) => h('li', null, h('span', { class: 'pill' }, d.kind), ' ', h('span', { class: 'mono muted' }, d.extractor), ' · ',
       d.stopped ? h('span', { class: 'err' }, 'replayed to ', srcEl(s, d.stopped), `: ${d.error}`) : d.status === 'not-read' ? h('span', { class: 'err' }, `not read: ${d.label}`) : d.label, ' · ', srcEl(s, d.at),
-      d.notes && d.notes.length ? h('div', { class: 'note' }, d.notes.join(' · ')) : null)))
+      d.notes && d.notes.length ? h('div', { class: 'note' }, d.notes.join(' · ')) : null))),
+      // the enums a code model declares
+      s.enums && s.enums.length ? h('ul', { class: 'links decls' }, s.enums.map((en) => h('li', null, h('span', { class: 'pill' }, 'enum'), ' ', h('b', { class: 'mono' }, en.name), h('span', { class: 'mono muted' }, ` ${en.values.join(' | ')}`), ' · ', srcs(s, en.src)))) : null]
   }
   function changesHead(s, ghost) {
     if (!s.ov) return null

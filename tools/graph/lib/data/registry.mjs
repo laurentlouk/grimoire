@@ -8,8 +8,12 @@
 //       (scope unit) → facts: { declarations } (model.mjs) }
 // ctx: { DatabaseSync (node:sqlite, for the SQL replay), yaml(text) → readers/yaml.mjs documents (the
 // index's parser; for a base, its YAML parsed aside: data/base.mjs), absent where no YAML is read,
-// tree(lang, text) → a tree-sitter tree (the code and inferred extractors: the index's grammars), or, for a base,
-// aside(id, path, text) → the code extractor's facts, read in a process of its own (readers/code-aside.mjs) }
+// tree(lang, text) → a tree-sitter tree (the extractors marked `tree`: the index's grammars), or, for a base,
+// aside(id, path, text) → what that extractor reads of one file (its `parse`, else its file extract), read
+// in a process of its own (readers/code-aside.mjs) }
+// An extractor may also say: tree (it parses source through the pinned grammars), parses(path, text)
+// (whether it parses this file so: its level > 0 when absent), config(path) (a file it reads as
+// configuration, kept whatever its content: a drizzle.config.*, a prisma.config.*).
 // A job runs again when the hash of any input, the extractor's version or its salt changes. One
 // that throws loses its facts and leaves its error for graph_status; the index goes on. The text
 // comes from the working tree (the index) or from a commit (extractAll, for the base of a diff):
@@ -23,18 +27,25 @@ import terraform, { wantsTf, tfLevel } from './extractors/terraform.mjs'
 import serde from './extractors/serde.mjs'
 import tsTypes from './extractors/ts-types.mjs'
 import dynamoAccess from './extractors/dynamo-access.mjs'
+import drizzleTs from './extractors/drizzle-ts.mjs'
+import prisma from './extractors/prisma.mjs'
 import { DOC } from './readers/documents.mjs'
 import { tableLevel } from './readers/dynamodb.mjs'
 import { skipped } from '../project.mjs'
 
-export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess]
-// the code extractors (kind code): they read a source file through the pinned grammars (ctx.tree)
-export const CODE = EXTRACTORS.filter((ex) => ex.kind === 'code')
-// the inferred ones (the access patterns) read source files through them too
+export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma]
+// the code and inferred extractors: their files are source (code, or a schema language), inspected by level
 export const SOURCE = EXTRACTORS.filter((ex) => ex.kind === 'code' || ex.kind === 'inferred')
-export const codeOf = (p) => CODE.find((ex) => ex.wants(p)) || null
+// those parsing source through the pinned grammars (ctx.tree), and the ones of them a base reads
+// aside (readers/code-aside.mjs; a base does not compare access patterns)
+export const TREE = EXTRACTORS.filter((ex) => ex.tree)
+export const ASIDE = TREE.filter((ex) => ex.kind === 'code')
+// the extractors a base parses this text with, aside
+export const asideOf = (p, text) => ASIDE.filter((ex) => ex.wants(p) && (ex.parses ? ex.parses(p, text) : ex.level(p, text) > 0))
 // A source file's level, bits: 1 what the item binding reads (its code extractor's level), 2 a
-// key-value SDK call shape (extractors/dynamo-access.mjs).
+// key-value SDK call shape (extractors/dynamo-access.mjs), 4 a table-builder schema and 8 a barrel
+// re-exporting relative modules (extractors/drizzle-ts.mjs), 16 a model, view or enum block and 32 a
+// datasource block of a schema-language file (extractors/prisma.mjs).
 export const sourceLevel = (p, text) => { let l = 0; for (const ex of SOURCE) if (ex.wants(p)) l |= ex.level(p, text); return l }
 const isSource = (p) => SOURCE.some((ex) => ex.wants(p))
 export const MAX_BYTES = 8 << 20 // an input past this is not read (its job reports it)
@@ -53,22 +64,25 @@ export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some(
 // it holds a key schema, a CreateTable input; 0: neither); for Terraform and Terragrunt files
 // (.tf, .tfvars, .tfvars.json, .hcl), extractors/terraform.mjs tfLevel (4: a module declaring a
 // table resource, 5: a terragrunt.hcl Terragrunt runs, 6: a module out of reach, 1: other); for a
-// source file (.rs, .ts, .js, .py, .go), sourceLevel's bits (1: what the item binding reads: a serde
-// derive, a type declaration, a conversion, an environment read, a string constant; 2: a key-value
-// SDK call shape; 0: none). A change to what this computes moves the store's SCHEMA_VERSION, so no
+// source file (.rs, .ts, .js, .py, .go, .prisma), sourceLevel's bits (1: what the item binding reads:
+// a serde derive, a type declaration, a conversion, an environment read, a string constant; 2: a
+// key-value SDK call shape; 4, 8: a table-builder schema, a barrel; 16, 32: a schema-language file's
+// models, its datasource; 0: none). A change to what this computes moves the store's SCHEMA_VERSION, so no
 // stale level survives in an index.
 export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : wantsTf(p) ? tfLevel(p, text) : DOC.test(p) ? tableLevel(text) : isSource(p) ? sourceLevel(p, text) : null)
 // A text worth keeping once inspected (an extractor may read it): every JSON and YAML file is a
 // candidate, but one only the table extractors want and that declares no table is never read again,
 // so the index and a base keep no copy of it; nor is a source file with nothing for the binding or
-// the access patterns.
+// the access patterns or a schema. A configuration an extractor reads is always kept (a base reads
+// it too: a drizzle.config.ts holds no level of its own).
 const TABLE_EXTRACTORS = new Set([dynamodbTable, cloudformation])
-export const keeps = (p, text) => (isSource(p) ? sourceLevel(p, text) > 0 : !DOC.test(p) || tableLevel(text) > 0 || EXTRACTORS.some((ex) => !TABLE_EXTRACTORS.has(ex) && ex.wants(p)))
+const isConfig = (p) => EXTRACTORS.some((ex) => ex.config?.(p))
+export const keeps = (p, text) => isConfig(p) || (isSource(p) ? sourceLevel(p, text) > 0 : !DOC.test(p) || tableLevel(text) > 0 || EXTRACTORS.some((ex) => !TABLE_EXTRACTORS.has(ex) && ex.wants(p)))
 // A job reads YAML (its context needs ctx.yaml): one of its inputs is a YAML file, or a .template
 // that is not JSON (the extractors decide by the text: readers/documents.mjs).
 export const readsYaml = (job) => job.inputs.some((p) => /\.(?:ya?ml|template)$/i.test(p))
 // A job parses source code (its context needs ctx.tree(lang, text) → a tree-sitter tree).
-export const readsCode = (job) => job.extractor.kind === 'code' || job.extractor.kind === 'inferred'
+export const readsCode = (job) => !!job.extractor.tree
 
 export const plan = (info, opts = {}) => EXTRACTORS.flatMap((ex) => ex.discover(info, opts).map((job) => ({ ...job, extractor: ex })))
 

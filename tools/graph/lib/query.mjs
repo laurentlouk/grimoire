@@ -3,7 +3,7 @@
 // The graph is a map for research (what relates to what, how far a change reaches). It is never
 // the source of truth for what code does: that is read in the code, at the path:line given here.
 import { langOf } from './langs.mjs'
-import { reconcile, elementsOf, storeSummary } from './data/reconcile.mjs'
+import { reconcile, elementsOf, storeSummary, schemaDrift, SCHEMA_DRIFT } from './data/reconcile.mjs'
 import { bindingHow } from './data/binding.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, capList, CAP, LABELS, FANOUT } from './data/access.mjs'
 import { kvIndex, projectionText } from './data/model.mjs'
@@ -352,8 +352,8 @@ export class Graph {
     const failed = clean(this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra))
     if (entity) return this.dataEntity(model, String(entity))
     if (store) return this.dataStore(model, String(store))
-    if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot and no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table) in the indexed repositories.'
-    const out = [`Data stores (${model.stores.length}), read from migrations, snapshots and table declarations:`]
+    if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot, no Drizzle TypeScript schema, no Prisma schema and no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table) in the indexed repositories.'
+    const out = [`Data stores (${model.stores.length}), read from migrations, snapshots, schemas and table declarations:`]
     for (const st of model.stores) {
       out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`)
       for (const d of st.declarations) {
@@ -463,6 +463,8 @@ export class Graph {
       const items = (e.bound || []).map((b) => `${b.type} (${b.confidence})`)
       out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}${items.length ? `  items: ${items.join(', ')}` : ''}${e.logical ? `  [one table with ${e.logical.members.filter((m) => m !== e.id).join(', ')}]` : ''}`)
     }
+    // the enums a code model declares
+    for (const en of st.enums || []) out.push(`  enum ${en.name}  ${en.values.join(' | ')}  ${this.sources(st.repo, en.sources)}`)
     return out.join('\n')
   }
   dataEntity(model, spec) {
@@ -482,7 +484,7 @@ export class Graph {
     // a key-value table's attributes: what its declarations type (the item's fields are listed apart)
     const declared = (f) => f.sources.filter((s) => s.kind !== 'code')
     if (kv) section('Attributes', e.fields.filter((f) => declared(f).length), (f) => `${f.name}  ${f.type.raw}${f.nullable ? '' : '  a key of the table'}`, declared)
-    else section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}`)
+    else section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}${f.computed ? `  computed ${f.computed}` : ''}${f.enum ? `  enum${f.enum.name ? ` ${f.enum.name}` : ''} (${f.enum.values.join(' | ')})` : ''}${f.unstated ? `  (${f.unstated.join(', ')} as written, not compared)` : ''}`)
     section('Keys', e.keys, (k) => (kv ? kvKeyText(k) : `${k.role} (${k.parts.join(', ')})`))
     section('Indexes', e.indexes, (i) => (kvIndex(i) ? `${i.name}  ${kvIndexText(i)}` : `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}`))
     section('Foreign keys', e.relations, (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
@@ -512,7 +514,8 @@ export class Graph {
     const conflicts = [...elementsOf(e).map(([label, x]) => [label, x.conflicts]), ...(e.access?.conflicts || []).map((c) => [c.label, [c]])]
       .flatMap(([label, list]) => list.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${shown(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc({ repo: s.repo ?? st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
     const moreCf = e.access?.moreConflicts || 0
-    out.push(conflicts.length ? `Conflicts (${conflicts.length + moreCf}): the declarations disagree${e.access?.conflicts.length ? ', or a call writes an attribute the bound item does not state (inferred, never overriding it)' : ''}; each side is kept` : 'Conflicts: none', ...conflicts, ...(moreCf ? [`  … and ${moreCf} more written attribute${moreCf === 1 ? '' : 's'} the item does not state (the first ${CAP} listed)`] : []))
+    const drift = elementsOf(e).some(([, x]) => x.conflicts.some(schemaDrift))
+    out.push(conflicts.length ? `Conflicts (${conflicts.length + moreCf}): the declarations disagree${e.access?.conflicts.length ? ', or a call writes an attribute the bound item does not state (inferred, never overriding it)' : ''}; each side is kept` : 'Conflicts: none', ...(drift ? [`  (${SCHEMA_DRIFT})`] : []), ...conflicts, ...(moreCf ? [`  … and ${moreCf} more written attribute${moreCf === 1 ? '' : 's'} the item does not state (the first ${CAP} listed)`] : []))
     if (kv && e.logical) {
       const g = e.logical
       out.push(`One logical table: ${g.members.join(' + ')} (${g.via}); their differences are conflicts`)

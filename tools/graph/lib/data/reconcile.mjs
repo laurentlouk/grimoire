@@ -28,14 +28,16 @@ import { resolveAccess } from './access.mjs'
 // attribute's type compares as written (S, N, B).
 const ATTRS = {
   entity: (e) => ({ kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}) }),
-  field: (f, kv) => ({ type: kv ? String(f.type ?? '') : normType(f.type), nullable: f.nullable, default: normDefault(f.default), generated: f.generated ?? null }),
+  // what a declaration cannot state in the store's terms (a code model's custom type, an expression
+  // default: model.mjs `unstated`) is undefined, and compared with nothing
+  field: (f, kv) => { const u = f.unstated || []; return { type: u.includes('type') ? undefined : kv ? String(f.type ?? '') : normType(f.type), nullable: u.includes('nullable') ? undefined : f.nullable, default: u.includes('default') ? undefined : normDefault(f.default), generated: f.generated ?? null } },
   key: (k) => (k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}),
   index: (i) => (kvIndex(i) ? { kind: i.kind, partition: i.partition.join(', '), sort: i.sort.join(', '), projection: projectionText(i) } : { unique: !!i.unique, columns: i.columns.join(', '), partial: !!i.partial }),
   relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate }),
 }
 const SHAPE = {
   entity: (e) => ({ name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nameTemplate: e.nameTemplate } : {}) }),
-  field: (f) => ({ name: f.name, type: { raw: f.type, norm: normType(f.type) }, nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null }),
+  field: (f) => ({ name: f.name, type: { raw: f.type, norm: normType(f.type) }, nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null, ...(f.unstated ? { unstated: f.unstated } : {}) }),
   key: (k) => ({ role: k.role, parts: k.parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}) }),
   index: (i) => (kvIndex(i) ? { name: i.name, kind: i.kind, partition: i.partition, sort: i.sort, projection: i.projection ?? null, include: i.include || [], columns: i.columns, unique: false, partial: false } : { name: i.name, unique: !!i.unique, columns: i.columns, partial: !!i.partial }),
   relation: (r) => ({ kind: 'fk', columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate }),
@@ -155,16 +157,32 @@ function merge(id, ds) {
   const entities = new Map()
   for (const d of ds) {
     for (const e of d.entities || []) {
-      const E = slot(entities, e.name, () => ({ ...SHAPE.entity(e), fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map(), whole: new Set() }))
+      const E = slot(entities, e.name, () => ({ ...SHAPE.entity(e), fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map(), whole: new Set(), part: new Set() }))
       note(E, d, ATTRS.entity(e), source(d, e), e)
       E.at.set(d, source(d, e))
       if (e.whole) E.whole.add(d)
-      for (const [type, list] of PARTS) for (const x of e[list] || []) note(slot(E[list], keyOf[type](x), () => SHAPE[type](x)), d, ATTRS[type](x, kv), source(d, x), x)
+      if (e.part) E.part.add(d) // it states the entity, not all of its parts
+      for (const [type, list] of PARTS) {
+        for (const x of e[list] || []) {
+          const el = slot(E[list], keyOf[type](x), () => SHAPE[type](x))
+          note(el, d, ATTRS[type](x, kv), source(d, x), x)
+          // what a code model alone says of a column: the default its client computes, its enum
+          if (type === 'field') { if (x.computed && !el.computed) el.computed = x.computed; if (x.enum && !el.enum) el.enum = x.enum }
+        }
+      }
+    }
+  }
+  // the enums the declarations state (a code model's), by name, each with its sources
+  const enums = new Map()
+  for (const d of ds) {
+    for (const x of d.enums || []) {
+      if (!enums.has(x.name)) enums.set(x.name, { name: x.name, values: x.values, sources: [] })
+      enums.get(x.name).sources.push(source(d, x))
     }
   }
   // a key-value element keeps what each declaration says of it: [[declKey, attrs]] (model.mjs)
   const per = (el) => (kv ? { per: [...el.by].map(([d, { attrs }]) => [declKey(d.extractor, d.source.path), attrs]) } : {})
-  const done = (el, presence, absent) => { const { by, at, whole, ...rest } = el; return { ...rest, ...per(el), conflicts: conflicts(el, compared, presence, absent) } }
+  const done = (el, presence, absent) => { const { by, at, whole, part, ...rest } = el; return { ...rest, ...per(el), conflicts: conflicts(el, compared, presence, absent) } }
   return {
     id,
     repo: ds[0].repo,
@@ -172,15 +190,24 @@ function merge(id, ds) {
     dialect: store.dialect ?? null,
     dialectFrom: store.dialectFrom ?? null,
     declarations: ds.map((d) => ({ extractor: d.extractor, kind: d.source.kind, path: d.source.path, line: d.source.line, status: d.status, label: d.label, stopped: d.stopped ?? null, error: d.error ?? null, notes: d.notes || [], files: d.files ?? null, implicitIndexes: d.implicitIndexes ?? 0, dialect: d.dialect ?? null, dialectFrom: d.dialectFrom ?? null })),
+    ...(enums.size ? { enums: [...enums.values()].sort(byName) } : {}),
     entities: [...entities.values()].sort(byName).map((E) => {
-      // the declarations that describe this entity whole: a complete one, or one stating it whole
-      const covering = ds.filter((d) => E.at.has(d) && (d.complete || E.whole.has(d)))
+      // the declarations that describe this entity whole: a complete one, or one stating it whole,
+      // unless it states the entity in part
+      const covering = ds.filter((d) => E.at.has(d) && (d.complete || E.whole.has(d)) && !E.part.has(d))
       const out = { id: `${id}/${E.name}`, ...done(E, complete, (d) => source(d, null)) }
       for (const [, list] of PARTS) out[list] = [...E[list].values()].map((x) => done(x, covering, (d) => E.at.get(d)))
       return out
     }),
   }
 }
+
+// A conflict setting a code model (a TypeScript schema, a schema-language file) against the migrations
+// or a snapshot of its store: the schema was edited and no migration generated (or a migration was
+// edited by hand). The conflict is the finding; this only names it.
+const GENERATED = new Set(['migration', 'artifact'])
+export const schemaDrift = (c) => c.values.some((v) => v.sources.length && v.sources.every((s) => s.kind === 'code')) && c.values.some((v) => v.sources.some((s) => GENERATED.has(s.kind)))
+export const SCHEMA_DRIFT = 'the code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand'
 
 // An entity and each of its elements, labelled as a conflict line names them.
 export const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name}.${f.name}`, f]), ...e.keys.map((k) => [`${e.name} ${k.role} (${k.parts.join(', ')})`, k]), ...e.indexes.map((i) => [`${e.name} index ${i.name}`, i]), ...e.relations.map((r) => [`${e.name} foreign key (${r.columns.join(', ')})`, r])]
@@ -213,6 +240,7 @@ function conflicts(el, compared, presence, absent) {
   for (const attr of Object.keys(seen[0]?.[1].attrs || {})) {
     const groups = new Map()
     for (const [, { attrs, src }] of seen) {
+      if (attrs[attr] === undefined) continue // a declaration that does not state it
       const k = JSON.stringify(attrs[attr])
       if (!groups.has(k)) groups.set(k, { value: attrs[attr], sources: [] })
       groups.get(k).sources.push(src)

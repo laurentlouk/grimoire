@@ -854,6 +854,7 @@ export default {
   version: 2,
   kind: 'inferred',
   scope: 'file',
+  tree: true,
   wants: (p) => SRC.test(p) && !DTS.test(p),
   level: accessLevel,
   discover: (info) => [...info].filter(([p, i]) => SRC.test(p) && !DTS.test(p) && (i.ddl & 2)).map(([p]) => ({ key: p, inputs: [p] })),

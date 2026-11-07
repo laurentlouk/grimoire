@@ -46,6 +46,7 @@ export default {
   kind: 'migration',
   scope: 'unit',
   wants: (p) => (SQL.test(p) && !DOWN.test(p)) || CONFIG.test(p),
+  config: (p) => CONFIG.test(p),
   // info: Map(path → { ddl }) of the candidate files, ddl the file's schemaLevel (2: creates or alters
   // a table or an index, 1: other schema statements only); overrides: [{ path, dialect }] for this repository.
   discover(info, { overrides = [] } = {}) {

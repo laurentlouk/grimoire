@@ -5,7 +5,8 @@
 // Liftoff-only WASM tier, lib/run.mjs), as readers/yaml-aside.mjs does for YAML: a grammar's crash
 // costs this process, never the server.
 //
-//   extractAside([{ id, path, text }]) → Map(path → facts | Error)
+//   extractAside([{ id, path, text, key? }]) → Map(key, else path → facts | Error)   (key: a file two
+//   extractors read, each its own answer)
 //   node --liftoff-only code-aside.mjs  < JSON [{ id, path, text }]  → JSON [{ facts } | { error }]
 //
 // Bounded: the files go in batches (BATCH texts or BATCH_BYTES, whichever comes first), each batch a
@@ -32,21 +33,21 @@ export function extractAside(items, { batchMs = BATCH_MS, totalMs = TOTAL_MS } =
     if (Array.isArray(got) && got.length === list.length) return got
     return { why: r.error?.code === 'ETIMEDOUT' || (r.signal && r.status === null) ? 'the code took too long to read: not read' : `the code reader stopped (${r.status ?? r.signal}): not read` }
   }
-  const settle = (x, g) => out.set(x.path, g.error ? new Error(g.error) : g.facts)
+  const settle = (x, g) => out.set(x.key ?? x.path, g.error ? new Error(g.error) : g.facts)
   for (let i = 0; i < items.length;) {
     const batch = []
     let bytes = 0
     while (i < items.length && batch.length < BATCH && (!batch.length || bytes + items[i].text.length <= BATCH_BYTES)) { bytes += items[i].text.length; batch.push(items[i++]) }
-    if (end - Date.now() <= 0) { for (const x of batch) out.set(x.path, late()); continue }
+    if (end - Date.now() <= 0) { for (const x of batch) out.set(x.key ?? x.path, late()); continue }
     const got = spawn(batch, end - Date.now())
     if (Array.isArray(got)) { batch.forEach((x, k) => settle(x, got[k])); continue }
-    if (batch.length === 1) { out.set(batch[0].path, new Error(got.why)); continue }
+    if (batch.length === 1) { out.set(batch[0].key ?? batch[0].path, new Error(got.why)); continue }
     // the batch failed whole (one file crashed the reader, or the batch ran out of time): each file
     // again on its own, so one bad file loses only itself
     for (const x of batch) {
-      if (end - Date.now() <= 0) { out.set(x.path, late()); continue }
+      if (end - Date.now() <= 0) { out.set(x.key ?? x.path, late()); continue }
       const one = spawn([x], end - Date.now())
-      if (Array.isArray(one)) settle(x, one[0]); else out.set(x.path, new Error(one.why))
+      if (Array.isArray(one)) settle(x, one[0]); else out.set(x.key ?? x.path, new Error(one.why))
     }
   }
   return out
@@ -61,15 +62,16 @@ if (process.argv[1] === HERE) {
     const rt = await loadRuntime({ install: false })
     for (const lang of CODE_LANGS) parsers[lang] = await rt.parserFor(lang)
   } catch (e) { why = `no code reader: ${e.message}` }
-  const { CODE } = await import('../registry.mjs')
+  const { ASIDE } = await import('../registry.mjs')
   const tree = (lang, text) => { if (!parsers[lang]) throw new Error(why || `the pinned ${lang} grammar did not load`); return parsers[lang].parse(text) }
   // a test seam: the reader dies on the file this names, as a grammar's crash would (tests/data.test.mjs)
   const crash = process.env.GRIMOIRE_TEST_ASIDE_CRASH || null
   const out = items.map((x) => {
     if (crash && x.path === crash) process.exit(70)
-    const ex = CODE.find((e) => e.id === x.id)
+    const ex = ASIDE.find((e) => e.id === x.id)
     if (!ex) return { error: `no code extractor ${x.id}` }
-    try { return { facts: ex.extract(x.text, x.path, { tree }) } } catch (e) { return { error: String(e.message || e).split('\n')[0].slice(0, 240) } }
+    // what the extractor reads of one file: a unit extractor's parse, a file extractor's facts
+    try { return { facts: ex.parse ? ex.parse(x.text, x.path, { tree }) : ex.extract(x.text, x.path, { tree }) } } catch (e) { return { error: String(e.message || e).split('\n')[0].slice(0, 240) } }
   })
   process.stdout.write(JSON.stringify(out))
 }
