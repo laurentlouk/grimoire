@@ -18,6 +18,8 @@
 //     one `git cat-file --batch` (git show <commit>:<path>, without a process per file; binary-safe,
 //     each capped as the index caps it). Memoised in this process per (repository, commit, extractor
 //     versions, the config that steers discovery); nothing is written to graph.db or to disk.
+//   treeAt(dir, commit), blobs(dir, list): those two git reads, shared with the architecture change
+//     view (arch-change.mjs), which reads the saved diagrams at the base the same way.
 import { spawnSync } from 'node:child_process'
 import { EXTRACTORS, MAX_BYTES, candidates, extractAll, idOf } from './registry.mjs'
 import { reconcile } from './reconcile.mjs'

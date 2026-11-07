@@ -847,7 +847,9 @@ told.
   delta's path, builds them, and before it returns runs `graph_changes` against its `startSha`
   with the delta. It returns `deltaStates` (planned and built, pending, built differently, per
   planned change) and `modelChanges`: one `{target, op, kept, reason, after}` per change the delta
-  does not plan, the parts built on a table the delta adds beyond what its `add` states included.
+  does not plan, the parts built on a table the delta adds beyond what its `add` states included,
+  and per architectural impact `graph_changes` lists (an architecture target: `component:<id>`,
+  `connection:<from>-><to>`, `boundary:<label>`; a kept one has the diagram updated in the branch).
   It keeps each one with a reason or reverts it; neither is a question, a pause or a failure.
   With no delta it reports every change its commits made to stored data. A later dispatch of the
   task (a fix round, a retry after a replan) is told the task's own start as the base (its first
@@ -875,7 +877,8 @@ told.
   after its gate carries them, under the same lock; a halt ship does too. Lanes and implementers
   never write the delta.
 - **The PR body** gets a **Data model and architecture changes** section, rebuilt with every
-  description: each planned change of the repo's tasks marked planned ✓, built differently (what
+  description (the delta's architecture changes and the architectural impact among them, under
+  the same heading, to acknowledge in the Architecture tab): each planned change of the repo's tasks marked planned ✓, built differently (what
   differs), pending (not built yet, or its task not landed), then each change outside the delta,
   unplanned ⚠, kept or reverted, with its reason (and, once written, "added to the delta"). With no
   delta it lists the branch's changes the implementers reported, kept or reverted; with no delta
@@ -884,8 +887,10 @@ told.
   delta write, the `model` and `delta` journal events (rendered by `/grimoire:logs`), and the
   result's `dataModel`. In a session, `implement` tells the user.
 
-The kept changes then show in the Data tab as unplanned and unacknowledged until the owner
-acknowledges them (`graph.mjs serve`).
+The kept changes then show in the Data tab (an architecture one in the Architecture tab) as
+unplanned and unacknowledged until the owner acknowledges them (`graph.mjs serve`). The hydration
+copies the delta's `architecture` changes with its `data` ones; `delta-append.mjs` routes an
+architecture target to the delta's `architecture` list.
 
 ## The decision journal
 
