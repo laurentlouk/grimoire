@@ -394,6 +394,10 @@ export function dataClient(ctx) {
   const ROLE = { partition: 'PK', sort: 'SK', ttl: 'TTL', primary: 'PK', unique: 'UQ' }
   const onOff = (v) => (v === true ? 'on' : v === false ? 'off' : 'not said')
   const projOf = (x) => (x.projection === 'INCLUDE' && x.include && x.include.length ? `INCLUDE (${x.include.join(', ')})` : x.projection || 'projection not said')
+  // a value no file states (a Terraform value from another configuration's output, the environment, a
+  // data source), kept as its expression: drawn as unknown
+  const UNK = 'unknown: no file states it (another configuration\'s output, the environment, a data source…): shown as its expression, never guessed'
+  const mark = (v) => (typeof v === 'string' && v.includes('${') ? h('span', { class: 'unk', title: UNK }, v) : v)
   function keyCard(s, ti) {
     const t = s.tables[ti]
     const types = new Map(t.fields.map((f) => [f.name, f.type]))
@@ -408,15 +412,16 @@ export function dataClient(ctx) {
     const was = (x) => (x.was && x.was.length && (s.ov || s.dv) ? h('div', { class: 'srcline chgline' }, s.ov ? `was: ${x.was.join(' · ')}` : x.was.join(' · ')) : null)
     const where = (x) => ((x.src || []).length ? x.src.map((p) => srcText(s, p)).join(' · ') : x.bsrc && x.bsrc.length ? `at the base: ${x.bsrc.map((p) => bsrcText(s, p)).join(' · ')}` : s.dv && x.dl && x.dl.s === 'prop' ? 'proposed: not in the code yet' : null)
     const row = (x, mk, ...body) => h('li', { class: `krow${cls(x)}`, title: where(x) }, h('span', { class: `mkl k-${mk.toLowerCase()}` }, mk), h('span', { class: `mono${struck(x) ? ' struck' : ''}` }, ...body), ...pills(x), was(x))
-    const keys = t.keys.map((k) => row(k, ROLE[k.role] || k.role, k.role === 'ttl' ? `${k.parts.join(', ')} · ${onOff(k.enabled)}` : k.parts.map(typed).join(' + ')))
-    const idx = t.indexes.map((x) => row(x, x.kind === 'lsi' ? 'LSI' : x.kind === 'gsi' ? 'GSI' : 'IDX', x.name, h('span', { class: 'muted' }, ` · ${[x.partition && x.partition.length ? `PK ${x.partition.map(typed).join(' + ')}` : null, x.sort && x.sort.length ? `SK ${x.sort.map(typed).join(' + ')}` : null, x.kind ? projOf(x) : `(${x.columns.join(', ')})`].filter(Boolean).join(' · ')}`)))
-    const attrs = t.fields.map((f) => row(f, 'A', f.name, h('span', { class: 'muted' }, ` ${f.type || '?'}`)))
+    const keys = t.keys.map((k) => row(k, ROLE[k.role] || k.role, mark(k.role === 'ttl' ? `${k.parts.length ? k.parts.join(', ') : 'no attribute'} · ${typeof k.enabled === 'string' ? k.enabled : onOff(k.enabled)}` : k.parts.map(typed).join(' + '))))
+    const idx = t.indexes.map((x) => row(x, x.kind === 'lsi' ? 'LSI' : x.kind === 'gsi' ? 'GSI' : 'IDX', mark(x.name), h('span', { class: 'muted' }, mark(` · ${[x.partition && x.partition.length ? `PK ${x.partition.map(typed).join(' + ')}` : null, x.sort && x.sort.length ? `SK ${x.sort.map(typed).join(' + ')}` : null, x.kind ? projOf(x) : `(${x.columns.join(', ')})`].filter(Boolean).join(' · ')}`))))
+    const attrs = t.fields.map((f) => row(f, 'A', mark(f.name), h('span', { class: 'muted' }, ` ${f.type || '?'}`)))
     const conflicts = [[`table ${t.name}`, t], ...t.fields.map((f) => [`attribute ${f.name}`, f]), ...t.keys.map((k) => [`${ROLE[k.role] || k.role} (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x])].flatMap(([label, x]) => cfs(x).map((c) => [label, c]))
     const as = [...new Set((t.src || []).map((p) => p[2]).filter(Boolean))]
     const dks = s.dv ? s.dl.ks.filter((k) => s.delta.changes[k].tbl === ti) : [], dus = s.dv ? s.dl.us.filter((j) => s.delta.unplanned[j].tbl === ti) : []
     return h('article', { class: `kcard${cls(t)}`, 'data-tbl': String(ti), 'aria-label': `${t.name}: ${plural(t.keys.length, 'key')}, ${plural(t.indexes.length, 'index', 'indexes')}, ${plural(t.fields.length, 'attribute')}${conflicts.length ? `, ${plural(conflicts.length, 'conflict')}` : ''}` },
       h('header', { class: 'khead' }, h('span', { class: 'tdot t-database' }), h('b', { class: `kname mono${struck(t) ? ' struck' : ''}` }, t.name),
-        h('span', { class: 'pill' }, t.billing || 'billing not said'), h('span', { class: 'pill' }, t.stream ? `stream ${t.stream}` : 'no stream'),
+        t.nt ? h('span', { class: 'pill unk', title: 'a part of the name is unknown (each {…}): its template, the literal parts kept, never guessed' }, 'name template') : null,
+        h('span', { class: 'pill' }, mark(t.billing || 'billing not said')), h('span', { class: 'pill' }, mark(t.stream ? `stream ${t.stream}` : 'no stream')),
         conflicts.length ? h('span', { class: 'pill warn', title: 'the declarations disagree: each side is kept, none is resolved' }, `≠${conflicts.length}`) : null, ...pills(t).slice(0, 3)),
       as.length ? h('div', { class: 'kas muted' }, as.join(' · ')) : null,
       was(t),
@@ -438,10 +443,10 @@ export function dataClient(ctx) {
       h('span', null, h('span', { class: 'pill warn' }, 'a ≠ b'), ' the declarations disagree, both values kept'))
     return h('section', null,
       h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect), h('span', { class: 'muted' }, s.summary), q ? h('span', { class: 'muted' }, `${plural(shown.length, 'table')} of ${s.tables.length} match “${st.q.trim()}”`) : null),
-      h('details', { class: 'problems' }, h('summary', null, `Read from ${plural(s.decls.length, 'declaration')}: each a table declaration (a CreateTable input, a template's table resource), references kept unresolved`), declList(s)),
+      h('details', { class: 'problems' }, h('summary', null, `Read from ${plural(s.decls.length, 'declaration')}: each a table declaration (a CreateTable input, a template's table resource, a Terraform module as a Terragrunt configuration or a tfvars file sets it), references kept unresolved, unknown values never guessed`), declList(s)),
       legend, changesHead(s, '(a removed table drawn as a struck card)'), s.dv ? deltaPanel(s) : null,
       h('div', { class: 'kcards', id: 'data-cards', role: 'list', 'aria-label': `${s.id}: ${plural(shown.length, 'key card')}` }, shown.map(([, i]) => keyCard(s, i))),
-      h('p', { class: 'note' }, 'Read from the files that declare each table (CreateTable inputs, CloudFormation, SAM and Serverless templates), never from a database. A table two files declare is one card citing both; where they disagree, both values are kept. A reference (!Ref, !Sub, ${…}) is shown as written, never evaluated. Hover a row for the path:line that declares it. A map, not the database: read the code at the path:line.'))
+      h('p', { class: 'note' }, 'Read from the files that declare each table (CreateTable inputs, CloudFormation, SAM and Serverless templates, Terraform modules evaluated with the Terragrunt inputs or tfvars that set them), never from a database. A table two files declare is one card citing both; where they disagree, both values are kept. A reference (!Ref, !Sub, ${…}) is shown as written, never evaluated; a Terraform value no file states (another configuration\'s output, the environment) is shown as ${its expression}, and a name with such a part as its template ({…} for each unknown part), never guessed. Hover a row for the path:line that declares it. A map, not the database: read the code at the path:line.'))
   }
 
   // ── the tab ──

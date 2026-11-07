@@ -42,6 +42,12 @@
 //  21. hostile JSON in bounded time (nesting past the cap refused, a wide file, a long "${" run), a
 //      byte order mark; a declaration that moves to another file or splits: its changes still seen,
 //      in the diff and the delta states
+//  22. Terraform and Terragrunt: the HCL reader (blocks, literals, heredocs, templates, comments,
+//      errors at their line; hostile text refused in bounded time), the evaluator (each construct,
+//      unknowns propagated and never guessed; the budget, depth and size caps), the extractor on
+//      fixtures/tf in memory (a table per for_each key, sources in the inputs and the module, an
+//      unknown input, a name template, a tfvars secret kept out, a var-file per environment, a
+//      module out of reach, files that do not parse), the levels and the candidates
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
@@ -66,6 +72,11 @@
 //      YAML parsed aside), a delta's states against every declaration, both overlays on the cards; a
 //      name holding a line break quoted in graph_data and graph_changes; a YAML template past the cap
 //      failing its job once, not read again until it changes
+//  23. Terraform and Terragrunt (fixtures/tf): a module run by a Terragrunt configuration that
+//      includes a root and an exposed file → graph_data (the tables, GSIs and TTL at their inputs
+//      lines, the module's beside; an input from dependency.*.outputs unknown; a table grouped with
+//      the CreateTable file of its exact name, and their conflicts), secrets in neither graph.db nor
+//      the page, the key cards (the unknown drawn), a name template, a branch against its base
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -2334,6 +2345,105 @@ async function indexed() {
     const fch = await kq('changes')
     ok(fch.includes('  + "forged\\n  + forged line"  table, 1 attribute, billing not said · no stream  — lending/local/tables/forged.json:1') && !fch.split('\n').includes('  + forged line"  table, 1 attribute') && fch.split('\n').filter((l) => l.startsWith('  + forged line')).length === 0, `graph_changes quotes it on its line (${fch.split('\n').find((l) => l.includes('forged')) || fch})`)
     rmSync(path.join(KV, 'lending/local/tables/forged.json'))
+
+    // ── 23 · Terraform and Terragrunt: a module run by a Terragrunt configuration ──
+    console.log('\n23 · Terraform and Terragrunt through call(): a module run by a configuration that includes its root and an exposed file (fixtures/tf), an input from another configuration, secrets beside, a CreateTable file naming one of the tables')
+    const TFP = path.join(SANDBOX, 'tf')
+    cpSync(path.join(HERE, 'fixtures', 'tf'), TFP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    // secret-looking values, built at run time (no token sits in the repository): one in the module's
+    // terraform.tfvars, one in the locals of the file the configuration includes
+    const fake = (tag) => [tag, Array.from({ length: 28 }, (_, i) => 'qrstuvwxyz0123456789ABCDEF'[(i * 11 + tag.length) % 26]).join('')].join('_')
+    const TFSECRET = fake('tfvar'), HCLSECRET = fake('local')
+    writeFileSync(path.join(TFP, 'shop/modules/kv-tables/terraform.tfvars'), `api_token = "${TFSECRET}"\n`)
+    const STAGE = path.join(TFP, 'shop/live/prod/stage.hcl')
+    writeFileSync(STAGE, readFileSync(STAGE, 'utf8').replace('  stage = "prod"\n', `  stage       = "prod"\n  db_password = "${HCLSECRET}"\n`))
+    const tq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: TFP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const tidx = await tq('index')
+    ok(/shop: /.test(tidx) && !tidx.includes('failure'), `index: the module, its configurations and the CreateTable file read, no extractor failure (${tidx.split('\n').find((l) => l.includes('shop')) || tidx})`)
+    eq(await tq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlive/prod/legacy/terragrunt.hcl\tterraform@1\nlocal/tables/orders.json\tdynamodb-table@1\nmodules/kv-tables\tterraform@1',
+      'found by content: the module folder (its job reads every HCL file), the configuration whose module is out of reach, the CreateTable file; the root, the stage file and the other configurations are inputs, no jobs')
+    const SH = 'shop/live/prod/tables/terragrunt.hcl', MT = 'shop/modules/kv-tables/main.tf', OJ = 'shop/local/tables/orders.json'
+    eq((await tq('data')).split('\n').slice(1), [
+      'shop:dynamodb  dynamodb  3 tables · 3 GSIs · 2 conflicts',
+      '  infra  terraform@1  not read: a module out of reach (tfr:///terraform-aws-modules/dynamodb-table/aws)  shop/live/prod/legacy/terragrunt.hcl',
+      '    note: live/prod/legacy/terragrunt.hcl:2: its module tfr:///terraform-aws-modules/dynamodb-table/aws is not in this repository (a remote source): the key-value tables it declares, if any, are unknown',
+      `  infra  terraform@1  Terraform module modules/kv-tables through Terragrunt, 3 tables  ${SH}`,
+      '    note: prod-shop-audit: range_key is unknown (dependency.search: another configuration\'s output, known only once it is applied)',
+      '    note: prod-shop-audit: its attribute blocks are unknown (dependency.search: another configuration\'s output, known only once it is applied)',
+      `  infra  dynamodb-table@1  CreateTable input  ${OJ}`,
+    ], 'graph_data: one key-value store for the repository, the Terraform module\'s instance beside the CreateTable file; the remote module found, not read; the unknown input noted')
+    eq(await tq('data', { store: 'shop:dynamodb' }), [
+      'shop:dynamodb  dynamodb  3 tables · 3 GSIs · 2 conflicts',
+      `  prod-shop-audit  table  2 attributes · partition (id) · sort (\${dependency.search.outputs.sort_attr}) · TTL (expires_at) on · 1 GSI · PAY_PER_REQUEST · no stream  ${SH}:42 · ${MT}:2`,
+      `  prod-shop-carts  table  1 attribute · partition (id) · TTL (no attribute) off · PAY_PER_REQUEST · no stream  ${SH}:36 · ${MT}:2`,
+      `  prod-shop-orders  table  5 attributes · partition (customer_id) · sort (order_id) · TTL (expires_at) on · 2 GSIs · PAY_PER_REQUEST · stream NEW_AND_OLD_IMAGES  ${SH}:22 · ${MT}:2 · ${OJ}:2  [2 conflicts]`,
+    ].join('\n'), 'graph_data store: a table per for_each key, named from the inputs merged through the includes, each citing its entry in the inputs and the module\'s resource')
+    eq(await tq('data', { entity: 'prod-shop-orders' }), [
+      'shop:dynamodb/prod-shop-orders  table  (dynamodb)',
+      `  declared at ${SH}:22 [infra terraform@1, aws_dynamodb_table.table["orders"]] · ${MT}:2 [infra terraform@1, the resource in modules/kv-tables] · ${OJ}:2 [infra dynamodb-table@1]`,
+      '  PAY_PER_REQUEST · stream NEW_AND_OLD_IMAGES',
+      'Attributes (5):',
+      `  customer_id  S  a key of the table  — ${SH}:23 · ${MT}:10 · ${OJ}:5`,
+      `  order_id  S  a key of the table  — ${SH}:24 · ${MT}:15 · ${OJ}:6`,
+      `  placed_at  N  — ${SH}:31 · ${MT}:23 · ${OJ}:8`,
+      `  status  S  — ${SH}:30 · ${MT}:23 · ${OJ}:7`,
+      `  sku  S  — ${OJ}:9`,
+      'Keys (3):',
+      `  partition (customer_id)  — ${SH}:23 · ${MT}:7 · ${OJ}:12`,
+      `  sort (order_id)  — ${SH}:24 · ${MT}:8 · ${OJ}:13`,
+      `  TTL (expires_at) on  — ${SH}:22 · ${MT}:45 · ${OJ}:28`,
+      'Indexes (2):',
+      `  ByStatus  global · partition (status) · sort (placed_at) · KEYS_ONLY  — ${SH}:28 · ${MT}:34 · ${OJ}:16`,
+      `  BySku  global · partition (sku) · ALL  — ${OJ}:21`,
+      'Conflicts (2): the declarations disagree; each side is kept',
+      `  prod-shop-orders.sku  presence: declared — ${OJ}:9 [infra] | absent — ${SH}:22 [infra]`,
+      `  prod-shop-orders index BySku  presence: declared — ${OJ}:21 [infra] | absent — ${SH}:22 [infra]`,
+    ].join('\n'), 'graph_data entity: the Terraform table and the CreateTable file name it alike, so it is one table: keys, GSI and TTL at the inputs lines that state them, the module\'s lines beside; what only the file declares is a conflict with both sides')
+    eq((await tq('data', { entity: 'prod-shop-audit' })).split('\n').filter((l) => /sort|Conflicts/.test(l)), [`  sort (\${dependency.search.outputs.sort_attr})  — ${SH}:44 · ${MT}:8`, 'Conflicts: none'], 'an input from dependency.*.outputs: unknown, shown as its expression at its line, never guessed')
+    // secrets: what the evaluator read and no table uses reaches neither graph.db nor the page
+    const GD = path.join(TFP, '.grimoire/graph')
+    const stored = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => [f, readFileSync(path.join(GD, f)).toString('latin1')])
+    ok(stored.some(([f]) => f === 'graph.db') && stored.every(([, t]) => !t.includes(TFSECRET) && !t.includes(HCLSECRET)), `neither the tfvars value nor the included file's local is in the index (${stored.map(([f]) => f).join(', ')})`)
+    const { renderGraph: renderTf } = await import('../lib/render.mjs')
+    const { loadProject: loadTf } = await import('../lib/project.mjs')
+    const tpage = await renderTf(loadTf(TFP))
+    ok(!tpage.includes(TFSECRET) && !tpage.includes(HCLSECRET), 'nor in the page')
+    // the page: a key card per table, the unknown drawn as such
+    const tpg = await stubPage(tpage, '#data-0')
+    const tcards = tpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
+    const tcard = (name) => tcards.find((c) => tpg.textOf(c.kids[0]).startsWith(name))
+    const under2 = (n, pred, out = []) => { if (n && typeof n === 'object') { if (pred(n)) out.push(n); for (const k of n.kids || []) under2(k, pred, out) } return out }
+    const audit = tcard('prod-shop-audit')
+    const sk = under2(audit, (n) => n.tagName === 'LI' && /\bkrow\b/.test(n.attrs.class || '')).find((r) => tpg.textOf(r).startsWith('SK'))
+    eq([tcards.length, tpg.textOf(sk), under2(sk, (n) => /\bunk\b/.test(n.attrs?.class || '')).length, sk.attrs.title], [3, 'SK${dependency.search.outputs.sort_attr} ?', 1, `${SH}:44 · ${MT}:8`], 'the card draws the unknown sort key as unknown (its expression, marked), citing the inputs line and the module\'s')
+    ok(tpg.textOf(tcard('prod-shop-orders')).includes(`${SH}:22 aws_dynamodb_table.table["orders"]`) && tpg.textOf(tcard('prod-shop-orders')).includes(`${MT}:2 the resource in modules/kv-tables`), 'the orders card cites the inputs entry and the module\'s resource, each named')
+    // a name with an unknown part: its template (the stage file gone)
+    rmSync(STAGE)
+    await tq('index')
+    eq((await tq('data', { store: 'shop:dynamodb' })).split('\n').slice(1).map((l) => l.trim().split('  ')[0]), ['prod-shop-orders', '{stage}-shop-audit', '{stage}-shop-carts', '{stage}-shop-orders'],
+      'the file that set the stage is gone: each Terraform table is named by its template, and no longer meets the CreateTable file\'s exact name')
+    const tmpl = await tq('data', { entity: '{stage}-shop-orders' })
+    ok(tmpl.includes('  name template {stage}-shop-orders: a part of the name is unknown (each {…}), never guessed'), `graph_data entity says it is a template (${tmpl.split('\n').slice(0, 4).join(' | ')})`)
+    const npg = await stubPage(await renderTf(loadTf(TFP)), '#data-0')
+    const ncard = npg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || '')).find((c) => npg.textOf(c.kids[0]).startsWith('{stage}-shop-orders'))
+    ok(!!ncard && npg.textOf(ncard.kids[0]).includes('name template'), 'its card says so, a pill beside the name')
+    // a branch against its base: the inputs gain a GSI and lose a stream (the base's HCL read through git)
+    writeFileSync(STAGE, 'locals {\n  stage = "prod"\n}\n')
+    rmSync(path.join(TFP, 'shop/modules/kv-tables/terraform.tfvars'))
+    git(TFP, 'init', '-q', '-b', 'main')
+    writeFileSync(path.join(TFP, '.gitignore'), '.grimoire/\n')
+    commit(TFP, 'the shop')
+    git(TFP, 'switch', '-q', '-c', 'feat')
+    const TG = path.join(TFP, SH)
+    writeFileSync(TG, readFileSync(TG, 'utf8').replace('      ttl      = false\n      indexes  = []', '      ttl      = false\n      indexes  = [{ name = "ByOwner", hash_key = "owner", projection = "ALL" }]').replace('      stream    = true\n', ''))
+    commit(TFP, 'carts by owner, no stream on orders')
+    await tq('index')
+    eq((await tq('changes')).split('\n').slice(1), [
+      'shop:dynamodb  dynamodb  modified',
+      `  + prod-shop-carts.owner  attribute S  — ${SH}:38 · ${MT}:23`,
+      `  + prod-shop-carts index ByOwner global · partition (owner) · ALL  — ${SH}:38 · ${MT}:34`,
+      `  ~ prod-shop-orders  table, 5 attributes, PAY_PER_REQUEST · no stream  stream in ${SH}: NEW_AND_OLD_IMAGES → none  — was ${SH}:22 · ${MT}:2 · ${OJ}:2; now ${SH}:22 · ${MT}:2 · ${OJ}:2`,
+    ], 'graph_changes: what the branch changed in the Terragrunt inputs, element by element, the change in one declaration named with its file (the CreateTable file still says the old value)')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

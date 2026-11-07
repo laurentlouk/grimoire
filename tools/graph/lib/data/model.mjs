@@ -30,6 +30,12 @@
 //                 false, partial: false }
 // A declaration that describes no store whole (complete: false) still describes each table it
 // states whole: its `whole` entities take part in presence conflicts.
+// A Terraform table (extractors/terraform.mjs) says two things more: an element may carry `via`
+// { path, line, as? }, a second place that declares it (the module's resource, beside the inputs
+// line that sets it), cited as a second source; an entity whose name has an unknown part is named
+// by its template and carries it, `nameTemplate` ({env}-{project}-orders: each {…} an unknown part,
+// the literal parts as written), for binding to the names code builds. A value the evaluator could
+// not know stays as `${expression}`, and its table is not `whole`.
 //
 // The merged model: Store { id: '<repo>:<folder>', repo, name, dialect, declarations, entities }, and
 // every element { …its attributes, sources[], conflicts[] }, a source being { repo, path, line, kind:

@@ -420,7 +420,7 @@ function packer(entities, src, cf, bsrc = null) {
     const keys = e.keys.map((k) => ({ k, parts: k.parts.map((c) => column(e, c)) }))
     const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
     return {
-      name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...cite(e),
+      name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nt: e.nameTemplate } : {}), ...cite(e),
       fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, ...cite(f) })),
       keys: keys.map(({ k, parts }) => ({ role: k.role, parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}), ...cite(k) })),
       indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, ...(kvIndex(x) ? kvPack(x) : {}), ...cite(x) })),
@@ -724,7 +724,7 @@ svg.arch .stalemk circle{fill:var(--warn)}svg.arch .stalemk text{font:700 10px u
 .khead{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.khead .pill{margin:0}.kname{font-size:14px;overflow-wrap:anywhere}.kas{font-size:12px;margin-top:3px;overflow-wrap:anywhere}
 .ksub{font-size:11.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:10px 0 3px}.ksub.warn{color:var(--warn)}
 ul.krows{list-style:none;margin:0;padding:0}.krow{padding:3px 6px;border-radius:6px;font-size:13px;overflow-wrap:anywhere}.krow:hover{background:var(--hover)}.krow .pill{margin:0 0 0 6px}
-ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4px}
+ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4px}.unk{text-decoration:underline dashed var(--warn);text-underline-offset:3px}.pill.unk{color:var(--warn);text-decoration:none}
 .mkl.k-pk{color:var(--accent);background:var(--accent-soft)}.mkl.k-sk{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 12%,var(--panel))}.mkl.k-ttl{color:var(--t-messagebus);background:color-mix(in srgb,var(--t-messagebus) 12%,var(--panel))}
 .mkl.k-gsi,.mkl.k-lsi,.mkl.k-idx{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 12%,var(--panel))}.mkl.k-a{color:var(--muted);background:var(--hover)}
 .kcard.ch-add,.kcard.dl-built{border:2px solid var(--ok)}.kcard.ch-del{border:2px dashed var(--err);opacity:.85}.kcard.ch-mod,.kcard.dl-diff{border:2px solid var(--warn)}
