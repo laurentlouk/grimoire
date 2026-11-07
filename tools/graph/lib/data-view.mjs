@@ -16,7 +16,10 @@
 // path (each field as each bound type stores it, the keys marked), each binding with its confidence,
 // evidence and rivals (dashed below convention), and the logical table it is one declaration of with
 // the conflicts across its declarations; above the cards, the item types per repository, the unbound
-// badged. Search narrows the cards. Everything goes through h(): text, never markup.
+// badged. With access patterns (data/access.mjs, inferred: `acc`), each index shows the functions that
+// query it or a lead pill, a list marks the functions reading and writing the table, and a write the
+// bound item does not state joins the card's conflicts. Search narrows the cards (a function's name
+// too). Everything goes through h(): text, never markup.
 //
 // The change overlay (render.mjs dataData packs it against the base, in Node): a toggle "Changes vs
 // <base>", off by default and absent when no base resolved (the tab says why). On, a store that
@@ -416,9 +419,26 @@ export function dataClient(ctx) {
       cfs(x).length ? h('span', { class: 'pill warn', title: cfs(x).map((c) => cfTip(s, c)).join('\n') }, `≠ ${cfs(x).map((c) => c.attr).join(', ')}`) : null]
     const was = (x) => (x.was && x.was.length && (s.ov || s.dv) ? h('div', { class: 'srcline chgline' }, s.ov ? `was: ${x.was.join(' · ')}` : x.was.join(' · ')) : null)
     const where = (x) => ((x.src || []).length ? x.src.map((p) => srcText(s, p)).join(' · ') : x.bsrc && x.bsrc.length ? `at the base: ${x.bsrc.map((p) => bsrcText(s, p)).join(' · ')}` : s.dv && x.dl && x.dl.s === 'prop' ? 'proposed: not in the code yet' : null)
-    const row = (x, mk, ...body) => h('li', { class: `krow${cls(x)}`, title: where(x) }, h('span', { class: `mkl k-${mk.toLowerCase()}` }, mk), h('span', { class: `mono${struck(x) ? ' struck' : ''}` }, ...body), ...pills(x), was(x))
+    const row = (x, mk, ...body) => rowWith(x, mk, null, ...body)
+    const rowWith = (x, mk, extra, ...body) => h('li', { class: `krow${cls(x)}`, title: where(x) }, h('span', { class: `mkl k-${mk.toLowerCase()}` }, mk), h('span', { class: `mono${struck(x) ? ' struck' : ''}` }, ...body), ...pills(x), was(x), extra)
     const keys = t.keys.map((k) => row(k, ROLE[k.role] || k.role, mark(k.role === 'ttl' ? `${k.parts.length ? k.parts.join(', ') : 'no attribute'} · ${typeof k.enabled === 'string' ? k.enabled : onOff(k.enabled)}` : k.parts.map(typed).join(' + '))))
-    const idx = t.indexes.map((x) => row(x, x.kind === 'lsi' ? 'LSI' : x.kind === 'gsi' ? 'GSI' : 'IDX', mark(x.name), h('span', { class: 'muted' }, mark(` · ${[x.partition && x.partition.length ? `PK ${x.partition.map(typed).join(' + ')}` : null, x.sort && x.sort.length ? `SK ${x.sort.map(typed).join(' + ')}` : null, x.kind ? projOf(x) : `(${x.columns.join(', ')})`].filter(Boolean).join(' · ')}`))))
+    // the access patterns (data/access.mjs, inferred): each index with the functions querying it, or a lead
+    const A = t.acc || null
+    const HOW = (DD.access && DD.access.how) || []
+    const howOf = (f) => (f.h || []).map((i) => HOW[i]).join(' · ')
+    const fnEl = (f) => h('span', { class: 'kfn', title: `${howOf(f)}${f.lines.length ? `\n${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')}` : ''}${f.c !== null && f.c !== undefined ? `\n${plural(f.c, 'caller')} in the index` : ''}` }, h('b', { class: 'mono' }, f.n), h('span', { class: 'muted' }, ` ${f.ops.join(' · ')}${f.w.length ? ` (writes ${f.w.join(', ')}${f.wm ? ` and ${f.wm} more` : ''})` : ''} `), srcEl(s, f.at), f.test ? h('span', { class: 'muted' }, ' (test code)') : null)
+    const FAN = (n) => `${plural(n, 'call')} name${n === 1 ? 's' : ''} it but could reach too many tables to say which: counted, not attributed`
+    const accOf = (x) => {
+      const ix = A && A.ix.find((i) => i.n === x.name)
+      if (!ix || (!ix.q.length && !ix.lead && !ix.sp)) return null
+      return h('div', { class: `srcline kacc${ix.lead && !ix.q.length ? ' lead' : ''}` }, ix.lead ? h('span', { class: 'pill warn', title: ix.lead }, ix.q.length ? 'no access outside test code (lead)' : 'no access found (lead)') : null,
+        ix.q.length ? [h('span', { class: 'muted' }, ix.lead ? ' queried by ' : 'queried by '), ...ix.q.flatMap((f, k) => [k ? ' · ' : null, fnEl(f)]), ix.more ? h('span', { class: 'muted' }, ` and ${plural(ix.more, 'more function')}`) : null]
+          : ix.lead ? h('span', { class: 'muted' }, ` ${ix.lead.replace(/^[^:]*: /, '')}`) : null,
+        ix.sp ? h('span', { class: 'muted' }, `${ix.q.length || ix.lead ? ' · ' : ''}${FAN(ix.sp)}`) : null)
+    }
+    const idx = t.indexes.map((x) => rowWith(x, x.kind === 'lsi' ? 'LSI' : x.kind === 'gsi' ? 'GSI' : 'IDX', accOf(x), mark(x.name), h('span', { class: 'muted' }, mark(` · ${[x.partition && x.partition.length ? `PK ${x.partition.map(typed).join(' + ')}` : null, x.sort && x.sort.length ? `SK ${x.sort.map(typed).join(' + ')}` : null, x.kind ? projOf(x) : `(${x.columns.join(', ')})`].filter(Boolean).join(' · ')}`))))
+    const rwMark = (f) => (f.wr && f.r ? 'RW' : f.wr ? 'W' : f.r ? 'R' : '?')
+    const rw = A ? A.rw.map((f) => h('li', { class: `krow kfnrow${f.test ? ' test' : ''}` }, h('span', { class: `mkl k-${f.wr ? 'w' : f.r ? 'r' : 'u'}`, title: f.u ? 'a call of unknown kind: neither a read nor a write said' : null }, rwMark(f)), fnEl(f), h('span', { class: 'muted' }, ` · ${howOf(f)}`))) : []
     const attrs = declared.map((f) => row(f, 'A', mark(f.name), h('span', { class: 'muted' }, ` ${f.type || '?'}`)))
     // the item: the bound types' fields as stored, a tree by dotted path, each key attribute marked
     const keyOf = new Map(t.keys.filter((k) => k.role !== 'ttl').flatMap((k) => k.parts.map((p) => [p, ROLE[k.role] || k.role])))
@@ -438,7 +458,8 @@ export function dataClient(ctx) {
       b.riv.length ? h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'rivals: '), b.riv.flatMap((r, k) => [k ? ' · ' : '', h('span', { class: 'mono' }, r.table), h('span', { class: 'muted' }, ` (${r.conf}, ${r.how})`)])) : null))
     const lg = t.lg
     const lgConflicts = lg ? lg.cf : []
-    const conflicts = [[`table ${t.name}`, t], ...t.fields.map((f) => [`attribute ${f.name}`, f]), ...t.keys.map((k) => [`${ROLE[k.role] || k.role} (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x])].flatMap(([label, x]) => cfs(x).map((c) => [label, c]))
+    const conflicts = [...[[`table ${t.name}`, t], ...t.fields.map((f) => [`attribute ${f.name}`, f]), ...t.keys.map((k) => [`${ROLE[k.role] || k.role} (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x])].flatMap(([label, x]) => cfs(x).map((c) => [label, c])),
+      ...(A ? A.cf.map((c) => [`written ${c.label.slice(t.name.length + 1)} (inferred)`, c]) : [])]
     const as = [...new Set((t.src || []).map((p) => p[2]).filter(Boolean))]
     const dks = s.dv ? s.dl.ks.filter((k) => s.delta.changes[k].tbl === ti) : [], dus = s.dv ? s.dl.us.filter((j) => s.delta.unplanned[j].tbl === ti) : []
     return h('article', { class: `kcard${cls(t)}`, 'data-tbl': String(ti), 'aria-label': `${t.name}: ${plural(t.keys.length, 'key')}, ${plural(t.indexes.length, 'index', 'indexes')}, ${plural(t.fields.length, 'attribute')}${conflicts.length ? `, ${plural(conflicts.length, 'conflict')}` : ''}` },
@@ -454,6 +475,9 @@ export function dataClient(ctx) {
       h('div', { class: 'ksub' }, `Attributes (${declared.length})`), h('ul', { class: 'krows kattrs' }, attrs),
       items.length ? [h('div', { class: 'ksub' }, `Item (${plural(items.length, 'field')}, as ${itemTypes.join(' and ')} ${itemTypes.length === 1 ? 'stores it' : 'store them'})`), h('ul', { class: 'krows kitem', 'aria-label': `${t.name}: the item's fields` }, items)] : null,
       binds.length ? [h('div', { class: 'ksub' }, `Bound item types (${binds.length})`), ...binds] : null,
+      A ? [h('div', { class: 'ksub' }, `Reads and writes (${plural(rw.length + (A.rwMore || 0), 'function')}, from their key-value calls: inferred)`), rw.length ? h('ul', { class: 'krows kaccess', 'aria-label': `${t.name}: the functions reading and writing it` }, rw) : h('p', { class: 'muted' }, 'no key-value call found reaching this table'),
+        A.rwMore ? h('p', { class: 'muted' }, `… and ${plural(A.rwMore, 'more function')} (graph_data lists the first ones)`) : null,
+        A.sp ? h('p', { class: 'muted' }, `+ ${plural(A.sp, 'call')} that could reach this table among too many to say which: counted, not listed`) : null, A.note ? h('p', { class: 'note' }, A.note) : null] : null,
       t.lnote ? h('p', { class: 'note' }, t.lnote) : null,
       lg ? [h('div', { class: `ksub${lgConflicts.length ? ' warn' : ''}` }, `One logical table: ${plural(lg.members.length, 'declaration')}${lgConflicts.length ? `, ${plural(lgConflicts.length, 'conflict')} across them` : ''}`),
         h('div', { class: 'srcline' }, `${lg.members.join(' + ')} (${lg.via}): their differences are conflicts, each side kept`),
@@ -462,12 +486,13 @@ export function dataClient(ctx) {
       h('div', { class: 'ksub' }, 'Declared at'), h('div', { class: 'srcline' }, ov(t) && t.ch === 'removed' ? ['at the base: ', bsrcs(s, t.bsrc)] : s.dv && t.dl && (t.dl.gone || t.dl.s === 'prop') ? (t.dl.gone ? ['at the base: ', bsrcs(s, t.bsrc)] : 'proposed: not in the code yet') : srcs(s, t.src)),
       conflicts.length ? [h('div', { class: 'ksub warn' }, `Conflicts (${conflicts.length}): each side kept, none resolved`),
         h('ul', { class: 'links dlist' }, conflicts.map(([label, c]) => h('li', null, h('div', null, h('b', null, label), h('span', { class: 'muted' }, ` · ${c.attr}`)),
-          c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src))))))] : null,
+          c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src)))))),
+        A && A.cfMore ? h('p', { class: 'muted' }, `… and ${A.cfMore} more written attribute${A.cfMore === 1 ? '' : 's'} the item does not state`) : null] : null,
       dks.length || dus.length ? [h('div', { class: 'ksub' }, `Delta: ${plural(dks.length, 'change')}${dus.length ? `, ${dus.length} not in the plan` : ''}`), h('ul', { class: 'links dlist' }, dks.map((k) => deltaItem(s.delta, k, 'p')), dus.map((j) => unplItem(s.delta, j)))] : null)
   }
   function cardsView(s) {
     const q = lower(st.q.trim())
-    const hit = (t) => !q || lower(t.name).includes(q) || t.fields.some((f) => lower(f.name).includes(q)) || t.indexes.some((x) => lower(x.name).includes(q)) || (t.bound || []).some((b) => lower(b.type).includes(q))
+    const hit = (t) => !q || lower(t.name).includes(q) || t.fields.some((f) => lower(f.name).includes(q)) || t.indexes.some((x) => lower(x.name).includes(q)) || (t.bound || []).some((b) => lower(b.type).includes(q)) || (t.acc ? t.acc.rw : []).some((f) => lower(f.n).includes(q))
     const shown = s.tables.map((t, i) => [t, i]).filter(([t]) => hit(t))
     const legend = h('div', { class: 'legend dlegend' }, h('span', null, h('span', { class: 'mkl k-pk' }, 'PK'), 'partition key'), h('span', null, h('span', { class: 'mkl k-sk' }, 'SK'), 'sort key (several attributes: a multi-attribute key)'),
       h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'time to live: on, off or not said'), h('span', null, h('span', { class: 'mkl k-gsi' }, 'GSI'), h('span', { class: 'mkl k-lsi' }, 'LSI'), 'global and local secondary indexes, with their keys and projection'),
@@ -561,7 +586,10 @@ export function dataClient(ctx) {
           : h('span', { class: 'pill warn', title: 'no table name and no environment variable the infra sets pairs with its conversions' }, 'unbound'),
         h('span', { class: 'muted' }, ` · ${plural(it.fields, 'field')} · `), path(it)))),
       h('p', null, 'An item type is one the code converts to or from an item; its binding is how the code names the table where it converts it (an environment variable the infra sets, a name the table\'s template matches, in one function or one file), with a confidence. Below convention, a binding is a lead.')) : null
-    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsErr, itemsList, list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
+    // the access patterns, in one line: each key card says the rest
+    const AC = DD.access
+    const accLine = DD.accessError ? h('p', { class: 'note err' }, `Access patterns: ${DD.accessError}.`) : AC ? h('p', { class: 'note', 'data-ctl': 'data-access' }, `Access patterns, inferred from ${plural(AC.calls, 'key-value SDK call')} in ${plural(AC.files, 'file')} (${AC.placed} reaching a table): each index lists the functions that query it, or ${plural(AC.leads, 'lead')} "no access found" (it may be reached through a constant built elsewhere, another repository, or a script). Leads, never verdicts.`) : null
+    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsErr, itemsList, accLine, list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
   }
   function open(n) { if (st.data !== n) { st.data = n; st.dataSel = null; st.dataAll = false; st.dataScroll = null } }
   return { view, has: (n) => !!S[n], open }

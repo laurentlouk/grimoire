@@ -1,0 +1,22 @@
+{
+  "TableName": "local-catalog-books",
+  "KeySchema": [
+    { "AttributeName": "shelfId", "KeyType": "HASH" },
+    { "AttributeName": "bookId", "KeyType": "RANGE" }
+  ],
+  "AttributeDefinitions": [
+    { "AttributeName": "shelfId", "AttributeType": "S" },
+    { "AttributeName": "bookId", "AttributeType": "S" },
+    { "AttributeName": "authorId", "AttributeType": "S" },
+    { "AttributeName": "isbn", "AttributeType": "S" },
+    { "AttributeName": "genre", "AttributeType": "S" },
+    { "AttributeName": "status", "AttributeType": "S" }
+  ],
+  "GlobalSecondaryIndexes": [
+    { "IndexName": "ByAuthor", "KeySchema": [{ "AttributeName": "authorId", "KeyType": "HASH" }], "Projection": { "ProjectionType": "ALL" } },
+    { "IndexName": "ByIsbn", "KeySchema": [{ "AttributeName": "isbn", "KeyType": "HASH" }], "Projection": { "ProjectionType": "KEYS_ONLY" } },
+    { "IndexName": "ByGenre", "KeySchema": [{ "AttributeName": "genre", "KeyType": "HASH" }], "Projection": { "ProjectionType": "KEYS_ONLY" } },
+    { "IndexName": "ByStatus", "KeySchema": [{ "AttributeName": "status", "KeyType": "HASH" }], "Projection": { "ProjectionType": "KEYS_ONLY" } }
+  ],
+  "BillingMode": "PAY_PER_REQUEST"
+}

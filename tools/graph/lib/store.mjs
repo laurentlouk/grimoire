@@ -18,15 +18,16 @@
 //            0 none); for a JSON or YAML file its tables (3 a template's table resource, 2 a key
 //            schema, a CreateTable input; 0 none); for a Terraform or Terragrunt file what it
 //            declares (4 a module with a table resource, 5 a terragrunt.hcl Terragrunt runs, 6 a
-//            module out of reach, 1 other); for a .rs or .ts file what the item binding reads
-//            (1 a serde derive or a type, a conversion, an environment read, a string constant; 0 none)
+//            module out of reach, 1 other); for a source file (.rs, .ts, .js, .py, .go), bits: 1 what
+//            the item binding reads (a serde derive or a type, a conversion, an environment read, a
+//            string constant), 2 a key-value SDK call shape (the access patterns); 0 none
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '8'
+export const SCHEMA_VERSION = '9'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.

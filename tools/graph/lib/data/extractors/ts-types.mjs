@@ -34,7 +34,7 @@ export const tsLevel = (text) => (LEVEL_RE.test(text) ? 1 : 0)
 const langOf = (p) => (/\.tsx$/i.test(p) ? 'tsx' : 'typescript')
 
 // ── types ──
-const strVal = (n) => named(n).filter((x) => x.type === 'string_fragment' || x.type === 'escape_sequence').map((x) => (x.type === 'escape_sequence' ? unescape1(x.text) : x.text)).join('')
+export const strVal = (n) => named(n).filter((x) => x.type === 'string_fragment' || x.type === 'escape_sequence').map((x) => (x.type === 'escape_sequence' ? unescape1(x.text) : x.text)).join('')
 const unescape1 = (s) => ({ '\\n': '\n', '\\t': '\t', '\\r': '\r', '\\0': '\0' })[s] ?? s.slice(1)
 const LIST = new Set(['Array', 'ReadonlyArray', 'Set', 'ReadonlySet'])
 const MAPS = new Set(['Record', 'Map', 'ReadonlyMap'])
@@ -125,7 +125,7 @@ function typeOf(node) {
 // ── uses ──
 const isEnvObj = (n) => n && n.type === 'member_expression' && n.text.replace(/\s+/g, '') === 'process.env'
 // a string-building expression's parts: [string | null], or null when it builds no string
-function partsOf(n, depth = 0) {
+export function partsOf(n, depth = 0) {
   if (!n || depth > 32) return null
   if (n.type === 'string') return [strVal(n)]
   if (n.type === 'template_string') return named(n).map((x) => (x.type === 'template_substitution' ? null : x.type === 'escape_sequence' ? unescape1(x.text) : x.text))
@@ -178,7 +178,7 @@ function calleeName(fn) {
 }
 
 const isKey = (n) => n.parent && n.parent.type === 'pair' && field(n.parent, 'key')?.startIndex === n.startIndex
-function scanUses(root, ctx, sink) {
+export function scanUses(root, ctx, sink) {
   each(root, (n) => {
     if (n.type === 'literal_type' || n.type === 'type_annotation' || n.type === 'type_arguments') return false
     if (n.type === 'string' && isKey(n)) return false // a member's name, not a value
@@ -257,18 +257,24 @@ function varsOf(fn, cls) {
   return vars
 }
 
-export function readTs(tree, file) {
-  const types = [], consts = [], fns = [], notes = []
-  const test = TEST_FILE.test(file)
-  const root = tree.rootNode
-  // what a function may read by name: the file's constants and the names it imports
+// A top-level statement's declaration (an export's, or the statement itself).
+export const decls = (n) => (n.type === 'export_statement' ? field(n, 'declaration') || named(n).find((x) => /declaration$/.test(x.type)) : n)
+// What a function may read by name: the file's constants and the names it imports.
+export function knownOf(root) {
   const known = new Set()
-  const decls = (n) => (n.type === 'export_statement' ? field(n, 'declaration') || named(n).find((x) => /declaration$/.test(x.type)) : n)
   for (const c of named(root)) {
     if (c.type === 'import_statement') each(c, (x) => { if (x.type === 'import_specifier') known.add((field(x, 'alias') || field(x, 'name'))?.text); else if (x.type === 'identifier' && x.parent?.type === 'import_clause') known.add(x.text); return true })
     const d = c && decls(c)
     if (d && (d.type === 'lexical_declaration' || d.type === 'variable_declaration')) for (const v of named(d)) if (v.type === 'variable_declarator' && field(v, 'name')?.type === 'identifier') known.add(field(v, 'name').text)
   }
+  return known
+}
+
+export function readTs(tree, file) {
+  const types = [], consts = [], fns = [], notes = []
+  const test = TEST_FILE.test(file)
+  const root = tree.rootNode
+  const known = knownOf(root)
   const fnOf = (node, name, cls) => {
     const sink = { names: [], env: [], uses: [], converts: [] }
     const body = field(node, 'body')
@@ -331,7 +337,7 @@ export default {
   scope: 'file',
   wants: (p) => TS.test(p) && !DTS.test(p),
   level: (p, text) => tsLevel(text),
-  discover: (info) => [...info].filter(([p, i]) => TS.test(p) && !DTS.test(p) && i.ddl === 1).map(([p]) => ({ key: p, inputs: [p] })),
+  discover: (info) => [...info].filter(([p, i]) => TS.test(p) && !DTS.test(p) && (i.ddl & 1)).map(([p]) => ({ key: p, inputs: [p] })),
   extract(text, file, ctx) {
     if (ctx.aside) return ctx.aside('ts-types', file, text)
     const tree = ctx.tree(langOf(file), text)

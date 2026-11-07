@@ -13,8 +13,8 @@
 //   architecture  the diagrams in docs/architecture (arch.mjs: checked against the index, laid out
 //              here) and one drafted from the graph on every render; drawn by arch-view.mjs
 //   data       the data model (lib/data, reconciled as graph_data answers): an ERD per SQL store,
-//              laid out here (data/layout.mjs), a key card per table of a key-value store (`cards`,
-//              no layout), with the folders found but not read, and two
+//              laid out here (data/layout.mjs), a key card per table of a key-value store (`cards`, its
+//              access patterns `acc` placed in the code graph's functions; no layout), with the folders found but not read, and two
 //              overlays packed here: the branch against its base, and a design's delta (the
 //              changes it proposes, each with its state against the code); drawn by data-view.mjs
 //   docs       the project's Markdown notes (docs.mjs), rendered in the page (md.mjs) as an
@@ -48,7 +48,8 @@ import { layoutErd, erdBox } from './data/layout.mjs'
 import { diffModels } from './data/diff.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
 import { parseDelta, deltaStates, findTarget, changeText, diffText } from './data/delta.mjs'
-import { changeVal, renameText, baseText, refName, CHANGE_KIND } from './query.mjs'
+import { changeVal, renameText, baseText, refName, CHANGE_KIND, symbolAt } from './query.mjs'
+import { byFunction, siteHow, isRead, isWrite, isUnknown, CAP, LABELS } from './data/access.mjs'
 import { dataClient } from './data-view.mjs'
 import { stageClient } from './stage-view.mjs'
 
@@ -195,6 +196,12 @@ export function dataData(db, files, repos, changes = null, deltas = []) {
   const shown = (repo, p) => { const r = root.get(repo); return r && r !== '.' ? (p === '.' ? r : `${r}/${p}`) : p }
   const fileId = new Map(files.map((f) => [`${f.repo}\0${f.path}`, f.id]))
   const model = reconcile(db.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+  // the access patterns (data/access.mjs), their calls placed in the code graph's functions
+  // (how each call reached its table, each text once in the page: the cards index it)
+  const how = [], howAt = new Map()
+  const acc = model.access ? { sites: model.access.sites, sym: symbolAt(db), how: (t) => { if (!howAt.has(t)) { howAt.set(t, how.length); how.push(t) } return howAt.get(t) } } : null
+  out.access = model.access ? { files: model.access.files, calls: model.access.sites.length, placed: model.access.placed, spread: model.access.spread || 0, leads: model.access.leads, how } : null
+  out.accessError = model.accessError || null
   let diff = null, whole = null
   if (changes?.base) {
     const compared = new Set(changes.base.repos.map((r) => r.name))
@@ -206,7 +213,7 @@ export function dataData(db, files, repos, changes = null, deltas = []) {
   }
   for (const st of model.stores) {
     const n = st.entities.length ? out.stores.length : -1
-    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null))
+    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc))
     for (const d of st.declarations) {
       if (n >= 0 && d.status !== 'not-read') continue
       const reason = d.status === 'not-read' ? d.label : d.stopped ? `replayed to ${shown(st.repo, d.stopped.path)}:${d.stopped.line}: ${d.error}` : `${d.label}: no table`
@@ -455,10 +462,34 @@ function packItems(e, src, cf) {
     ...(e.logicalNote ? { lnote: e.logicalNote } : {}),
   }
 }
+// A key-value table's access patterns (data/access.mjs), as its key card draws them, each list its
+// first CAP functions and a count of the rest:
+//   acc { ix: [{ n: the index, q: [Fn] the functions querying it, more, lead: text | null, sp: calls
+//         naming it that could reach more than FANOUT tables }], rw: [Fn + { r: it reads, wr: it
+//         writes, u: a call of unknown kind }], rwMore, sp: such calls that could reach this table,
+//         cf: [{ label, attr, values: [{ value, src }] }] (what a call writes that the bound item does
+//         not state), cfMore, note? }
+//   Fn  { n: its name (the code graph's symbol), ops: [words], w: [path written] (capped), at: [p,
+//         line], lines: [the calls' lines] (capped), h: [how the calls reached the table, as indexes
+//         into the page's access.how: each text once per page], test, c: its callers }
+function packAccess(e, src, cf, acc) {
+  if (!e.access || !acc) return {}
+  const sites = (list) => list.map((k) => acc.sites[k])
+  const fn = (f) => ({ n: f.name, ops: f.ops, w: f.writes.slice(0, 8), ...(f.writes.length > 8 ? { wm: f.writes.length - 8 } : {}), at: src([{ repo: f.repo, path: f.path, line: f.line, kind: 'code' }])[0], lines: f.sites.slice(0, 5).map((s) => s.line), h: [...new Set(f.sites.map(siteHow))].slice(0, LABELS).map(acc.how), ...(f.test ? { test: 1 } : {}), c: f.callers })
+  const all = byFunction(sites(e.access.sites), acc.sym)
+  return {
+    acc: {
+      ix: e.access.indexes.map((i) => { const q = byFunction(sites(i.sites), acc.sym); return { n: i.name, q: q.slice(0, CAP).map(fn), more: Math.max(0, q.length - CAP), lead: i.lead, sp: i.spread || 0 } }),
+      rw: all.slice(0, CAP).map((f) => ({ ...fn(f), r: f.sites.some(isRead) ? 1 : 0, wr: f.sites.some(isWrite) ? 1 : 0, u: f.sites.some(isUnknown) ? 1 : 0 })), rwMore: Math.max(0, all.length - CAP), sp: e.access.spread || 0,
+      cf: cf(e.access.conflicts).map((c, j) => ({ label: e.access.conflicts[j].label, ...c })), cfMore: e.access.moreConflicts || 0,
+      ...(e.access.note ? { note: e.access.note } : {}),
+    },
+  }
+}
 // A store drawn as key cards rather than an ERD: a key-value one (its tables have no foreign key to
 // draw, and keys, indexes, TTL and stream to show).
 const CARDS = new Set(['dynamodb'])
-function packStore(st, shown, fileId, sd = null) {
+function packStore(st, shown, fileId, sd = null, acc = null) {
   const paths = [], at = new Map()
   // a path of the store's repository, or of another (the code an item type is bound from)
   const P = (p, kind = null, repo = st.repo) => {
@@ -472,7 +503,7 @@ function packStore(st, shown, fileId, sd = null) {
   const tables = st.entities.map(packer(st.entities, src, cf))
   // a key-value table's item types (data/binding.mjs): its bindings with their evidence and rivals,
   // the logical table it is one declaration of with the conflicts across it
-  if (CARDS.has(st.dialect)) st.entities.forEach((e, i) => Object.assign(tables[i], packItems(e, src, cf)))
+  if (CARDS.has(st.dialect)) st.entities.forEach((e, i) => Object.assign(tables[i], packItems(e, src, cf), packAccess(e, src, cf, acc)))
   const f = st.dialectFrom, cards = CARDS.has(st.dialect), collapsed = !cards && tables.length > DATA_COLLAPSE
   return {
     id: st.id, repo: st.repo, name: st.name, dialect: st.dialect, summary: storeSummary(st),
@@ -758,6 +789,7 @@ ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4
 .mkl.k-pk{color:var(--accent);background:var(--accent-soft)}.mkl.k-sk{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 12%,var(--panel))}.mkl.k-ttl{color:var(--t-messagebus);background:color-mix(in srgb,var(--t-messagebus) 12%,var(--panel))}
 .mkl.k-gsi,.mkl.k-lsi,.mkl.k-idx{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 12%,var(--panel))}.mkl.k-a{color:var(--muted);background:var(--hover)}
 .mkl.k-i{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 10%,var(--panel))}ul.kitem .krow.d1{padding-left:20px}ul.kitem .krow.d2{padding-left:34px}ul.kitem .krow.d3{padding-left:48px}ul.kitem .krow.d4,ul.kitem .krow.d5,ul.kitem .krow.d6{padding-left:62px}
+.krow .kacc{margin:1px 0 2px 30px;font-size:12px}.krow .kacc .pill{margin:0 4px 0 0}.kfn{overflow-wrap:anywhere}.mkl.k-r{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,var(--panel))}.mkl.k-w{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel))}.mkl.k-u{color:var(--muted);background:var(--hover)}ul.kaccess .krow.test{opacity:.8}
 .kbind{border:1px solid var(--border);border-radius:8px;padding:6px 8px;margin:4px 0}.kbind.dash{border-style:dashed}.kbind .srcline{margin:2px 0 0}.pill.c-declared,.pill.c-convention{color:var(--ok);border-color:currentColor}.pill.c-name-match,.pill.c-ambiguous{color:var(--warn);border-color:currentColor;border-style:dashed}
 .kcard.ch-add,.kcard.dl-built{border:2px solid var(--ok)}.kcard.ch-del{border:2px dashed var(--err);opacity:.85}.kcard.ch-mod,.kcard.dl-diff{border:2px solid var(--warn)}
 .kcard.dl-prop{border:2px dashed var(--ok)}.kcard.dl-pend,.kcard.dl-rm{border:2px dashed var(--warn)}.kcard.dl-unpl{border:2px solid var(--t-worker)}.kcard.gone{opacity:.85}

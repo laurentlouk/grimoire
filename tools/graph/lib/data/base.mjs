@@ -24,7 +24,7 @@
 //   treeAt(dir, commit), blobs(dir, list): those two git reads, shared with the architecture change
 //     view (arch-change.mjs), which reads the saved diagrams at the base the same way.
 import { spawnSync } from 'node:child_process'
-import { EXTRACTORS, CODE, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
+import { EXTRACTORS, codeOf, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
 import { reconcile } from './reconcile.mjs'
 import { parseAside } from './readers/yaml-aside.mjs'
 import { extractAside } from './readers/code-aside.mjs'
@@ -103,8 +103,10 @@ function extractAt(abs, commit, project, overrides, ctx) {
   // the YAML a table extractor will read, parsed in a process of its own (readers/yaml-aside.mjs)
   const yaml = parseAside([...new Set(want.filter((p) => YAML.test(p) && text.has(p)).map((p) => stripBom(read(p))).filter((t) => tableLevel(t)))])
   const yamlOf = (t) => { const v = yaml.get(t); if (v instanceof Error) throw v; if (!v) throw new Error('no YAML reader: the text was not parsed'); return v }
-  // the source files a code extractor reads, read in a process of its own too (readers/code-aside.mjs)
-  const code = want.filter((p) => text.get(p) && CODE.some((ex) => ex.wants(p))).map((p) => ({ id: CODE.find((ex) => ex.wants(p)).id, path: p, text: text.get(p) }))
+  // the source files a code extractor reads, read in a process of its own too (readers/code-aside.mjs);
+  // the access patterns are not read at a base (graph_changes does not compare them): a file kept
+  // only for them is not parsed
+  const code = want.filter((p) => text.get(p) && codeOf(p) && codeOf(p).level(p, text.get(p)) > 0).map((p) => ({ id: codeOf(p).id, path: p, text: text.get(p) }))
   const facts = code.length ? extractAside(code) : new Map()
   const aside = (id, p) => { const v = facts.get(p); if (v instanceof Error) throw v; if (!v) throw new Error('no code reader: the file was not read'); return v }
   return extractAll({ paths, size: (p) => files.get(p).size, read }, { exclude: [], ...project }, overrides, { ...ctx, yaml: yamlOf, aside })

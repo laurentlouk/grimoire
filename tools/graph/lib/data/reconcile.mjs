@@ -13,12 +13,15 @@
 //
 // Then, over every store at once (items below, binding.mjs): the key-value tables declared in several
 // places grouped into logical tables (their disagreements across declarations its conflicts), and the
-// item types code converts bound to them, their fields on the tables.
+// item types code converts bound to them, their fields on the tables; then the access patterns
+// (access.mjs): the key-value calls code makes, resolved to those tables, each index with the calls
+// that query it or a lead, and what a call writes that the bound item does not state.
 //
 //   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store], logical, items,
-//     bindings, unresolved }   (model.mjs, binding.mjs)
+//     bindings, unresolved, access?, accessError? }   (model.mjs, binding.mjs, access.mjs)
 import { KINDS, keyOf, normType, normDefault, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
-import { logicalTables, bindItems, itemField, itemOf } from './binding.mjs'
+import { logicalTables, bindItems, itemField, itemOf, tableResolver } from './binding.mjs'
+import { resolveAccess } from './access.mjs'
 
 // What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
 // an LSI's kind, key attributes and projection, beside what a SQL element says. A key-value
@@ -90,7 +93,11 @@ function plan(model, rows, decls) {
   // what the infra sets each environment variable to (a function's environment naming a table)
   const wiring = decls.flatMap((d) => (d.env || []).map((w) => ({ name: w.name, entity: `${d.repo}:${d.store}/${w.table}`, repo: d.repo, path: w.path, line: w.line }))).filter((w) => entities.has(w.entity))
   const code = rows.filter((r) => r.facts?.code).map((r) => ({ repo: r.repo, extractor: r.extractor, code: r.facts.code }))
-  const b = bindItems(code, groups, entities, wiring)
+  // the access patterns' files: those holding a call, and those holding only constants a call may name
+  const access = rows.filter((r) => r.facts?.access).map((r) => ({ repo: r.repo, extractor: r.extractor, access: r.facts.access }))
+  // one resolver for the binding and the access patterns: the constants of the files either reads
+  const R = tableResolver([...code, ...access.map((r) => ({ repo: r.repo, code: { lang: r.access.lang, path: r.access.path, consts: r.access.consts } }))], groups, entities, wiring)
+  const b = bindItems(code, groups, entities, wiring, R)
   Object.assign(out, { items: b.items, bindings: b.bindings, unresolved: b.unresolved })
   const byId = new Map(b.items.map((it) => [it.id, it]))
   const indexes = new Map() // entity → its fields by name
@@ -112,6 +119,15 @@ function plan(model, rows, decls) {
         fields[at] = { ...have, item: [...(have.item || []), itemOf(f, bd)], sources: [...have.sources, { repo: f.repo, path: f.file, line: f.line, kind: 'code', extractor: it.extractor, confidence: bd.confidence }] }
       }
     }
+  }
+  // the access patterns (access.mjs), against the tables and their item shapes as bound: a failure
+  // there leaves the binding as it is, and says why
+  if (access.some((r) => r.access.sites?.length)) {
+    try {
+      const a = resolveAccess(access, { groups, entities, R, fieldsOf: (e) => patches.get(e)?.fields || e.fields, boundOf: (e) => patches.get(e)?.bound || [], items: b.items })
+      for (const [id, x] of a.entities) patch(entities.get(id)).access = x
+      out.access = a.model
+    } catch (e) { out.accessError = `the access patterns were not resolved: ${String(e?.message || e).split('\n')[0].slice(0, 200)}` }
   }
   return { entities: patches, model: out }
 }
@@ -178,7 +194,8 @@ export function storeSummary(st) {
   // the conflicts of its elements, and those across the declarations of a logical table it holds a
   // member of (binding.mjs), counted once
   const groups = new Map(st.entities.filter((e) => e.logical).map((e) => [e.logical.id, e.logical]))
-  const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0) + [...groups.values()].reduce((a, g) => a + g.conflicts.length, 0)
+  // and what a call writes that the item bound to its table does not state (access.mjs: inferred)
+  const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0) + (e.access ? e.access.conflicts.length + (e.access.moreConflicts || 0) : 0), 0) + [...groups.values()].reduce((a, g) => a + g.conflicts.length, 0)
   if (st.dialect === 'dynamodb') {
     const k = (kind) => tables.reduce((a, e) => a + e.indexes.filter((i) => i.kind === kind).length, 0)
     const items = new Set(tables.flatMap((e) => (e.bound || []).map((b) => b.item))).size
