@@ -27,10 +27,19 @@
 // update writes (SET, REMOVE, ADD, DELETE paths, `#names` resolved through ExpressionAttributeNames
 // when its map is literal), the attributes a literal put item holds, the projection. A value read from
 // a constant of the same file is followed (`.index_name(BY_OWNER)`, `IndexName: Indexes.ByOwner`); one
-// from elsewhere is kept by its name, for the binding's constant resolution. Nothing is evaluated: a
-// value built any other way is kept as unknown, never guessed.
+// from elsewhere is kept by its name, for the binding's constant resolution: a name of the file (an
+// import, a top-level name) or one in SCREAMING_CASE, a member only of a module imported whole, never
+// a parameter or another object's member (`process.env.X`, `cfg.X`). Nothing is evaluated: a value
+// built any other way is kept as unknown, never guessed.
+// Never a call: what declares a table or an index (a CreateTable or UpdateTable input, a GSI's or an
+// LSI's declaration in code: `GlobalSecondaryIndex::builder()`, `{ IndexName, KeySchema, Projection }`,
+// `types.GlobalSecondaryIndex{…}`), the table's administration, an `UpdateExpression` key alone (an
+// ESTree visitor's). Test code: the code graph's test paths (lib/langs.mjs TEST_PATH), and each
+// language's own marks. Bounded: MAX_SITES calls per file, the walk stopping there; a variable's
+// operation found in one pass over the file.
 //
-// Facts: { declarations: [], access: { lang, path, sites: [Site], fns: [Fn], consts: [Const], notes } }
+// Facts: { declarations: [], access: { lang, path, sites: [Site], fns: [Fn], consts: [Const], notes } };
+// a file holding no call but string constants keeps only them (`sites: []`), for other files' calls.
 //   Site   { line, fn: index into fns (-1 outside a function), op | null, test?, table: Sink | null
 //            (what the call's table argument names), index | null, indexConst? (a constant of another
 //            file), indexExpr? (a value not read), key: [attribute] | null, writes: [{ path, clause }],
@@ -43,6 +52,7 @@ import { codeName } from '../readers/names.mjs'
 import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each } from '../readers/code.mjs'
 import { readRust, scanUses as rsScan, strOf, isStr, attrOf, isTestAttr, formatParts } from './serde.mjs'
 import { readTs, scanUses as tsScan, strVal, knownOf, decls } from './ts-types.mjs'
+import { TEST_PATH } from '../../langs.mjs'
 
 export const SRC = /\.(?:rs|ts|mts|cts|tsx|js|mjs|cjs|jsx|py|go)$/i
 const DTS = /\.d\.[cm]?ts$/i
@@ -54,12 +64,14 @@ export const treeLang = (p) => (/\.rs$/i.test(p) ? 'rust' : /\.tsx$/i.test(p) ? 
 // JavaScript's together, as the item binding names them
 const familyOf = (lang) => (lang === 'tsx' || lang === 'typescript' || lang === 'javascript' ? 'ts' : lang)
 
-// What a file holds that this reads (registry.mjs inspect: bit 2).
+// What a file holds that this reads (registry.mjs inspect: bit 2): a call shape, or a string constant
+// another file's call may name (an exported const, a module-level SCREAMING_CASE name, a Go const;
+// Rust's are read for the item binding already, extractors/serde.mjs)
 const LEVEL = {
   rust: /\.(?:set_)?(?:index_name|table_name|key_condition_expression|update_expression)\s*\(/,
-  ts: /['"]?\b(?:IndexName|TableName|KeyConditionExpression|UpdateExpression)\b['"]?\s*:/,
-  python: /\b(?:IndexName|TableName|KeyConditionExpression|UpdateExpression)\s*=|\bTable\s*\(/,
-  go: /\b(?:IndexName|TableName|KeyConditionExpression|UpdateExpression)\s*:/,
+  ts: /['"]?\b(?:IndexName|TableName|KeyConditionExpression|UpdateExpression)\b['"]?\s*:|^[ \t]*export[ \t]+const[ \t]+[A-Za-z_$][\w$]*[ \t]*(?::[^=\n]+)?=[ \t]*['"`]/m,
+  python: /\b(?:IndexName|TableName|KeyConditionExpression|UpdateExpression)\s*=|\bTable\s*\(|^[A-Z][A-Z0-9_]{2,}[ \t]*(?::[^=\n]+)?=[ \t]*[rRuU]?['"]/m,
+  go: /\b(?:IndexName|TableName|KeyConditionExpression|UpdateExpression)\s*:|^[ \t]*const[ \t]*(?:\(|\w+(?:[ \t]+\w+)?[ \t]*=[ \t]*["`])/m,
 }
 export const accessLevel = (p, text) => { const l = treeLang(p); return l && LEVEL[familyOf(l)].test(text) ? 2 : 0 }
 
@@ -154,6 +166,10 @@ const sameNode = (a, b) => !!a && !!b && a.startIndex === b.startIndex && a.endI
 const RS_OPS = { query: 'query', scan: 'scan', get_item: 'get', put_item: 'put', update_item: 'update', delete_item: 'delete', batch_get_item: 'batch-get', batch_write_item: 'batch-write', transact_write_items: 'transact-write', transact_get_items: 'transact-get' }
 const RS_BUILDERS = { Update: 'update', Put: 'put', Delete: 'delete', Get: 'get', ConditionCheck: 'check', PutRequest: 'put', DeleteRequest: 'delete', QueryInput: 'query', ScanInput: 'scan', GetItemInput: 'get', PutItemInput: 'put', UpdateItemInput: 'update', DeleteItemInput: 'delete' }
 const RS_PART = { index_name: 'index', set_index_name: 'index', table_name: 'table', set_table_name: 'table', key_condition_expression: 'key', set_key_condition_expression: 'key', update_expression: 'update', set_update_expression: 'update', projection_expression: 'projection', set_projection_expression: 'projection', expression_attribute_names: 'names', set_expression_attribute_names: 'names', item: 'item' }
+// What declares a table or an index rather than reaching one: the builder types and the methods of a
+// create_table / update_table chain (a chain carrying one is never a call)
+const RS_DECL_TYPES = /^(?:GlobalSecondaryIndex|LocalSecondaryIndex|GlobalSecondaryIndexUpdate|ReplicaGlobalSecondaryIndex\w*|\w*SecondaryIndexAction|KeySchemaElement|AttributeDefinition|Projection|ProvisionedThroughput|\w*Description)$/
+const RS_DECL_PARTS = new Set(['key_schema', 'set_key_schema', 'projection', 'set_projection', 'attribute_definitions', 'set_attribute_definitions', 'provisioned_throughput', 'set_provisioned_throughput', 'global_secondary_indexes', 'set_global_secondary_indexes', 'local_secondary_indexes', 'set_local_secondary_indexes', 'global_secondary_index_updates', 'set_global_secondary_index_updates', 'billing_mode', 'stream_specification'])
 const RS_THROUGH = new Set(['try_expression', 'await_expression', 'parenthesized_expression'])
 const RS_UNWRAP = /^(?:to_string|to_owned|into|clone|as_str|as_ref|as_deref|borrow)$/
 const argsOf = (call) => { const a = field(call, 'arguments'); return a ? named(a).filter((x) => x.type !== 'line_comment' && x.type !== 'block_comment' && x.type !== 'attribute_item') : [] }
@@ -229,8 +245,15 @@ function rsChain(call, consts, impl) {
   let op = null
   if (root && root.type === 'call_expression') {
     const fn = field(root, 'function')
-    if (fn && fn.type === 'scoped_identifier' && field(fn, 'name')?.text === 'builder') op = RS_BUILDERS[lastSeg(field(fn, 'path') || fn)] || null
+    if (fn && fn.type === 'scoped_identifier') {
+      const type = lastSeg(field(fn, 'path') || fn)
+      // a table's or an index's declaration in code (`GlobalSecondaryIndex::builder().index_name(…)`
+      // inside `create_table()`): no call reaches the index through it
+      if (RS_DECL_TYPES.test(type)) return null
+      if (field(fn, 'name')?.text === 'builder') op = RS_BUILDERS[type] || null
+    }
   }
+  if (parts.some((p) => RS_DECL_PARTS.has(p.m))) return null
   for (const p of parts) if (!op && RS_OPS[p.m] && !p.args.length) op = RS_OPS[p.m]
   const raw = { op, table: null, index: null, key: null, update: null, projection: null, names: { map: {}, open: false }, item: null }
   let any = false, named0 = false
@@ -252,7 +275,7 @@ function rsChain(call, consts, impl) {
   if (!any || (!op && !named0)) return null
   return raw
 }
-function readRustAccess(tree) {
+function readRustAccess(tree, file) {
   const root = tree.rootNode
   const base = readRust(tree)
   const consts = new Map() // a string constant of this file → { value, line }
@@ -260,14 +283,10 @@ function readRustAccess(tree) {
     if ((n.type === 'const_item' || n.type === 'static_item') && field(n, 'name')) { const v = field(n, 'value'); if (v && isStr(v)) { const s = strOf(v); if (s !== null && !consts.has(field(n, 'name').text)) consts.set(field(n, 'name').text, { value: s, line: lineOf(n) }) } return false }
     return true
   })
-  const fns = base.fns.map(({ name, line, end, test, names, env, uses }) => ({ name, line, end, ...(test ? { test: true } : {}), names, env, uses }))
+  const fileTest = TEST_PATH.test(file)
+  const fns = base.fns.map(({ name, line, end, test, names, env, uses }) => ({ name, line, end, ...(test || fileTest ? { test: true } : {}), names, env, uses }))
   const sites = []
-  const fnIndex = (name, node, test) => {
-    const line = lineOf(node)
-    let i = fns.findIndex((f) => f.line === line && f.name === name)
-    if (i < 0 && fns.length < MAX.fns) { fns.push({ name, line, end: endOf(node), ...(test ? { test: true } : {}), names: [], env: [], uses: [] }); i = fns.length - 1 }
-    return i
-  }
+  const fnIndex = fnIndexer(fns)
   const walk = (list, ctx) => {
     let pending = []
     for (const c of named(list)) {
@@ -280,9 +299,10 @@ function readRustAccess(tree) {
         const test = ctx.test || isTestAttr(attrs), qual = ctx.impl ? `${ctx.impl}::${name}` : name
         let f = null
         each(body, (n) => {
+          if (sites.length >= MAX_SITES) return false
           if (n.type === 'call_expression' && !rsReceiver(n)) {
             const raw = rsChain(n, consts, ctx.impl)
-            if (raw) { if (f === null) f = fnIndex(qual, c, test); push(sites, site(raw, lineOf(n), f, test), MAX_SITES) }
+            if (raw) { if (f === null) f = fnIndex(qual, lineOf(c), endOf(c), test); push(sites, site(raw, lineOf(n), f, test), MAX_SITES) }
           }
           return true
         })
@@ -292,8 +312,21 @@ function readRustAccess(tree) {
       if (c.type === 'impl_item' || c.type === 'trait_item') { const b = field(c, 'body'), t = field(c, 'type') || field(c, 'name'); if (b) walk(b, { ...ctx, impl: t ? lastSeg(t.type === 'generic_type' ? field(t, 'type') || t : t) : ctx.impl }); continue }
     }
   }
-  walk(root, { test: false, impl: null })
+  walk(root, { test: fileTest, impl: null })
   return { lang: 'rust', sites, fns, consts: base.consts, notes: base.notes }
+}
+// A function's index in a file's list, found by its name and line in constant time, added (with
+// nothing it names) when the list does not hold it.
+function fnIndexer(fns) {
+  const at = new Map(fns.map((f, i) => [`${f.line}\0${f.name}`, i]))
+  return (name, line, end, test) => {
+    const k = `${line}\0${name}`
+    if (at.has(k)) return at.get(k)
+    if (fns.length >= MAX.fns) return -1
+    fns.push({ name, line, end, ...(test ? { test: true } : {}), names: [], env: [], uses: [] })
+    at.set(k, fns.length - 1)
+    return fns.length - 1
+  }
 }
 
 // ── TypeScript and JavaScript ──
@@ -301,6 +334,13 @@ const TS_OPS = { Query: 'query', Scan: 'scan', GetItem: 'get', Get: 'get', PutIt
 const TS_METHODS = { query: 'query', scan: 'scan', get: 'get', getItem: 'get', put: 'put', putItem: 'put', update: 'update', updateItem: 'update', delete: 'delete', deleteItem: 'delete', batchGet: 'batch-get', batchGetItem: 'batch-get', batchWrite: 'batch-write', batchWriteItem: 'batch-write', transactWrite: 'transact-write', transactWriteItems: 'transact-write', transactGet: 'transact-get', transactGetItems: 'transact-get', paginateQuery: 'query', paginateScan: 'scan' }
 const TS_LEGS = { Update: 'update', Put: 'put', Delete: 'delete', Get: 'get', ConditionCheck: 'check' }
 const TS_SITE_KEYS = new Set(['TableName', 'IndexName', 'KeyConditionExpression', 'UpdateExpression'])
+// What declares a table or an index rather than reaching one: an object holding one of these keys
+// (a CreateTable or UpdateTable input, a GSI's or an LSI's declaration), or one these keys hold
+const TS_DECL_KEYS = new Set(['KeySchema', 'AttributeDefinitions', 'Projection', 'ProvisionedThroughput', 'BillingMode', 'StreamSpecification', 'GlobalSecondaryIndexes', 'LocalSecondaryIndexes', 'GlobalSecondaryIndexUpdates', 'ReplicaUpdates', 'Replicas'])
+const TS_DECL_UNDER = new Set(['GlobalSecondaryIndexes', 'LocalSecondaryIndexes', 'GlobalSecondaryIndexUpdates', 'ReplicaUpdates', 'Replicas', 'ReplicaGlobalSecondaryIndexUpdates'])
+// a command or a method of the table's administration, never one reaching its items
+const TS_ADMIN = /^(?:create|update|delete|describe)(?:Global)?Table$|TimeToLive|ContinuousBackups|Backup|Export|Import|ContributorInsights|KinesisStreamingDestination|TagResource/i
+const FN_VALUE = /^(?:arrow_function|function_expression|function|generator_function|method_definition)$/
 const TEST_TS = /\.(?:test|spec)\.[cm]?[jt]sx?$/i
 const opOfCommand = (name) => { const m = /^(\w+?)Command$/.exec(name || ''); return m && m[1] in TS_OPS ? TS_OPS[m[1]] : null }
 const opOfType = (name) => { const m = /^(\w+?)(?:Command)?Input$/.exec(name || ''); return m && m[1] in TS_OPS ? TS_OPS[m[1]] : null }
@@ -323,8 +363,12 @@ function tsValue(n, consts, depth = 0) {
   if (n.type === 'identifier' || n.type === 'member_expression') {
     const key = n.text.replace(/\s+/g, '').replace(/^this\./, ''), c = consts.get(key)
     if (c) return { lit: c.value, const: key, at: c.line }
-    const name = n.type === 'identifier' ? n.text : field(n, 'property')?.text
-    return name && (CONST_NAME.test(name) || (n.type === 'identifier' && consts.known?.has(name))) ? { const: name } : { expr: n.text }
+    // a name of the file (a constant, an import) or one in SCREAMING_CASE: resolved elsewhere by the
+    // binding; a member only of a module imported whole (`import * as C`, `require`), never of another
+    // object (`process.env.X`, `cfg.X`: unknown, never a constant of the same name elsewhere)
+    if (n.type === 'identifier') return CONST_NAME.test(n.text) || consts.known?.has(n.text) ? { const: n.text } : { expr: n.text }
+    const obj = field(n, 'object'), prop = field(n, 'property')?.text
+    return obj?.type === 'identifier' && consts.modules?.has(obj.text) && prop ? { const: prop } : { expr: n.text }
   }
   return { expr: n.text }
 }
@@ -342,20 +386,24 @@ const tsPairs = (o, consts) => {
 function readTsAccess(tree, file, lang) {
   const root = tree.rootNode
   const base = readTs(tree, file)
-  const test = TEST_TS.test(file)
+  const test = TEST_TS.test(file) || TEST_PATH.test(file)
   const known = knownOf(root)
   for (const c of base.consts) known.add(c.name)
   // the file's string constants: `const X = 'x'`, an object's (`Obj.key`), an enum's (`E.Member`);
-  // another name of the file (an import) is a constant to resolve elsewhere, a parameter is not
-  const consts = new Map()
+  // another name of the file (an import) is a constant to resolve elsewhere, a parameter is not; the
+  // modules imported whole (`import * as C from …`, `const C = require(…)`), whose members may be
+  const consts = new Map(), modules = new Set()
   consts.known = known
+  consts.modules = modules
   for (const top of named(root)) {
+    if (top.type === 'import_statement') each(top, (x) => { if (x.type === 'namespace_import') { const id = named(x).find((y) => y.type === 'identifier'); if (id) modules.add(id.text) } return true })
     const c = decls(top)
     if (!c) continue
     if (c.type === 'lexical_declaration' || c.type === 'variable_declaration') {
       for (const v of named(c)) {
         if (v.type !== 'variable_declarator' || field(v, 'name')?.type !== 'identifier') continue
         const name = field(v, 'name').text, val = field(v, 'value')
+        if (val?.type === 'call_expression' && field(val, 'function')?.text === 'require') { modules.add(name); continue }
         const lit = tsLit(val)
         if (lit !== null) { consts.set(name, { value: lit, line: lineOf(v) }); continue }
         let o = val
@@ -370,9 +418,10 @@ function readTsAccess(tree, file, lang) {
       for (const m of body ? named(body) : []) if ((m.type === 'public_field_definition' || m.type === 'field_definition') && field(m, 'value')) { const k = tsKey(field(m, 'name') || field(m, 'property')), l = tsLit(field(m, 'value')); if (cname && k !== null && l !== null) { consts.set(`${cname}.${k}`, { value: l, line: lineOf(m) }); consts.set(k, consts.get(k) || { value: l, line: lineOf(m) }) } }
     }
   }
-  const fns = base.fns.map(({ name, line, end, test: t, names, env, uses }) => ({ name, line, end, ...(t ? { test: true } : {}), names, env, uses }))
+  const fns = base.fns.map(({ name, line, end, test: t, names, env, uses }) => ({ name, line, end, ...(t || test ? { test: true } : {}), names, env, uses }))
   const FN = /^(?:function_declaration|generator_function_declaration|method_definition|arrow_function|function_expression|function|generator_function)$/
-  // the function holding a node, named as readTs names it (a method by its class, an arrow by what holds it)
+  // the function holding a node, named as readTs names it (a method by its class, an arrow by what
+  // holds it: a variable, a class field, the export default, what it is assigned to, `exports.h`)
   const enclosing = (n) => {
     for (let p = n.parent; p; p = p.parent) {
       if (!FN.test(p.type)) continue
@@ -384,6 +433,7 @@ function readTsAccess(tree, file, lang) {
         if (h?.type === 'variable_declarator') name = field(h, 'name')?.text
         else if (h && (h.type === 'public_field_definition' || h.type === 'field_definition')) name = `${classOf(h)}.${tsKey(field(h, 'name') || field(h, 'property'))}`
         else if (h?.type === 'export_statement') name = '(default)'
+        else if (h?.type === 'assignment_expression') name = cap(field(h, 'left')?.text.replace(/\s+/g, '') || '', 80) || null
         else continue // a callback: it belongs to the function around it
       }
       return { node: p, name: name || '(function)' }
@@ -391,57 +441,93 @@ function readTsAccess(tree, file, lang) {
     return null
   }
   const classOf = (n) => { for (let p = n.parent; p; p = p.parent) if (p.type === 'class_declaration' || p.type === 'abstract_class_declaration' || p.type === 'class') return field(p, 'name')?.text || '(class)'; return '(class)' }
-  const fnIndex = (e) => {
-    if (!e) return -1
-    const line = lineOf(e.node)
-    let i = fns.findIndex((f) => f.line === line && f.name === e.name)
-    if (i < 0 && fns.length < MAX.fns) { fns.push({ name: e.name, line, end: endOf(e.node), ...(test ? { test: true } : {}), names: [], env: [], uses: [] }); i = fns.length - 1 }
-    return i
-  }
-  // the operation a variable holding the input is given to: `doc.query(params)`, `new QueryCommand(params)`
-  const passedTo = (name, scope) => {
-    let op = null
-    each(scope, (n) => {
-      if (op) return false
-      if (n.type === 'new_expression' || n.type === 'call_expression') {
-        const args = field(n, 'arguments')
-        if (args && named(args).some((a) => a.type === 'identifier' && a.text === name)) op = n.type === 'new_expression' ? opOfCommand(lastProp(field(n, 'constructor'))) : TS_METHODS[lastProp(field(n, 'function'))] || null
+  const indexOfFn = fnIndexer(fns)
+  const fnIndex = (e) => (e ? indexOfFn(e.name, lineOf(e.node), endOf(e.node), test) : -1)
+  // The operation a variable holding the input is given to (`doc.query(params)`, `new
+  // QueryCommand(params)`): the first call after its declaration, within the block that declares it,
+  // that takes it by name. One pass over the file, the first time it is asked: every call or `new`
+  // taking an identifier, by name, in source order; then a binary search per variable.
+  let given = null
+  const givenTo = () => {
+    if (given) return given
+    given = new Map()
+    each(root, (n) => {
+      if (n.type !== 'new_expression' && n.type !== 'call_expression') return true
+      const args = field(n, 'arguments')
+      for (const a of args ? named(args) : []) {
+        if (a.type !== 'identifier') continue
+        if (!given.has(a.text)) given.set(a.text, [])
+        given.get(a.text).push({ at: n.startIndex, op: n.type === 'new_expression' ? opOfCommand(lastProp(field(n, 'constructor'))) : TS_METHODS[lastProp(field(n, 'function'))] || null, admin: TS_ADMIN.test(lastProp(n.type === 'new_expression' ? field(n, 'constructor') : field(n, 'function')) || '') })
       }
       return true
     })
-    return op
+    return given
   }
-  const opOf = (o, keys) => {
+  const BLOCK = /^(?:statement_block|program|arrow_function|function_expression|function|function_declaration|method_definition|class_body|switch_case)$/
+  const passedTo = (decl, name) => {
+    let scope = decl.parent
+    while (scope && !BLOCK.test(scope.type)) scope = scope.parent
+    const list = givenTo().get(name) || []
+    let lo = 0, hi = list.length
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid].at < decl.endIndex) lo = mid + 1; else hi = mid }
+    const hit = list[lo]
+    return hit && (!scope || hit.at < scope.endIndex) ? hit : null
+  }
+  // the operation an input object is given to, and whether it goes to the table's administration
+  const opOf = (o) => {
     let p = o.parent
     while (p && (p.type === 'as_expression' || p.type === 'satisfies_expression' || p.type === 'parenthesized_expression')) {
-      if (p.type !== 'parenthesized_expression') { const t = opOfType(typeNameOf(named(p)[1])); if (t) return t }
+      if (p.type !== 'parenthesized_expression') { const t = opOfType(typeNameOf(named(p)[1])); if (t) return { op: t } }
       p = p.parent
     }
-    if (!p) return null
+    if (!p) return { op: null }
     if (p.type === 'arguments') {
-      const call = p.parent
-      if (call?.type === 'new_expression') return opOfCommand(lastProp(field(call, 'constructor')))
-      if (call?.type === 'call_expression') return TS_METHODS[lastProp(field(call, 'function'))] || null
+      const call = p.parent, callee = call?.type === 'new_expression' ? lastProp(field(call, 'constructor')) : call?.type === 'call_expression' ? lastProp(field(call, 'function')) : null
+      if (TS_ADMIN.test(callee || '')) return { admin: true }
+      if (call?.type === 'new_expression') return { op: opOfCommand(callee), sdk: /Command$/.test(callee || '') }
+      if (call?.type === 'call_expression') return { op: TS_METHODS[callee] || null, sdk: !!TS_METHODS[callee] }
     }
-    if (p.type === 'pair') return TS_LEGS[tsKey(field(p, 'key'))] || null
+    if (p.type === 'pair') return { op: TS_LEGS[tsKey(field(p, 'key'))] || null, sdk: !!TS_LEGS[tsKey(field(p, 'key'))] }
     if (p.type === 'variable_declarator') {
       const t = opOfType(typeNameOf(field(p, 'type')))
-      if (t) return t
+      if (t) return { op: t, sdk: true }
       const name = field(p, 'name')
-      const scope = enclosing(p)?.node || root
-      if (name?.type === 'identifier') return passedTo(name.text, scope)
+      const hit = name?.type === 'identifier' ? passedTo(p, name.text) : null
+      if (hit?.admin) return { admin: true }
+      if (hit) return { op: hit.op, sdk: !!hit.op }
     }
-    return null
+    return { op: null }
+  }
+  // inside a GSI's or an LSI's declaration, a CreateTable's or an UpdateTable's: no call
+  const declared = (o) => {
+    let n = o
+    for (let k = 0; k < 8 && n.parent; k++) {
+      const p = n.parent
+      if (p.type === 'pair' && TS_DECL_UNDER.has(tsKey(field(p, 'key')))) return true
+      if (!/^(?:object|array|pair|as_expression|satisfies_expression|parenthesized_expression)$/.test(p.type)) return false
+      n = p
+    }
+    return false
   }
   const sites = []
   each(root, (o) => {
+    if (sites.length >= MAX_SITES) return false
     if (o.type !== 'object') return true
     const pairs = new Map()
     for (const p of named(o)) if (p.type === 'pair') { const k = tsKey(field(p, 'key')); if (k !== null && !pairs.has(k)) pairs.set(k, field(p, 'value')) }
     if (![...pairs.keys()].some((k) => TS_SITE_KEYS.has(k))) return true
+    if ([...pairs.keys()].some((k) => TS_DECL_KEYS.has(k)) || declared(o)) return true
+    const how = opOf(o)
+    if (how.admin) return true
+    // an UpdateExpression alone (an ESTree visitor's key, say) is no call: it holds a text, beside the
+    // item's Key or given to an SDK command or method
+    if (!pairs.has('TableName') && !pairs.has('IndexName') && !pairs.has('KeyConditionExpression')) {
+      const u = pairs.get('UpdateExpression')
+      if (!u || FN_VALUE.test(u.type) || u.type === 'object' || !(pairs.has('Key') || how.sdk)) return true
+    }
     const e = enclosing(o), f = fnIndex(e)
     const cls = e && e.name.includes('.') ? e.name.slice(0, e.name.indexOf('.')) : null
-    const raw = { op: opOf(o, pairs), table: null, index: null, key: null, update: null, projection: null, names: { map: {}, open: false }, item: null }
+    const raw = { op: how.op, table: null, index: null, key: null, update: null, projection: null, names: { map: {}, open: false }, item: null }
     if (pairs.has('TableName')) { raw.table = emptySink(); tsScan(pairs.get('TableName'), { vars: new Map(), known, cls, ret: null }, raw.table) }
     if (pairs.has('IndexName')) raw.index = tsValue(pairs.get('IndexName'), consts)
     if (pairs.has('KeyConditionExpression')) raw.key = tsValue(pairs.get('KeyConditionExpression'), consts)
@@ -518,11 +604,19 @@ function pyValue(n, consts) {
   if (!n) return null
   const s = pyLit(n)
   if (s !== null) return { lit: s }
-  if (n.type === 'identifier' || n.type === 'attribute') {
-    const name = n.type === 'identifier' ? n.text : field(n, 'attribute')?.text
-    const c = consts.get(name)
-    if (c) return { lit: c.value, const: name, at: c.line }
-    return name && (CONST_NAME.test(name) || (n.type === 'identifier' && consts.known?.has(name))) ? { const: name } : { expr: n.text }
+  if (n.type === 'identifier') {
+    const c = consts.get(n.text)
+    if (c) return { lit: c.value, const: n.text, at: c.line }
+    return CONST_NAME.test(n.text) || consts.known?.has(n.text) ? { const: n.text } : { expr: n.text }
+  }
+  if (n.type === 'attribute') {
+    // a class's own constant (`self.X`, `cls.X`, `Repo.X`), a module's imported whole (`consts.X`);
+    // never another object's (`settings.X`, `os.environ`: unknown, never a constant of that name elsewhere)
+    const obj = field(n, 'object'), name = field(n, 'attribute')?.text
+    const owner = obj?.type === 'identifier' ? obj.text : null
+    if (owner && name && (owner === 'self' || owner === 'cls' || consts.classes?.has(owner))) { const c = consts.get(name); if (c) return { lit: c.value, const: name, at: c.line } }
+    if (owner && name && consts.modules?.has(owner)) return { const: name }
+    return { expr: n.text }
   }
   return { expr: n.text }
 }
@@ -537,9 +631,17 @@ const pyKeyAttrs = (n) => { const out = []; each(n, (x) => { if (x.type === 'cal
 const isTableCall = (n) => n?.type === 'call' && /(?:^|\.)Table$/.test((field(n, 'function')?.text || '').replace(/\s+/g, ''))
 function readPython(tree, file) {
   const root = tree.rootNode
-  const fileTest = TEST_PY.test(file)
+  const fileTest = TEST_PY.test(file) || TEST_PATH.test(file)
   const known = new Set(), consts = new Map(), constList = []
   consts.known = known
+  // the classes of the file, and the modules it imports whole (`import consts`, `from app import consts`)
+  consts.classes = new Set()
+  consts.modules = new Set()
+  for (const st of named(root)) {
+    if (st.type === 'import_statement') for (const x of named(st)) { const id = x.type === 'aliased_import' ? field(x, 'alias') : x.type === 'dotted_name' ? named(x)[0] : null; if (id) consts.modules.add(id.text) }
+    if (st.type === 'import_from_statement') for (const x of named(st).slice(1)) { const id = x.type === 'aliased_import' ? field(x, 'alias') : x.type === 'dotted_name' && named(x).length === 1 && !CONST_NAME.test(x.text) ? named(x)[0] : null; if (id) consts.modules.add(id.text) }
+  }
+  each(root, (n) => { if (n.type === 'class_definition' && field(n, 'name')) consts.classes.add(field(n, 'name').text); return n.type !== 'function_definition' })
   // module-level and class-level assignments: constants by name, and what a Table is bound to
   const tables = new Map() // an assignment's target, as written (`table`, `self.table`) → the Table(…) argument
   const assigns = (scope, cls) => {
@@ -570,6 +672,7 @@ function readPython(tree, file) {
     if (body) scan(body, i < MAX.fns ? i : -1, test)
   }
   const scan = (scope, f, test) => each(scope, (n) => {
+    if (sites.length >= MAX_SITES) return false
     if (n.type === 'function_definition' && f >= 0) return true // a nested function belongs to its function
     if (n.type !== 'call') return true
     const fn = field(n, 'function')
@@ -664,7 +767,7 @@ const goFields = (body) => {
 }
 function readGo(tree, file) {
   const root = tree.rootNode
-  const fileTest = /_test\.go$/i.test(file)
+  const fileTest = /_test\.go$/i.test(file) || TEST_PATH.test(file)
   const known = new Set(), consts = new Map(), constList = []
   consts.known = known
   for (const d of named(root)) {
@@ -698,6 +801,7 @@ function readGo(tree, file) {
     push(fns, { name, line: lineOf(d), end: endOf(d), ...(test ? { test: true } : {}), ...sink }, MAX.fns)
     if (!body) continue
     each(body, (n) => {
+      if (sites.length >= MAX_SITES) return false
       if (n.type !== 'composite_literal') return true
       const t = field(n, 'type')
       const tname = t ? (t.type === 'qualified_type' ? field(t, 'name')?.text : t.type === 'type_identifier' ? t.text : null) : null
@@ -705,7 +809,8 @@ function readGo(tree, file) {
       const fields = goFields(field(n, 'body'))
       if (![...fields.keys()].some((k) => GO_KEYS.has(k))) return true
       const op = GO_TYPES[tname] || (GO_LEGS[tname] && (pkg === 'types' || pkg === 'dynamodb') ? GO_LEGS[tname] : null)
-      if (!op && !tname?.endsWith('Input')) return true
+      // only an input reaching items: a CreateTableInput, an UpdateTableInput, a GSI's declaration are none
+      if (!op) return true
       const raw = { op, table: null, index: null, key: null, update: null, projection: null, names: { map: {}, open: false }, item: null }
       if (fields.has('TableName')) { raw.table = emptySink(); goScan(goUnwrap(fields.get('TableName')) || fields.get('TableName'), { known }, raw.table) }
       if (fields.has('IndexName')) raw.index = goValue(fields.get('IndexName'), consts)
@@ -739,14 +844,14 @@ function reindex(fns, sites) {
 // One file's access patterns, from its tree.
 export function readAccess(tree, lang, file) {
   const fam = familyOf(lang)
-  const a = fam === 'rust' ? readRustAccess(tree) : fam === 'ts' ? readTsAccess(tree, file, lang) : fam === 'python' ? readPython(tree, file) : readGo(tree, file)
+  const a = fam === 'rust' ? readRustAccess(tree, file) : fam === 'ts' ? readTsAccess(tree, file, lang) : fam === 'python' ? readPython(tree, file) : readGo(tree, file)
   if (a.sites.length >= MAX_SITES) a.notes = [...(a.notes || []), `more than ${MAX_SITES} key-value calls: the first ${MAX_SITES} read`]
   return a
 }
 
 export default {
   id: 'dynamo-access',
-  version: 1,
+  version: 2,
   kind: 'inferred',
   scope: 'file',
   wants: (p) => SRC.test(p) && !DTS.test(p),
@@ -759,7 +864,9 @@ export default {
     const tree = ctx.tree(lang, text)
     try {
       const a = readAccess(tree, lang, file)
-      return a.sites.length ? { declarations: [], access: { path: file, ...a } } : { declarations: [] }
+      // a file with no call keeps its constants, for the calls of other files to name (not its functions)
+      if (a.sites.length) return { declarations: [], access: { path: file, ...a } }
+      return a.consts.length ? { declarations: [], access: { path: file, lang: a.lang, sites: [], fns: [], consts: a.consts, notes: [] } } : { declarations: [] }
     } finally { tree.delete?.() }
   },
 }

@@ -13,15 +13,20 @@
 //   index     no code around it names a table, or what does declares no index of the name it queries:
 //             the tables declaring an index of that name (exact, never fuzzy)
 // Production code over test code at each step; several tables at once: ambiguous, each the others' rival.
-// A call naming an index keeps, among the tables found, those declaring an index of that name.
+// A call naming an index keeps, among the tables found, those declaring an index of that name; when
+// the tables its function or its file name declare none (only the call's own argument is trusted
+// over the index), the tables declaring it stand in. A call that could reach more than FANOUT tables
+// says too little to attach to any: it is counted on each (`spread`), never listed, and an index it
+// names is not called unqueried on them (that would be a false lead).
 //
 // What it adds:
-//   model.access { files, sites: [Site], placed, leads } (absent when no file holds a call)
+//   model.access { files, sites: [Site], placed, spread, leads } (absent when no file holds a call)
 //   Site  { repo, path, line, extractor, fn, fnLine, op, index, indexAt?, test, tables: [group id],
 //           labels, pairing, ambiguous, testOnly, evidence, writes, open, item, key, projection,
-//           mismatch?: its table declares no index of that name }
-//   per kv entity (every member of a logical table): access { sites: [site index], indexes: [{ name,
-//           sites: [site index], lead: text | null }], conflicts: [Conflict], note? }
+//           mismatch?: its table declares no index of that name, spread?: how many tables it could reach }
+//   per kv entity (every member of a logical table): access { sites: [site index], spread: count,
+//           indexes: [{ name, sites: [site index], lead: text | null, spread: count }],
+//           conflicts: [Conflict] (the first CAP), moreConflicts, note? }
 //   Conflict  an attribute a call writes (an update's SET, REMOVE, ADD or DELETE path; a literal put
 //             item's attribute) that neither the bound item shape nor the declarations state:
 //             { label, attr: 'presence', path, values: [{ value: 'written (…)', sources: [inferred] },
@@ -32,15 +37,24 @@ import { kvIndex } from './model.mjs'
 // what "no access found" says it searched, and what it may have missed: a lead, never a verdict
 export const NO_ACCESS = 'no access found (lead): no IndexName or index_name naming it in the indexed repositories; it may be reached through a constant built elsewhere, another repository, or a script'
 export const READS = new Set(['query', 'scan', 'get', 'batch-get', 'transact-get', 'check'])
+export const WRITES = new Set(['put', 'update', 'delete', 'batch-write', 'transact-write'])
 export const PAIRING_TEXT = { call: 'the table named at the call', function: 'the table named in its function', file: 'the table named in its file', index: 'no code around it names the table: the tables declaring an index of that name' }
 const MAX_EVIDENCE = 3, MAX_SOURCES = 6
+// Bounds on what one table says (graph_data and the page): the functions listed per index and per
+// table, the inferred conflicts, the rivals an ambiguous call names; past them, a count. A call that
+// could reach more than FANOUT tables is counted, not attached.
+export const CAP = 25, LABELS = 3, FANOUT = 5
 // An operation in words (graph_data and the page say the same); a call naming an index and nothing
-// else reads it, by a query or a scan.
+// else reads it, by a query or a scan; one with neither is of unknown kind, never counted a write.
 const OP_TEXT = { 'batch-get': 'batch get', 'batch-write': 'batch write', 'transact-write': 'transaction write', 'transact-get': 'transaction get', check: 'condition check' }
-export const opText = (s) => (s.op ? OP_TEXT[s.op] || s.op : s.index ? 'query or scan' : 'call')
+export const opText = (s) => (s.op ? OP_TEXT[s.op] || s.op : s.index ? 'query or scan' : 'unknown operation')
 export const isRead = (s) => READS.has(s.op) || (!s.op && !!s.index)
+export const isWrite = (s) => WRITES.has(s.op)
+export const isUnknown = (s) => !isRead(s) && !isWrite(s)
+// A list of names: the first `n`, and a count of the rest.
+export const capList = (list, n = LABELS, sep = ' | ') => (list.length > n ? `${list.slice(0, n).join(sep)} and ${list.length - n} more` : list.join(sep))
 // How a call reached its table, in words: its pairing, test code, the rivals of an ambiguous one.
-export const siteHow = (s) => [PAIRING_TEXT[s.pairing] || 'no table found', s.testOnly ? 'named only in test code' : null, s.ambiguous ? `ambiguous: ${s.labels.join(' | ')}` : null, s.mismatch ? `its table declares no index ${s.index}` : null].filter(Boolean).join('; ')
+export const siteHow = (s) => [PAIRING_TEXT[s.pairing] || 'no table found', s.testOnly ? 'named only in test code' : null, s.ambiguous ? `ambiguous: ${capList(s.labels)}` : null, s.mismatch ? `its table declares no index ${s.index}` : null].filter(Boolean).join('; ')
 
 // The functions holding a list of calls, one entry per function: `sym(site)` → the code graph's
 // symbol around it, { key, name, line } (lib/query.mjs symbolAt), else the extractor's name for it.
@@ -70,8 +84,11 @@ export function resolveAccess(rows, { groups, entities, R, fieldsOf, boundOf, it
   const sites = []
   const byGroup = new Map() // group id → [site index]
   const named = new Map() // index name → [site index] (every call naming it, wherever it resolved)
+  const spread = new Map(), spreadIdx = new Map() // group id, `<group id>|<index>` → calls counted, not attached
+  const count = (m, k) => m.set(k, (m.get(k) || 0) + 1)
   for (const r of rows) {
     const a = r.access
+    if (!a.sites?.length) continue // a file of constants only: the resolver reads them
     const at = { repo: r.repo, path: a.path, lang: a.lang }
     const refsAt = (sink, test) => R.collapse([...R.refsOf(sink, at, test), ...(sink.uses || []).flatMap((u) => R.constRefs(u, at, test))])
     const fnRefs = new Map()
@@ -97,13 +114,19 @@ export function resolveAccess(rows, { groups, entities, R, fieldsOf, boundOf, it
         const D = declaring.get(index) || new Set()
         const narrowed = cands.filter((x) => D.has(x.group))
         if (narrowed.length) cands = narrowed
-        else if (D.size && (!cands.length || pairing === 'file')) { cands = [...D].map((g) => ({ group: g, via: 'index', test, evidence: [] })); pairing = 'index' }
+        // only the call's own table argument outweighs the index it names: a name its function or its
+        // file builds may be another table's
+        else if (D.size && pairing !== 'call') { cands = [...D].map((g) => ({ group: g, via: 'index', test, evidence: [] })); pairing = 'index' }
         else if (cands.length) mismatch = true
       }
+      // a call that could reach more than FANOUT tables is counted on each, never attached
+      const fan = cands.length > FANOUT ? cands : null
+      if (fan) for (const x of fan) { count(spread, x.group.id); if (index !== null) count(spreadIdx, `${x.group.id}|${index}`) }
       const k = sites.length
       const rec = {
         repo: r.repo, path: a.path, line: s.line, extractor: r.extractor, fn: fn?.name ?? null, fnLine: fn?.line ?? null, op: s.op, index, ...(indexAt ? { indexAt } : {}), test,
-        tables: cands.map((x) => x.group.id), labels: cands.map((x) => x.group.label), pairing: cands.length ? pairing : null, ambiguous: cands.length > 1, testOnly: cands.length > 0 && cands.every((x) => x.test),
+        tables: fan ? [] : cands.map((x) => x.group.id), labels: fan ? [] : cands.map((x) => x.group.label), ...(fan ? { spread: fan.length } : {}),
+        pairing: cands.length ? pairing : null, ambiguous: !fan && cands.length > 1, testOnly: cands.length > 0 && cands.every((x) => x.test),
         evidence: (cands[0]?.evidence || []).slice(0, MAX_EVIDENCE), writes: s.writes || [], open: s.open || 0, item: s.item || null, key: s.key || null, projection: s.projection || null,
         ...(s.indexExpr ? { indexExpr: s.indexExpr } : {}), ...(s.indexConst && index === null ? { indexConst: s.indexConst } : {}), ...(s.updateFrom ? { updateFrom: s.updateFrom } : {}), ...(mismatch ? { mismatch: true } : {}),
       }
@@ -148,25 +171,27 @@ export function resolveAccess(rows, { groups, entities, R, fieldsOf, boundOf, it
         const hits = mine.filter((k) => sites[k].index === i.name && !sites[k].mismatch)
         let lead = null
         const prodHits = hits.filter((k) => !sites[k].test)
-        if (!hits.length) {
-          const elsewhere = (named.get(i.name) || []).filter((k) => !sites[k].tables.includes(g.id))
-          lead = elsewhere.length ? `no access found on this table (lead): ${elsewhere.length} call${elsewhere.length === 1 ? '' : 's'} name${elsewhere.length === 1 ? 's' : ''} an index ${i.name} of another table (${[...new Set(elsewhere.flatMap((k) => sites[k].labels))].join(', ') || 'none found'}); it may be reached through a constant built elsewhere, another repository, or a script` : NO_ACCESS
+        const fanned = spreadIdx.get(`${g.id}|${i.name}`) || 0
+        if (!hits.length && fanned) lead = null // calls name it but could reach too many tables to say: counted, never a lead
+        else if (!hits.length) {
+          const elsewhere = (named.get(i.name) || []).filter((k) => sites[k].tables.length && !sites[k].tables.includes(g.id))
+          lead = elsewhere.length ? `no access found on this table (lead): ${elsewhere.length} call${elsewhere.length === 1 ? '' : 's'} name${elsewhere.length === 1 ? 's' : ''} an index ${i.name} of another table (${capList([...new Set(elsewhere.flatMap((k) => sites[k].labels))], LABELS, ', ')}); it may be reached through a constant built elsewhere, another repository, or a script` : NO_ACCESS
         } else if (!prodHits.length) lead = 'no access found outside test code (lead): only tests name it; it may be reached through a constant built elsewhere, another repository, or a script'
         if (lead) leads.add(`${g.id}|${i.name}`)
-        return { name: i.name, sites: hits, lead }
+        return { name: i.name, sites: hits, lead, spread: fanned }
       })
       const types = [...new Set(bound.map((b) => b.type))].join(', ')
-      const cf = [...conflicts].map(([path, c]) => ({
+      const cf = [...conflicts].slice(0, CAP).map(([path, c]) => ({
         label: `${e.name}.${path}`, attr: 'presence', path, inferred: true,
         values: [
           { value: `written (${[...c.clauses].join(', ')})`, sources: c.sites.slice(0, MAX_SOURCES).map((k) => ({ repo: sites[k].repo, path: sites[k].path, line: sites[k].line, kind: 'inferred', extractor: sites[k].extractor, confidence: sites[k].pairing })) },
           { value: `absent from the item${types ? ` (${types})` : ''}`, sources: bound.slice(0, MAX_SOURCES).map((b) => ({ repo: b.repo, path: b.path, line: b.line, kind: 'code', extractor: itemExtractor.get(b.item) ?? null, confidence: b.confidence })) },
         ],
       }))
-      out.set(e.id, { sites: mine, indexes, conflicts: cf, ...(mine.some((k) => sites[k].writes.length || sites[k].item) && !itemBound ? { note: 'written attributes not compared: no item type is bound to this table' } : {}) })
+      out.set(e.id, { sites: mine, spread: spread.get(g.id) || 0, indexes, conflicts: cf, moreConflicts: Math.max(0, conflicts.size - CAP), ...(mine.some((k) => sites[k].writes.length || sites[k].item) && !itemBound ? { note: 'written attributes not compared: no item type is bound to this table' } : {}) })
     }
   }
-  return { model: { files: rows.length, sites, placed: sites.filter((s) => s.tables.length).length, leads: leads.size }, entities: out }
+  return { model: { files: rows.filter((r) => r.access.sites?.length).length, sites, placed: sites.filter((s) => s.tables.length).length, spread: sites.filter((s) => s.spread).length, leads: leads.size }, entities: out }
 }
 
 // Is a written path one the shape states? Not when its top-level attribute is absent, or when it goes

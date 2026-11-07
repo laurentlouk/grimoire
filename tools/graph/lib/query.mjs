@@ -5,7 +5,7 @@
 import { langOf } from './langs.mjs'
 import { reconcile, elementsOf, storeSummary } from './data/reconcile.mjs'
 import { bindingHow } from './data/binding.mjs'
-import { byFunction, opText, siteHow, isRead } from './data/access.mjs'
+import { byFunction, siteHow, isRead, isWrite, isUnknown, capList, CAP, LABELS, FANOUT } from './data/access.mjs'
 import { kvIndex, projectionText } from './data/model.mjs'
 import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
@@ -209,7 +209,7 @@ export class Graph {
         const facts = data.map((x) => (x.facts ? JSON.parse(x.facts) : null))
         const decls = facts.flatMap((f) => (f ? f.declarations : []))
         const code = facts.filter((f) => f && f.code).length // source files read for item shapes (data/binding.mjs)
-        const calls = facts.filter((f) => f && f.access).length // and for access patterns (data/access.mjs)
+        const calls = facts.filter((f) => f && f.access?.sites?.length).length // and for access patterns (data/access.mjs)
         const stopped = decls.filter((d) => d.partial).length, failed = data.filter((x) => x.error)
         lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${code ? `, ${code} source file(s) read for item shapes` : ''}${calls ? `, ${calls} for access patterns` : ''}${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
       }
@@ -400,35 +400,40 @@ export class Graph {
     if (model.accessError) return [`Access patterns: ${model.accessError}`]
     const a = model.access
     if (!a) return []
-    const lost = a.sites.length - a.placed
-    return [`Access patterns (inferred from key-value SDK calls; leads, never verdicts): ${plural(a.sites.length, 'call')} in ${plural(a.files, 'file')}, ${a.placed} reaching a table${lost ? `, ${lost} no table found for` : ''}; ${plural(a.leads, 'index', 'indexes')} with no access found (graph_data with a table lists them)`]
+    const lost = a.sites.length - a.placed - (a.spread || 0)
+    return [`Access patterns (inferred from key-value SDK calls; leads, never verdicts): ${plural(a.sites.length, 'call')} in ${plural(a.files, 'file')}, ${a.placed} reaching a table${a.spread ? `, ${a.spread} that could reach more than ${FANOUT} (counted on each, not listed)` : ''}${lost ? `, ${lost} no table found for` : ''}; ${plural(a.leads, 'index', 'indexes')} with no access found (graph_data with a table lists them)`]
   }
   // a key-value table's access: each index with the functions that query it, or a lead; the functions
-  // reading and writing it, through the code graph's symbols
+  // reading and writing it, through the code graph's symbols. Each list keeps its first CAP functions.
   dataEntityAccess(model, e) {
     const a = e.access, sites = model.access?.sites || []
     if (!a) return []
     const sym = symbolAt(this.db)
     const fnLine = (f) => {
-      const via = [...new Set(f.sites.map(siteHow))].join(' · ')
-      const at = f.sites.map((s) => s.line).join(', ')
-      return `${f.name}  ${f.ops.join(' · ')}${f.writes.length ? ` (writes ${f.writes.join(', ')})` : ''}  ${this.dloc({ repo: f.repo, path: f.path, line: f.line })}  (${f.sites.length === 1 ? 'the call at line' : 'the calls at lines'} ${at}; ${via})${f.callers !== null ? ` · ${plural(f.callers, 'caller')}` : ''}${f.test ? '  (test code)' : ''}`
+      const via = capList([...new Set(f.sites.map(siteHow))], LABELS, ' · ')
+      const lines = f.sites.map((s) => s.line)
+      return `${f.name}  ${f.ops.join(' · ')}${f.writes.length ? ` (writes ${capList(f.writes, 8, ', ')})` : ''}  ${this.dloc({ repo: f.repo, path: f.path, line: f.line })}  (${lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${capList(lines, 5, ', ')}; ${via})${f.callers !== null ? ` · ${plural(f.callers, 'caller')}` : ''}${f.test ? '  (test code)' : ''}`
     }
+    const more = (n, indent) => (n > CAP ? [`${indent}… and ${plural(n - CAP, 'more function')} (the first ${CAP} listed)`] : [])
     const out = ['Access (inferred from the key-value SDK calls of the indexed repositories; leads, never verdicts):']
+    const fanned = (n) => `${plural(n, 'call')} name${n === 1 ? 's' : ''} an index of this name but could reach more than ${FANOUT} tables: counted, not attributed (not a lead)`
     for (const i of a.indexes) {
       const fns = byFunction(i.sites.map((k) => sites[k]), sym)
-      if (i.lead && !fns.length) { out.push(`  index ${i.name}  ${i.lead}`); continue }
-      out.push(`  index ${i.name}  ${i.lead ? `${i.lead}; ` : ''}queried by ${plural(fns.length, 'function')}:`)
-      for (const f of fns) {
+      if (!fns.length) { out.push(`  index ${i.name}  ${i.lead || fanned(i.spread)}`); continue }
+      out.push(`  index ${i.name}  ${i.lead ? `${i.lead}; ` : ''}queried by ${plural(fns.length, 'function')}${i.spread ? `; and ${fanned(i.spread)}` : ''}:`)
+      for (const f of fns.slice(0, CAP)) {
         const via = f.sites.find((s) => s.indexAt)?.indexAt
         out.push(`    ${fnLine(f)}${via ? `; its name from ${via.text} at ${this.dloc(via)}` : ''}`)
       }
+      out.push(...more(fns.length, '    '))
     }
     if (!a.indexes.length) out.push('  no secondary index declared')
     const all = byFunction(a.sites.map((k) => sites[k]), sym)
-    const reads = all.filter((f) => f.sites.some(isRead)), writes = all.filter((f) => f.sites.some((s) => !isRead(s)))
-    out.push(all.length ? `Reads and writes (${plural(all.length, 'function')}: ${reads.length} reading, ${writes.length} writing), each with what its calls do:` : 'Reads and writes: no key-value call found reaching this table')
-    for (const f of all) out.push(`  ${fnLine(f)}`)
+    const reads = all.filter((f) => f.sites.some(isRead)).length, writes = all.filter((f) => f.sites.some(isWrite)).length, unknown = all.filter((f) => f.sites.some(isUnknown)).length
+    out.push(all.length ? `Reads and writes (${plural(all.length, 'function')}: ${reads} reading, ${writes} writing${unknown ? `, ${unknown} of unknown kind` : ''}), each with what its calls do:` : 'Reads and writes: no key-value call found reaching this table')
+    for (const f of all.slice(0, CAP)) out.push(`  ${fnLine(f)}`)
+    out.push(...more(all.length, '  '))
+    if (a.spread) out.push(`  + ${plural(a.spread, 'call')} that could reach this table among more than ${FANOUT}: counted, not listed`)
     if (a.note) out.push(`  note: ${a.note}`)
     return out
   }
@@ -506,7 +511,8 @@ export class Graph {
     // the declarations' conflicts, then what a call writes that the bound item does not state (inferred)
     const conflicts = [...elementsOf(e).map(([label, x]) => [label, x.conflicts]), ...(e.access?.conflicts || []).map((c) => [c.label, [c]])]
       .flatMap(([label, list]) => list.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${shown(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc({ repo: s.repo ?? st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
-    out.push(conflicts.length ? `Conflicts (${conflicts.length}): the declarations disagree${e.access?.conflicts.length ? ', or a call writes an attribute the bound item does not state (inferred, never overriding it)' : ''}; each side is kept` : 'Conflicts: none', ...conflicts)
+    const moreCf = e.access?.moreConflicts || 0
+    out.push(conflicts.length ? `Conflicts (${conflicts.length + moreCf}): the declarations disagree${e.access?.conflicts.length ? ', or a call writes an attribute the bound item does not state (inferred, never overriding it)' : ''}; each side is kept` : 'Conflicts: none', ...conflicts, ...(moreCf ? [`  … and ${moreCf} more written attribute${moreCf === 1 ? '' : 's'} the item does not state (the first ${CAP} listed)`] : []))
     if (kv && e.logical) {
       const g = e.logical
       out.push(`One logical table: ${g.members.join(' + ')} (${g.via}); their differences are conflicts`)

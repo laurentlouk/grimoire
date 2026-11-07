@@ -2330,6 +2330,28 @@ console.log('\n26 · access patterns: key-value SDK calls read per language (ext
   const { siteHow } = await import('../lib/data/access.mjs')
   eq([M3.access.sites[1].labels, M3.access.sites[1].mismatch, siteHow(M3.access.sites[1]), M3.stores[0].entities.find((e) => e.name === 'local-shop-orders').access.indexes.find((i) => i.name === 'ByStatus').sites], [['local-shop-carts'], true, 'the table named at the call; its table declares no index ByStatus', []],
     'a call whose own table declares no index of the name it queries: kept on its table, said, and credited to no other table\'s index')
+  // only the call's own table argument outweighs the index it names: a function naming another table
+  // (a delete beside it) gives way to the tables declaring the index
+  const M4 = reconcile([...rows.slice(0, 3), { repo: 'api', extractor: 'dynamo-access@2', facts: { declarations: [], access: { lang: 'rust', path: 'src/cleanup.rs', notes: [], consts: [], fns: [{ name: 'cleanup', line: 1, end: 5, ...sink(['{}-shop-carts']) }], sites: [s0(2, { op: 'delete', table: sink(['{}-shop-carts']) }), s0(4, { index: 'ByStatus' })] } } }])
+  const m4ord = M4.stores[0].entities.find((e) => e.name === 'local-shop-orders').access.indexes.find((i) => i.name === 'ByStatus')
+  eq([M4.access.sites[1].pairing, M4.access.sites[1].labels, m4ord.lead, m4ord.sites.length], ['index', ['local-shop-orders'], null, 1],
+    'a call whose table only its function names, querying an index that table lacks: attributed by the index (no false "no access found on this table" on the table declaring it)')
+  // a call of unknown kind is never counted a write
+  const { isRead, isWrite, isUnknown, opText, capList, FANOUT } = await import('../lib/data/access.mjs')
+  eq([{ op: null, index: null }, { op: null, index: 'I' }, { op: 'update', index: null }, { op: 'query' }].map((s) => [opText(s), isRead(s), isWrite(s), isUnknown(s)]), [['unknown operation', false, false, true], ['query or scan', true, false, false], ['update', false, true, false], ['query', true, false, false]],
+    'an operation is a read, a write, or of unknown kind (never a write by default)')
+  eq([capList(['a', 'b', 'c', 'd', 'e']), capList(['a', 'b']), siteHow({ pairing: 'index', ambiguous: true, labels: ['t1', 't2', 't3', 't4', 't5'] })], ['a | b | c and 2 more', 'a | b', 'no code around it names the table: the tables declaring an index of that name; ambiguous: t1 | t2 | t3 and 2 more'], 'an ambiguous call\'s rivals: the first three and a count')
+  // a call that could reach more than FANOUT tables: counted on each, never attached, never turning an index into a lead
+  const many = Array.from({ length: FANOUT + 2 }, (_, i) => ({ repo: 'infra', extractor: 'dynamodb-table@1', facts: dynamodbTable.extract(JSON.stringify({ TableName: `local-t${i}-store`, KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }, { AttributeName: 'g', AttributeType: 'S' }], GlobalSecondaryIndexes: [{ IndexName: 'GSI1', KeySchema: [{ AttributeName: 'g', KeyType: 'HASH' }], Projection: { ProjectionType: 'ALL' } }, { IndexName: 'GSI2', KeySchema: [{ AttributeName: 'g', KeyType: 'HASH' }], Projection: { ProjectionType: 'ALL' } }] }), `tables/t${i}.json`) }))
+  const fanRows = [...many, { repo: 'web', extractor: 'dynamo-access@2', facts: { declarations: [], access: { lang: 'ts', path: 'src/repos.ts', notes: [], consts: [], fns: Array.from({ length: 40 }, (_, i) => ({ name: `Repo${i}.q`, line: i + 1, end: i + 1, ...sink() })), sites: Array.from({ length: 40 }, (_, i) => s0(i + 1, { fn: i, index: 'GSI1' })) } } }]
+  const MF = reconcile(fanRows)
+  const t0f = MF.stores.find((s) => s.repo === 'infra').entities[0]
+  eq([MF.access.placed, MF.access.spread, MF.access.leads, t0f.access.sites.length, t0f.access.spread, t0f.access.indexes.map((i) => [i.name, i.sites.length, i.spread, i.lead === NO_ACCESS])], [0, 40, FANOUT + 2, 0, 40, [['GSI1', 0, 40, false], ['GSI2', 0, 0, true]]],
+    `calls naming an index ${FANOUT + 2} tables declare, and no table: counted on each (not listed, not a lead for the index they name); the index no call names stays a lead`)
+  // a file holding only constants keeps them, and a call of another file resolves its index through them
+  const MC = reconcile([...rows.slice(0, 3), { repo: 'api', extractor: 'dynamo-access@2', facts: { declarations: [], access: { lang: 'ts', path: 'web/indexes.ts', notes: [], sites: [], fns: [], consts: [{ name: 'INDEX_BY_OWNER', line: 1, names: [{ text: 'ByOwner', line: 1 }], env: [] }] } } },
+    { repo: 'api', extractor: 'dynamo-access@2', facts: { declarations: [], access: { lang: 'ts', path: 'web/owners.ts', notes: [], consts: [], fns: [{ name: 'byOwner', line: 1, end: 3, ...sink() }], sites: [s0(2, { table: sink(['{}-shop-carts']), indexConst: 'INDEX_BY_OWNER' })] } } }])
+  eq([MC.access.files, MC.access.sites.map((s) => [s.index, s.indexAt?.path, s.labels])], [1, [['ByOwner', 'web/indexes.ts', ['local-shop-carts']]]], 'a constants-only file (no call of its own) gives its constants to the calls of another file; it counts as no file of calls')
   // a failure while resolving leaves the binding answered
   const broken = reconcile([...rows.slice(0, 3), { repo: 'api', extractor: 'dynamo-access@1', facts: { declarations: [], access: { lang: 'rust', path: 'src/x.rs', notes: [], consts: [], fns: null, sites: [s0(1, { fn: 0 })] } } }])
   ok(/^the access patterns were not resolved: /.test(broken.accessError) && broken.bindings.length === 1 && !broken.access, `a failure while resolving: said, and the binding stands (${broken.accessError})`)
@@ -2459,6 +2481,63 @@ console.log('\n26 · access patterns: key-value SDK calls read per language (ext
     eq([go.consts.map((c) => [c.name, c.names.map((n) => n.text), c.env.map((e) => e.name)])], [[['byOwner', ['ByOwner'], []], ['table', ['{}-shop-orders'], ['STAGE']]]], 'Go constants and variables naming a table: Sprintf\'s verbs as parts filled in, the environment it reads')
     const { inspect } = await import('../lib/data/registry.mjs')
     eq([inspect('src/a.rs', 'const X: &str = "x";\nfn f() { c.query().index_name("I"); }'), inspect('src/b.rs', 'fn f() { c.query().index_name("I"); }'), inspect('src/c.rs', '#[derive(Serialize)] struct A {}'), inspect('jobs/a.py', 'x = 1'), inspect('jobs/b.py', 't.query(IndexName="I")')], [3, 2, 1, 0, 2], 'a source file\'s level: 1 for the binding, 2 for the access patterns, both at once')
+
+    // what declares a table or an index is no call: a CreateTable or UpdateTable input, a GSI's declaration, in each language
+    const none = (file, lines) => { const f = access.extract(lines.join('\n'), file, ctx); return f.access ? f.access.sites.map((x) => `${x.line} ${x.op} ${x.index ?? ''}`) : [] }
+    eq(none('src/setup.ts', [
+      "import { CreateTableCommand, UpdateTableCommand } from '@aws-sdk/client-dynamodb'",
+      'export async function setup(client: Client) {',
+      "  await client.send(new CreateTableCommand({ TableName: 'local-shop-orders', KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],",
+      "    GlobalSecondaryIndexes: [{ IndexName: 'ByStatus', KeySchema: [{ AttributeName: 's', KeyType: 'HASH' }], Projection: { ProjectionType: 'ALL' } }] }))",
+      "  await client.send(new UpdateTableCommand({ TableName: 'local-shop-orders', GlobalSecondaryIndexUpdates: [{ Create: { IndexName: 'ByDay', KeySchema: [], Projection: { ProjectionType: 'KEYS_ONLY' } } }, { Delete: { IndexName: 'ByOld' } }] }))",
+      "  const gsi = { IndexName: 'ByOwner', KeySchema: [], Projection: { ProjectionType: 'ALL' } }",
+      '}',
+    ]), [], 'TypeScript: a CreateTable input, an UpdateTable\'s index updates (a Delete leg too), a GSI\'s declaration held in a variable: no call')
+    eq(none('scripts/tables.js', ["const params = { TableName: 'local-shop-orders', AttributeDefinitions: [], KeySchema: [], GlobalSecondaryIndexes: [{ IndexName: 'ByStatus', KeySchema: [], Projection: { ProjectionType: 'ALL' } }] }", 'dynamodb.createTable(params).promise()', "dynamodb.describeTable({ TableName: 'local-shop-orders' }).promise()"]), [], 'JavaScript: the low-level client\'s createTable and describeTable inputs: no call')
+    eq(none('src/setup.rs', [
+      'pub async fn ensure(client: &Client, stage: &str) -> Result<(), Error> {',
+      '    client.create_table().table_name(format!("{}-shop-orders", stage)).global_secondary_indexes(',
+      '        GlobalSecondaryIndex::builder().index_name("ByDay").key_schema(k).projection(p).build()?).send().await?;',
+      '    client.update_table().table_name(T).global_secondary_index_updates(GlobalSecondaryIndexUpdate::builder().create(CreateGlobalSecondaryIndexAction::builder().index_name("ByNew").build()?).build()).send().await?;',
+      '    Ok(())',
+      '}',
+    ]), [], 'Rust: create_table and update_table chains, a GlobalSecondaryIndex builder, a CreateGlobalSecondaryIndexAction: no call')
+    eq([none('setup/tables.py', ['def create(c):', '    c.create_table(TableName="t", KeySchema=[], GlobalSecondaryIndexes=[{"IndexName": "ByHelper", "KeySchema": []}])']), none('setup/tables.go', ['package setup', 'func create(c *dynamodb.Client) {', '\tc.CreateTable(ctx, &dynamodb.CreateTableInput{TableName: aws.String("t"), GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{IndexName: aws.String("ByOwner")}}})', '}'])], [[], []],
+      'Python\'s create_table and Go\'s CreateTableInput and GlobalSecondaryIndex literals: no call')
+
+    // a variable's operation: the first call taking it after its declaration, within its block (handlers assigned to exports.* have no name)
+    const hjs = read('lambda/h.js', [
+      'exports.a = async (e) => {', "  const params = { TableName: 'x', Key: { id: e.id } }", '  return doc.get(params).promise()', '}',
+      'exports.b = async (e) => {', "  const params = { TableName: 'x', Key: { id: e.id }, UpdateExpression: 'SET a = :a' }", '  return doc.update(params).promise()', '}',
+      'exports.c = async (e) => {', "  const params = { TableName: 'x', IndexName: 'ByOwner', KeyConditionExpression: 'o = :o' }", '  return doc.query(params).promise()', '}',
+    ])
+    eq(hjs.sites.map((x) => [hjs.fns[x.fn]?.name, x.op]), [['exports.a', 'get'], ['exports.b', 'update'], ['exports.c', 'query']], 'each handler\'s input given to its own call, named by what it is assigned to (an update is never shown as a read)')
+    // bounded: one function holding 2 000 inputs, and 400 top-level ones before 20 000 lines, read in a pass each
+    const t0big = Date.now()
+    const big1 = read('src/big.ts', ['export function big(doc: Doc) {', ...Array.from({ length: 2000 }, (_, i) => `  const p${i} = { TableName: 'orders-table', IndexName: 'ByA' }\n  const z${i} = [1, 2, 3].map((x) => x + ${i})`), '}'])
+    const big2 = read('src/many.ts', [...Array.from({ length: 400 }, (_, i) => `const p${i} = { TableName: 'orders-table', IndexName: 'ByA' }`), ...Array.from({ length: 20000 }, (_, i) => `export const f${i} = (v: number) => ({ a: 'n', b: v, c: [1, 2, 3] })`)])
+    const bigMs = Date.now() - t0big
+    ok(big1.sites.length === 400 && big2.sites.length === 400 && big1.notes.some((n) => /more than 400 key-value calls/.test(n)) && bigMs < 20000, `a file past ${400} calls stops there, said, in bounded time (${bigMs} ms for both)`)
+
+    // a member is a constant only of a module imported whole; `process.env.X`, `cfg.X`, `settings.X` stay unknown
+    const mem = read('src/mem.ts', ["import * as C from './indexes'", 'const K = require("./keys")', 'export async function f(doc: Doc, cfg: Cfg) { return Promise.all([doc.query({ TableName: T, IndexName: cfg.INDEX_NAME }), doc.query({ TableName: T, IndexName: process.env.INDEX_NAME }), doc.query({ TableName: T, IndexName: C.BY_OWNER }), doc.query({ TableName: T, IndexName: K.BY_DAY })]) }'])
+    eq(mem.sites.map((x) => [x.indexConst ?? null, x.indexExpr ?? null]), [[null, 'cfg.INDEX_NAME'], [null, 'process.env.INDEX_NAME'], ['BY_OWNER', null], ['BY_DAY', null]], 'TypeScript: a member of an object or of process.env is unknown; one of a module imported whole is a constant to resolve')
+    const pmem = read('jobs/mem.py', ['import consts', 'from app import names', 'class Repo:', '    INDEX = "ByStatus"', '    def a(self, settings):', '        t.query(IndexName=settings.INDEX_NAME, KeyConditionExpression="a = :a")', '        t.query(IndexName=consts.BY_OWNER, KeyConditionExpression="a = :a")', '        t.query(IndexName=self.INDEX, KeyConditionExpression="a = :a")', '        t.query(IndexName=names.BY_DAY, KeyConditionExpression="a = :a")'])
+    eq(pmem.sites.map((x) => [x.index ?? null, x.indexConst ?? null, x.indexExpr ?? null]), [[null, null, 'settings.INDEX_NAME'], [null, 'BY_OWNER', null], ['ByStatus', null, null], [null, 'BY_DAY', null]], 'Python: another object\'s attribute is unknown; a module\'s is a constant to resolve; the class\'s own is followed')
+
+    // a file holding only exported string constants is read for them, so another file's call can name them
+    eq([accessLevel('src/indexes.ts', "export const INDEX_BY_OWNER = 'ByTsConst'\nexport const T = 1\n"), accessLevel('jobs/indexes.py', 'BY_OWNER = "ByPyConst"\n'), accessLevel('pkg/indexes.go', 'package pkg\nconst byOwner = "ByGoConst"\n'), accessLevel('src/a.ts', 'export const n = 1\n')], [2, 2, 2, 0], 'a file of string constants is found by content, in TypeScript, Python and Go')
+    eq([read('src/indexes.ts', ["export const INDEX_BY_OWNER = 'ByTsConst'", 'export const T = 1', 'export interface X { a: string }']), read('jobs/indexes.py', ['BY_OWNER = "ByPyConst"'])].map((a) => [a.sites.length, a.fns.length, a.consts.map((c) => `${c.name}=${c.names.map((n) => n.text)}`)]), [[0, 0, ['INDEX_BY_OWNER=ByTsConst']], [0, 0, ['BY_OWNER=ByPyConst']]],
+      'its facts: its constants only (no call, no function)')
+
+    // an UpdateExpression key alone is no call (an ESTree visitor's); beside the item's Key, or given to an SDK call, it is
+    const est = read('tools/visit.js', ["const visitor = { UpdateExpression(path) { path.skip() }, Identifier: (p) => p }", "const other = { UpdateExpression: (node) => node, AssignmentExpression: () => {} }", "const lone = { UpdateExpression: 'SET a = :a' }", "export const h = () => doc.update({ Key: { id: 1 }, UpdateExpression: 'SET b = :b' })"])
+    eq(est.sites.map((x) => [x.line, x.op, x.writes.map((w) => w.path)]), [[4, 'update', ['b']]], 'an ESTree visitor\'s UpdateExpression (a method, a function, a text with no Key) is no call; with the item\'s Key, it is')
+
+    // test code by the code graph's test paths, in every language
+    const isT = (file, lines) => read(file, lines).sites.every((x) => x.test)
+    eq([isT('tests/common/helpers.rs', ['pub async fn seed(c: &Client) { c.query().table_name("t").index_name("I").send().await; }']), isT('__tests__/helpers.ts', ["export const q = (doc: Doc) => doc.query({ TableName: 't', IndexName: 'I' })"]), isT('tests/helpers.py', ['def q(t):', '    t.query(IndexName="I", KeyConditionExpression="a = :a")']), isT('store/orders-test.go', ['package store', 'func Q(c *dynamodb.Client) {', '\tc.Query(ctx, &dynamodb.QueryInput{TableName: aws.String("t"), IndexName: aws.String("I")})', '}']), isT('src/orders.rs', ['pub async fn q(c: &Client) { c.query().table_name("t").index_name("I").send().await; }'])], [true, true, true, true, false],
+      'test code by path (tests/, __tests__/, a -test or _test file), as the code graph marks it, in every language')
   }
 }
 
@@ -3199,9 +3278,9 @@ async function indexed() {
     cpSync(path.join(HERE, 'fixtures', 'access'), AP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
     const aq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: AP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const aidx = await aq('index')
-    ok(/catalog: 3 files/.test(aidx) && /reports: 1 files/.test(aidx) && !aidx.includes('failure'), `index: both repositories, no extractor failure (${aidx.replace(/\n/g, ' | ')})`)
-    eq(await aq('sql', { sql: "SELECT repo, key, extractor FROM data_facts WHERE extractor LIKE 'dynamo-access%' ORDER BY repo, key" }), 'repo\tkey\textractor\ncatalog\tsrc/books.rs\tdynamo-access@1\nreports\treports/genres.py\tdynamo-access@1',
-      'found by content: the Rust and the Python file making key-value calls (the model and the index names hold none)')
+    ok(/catalog: 4 files/.test(aidx) && /reports: 1 files/.test(aidx) && !aidx.includes('failure'), `index: both repositories, no extractor failure (${aidx.replace(/\n/g, ' | ')})`)
+    eq(await aq('sql', { sql: "SELECT repo, key, extractor, facts LIKE '%\"access\"%' AS calls FROM data_facts WHERE extractor LIKE 'dynamo-access%' ORDER BY repo, key" }), 'repo\tkey\textractor\tcalls\ncatalog\tsrc/books.rs\tdynamo-access@2\t1\ncatalog\tsrc/setup.rs\tdynamo-access@2\t0\nreports\treports/genres.py\tdynamo-access@2\t1',
+      'found by content: the Rust and the Python file making key-value calls; the table\'s declaration in code (create_table with a GSI builder) read, and holding none')
     const alist = (await aq('data')).split('\n')
     eq([alist[1], alist[alist.length - 1]], ['catalog:dynamodb  dynamodb  1 table · 4 GSIs · 1 item type bound · 1 conflict', 'Access patterns (inferred from key-value SDK calls; leads, never verdicts): 7 calls in 2 files, 7 reaching a table; 1 index with no access found (graph_data with a table lists them)'],
       'graph_data: the store counts the inferred conflict with its own; the access patterns in one line')
@@ -3240,7 +3319,7 @@ async function indexed() {
     const { loadProject: loadAcc } = await import('../lib/project.mjs')
     const apage = await renderAcc(loadAcc(AP))
     const adata = dataOf(apage).data
-    eq([adata.access, adata.stores[0].tables[0].acc.ix.map((i) => [i.n, i.q.map((f) => f.n), !!i.lead])], [{ files: 2, calls: 7, placed: 7, leads: 1 }, [['ByAuthor', ['by_author'], false], ['ByIsbn', ['by_isbn'], false], ['ByGenre', ['by_genre'], false], ['ByStatus', [], true]]], 'the page packs the access patterns per table, in graph_data\'s words')
+    eq([adata.access, adata.stores[0].tables[0].acc.ix.map((i) => [i.n, i.q.map((f) => f.n), !!i.lead])], [{ files: 2, calls: 7, placed: 7, spread: 0, leads: 1, how: ['the table named at the call'] }, [['ByAuthor', ['by_author'], false], ['ByIsbn', ['by_isbn'], false], ['ByGenre', ['by_genre'], false], ['ByStatus', [], true]]], 'the page packs the access patterns per table, in graph_data\'s words, each way a call reached its table once')
     const accPg = await stubPage(apage, '#data-0')
     const acard = accPg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))[0]
     const atext = accPg.textOf(acard)
@@ -3259,6 +3338,32 @@ async function indexed() {
     const ae2 = await aq('data', { entity: 'local-catalog-books' })
     ok(sect(ae2, 'Access (').includes(`    shelved  query  ${GP}:20  (the call at line 21; the table named at the call) · 0 callers`) && !ae2.includes('no access found') && ae2.includes('Conflicts: none'),
       `re-indexed: the index is queried now, its lead gone; the write the item lacked is gone, and its conflict (${sect(ae2, 'Access (').slice(-2).join(' | ')})`)
+
+    // bounded output: 200 repository classes querying an index 8 tables declare, through a table name
+    // they are given (counted, not attached), and 30 functions querying one table's index (listed to a cap)
+    const FP = path.join(SANDBOX, 'fan')
+    const wr = (rel, text) => { mkdirSync(path.dirname(path.join(FP, rel)), { recursive: true }); writeFileSync(path.join(FP, rel), text) }
+    wr('grimoire.config.json', JSON.stringify({ repos: [{ name: 'infra', path: 'infra' }, { name: 'mono', path: 'mono' }], graph: { dir: '.grimoire/graph' } }))
+    const gsi = (n) => ({ IndexName: n, KeySchema: [{ AttributeName: 'a1', KeyType: 'HASH' }], Projection: { ProjectionType: 'ALL' } })
+    for (let i = 0; i < 8; i++) wr(`infra/dynamodb/tables/t${i}.json`, JSON.stringify({ TableName: `local-users-a${i}-store`, KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }, { AttributeName: 'a1', AttributeType: 'S' }], GlobalSecondaryIndexes: [gsi('GSI1'), gsi('GSI2')] }))
+    wr('mono/dynamodb/tables/big.json', JSON.stringify({ TableName: 'local-big-orders', KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }, { AttributeName: 'x', AttributeType: 'S' }], GlobalSecondaryIndexes: [gsi('ByX')] }))
+    for (let f = 0; f < 10; f++) wr(`mono/src/repos${f}.ts`, Array.from({ length: 20 }, (_, i) => `export class Repo${f}x${i} {\n  constructor(private readonly tableName: string, private doc: Doc) {}\n  async byGsi(k: string) { return this.doc.query({ TableName: this.tableName, IndexName: 'GSI1', KeyConditionExpression: 'a1 = :a' }) }\n}`).join('\n') + '\n')
+    wr('mono/src/big.ts', Array.from({ length: 30 }, (_, i) => `export async function byX${i}(doc: Doc) { return doc.query({ TableName: 'local-big-orders', IndexName: 'ByX', KeyConditionExpression: 'x = :x' }) }`).join('\n') + '\n')
+    const fq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: FP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    await fq('index')
+    const fan0 = await fq('data', { entity: 'local-users-a0-store' })
+    ok(sect(fan0, 'Access (').includes('  index GSI1  200 calls name an index of this name but could reach more than 5 tables: counted, not attributed (not a lead)') && sect(fan0, 'Reads and writes').includes('  + 200 calls that could reach this table among more than 5: counted, not listed') && fan0.length < 4000,
+      `a call that could reach more than 5 tables: counted on each, never listed, its index no lead; the table's answer stays small (${fan0.length} characters: ${sect(fan0, 'Access (').slice(1, 3).join(' | ')})`)
+    ok(sect(fan0, 'Access (').some((l) => l.startsWith('  index GSI2  no access found (lead)')) && (await fq('data')).includes('200 that could reach more than 5 (counted on each, not listed)'), 'the index no call names stays a lead; graph_data counts the calls not attributed')
+    const bigE = await fq('data', { entity: 'local-big-orders' })
+    const bx = sect(bigE, 'Access ('), brw = sect(bigE, 'Reads and writes')
+    eq([bx[1], bx.length, bx[bx.length - 1], brw[0], brw.length, brw[brw.length - 1]], ['  index ByX  queried by 30 functions:', 2 + 25 + 1, '    … and 5 more functions (the first 25 listed)', 'Reads and writes (30 functions: 30 reading, 0 writing), each with what its calls do:', 1 + 25 + 1, '  … and 5 more functions (the first 25 listed)'],
+      'an index queried by 30 functions, a table 30 functions read: the first 25 listed, the rest counted')
+    const fpage = dataOf(await renderAcc(loadAcc(FP))).data
+    const accBytes = fpage.stores.flatMap((s) => s.tables).reduce((a, t) => a + (t.acc ? JSON.stringify(t.acc).length : 0), 0)
+    const bigT = fpage.stores.flatMap((s) => s.tables).find((t) => t.name === 'local-big-orders')
+    ok(accBytes < 30000 && fpage.access.how.length < 10 && bigT.acc.ix[0].q.length === 25 && bigT.acc.ix[0].more === 5 && bigT.acc.rw.length === 25 && bigT.acc.rwMore === 5 && fpage.stores.flatMap((s) => s.tables).filter((t) => /users/.test(t.name)).every((t) => t.acc.sp === 200 && !t.acc.rw.length),
+      `the page: each list capped (25, and the rest counted), how a call reached its table once per page (${fpage.access.how.length} texts), the counted calls a number; ${accBytes} bytes of access patterns for 9 tables and 230 calls`)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

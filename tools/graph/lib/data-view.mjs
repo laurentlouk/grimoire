@@ -424,15 +424,21 @@ export function dataClient(ctx) {
     const keys = t.keys.map((k) => row(k, ROLE[k.role] || k.role, mark(k.role === 'ttl' ? `${k.parts.length ? k.parts.join(', ') : 'no attribute'} · ${typeof k.enabled === 'string' ? k.enabled : onOff(k.enabled)}` : k.parts.map(typed).join(' + '))))
     // the access patterns (data/access.mjs, inferred): each index with the functions querying it, or a lead
     const A = t.acc || null
-    const fnEl = (f) => h('span', { class: 'kfn', title: `${f.how}${f.lines.length ? `\n${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')}` : ''}${f.c !== null && f.c !== undefined ? `\n${plural(f.c, 'caller')} in the index` : ''}` }, h('b', { class: 'mono' }, f.n), h('span', { class: 'muted' }, ` ${f.ops.join(' · ')}${f.w.length ? ` (writes ${f.w.join(', ')})` : ''} `), srcEl(s, f.at), f.test ? h('span', { class: 'muted' }, ' (test code)') : null)
+    const HOW = (DD.access && DD.access.how) || []
+    const howOf = (f) => (f.h || []).map((i) => HOW[i]).join(' · ')
+    const fnEl = (f) => h('span', { class: 'kfn', title: `${howOf(f)}${f.lines.length ? `\n${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')}` : ''}${f.c !== null && f.c !== undefined ? `\n${plural(f.c, 'caller')} in the index` : ''}` }, h('b', { class: 'mono' }, f.n), h('span', { class: 'muted' }, ` ${f.ops.join(' · ')}${f.w.length ? ` (writes ${f.w.join(', ')}${f.wm ? ` and ${f.wm} more` : ''})` : ''} `), srcEl(s, f.at), f.test ? h('span', { class: 'muted' }, ' (test code)') : null)
+    const FAN = (n) => `${plural(n, 'call')} name${n === 1 ? 's' : ''} it but could reach too many tables to say which: counted, not attributed`
     const accOf = (x) => {
       const ix = A && A.ix.find((i) => i.n === x.name)
-      if (!ix) return null
+      if (!ix || (!ix.q.length && !ix.lead && !ix.sp)) return null
       return h('div', { class: `srcline kacc${ix.lead && !ix.q.length ? ' lead' : ''}` }, ix.lead ? h('span', { class: 'pill warn', title: ix.lead }, ix.q.length ? 'no access outside test code (lead)' : 'no access found (lead)') : null,
-        ix.q.length ? [h('span', { class: 'muted' }, ix.lead ? ' queried by ' : 'queried by '), ...ix.q.flatMap((f, k) => [k ? ' · ' : null, fnEl(f)])] : h('span', { class: 'muted' }, ` ${ix.lead.replace(/^[^:]*: /, '')}`))
+        ix.q.length ? [h('span', { class: 'muted' }, ix.lead ? ' queried by ' : 'queried by '), ...ix.q.flatMap((f, k) => [k ? ' · ' : null, fnEl(f)]), ix.more ? h('span', { class: 'muted' }, ` and ${plural(ix.more, 'more function')}`) : null]
+          : ix.lead ? h('span', { class: 'muted' }, ` ${ix.lead.replace(/^[^:]*: /, '')}`) : null,
+        ix.sp ? h('span', { class: 'muted' }, `${ix.q.length || ix.lead ? ' · ' : ''}${FAN(ix.sp)}`) : null)
     }
     const idx = t.indexes.map((x) => rowWith(x, x.kind === 'lsi' ? 'LSI' : x.kind === 'gsi' ? 'GSI' : 'IDX', accOf(x), mark(x.name), h('span', { class: 'muted' }, mark(` · ${[x.partition && x.partition.length ? `PK ${x.partition.map(typed).join(' + ')}` : null, x.sort && x.sort.length ? `SK ${x.sort.map(typed).join(' + ')}` : null, x.kind ? projOf(x) : `(${x.columns.join(', ')})`].filter(Boolean).join(' · ')}`))))
-    const rw = A ? A.rw.map((f) => h('li', { class: `krow kfnrow${f.test ? ' test' : ''}` }, h('span', { class: `mkl k-${f.wr ? 'w' : 'r'}` }, f.wr && f.r ? 'RW' : f.wr ? 'W' : 'R'), fnEl(f), h('span', { class: 'muted' }, ` · ${f.how}`))) : []
+    const rwMark = (f) => (f.wr && f.r ? 'RW' : f.wr ? 'W' : f.r ? 'R' : '?')
+    const rw = A ? A.rw.map((f) => h('li', { class: `krow kfnrow${f.test ? ' test' : ''}` }, h('span', { class: `mkl k-${f.wr ? 'w' : f.r ? 'r' : 'u'}`, title: f.u ? 'a call of unknown kind: neither a read nor a write said' : null }, rwMark(f)), fnEl(f), h('span', { class: 'muted' }, ` · ${howOf(f)}`))) : []
     const attrs = declared.map((f) => row(f, 'A', mark(f.name), h('span', { class: 'muted' }, ` ${f.type || '?'}`)))
     // the item: the bound types' fields as stored, a tree by dotted path, each key attribute marked
     const keyOf = new Map(t.keys.filter((k) => k.role !== 'ttl').flatMap((k) => k.parts.map((p) => [p, ROLE[k.role] || k.role])))
@@ -469,7 +475,9 @@ export function dataClient(ctx) {
       h('div', { class: 'ksub' }, `Attributes (${declared.length})`), h('ul', { class: 'krows kattrs' }, attrs),
       items.length ? [h('div', { class: 'ksub' }, `Item (${plural(items.length, 'field')}, as ${itemTypes.join(' and ')} ${itemTypes.length === 1 ? 'stores it' : 'store them'})`), h('ul', { class: 'krows kitem', 'aria-label': `${t.name}: the item's fields` }, items)] : null,
       binds.length ? [h('div', { class: 'ksub' }, `Bound item types (${binds.length})`), ...binds] : null,
-      A ? [h('div', { class: 'ksub' }, `Reads and writes (${plural(rw.length, 'function')}, from their key-value calls: inferred)`), rw.length ? h('ul', { class: 'krows kaccess', 'aria-label': `${t.name}: the functions reading and writing it` }, rw) : h('p', { class: 'muted' }, 'no key-value call found reaching this table'), A.note ? h('p', { class: 'note' }, A.note) : null] : null,
+      A ? [h('div', { class: 'ksub' }, `Reads and writes (${plural(rw.length + (A.rwMore || 0), 'function')}, from their key-value calls: inferred)`), rw.length ? h('ul', { class: 'krows kaccess', 'aria-label': `${t.name}: the functions reading and writing it` }, rw) : h('p', { class: 'muted' }, 'no key-value call found reaching this table'),
+        A.rwMore ? h('p', { class: 'muted' }, `… and ${plural(A.rwMore, 'more function')} (graph_data lists the first ones)`) : null,
+        A.sp ? h('p', { class: 'muted' }, `+ ${plural(A.sp, 'call')} that could reach this table among too many to say which: counted, not listed`) : null, A.note ? h('p', { class: 'note' }, A.note) : null] : null,
       t.lnote ? h('p', { class: 'note' }, t.lnote) : null,
       lg ? [h('div', { class: `ksub${lgConflicts.length ? ' warn' : ''}` }, `One logical table: ${plural(lg.members.length, 'declaration')}${lgConflicts.length ? `, ${plural(lgConflicts.length, 'conflict')} across them` : ''}`),
         h('div', { class: 'srcline' }, `${lg.members.join(' + ')} (${lg.via}): their differences are conflicts, each side kept`),
@@ -478,7 +486,8 @@ export function dataClient(ctx) {
       h('div', { class: 'ksub' }, 'Declared at'), h('div', { class: 'srcline' }, ov(t) && t.ch === 'removed' ? ['at the base: ', bsrcs(s, t.bsrc)] : s.dv && t.dl && (t.dl.gone || t.dl.s === 'prop') ? (t.dl.gone ? ['at the base: ', bsrcs(s, t.bsrc)] : 'proposed: not in the code yet') : srcs(s, t.src)),
       conflicts.length ? [h('div', { class: 'ksub warn' }, `Conflicts (${conflicts.length}): each side kept, none resolved`),
         h('ul', { class: 'links dlist' }, conflicts.map(([label, c]) => h('li', null, h('div', null, h('b', null, label), h('span', { class: 'muted' }, ` · ${c.attr}`)),
-          c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src))))))] : null,
+          c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src)))))),
+        A && A.cfMore ? h('p', { class: 'muted' }, `… and ${A.cfMore} more written attribute${A.cfMore === 1 ? '' : 's'} the item does not state`) : null] : null,
       dks.length || dus.length ? [h('div', { class: 'ksub' }, `Delta: ${plural(dks.length, 'change')}${dus.length ? `, ${dus.length} not in the plan` : ''}`), h('ul', { class: 'links dlist' }, dks.map((k) => deltaItem(s.delta, k, 'p')), dus.map((j) => unplItem(s.delta, j)))] : null)
   }
   function cardsView(s) {
