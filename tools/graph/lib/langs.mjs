@@ -85,7 +85,7 @@ export function bare(n, to = n.endIndex) {
 const NAME_FIELDS = ['name', 'field', 'property', 'attribute', 'method', 'suffix']
 const RECV_FIELDS = ['object', 'value', 'operand', 'receiver', 'scope', 'argument', 'path', 'expression', 'target']
 export function calleeOf(n) {
-  if (!n) return null
+  if (!n || LITERAL.has(n.type)) return null // `handlers['…'](x)` calls by a value, never by a name
   if (n.namedChildCount === 0) return { name: n.text.split(/::|\.|\\|->/).pop(), qual: '' }
   if (/generic|template/.test(n.type)) return calleeOf(field(n, 'function') || field(n, 'name') || n.namedChild(0))
   for (const f of NAME_FIELDS) {

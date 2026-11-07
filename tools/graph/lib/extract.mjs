@@ -9,11 +9,15 @@ const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'enum', 'protoc
 const IDENT = /^[\p{L}_$][\p{L}\p{N}_$]*[!?]?$/u
 // A definition's signature: its first line up to its body (name, parameters, return type), with
 // no literal's value and no comment in it (langs.mjs bare), at most 160 characters. The body is
-// the `body` field, or the last child in Kotlin, whose grammar names no field.
+// the `body` field, a C macro's `value` (unparsed text), or the last child in Kotlin, whose
+// grammar names no field.
 const KOTLIN_BODY = /^(function_body|class_body|enum_class_body)$/
-const signature = (n) => {
+const bodyOf = (n) => {
   const last = n.lastNamedChild
-  const nl = n.text.indexOf('\n'), body = n.childForFieldName('body') || (last && KOTLIN_BODY.test(last.type) ? last : null)
+  return n.childForFieldName('body') || (n.type.startsWith('preproc_') && n.childForFieldName('value')) || (last && KOTLIN_BODY.test(last.type) ? last : null)
+}
+const signature = (n) => {
+  const nl = n.text.indexOf('\n'), body = bodyOf(n)
   let to = nl < 0 ? n.endIndex : n.startIndex + nl
   if (body && body.startIndex > n.startIndex) to = Math.min(to, body.startIndex)
   return bare(n, to).replace(/\s+/g, ' ').replace(/\s*[{:=]\s*$/, '').trim().slice(0, 160)

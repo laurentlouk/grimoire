@@ -28,7 +28,7 @@
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
 export const SCHEMA_VERSION = '13'
@@ -72,12 +72,16 @@ CREATE TABLE IF NOT EXISTS data_facts(repo TEXT, scope TEXT, key TEXT, extractor
 export async function openStore(dbPath, { readOnly = false } = {}) {
   const { DatabaseSync } = await driver()
   if (!readOnly) mkdirSync(path.dirname(dbPath), { recursive: true })
-  const db = new DatabaseSync(dbPath, readOnly ? { readOnly: true } : {})
-  if (readOnly) return db
-  db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;')
+  if (readOnly) return new DatabaseSync(dbPath, { readOnly: true })
+  const open = () => { const d = new DatabaseSync(dbPath); d.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;'); return d }
+  let db = open()
   const v = (() => { try { return db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value } catch { return null } })()
+  // An index from another version is deleted, not emptied: dropped tables leave their text in free
+  // pages, and an older index may hold literals this one never stores.
   if (v && v !== SCHEMA_VERSION) {
-    for (const t of TABLES) db.exec(`DROP TABLE IF EXISTS ${t}`)
+    db.close()
+    for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) rmSync(f, { force: true })
+    db = open()
   }
   db.exec(DDL)
   db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('schema', ?)").run(SCHEMA_VERSION)

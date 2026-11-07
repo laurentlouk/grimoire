@@ -98,7 +98,7 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
   // body; each string, template, character or regex literal in it shows as `…` between its
   // delimiters, a comment is dropped, and a call's receiver text hides literals the same way.
   const one = {
-    typescript: ["export function token(/* canary3 */ scope: string = 'canary1'): string { return db.query(`ALTER ROLE app PASSWORD 'canary2'`).then((r) => r.text()) }\ntype Verb = 'canary4' | 'b'\nclass K { m(x = /canary5/g) { return 'canary6'.length } }\n",
+    typescript: ["export function token(/* canary3 */ scope: string = 'canary1'): string { return db.query(`ALTER ROLE app PASSWORD 'canary2'`).then((r) => r.text()) }\ntype Verb = 'canary4' | 'b'\nclass K { m(x = /canary5/g) { return 'canary6'.length } }\nfunction pick(x: number) { return handlers['canary7'](x) }\n",
       { token: "function token(scope: string = '…'): string", Verb: "type Verb = '…' | '…'", K: 'class K', 'K.m': 'm(x = /…/)' }],
     python: ['def token(scope="canary1"): return requests.get(f"https://api.test/?key=canary2{scope}").json()  # canary3\nclass K:  # canary4\n  pass\n',
       { token: 'def token(scope="…")', K: 'class K' }],
@@ -110,11 +110,11 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
       { A: 'class A', 'A.token': '@Query("…") public String token()' }],
     kotlin: ['fun token(scope: String = "canary1"): String = "canary2".uppercase()\nclass K(val a: Int) { fun m() = "canary3" }\n',
       { token: 'fun token(scope: String = "…"): String', K: 'class K(val a: Int)', 'K.m': 'fun m()' }],
-    c: ['const char *token(void) { return "canary1"; } /* canary2 */\n', { token: 'const char *token(void)' }],
-    cpp: ['std::string token() { return std::string(R"(canary1)").substr(1); }\n', { token: 'std::string token()' }],
+    c: ['const char *token(void) { return "canary1"; } /* canary2 */\n#define TOKEN(x) "canary3" x\nint pick(int x) { return m["canary4"](x); }\n', { token: 'const char *token(void)', TOKEN: '#define TOKEN(x)' }],
+    cpp: ['std::string token() { return std::string(R"(canary1)").substr(1); }\n#define TOKEN(x) printf("canary2 %s", x)\n', { token: 'std::string token()', TOKEN: '#define TOKEN(x)' }],
     csharp: ['class A { public string Token(string s = @"canary1") => $"canary2".Trim(); }\n', { A: 'class A' }],
     ruby: ["def token(scope = 'canary1') = \"canary2\".upcase\nclass K; def m; %q(canary3).strip; end; end\n", {}],
-    php: ["<?php function token($s = 'canary1') { return strtoupper(\"canary2\"); }\n", { token: "function token($s = '…')" }],
+    php: ["<?php function token($s = 'canary1') { return strtoupper(\"canary2\"); }\nfunction pick($x) { return $m[\"canary3\"]($x) . (new Foo)->{\"canary4\"}(); }\n", { token: "function token($s = '…')" }],
     swift: ['func token(scope: String = "canary1") -> String { return "canary2".uppercased() }\n', { token: 'func token(scope: String = "…") -> String' }],
   }
   for (const [lang, [src, want]] of Object.entries(one)) {
@@ -122,9 +122,9 @@ ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every(
     const r = extract(tree, lang, false)
     tree.delete()
     const sig = Object.fromEntries(r.symbols.map((s) => [s.qualname, s.signature]))
-    const leaks = [...r.symbols.map((s) => s.signature), ...r.refs.map((x) => x.qual || '')].filter((t) => /canary/.test(t))
+    const leaks = [...r.symbols.map((s) => s.signature), ...r.refs.map((x) => `${x.qual || ''} ${x.name}`)].filter((t) => /canary/.test(t))
     const wrong = Object.entries(want).filter(([q, s]) => sig[q] !== s).map(([q, s]) => `${q}: ${JSON.stringify(sig[q])}, not ${JSON.stringify(s)}`)
-    ok(r.symbols.length && !leaks.length && !wrong.length, `${lang}: no literal's value in a one-line definition's signature or a receiver${leaks.length ? `; leaks ${JSON.stringify(leaks)}` : ''}${wrong.length ? `; ${wrong.join(' · ')}` : ''}`)
+    ok(r.symbols.length && !leaks.length && !wrong.length, `${lang}: no literal's value in a one-line definition's signature, a macro's, a receiver or a name called by a string key${leaks.length ? `; leaks ${JSON.stringify(leaks)}` : ''}${wrong.length ? `; ${wrong.join(' · ')}` : ''}`)
   }
   const rs = extract((await rt.parserFor('rust')).parse(one.rust[0]), 'rust', false).refs.filter((x) => x.qual).map((x) => `${x.qual}.${x.name}`)
   ok(rs.includes('"…".to_string') && rs.includes('r#"…"#.len'), `a literal receiver keeps its delimiters, so a call on it still reads as one (${rs.join(', ')})`)
@@ -544,6 +544,15 @@ console.log('\n2b · no literal value in the index')
   const found = answers[1] + answers[2]
   const sigs = ["function token(role: string = '…'): Promise<string>", 'def token(scope="…")', 'func Token() string', 'pub fn token() -> String']
   ok(sigs.every((s) => found.includes(s)), `a signature still names the function, its parameters and its return type (${sigs.filter((s) => !found.includes(s)).join(' · ') || 'all four'})`)
+  // An index from an older version, its pages full of literals: rebuilt, not one of them left in a byte.
+  const { openStore } = await import('../lib/store.mjs')
+  const old = await openStore(path.join(dir, 'graph.db'))
+  const add = old.prepare("INSERT INTO nodes(kind, name, signature) VALUES('function', 'old', ?)")
+  for (let i = 0; i < 3000; i++) add.run(`function old() { return 'canary-old-${i}' }`)
+  old.prepare("UPDATE meta SET value = '2' WHERE key = 'schema'").run(); old.close()
+  await hq('search', { query: 'token' })
+  const kept = readdirSync(dir, { withFileTypes: true }).filter((f) => f.isFile()).flatMap((f) => (readFileSync(path.join(dir, f.name), 'latin1').match(/canary-old-\d+/g) || []).map(() => f.name))
+  ok(!kept.length, `an older index is deleted, not emptied: no byte of the one it holds stays (${kept.length ? `${kept.length} in ${[...new Set(kept)].join(', ')}` : 'none'})`)
 }
 
 // ── 3 · incremental refresh ──
