@@ -44,6 +44,10 @@
 //      graph_changes and graph.mjs changes; a ref that does not resolve; a base without the folder
 //  16. that branch against a design's delta: graph_changes --delta (each change's state, the
 //      unplanned, the summary), graph.mjs changes and render --delta
+//  17. the architecture in graph_changes (the change view, slice 6): a worktree branch adds an import
+//      between two components no line joins → a new link no line draws against the base checkout's
+//      index, unplanned with the delta; appended by delta-append.mjs (to `architecture`), pending;
+//      the diagram updated in the branch, planned and built
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -1379,6 +1383,49 @@ async function indexed() {
     ok(answers.every((a) => a === REFUSAL), `graph_changes refuses, in one message that says nothing of the file, an absolute path, a path out of the project, a symlink out, another extension, a missing delta, a path not plain, one past the size limit (${[...new Set(answers)].join(' | ')})`)
     ok((await br('changes', { delta: 'docs/specs/2026-11-06-loans.delta.json' })).includes('  pending  returned-idx'), '… and a delta beside the specs still answers')
     eq(run('changes', '--delta', '../dotenv').stderr.trim(), `graph: ${REFUSAL}`, 'graph.mjs changes --delta is the same tool, under the same rule')
+
+    // ── 17 · the architecture: a worktree branch against its base checkout ──
+    console.log('\n17 · the architecture in graph_changes: a branch adds an import no line draws (a worktree against its base checkout)')
+    const MAIN = path.join(SANDBOX, 'arch-main'), FEAT = path.join(SANDBOX, 'arch-feat')
+    const put = (dir, rel, text) => { mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); writeFileSync(path.join(dir, rel), text) }
+    const DIAGRAM = 'docs/architecture/shop.architecture.json'
+    const shop = { schema: 1, title: 'Shop', components: [{ id: 'web', label: 'Web', type: 'frontend', paths: ['src/web'] }, { id: 'api', label: 'API', type: 'backend', paths: ['src/api'] }, { id: 'store', label: 'Store', type: 'database', paths: ['src/store'] }],
+      connections: [{ from: 'web', to: 'api', label: 'calls' }, { from: 'api', to: 'store', label: 'queries' }] }
+    put(MAIN, 'grimoire.config.json', JSON.stringify({ repos: [{ name: 'shop', path: '.' }] }))
+    put(MAIN, '.gitignore', '.grimoire/\n')
+    put(MAIN, 'src/web/page.js', "import { listOrders } from '../api/orders.js'\nexport function render() { return listOrders() }\n")
+    put(MAIN, 'src/api/orders.js', "import { query } from '../store/db.js'\nexport function listOrders() { return query('orders') }\n")
+    put(MAIN, 'src/store/db.js', 'export function query(t) { return [t] }\n')
+    put(MAIN, DIAGRAM, JSON.stringify(shop, null, 2) + '\n')
+    put(MAIN, 'docs/specs/2026-11-07-stock.delta.json', JSON.stringify({ schema: 1, spec: 'docs/specs/2026-11-07-stock-design.md', data: [], architecture: [] }, null, 2) + '\n')
+    git(MAIN, 'init', '-q', '-b', 'main')
+    commit(MAIN, 'the shop')
+    const inMain = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: MAIN })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    await inMain('index')
+    git(MAIN, 'worktree', 'add', '-q', '-b', 'feat', FEAT)
+    // the branch: the page reads the stock straight from the store, and no line of the diagram says so
+    put(FEAT, 'src/web/page.js', "import { listOrders } from '../api/orders.js'\nimport { query } from '../store/db.js'\nexport function render() { return [listOrders(), query('stock')] }\n")
+    const ft = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: FEAT })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const plain = await ft('changes')
+    const archPart = plain.slice(plain.indexOf('\n\nArchitecture') + 2).split('\n')
+    ok(/^Architecture against main \(the index's base branch\) at [0-9a-f]{10}: no diagram file changed; in the code: 1 finding on the branch's index and not on the base checkout's \(main, .+arch-main\)$/.test(archPart[0]), `graph_changes covers the architecture: the diagrams against the base, then the code against the base checkout's index (${archPart[0]})`)
+    eq(archPart.slice(1), ['In the code (the check, against the base checkout\'s index):', `  + web uses store (1 file pair in the graph), but no line is drawn between them  — ${DIAGRAM}  → connection:web->store`], 'the import the branch adds between two components no line joins: a new link no line draws')
+    const DREL = 'docs/specs/2026-11-07-stock.delta.json'
+    const archOf = async () => { const x = await ft('changes', { delta: DREL }); return x.slice(x.indexOf('\nArchitecture:') + 1).split('\n') }
+    eq((await archOf()).slice(1), ['Unplanned (1): in the branch, in no change of the delta', `  + connection:web->store  web uses store (1 file pair in the graph), but no line is drawn between them  — ${DIAGRAM} (in the code, not drawn: update the diagram)`, 'Summary: 0 planned and built · 0 pending · 0 built differently · 1 unplanned · 0 acknowledged · 0 stale · 0 not acknowledged'],
+      'with the delta: an unplanned architectural change')
+    // the implementer keeps it: the ship appends it (origin unplanned), then the diagram is updated in the branch
+    const r = spawnSync(process.execPath, [path.join(ROOT, 'delta-append.mjs'), path.join(FEAT, DREL), (() => { const f = path.join(SANDBOX, 'kept.json'); writeFileSync(f, JSON.stringify([{ id: 'unplanned-PROJ-1-stock', op: 'add', target: 'connection:web->store', after: { label: 'reads stock' }, why: 'the page shows the stock as it is', slice: 1, origin: 'unplanned' }])); return f })()], { encoding: 'utf8' })
+    eq([r.stdout.trim(), JSON.parse(readFileSync(path.join(FEAT, DREL), 'utf8')).architecture.map((c) => c.target)], ['DELTA ok added=1 already=0 refused=0', ['connection:web->store']], 'delta-append.mjs routes the kept architectural change to the delta\'s architecture list')
+    eq((await archOf()).slice(0, 4), ['Architecture: 1 change in the delta, against the saved diagrams and the branch against main (the index\'s base branch) at ' + archPart[0].split(' at ')[1].slice(0, 10), '  pending  unplanned-PROJ-1-stock  add connection:web->store', '    why: the page shows the stock as it is · slice 1 · unplanned, kept by the implementer · not acknowledged', 'Unplanned: none, every architectural change of the branch is in the delta'],
+      'appended, it is planned: pending, not drawn yet, and nothing is unplanned')
+    put(FEAT, DIAGRAM, JSON.stringify({ ...shop, connections: [...shop.connections, { from: 'web', to: 'store', label: 'reads stock' }] }, null, 2) + '\n')
+    const built = await archOf()
+    eq(built.slice(1, 3), [`  planned and built  unplanned-PROJ-1-stock  add connection:web->store  — ${DIAGRAM}`, '    why: the page shows the stock as it is · slice 1 · unplanned, kept by the implementer · not acknowledged'], 'the diagram updated in the branch draws it: planned and built')
+    ok(built.includes('Unplanned: none, every architectural change of the branch is in the delta'), '… and the line the diagram gained is that change, not an unplanned one')
+    has((await ft('changes')).split('\n\nArchitecture')[1] || '', `${DIAGRAM}  modified\n  + connection web → store  "reads stock"`, 'without the delta: the diagram\'s new line, against the base')
+    has(spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'changes', '--delta', DREL, '--root', FEAT], { encoding: 'utf8' }).stdout, '  planned and built  unplanned-PROJ-1-stock  add connection:web->store', 'graph.mjs changes --delta prints the same')
+    ok(!(await ft('changes', { repo: 'shop' })).includes('Architecture'), '`repo` leaves the architecture out')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

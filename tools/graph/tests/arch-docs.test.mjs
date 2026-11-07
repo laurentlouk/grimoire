@@ -11,6 +11,12 @@
 //  4. the server (serve.mjs): host, origin and token checks, reading, saving, conflicts, creating;
 //     acknowledging a design delta's changes (the one other file it writes)
 //  5. the page: both tabs rendered by the page's own script in a stub DOM
+//  6. the architecture change view (arch-change.mjs): the delta's architecture targets and their
+//     validation, acknowledgements and appended changes in their list, the diagram diff, the check's
+//     findings on two indexes, the states of the delta's architecture changes and the unplanned
+//  7. the Architecture tab draws it: a worktree branch against its base checkout (two hand-built
+//     indexes), the Changes and Delta overlays in a stub DOM, acknowledging through the server,
+//     the undrawn link kept, appended, then drawn (built), and no base index (diagram files only)
 //
 //  Needs no parser runtime: indexes here are built by hand (sections 2) or empty (4, 5).
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, readdirSync, lstatSync, chmodSync, rmdirSync, utimesSync, rmSync } from 'node:fs'
