@@ -34,7 +34,10 @@
 // { path, line, as? }, a second place that declares it (the module's resource, beside the inputs
 // line that sets it), cited as a second source; an entity whose name has an unknown part is named
 // by its template and carries it, `nameTemplate` ({env}-{project}-orders: each {…} an unknown part,
-// the literal parts as written), for binding to the names code builds. A value the evaluator could
+// the literal parts as written), for binding to the names code builds (binding.mjs). A declaration may
+// say which environment variables the infra sets to its tables, `env` [{ name, table, path, line }]
+// (a Terraform function's environment, a template function's Environment.Variables). A code file's
+// facts (readers/code.mjs) hold no declaration: { declarations: [], code }. A value the evaluator could
 // not know stays as `${expression}`, and its table is not `whole`.
 //
 // The merged model: Store { id: '<repo>:<folder>', repo, name, dialect, declarations, entities }, and

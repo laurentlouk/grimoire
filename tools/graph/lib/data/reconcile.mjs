@@ -11,8 +11,14 @@
 // (`partial`) is listed with its sources but compared with nothing, since it describes the store as
 // it was partway. Drizzle v1 snapshots form a DAG through prevIds: only its leaves declare a store.
 //
-//   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store] }   (model.mjs)
+// Then, over every store at once (items below, binding.mjs): the key-value tables declared in several
+// places grouped into logical tables (their disagreements across declarations its conflicts), and the
+// item types code converts bound to them, their fields on the tables.
+//
+//   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store], logical, items,
+//     bindings, unresolved }   (model.mjs, binding.mjs)
 import { KINDS, keyOf, normType, normDefault, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
+import { logicalTables, bindItems, itemField, itemOf } from './binding.mjs'
 
 // What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
 // an LSI's kind, key attributes and projection, beside what a SQL element says. A key-value
@@ -39,7 +45,75 @@ export function reconcile(rows) {
     .sort((a, b) => KINDS.indexOf(a.source.kind) - KINDS.indexOf(b.source.kind) || (a.source.path < b.source.path ? -1 : 1))
   const stores = new Map()
   for (const d of decls) { const id = `${d.repo}:${d.store}`; if (!stores.has(id)) stores.set(id, []); stores.get(id).push(d) }
-  return { stores: [...stores].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, ds]) => merge(id, ds)) }
+  const model = { stores: [...stores].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, ds]) => merge(id, ds)) }
+  items(model, rows, decls)
+  return model
+}
+
+// ── key-value tables across stores, and the item shapes bound to them (binding.mjs) ──
+// model gains: logical (the groups of two declarations or more, each with its conflicts across them),
+// items, bindings, unresolved; a member entity gains `logical` (its group, the conflicts across it),
+// `bound` (its bindings) and its bound item types' fields (binding.mjs says how). Whatever a project's
+// code holds, the stores are answered: the whole computation is planned first, without touching the
+// model, and a failure in it leaves the model as merged, with `itemsError` saying why.
+function items(model, rows, decls) {
+  Object.assign(model, { logical: [], items: [], bindings: [], unresolved: [] })
+  let p
+  try { p = plan(model, rows, decls) } catch (e) { model.itemsError = `the item shapes were not bound: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`; return }
+  for (const [e, patch] of p.entities) Object.assign(e, patch)
+  Object.assign(model, p.model)
+}
+function plan(model, rows, decls) {
+  const kv = model.stores.filter((s) => KV_DIALECTS.has(s.dialect))
+  const entities = new Map(kv.flatMap((s) => s.entities.map((e) => [e.id, e])))
+  const patches = new Map() // entity → what it gains
+  const patch = (e) => { if (!patches.has(e)) patches.set(e, {}); return patches.get(e) }
+  const { groups, notes } = logicalTables([...entities.values()].map((e) => ({ id: e.id, name: e.name })))
+  for (const [id, note] of notes) patch(entities.get(id)).logicalNote = note
+  const out = { logical: [] }
+  for (const g of groups.filter((x) => x.members.length > 1)) {
+    const members = new Set(g.members)
+    // every declaration stating a member, that member renamed to the group's name and marked, merged
+    // as one table's declarations are: what they disagree on across members is the group's conflict
+    const synth = decls.filter((d) => KV_DIALECTS.has(d.dialect)).flatMap((d) => {
+      const es = (d.entities || []).filter((e) => members.has(`${d.repo}:${d.store}/${e.name}`))
+      return es.map((e) => ({ ...d, member: `${d.repo}:${d.store}/${e.name}`, entities: [{ ...e, name: g.name }] }))
+    })
+    const merged = merge(g.id, synth).entities[0]
+    const across = (c) => new Set(c.values.flatMap((v) => v.sources.map((s) => s.member))).size > 1
+    const strip = (s) => { const { member, ...rest } = s; return rest }
+    const conflicts = merged ? elementsOf(merged).flatMap(([label, x]) => x.conflicts.filter(across).map((c) => ({ label, attr: c.attr, values: c.values.map((v) => ({ value: v.value, sources: v.sources.map(strip) })) }))) : []
+    const logical = { id: g.id, name: g.name, via: g.via, members: g.members, conflicts }
+    out.logical.push(logical)
+    for (const m of g.members) patch(entities.get(m)).logical = logical
+  }
+  // what the infra sets each environment variable to (a function's environment naming a table)
+  const wiring = decls.flatMap((d) => (d.env || []).map((w) => ({ name: w.name, entity: `${d.repo}:${d.store}/${w.table}`, repo: d.repo, path: w.path, line: w.line }))).filter((w) => entities.has(w.entity))
+  const code = rows.filter((r) => r.facts?.code).map((r) => ({ repo: r.repo, extractor: r.extractor, code: r.facts.code }))
+  const b = bindItems(code, groups, entities, wiring)
+  Object.assign(out, { items: b.items, bindings: b.bindings, unresolved: b.unresolved })
+  const byId = new Map(b.items.map((it) => [it.id, it]))
+  const indexes = new Map() // entity → its fields by name
+  for (const bd of b.bindings) {
+    for (const id of bd.entities) {
+      const e = entities.get(id), pe = patch(e)
+      ;(pe.bound ||= []).push(bd)
+      if (bd.confidence === 'ambiguous') continue
+      // the item's fields on the table: one element per stored path, the attribute definition's when
+      // the infra types it too (a copy: the model is touched only once all is planned)
+      const fields = (pe.fields ||= e.fields.slice())
+      const index = (indexes.has(e) ? indexes : indexes.set(e, new Map(fields.map((x, i) => [x.name, i])))).get(e)
+      const it = byId.get(bd.item)
+      for (const f of it.fields) {
+        const at = index.has(f.path) ? index.get(f.path) : -1
+        if (at < 0) { index.set(f.path, fields.length); fields.push(itemField(f, bd, it.extractor)); continue }
+        const have = fields[at]
+        if ((have.item || []).some((x) => x.type === bd.type)) continue
+        fields[at] = { ...have, item: [...(have.item || []), itemOf(f, bd)], sources: [...have.sources, { repo: f.repo, path: f.file, line: f.line, kind: 'code', extractor: it.extractor, confidence: bd.confidence }] }
+      }
+    }
+  }
+  return { entities: patches, model: out }
 }
 
 function leaves(decls) {
@@ -50,13 +124,13 @@ function leaves(decls) {
 function merge(id, ds) {
   const compared = new Set(ds.some((d) => !d.partial) ? ds.filter((d) => !d.partial) : ds)
   const complete = ds.filter((d) => d.complete)
-  const source = (d, el) => ({ repo: d.repo, path: el?.path ?? d.source.path, line: el?.line ?? d.source.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(el?.as ? { as: el.as } : {}) })
+  const source = (d, el) => ({ repo: d.repo, path: el?.path ?? d.source.path, line: el?.line ?? d.source.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(el?.as ? { as: el.as } : {}), ...(d.member ? { member: d.member } : {}) })
   const slot = (map, key, make) => { if (!map.has(key)) map.set(key, { ...make(), sources: [], by: new Map() }); return map.get(key) }
   // an element a declaration states in two places (a Terraform table: the inputs that set it, and
   // the module's resource, its `via`) cites both, the line that states it first
   const note = (el, d, attrs, src, x) => {
     el.sources.push(src)
-    if (x?.via && !(x.via.path === src.path && x.via.line === src.line)) el.sources.push({ repo: d.repo, path: x.via.path, line: x.via.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(x.via.as ? { as: x.via.as } : {}) })
+    if (x?.via && !(x.via.path === src.path && x.via.line === src.line)) el.sources.push({ repo: d.repo, path: x.via.path, line: x.via.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(x.via.as ? { as: x.via.as } : {}), ...(d.member ? { member: d.member } : {}) })
     el.by.set(d, { attrs, src })
   }
 
@@ -101,10 +175,14 @@ export function storeSummary(st) {
   const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
   const tables = st.entities.filter((e) => e.kind === 'table'), views = st.entities.length - tables.length
   if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
-  const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0)
+  // the conflicts of its elements, and those across the declarations of a logical table it holds a
+  // member of (binding.mjs), counted once
+  const groups = new Map(st.entities.filter((e) => e.logical).map((e) => [e.logical.id, e.logical]))
+  const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0) + [...groups.values()].reduce((a, g) => a + g.conflicts.length, 0)
   if (st.dialect === 'dynamodb') {
     const k = (kind) => tables.reduce((a, e) => a + e.indexes.filter((i) => i.kind === kind).length, 0)
-    return [n(tables.length, 'table'), n(k('gsi'), 'GSI'), k('lsi') && n(k('lsi'), 'LSI'), conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
+    const items = new Set(tables.flatMap((e) => (e.bound || []).map((b) => b.item))).size
+    return [n(tables.length, 'table'), n(k('gsi'), 'GSI'), k('lsi') && n(k('lsi'), 'LSI'), items && `${n(items, 'item type')} bound`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
   }
   const implicit = Math.max(0, ...st.declarations.map((d) => d.implicitIndexes)) // the indexes SQLite builds for keys, beside the declared ones
   return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), `${n(tables.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')

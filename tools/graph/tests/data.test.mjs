@@ -77,6 +77,26 @@
 //      lines, the module's beside; an input from dependency.*.outputs unknown; a table grouped with
 //      the CreateTable file of its exact name, and their conflicts), secrets in neither graph.db nor
 //      the page, the key cards (the unknown drawn), a name template, a branch against its base
+//  25. item shapes and binding (fixtures/bind): Terraform tables named by a template in an infra
+//      repository, a function given two of them in its environment; an api repository with serde
+//      structs and conversions building `format!("{}-shop-…")` names, a TypeScript service reading
+//      ORDERS_TABLE, a test naming a table, a type no table pairs with, and local-dev CreateTable
+//      files (one named so its template matches, one not) → graph_data (the logical table and its
+//      local-dev against prod conflicts, each binding's confidence, evidence and rivals, the item
+//      tree, the unbound type), the key cards (item tree, bindings dashed below convention, rivals,
+//      conflicts across declarations, the item types list), a branch adding an item field and
+//      changing one (the base's code read aside), an item field addressed by a delta
+//
+//  (Part 1, continued) 24. item shapes and binding: names matched on a template's literal parts, no
+//      fuzzy matching; serde's case rules; logical tables; each binding rule on hand-written facts
+//      (env chain, name template in a function and in a file, a constant of another file, an exact
+//      name, the mapper hook, ambiguous with rivals, unbound, unresolved); types that hold themselves
+//      (newtypes, aliases), a wide graph of types and a file of many functions in bounded time, a
+//      failure while binding leaving the stores answered; serde's tagging of newtype variants in
+//      each mode; resolution within one language; two repositories' tables of one name kept apart;
+//      a table named only in test code; then, with the parser
+//      runtime, the serde and TypeScript extractors (every serde attribute, TypeScript's optional,
+//      unions, extends and intersections, the uses per function) and the shapes as stored
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -429,7 +449,7 @@ CREATE TABLE \`shelf_books\` (
 console.log('\n6 · finding and ordering migration folders')
 {
   eq(candidates(['a/down.sql', 'a/0001_x.down.sql', 'a/0001_x.up.sql', 'tests/fixtures/db/0001_a.sql', 'node_modules/pkg/0001_a.sql', 'db/0007_tests.sql', 'src/app.ts', 'drizzle/meta/0003_snapshot.json'], { exclude: [] }),
-    ['a/0001_x.up.sql', 'db/0007_tests.sql', 'drizzle/meta/0003_snapshot.json'], 'inputs: SQL but no down migration, nothing under test-support folders or dependencies (a migration named …_tests.sql is still one)')
+    ['a/0001_x.up.sql', 'db/0007_tests.sql', 'src/app.ts', 'drizzle/meta/0003_snapshot.json'], 'inputs: SQL but no down migration, nothing under test-support folders or dependencies (a migration named …_tests.sql is still one); a TypeScript source, for the item shapes')
   const info = new Map(Object.entries({
     'drizzle.config.ts': {}, 'drizzle/0000_a.sql': { ddl: 2 }, 'drizzle/0001_b.sql': { ddl: 1 }, 'drizzle/meta/_journal.json': {},
     'prisma/schema.prisma': {}, 'prisma/migrations/migration_lock.toml': {}, 'prisma/migrations/20240105090000_init/migration.sql': { ddl: 2 },
@@ -1775,7 +1795,7 @@ resource "aws_dynamodb_table" "c" {
     return extractAll({ paths: [...files.keys()], size: (p) => files.get(p).length, read: (p) => files.get(p) }, { exclude: [] }, [], {})
   }
   const rows = tfRun()
-  eq(rows.map((r) => [r.extractor, r.key, r.error || null]), [['dynamodb-table@1', 'local/tables/orders.json', null], ['terraform@1', 'modules/kv-tables', null], ['terraform@1', 'live/prod/legacy/terragrunt.hcl', null]],
+  eq(rows.map((r) => [r.extractor, r.key, r.error || null]), [['dynamodb-table@1', 'local/tables/orders.json', null], ['terraform@2', 'modules/kv-tables', null], ['terraform@2', 'live/prod/legacy/terragrunt.hcl', null]],
     'found by content: the module folder declaring a table resource is a job, the configuration whose module is out of reach another; the configuration of a remote module that is no table module, and the root and stage files, are none')
   const decl = rows[1].facts.declarations
   eq(decl.map((d) => [d.source.path, d.label, d.status]), [['live/prod/tables/terragrunt.hcl', 'Terraform module modules/kv-tables through Terragrunt, 3 tables', 'read']], 'one declaration per configuration that runs the module, at that configuration')
@@ -1952,6 +1972,301 @@ resource "aws_dynamodb_table" "events" {
   eq([tfLevel('m/main.tf', 'resource "aws_dynamodb_table" "t" {}'), tfLevel('m/x.tf', '# resource "aws_dynamodb_table"\nvariable "a" {}'), tfLevel('a/terragrunt.hcl', 'include "root" {}'), tfLevel('a/root.hcl', 'inputs = {}'), tfLevel('a/terragrunt.hcl', 'terraform {\n  source = "git::https://example.com/m.git//dynamodb"\n}'), tfLevel('a/terragrunt.hcl', 'terraform {\n  source = "../modules/dynamodb"\n}'), tfLevel('m/c.tf', 'module "t" {\n  source = "terraform-aws-modules/dynamodb-table/aws"\n}')],
     [TF_LEVEL.module, 1, TF_LEVEL.unit, 1, TF_LEVEL.remote, TF_LEVEL.unit, TF_LEVEL.remote], 'tfLevel: a module declares a table resource (not in a comment); a terragrunt.hcl is a configuration Terragrunt runs; a remote source naming a table module is out of reach; a local one is no such thing')
   eq(candidates(['m/main.tf', 'm/terraform.tfvars', 'm/x.auto.tfvars.json', 'live/terragrunt.hcl', 'm/tests/plan.tftest.hcl', 'm/.terraform.lock.hcl', 'live/.terragrunt-cache/abc/main.tf', 'm/plan.tftest.hcl'], { exclude: [] }), ['m/main.tf', 'm/terraform.tfvars', 'm/x.auto.tfvars.json', 'live/terragrunt.hcl'], 'the candidates: .tf, .tfvars(.json), .hcl; never a test file, a lock file or Terragrunt\'s cache')
+}
+
+// ── 24 · item shapes and binding ──
+console.log('\n24 · item shapes and binding: names matched on a template\'s literal parts (readers/names.mjs), serde\'s case rules, logical tables, bindings with their confidence and rivals (data/binding.mjs)')
+{
+  const { namesMatch, codeName, lastWord } = await import('../lib/data/readers/names.mjs')
+  const { renameField, renameVariant, RULES } = await import('../lib/data/extractors/serde.mjs')
+  const { logicalTables, bindItems, dashed, bindingHow } = await import('../lib/data/binding.mjs')
+  const T = '{env}-{project}-orders'
+  // the template's literal parts, its unknown parts wildcards; the code's {} anything it fills in
+  eq([['{}-shop-orders', T], ['test-shop-orders', T], ['{}-orders', T], ['{}-{}-orders', '{env}-shop-orders'], ['{}-shop-orders', 'local-shop-orders'], ['Orders', 'Orders']].map(([c, t]) => namesMatch(c, t)), [true, true, true, true, true, true],
+    'a name the code builds matches a template on its literal parts (a format! string, a literal, a wildcard holding several parts), and an exact name')
+  eq([['{}-{}', T], ['{}', T], ['orders', T], ['{}-shop-orders-archive', T], ['{}-shop-orders', '{env}-{project}-archived_orders'], ['test-shop-cart', '{env}-{project}-cart_items'], ['test-shop-cart_items', '{env}-{project}-cart'], ['{}', '{name}']].map(([c, t]) => namesMatch(c, t)), [false, false, false, false, false, false, false, false],
+    'the table\'s last word must be spelt by the code\'s literal characters, the whole name matched: no wildcard alone, no prefix or suffix of another name, a name wholly unknown matches nothing')
+  eq([['orders', 'Orders'], ['Order', 'Orders'], ['{}-shop-order', T], ['{}-Shop-Orders', '{env}-shop-orders'], ['{}-shop_orders', T]].map(([c, t]) => namesMatch(c, t)), [false, false, false, false, false],
+    'no fuzzy matching: no letter case folded, no plural, no separator swapped')
+  eq([codeName([null, '-shop-orders']), codeName(['test-shop-orders']), codeName(['id']), codeName(['a b']), codeName([null]), codeName(['123']), codeName([null, '-', null, '-', null, '-', null, '-', null, '-x'])], ['{}-shop-orders', 'test-shop-orders', null, null, null, null, null],
+    'codeName: what could name a table (DynamoDB\'s characters, 3 literal characters and a letter at least, few parts filled in)')
+  eq([lastWord(T), lastWord('Orders'), lastWord('{env}-cart_items'), lastWord('{name}')], ['orders', 'Orders', 'items', null], 'the distinctive part: the last word of the literal text')
+  // serde's case rules: a field's from snake_case, a variant's from PascalCase
+  eq(RULES.map((r) => renameField('created_at_utc', r)), ['created_at_utc', 'CREATED_AT_UTC', 'CreatedAtUtc', 'createdAtUtc', 'created_at_utc', 'CREATED_AT_UTC', 'created-at-utc', 'CREATED-AT-UTC'], 'rename_all on a field: every case style serde knows')
+  eq(RULES.map((r) => renameVariant('OnHold', r)), ['onhold', 'ONHOLD', 'OnHold', 'onHold', 'on_hold', 'ON_HOLD', 'on-hold', 'ON-HOLD'], 'rename_all on a variant: every case style serde knows')
+
+  // logical tables: one table declared in several places, grouped by its template, never by a guess
+  const ents = [['infra:dynamodb/{env}-{project}-orders', T], ['web:dynamodb/{env}-{project}-orders', T], ['api:dynamodb/local-shop-orders', 'local-shop-orders'], ['api:dynamodb/Orders', 'Orders'], ['api:dynamodb/orders', 'orders'],
+    ['infra:dynamodb/{env}-{project}-carts', '{env}-{project}-carts'], ['infra:dynamodb/{env}-carts', '{env}-carts'], ['api:dynamodb/dev-shop-carts', 'dev-shop-carts'], ['a:dynamodb/Reviews', 'Reviews'], ['b:dynamodb/Reviews', 'Reviews']].map(([id, name]) => ({ id, name }))
+  const lt = logicalTables(ents)
+  eq(lt.groups.filter((g) => g.members.length > 1).map((g) => [g.name, g.members, g.via]), [
+    [T, ['api:dynamodb/local-shop-orders', 'infra:dynamodb/{env}-{project}-orders', 'web:dynamodb/{env}-{project}-orders'], 'an exact name its template matches'],
+  ], 'grouped: one template in two stores, an exact name it matches; Orders and orders stay apart (no case folding), and so do two repositories\' Reviews (a bare name is no evidence across repositories)')
+  eq([...lt.notes].sort(), [['a:dynamodb/Reviews', 'b:dynamodb/Reviews also names a table Reviews: not grouped (the same name in two repositories is no evidence they are one table)'], ['api:dynamodb/dev-shop-carts', 'its name matches 2 name templates ({env}-carts, {env}-{project}-carts): grouped with none'], ['b:dynamodb/Reviews', 'a:dynamodb/Reviews also names a table Reviews: not grouped (the same name in two repositories is no evidence they are one table)']],
+    'an exact name two templates match joins neither, and two repositories\' tables of one name stay apart: each says why')
+  eq(lt.groups.filter((g) => g.name === 'Reviews').map((g) => [g.id, g.label]), [['table:a:dynamodb/Reviews', 'a:dynamodb/Reviews'], ['table:b:dynamodb/Reviews', 'b:dynamodb/Reviews']], 'two logical tables of one name are told apart by where they are declared')
+
+  // bindings, from hand-written code facts: each rule with its evidence, its confidence and its rivals
+  const groups = logicalTables([...[T, '{env}-{project}-customers', '{env}-{project}-carts', '{env}-{project}-saved_carts', '{env}-{project}-reviews'].map((n) => ({ id: `infra:dynamodb/${n}`, name: n })), { id: 'api:dynamodb/Orders', name: 'Orders' }]).groups
+  const entities = new Map(groups.flatMap((g) => g.members).map((id) => [id, { id, name: id.slice(id.indexOf('/') + 1) }]))
+  const wiring = [{ name: 'CUSTOMERS_TABLE', entity: 'infra:dynamodb/{env}-{project}-customers', repo: 'infra', path: 'main.tf', line: 30 }, { name: 'ORDERS_TABLE', entity: `infra:dynamodb/${T}`, repo: 'infra', path: 'main.tf', line: 31 }]
+  const ty = (name, line, extra = {}) => ({ name, kind: 'struct', line, end: line + 2, serde: true, fields: [{ name: 'id', raw: 'String', t: { k: 'string' }, nullable: false, default: null, line: line + 1 }], ...extra })
+  const fn = (name, line, x = {}) => ({ name, line, end: line + 5, converts: [], names: [], env: [], uses: [], ...x })
+  const row = (path, code) => ({ repo: 'api', extractor: 'serde@1', code: { path, lang: 'rust', types: [], consts: [], fns: [], notes: [], ...code } })
+  const code = [
+    row('src/model.rs', { types: [ty('Order', 1), ty('Customer', 5), ty('Cart', 9), ty('Review', 13), ty('Coupon', 17, { converts: 20 }), ty('Promo', 21), ty('Thing', 25), ty('Ledger', 29)] }),
+    row('src/orders.rs', { fns: [fn('put_order', 3, { converts: [{ type: 'Order', line: 4, how: 'to_item' }], names: [{ text: '{}-shop-orders', line: 5 }] })] }),
+    row('src/customers.rs', { fns: [fn('load', 3, { converts: [{ type: 'Customer', line: 6, how: 'from_item' }], env: [{ name: 'CUSTOMERS_TABLE', line: 4 }] }), fn('old', 10, { names: [{ text: '{}-shop-orders', line: 11 }] })] }),
+    row('src/carts.rs', { fns: [fn('save_for_later', 3, { converts: [{ type: 'Cart', line: 4, how: 'to_item' }], names: [{ text: '{}-shop-saved_carts', line: 5 }, { text: '{}-shop-carts', line: 6 }] })] }),
+    row('src/reviews.rs', { fns: [fn('put', 3, { converts: [{ type: 'Review', line: 4, how: 'to_item' }] }), fn('tests::names_its_table', 20, { test: true, names: [{ text: 'test-shop-reviews', line: 21 }] })] }),
+    row('src/config.rs', { consts: [{ name: 'ORDERS', line: 2, names: [], env: [{ name: 'ORDERS_TABLE', line: 2 }] }] }),
+    row('src/admin.rs', { types: [ty('Export', 1), ty('Thing', 4)], fns: [fn('export', 5, { converts: [{ type: 'Export', line: 6, how: 'to_item' }], uses: ['ORDERS'] })] }),
+    row('src/local.rs', { fns: [fn('seed', 12, { converts: [{ type: 'Promo', line: 13, how: 'to_item' }], names: [{ text: 'Orders', line: 14 }] })] }),
+    row('src/other.rs', { fns: [fn('x', 1, { converts: [{ type: 'Thing', line: 2, how: 'from_item' }] })] }),
+    row('src/ledger.rs', { fns: [fn('put', 3, { converts: [{ type: 'Ledger', line: 4, how: 'to_item' }], names: [{ text: '{}-shop-reviews', line: 5 }] }), fn('tests::seeds_carts', 20, { test: true, converts: [{ type: 'Ledger', line: 21, how: 'to_item' }], names: [{ text: '{}-shop-carts', line: 22 }] })] }),
+  ]
+  code.push({ repo: 'api', extractor: 'serde@1', code: { path: 'src/mapped.rs', lang: 'rust', types: [ty('Sku', 1)], consts: [], fns: [], notes: [], mappers: [{ type: 'Sku', table: '{env}-{project}-reviews', line: 1 }] } })
+  const B = bindItems(code, groups, entities, wiring)
+  const by = (item) => B.bindings.filter((b) => b.item === item).map((b) => [b.table, b.confidence, b.via, b.pairing, b.rivals.map((r) => `${r.table} ${r.confidence}`)])
+  eq(by('api:Customer'), [['{env}-{project}-customers', 'convention', 'env', 'function', [`${T} name-match`]]], 'env chain: the function reads the variable the infra sets to the table: convention; a name built in another function of the file is a weaker rival')
+  eq(B.bindings.find((b) => b.item === 'api:Customer').evidence.map((x) => [x.what, x.text, `${x.path}:${x.line}`]), [['converts', 'Customer (from_item) in load', 'src/customers.rs:6'], ['reads', 'CUSTOMERS_TABLE', 'src/customers.rs:4'], ['sets', `CUSTOMERS_TABLE = {env}-{project}-customers`, 'main.tf:30']], '… with its evidence: the conversion, the read, the infra line that sets it')
+  eq(by('api:Order'), [[T, 'name-match', 'nameTemplate', 'function', []]], 'name template: a format string its template matches, in the function that converts it: name-match')
+  eq(by('api:Cart'), [['{env}-{project}-carts', 'ambiguous', 'nameTemplate', 'function', ['{env}-{project}-saved_carts ambiguous']], ['{env}-{project}-saved_carts', 'ambiguous', 'nameTemplate', 'function', ['{env}-{project}-carts ambiguous']]], 'two tables at the best rank: each ambiguous, the other its rival')
+  ok(dashed('ambiguous') && dashed('name-match') && !dashed('convention') && !dashed('declared'), 'below convention a binding is drawn dashed')
+  eq([by('api:Review'), B.bindings.find((b) => b.item === 'api:Review').evidence.map((x) => [x.what, x.test || false])], [[['{env}-{project}-reviews', 'name-match', 'nameTemplate', 'file', []]], [['converts', false], ['builds', true]]], 'co-occurrence in one file only (a test names the table): name-match, the test code said')
+  eq(B.bindings.filter((b) => b.item === 'api:Export').map((b) => [b.table, b.via, b.pairing, b.confidence, b.evidence.map((x) => `${x.what} ${x.path}:${x.line}`)]), [[T, 'env', 'function', 'convention', ['converts src/admin.rs:6', 'const src/config.rs:2', 'reads src/config.rs:2', 'sets main.tf:31']]],
+    'a constant of another file the function reads counts as its own: the env chain through it, in one function')
+  eq(by('api:Promo'), [['Orders', 'name-match', 'nameTemplate', 'function', []]], 'an exact name the code spells binds the table of that name, and only it (Orders, never {env}-{project}-orders)')
+  eq(by('api:Sku'), [['{env}-{project}-reviews', 'declared', 'mapper', 'mapper', []]], 'the mapper hook: a binding a mapper declares is declared')
+  eq(by('api:Ledger'), [['{env}-{project}-reviews', 'name-match', 'nameTemplate', 'function', ['{env}-{project}-carts name-match']]], 'a conversion in test code ranks below the code it tests: the test that builds a ledger item for the carts fixture is a rival, not a tie')
+  eq(B.items.filter((it) => !it.bound.length).map((it) => [it.id, it.converts.map((c) => c.how)]), [['api:Coupon', ['implements a conversion']]], 'a type implementing a conversion that no table name pairs with is unbound')
+  eq(B.unresolved.map((u) => [u.type, u.path]), [['Thing', 'src/other.rs']], 'a conversion of a name with two definitions and none in its file is not resolved, and said')
+
+  // ── the review's round: cycles, work bounds, serde tagging of newtype variants, languages, repositories ──
+  const types1 = (lang, path, types) => ({ repo: 'r', extractor: lang === 'rust' ? 'serde@1' : 'ts-types@1', code: { path, lang, types, consts: [], fns: [], notes: [] } })
+  const st = (name, fields, extra = {}) => ({ name, kind: 'struct', line: 1, end: 2, serde: true, fields, ...extra })
+  const fl = (name, t, extra = {}) => ({ name, raw: name, t, nullable: false, default: null, line: 1, ...extra })
+  const R = (n) => ({ k: 'ref', n })
+  const shapeOf = (rows, name) => { const it = bindItems(rows, [], new Map(), []).items.find((x) => x.name === name); return it ? it.fields.map((f) => `${f.path} ${f.kind}${f.nullable ? '?' : ''}${f.values ? ` [${f.values.join(',')}]` : ''}`) : null }
+  const cycles = [
+    ['a Rust newtype holding itself', 'rust', [st('Node', [], { newtype: { k: 'ref', n: 'Node', nullable: true } }), st('Z', [fl('n', R('Node'))], { converts: 9 })]],
+    ['two Rust newtypes holding each other', 'rust', [st('A', [], { newtype: R('B') }), st('B', [], { newtype: R('A') }), st('Z', [fl('n', R('A'))], { converts: 9 })]],
+    ['a Rust newtype of a list of itself', 'rust', [st('L', [], { newtype: { k: 'list', of: R('L') } }), st('Z', [fl('n', R('L'))], { converts: 9 })]],
+    ['a TypeScript alias of itself', 'ts', [{ name: 'A', kind: 'alias', line: 1, end: 1, serde: true, fields: [], alias: R('A') }, { name: 'Z', kind: 'interface', line: 2, end: 2, serde: true, fields: [fl('f', R('A'))], converts: 9 }]],
+    ['two TypeScript aliases of each other', 'ts', [{ name: 'A', kind: 'alias', line: 1, end: 1, serde: true, fields: [], alias: R('B') }, { name: 'B', kind: 'alias', line: 2, end: 2, serde: true, fields: [], alias: R('A') }, { name: 'Z', kind: 'interface', line: 3, end: 3, serde: true, fields: [fl('f', R('A'))], converts: 9 }]],
+  ]
+  for (const [what, lang, ts] of cycles) {
+    let got
+    try { got = shapeOf([types1(lang, lang === 'rust' ? 'a.rs' : 'a.ts', ts)], 'Z') } catch (e) { got = `throws ${e.constructor.name}: ${String(e.message).slice(0, 60)}` }
+    ok(Array.isArray(got) && got.length >= 1 && got.length <= 2 && /^[nf] /.test(got[0]), `${what}: the shape stops at the type already followed, a leaf (${JSON.stringify(got)})`)
+  }
+  // whatever a project's code says, reconcile answers: an unexpected failure of the binding is a note
+  const broken = reconcile([{ repo: 'app', extractor: 'dynamodb-table@1', facts: dynamodbTable.extract('{ "TableName": "a", "KeySchema": [{ "AttributeName": "id", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "id", "AttributeType": "S" }] }', 'a.json') }, { repo: 'app', extractor: 'serde@1', facts: { declarations: [], code: { path: 'x.rs', lang: 'rust', types: 7, consts: [], fns: [] } } }])
+  eq([broken.stores.map((s) => s.entities.map((e) => e.name)), broken.items, broken.bindings, /^the item shapes were not bound: /.test(broken.itemsError || '')], [[['a']], [], [], true], 'a failure while binding item shapes leaves the stores answered, and says so')
+
+  // work bounds: a wide graph of types, and a file of many functions, each in bounded time
+  const dag = Array.from({ length: 10 }, (_, i) => st(`T${i}`, Array.from({ length: 12 }, (_, k) => fl(`f${k}`, R(`T${i + 1}`))), i === 0 ? { converts: 9 } : {})).concat([st('T10', [fl('leaf', { k: 'number' })])])
+  let t0 = Date.now()
+  const wide = bindItems([types1('rust', 'dag.rs', dag)], [], new Map(), []).items.find((x) => x.name === 'T0')
+  const wideMs = Date.now() - t0
+  ok(wideMs < 3000 && wide.fields.length === 400 && wide.notes.some((n) => /cut at 400 fields/.test(n)), `ten types of twelve fields each holding the next: expanded once per type, cut at 400 fields and said so (${wideMs} ms, ${wide.fields.length} fields, ${JSON.stringify(wide.notes)})`)
+  const many = { repo: 'r', extractor: 'serde@1', code: { path: 'many.rs', lang: 'rust', types: Array.from({ length: 40 }, (_, k) => st(`C${k}`, [fl('id', { k: 'string' })])), consts: [], notes: [],
+    fns: Array.from({ length: 300 }, (_, i) => fn(`f${i}`, i * 10, { converts: Array.from({ length: 40 }, (_, k) => ({ type: `C${k}`, line: i * 10 + 1, how: 'to_item' })), names: Array.from({ length: 40 }, (_, k) => ({ text: `{}-shop-t${k}`, line: i * 10 + 2 })) })) } }
+  const tgroups = logicalTables(Array.from({ length: 40 }, (_, k) => ({ id: `infra:dynamodb/{env}-{project}-t${k}`, name: `{env}-{project}-t${k}` }))).groups
+  t0 = Date.now()
+  const mb = bindItems([many], tgroups, new Map(tgroups.flatMap((g) => g.members).map((id) => [id, { id, name: id.slice(id.indexOf('/') + 1) }])), [])
+  const manyMs = Date.now() - t0
+  ok(manyMs < 3000 && mb.bindings.length === 40 * 40 && mb.bindings.every((b) => b.confidence === 'ambiguous' && b.sites === 300), `300 functions each converting 40 types and naming 40 tables: paired per type and table, not per conversion and name (${manyMs} ms, ${mb.bindings.length} bindings)`)
+
+  // serde's tagging of newtype variants (internally tagged: the variant's struct beside the tag;
+  // adjacently tagged: the variant's type at the content key; untagged: inline; externally: under its name)
+  const ev = (name, variants, extra) => ({ name, kind: 'enum', line: 3, end: 4, serde: true, fields: [], variants, converts: 9, ...extra })
+  const V = (name, x = {}) => ({ name, line: 3, ...x })
+  const tagRows = [types1('rust', 'ev.rs', [st('Created', [fl('id', { k: 'string' }), fl('at', { k: 'number' })]), st('Deleted', [fl('id', { k: 'string' })]),
+    ev('Internal', [V('Created', { t: R('Created') }), V('Deleted', { t: R('Deleted') }), V('Bare', { t: { k: 'string' } }), V('Gone', { unit: true })], { tag: 'type' }),
+    ev('Adjacent', [V('Created', { t: R('Created') }), V('Note', { t: { k: 'string' } }), V('Moved', { fields: [fl('to', { k: 'string' })] })], { tag: 'kind', content: 'payload' }),
+    ev('Untagged', [V('Created', { t: R('Created') }), V('Deleted', { t: R('Deleted') })], { untagged: true }),
+    ev('External', [V('Made', { t: R('Created') }), V('Count', { t: { k: 'number' } }), V('Off', { unit: true }), V('Moved', { fields: [fl('to', { k: 'string' })] })]),
+  ])]
+  eq(shapeOf(tagRows, 'Internal'), ['type enum [Created,Deleted,Bare,Gone]', 'id string', 'at number'], 'internally tagged: a newtype variant\'s struct stored beside the tag')
+  ok(bindItems(tagRows, [], new Map(), []).items.find((x) => x.name === 'Internal').notes.some((n) => n.includes('Internal::Bare') && n.includes('serde rejects')), 'internally tagged, a newtype of a string: serde rejects it, and the shape says so')
+  eq(shapeOf(tagRows, 'Adjacent'), ['kind enum [Created,Note,Moved]', 'payload any', 'payload.id string', 'payload.at number', 'payload.to string'], 'adjacently tagged: each variant\'s value at the content key (a struct\'s fields under it, a string the value itself, so its kind is any)')
+  eq(shapeOf(tagRows, 'Untagged'), ['id string', 'at number'], 'untagged: the newtype variants\' structs inline')
+  eq(shapeOf(tagRows, 'External'), ['Made object?', 'Made.id string', 'Made.at number', 'Count number?', 'Moved object?', 'Moved.to string'], 'externally tagged: one member per variant (a unit variant none)')
+
+  // languages: a name resolves among the types of its own language
+  const homRows = [types1('rust', 'src/model.rs', [st('Order', [fl('id', { k: 'string' })]), st('Wrapper', [fl('status', R('Status')), fl('id', { k: 'string' })], { converts: 9 })]),
+    { repo: 'r', extractor: 'serde@1', code: { path: 'src/puts.rs', lang: 'rust', types: [], consts: [], notes: [], fns: [fn('put', 1, { converts: [{ type: 'Order', line: 2, how: 'to_item' }] })] } },
+    types1('ts', 'web/order.ts', [{ name: 'Order', kind: 'interface', line: 1, end: 1, serde: true, fields: [fl('orderId', { k: 'string' })] }, { name: 'Status', kind: 'alias', line: 2, end: 2, serde: true, fields: [], values: ['draft', 'sent'] }])]
+  const hom = bindItems(homRows, [], new Map(), [])
+  eq([hom.unresolved, hom.items.map((it) => [it.id, it.lang, it.path])], [[], [['r:Order', 'rust', 'src/model.rs'], ['r:Wrapper', 'rust', 'src/model.rs']]], 'a Rust conversion of Order resolves to the Rust Order, never the TypeScript one of the same repository')
+  eq(shapeOf(homRows, 'Wrapper'), ['status ref', 'id string'], 'a Rust field typed by a type serde does not shape stays its name: never the TypeScript type of that name')
+
+  // repositories: a bare name is no evidence across them (two repositories' own sessions tables)
+  const sess = (repo) => ({ repo, extractor: 'dynamodb-table@1', facts: dynamodbTable.extract(`{ "TableName": "sessions", "KeySchema": [{ "AttributeName": "${repo === 'api' ? 'sid' : 'invoice'}", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "${repo === 'api' ? 'sid' : 'invoice'}", "AttributeType": "S" }] }`, 'tables/sessions.json') })
+  const two = reconcile([sess('api'), sess('billing'), { repo: 'api', extractor: 'serde@1', facts: { declarations: [], code: { path: 'src/sess.rs', lang: 'rust', notes: [], consts: [], types: [st('LoginSession', [fl('sid', { k: 'string' }), fl('user', { k: 'string' })])], fns: [fn('save', 3, { converts: [{ type: 'LoginSession', line: 4, how: 'to_item' }], names: [{ text: 'sessions', line: 5 }] })] } } }])
+  const sOf = (id) => two.stores.flatMap((s) => s.entities).find((e) => e.id === id)
+  eq([two.logical, two.bindings.map((b) => [b.type, b.table, b.confidence, b.entities]), sOf('billing:dynamodb/sessions').fields.map((f) => f.name), (sOf('billing:dynamodb/sessions').bound || []).length, sOf('api:dynamodb/sessions').fields.map((f) => f.name)],
+    [[], [['LoginSession', 'api:dynamodb/sessions', 'name-match', ['api:dynamodb/sessions']]], ['invoice'], 0, ['sid', 'user']],
+    'two repositories each with their own sessions table: not one table, no conflict between them; the api code\'s literal binds its own repository\'s table only, and its fields stay off the other')
+
+  // a table named only in test code says so, and ranks no higher than a name-match
+  const tq = bindItems([types1('rust', 'src/probe.rs', [st('Probe', [fl('id', { k: 'string' })])]), { repo: 'r', extractor: 'serde@1', code: { path: 'src/probe_repo.rs', lang: 'rust', types: [], consts: [], notes: [], fns: [fn('put', 1, { converts: [{ type: 'Probe', line: 2, how: 'to_item' }] }), fn('tests::reads_the_table', 9, { test: true, env: [{ name: 'CUSTOMERS_TABLE', line: 10 }] })] } }], groups, entities, wiring)
+  eq(tq.bindings.map((b) => [b.table, b.confidence, b.via, b.pairing, b.testOnly, bindingHow(b)]), [['{env}-{project}-customers', 'name-match', 'env', 'file', true, 'an environment variable the infra sets, in one file, named only in test code']], 'the variable is read only in a test: name-match, said to be named only in test code')
+
+  // the extractors, through the pinned grammars
+  const deps = await import('../lib/deps.mjs')
+  if (!deps.findDeps()) {
+    if (process.env.CI) { FAIL++; console.log('   ✗ FAIL: parser runtime missing (run npm ci --prefix tools/graph)') } else console.log('   - extractors skipped: parser runtime not installed (npm ci --prefix tools/graph)')
+  } else {
+    const rt = await deps.loadRuntime({ install: false })
+    const ps = { rust: await rt.parserFor('rust'), typescript: await rt.parserFor('typescript'), tsx: await rt.parserFor('tsx') }
+    const ctx = { tree: (lang, t) => ps[lang].parse(t) }
+    const { default: serde } = await import('../lib/data/extractors/serde.mjs')
+    const { default: tsTypes } = await import('../lib/data/extractors/ts-types.mjs')
+    const RS = [
+      'use serde::{Deserialize, Serialize};',
+      '#[derive(Debug, Serialize, Deserialize)]',
+      '#[serde(rename_all = "camelCase")]',
+      'pub struct Order {',
+      '    pub order_id: String,',
+      '    #[serde(rename = "pk")]',
+      '    pub key: String,',
+      '    pub r#type: Kind,',
+      '    pub note: Option<String>,',
+      '    #[serde(skip_serializing_if = "Vec::is_empty")]',
+      '    pub tags: Vec<String>,',
+      '    #[serde(default)]',
+      '    pub gift: bool,',
+      '    #[serde(default = "zero")]',
+      '    pub retries: u32,',
+      '    #[serde(skip)]',
+      '    pub cache: Option<u64>,',
+      '    #[serde(skip_serializing)]',
+      '    pub digest: String,',
+      '    #[serde(skip_deserializing)]',
+      '    pub computed: u32,',
+      '    #[serde(flatten)]',
+      '    pub audit: Audit,',
+      '    pub lines: Vec<Line>,',
+      '    pub prices: HashMap<String, Price>,',
+      '    pub shipping: Box<Address>,',
+      '    #[serde(rename(serialize = "st", deserialize = "state"))]',
+      '    pub status: Status,',
+      '    pub pay: Payment,',
+      '    pub legacy: Legacy,',
+      '    pub ext: External,',
+      '}',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(default)]',
+      'pub struct Audit { pub created_at: String, pub by: Option<UserId> }',
+      '#[derive(Serialize, Deserialize)]',
+      'pub struct UserId(String);',
+      '#[derive(Serialize, Deserialize)]',
+      'pub struct Line { pub sku: String }',
+      '#[derive(Serialize, Deserialize)]',
+      'pub struct Price { pub cents: i64 }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(transparent)]',
+      'pub struct Address { pub text: String }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(rename_all = "snake_case")]',
+      'pub enum Status { Open, OnHold }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(tag = "type", rename_all = "lowercase", rename_all_fields = "camelCase")]',
+      'pub enum Payment { Card { last_four: String }, #[serde(rename = "wire")] Bank { iban_hash: String }, Cash }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(untagged)]',
+      'pub enum Legacy { V1 { old: String }, V2 { new_name: String } }',
+      '#[derive(Serialize, Deserialize)]',
+      'pub enum External { A { x: u8 }, B(u8), C }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(tag = "kind")]',
+      'pub struct Event { pub id: String }',
+      'pub struct Plain { pub a: u8 }',
+      'const ORDERS: &str = "orders-v2";',
+      'static TABLE: Lazy<String> = Lazy::new(|| std::env::var("ORDERS_TABLE").unwrap());',
+      'impl Event { pub fn to_dynamo_item(&self) -> Item { serde_dynamo::to_item(self).unwrap() } }',
+      'pub async fn put(client: &Client, stage: &str, order: &Order) -> Result<Option<Line>, Error> {',
+      '    let item = serde_dynamo::to_item(order)?;',
+      '    client.put_item().table_name(format!("{}-shop-orders", stage)).table_name(ORDERS).send().await?;',
+      '    let e: Event = serde_dynamo::from_item(item.clone())?;',
+      '    let ps = serde_dynamo::from_items::<_, Price>(items)?;',
+      '    let a = Audit::from_dynamo_item(item.clone());',
+      '    let t = std::env::var("PRICES_TABLE")?;',
+      '    Ok(out.item.map(|i| serde_dynamo::from_item(i)).transpose()?)',
+      '}',
+      '#[cfg(test)]',
+      'mod tests { #[test] fn t() { let x = "test-shop-orders"; } }',
+    ].join('\n')
+    const rc = serde.extract(RS, 'src/model.rs', ctx).code
+    const order = rc.types.find((t) => t.name === 'Order')
+    eq(order.fields.map((f) => [f.name, f.ident ?? null, f.nullable, f.default, !!f.flatten]), [
+      ['orderId', 'order_id', false, null, false], ['pk', 'key', false, null, false], ['type', null, false, null, false], ['note', null, true, null, false], ['tags', null, true, null, false],
+      ['gift', null, false, 'Default::default()', false], ['retries', null, false, 'zero', false], ['computed', null, false, null, false], ['audit', null, false, null, true], ['lines', null, false, null, false],
+      ['prices', null, false, null, false], ['shipping', null, false, null, false], ['st', 'status', false, null, false], ['pay', null, false, null, false], ['legacy', null, false, null, false], ['ext', null, false, null, false],
+    ], 'serde: rename_all camelCase, rename (and its serialize half), r#type stored as type, Option and skip_serializing_if nullable, default bare and with its function, skip_deserializing kept, flatten marked')
+    eq(order.skipped, [{ ident: 'cache', why: 'skip' }, { ident: 'digest', why: 'skip_serializing' }], 'skip and skip_serializing: never stored, so not in the shape (listed)')
+    eq(rc.types.map((t) => t.name), ['Order', 'Audit', 'UserId', 'Line', 'Price', 'Address', 'Status', 'Payment', 'Legacy', 'External', 'Event'], 'the types serde shapes (a struct with no derive is left out)')
+    eq([rc.types.find((t) => t.name === 'Payment').variants.map((v) => [v.name, v.ident ?? null, (v.fields || []).map((f) => f.name)]), rc.types.find((t) => t.name === 'Status').variants.map((v) => v.name)],
+      [[['card', 'Card', ['lastFour']], ['wire', 'Bank', ['ibanHash']], ['cash', 'Cash', []]], ['open', 'on_hold']], 'an enum: rename_all on its variants, a variant\'s rename, rename_all_fields on its struct variants\' fields')
+    eq(rc.fns.map((f) => [f.name, f.converts.map((c) => `${c.type} ${c.how}`), f.names.map((n) => n.text), f.env.map((e) => e.name), f.uses, !!f.test]), [
+      ['Event::to_dynamo_item', ['Event to_item'], [], [], [], false],
+      ['put', ['Order to_item', 'Event from_item', 'Price from_items', 'Audit from_dynamo_item', 'Line from_item'], ['{}-shop-orders'], ['PRICES_TABLE'], ['ORDERS'], false],
+      ['t', [], ['test-shop-orders'], [], [], true],
+    ], 'uses per function (a method named by its type): each conversion\'s type (self in its impl, an argument\'s, a typed let, the turbofish, the path, the return type), the format! name, the environment read, the constant read; test code marked')
+    eq([rc.consts.map((c) => [c.name, c.names.map((n) => n.text), c.env.map((e) => e.name)]), rc.types.find((t) => t.name === 'Event').converts], [[['ORDERS', ['orders-v2'], []], ['TABLE', [], ['ORDERS_TABLE']]], 62], 'constants holding a name or reading the environment; a type implementing a conversion')
+    // the shape as stored, nested by path (data/binding.mjs)
+    const shape = (rows, item) => bindItems(rows, [], new Map(), []).items.find((it) => it.name === item).fields.map((f) => `${f.path} ${f.kind}${f.nullable ? '?' : ''}${f.values ? ` [${f.values.join(',')}]` : ''}`)
+    const rsRows = [{ repo: 'api', extractor: 'serde@1', code: rc }]
+    eq(shape(rsRows, 'Order'), ['orderId string', 'pk string', 'type ref', 'note string?', 'tags list?', 'gift bool', 'retries number', 'computed number', 'created_at string', 'by string?', 'lines list', 'lines[].sku string', 'prices map', 'prices{}.cents number',
+      'shipping string', 'st enum [open,on_hold]', 'pay object', 'pay.type enum [card,wire,cash]', 'pay.lastFour string', 'pay.ibanHash string', 'legacy object', 'legacy.old string', 'legacy.new_name string', 'ext object', 'ext.A object?', 'ext.A.x number', 'ext.B number?'],
+      'the item as stored: flatten inlines (the flattened type\'s own rules), a newtype and a transparent struct are what they hold, a unit enum its stored names, a list\'s elements under [], a map\'s values under {}, internal tagging (the tag beside the fields), untagged, external (one member per variant, a unit variant none); a type no file defines kept as its name')
+    eq([shape(rsRows, 'Event'), rc.types.find((t) => t.name === 'Event').tag], [['kind enum [Event]', 'id string'], 'kind'], 'a struct\'s tag stores its own name beside its fields')
+
+    const TSX = [
+      'export interface Base { id: string; createdAt: string }',
+      'export interface Order extends Base {',
+      "  status: 'open' | 'paid'",
+      '  note?: string',
+      '  total: number | null',
+      '  lines: Line[]',
+      '  tags: Array<string>',
+      '  prices: Record<string, Price>',
+      '  shipping: { city: string; zip?: string }',
+      '  at: Date',
+      '}',
+      'export interface Line { sku: string; qty: number }',
+      'export type Price = { cents: number }',
+      "export type Status = 'a' | 'b'",
+      'export type Named = Base & { name: string; status: Status }',
+      'const TABLE = process.env.ORDERS_TABLE',
+      'export async function save(o: Order) { await doc.send(new PutCommand({ TableName: TABLE, Item: o })) }',
+      'export const load = async (): Promise<Named> => { const r = await doc.send(new GetCommand({ TableName: `${process.env.STAGE}-shop-named`, Key: {} })); return r.Item as Named }',
+      "export function convert(item: Record<string, unknown>) { const l = unmarshall(item) as Line; return 'line-' + l.sku }",
+      'class Repo { private table = process.env.REPO_TABLE; async put(x: Price) { return this.client.send(new PutCommand({ TableName: this.table, Item: marshall(x) })) } }',
+    ].join('\n')
+    const tc = tsTypes.extract(TSX, 'src/orders.ts', ctx).code
+    eq(tc.types.map((t) => [t.name, t.kind, t.fields.map((f) => `${f.name}${f.nullable ? '?' : ''}`), t.extends ?? null, t.values ?? null]), [
+      ['Base', 'interface', ['id', 'createdAt'], null, null], ['Order', 'interface', ['status', 'note?', 'total?', 'lines', 'tags', 'prices', 'shipping', 'at'], ['Base'], null], ['Line', 'interface', ['sku', 'qty'], null, null],
+      ['Price', 'alias', ['cents'], null, null], ['Status', 'alias', [], null, ['a', 'b']], ['Named', 'alias', ['name', 'status'], ['Base'], null],
+    ], 'TypeScript: interfaces and type aliases, `?` and `| null` nullable, extends and & kept, a union of string literals an enum')
+    eq(tc.fns.map((f) => [f.name, f.converts.map((c) => `${c.type} ${c.how}`), f.names.map((n) => n.text), f.env.map((e) => e.name), f.uses]), [
+      ['save', ['Order Item'], [], [], ['TABLE']], ['load', ['Named Item as'], ['{}-shop-named'], ['STAGE'], []], ['convert', ['Line unmarshall'], ['line-{}'], [], []], ['Repo.put', ['Price marshall'], [], [], ['Repo.table']],
+    ], 'uses per function: an Item member, `.Item as T`, unmarshall(…) as T, marshall(x) of a typed parameter; a template literal\'s name and the environment it reads, a concatenation\'s name; a file constant and a class\'s own field read')
+    eq(tc.consts.map((c) => [c.name, c.env.map((e) => e.name)]), [['TABLE', ['ORDERS_TABLE']], ['Repo.table', ['REPO_TABLE']]], 'constants: a file-level const, a class field')
+    const tsRows = [{ repo: 'web', extractor: 'ts-types@1', code: tc }]
+    eq(shape(tsRows, 'Order'), ['id string', 'createdAt string', 'status enum [open,paid]', 'note string?', 'total number?', 'lines list', 'lines[].sku string', 'lines[].qty number', 'tags list', 'prices map', 'prices{}.cents number', 'shipping object', 'shipping.city string', 'shipping.zip string?', 'at string'],
+      'the TypeScript item as stored: what it extends first, nested object types, list elements and map values by path')
+    eq(shape(tsRows, 'Named'), ['id string', 'createdAt string', 'name string', 'status enum [a,b]'], 'an intersection inlines the type it names; a field typed by an alias of literals is an enum')
+    // a base's code is read aside in batches; a file that kills the reader fails alone
+    const { extractAside } = await import('../lib/data/readers/code-aside.mjs')
+    process.env.GRIMOIRE_TEST_ASIDE_CRASH = 'src/b.rs'
+    let aside
+    try { aside = extractAside([{ id: 'serde', path: 'src/a.rs', text: RS }, { id: 'serde', path: 'src/b.rs', text: RS }, { id: 'ts-types', path: 'src/c.ts', text: TSX }]) } finally { delete process.env.GRIMOIRE_TEST_ASIDE_CRASH }
+    eq([aside.get('src/a.rs')?.code?.types?.length, aside.get('src/b.rs') instanceof Error ? aside.get('src/b.rs').message : null, aside.get('src/c.ts')?.code?.types?.length], [rc.types.length, 'the code reader stopped (70): not read', tc.types.length],
+      'a batch the reader dies on is read again file by file: the file that killed it fails alone, the others are read')
+  }
 }
 
 // ════ Part 2 · through call(), on an indexed project ════
@@ -2247,14 +2562,14 @@ async function indexed() {
     const kq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: KV })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const kidx = await kq('index')
     ok(/lending: /.test(kidx) && !kidx.includes('failure'), `index: the YAML template and the JSON tables read, no extractor failure (${kidx.split('\n').find((l) => l.startsWith('lending')) || kidx})`)
-    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@1\nlocal/tables/loans.json\tdynamodb-table@1\ntemplate.yaml\tcloudformation@1',
-      'found by content: the template and the two CreateTable files are jobs; the CI workflow and the settings file (JSON and YAML declaring no table) are not')
+    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@1\nlocal/tables/loans.json\tdynamodb-table@1\nsrc/handler.ts\tts-types@1\ntemplate.yaml\tcloudformation@2',
+      'found by content: the template and the two CreateTable files are jobs, and the handler for its item shapes; the CI workflow and the settings file (JSON and YAML declaring no table) are not')
     const klist = await kq('data')
     eq(klist.split('\n').slice(1), [
       'lending:dynamodb  dynamodb  3 tables · 2 GSIs · 1 LSI · 4 conflicts',
       '  infra  dynamodb-table@1  CreateTable input  lending/local/tables/fines.json',
       '  infra  dynamodb-table@1  CreateTable input  lending/local/tables/loans.json',
-      '  infra  cloudformation@1  SAM template, 2 tables  lending/template.yaml',
+      '  infra  cloudformation@2  SAM template, 2 tables  lending/template.yaml',
       '    note: HoldsTable: its TableName is !Sub ${AWS::StackName}-holds, a reference, not resolved: named by its logical id',
     ], 'graph_data: the repository\'s key-value store, every declaration labelled with its kind and format, the reference noted as unresolved')
     eq(await kq('data', { store: 'lending:dynamodb' }), [
@@ -2265,7 +2580,7 @@ async function indexed() {
     ].join('\n'), 'graph_data store: each table with its keys, indexes, TTL, billing and stream (where two declarations disagree, the first\'s, by kind then path, as for SQL; the conflicts say the rest), citing every declaration')
     eq(await kq('data', { entity: 'loans' }), [
       'lending:dynamodb/loans  table  (dynamodb)',
-      '  declared at lending/local/tables/loans.json:2 [infra dynamodb-table@1] · lending/template.yaml:16 [infra cloudformation@1, LoansTable (AWS::DynamoDB::Table)]',
+      '  declared at lending/local/tables/loans.json:2 [infra dynamodb-table@1] · lending/template.yaml:16 [infra cloudformation@2, LoansTable (AWS::DynamoDB::Table)]',
       '  PAY_PER_REQUEST · no stream',
       'Attributes (5):',
       '  memberId  S  a key of the table  — lending/local/tables/loans.json:4 · lending/template.yaml:21',
@@ -2336,7 +2651,7 @@ async function indexed() {
     mkdirSync(path.dirname(HUGE), { recursive: true })
     writeFileSync(HUGE, `Resources:\n  T:\n    Type: AWS::DynamoDB::Table\n# ${'x'.repeat(2 << 20)}\n`)
     const hidx = await kq('index')
-    ok(hidx.includes('infra/huge.yaml (cloudformation@1): the YAML is larger than 512 KB: not read') && (await kq('status')).includes('extractor failure(s): cloudformation@1 on lending/infra/huge.yaml: the YAML is larger than 512 KB: not read'), `a YAML template past the cap: its job fails with the reason, graph_status says it (${hidx.split('\n').find((l) => l.includes('lending')) || hidx})`)
+    ok(hidx.includes('infra/huge.yaml (cloudformation@2): the YAML is larger than 512 KB: not read') && (await kq('status')).includes('extractor failure(s): cloudformation@2 on lending/infra/huge.yaml: the YAML is larger than 512 KB: not read'), `a YAML template past the cap: its job fails with the reason, graph_status says it (${hidx.split('\n').find((l) => l.includes('lending')) || hidx})`)
     utimesSync(HUGE, new Date(Date.now() + 5000), new Date(Date.now() + 5000))
     const again = await kq('index')
     ok(!/huge\.yaml|data job\(s\) run|failure/.test(again) && (await kq('status')).includes('lending/infra/huge.yaml: the YAML is larger than 512 KB'), `indexed again, unchanged (its mtime moved, its content did not): its failure stands with its hash, the job is not run again (${again.split('\n').find((l) => l.includes('lending'))})`)
@@ -2434,14 +2749,14 @@ async function indexed() {
     const tq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: TFP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const tidx = await tq('index')
     ok(/shop: /.test(tidx) && !tidx.includes('failure'), `index: the module, its configurations and the CreateTable file read, no extractor failure (${tidx.split('\n').find((l) => l.includes('shop')) || tidx})`)
-    eq(await tq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlive/prod/legacy/terragrunt.hcl\tterraform@1\nlocal/tables/orders.json\tdynamodb-table@1\nmodules/kv-tables\tterraform@1',
+    eq(await tq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlive/prod/legacy/terragrunt.hcl\tterraform@2\nlocal/tables/orders.json\tdynamodb-table@1\nmodules/kv-tables\tterraform@2',
       'found by content: the module folder (its job reads every HCL file), the configuration whose module is out of reach, the CreateTable file; the root, the stage file and the other configurations are inputs, no jobs')
     const SH = 'shop/live/prod/tables/terragrunt.hcl', MT = 'shop/modules/kv-tables/main.tf', OJ = 'shop/local/tables/orders.json'
     eq((await tq('data')).split('\n').slice(1), [
       'shop:dynamodb  dynamodb  3 tables · 3 GSIs · 2 conflicts',
-      '  infra  terraform@1  not read: a module out of reach (tfr:///terraform-aws-modules/dynamodb-table/aws)  shop/live/prod/legacy/terragrunt.hcl',
+      '  infra  terraform@2  not read: a module out of reach (tfr:///terraform-aws-modules/dynamodb-table/aws)  shop/live/prod/legacy/terragrunt.hcl',
       '    note: live/prod/legacy/terragrunt.hcl:2: its module tfr:///terraform-aws-modules/dynamodb-table/aws is not in this repository (a remote source): the key-value tables it declares, if any, are unknown',
-      `  infra  terraform@1  Terraform module modules/kv-tables through Terragrunt, 3 tables  ${SH}`,
+      `  infra  terraform@2  Terraform module modules/kv-tables through Terragrunt, 3 tables  ${SH}`,
       '    note: prod-shop-audit: range_key is unknown (dependency.search: another configuration\'s output, known only once it is applied)',
       '    note: prod-shop-audit: its attribute blocks are unknown (dependency.search: another configuration\'s output, known only once it is applied)',
       `  infra  dynamodb-table@1  CreateTable input  ${OJ}`,
@@ -2454,7 +2769,7 @@ async function indexed() {
     ].join('\n'), 'graph_data store: a table per for_each key, named from the inputs merged through the includes, each citing its entry in the inputs and the module\'s resource')
     eq(await tq('data', { entity: 'prod-shop-orders' }), [
       'shop:dynamodb/prod-shop-orders  table  (dynamodb)',
-      `  declared at ${SH}:22 [infra terraform@1, aws_dynamodb_table.table["orders"]] · ${MT}:2 [infra terraform@1, the resource in modules/kv-tables] · ${OJ}:2 [infra dynamodb-table@1]`,
+      `  declared at ${SH}:22 [infra terraform@2, aws_dynamodb_table.table["orders"]] · ${MT}:2 [infra terraform@2, the resource in modules/kv-tables] · ${OJ}:2 [infra dynamodb-table@1]`,
       '  PAY_PER_REQUEST · stream NEW_AND_OLD_IMAGES',
       'Attributes (5):',
       `  customer_id  S  a key of the table  — ${SH}:23 · ${MT}:10 · ${OJ}:5`,
@@ -2548,6 +2863,142 @@ async function indexed() {
     const lstored = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => readFileSync(path.join(GD, f)).toString('latin1'))
     ok(!llist.includes('leaked') && (await tq('data', { store: 'shop:dynamodb' })).includes('  prod-shop-orders  table') && lstored.every((t) => !t.includes(OUTSECRET)) && !(await renderTf(loadTf(TFP))).includes(OUTSECRET), 'not followed: the outside file sets no name, and its secret is in neither graph.db nor the page')
     rmSync(LINK)
+
+    // ── 25 · item shapes bound to tables, across two repositories ──
+    console.log('\n25 · item shapes and binding through call(): Terraform tables in one repository, a Rust and a TypeScript service and a local-dev CreateTable file in another (fixtures/bind)')
+    const BP = path.join(SANDBOX, 'bind')
+    cpSync(path.join(HERE, 'fixtures', 'bind'), BP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const bq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: BP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const bidx2 = await bq('index')
+    ok(/infra: 3 files/.test(bidx2) && /api: 7 files/.test(bidx2) && !bidx2.includes('failure'), `index: both repositories, no extractor failure (${bidx2.replace(/\n/g, ' | ')})`)
+    eq(await bq('sql', { sql: "SELECT repo, key, extractor FROM data_facts WHERE extractor LIKE 'serde%' OR extractor LIKE 'ts-types%' ORDER BY repo, key" }),
+      'repo\tkey\textractor\napi\tnode/src/orders.ts\tts-types@1\napi\tnode/src/types.ts\tts-types@1\napi\tsrc/carts.rs\tserde@1\napi\tsrc/customers.rs\tserde@1\napi\tsrc/model.rs\tserde@1\napi\tsrc/orders.rs\tserde@1\napi\tsrc/reviews.rs\tserde@1',
+      'found by content: each Rust and TypeScript file with a serde derive, a type, a conversion or an environment read is a job of its own')
+    const ORD = '{env}-{project}-orders', TFMAIN = 'infra/modules/shop-tables/main.tf'
+    eq((await bq('data')).split('\n').filter((l) => !/^ {2}(infra|  note)/.test(l)), [
+      'Data stores (2), read from migrations, snapshots and table declarations:',
+      'api:dynamodb  dynamodb  2 tables · 1 GSI · 2 item types bound · 2 conflicts',
+      'infra:dynamodb  dynamodb  5 tables · 0 GSIs · 5 item types bound · 2 conflicts',
+      'Logical tables (1), one table declared in several places (the same name template, or an exact name a template matches on its literal parts; never by a guess, never by a bare name across repositories):',
+      `  ${ORD}  api:dynamodb/local-shop-orders + infra:dynamodb/${ORD}  (an exact name its template matches)  [2 conflicts across them]`,
+      'Item types (6), the types code converts to or from an item: 5 bound to a table, 1 unbound',
+      '  api:Cart  ambiguous: {env}-{project}-carts | {env}-{project}-saved_carts (a name the table\'s name or template matches, in one function)  api/src/model.rs:63',
+      '  api:Coupon  unbound: no table name or environment variable pairs with its conversions  api/src/model.rs:77',
+      '  api:Customer  → {env}-{project}-customers  convention (an environment variable the infra sets, in one function)  api/src/model.rs:55',
+      `  api:Order  → ${ORD}  name-match (a name the table's name or template matches, in one function)  api/src/model.rs:7`,
+      `  api:OrderView  → ${ORD}  convention (an environment variable the infra sets, in one function)  api/node/src/types.ts:2`,
+      '  api:Review  → {env}-{project}-reviews  name-match (a name the table\'s name or template matches, in one file, named only in test code)  api/src/model.rs:69',
+    ], 'graph_data: the infra repository\'s tables bound to the api repository\'s types; the local-dev file\'s orders and the prod template one logical table, the local-dev Customers apart; each item type with its table and confidence, the ambiguous one with both tables, the unbound one listed')
+    const oe = await bq('data', { entity: `infra:dynamodb/${ORD}` })
+    const sect = (text, head) => { const ls = text.split('\n'), i = ls.findIndex((l) => l.startsWith(head)); if (i < 0) return []; const out = [ls[i]]; for (const l of ls.slice(i + 1)) { if (!l.startsWith(' ')) break; out.push(l) } return out }
+    eq(sect(oe, 'Item ('), [
+      'Item (17 fields, as Order and OrderView store them; nested by dotted path):',
+      '  customerId  Order: String · OrderView: string  [partition key]  — api/src/model.rs:8 · api/node/src/types.ts:3',
+      '  orderId  Order: String · OrderView: string  [sort key]  — api/src/model.rs:9 · api/node/src/types.ts:4',
+      "  status  Order: OrderStatus (OPEN | PAID | ON_HOLD) · OrderView: 'OPEN' | 'PAID' | 'ON_HOLD'  — api/src/model.rs:10 · api/node/src/types.ts:5",
+      '  total  Order: u64 · OrderView: number  — api/src/model.rs:12 · api/node/src/types.ts:6',
+      '  note  Order: Option<String>, nullable · OrderView: string | null, nullable  — api/src/model.rs:13 · api/node/src/types.ts:7',
+      '  lines  Order: Vec<LineItem> · OrderView: { sku: string; qty: number }[]  — api/src/model.rs:14 · api/node/src/types.ts:8',
+      '    lines[].sku  Order: String · OrderView: string  — api/src/model.rs:35 · api/node/src/types.ts:8',
+      '    lines[].qty  Order: u32 · OrderView: number  — api/src/model.rs:36 · api/node/src/types.ts:8',
+      '  coupons  HashMap<String, u32>  — api/src/model.rs:15',
+      '  created_at  String  — api/src/model.rs:41',
+      '  updated_at  Option<String>, nullable  — api/src/model.rs:43',
+      '  gift  bool, default Default::default()  — api/src/model.rs:19',
+      '  payment  Payment  — api/src/model.rs:22',
+      '    payment.method  tag (card | gift-card | invoice)  — api/src/model.rs:48',
+      '    payment.details  content  — api/src/model.rs:48',
+      '      payment.details.last4  String  — api/src/model.rs:49',
+      '      payment.details.code  String  — api/src/model.rs:50',
+    ], 'graph_data entity: the item tree, as both bound types store it (serde\'s rename_all, rename, flatten with the flattened type\'s own names, default, skip; TypeScript\'s `?` and literal union), the keys marked, each field at its code line in the other repository')
+    eq(sect(oe, 'Bound item types'), [
+      'Bound item types (2): how code pairs each with this table (below convention, a lead: its rivals listed)',
+      '  Order  name-match  a name the table\'s name or template matches, in one function, 2 sites  api/src/model.rs:7',
+      '    converts  Order (to_item) in put_order  api/src/orders.rs:5',
+      '    builds  {}-shop-orders  api/src/orders.rs:8',
+      '  OrderView  convention  an environment variable the infra sets, in one function  api/node/src/types.ts:2',
+      '    converts  OrderView (Item) in saveOrder  api/node/src/orders.ts:7',
+      '    const  TABLE  api/node/src/orders.ts:4',
+      '    reads  ORDERS_TABLE  api/node/src/orders.ts:4',
+      `    sets  ORDERS_TABLE = ${ORD}  ${TFMAIN}:31`,
+    ], 'each binding with its confidence and evidence: the Rust conversion beside the format! name its template matches; the TypeScript one through a constant reading the variable the Terraform function sets to the table')
+    eq(sect(oe, 'Conflicts across them'), [
+      'Conflicts across them (2): each declaration kept',
+      `  ${ORD}.status  presence: declared — api/dynamodb/tables/orders.json:10 [infra] | absent — infra/live/prod/terragrunt.hcl:8 [infra]`,
+      `  ${ORD} index ByStatus  presence: declared — api/dynamodb/tables/orders.json:13 [infra] | absent — infra/live/prod/terragrunt.hcl:8 [infra]`,
+    ], 'local-dev against prod: the CreateTable file\'s GSI and its attribute, absent from the Terraform table its template matches, are conflicts with both sides')
+    ok(oe.includes(`One logical table: api:dynamodb/local-shop-orders + infra:dynamodb/${ORD} (an exact name its template matches); their differences are conflicts`) && oe.includes('Conflicts: none'), 'the table says which declarations are one, and keeps its own conflicts apart')
+    eq(sect(await bq('data', { entity: '{env}-{project}-carts' }), 'Bound item types'), [
+      'Bound item types (1): how code pairs each with this table (below convention, a lead: its rivals listed)',
+      '  Cart  ambiguous  a name the table\'s name or template matches, in one function  api/src/model.rs:63',
+      '    converts  Cart (to_item) in save_for_later  api/src/carts.rs:5',
+      '    builds  {}-shop-carts  api/src/carts.rs:7',
+      '    rivals: {env}-{project}-saved_carts (ambiguous, a name the table\'s name or template matches, in one function)',
+    ], 'the ambiguous case: one function names two tables, each binding lists the other as its rival')
+    const rv = await bq('data', { entity: '{env}-{project}-reviews' })
+    ok(rv.includes('  Review  name-match  a name the table\'s name or template matches, in one file, named only in test code  api/src/model.rs:69') && rv.includes('    builds  test-shop-reviews  api/src/reviews.rs:27  (test code)'), 'co-occurrence in one file: the conversion, and the name its test builds (said to be test code)')
+    const cu = await bq('data', { entity: 'Customers' })
+    ok(cu.includes('Bound item types: none') && !cu.includes('logical') && (await bq('data', { entity: '{env}-{project}-customers' })).includes('  Customer  convention  an environment variable the infra sets, in one function'),
+      'the local-dev Customers (another naming) binds to nothing and joins no logical table: no rule states it; the prod table takes the type through its variable')
+    eq((await bq('data', { store: 'api:dynamodb' })).split('\n')[2], '  local-shop-orders  table  3 attributes · 14 item fields · partition (customerId) · sort (orderId) · 1 GSI · PAY_PER_REQUEST · no stream  api/dynamodb/tables/orders.json:2  items: Order (name-match), OrderView (convention)  [one table with infra:dynamodb/{env}-{project}-orders]',
+      'graph_data store: the local-dev table carries the item of the logical table it is one declaration of')
+
+    // the page: the item tree on each card, the bindings (dashed below convention), the rivals, the conflicts across declarations, the unbound type
+    const { renderGraph: renderBind } = await import('../lib/render.mjs')
+    const { loadProject: loadBind } = await import('../lib/project.mjs')
+    const bpage2 = await renderBind(loadBind(BP))
+    const bdata = dataOf(bpage2).data
+    const infraAt = bdata.stores.findIndex((s) => s.id === 'infra:dynamodb'), apiAt = bdata.stores.findIndex((s) => s.id === 'api:dynamodb')
+    eq(bdata.items.map((it) => [it.id, it.bound.map((b) => `${b.table} ${b.conf}`)]), [['api:Cart', ['{env}-{project}-carts ambiguous', '{env}-{project}-saved_carts ambiguous']], ['api:Coupon', []], ['api:Customer', ['{env}-{project}-customers convention']], ['api:Order', [`${ORD} name-match`]], ['api:OrderView', [`${ORD} convention`]], ['api:Review', ['{env}-{project}-reviews name-match']]],
+      'the page packs the item types with their tables, in graph_data\'s words')
+    const bpg = await stubPage(bpage2, `#data-${infraAt}`)
+    const kcards = bpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
+    const kcard = (name) => kcards.find((c) => bpg.textOf(c.kids[0]).startsWith(name))
+    const ocard = kcard(ORD)
+    const rowsOf = (card, cls) => bpg.all((n) => n.tagName === 'UL' && (n.attrs.class || '').includes(cls)).filter((u) => within(card, u)).flatMap((u) => u.kids.filter((k) => k && k.tagName === 'LI').map((k) => bpg.textOf(k)))
+    const within = (root, target) => { if (root === target) return true; for (const k of root.kids || []) if (k && typeof k === 'object' && within(k, target)) return true; return false }
+    eq(rowsOf(ocard, 'kitem').slice(0, 3), ['PKcustomerId Order: String · OrderView: string', 'SKorderId Order: String · OrderView: string', "Estatus Order: OrderStatus (OPEN | PAID | ON_HOLD) · OrderView: 'OPEN' | 'PAID' | 'ON_HOLD'"], 'the card\'s item tree: each field as each bound type stores it, the keys marked')
+    ok(rowsOf(ocard, 'kitem').length === 17 && bpg.all((n) => n.tagName === 'LI' && /\bd2\b/.test(n.attrs.class || '') && within(ocard, n)).length === 2, 'nested fields indented by depth (payment.details.last4 and .code two levels down)')
+    const binds = bpg.all((n) => n.tagName === 'DIV' && /\bkbind\b/.test(n.attrs.class || '') && within(ocard, n))
+    eq(binds.map((b) => [b.attrs['data-conf'], /\bdash\b/.test(b.attrs.class)]), [['name-match', true], ['convention', false]], 'the bindings: below convention dashed, a convention solid')
+    const ccard = kcard('{env}-{project}-carts')
+    ok(bpg.textOf(ccard).includes('rivals: {env}-{project}-saved_carts (ambiguous'), 'the ambiguous binding lists its rival on the card')
+    ok(bpg.textOf(ocard).includes('One logical table: 2 declarations, 2 conflicts across them') && bpg.textOf(ocard).includes('index ByStatus'), 'the card says it is one table with the local-dev declaration, and lists the conflicts across them')
+    const items = bpg.ctl('data-items')
+    ok(!!items && bpg.textOf(items).includes('Item types (6), from code: 5 bound to a table, 1 unbound') && bpg.textOf(items).includes('api:Coupon unbound'), 'the Data tab lists the item types, the unbound one badged')
+    const apg = await stubPage(bpage2, `#data-${apiAt}`)
+    const acards = apg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
+    ok(apg.textOf(acards.find((c) => apg.textOf(c.kids[0]).startsWith('local-shop-orders'))).includes('≡ 2 declarations') && !apg.textOf(acards.find((c) => apg.textOf(c.kids[0]).startsWith('Customers'))).includes('≡'), 'the local-dev card: one of two declarations; Customers, one alone')
+
+    // a branch against its base: the item gains a field and one changes (the base's code read aside)
+    git(BP, 'init', '-q', '-b', 'main')
+    writeFileSync(path.join(BP, '.gitignore'), '.grimoire/\n')
+    commit(BP, 'the shop')
+    git(BP, 'switch', '-q', '-c', 'feat')
+    const MR = path.join(BP, 'api/src/model.rs')
+    writeFileSync(MR, readFileSync(MR, 'utf8').replace('    pub gift: bool,\n', '    pub gift: bool,\n    pub currency: String,\n').replace('    pub qty: u32,', '    pub qty: Option<u32>,'))
+    commit(BP, 'orders: a currency; a quantity may be absent')
+    await bq('index')
+    const bch = (await bq('changes')).split('\n')
+    ok(bch.includes(`  + ${ORD}.currency  item field, Order: String  — api/src/model.rs:20`) && bch.some((l) => l.startsWith(`  ~ ${ORD}.lines[].qty  item field, Order: Option<u32>, nullable · OrderView: number  item: Order: u32 · OrderView: number → Order: Option<u32>, nullable · OrderView: number`)),
+      `graph_changes: the item field added and the one changed, addressed <table>.<field path> (${bch.filter((l) => /currency|qty/.test(l)).join(' | ')})`)
+    ok(bch.includes('  + local-shop-orders.currency  item field, Order: String  — api/src/model.rs:20'), 'the local-dev declaration of the same table, bound the same way, changes alike')
+    const { parseTarget: pt, findTarget: findT } = await import('../lib/data/delta.mjs')
+    const { reconcile: rec } = await import('../lib/data/reconcile.mjs')
+    const { openStore } = await import('../lib/store.mjs')
+    const bdb = await openStore(path.join(BP, '.grimoire/graph/graph.db'))
+    const bmodel = rec(bdb.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+    bdb.close()
+    const tgt = pt(`infra:dynamodb/${ORD}.lines[].qty`)
+    eq([tgt.entity, tgt.kind, tgt.el.name, findT(bmodel, tgt).el?.name], [ORD, 'field', 'lines[].qty', 'lines[].qty'], 'a delta addresses an item field as <table>.<field path>: it resolves')
+    // a type that holds itself, in Rust and in TypeScript: every data tool still answers
+    writeFileSync(path.join(BP, 'api/src/tree.rs'), ['use serde::{Deserialize, Serialize};', '#[derive(Serialize, Deserialize)]', 'pub struct Node(Option<Box<Node>>);', '#[derive(Serialize, Deserialize)]', 'pub struct Tree { pub root: Node }', 'impl Tree { pub fn to_item(&self) -> Item { serde_dynamo::to_item(self).unwrap() } }', ''].join('\n'))
+    writeFileSync(path.join(BP, 'api/node/src/loop.ts'), 'export type A = B\nexport type B = Partial<A>\nexport interface Looped { f: A }\nexport function put(x: Looped) { return marshall(x) }\n')
+    await bq('index')
+    const cyc = await bq('data')
+    const cent = await bq('data', { entity: `infra:dynamodb/${ORD}` }), cch = await bq('changes'), cpage = dataOf(await renderBind(loadBind(BP))).data
+    ok(cyc.includes('  api:Tree  unbound') && cyc.includes('  api:Looped  unbound'), `a newtype holding itself and two aliases holding each other: graph_data answers (${cyc.split('\n').filter((l) => /Tree|Looped/.test(l)).join(' | ')})`)
+    ok(cent.includes('Item (18 fields') && cch.includes('currency') && cpage.items.some((it) => it.id === 'api:Tree'), `… and so do graph_data entity, graph_changes and the page (${cent.split('\n').find((l) => l.startsWith('Item')) || cent.slice(0, 200)})`)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

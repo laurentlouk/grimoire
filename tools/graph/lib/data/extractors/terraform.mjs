@@ -38,6 +38,11 @@
 // entity. A module out of reach (a git, registry or other remote source whose address names a
 // key-value table module: found per file, `remote`) is noted as found, not read.
 //
+// The environment the module sets to its tables: a resource's `environment { variables = { … } }` (a
+// function's) whose value is a table's `.name` or `.id` by its address, or its name evaluated, is kept
+// on the declaration as `env` [{ name, table, path, line }], for the item binding (data/binding.mjs:
+// code reading that variable names that table). No other variable is kept, by name or by value.
+//
 // Secrets: only what lands in the model is kept (names, keys, attribute names and types, index
 // names, the TTL attribute, stream, billing); every other value is evaluated in memory, if at all,
 // and dropped with the evaluation. A note names what the source writes (an expression, readers/hcl.mjs
@@ -47,7 +52,7 @@ import path from 'node:path'
 import { parseHcl, HclError, refText, HCL_MAX } from '../readers/hcl.mjs'
 import {
   Evaluator, BudgetError, Unknown, Partial, isUnk, readModule, moduleScope, instancesOf, attrOf, blocksOf,
-  tfvarsValues, jsonValues, Terragrunt, moduleDir, safeAddress, memberAt, isObj, EVAL_MS,
+  tfvarsValues, jsonValues, Terragrunt, moduleDir, safeAddress, memberAt, isObj, EVAL_MS, child,
 } from '../readers/hcl-eval.mjs'
 import { jsonLines, pathKey, parseJson } from '../readers/json-lines.mjs'
 import { capNotes, NOTES } from '../readers/dynamodb.mjs'
@@ -79,7 +84,7 @@ export function tfLevel(p, text) {
 
 export default {
   id: 'terraform',
-  version: 1,
+  version: 2,
   kind: 'infra',
   scope: 'unit',
   wants: wantsTf,
@@ -168,6 +173,7 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
   const ev = inst.ev || new Evaluator({ deadline })
   const entities = []
   const templated = new Map() // why a name has an unknown part → the templates it names
+  let scope = null
   try {
     const values = new Map()
     if (inst.kind === 'terragrunt') {
@@ -179,7 +185,7 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
     for (const p of [...auto, ...(inst.kind === 'tfvars' ? [inst.path] : [])]) {
       try { for (const [k, x] of varsOf(p, body, texts, ev)) values.set(k, x) } catch (e) { if (bounded(e)) throw e; notes.push(`${p} does not parse: ${msg(e)}`) }
     }
-    const { scope } = moduleScope(mod, values, { dir })
+    scope = moduleScope(mod, values, { dir }).scope
     for (const res of resources) {
       const addr = `aws_dynamodb_table.${res.name}`
       const r = instancesOf(res, scope, ev)
@@ -196,6 +202,8 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
     if (!bounded(e)) throw e
     notes.push(`the evaluation stopped: ${msg(bounded(e))}; the tables read before it are kept`)
   }
+  let env = []
+  try { env = wiring(mod, entities, ev, scope) } catch (e) { if (!bounded(e)) throw e; notes.push(`the environment variables were not read: ${msg(bounded(e))}`) }
   // one note per reason a name is unknown, not one per table
   for (const [why, names] of templated) notes.unshift(names.length === 1 ? `${names[0]}: a part of its name is unknown (${why}): named by its template` : `${names.length} tables: a part of each name is unknown (${why}): each named by its template (${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''})`)
   const how = inst.kind === 'terragrunt' ? 'through Terragrunt' : inst.kind === 'tfvars' ? `with ${P.basename(inst.path)}` : auto.length ? `with ${auto.map((p) => P.basename(p)).join(', ')}` : 'with its defaults'
@@ -206,9 +214,42 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
     label: `Terraform module ${dir} ${how}, ${plural(entities.length, 'table')}`,
     files: 1,
     notes: capNotes(notes, 4 * NOTES), entities,
+    ...(env.length ? { env } : {}),
   }
 }
-const forEachOf = (res) => res.block.body.items.find((x) => x.t === 'attr' && (x.name === 'for_each' || x.name === 'count'))?.expr ?? null
+
+// The environment variables the module's resources set to one of its tables (a function's
+// `environment { variables = { ORDERS_TABLE = aws_dynamodb_table.this["orders"].name } }`), for the
+// item binding (data/binding.mjs): [{ name, table, path, line }]. A value names a table when it is
+// that table's `.name` or `.id` by its address (a literal key), or evaluates to its name, or to a
+// template its name template is. Only those variables are kept: no other variable's name or value.
+function wiring(mod, entities, ev, scope) {
+  const out = []
+  if (!entities.length) return out
+  const byAs = new Map(entities.map((e) => [e.as, e]))
+  for (const res of mod.resources) {
+    for (const b of res.block.body.items) {
+      if (b.t !== 'block' || b.type !== 'environment') continue
+      const vars = b.body.items.find((x) => x.t === 'attr' && x.name === 'variables')
+      if (!vars || vars.expr.t !== 'object') continue
+      for (const it of vars.expr.items) {
+        const key = it.key && it.key.t === 'lit' && typeof it.key.v === 'string' ? it.key.v : null
+        if (!key || !it.value) continue
+        const m = /^(aws_dynamodb_table\.[A-Za-z_][\w-]*(?:\[[^\]]+\])?)\.(?:name|id)$/.exec(refText(it.value, 200))
+        let e = m ? byAs.get(m[1]) : null
+        if (!e && scope && (it.value.t === 'lit' || it.value.t === 'tpl')) {
+          let v = null
+          try { v = ev.value(it.value, child(scope, {}, {}, res.path)) } catch (x) { if (bounded(x)) throw x }
+          const name = typeof v === 'string' ? v : v instanceof Partial ? v.parts.map((p) => (typeof p === 'string' ? p : `{${p.label ?? 'name'}}`)).join('') : null
+          if (name) e = entities.find((x) => x.name === name) || null
+        }
+        if (e) out.push({ name: key, table: e.name, path: res.path, line: it.line ?? b.line })
+      }
+    }
+  }
+  return out
+}
+const forEachOf =(res) => res.block.body.items.find((x) => x.t === 'attr' && (x.name === 'for_each' || x.name === 'count'))?.expr ?? null
 
 // a tfvars file's values (HCL, or JSON with the line of each member)
 function varsOf(p, body, texts, ev) {

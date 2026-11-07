@@ -1,0 +1,4 @@
+{
+  "repos": [{ "name": "infra", "path": "infra" }, { "name": "api", "path": "api" }],
+  "graph": { "dir": ".grimoire/graph" }
+}
