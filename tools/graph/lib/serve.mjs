@@ -11,7 +11,9 @@
 //                         or remove their acknowledgement (false): `path` must be
 //                         docs/specs/<name>.delta.json in a root (docs.mjs resolveDelta), `base` the
 //                         hash it was loaded with (409 with the disk text when it changed since), `ids`
-//                         its data changes. The server writes each ack as { by: the git user.name of
+//                         its changes, data or architecture (ids are unique across both lists: the
+//                         Data and Architecture tabs send the same request). The server writes each
+//                         ack as { by: the git user.name of
 //                         that root, else the system user, at: now, hash: the change's hash
 //                         (data/delta.mjs) }, never what the request says, and edits only those `ack`
 //                         members in the file (setAcks): its layout and every other change stay. A
@@ -141,15 +143,20 @@ export async function serve(project, { port = 0, log = () => {}, refresh = true,
           if (docHash(disk) !== body.base) return [409, { error: 'changed on disk since it was loaded', text: disk, hash: docHash(disk) }]
           const { delta: doc, errors } = parseDelta(disk)
           if (errors.length) return [422, { error: `the delta does not validate: ${errors.join('; ')}` }]
-          const at = new Map(doc.data.map((c, i) => [c.id, i]))
+          // ids are unique across both lists: each names a data change or an architecture one
+          const at = new Map([...doc.data.map((c, i) => [c.id, ['data', i]]), ...doc.architecture.map((c, i) => [c.id, ['architecture', i]])])
           const missing = [...new Set(body.ids)].filter((id) => !at.has(id))
-          if (missing.length) return [400, { error: `no data change with the id ${missing.map((x) => JSON.stringify(x)).join(', ')}` }]
+          if (missing.length) return [400, { error: `no change with the id ${missing.map((x) => JSON.stringify(x)).join(', ')}` }]
           const when = new Date().toISOString()
-          const edits = new Map(body.ids.map((id) => [at.get(id), body.ack ? { by, at: when, hash: changeHash(doc.data[at.get(id)]) } : null]))
-          const text = setAcks(disk, edits)
+          const ackOf = new Map(body.ids.map((id) => { const [list, i] = at.get(id); return [id, body.ack ? { by, at: when, hash: changeHash(doc[list][i]) } : null] }))
+          let text = disk
+          for (const list of ['data', 'architecture']) {
+            const edits = new Map([...ackOf].filter(([id]) => at.get(id)[0] === list).map(([id, a]) => [at.get(id)[1], a]))
+            if (edits.size) text = setAcks(text, edits, list)
+          }
           writeAtomic(r.abs, text, statSync(r.abs).mode & 0o777)
           log(`${body.ack ? 'acknowledged' : 'removed the acknowledgement of'} ${body.ids.slice(0, 20).map((x) => JSON.stringify(x.slice(0, 80))).join(', ')}${body.ids.length > 20 ? ` and ${body.ids.length - 20} more` : ''} in ${JSON.stringify(path.relative(project.root, r.abs)).slice(1, -1)}`)
-          return [200, { hash: docHash(text), changes: [...new Set(body.ids)].map((id) => ({ id, ack: edits.get(at.get(id)) })) }]
+          return [200, { hash: docHash(text), changes: [...new Set(body.ids)].map((id) => ({ id, ack: ackOf.get(id) })) }]
         }, deltaLock)
         if (done.busy) return send(res, 503, { error: 'busy: another writer has the delta (the loop recording a change); try again in a moment' })
         return send(res, ...done.value)

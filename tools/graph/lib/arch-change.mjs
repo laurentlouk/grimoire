@@ -56,10 +56,11 @@ const rel = (from, to) => path.relative(from, to).split(path.sep).join('/')
 
 // ── the diagrams, on each side ──
 // The working tree's saved diagrams: [{ file (project-relative), doc } | { file, error }].
+// The key of a diagram on both sides: its path from the project root, as the page names it.
+const fileKey = (project, inDir) => rel(project.root, path.join(project.architectureDir, inDir))
 export function currentDiagrams(project) {
   if (!project.root) return []
-  const root = realish(project.root), dir = realish(project.architectureDir)
-  return readDiagrams(project.architectureDir).map((d) => ({ ...d, file: rel(root, path.join(dir, d.file)) }))
+  return readDiagrams(project.architectureDir).map((d) => ({ ...d, file: fileKey(project, d.file) }))
 }
 // The saved diagrams at the base: the folder read through git at the base's merge base with HEAD
 // (the repository's own `at` when the folder is in one of base.repos, else the same ref resolved in
@@ -85,9 +86,8 @@ export function diagramsAt(project, base) {
   const files = treeAt(realTop, at)
   const want = [...files.keys()].filter((p) => (inDir === '' || p.startsWith(`${inDir}/`)) && p.endsWith(SUFFIX) && !p.slice(inDir ? inDir.length + 1 : 0).split('/').slice(0, -1).some((s) => s.startsWith('.'))).sort()
   const text = blobs(realTop, want.map((p) => files.get(p)))
-  const root = realish(project.root)
   const list = want.map((p) => {
-    const file = rel(root, path.join(realTop, p)), b = text.get(files.get(p).oid)
+    const file = fileKey(project, inDir ? p.slice(inDir.length + 1) : p), b = text.get(files.get(p).oid)
     if (!b) return { file, error: 'could not be read at the base' }
     try { return { file, doc: JSON.parse(b.toString('utf8')) } } catch (e) { return { file, error: `does not parse: ${e.message}` } }
   })
@@ -263,6 +263,13 @@ export function archDeltaStates(list, current, { base = null, impact = null } = 
     out.files = [...new Set([...out.hits.map((h) => h.file), ...docs.filter((x) => comps(x.doc).some((k) => ids.includes(k.id))).map((x) => x.file)])]
     return out
   })
+  // a component proposed on its own concerns the diagrams of the lines the delta draws to it (whose
+  // other end they hold), else the first diagram
+  for (const r of changes) {
+    if (r.t.error || r.t.kind !== 'component' || r.change.op !== 'add' || r.files.length) continue
+    const near = changes.filter((x) => !x.t.error && x.t.kind === 'connection' && (x.t.from === r.t.id || x.t.to === r.t.id)).flatMap((x) => x.files)
+    r.files = near.length ? [...new Set(near)] : docs.length ? [docs[0].file] : []
+  }
   const unplanned = []
   if (impact) {
     const parsed = changes.filter((r) => !r.t.error)
