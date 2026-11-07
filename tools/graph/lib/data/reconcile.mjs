@@ -3,10 +3,14 @@
 // merged element by element (model.mjs keyOf): every element keeps the source of each declaration
 // that states it, most trusted first, and a conflict wherever they disagree:
 //   - an attribute (a field's type, nullability, default; an index's columns; a foreign key's
-//     actions) with two values: both are kept, each with its sources. Types compare lower-cased,
-//     defaults without one outer pair of parentheses (model.mjs normDefault);
+//     actions) with two values: both are kept, each with its sources. Types compare lower-cased (and
+//     a Postgres or MySQL type by the engine's name for it, model.mjs normType), defaults without one
+//     outer pair of parentheses (model.mjs normDefault); in a MySQL store a unique index is the
+//     unique key it is (uniqueKeys);
 //   - presence: an element one complete declaration states and another, describing the same
-//     entity, lacks (`absent` cites where that declaration describes the entity).
+//     entity, lacks (`absent` cites where that declaration describes the entity). Never for a
+//     migration tool's own table a dump states (`bookkeeping`), nor for an index the engine builds
+//     for a foreign key (`implicit`: MySQL's), which only a replay or a dump states.
 // Nothing is resolved by precedence: the disagreement is the finding. A replay that stopped early
 // (`partial`) is listed with its sources but compared with nothing, since it describes the store as
 // it was partway. Drizzle v1 snapshots form a DAG through prevIds: only its leaves declare a store.
@@ -19,7 +23,7 @@
 //
 //   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store], logical, items,
 //     bindings, unresolved, access?, accessError? }   (model.mjs, binding.mjs, access.mjs)
-import { KINDS, keyOf, normType, normDefault, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
+import { KINDS, keyOf, normType, normDefault, normColumn, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
 import { logicalTables, bindItems, itemField, itemOf, tableResolver } from './binding.mjs'
 import { resolveAccess } from './access.mjs'
 
@@ -30,19 +34,30 @@ const ATTRS = {
   entity: (e) => ({ kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}) }),
   // what a declaration cannot state in the store's terms (a code model's custom type, an expression
   // default: model.mjs `unstated`) is undefined, and compared with nothing
-  field: (f, kv) => { const u = f.unstated || []; return { type: u.includes('type') ? undefined : kv ? String(f.type ?? '') : normType(f.type), nullable: u.includes('nullable') ? undefined : f.nullable, default: u.includes('default') ? undefined : normDefault(f.default), generated: f.generated ?? null } },
+  field: (f, kv, dialect) => { const u = f.unstated || []; return { type: u.includes('type') ? undefined : kv ? String(f.type ?? '') : normType(f.type, dialect), nullable: u.includes('nullable') ? undefined : f.nullable, default: u.includes('default') ? undefined : normDefault(f.default, dialect), generated: f.generated ?? null } },
   key: (k) => (k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}),
-  index: (i) => (kvIndex(i) ? { kind: i.kind, partition: i.partition.join(', '), sort: i.sort.join(', '), projection: projectionText(i) } : { unique: !!i.unique, columns: i.columns.join(', '), partial: !!i.partial }),
+  index: (i, kv, dialect) => (kvIndex(i) ? { kind: i.kind, partition: i.partition.join(', '), sort: i.sort.join(', '), projection: projectionText(i) } : { unique: !!i.unique, columns: i.columns.map((c) => normColumn(c, dialect)).join(', '), partial: !!i.partial }),
   relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate }),
 }
 const SHAPE = {
-  entity: (e) => ({ name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nameTemplate: e.nameTemplate } : {}) }),
-  field: (f) => ({ name: f.name, type: { raw: f.type, norm: normType(f.type) }, nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null, ...(f.unstated ? { unstated: f.unstated } : {}) }),
+  entity: (e) => ({ name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nameTemplate: e.nameTemplate } : {}), ...(e.bookkeeping ? { bookkeeping: true } : {}) }),
+  field: (f, dialect) => ({ name: f.name, type: { raw: f.type, norm: normType(f.type, dialect) }, nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null, ...(f.unstated ? { unstated: f.unstated } : {}) }),
   key: (k) => ({ role: k.role, parts: k.parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}) }),
   index: (i) => (kvIndex(i) ? { name: i.name, kind: i.kind, partition: i.partition, sort: i.sort, projection: i.projection ?? null, include: i.include || [], columns: i.columns, unique: false, partial: false } : { name: i.name, unique: !!i.unique, columns: i.columns, partial: !!i.partial }),
   relation: (r) => ({ kind: 'fk', columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate }),
 }
 const PARTS = [['field', 'fields'], ['key', 'keys'], ['index', 'indexes'], ['relation', 'relations']]
+
+// MySQL keeps one object for a unique constraint and a unique index (a migration's `CONSTRAINT x
+// UNIQUE`, a dump's `UNIQUE KEY`, a schema's unique index are the same thing), so in a MySQL store
+// every unique index is compared, and shown, as the unique key it is.
+function uniqueKeys(e) {
+  const uniq = (e.indexes || []).filter((i) => i.unique && !i.partial && !kvIndex(i))
+  if (!uniq.length) return e
+  const keys = [...(e.keys || [])]
+  for (const i of uniq) if (!keys.some((k) => k.role === 'unique' && k.parts.join('\0') === i.columns.join('\0'))) keys.push({ role: 'unique', parts: i.columns, path: i.path, line: i.line })
+  return { ...e, keys, indexes: e.indexes.filter((i) => !uniq.includes(i)) }
+}
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 
 export function reconcile(rows) {
@@ -156,18 +171,22 @@ function merge(id, ds) {
   const kv = KV_DIALECTS.has(store.dialect)
   const entities = new Map()
   for (const d of ds) {
-    for (const e of d.entities || []) {
+    for (const e0 of d.entities || []) {
+      const e = store.dialect === 'mysql' ? uniqueKeys(e0) : e0
       const E = slot(entities, e.name, () => ({ ...SHAPE.entity(e), fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map(), whole: new Set(), part: new Set() }))
       note(E, d, ATTRS.entity(e), source(d, e), e)
       E.at.set(d, source(d, e))
       if (e.whole) E.whole.add(d)
       if (e.part) E.part.add(d) // it states the entity, not all of its parts
+      if (e.bookkeeping) E.bookkeeping = true // a migration tool's own table, as a dump states it
       for (const [type, list] of PARTS) {
         for (const x of e[list] || []) {
-          const el = slot(E[list], keyOf[type](x), () => SHAPE[type](x))
-          note(el, d, ATTRS[type](x, kv), source(d, x), x)
+          const el = slot(E[list], keyOf[type](x), () => SHAPE[type](x, store.dialect))
+          note(el, d, ATTRS[type](x, kv, store.dialect), source(d, x), x)
           // what a code model alone says of a column: the default its client computes, its enum
           if (type === 'field') { if (x.computed && !el.computed) el.computed = x.computed; if (x.enum && !el.enum) el.enum = x.enum }
+          // an index MySQL builds for a foreign key (a replay's, a dump's): the engine's, not a design's
+          if (type === 'index' && x.implicit) el.implicit = true
         }
       }
     }
@@ -195,8 +214,10 @@ function merge(id, ds) {
       // the declarations that describe this entity whole: a complete one, or one stating it whole,
       // unless it states the entity in part
       const covering = ds.filter((d) => E.at.has(d) && (d.complete || E.whole.has(d)) && !E.part.has(d))
-      const out = { id: `${id}/${E.name}`, ...done(E, complete, (d) => source(d, null)) }
-      for (const [, list] of PARTS) out[list] = [...E[list].values()].map((x) => done(x, covering, (d) => E.at.get(d)))
+      // a migration tool's own table (a dump's): stated as it is, never a presence conflict
+      const out = { id: `${id}/${E.name}`, ...done(E, E.bookkeeping ? [] : complete, (d) => source(d, null)) }
+      // an index the engine builds for a foreign key is compared where two state it, never missing
+      for (const [, list] of PARTS) out[list] = [...E[list].values()].map((x) => done(x, x.implicit ? [] : covering, (d) => E.at.get(d)))
       return out
     }),
   }
@@ -216,7 +237,7 @@ export const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name
 // (graph_data and the page's Data tab say the same).
 export function storeSummary(st) {
   const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
-  const tables = st.entities.filter((e) => e.kind === 'table'), views = st.entities.length - tables.length
+  const tables = st.entities.filter((e) => e.kind === 'table' && !e.bookkeeping), views = st.entities.filter((e) => e.kind === 'view').length
   if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
   // the conflicts of its elements, and those across the declarations of a logical table it holds a
   // member of (binding.mjs), counted once
@@ -228,8 +249,10 @@ export function storeSummary(st) {
     const items = new Set(tables.flatMap((e) => (e.bound || []).map((b) => b.item))).size
     return [n(tables.length, 'table'), n(k('gsi'), 'GSI'), k('lsi') && n(k('lsi'), 'LSI'), items && `${n(items, 'item type')} bound`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
   }
-  const implicit = Math.max(0, ...st.declarations.map((d) => d.implicitIndexes)) // the indexes SQLite builds for keys, beside the declared ones
-  return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), `${n(tables.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
+  // the indexes SQLite builds for keys, and MySQL for foreign keys, beside the declared ones
+  const built = tables.reduce((a, e) => a + e.indexes.filter((i) => i.implicit).length, 0)
+  const implicit = Math.max(0, ...st.declarations.map((d) => d.implicitIndexes)) + built
+  return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), `${n(tables.reduce((a, e) => a + e.indexes.length, 0) - built, 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
 }
 
 // An element's conflicts. presence: the complete declarations expected to state it; absent(d): what

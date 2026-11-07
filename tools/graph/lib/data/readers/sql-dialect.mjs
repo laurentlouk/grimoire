@@ -7,7 +7,8 @@
 //                                  | { dialect: null, reason }
 //
 // Backtick identifiers are a weak marker: MySQL's, but SQLite accepts them and Drizzle writes them
-// for SQLite. They name MySQL only when no other marker is present.
+// for SQLite. They name MySQL only when no other marker is present. A `DELIMITER` line is MySQL's
+// (its client's command), and the string it sets (`$$`) is no Postgres dollar quote.
 import { blank } from './sql-split.mjs'
 
 const MARKERS = [
@@ -17,7 +18,7 @@ const MARKERS = [
   ['sqlite', 'STRICT', /\)\s*STRICT\b/i],
   ['postgres', 'SERIAL', /\b(?:BIG|SMALL)?SERIAL\b/i],
   ['postgres', '::', /::/],
-  ['postgres', '$$', /\$\w*\$/],
+  ['postgres', '$$', /(?<![\w$])\$\w*\$/], // never a word's end (MySQL's END$$ under a DELIMITER)
   ['postgres', 'JSONB', /\bJSONB\b/i],
   ['postgres', 'TIMESTAMPTZ', /\bTIMESTAMPTZ\b/i],
   ['postgres', 'CREATE EXTENSION', /\bCREATE\s+EXTENSION\b/i],
@@ -25,13 +26,21 @@ const MARKERS = [
   ['mysql', 'ENGINE=', /\bENGINE\s*=/i],
   ['mysql', 'AUTO_INCREMENT', /\bAUTO_INCREMENT\b/i],
   ['mysql', 'UNSIGNED', /\bUNSIGNED\b/i],
+  ['mysql', 'DELIMITER', /^[ \t]*DELIMITER(?:[ \t]+[^\w\s]\S*)?[ \t]*$/im], // the MySQL client's own command (its string blanked below)
   ['mysql', 'backtick identifiers', /`/, 'weak'],
 ]
+
+// a DELIMITER line: the word, then a string that is no word (`$$`, `//`, `;`), alone on its line
+const DELIMITER_LINE = /^[ \t]*DELIMITER[ \t]+([^\w\s]\S*)[ \t]*$/gim
 
 export function sniffDialect(files) {
   const strong = new Map(), weak = new Map() // dialect → its first marker { marker, path, line, at }
   files.forEach((f, fi) => {
-    const code = blank(f.text)
+    let code = blank(f.text)
+    // a DELIMITER's string (`$$`, `//`) is the MySQL client's statement end, never a dollar quote:
+    // blanked wherever it stands (the DELIMITER line itself stays, a marker of its own)
+    const delims = new Set([...code.matchAll(DELIMITER_LINE)].map((m) => m[1]).filter((d) => d && d !== ';'))
+    for (const d of delims) code = code.split(d).join(' '.repeat(d.length))
     for (const [dialect, marker, re, strength] of MARKERS) {
       const m = re.exec(code)
       if (!m) continue

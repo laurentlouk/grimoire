@@ -1,0 +1,13 @@
+{
+  "repos": [
+    { "name": "supa", "path": "supa" },
+    { "name": "fly", "path": "fly" },
+    { "name": "gom", "path": "gom" },
+    { "name": "goose", "path": "goose" },
+    { "name": "dbm", "path": "dbm" },
+    { "name": "loose", "path": "loose" }
+  ],
+  "graph": {
+    "dir": ".grimoire/graph"
+  }
+}

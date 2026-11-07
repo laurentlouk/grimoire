@@ -59,8 +59,8 @@ const TEST_DIRS = /(^|\/)(tests?|__tests__|spec|specs|testing|__mocks__|mocks?|_
 export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some((ex) => ex.wants(p)) && !TEST_DIRS.test(p) && !skipped(p, project))
 
 // What the index keeps about an input's content beside its hash, so discovery goes by content: for
-// SQL, its schemaLevel (2: it creates or alters a table or an index, 1: other schema statements
-// only, 0: none); for JSON and YAML, its tableLevel (3: it names a table resource of a template, 2:
+// SQL, its schemaLevel (3: a schema dump's header over a table, 2: it creates or alters a table or
+// an index, 1: other schema statements only, 0: none); for JSON and YAML, its tableLevel (3: it names a table resource of a template, 2:
 // it holds a key schema, a CreateTable input; 0: neither); for Terraform and Terragrunt files
 // (.tf, .tfvars, .tfvars.json, .hcl), extractors/terraform.mjs tfLevel (4: a module declaring a
 // table resource, 5: a terragrunt.hcl Terragrunt runs, 6: a module out of reach, 1: other); for a

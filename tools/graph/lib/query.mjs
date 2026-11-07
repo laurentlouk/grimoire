@@ -459,7 +459,7 @@ export class Graph {
       const count = (kind) => e.indexes.filter((i) => i.kind === kind).length
       const itemOnly = e.fields.filter((f) => f.item && f.sources.every((s) => s.kind === 'code')).length
       const parts = kv ? [plural(e.fields.length - itemOnly, 'attribute'), itemOnly ? plural(itemOnly, 'item field') : null, ...e.keys.map(kvKeyText), count('gsi') ? plural(count('gsi'), 'GSI') : null, count('lsi') ? plural(count('lsi'), 'LSI') : null, kvTableText(e)].filter(Boolean)
-        : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.length ? `foreign keys → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null].filter(Boolean)
+        : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.length ? `foreign keys → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null, e.bookkeeping ? "a migration tool's own record (not compared)" : null].filter(Boolean)
       const items = (e.bound || []).map((b) => `${b.type} (${b.confidence})`)
       out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}${items.length ? `  items: ${items.join(', ')}` : ''}${e.logical ? `  [one table with ${e.logical.members.filter((m) => m !== e.id).join(', ')}]` : ''}`)
     }
@@ -486,7 +486,7 @@ export class Graph {
     if (kv) section('Attributes', e.fields.filter((f) => declared(f).length), (f) => `${f.name}  ${f.type.raw}${f.nullable ? '' : '  a key of the table'}`, declared)
     else section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}${f.computed ? `  computed ${f.computed}` : ''}${f.enum ? `  enum${f.enum.name ? ` ${f.enum.name}` : ''} (${f.enum.values.join(' | ')})` : ''}${f.unstated ? `  (${f.unstated.join(', ')} as written, not compared)` : ''}`)
     section('Keys', e.keys, (k) => (kv ? kvKeyText(k) : `${k.role} (${k.parts.join(', ')})`))
-    section('Indexes', e.indexes, (i) => (kvIndex(i) ? `${i.name}  ${kvIndexText(i)}` : `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}`))
+    section('Indexes', e.indexes, (i) => (kvIndex(i) ? `${i.name}  ${kvIndexText(i)}` : `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}${i.implicit ? ' (built for a foreign key)' : ''}`))
     section('Foreign keys', e.relations, (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
     if (kv) {
       const item = e.fields.filter((f) => f.item)

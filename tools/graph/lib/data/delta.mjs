@@ -83,7 +83,7 @@
 // The loop's ship step appends the unplanned changes implementers kept (appendChanges), with
 // origin `unplanned` and the implementer's reason as `why`, never acknowledged: the user does that.
 import { createHash } from 'node:crypto'
-import { normType, normDefault, kvIndex, projectionText, declPath } from './model.mjs'
+import { normType, normDefault, normColumn, kvIndex, projectionText, declPath } from './model.mjs'
 import { KEY, NAME, foldOf } from './diff.mjs'
 import { parseJson } from './readers/json-lines.mjs'
 import { TYPES, VARIANTS, BOUNDARY_KINDS, ID } from '../arch.mjs'
@@ -324,7 +324,7 @@ export function findTarget(model, t) {
   const stores = t.error ? [] : model?.stores || []
   const st = stores.find((s) => s.id === t.storeId) || stores.find((s) => s.id.toLowerCase() === t.storeId.toLowerCase()) || null
   if (!st) return { st: null, e: null, el: null, fold: foldOf(null) }
-  const fold = foldOf(st.dialect)
+  const fold = Object.assign(foldOf(st.dialect), { dialect: st.dialect }) // names folded; types, defaults and expressions compared in the dialect's terms
   const e = st.entities.find((x) => fold(x.name) === fold(t.entity)) || null
   if (!e || t.kind === 'entity') return { st, e, el: e, fold }
   const k = KEY[t.kind](t.el, fold)
@@ -344,9 +344,9 @@ const lower = (v) => (v === null || v === undefined ? v : String(v).trim().toLow
 function shapeDiffs(kind, after, el, fold, whole, pre = '') {
   const out = []
   if (kind === 'field') {
-    if ('type' in after && normType(after.type) !== normType(typeOf(el))) out.push(d(`${pre}type`, after.type, typeOf(el)))
+    if ('type' in after && normType(after.type, fold.dialect) !== normType(typeOf(el), fold.dialect)) out.push(d(`${pre}type`, after.type, typeOf(el)))
     if ('nullable' in after && after.nullable !== el.nullable) out.push(d(`${pre}nullable`, after.nullable, el.nullable))
-    if ('default' in after && normDefault(after.default === null ? null : String(after.default)) !== normDefault(el.default)) out.push(d(`${pre}default`, after.default, el.default ?? null))
+    if ('default' in after && normDefault(after.default === null ? null : String(after.default), fold.dialect) !== normDefault(el.default, fold.dialect)) out.push(d(`${pre}default`, after.default, el.default ?? null))
     if ('generated' in after && (after.generated ?? null) !== (el.generated ?? null)) out.push(d(`${pre}generated`, after.generated, el.generated ?? null))
   } else if (kind === 'index' && (kvIndex(el) || kvAfter(after))) {
     // a GSI or an LSI: what it states of its kind, keys and projection (no sort key unless stated)
@@ -358,7 +358,7 @@ function shapeDiffs(kind, after, el, fold, whole, pre = '') {
       if (planned !== built) out.push(d(`${pre}projection`, planned, built))
     }
   } else if (kind === 'index') {
-    if ('columns' in after && after.columns.map(fold).join(',') !== el.columns.map(fold).join(',')) out.push(d(`${pre}columns`, after.columns.join(', '), el.columns.join(', ')))
+    if ('columns' in after && after.columns.map((c) => fold(normColumn(c, fold.dialect))).join(',') !== el.columns.map((c) => fold(normColumn(c, fold.dialect))).join(',')) out.push(d(`${pre}columns`, after.columns.join(', '), el.columns.join(', ')))
     for (const a of ['unique', 'partial']) if ((a in after || whole) && !!after[a] !== !!el[a]) out.push(d(`${pre}${a}`, !!after[a], !!el[a]))
   } else if (kind === 'key') {
     if ('enabled' in after && (after.enabled ?? null) !== (el.enabled ?? null)) out.push(d(`${pre}enabled`, after.enabled, el.enabled ?? null))
@@ -416,7 +416,8 @@ export function extrasOf(after, el, fold) {
   const out = []
   for (const [kind, list] of Object.entries(LIST)) {
     const stated = new Set((after?.[list] || []).map((x) => KEY[kind](x, fold)))
-    el[list].forEach((x, pos) => { if (!stated.has(KEY[kind](x, fold))) out.push({ kind, el: x, pos }) })
+    // an index MySQL builds for a foreign key is the engine's: no design states it
+    el[list].forEach((x, pos) => { if (!stated.has(KEY[kind](x, fold)) && !(kind === 'index' && x.implicit)) out.push({ kind, el: x, pos }) })
   }
   return out
 }
@@ -476,7 +477,10 @@ export function deltaStates(delta, model, { base = null, diff = null } = {}) {
   for (const sd of diff?.stores || []) {
     const fold = foldOf(sd.dialect)
     for (const c of sd.changes) {
-      if (!covered.has(key(sd.id, c.kind, c.entity, c.key, fold))) { unplanned.push({ st: sd, c, target: targetOf(sd.id, c.entity, c.kind, c.after || c.before) }); continue }
+      if (!covered.has(key(sd.id, c.kind, c.entity, c.key, fold))) {
+        if (!(c.kind === 'index' && (c.after || c.before)?.implicit)) unplanned.push({ st: sd, c, target: targetOf(sd.id, c.entity, c.kind, c.after || c.before) })
+        continue
+      }
       // a table the branch adds and a change of the delta adds: what it built there beyond that change
       const r = c.kind === 'entity' && c.change === 'added' ? changes.find((x) => x.change.op === 'add' && x.t.kind === 'entity' && x.el && x.st?.id === sd.id && fold(x.el.name) === fold(c.after.name)) : null
       if (!r) continue

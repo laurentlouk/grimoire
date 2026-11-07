@@ -4,7 +4,9 @@
 // created or last altered it.
 //
 //   replay([{ path, text }] in order, DatabaseSync) → { entities, implicit, statements, stopped, notes }
-//     entities   the data model's declaration shape (model.mjs), sorted by name
+//     entities   the data model's declaration shape (model.mjs), sorted by name; an index's
+//                expression column by its text, as its CREATE INDEX writes it (PRAGMA names none:
+//                readers/ddl.mjs indexParts reads it)
 //     implicit   how many indexes SQLite built itself for primary and unique keys (sqlite_autoindex_*):
 //                the keys are the elements, this counts what PRAGMA index_list shows beside the
 //                declared indexes
@@ -29,6 +31,7 @@
 // or on the statement that added or renamed it; keys and foreign keys on the line of that
 // definition that states them.
 import { split } from './sql-split.mjs'
+import { indexParts } from './ddl.mjs'
 
 // SQLite's error as stored and shown, without the text it quotes when that is not a name: `near
 // "'…": syntax error`, `unrecognized token: "'…"` quote a string literal of the migration, which may
@@ -152,7 +155,13 @@ function read(db, tables, objects) {
     for (const ix of all('SELECT * FROM pragma_index_list(?) ORDER BY name', name)) {
       if (ix.origin !== 'c') implicit++
       if (ix.origin === 'pk') continue // the primary key's own index: the key is the element
-      const columns = all('SELECT name FROM pragma_index_info(?) ORDER BY seqno', ix.name).map((c) => c.name ?? '(expression)')
+      let columns = all('SELECT name FROM pragma_index_info(?) ORDER BY seqno', ix.name).map((c) => c.name)
+      // an expression has no name: its text, as its CREATE INDEX writes it
+      if (columns.includes(null)) {
+        const sql = all("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", ix.name)[0]?.sql
+        const parts = sql ? indexParts(sql, 'sqlite') : null
+        columns = columns.map((c, i) => c ?? (parts?.length === columns.length && parts[i] ? parts[i] : '(expression)'))
+      }
       if (ix.origin === 'u') keys.push({ role: 'unique', parts: columns, ...at(lineIn(t.def, new RegExp(`\\bUNIQUE\\b.*${word(columns[0])}|${word(columns[0])}.*\\bUNIQUE\\b`, 'i'), /\bUNIQUE\b/i) || colAt(columns[0])) })
       else indexes.push({ name: ix.name, unique: !!ix.unique, columns, partial: !!ix.partial, ...at(objects.get(ix.name) || t.loc) })
     }
