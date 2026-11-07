@@ -10,9 +10,11 @@
 //                 `::`, ON DUPLICATE KEY: readers/sql-query.mjs, the DDL sniffer), else unknown;
 //   attached      to a declared SQL store of the repository (migrations, a snapshot, a dump, a schema)
 //                 only on evidence: the same client (a Prisma client's $queryRaw and the Prisma schema,
-//                 drizzle-orm and the Drizzle schema), the only one of its dialect, the only declared
-//                 SQL store of the repository, or the module they share (the deepest common folder,
-//                 when one store's is deepest). A dialect that contradicts the store's never attaches.
+//                 drizzle-orm and the Drizzle schema), or the module they share (the deepest common
+//                 folder, when one store's is deepest). The only declared store of its dialect, or of
+//                 the repository, is evidence by elimination: it attaches only when the file names a
+//                 table that store declares. A dialect that contradicts the store's never attaches. How
+//                 they attach is said with how many of the tables they name it declares.
 //                 Attached, the queries add only: an `[inferred]` conflict where the code names a table
 //                 or a column the declaration lacks, and the code's access sites on the declared tables;
 //   deduced       otherwise, a store of its own per dialect: `<repo>:sql (inferred, <dialect>)`, named by
@@ -35,7 +37,8 @@
 //   every element's sources [{ repo, path, line, kind: inferred, extractor, confidence: 'seen' }], the
 //   first MAX_SOURCES, and `more` past them; conflicts []
 // model.queries { files, statements, sites: [Site], attached: [{ store, files, why }], clients: [{ repo,
-//   source }] (the client imports of a repository whose queries were read: no longer a gap), tests }
+//   source }] (no longer a gap: a client a file whose queries were read imports, or one of its repository
+//   speaking the dialect of a store its queries were read into), tests }
 //   Site { repo, path, line, extractor, fn, fnLine, call, store, reads: [entity id], writes: [entity id], kinds }
 // A declared store with queries attached gains queries { files, statements, why, conflicts, more };
 // its entities gain queries { sites, conflicts, more }.
@@ -74,9 +77,13 @@ function dialectOf(q, repoClients) {
 const FAMILY = [['prisma', ['@prisma/client'], /^prisma@/, ['$queryRaw', '$executeRaw', '$queryRawUnsafe', '$executeRawUnsafe']], ['drizzle', ['drizzle-orm'], /^drizzle-(?:ts|snapshot)@/, []]]
 const commonDir = (a, b) => { const x = a.split('/').slice(0, -1), y = b === '.' ? [] : b.split('/'); let n = 0; while (n < x.length && n < y.length && x[n] === y[n]) n++; return n }
 
+// Evidence, in order: the same client (a Prisma client's raw query and the Prisma schema, drizzle-orm
+// and the Drizzle schema), the module they share (the deepest common folder, one store's alone). Being
+// the only declared store of the dialect, or of the repository, is evidence by elimination: it attaches
+// only when the file names a table that store declares (by its exact name, folded as the store folds
+// names), else the queries are a store of their own, and say why.
 function attachTo(q, d, declared) {
   if (!declared.length) return { store: null, why: null }
-  // the same client: a Prisma client's raw query and the Prisma schema, drizzle-orm and the Drizzle schema
   for (const [name, imports, extractor, calls] of FAMILY) {
     const mine = q.clients.some((c) => imports.some((p) => importMatches(c.source, p))) || q.sites.some((s) => calls.includes(s.call))
     if (!mine) continue
@@ -85,19 +92,24 @@ function attachTo(q, d, declared) {
   }
   const fits = d ? declared.filter((s) => !s.dialect || s.dialect === d.dialect) : declared
   if (!fits.length) return { store: null, why: `not attached: its client speaks ${d.dialect}, the declared SQL store${declared.length === 1 ? '' : 's'} of the repository ${declared.map((s) => `${s.id} (${s.dialect || 'dialect unknown'})`).join(', ')}` }
-  if (fits.length === 1) return { store: fits[0], why: declared.length === 1 ? 'the only declared SQL store in the repository' : `the only declared ${d.dialect} store in the repository` }
-  // the module they share: the deepest common folder, one store's alone
   const depth = fits.map((s) => commonDir(q.path, s.name))
   const best = Math.max(...depth)
   const at = fits.filter((_, i) => depth[i] === best)
   if (best > 0 && at.length === 1) return { store: at[0], why: `the same module (${q.path.split('/').slice(0, best).join('/')}/)` }
+  if (fits.length === 1) {
+    const names = new Set(q.sites.flatMap((s) => s.statements.flatMap((x) => x.tables.map((t) => t.name))))
+    if (![...names].some((n) => entityIn(fits[0], n))) return { store: null, why: `not attached: no table it names is declared in ${fits[0].id}` }
+    return { store: fits[0], why: declared.length === 1 ? 'the only declared SQL store in the repository' : `the only declared ${d.dialect} store in the repository` }
+  }
   return { store: null, why: `not attached: the repository declares ${plural(fits.length, 'SQL store')} (${fits.map((s) => s.id).join(', ')}) and nothing ties these queries to one` }
 }
 
-// a table's declared entity, by its name as the code writes it (a schema-qualified one by its own name too)
+// a table's declared entity, by its name as the code writes it: exact, or folded as the store folds
+// names (Postgres: an unquoted name to lower case; SQLite and MySQL: any case); never fuzzy, never
+// across schemas
 function entityIn(st, name) {
   const l = lower(name)
-  return st.entities.find((e) => e.name === name) || st.entities.find((e) => lower(e.name) === l) || (name.includes('.') ? st.entities.find((e) => lower(e.name) === lower(name.split('.').pop())) : null) || null
+  return st.entities.find((e) => e.name === name) || (st.dialect === 'postgres' ? st.entities.find((e) => e.name === l) : st.entities.find((e) => lower(e.name) === l)) || null
 }
 // the referenced side of a join: the side whose column is `id`, or whose table the other's column names
 function direction(j) {
@@ -123,7 +135,6 @@ export function resolveQueries(rows, model) {
     out.tests += mine.reduce((a, f) => a + (f.q.tests || 0), 0)
     const withSites = mine.filter((f) => f.q.sites.length)
     if (!withSites.length) continue
-    for (const c of repoClients) if (!out.clients.some((x) => x.repo === repo && x.source === c.source)) out.clients.push({ repo, source: c.source })
     const declared = declaredOf.get(repo) || []
     // each file: its dialect, then attached or deduced
     const groups = new Map() // dialect | '' → { files, d }
@@ -152,6 +163,11 @@ export function resolveQueries(rows, model) {
     }
     for (const [k, g] of [...groups].sort(([a], [b]) => (a < b ? -1 : 1))) added.push(deduce(repo, k || null, g, out, repoClients))
     for (const a of attached.values()) attach(a, out)
+    // the clients that are no longer a gap: those of a file whose queries were read, and the
+    // repository's speaking the dialect of a store its queries were read into (a driver imported
+    // apart from the queries); never a client whose queries are not read (SQL built elsewhere)
+    const read = new Set([...added.filter((s) => s.repo === repo).map((s) => s.dialect), ...[...attached.values()].map((a) => a.store.dialect)].filter(Boolean))
+    for (const c of [...withSites.flatMap((f) => f.q.clients), ...repoClients.filter((c) => c.dialect && read.has(c.dialect))]) if (!out.clients.some((x) => x.repo === repo && x.source === c.source)) out.clients.push({ repo, source: c.source })
   }
   out.files = files.filter((f) => f.q.sites.length).length
   return { stores: added, queries: out }
@@ -299,9 +315,14 @@ function attach(a, out) {
     if (list.length > CAP) e.queries.more = list.length - CAP
   }
   const list = [...conflicts.values()]
-  st.queries = { files: a.files.length, statements, why: a.why, conflicts: list.slice(0, CAP), ...(list.length > CAP ? { more: list.length - CAP } : {}) }
+  // how many of the tables they name the store declares: said with why they attach
+  const named = new Map()
+  for (const f of a.files) for (const s of f.q.sites) for (const x of s.statements) for (const t of x.tables) if (!named.has(lower(t.name))) named.set(lower(t.name), !!entityIn(st, t.name))
+  const k = [...named.values()].filter(Boolean).length, n = named.size
+  const why = `${a.why}; ${k} of ${n} ${n === 1 ? 'table named is' : 'tables named are'} declared`
+  st.queries = { files: a.files.length, statements, why, named: n, declared: k, conflicts: list.slice(0, CAP), ...(list.length > CAP ? { more: list.length - CAP } : {}) }
   out.statements += statements
-  out.attached.push({ store: st.id, files: a.files.length, why: a.why })
+  out.attached.push({ store: st.id, files: a.files.length, why })
 }
 
 // What a deduced store does not know, in one line (graph_data and the Data tab say the same)

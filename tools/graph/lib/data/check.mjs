@@ -507,8 +507,10 @@ export function gapsOf(model, stores, imports) {
     const seen = imports.filter((im) => d.imports.some((p) => importMatches(im.source, p)))
     if (!seen.length) continue
     const dialects = COVERS[d.id] || []
-    if (model.stores.some((s) => dialects.includes(s.dialect) && s.entities.length)) continue
-    // an import a refined store names, or a client of a repository whose queries are read (queries.mjs)
+    // a declared store of a matching dialect covers the datastore everywhere; a store deduced from the
+    // queries in code never does (it covers only the clients its repository's queries were read through)
+    if (model.stores.some((s) => !s.inferred && dialects.includes(s.dialect) && s.entities.length)) continue
+    // an import a refined store names, or a client whose queries are read (queries.mjs)
     const read = model.queries?.clients || []
     const open = seen.filter((im) => !stores.some((s) => s.imports.some((p) => importMatches(im.source, p))) && !read.some((c) => c.repo === im.repo && c.source === im.source))
     if (!open.length) continue

@@ -657,7 +657,9 @@ export class Graph {
     const drift = elementsOf(e).some(([, x]) => x.conflicts.some(schemaDrift))
     const why = [e.access?.conflicts.length ? 'a call writes an attribute the bound item does not state' : null, qcf.length ? 'the queries in code name a column the declarations lack' : null].filter(Boolean)
     const moreAcc = e.access?.moreConflicts || 0, moreQ = e.queries?.more || 0
-    out.push(conflicts.length ? `Conflicts (${conflicts.length + moreCf}): the declarations disagree${why.length ? `, or ${why.join(', or ')} (inferred, never overriding ${why.length === 1 && !qcf.length ? 'it' : 'them'})` : ''}; each side is kept` : 'Conflicts: none', ...(drift ? [`  (${SCHEMA_DRIFT})`] : []), ...conflicts,
+    // (the queries' coverage of the store said where their conflicts are: how they attach, how many of the tables they name it declares)
+    const attachedAs = qcf.length && st.queries ? `; they attach as ${st.queries.why}` : ''
+    out.push(conflicts.length ? `Conflicts (${conflicts.length + moreCf}): the declarations disagree${why.length ? `, or ${why.join(', or ')} (inferred, never overriding ${why.length === 1 && !qcf.length ? 'it' : 'them'}${attachedAs})` : ''}; each side is kept` : 'Conflicts: none', ...(drift ? [`  (${SCHEMA_DRIFT})`] : []), ...conflicts,
       ...(moreAcc ? [`  … and ${moreAcc} more written attribute${moreAcc === 1 ? '' : 's'} the item does not state (the first ${CAP} listed)`] : []), ...(moreQ ? [`  … and ${plural(moreQ, 'more column')} only the queries in code name (the first ${CAP} listed)`] : []))
     if (kv && e.logical) {
       const g = e.logical

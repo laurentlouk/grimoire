@@ -361,7 +361,7 @@ export function dataClient(ctx) {
         h('div', { class: 'srcline' }, r.why), r.at.length ? h('div', { class: 'srcline' }, r.at.join(' · ')) : null)) : null,
       section('Referenced by', by, ([o, r]) => h('li', null, go(o.name), h('span', { class: 'mono muted' }, ` (${r.columns.join(', ')}) → (${r.toColumns.join(', ')})`), r.rf ? REFINED() : null)),
       sqList(s, t),
-      conflicts.length ? [h('h2', null, `Conflicts (${conflicts.length})`), h('p', { class: 'note' }, `The declarations disagree${conflicts.some(([, c]) => c.inf) ? ', or the queries in code name a column they lack (inferred, never overriding them)' : ''}; each side is kept, none is resolved.`),
+      conflicts.length ? [h('h2', null, `Conflicts (${conflicts.length})`), h('p', { class: 'note' }, `The declarations disagree${conflicts.some(([, c]) => c.inf) ? `, or the queries in code name a column they lack (inferred, never overriding them${s.q ? `; they attach as ${s.q.why}` : ''})` : ''}; each side is kept, none is resolved.`),
         conflicts.some(([, c]) => c.drift) ? h('p', { class: 'note' }, 'The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.') : null,
         h('ul', { class: 'links dlist' }, conflicts.map(([label, c]) => h('li', null, h('div', null, h('b', null, label), h('span', { class: 'muted' }, ` · ${c.attr}`)),
           c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src))))))] : null)

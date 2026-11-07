@@ -18,7 +18,9 @@
 //               functions query, query_as, query_scalar, sql_query (`sqlx::query(…)`); the methods
 //               execute, query, query_row, query_map, query_one, query_opt, prepare, prepare_cached,
 //               execute_batch, simple_query, batch_execute (rusqlite, postgres).
-// SQL text: a string or template literal; a constant of the same file holding one; a concatenation;
+// SQL text: a string or template literal; a constant of the same file holding one (only what nothing can
+// change: a TypeScript `const`, a Go `const`, a Rust `const` or immutable `static`, a Python module-level
+// ALL_CAPS name assigned once; never one a parameter or a local of a function around the call shadows); a concatenation;
 // a format (Go's fmt.Sprintf, Python's % and .format, an f-string, Rust's format!). Whatever code fills
 // in (a template's ${…}, an f-string's {…}, a format verb, a concatenated variable) is a parameter
 // (readers/sql-query.mjs PARAM): a table named by one is never a table, and SQL built from variables is
@@ -26,7 +28,9 @@
 // (SELECT, INSERT, UPDATE, DELETE, WITH, …): a query builder's fragment (`sql\`${col} = 1\``) is none.
 // Test code (the code graph's test paths, each language's own marks) is not read for the model: its
 // sites are counted. Bounded: MAX_SITES calls, MAX_STATEMENTS statements and MAX_FACTS names a file; a
-// text many calls send (a constant) is read once.
+// text many calls send (a constant) is read once; one walk down the tree (a call's function, class and
+// test status come down with it, never by walking up: a node's parent costs the tree's depth), within
+// FILE_MS; the content filter linear in the text.
 //
 // The clients a file imports (CLIENTS: the architecture's known SQL clients, by module, with the
 // dialect each speaks, null for a generic one) are kept with their line, so the store is named by its
@@ -68,11 +72,14 @@ export function clientOf(source) {
 const RS_HINTS = [['postgres', /\b(?:PgPool|PgPoolOptions|PgConnection|PgRow|PgConnectOptions)\b|\bsqlx::Postgres\b/], ['mysql', /\b(?:MySqlPool|MySqlPoolOptions|MySqlConnection|MySqlRow)\b|\bsqlx::MySql\b/], ['sqlite', /\b(?:SqlitePool|SqlitePoolOptions|SqliteConnection|SqliteRow)\b|\bsqlx::Sqlite\b/]]
 
 // ── what a file holds that this reads (registry.mjs inspect: bit 64) ──
-const CALL = /(?:\b(?:query|queryRow|execute|exec|prepare|raw|unsafe|sql|SQL|Query|QueryRow|QueryContext|QueryRowContext|Exec|ExecContext|Prepare|PrepareContext|Get|GetContext|Select|SelectContext|Queryx|QueryRowx|MustExec|NamedExec|NamedQuery|executemany|executescript|mogrify|fetch|fetchrow|fetchval|read_sql|text|query_as|query_scalar|query_row|query_map|query_one|query_opt|prepare_cached|execute_batch|simple_query|batch_execute|sql_query)\s*!?\s*(?:<[^>\n]{0,80}>\s*)?[(`])|\$(?:query|execute)Raw/
-const SQL_TEXT = /(?:["'`]|r#*")\s*\(?\s*(?:SELECT|INSERT|UPDATE|DELETE|WITH|REPLACE)\b/i
+// Run on every source file at index time, so linear whatever the text: no two repetitions that can
+// match the same blanks (`\s*!?\s*` backtracks quadratically over a run of blanks): an optional part
+// that repeats ends with a mark of its own (`(?:\s*!)?\s*`, `(?:\s*\()?\s*`).
+const CALL = /(?:\b(?:query|queryRow|execute|exec|prepare|raw|unsafe|sql|SQL|Query|QueryRow|QueryContext|QueryRowContext|Exec|ExecContext|Prepare|PrepareContext|Get|GetContext|Select|SelectContext|Queryx|QueryRowx|MustExec|NamedExec|NamedQuery|executemany|executescript|mogrify|fetch|fetchrow|fetchval|read_sql|text|query_as|query_scalar|query_row|query_map|query_one|query_opt|prepare_cached|execute_batch|simple_query|batch_execute|sql_query)(?:\s*!)?\s*(?:<[^>\n]{0,80}>\s*)?[(`])|\$(?:query|execute)Raw/
+const SQL_TEXT = /(?:["'`]|r#{0,8}")(?:\s*\()?\s*(?:SELECT|INSERT|UPDATE|DELETE|WITH|REPLACE)\b/i
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
 const CLIENT_TEXT = {
-  ts: new RegExp(`(?:\\bfrom|\\brequire\\s*\\(|\\bimport\\s*\\(?)\\s*["'\`](?:${CLIENTS.map((c) => esc(c.source)).join('|')})(?:/[^"'\`\\n]*)?["'\`]`),
+  ts: new RegExp(`(?:\\bfrom|\\brequire\\s*\\(|\\bimport(?:\\s*\\()?)\\s*["'\`](?:${CLIENTS.map((c) => esc(c.source)).join('|')})(?:/[^"'\`\\n]*)?["'\`]`),
   go: new RegExp(`"(?:${CLIENTS.filter((c) => c.source.includes('/') || c.source === 'database/sql').map((c) => esc(c.source)).join('|')})(?:/[^"\\n]*)?"`),
   python: new RegExp(`^[ \\t]*(?:from|import)[ \\t]+(?:${CLIENTS.map((c) => esc(c.source)).join('|')})\\b`, 'm'),
   rust: new RegExp(`\\buse[ \\t]+(?:${CLIENTS.filter((c) => !c.source.includes('/')).map((c) => esc(c.source.split('::')[0])).join('|')})::|\\bextern[ \\t]+crate[ \\t]+(?:sqlx|rusqlite|postgres|tokio_postgres|mysql|diesel)\\b`),
@@ -134,7 +141,7 @@ function goSegs(n, consts, depth = 0) {
       // fmt.Sprintf("… %s …", x): each verb a parameter (%% a percent sign)
       if (!/^fmt\.Sprintf$/.test(field(n, 'function')?.text || '')) return null
       const f = goSegs(named(field(n, 'arguments') || n)[0], consts, depth + 1)
-      return f ? f.map((s) => ({ ...s, text: s.text.replace(/%%|%[-+# 0]*\d*(?:\.\d+)?[a-zA-Z]/g, (m) => (m === '%%' ? '%' : PARAM)) })) : null
+      return f ? f.map((s) => ({ ...s, text: s.text.replace(/%%|%[-+# 0]{0,8}\d{0,8}(?:\.\d{0,8})?[a-zA-Z]/g, (m) => (m === '%%' ? '%' : PARAM)) })) : null
     }
     default: return null
   }
@@ -208,155 +215,241 @@ const RS_MACROS = new Set(['query', 'query_as', 'query_scalar', 'query_unchecked
 const RS_FNS = new Set(['query', 'query_as', 'query_scalar', 'sql_query', 'query_with', 'query_as_with'])
 const RS_METHODS = new Set(['execute', 'query', 'query_row', 'query_map', 'query_one', 'query_opt', 'prepare', 'prepare_cached', 'execute_batch', 'simple_query', 'batch_execute'])
 
-// the function holding a node, as each language names it, and whether it is test code
-const FN_TYPES = { ts: /^(?:function_declaration|generator_function_declaration|method_definition|arrow_function|function_expression|function|generator_function)$/, go: /^(?:function_declaration|method_declaration)$/, python: /^function_definition$/, rust: /^function_item$/ }
-function enclosing(n, fam) {
-  for (let p = n.parent; p; p = p.parent) {
-    if (!FN_TYPES[fam].test(p.type)) continue
-    let name = null
-    if (fam === 'ts') {
-      if (p.type === 'function_declaration' || p.type === 'generator_function_declaration') name = field(p, 'name')?.text
-      else if (p.type === 'method_definition') name = `${owner(p, /^(?:class_declaration|abstract_class_declaration|class)$/) || '(class)'}.${field(p, 'name')?.text || '(method)'}`
-      else {
-        const h = p.parent
-        if (h?.type === 'variable_declarator') name = field(h, 'name')?.text
-        else if (h?.type === 'pair') name = field(h, 'key')?.text
-        else if (h && (h.type === 'public_field_definition' || h.type === 'field_definition')) name = `${owner(h, /^(?:class_declaration|abstract_class_declaration|class)$/) || '(class)'}.${(field(h, 'name') || field(h, 'property'))?.text}`
-        else if (h?.type === 'export_statement') name = '(default)'
-        else continue // a callback belongs to the function around it
-      }
-    } else if (fam === 'go') {
-      name = field(p, 'name')?.text || '(func)'
-      if (p.type === 'method_declaration') { let recv = null; each(field(p, 'receiver') || p, (x) => { if (!recv && x.type === 'type_identifier') recv = x.text; return !recv }); if (recv) name = `${recv}.${name}` }
-    } else if (fam === 'python') { const cls = owner(p, /^class_definition$/, /^function_definition$/); name = `${cls ? `${cls}.` : ''}${field(p, 'name')?.text || '(function)'}` }
-    else { const impl = implOf(p); name = `${impl ? `${impl}::` : ''}${field(p, 'name')?.text || '(fn)'}` }
-    return { node: p, name: (name || '(function)').slice(0, 120) }
+
+// ── one walk down the tree ──
+// Each node is visited once, with what holds it: its function (named as each language names it), its
+// class or impl, whether it is test code, and the scopes of the functions around it (the names their
+// parameters and locals bind). Nothing ever walks up from a node (a parent costs the tree's depth
+// each time): a call's function, class and test status come down with the walk.
+export const FILE_MS = 10_000 // a file's read stops past this (said), as a replay does
+const FN = { ts: /^(?:function_declaration|generator_function_declaration|method_definition|arrow_function|function_expression|function|generator_function)$/, go: /^(?:function_declaration|method_declaration|func_literal)$/, python: /^(?:function_definition|lambda)$/, rust: /^(?:function_item|closure_expression)$/ }
+const CLASS = { ts: /^(?:class_declaration|abstract_class_declaration|class)$/, python: /^class_definition$/ }
+const TEST_ATTR = /\b(?:test|cfg\s*\(\s*test\s*\))/
+const TEST_FILE = { ts: /\.(?:test|spec)\.[cm]?[jt]sx?$/i, go: /_test\.go$/i, python: /(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$/i, rust: /(?:^|\/)tests\// }
+const isTestName = (fam, name) => (fam === 'go' ? /^(?:Test|Benchmark|Example|Fuzz)/.test(name.split('.').pop()) : fam === 'python' ? /^test/.test(name.split('.').pop()) || /(?:^|\.)Test/.test(name) : false)
+
+// The function a function-like node is, as its language names it (`parent`: what holds it, known
+// from the walk) → its name, or null for a callback, which belongs to the function around it
+function fnName(n, parent, fam, ctx) {
+  if (fam === 'ts') {
+    if (n.type === 'function_declaration' || n.type === 'generator_function_declaration') return field(n, 'name')?.text || '(function)'
+    if (n.type === 'method_definition') return `${ctx.cls || '(class)'}.${field(n, 'name')?.text || '(method)'}`
+    if (parent?.type === 'variable_declarator') return field(parent, 'name')?.text || null
+    if (parent?.type === 'pair') return field(parent, 'key')?.text || null
+    if (parent && (parent.type === 'public_field_definition' || parent.type === 'field_definition')) return `${ctx.cls || '(class)'}.${(field(parent, 'name') || field(parent, 'property'))?.text}`
+    if (parent?.type === 'export_statement') return '(default)'
+    return null
   }
-  return null
+  if (fam === 'go') {
+    if (n.type === 'func_literal') return null
+    let name = field(n, 'name')?.text || '(func)'
+    if (n.type === 'method_declaration') { let recv = null; each(field(n, 'receiver') || n, (x) => { if (!recv && x.type === 'type_identifier') recv = x.text; return !recv }); if (recv) name = `${recv}.${name}` }
+    return name
+  }
+  if (fam === 'python') return n.type === 'lambda' ? null : `${ctx.pyCls ? `${ctx.pyCls}.` : ''}${field(n, 'name')?.text || '(function)'}`
+  return n.type === 'closure_expression' ? null : `${ctx.impl ? `${ctx.impl}::` : ''}${field(n, 'name')?.text || '(fn)'}`
 }
-const owner = (n, re, stop = null) => { for (let p = n.parent; p; p = p.parent) { if (stop && stop.test(p.type)) return null; if (re.test(p.type)) return field(p, 'name')?.text || null } return null }
-const implOf = (n) => { for (let p = n.parent; p; p = p.parent) if (p.type === 'impl_item') { const t = field(p, 'type'); return t ? t.text.replace(/<[\s\S]*$/, '') : null } return null }
-// test code: a test function (Go's TestX, Python's test_x and TestX classes, Rust's #[test] and #[cfg(test)] modules)
-function isTestFn(n, fam, name) {
-  if (fam === 'go') return /^(?:Test|Benchmark|Example|Fuzz)/.test(name.split('.').pop())
-  if (fam === 'python') return /^test/.test(name.split('.').pop()) || /(?:^|\.)Test/.test(name)
-  if (fam === 'rust') {
-    for (let p = n; p; p = p.parent) {
-      if (p.type !== 'function_item' && p.type !== 'mod_item') continue
-      for (let s = p.previousNamedSibling; s && s.type === 'attribute_item'; s = s.previousNamedSibling) if (/\b(?:test|cfg\s*\(\s*test\s*\))/.test(s.text)) return true
+
+// The names a declaration binds in the function around it (a parameter, a local): each identifier
+// of its pattern, never one of a type, a default value, an attribute or a member. Bounded.
+const BINDS = {
+  ts: { variable_declarator: 'name', required_parameter: 'pattern', optional_parameter: 'pattern', formal_parameters: null, catch_clause: 'parameter' },
+  go: { parameter_declaration: null, variadic_parameter_declaration: null, short_var_declaration: 'left', var_spec: null, const_spec: null, range_clause: 'left' },
+  python: { parameters: null, lambda_parameters: null, assignment: 'left', augmented_assignment: 'left', for_statement: 'left', as_pattern_target: null },
+  rust: { parameter: 'pattern', let_declaration: 'pattern', closure_parameters: null },
+}
+const NOT_A_BINDING = /^(?:type_annotation|type|.*_type|type_identifier|attribute|member_expression|subscript|subscript_expression|field_expression|call|call_expression|string|template_string|number|integer|float|true|false|none|null)$/
+function bound(n, fam, out) {
+  const f = BINDS[fam][n.type]
+  if (f === undefined) return
+  // the part that binds: a field, or (null) the node itself, its value fields left out
+  const root = f ? field(n, f) : n
+  if (!root) return
+  const stack = [root]
+  for (let k = 0; stack.length && k < 256; k++) {
+    const x = stack.pop()
+    if (x.type === 'identifier' || x.type === 'shorthand_property_identifier_pattern') { out.add(x.text); continue }
+    if (NOT_A_BINDING.test(x.type)) continue
+    for (const c of x.namedChildren) {
+      // never a default value (`= 1`, `a: number = 2`), never a short var's or a spec's value
+      if (c === field(x, 'value') || c === field(x, 'right') || c === field(x, 'default') || c === field(x, 'type')) continue
+      stack.push(c)
     }
   }
-  return false
 }
-const TEST_FILE = { ts: /\.(?:test|spec)\.[cm]?[jt]sx?$/i, go: /_test\.go$/i, python: /(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$/i, rust: /(?:^|\/)tests\// }
+
+// A file's string constants a call may name, kept only where nothing can change them: TypeScript's
+// `const`, Go's `const`, Rust's `const` and immutable `static`, Python's module-level ALL_CAPS names
+// assigned once; never a `let`, a `var`, a Go `var`, a lowercase Python name (code may reassign them)
+function constsOf(root, fam) {
+  const consts = new Map(), twice = new Set()
+  for (const top of root.namedChildren) {
+    let decl = top
+    if (decl.type === 'export_statement') decl = field(decl, 'declaration') || decl.namedChildren[0]
+    if (!decl) continue
+    if (fam === 'ts' && decl.type === 'lexical_declaration' && field(decl, 'kind')?.text === 'const') { for (const v of decl.namedChildren) if (v.type === 'variable_declarator' && field(v, 'name')?.type === 'identifier' && field(v, 'value')) consts.set(field(v, 'name').text, field(v, 'value')) }
+    else if (fam === 'go' && decl.type === 'const_declaration') each(decl, (s) => { if (s.type !== 'const_spec') return true; const names = s.namedChildren.filter((x) => x.type === 'identifier'); const vals = field(s, 'value') ? field(s, 'value').namedChildren : []; names.forEach((nm, i) => { if (vals[i]) consts.set(nm.text, vals[i]) }); return false })
+    else if (fam === 'python' && decl.type === 'expression_statement') {
+      const a = decl.namedChildren[0]
+      if ((a?.type === 'assignment' || a?.type === 'augmented_assignment') && field(a, 'left')?.type === 'identifier') {
+        const name = field(a, 'left').text
+        if (consts.has(name) || a.type === 'augmented_assignment') twice.add(name)
+        if (/^[A-Z][A-Z0-9_]*$/.test(name) && a.type === 'assignment' && field(a, 'right')) consts.set(name, field(a, 'right'))
+      }
+    } else if (fam === 'rust' && (decl.type === 'const_item' || (decl.type === 'static_item' && !decl.namedChildren.some((c) => c.type === 'mutable_specifier'))) && field(decl, 'name') && field(decl, 'value')) consts.set(field(decl, 'name').text, field(decl, 'value'))
+  }
+  for (const n of twice) consts.delete(n)
+  return consts
+}
 
 // The SQL text an argument holds, by language → { text, line } | null
 const SEGS = { ts: tsSegs, go: goSegs, python: pySegs, rust: rsSegs }
 
-export function readQueryFile(tree, lang, file) {
+export function readQueryFile(tree, lang, file, { ms = FILE_MS } = {}) {
   const fam = familyOf(lang)
   const root = tree.rootNode
   const out = { lang: fam, path: file, clients: [], hints: [], markers: [], sites: [], fns: [], notes: [], tests: 0 }
   const note = (s) => { if (out.notes.length < 8 && !out.notes.includes(s)) out.notes.push(s) }
-  // the clients it imports, through the code graph's own import reading (lib/langs.mjs)
   const spec = LANGS[lang]?.spec
   const seenClient = new Set()
+  const consts = constsOf(root, fam)
+  const fileTest = TEST_PATH.test(file) || TEST_FILE[fam].test(file)
+  let statements = 0, facts = 0
+  const read = new Map() // a text many calls send (a constant) is read once
+  const size = (s) => s.tables.length + s.columns.length + s.joins.length + s.lookups.length + s.casts.length
+  const deadline = Date.now() + ms
+  let steps = 0, stopped = false
+  const late = () => (++steps & 4095) === 0 && Date.now() > deadline
+  // the clients it imports, through the code graph's own import reading (lib/langs.mjs), first: the
+  // dialect they speak sets the tokenizer's rules
   each(root, (n) => {
-    const read = spec?.imports?.[n.type]
-    if (!read) return true
+    if (stopped || (late() && (stopped = true))) return false
+    const imp = spec?.imports?.[n.type]
+    if (!imp) return true
     let list = []
-    try { list = read(n) || [] } catch {}
+    try { list = imp(n) || [] } catch {}
     for (const im of list) {
       const c = im && im.source ? clientOf(im.source) : null
       if (c && !seenClient.has(im.source) && out.clients.length < 16) { seenClient.add(im.source); out.clients.push({ source: im.source, dialect: c.dialect, line: lineOf(n) }) }
     }
     return n.type !== 'import_statement' && n.type !== 'use_declaration' && n.type !== 'import_declaration'
   })
-  if (fam === 'rust' && out.clients.some((c) => importMatches(c.source, 'sqlx'))) {
-    const text = root.text
-    for (const [dialect, re] of RS_HINTS) { const m = re.exec(text); if (m) out.hints.push({ dialect, why: m[0], line: text.slice(0, m.index).split('\n').length }) }
-  }
-  // the file's string constants a call may name (module level)
-  const consts = new Map()
-  for (const top of named(root)) {
-    let decl = top
-    if (decl.type === 'export_statement') decl = field(decl, 'declaration') || named(decl)[0]
-    if (!decl) continue
-    if (fam === 'ts' && (decl.type === 'lexical_declaration' || decl.type === 'variable_declaration')) { for (const v of named(decl)) if (v.type === 'variable_declarator' && field(v, 'name')?.type === 'identifier' && field(v, 'value')) consts.set(field(v, 'name').text, field(v, 'value')) }
-    else if (fam === 'go' && (decl.type === 'const_declaration' || decl.type === 'var_declaration')) each(decl, (s) => { if (s.type !== 'const_spec' && s.type !== 'var_spec') return true; const names = named(s).filter((x) => x.type === 'identifier'); const vals = field(s, 'value') ? named(field(s, 'value')) : []; names.forEach((nm, i) => { if (vals[i]) consts.set(nm.text, vals[i]) }); return false })
-    else if (fam === 'python' && decl.type === 'expression_statement') { const a = named(decl)[0]; if (a?.type === 'assignment' && field(a, 'left')?.type === 'identifier' && field(a, 'right')) consts.set(field(a, 'left').text, field(a, 'right')) }
-    else if (fam === 'rust' && (decl.type === 'const_item' || decl.type === 'static_item') && field(decl, 'name') && field(decl, 'value')) consts.set(field(decl, 'name').text, field(decl, 'value'))
-  }
-  const fileTest = TEST_PATH.test(file) || TEST_FILE[fam].test(file)
-  const fnAt = new Map()
-  let statements = 0, facts = 0
-  const read = new Map() // a text many calls send (a constant) is read once
-  const size = (s) => s.tables.length + s.columns.length + s.joins.length + s.lookups.length + s.casts.length
-  const site = (call, arg, name) => {
+  const ds = [...new Set(out.clients.map((c) => c.dialect).filter(Boolean))]
+  const fileDialect = ds.length === 1 ? ds[0] : null
+  const shadowed = [] // [site, the constants it inlined, its scope]: checked once every scope is known
+  // the SQL text an argument holds, recording the constants it inlines
+  const sqlOf = (arg, used) => (arg ? assemble(SEGS[fam](arg, { get: (k) => { const v = consts.get(k); if (v) used.add(k); return v } })) : null)
+  const site = (call, arg, name, ctx) => {
     if (out.sites.length >= MAX_SITES || statements >= MAX_STATEMENTS || facts >= MAX_FACTS) return false
-    const seg = arg ? SEGS[fam](arg, consts) : null
-    const sql = assemble(seg)
+    const used = new Set()
+    const sql = sqlOf(arg, used)
     if (!sql || !isSql(sql.text)) return false
-    const e = enclosing(call, fam)
-    if (fileTest || (e && isTestFn(e.node, fam, e.name)) || (fam === 'rust' && isTestFn(call, fam, ''))) { out.tests++; return true }
-    let f = -1
-    if (e) {
-      const k = `${lineOf(e.node)}\0${e.name}`
-      if (!fnAt.has(k)) { fnAt.set(k, out.fns.length); out.fns.push({ name: e.name, line: lineOf(e.node), end: endOf(e.node) }) }
-      f = fnAt.get(k)
-    }
+    if (fileTest || ctx.test) { out.tests++; return true }
     const k = `${sql.line}\0${sql.text}`
     if (!read.has(k)) read.set(k, readQueries(sql.text, { dialect: fileDialect, line: sql.line }))
     const r = read.get(k)
+    if (!r.statements.length) return false // prose, or no statement it reads
     for (const n of r.notes) note(n)
     for (const m of r.markers) if (!out.markers.some((x) => x.dialect === m.dialect && !!x.weak === !!m.weak)) out.markers.push(m)
     const sts = []
     for (const s of r.statements) { if (statements >= MAX_STATEMENTS || facts >= MAX_FACTS) break; sts.push(s); statements++; facts += size(s) }
-    out.sites.push({ line: lineOf(call), fn: f, call: name, statements: sts })
+    let f = -1
+    if (ctx.fn) {
+      if (ctx.fn.idx < 0) { ctx.fn.idx = out.fns.length; out.fns.push({ name: ctx.fn.name, line: ctx.fn.line, end: ctx.fn.end }) }
+      f = ctx.fn.idx
+    }
+    const s = { line: lineOf(call), fn: f, call: name, statements: sts }
+    out.sites.push(s)
+    if (used.size) shadowed.push([s, used, ctx.scope])
     return true
   }
-  // the dialect the file's own clients speak, for the tokenizer's rules
-  const ds = [...new Set(out.clients.map((c) => c.dialect).filter(Boolean))]
-  const fileDialect = ds.length === 1 ? ds[0] : null
-  const firstSql = (args) => { for (const a of args) { const s = assemble(SEGS[fam](a, consts)); if (s && isSql(s.text)) return a } return null }
-  each(root, (n) => {
-    if (out.sites.length >= MAX_SITES || statements >= MAX_STATEMENTS) return false
+  const firstSql = (args) => { for (const a of args) { const s = sqlOf(a, new Set()); if (s && isSql(s.text)) return a } return null }
+  // the call sites, by language
+  const visit = (n, ctx) => {
     if (fam === 'ts' && n.type === 'call_expression') {
       const fn = field(n, 'function'), args = field(n, 'arguments')
       const name = fn ? (fn.type === 'identifier' ? fn.text : fn.type === 'member_expression' ? field(fn, 'property')?.text : null) : null
-      if (!name || !args) return true
-      if (args.type === 'template_string') { if (TS_TAGS.has(name)) site(n, args, name); return true }
-      if (!TS_CALLS.has(name)) return true
-      const list = named(args)
+      if (!name || !args) return
+      if (args.type === 'template_string') { if (TS_TAGS.has(name)) site(n, args, name, ctx); return }
+      if (!TS_CALLS.has(name)) return
+      const list = args.namedChildren
       // pool.query({ text: '…', values }): the config's text
-      const cfg = list[0]?.type === 'object' ? named(list[0]).find((p) => p.type === 'pair' && /^(?:text|sql)$/.test(field(p, 'key')?.text?.replace(/['"]/g, '') || '')) : null
-      site(n, cfg ? field(cfg, 'value') : firstSql(list), name)
+      const cfg = list[0]?.type === 'object' ? list[0].namedChildren.find((p) => p.type === 'pair' && /^(?:text|sql)$/.test(field(p, 'key')?.text?.replace(/['"]/g, '') || '')) : null
+      site(n, cfg ? field(cfg, 'value') : firstSql(list), name, ctx)
     } else if (fam === 'go' && n.type === 'call_expression') {
       const fn = field(n, 'function')
       const name = fn?.type === 'selector_expression' ? field(fn, 'field')?.text : null
-      if (name && GO_CALLS.has(name)) site(n, firstSql(named(field(n, 'arguments') || n)), name)
+      if (name && GO_CALLS.has(name)) site(n, firstSql((field(n, 'arguments') || n).namedChildren), name, ctx)
     } else if (fam === 'python' && n.type === 'call') {
       const fn = field(n, 'function')
       const name = fn?.type === 'attribute' ? field(fn, 'attribute')?.text : fn?.type === 'identifier' ? fn.text : null
-      if (name && (PY_CALLS.has(name) || (name === 'text' && fn.type === 'identifier'))) site(n, positional(n)[0] || null, name)
+      if (name && (PY_CALLS.has(name) || (name === 'text' && fn.type === 'identifier'))) site(n, positional(n)[0] || null, name, ctx)
     } else if (fam === 'rust' && n.type === 'macro_invocation') {
       const name = (field(n, 'macro')?.text || '').split('::').pop()
-      if (!RS_MACROS.has(name)) return true
-      const tt = named(n).find((c) => c.type === 'token_tree')
-      const lit = tt ? named(tt).find((c) => c.type === 'string_literal' || c.type === 'raw_string_literal' || (c.type === 'identifier' && consts.has(c.text))) : null
-      site(n, lit || null, `${name}!`)
-      return false
+      if (!RS_MACROS.has(name)) return
+      const tt = n.namedChildren.find((c) => c.type === 'token_tree')
+      const lit = tt ? tt.namedChildren.find((c) => c.type === 'string_literal' || c.type === 'raw_string_literal' || (c.type === 'identifier' && consts.has(c.text))) : null
+      site(n, lit || null, `${name}!`, ctx)
     } else if (fam === 'rust' && n.type === 'call_expression') {
       let fn = field(n, 'function')
       if (fn?.type === 'generic_function') fn = field(fn, 'function')
       const name = fn ? (fn.type === 'field_expression' ? field(fn, 'field')?.text : fn.text.split('::').pop()) : null
-      if (name && ((fn.type === 'field_expression' && RS_METHODS.has(name)) || (fn.type !== 'field_expression' && RS_FNS.has(name)))) site(n, firstSql(named(field(n, 'arguments') || n)), name)
+      if (name && ((fn.type === 'field_expression' && RS_METHODS.has(name)) || (fn.type !== 'field_expression' && RS_FNS.has(name)))) site(n, firstSql((field(n, 'arguments') || n).namedChildren), name, ctx)
     }
-    return true
-  })
+  }
+  // the walk: [node, its context, what holds it]
+  const top = { fn: null, cls: null, pyCls: null, impl: null, test: false, scope: null }
+  const stack = stopped ? [] : [[root, top, null]]
+  while (stack.length) {
+    if (late()) { stopped = true; break }
+    const [n, ctx, parent] = stack.pop()
+    // what a declaration binds, in the function around it (never at the top level: those are the constants)
+    if (ctx.scope) bound(n, fam, ctx.scope.names)
+    if (out.sites.length < MAX_SITES && statements < MAX_STATEMENTS && facts < MAX_FACTS) visit(n, ctx)
+    // the context its children get
+    let c = ctx
+    if (FN[fam].test(n.type)) {
+      const name = fnName(n, parent, fam, ctx)
+      const scope = { names: new Set(), up: ctx.scope }
+      c = name !== null
+        ? { ...ctx, fn: { name: name.slice(0, 120), line: lineOf(n), end: endOf(n), idx: -1 }, scope, test: ctx.test || isTestName(fam, name), pyCls: null }
+        : { ...ctx, scope, pyCls: fam === 'python' ? null : ctx.pyCls }
+      if (fam === 'ts' && n.type === 'arrow_function' && field(n, 'parameter')) scope.names.add(field(n, 'parameter').text)
+    } else if (CLASS[fam]?.test(n.type)) {
+      const name = field(n, 'name')?.text || '(class)'
+      c = fam === 'python' ? { ...ctx, pyCls: name, test: ctx.test || /^Test/.test(name) } : { ...ctx, cls: name }
+    } else if (fam === 'rust' && n.type === 'impl_item') {
+      const t = field(n, 'type')
+      c = { ...ctx, impl: t ? t.text.replace(/<[\s\S]*$/, '') : null }
+    }
+    // children, in source order on the stack; Rust's attributes mark the item after them as test code
+    const kids = n.namedChildren
+    let attrTest = false
+    const pushes = []
+    for (const k of kids) {
+      if (fam === 'rust' && k.type === 'attribute_item') { if (TEST_ATTR.test(k.text)) attrTest = true; pushes.push([k, c, n]); continue }
+      pushes.push([k, attrTest && (k.type === 'function_item' || k.type === 'mod_item') ? { ...c, test: true } : c, n])
+      attrTest = false
+    }
+    for (let i = pushes.length - 1; i >= 0; i--) stack.push(pushes[i])
+  }
+  if (stopped) note(`the file took more than ${ms / 1000} s to read: the calls after that not read`)
+  // a constant a function's parameter or local shadows is not the one the call sends: its site is dropped
+  if (shadowed.length) {
+    const drop = new Set()
+    for (const [s, used, scope] of shadowed) for (let sc = scope; sc; sc = sc.up) if ([...used].some((u) => sc.names.has(u))) { drop.add(s); break }
+    if (drop.size) out.sites = out.sites.filter((s) => !drop.has(s))
+  }
+  if (fam === 'rust' && out.clients.some((c) => importMatches(c.source, 'sqlx'))) {
+    const text = root.text
+    for (const [dialect, re] of RS_HINTS) { const m = re.exec(text); if (m) out.hints.push({ dialect, why: m[0], line: text.slice(0, m.index).split('\n').length }) }
+  }
   if (out.sites.length >= MAX_SITES) note(`more than ${MAX_SITES} query calls: the first ${MAX_SITES} read`)
   if (statements >= MAX_STATEMENTS) note(`more than ${MAX_STATEMENTS} statements: the first ${MAX_STATEMENTS} read`)
   if (facts >= MAX_FACTS) note(`more than ${MAX_FACTS} names read: the statements after them not kept`)
+  // a function that holds no site kept after the drop: renumber
+  const keep = [...new Set(out.sites.map((s) => s.fn).filter((f) => f >= 0))].sort((a, b) => a - b)
+  if (keep.length !== out.fns.length) { const at = new Map(keep.map((f, i) => [f, i])); out.fns = keep.map((f) => out.fns[f]); for (const s of out.sites) if (s.fn >= 0) s.fn = at.get(s.fn) }
   return out
 }
 
