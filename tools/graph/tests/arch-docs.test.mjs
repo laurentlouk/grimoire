@@ -659,7 +659,7 @@ else {
     put(MAIN, '.gitignore', '.grimoire/\n')
     for (const p of CODE) put(MAIN, p, 'export const x = 1\n')
     put(MAIN, DIAGRAM, JSON.stringify(shop, null, 2) + '\n')
-    git(MAIN, 'init', '-q', '-b', 'main'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base')
+    git(MAIN, 'init', '-q', '-b', 'main'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'base')
     git(MAIN, 'worktree', 'add', '-q', '-b', 'feat', FEAT)
     await handIndex(MAIN, CODE, [['src/web/page.js', 'src/api/orders.js'], ['src/api/orders.js', 'src/store/db.js']])
     // the branch: the web page now imports the store directly (no line draws it), a search service is
@@ -803,7 +803,7 @@ else {
     // the branch merges main and changes nothing more: no code finding, the reason said, no path
     const staleHead = git(MAIN, 'rev-parse', 'HEAD').stdout.trim()
     put(MAIN, 'src/extra/z.js', 'export const z = 3\n')
-    git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'more on main')
+    git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'more on main')
     const fork = git(MAIN, 'rev-parse', 'HEAD').stdout.trim()
     const merged = git(FEAT, '-c', 'user.email=t@t', '-c', 'user.name=t', 'merge', '-q', '--ff-only', 'main')
     await handIndex(FEAT, [...BR_CODE, 'src/extra/z.js'], [['src/web/page.js', 'src/api/orders.js'], ['src/web/page.js', 'src/store/db.js']])

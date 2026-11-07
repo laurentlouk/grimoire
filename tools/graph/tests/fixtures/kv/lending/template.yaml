@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "Lending: the loans members take out, and the holds they place on books"
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 10
+
+Resources:
+  LoansTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: loans
+      AttributeDefinitions:
+        - AttributeName: memberId
+          AttributeType: S
+        - AttributeName: loanId
+          AttributeType: S
+        - AttributeName: bookId
+          AttributeType: S
+        - AttributeName: dueAt
+          AttributeType: N
+      KeySchema:
+        - AttributeName: memberId
+          KeyType: HASH
+        - AttributeName: loanId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: ByBook
+          KeySchema:
+            - { AttributeName: bookId, KeyType: HASH }
+            - { AttributeName: dueAt, KeyType: RANGE }
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes: [title, dueAt]
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      BillingMode: &billing PAY_PER_REQUEST
+
+  HoldsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-holds"
+      BillingMode: *billing
+      AttributeDefinitions:
+        - AttributeName: bookId
+          AttributeType: S
+        - AttributeName: placedAt
+          AttributeType: N
+      KeySchema:
+        - AttributeName: bookId
+          KeyType: HASH
+        - AttributeName: placedAt
+          KeyType: RANGE
+
+  LendFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handler.lend
+      Environment:
+        Variables:
+          LOANS_TABLE: !Ref LoansTable
+          HOLDS_TABLE: !Ref HoldsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LoansTable
+
+Outputs:
+  LoansTableArn:
+    Value: !GetAtt LoansTable.Arn

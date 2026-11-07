@@ -68,6 +68,13 @@ export const kvIndex = (i) => i.kind === 'gsi' || i.kind === 'lsi'
 export const projectionText = (i) => (i.projection === 'INCLUDE' && i.include?.length ? `INCLUDE (${[...i.include].sort().join(', ')})` : i.projection ?? null)
 // A key-value table: it states its billing and stream (each null or not).
 export const kvTable = (e) => 'stream' in e
+// Stores whose declarations are files of equal standing (a local-dev table file, a template): each
+// element keeps what every declaration says of it (`per`, reconcile.mjs), and the diff and the delta
+// states compare each declaration, not only the first (diff.mjs, delta.mjs).
+export const KV_DIALECTS = new Set(['dynamodb'])
+// A declaration as `per` names it: its extractor and its file (key-value extractors read one file each).
+export const declKey = (extractor, path) => `${extractor}|${path}`
+export const declPath = (key) => key.slice(key.indexOf('|') + 1)
 
 // Element keys within their entity (and the ids the change view will address: <store>/<entity>.<field>).
 export const keyOf = {

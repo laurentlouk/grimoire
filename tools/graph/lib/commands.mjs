@@ -100,8 +100,8 @@ export const TOOLS = [
   },
   {
     name: 'graph_data',
-    description: 'The data model, read from SQL migrations and schema snapshots, never from a database. No argument: every store (a migration folder, found by its DDL whatever its name: its dialect and how that is known, how it was read, its tables, foreign keys, indexes and conflicts). `store`: its entities. `entity`: one table with its fields, keys, indexes and foreign keys, each citing the migration or snapshot path:line that declares it, and the conflicts where two declarations of the store disagree (both sides kept).',
-    params: { store: { type: 'string', description: 'A store: its folder (`drizzle`) or `repo:folder`. Lists its entities.' }, entity: { type: 'string', description: 'One entity: `books`, `drizzle/books` or `repo:drizzle/books`.' }, repo: repoParam },
+    description: 'The data model, read from SQL migrations, schema snapshots and key-value table declarations (DynamoDB CreateTable inputs, CloudFormation, SAM and Serverless table resources, JSON or YAML), never from a database. No argument: every store (a migration folder, found by its DDL whatever its name: its dialect and how that is known; or a repository\'s key-value tables, `dynamodb`, found by their content; how each was read, its tables, foreign keys, indexes and conflicts). `store`: its entities. `entity`: one table with its fields, keys, indexes and foreign keys (for a key-value table: its attributes, partition and sort keys, TTL, GSIs and LSIs with their projection, stream and billing; references such as !Ref kept unresolved), each citing the path:line that declares it, and the conflicts where two declarations disagree (both sides kept).',
+    params: { store: { type: 'string', description: 'A store: its folder (`drizzle`), `dynamodb` for a repository\'s key-value tables, or `repo:folder`. Lists its entities.' }, entity: { type: 'string', description: 'One entity: `books`, `drizzle/books` or `repo:drizzle/books`.' }, repo: repoParam },
     run: (g, a) => g.data(a),
     footer: DATA_FOOTER,
   },

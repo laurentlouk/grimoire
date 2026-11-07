@@ -12,13 +12,14 @@
 // it was partway. Drizzle v1 snapshots form a DAG through prevIds: only its leaves declare a store.
 //
 //   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store] }   (model.mjs)
-import { KINDS, keyOf, normType, normDefault, kvIndex, kvTable, projectionText } from './model.mjs'
+import { KINDS, keyOf, normType, normDefault, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
 
 // What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
-// an LSI's kind, key attributes and projection, beside what a SQL element says.
+// an LSI's kind, key attributes and projection, beside what a SQL element says. A key-value
+// attribute's type compares as written (S, N, B).
 const ATTRS = {
   entity: (e) => ({ kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}) }),
-  field: (f) => ({ type: normType(f.type), nullable: f.nullable, default: normDefault(f.default), generated: f.generated ?? null }),
+  field: (f, kv) => ({ type: kv ? String(f.type ?? '') : normType(f.type), nullable: f.nullable, default: normDefault(f.default), generated: f.generated ?? null }),
   key: (k) => (k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}),
   index: (i) => (kvIndex(i) ? { kind: i.kind, partition: i.partition.join(', '), sort: i.sort.join(', '), projection: projectionText(i) } : { unique: !!i.unique, columns: i.columns.join(', '), partial: !!i.partial }),
   relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate }),
@@ -53,6 +54,8 @@ function merge(id, ds) {
   const slot = (map, key, make) => { if (!map.has(key)) map.set(key, { ...make(), sources: [], by: new Map() }); return map.get(key) }
   const note = (el, d, attrs, src) => { el.sources.push(src); el.by.set(d, { attrs, src }) }
 
+  const store = ds.find((d) => d.dialect) || ds[0]
+  const kv = KV_DIALECTS.has(store.dialect)
   const entities = new Map()
   for (const d of ds) {
     for (const e of d.entities || []) {
@@ -60,11 +63,12 @@ function merge(id, ds) {
       note(E, d, ATTRS.entity(e), source(d, e))
       E.at.set(d, source(d, e))
       if (e.whole) E.whole.add(d)
-      for (const [type, list] of PARTS) for (const x of e[list] || []) note(slot(E[list], keyOf[type](x), () => SHAPE[type](x)), d, ATTRS[type](x), source(d, x))
+      for (const [type, list] of PARTS) for (const x of e[list] || []) note(slot(E[list], keyOf[type](x), () => SHAPE[type](x)), d, ATTRS[type](x, kv), source(d, x))
     }
   }
-  const done = (el, presence, absent) => { const { by, at, whole, ...rest } = el; return { ...rest, conflicts: conflicts(el, compared, presence, absent) } }
-  const store = ds.find((d) => d.dialect) || ds[0]
+  // a key-value element keeps what each declaration says of it: [[declKey, attrs]] (model.mjs)
+  const per = (el) => (kv ? { per: [...el.by].map(([d, { attrs }]) => [declKey(d.extractor, d.source.path), attrs]) } : {})
+  const done = (el, presence, absent) => { const { by, at, whole, ...rest } = el; return { ...rest, ...per(el), conflicts: conflicts(el, compared, presence, absent) } }
   return {
     id,
     repo: ds[0].repo,

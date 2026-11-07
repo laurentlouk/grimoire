@@ -4,8 +4,9 @@
 // the source of truth for what code does: that is read in the code, at the path:line given here.
 import { langOf } from './langs.mjs'
 import { reconcile, elementsOf, storeSummary } from './data/reconcile.mjs'
+import { kvIndex, projectionText } from './data/model.mjs'
 import { diffModels } from './data/diff.mjs'
-import { parseDelta, parseTarget, deltaStates, changeText, STATE_TEXT } from './data/delta.mjs'
+import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files, never from a database. Open path:line before relying on any of it.'
@@ -15,16 +16,40 @@ export const ARCH_CHANGES_FOOTER = 'Leads, not facts: both sides are read from m
 export const DELTA_FOOTER = 'Leads, not facts: the states are computed from migrations and generated files (the base through git at its commit), never from a database, and never written into the delta. Open path:line before relying on any of it.'
 export const ARCH_DELTA_FOOTER = 'Leads, not facts: the states are computed from migrations and generated files (the base through git at its commit), never from a database (the architecture\'s from the saved diagrams), and never written into the delta. Open path:line before relying on any of it.'
 
+// What the data model's text answers print comes from the project's files: a name holding a line
+// break or another control character could forge a line of the answer. Every such string is shown
+// JSON-quoted ("a\n  + b"), on its own line; the others as they are. clean() maps a whole result
+// (a model, a diff, delta states), keeping what it shares shared.
+const CTRL = /[\u0000-\u001f\u007f\u2028\u2029]/
+export function clean(x, seen = new Map()) {
+  if (typeof x === 'string') return CTRL.test(x) ? JSON.stringify(x) : x
+  if (x === null || typeof x !== 'object') return x
+  if (seen.has(x)) return seen.get(x)
+  if (Array.isArray(x)) { const out = []; seen.set(x, out); for (const v of x) out.push(clean(v, seen)); return out }
+  const out = {}
+  seen.set(x, out)
+  for (const k of Object.keys(x)) out[k] = clean(x[k], seen)
+  return out
+}
+
 // How a data model change reads, shared by graph_changes and the page (render.mjs packs the same words).
 const plural = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
-export const changeVal = (attr, v) => (attr === 'nullable' ? (v ? 'nullable' : 'not null') : attr === 'unique' ? (v ? 'unique' : 'not unique') : attr === 'partial' ? (v ? 'partial' : 'whole') : v === null || v === undefined || v === '' ? 'none' : String(v))
+export const changeVal = (attr, v, at = (p) => p) => (Array.isArray(v) ? v.map(at).join(', ') : attr === 'nullable' ? (v ? 'nullable' : 'not null') : attr === 'unique' ? (v ? 'unique' : 'not unique') : attr === 'partial' ? (v ? 'partial' : 'whole') : attr === 'enabled' ? (v === true ? 'on' : v === false ? 'off' : 'not said') : v === null || v === undefined || v === '' ? 'none' : String(v))
 export const CHANGE_KIND = { field: 'column', key: 'key', index: 'index', relation: 'foreign key' }
 const typeOf = (x) => x.type?.raw ?? x.type
-// One element of a change, as graph_changes lists it.
-export function describe(c, el) {
-  if (c.kind === 'entity') return `${el.name}  ${el.kind}${el.kind === 'table' || el.fields.length ? `, ${plural(el.fields.length, 'column')}` : ''}`
+// A key-value table's elements in words (graph_data, graph_changes): a key, an index, the table.
+export const kvKeyText = (k) => (k.role === 'ttl' ? `TTL (${k.parts.join(', ')})${k.enabled === true ? ' on' : k.enabled === false ? ' off' : ''}` : `${k.role} (${k.parts.join(', ')})`)
+export const kvIndexText = (i) => [i.kind === 'lsi' ? 'local' : 'global', i.partition.length ? `partition (${i.partition.join(', ')})` : null, i.sort.length ? `sort (${i.sort.join(', ')})` : null, projectionText(i) || 'projection not said'].filter(Boolean).join(' · ')
+export const kvTableText = (e) => `${e.billing || 'billing not said'} · ${e.stream ? `stream ${e.stream}` : 'no stream'}`
+// One element of a change, as graph_changes lists it (`dialect`: its store's).
+export function describe(c, el, dialect = null) {
+  const kv = dialect === 'dynamodb'
+  if (c.kind === 'entity') return `${el.name}  ${el.kind}${el.kind === 'table' || el.fields.length ? `, ${plural(el.fields.length, kv ? 'attribute' : 'column')}` : ''}${kv ? `, ${kvTableText(el)}` : ''}`
+  if (c.kind === 'field' && kv) return `${c.entity}.${el.name}  attribute ${typeOf(el)}${el.nullable ? '' : ', a key of the table'}`
   if (c.kind === 'field') return `${c.entity}.${el.name}  column ${typeOf(el)}, ${el.nullable ? 'nullable' : 'not null'}${el.default !== null && el.default !== undefined ? `, default ${el.default}` : ''}${el.generated ? `, generated ${el.generated}` : ''}`
+  if (c.kind === 'key' && kv) return `${c.entity} ${kvKeyText(el)}${el.role === 'ttl' ? '' : ' key'}`
   if (c.kind === 'key') return `${c.entity} ${el.role} key (${el.parts.join(', ')})`
+  if (c.kind === 'index' && kvIndex(el)) return `${c.entity} index ${el.name} ${kvIndexText(el)}`
   if (c.kind === 'index') return `${c.entity} index ${el.name}${el.unique ? ' unique' : ''} (${el.columns.join(', ')})${el.partial ? ' partial' : ''}`
   return `${c.entity} foreign key (${el.columns.join(', ')}) → ${el.to}(${el.toColumns.join(', ')})`
 }
@@ -303,12 +328,12 @@ export class Graph {
   dloc(s) { const root = this.roots.get(s.repo); const p = root && root !== '.' ? (s.path === '.' ? root : `${root}/${s.path}`) : s.path; return s.line ? `${p}:${s.line}` : p }
   data({ store, entity, repo }) {
     const R = repo ? ' AND repo = ?' : '', ra = repo ? [repo] : []
-    const model = reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL${R} ORDER BY repo, key, extractor`, ...ra).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
-    const failed = this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra)
+    const model = clean(reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL${R} ORDER BY repo, key, extractor`, ...ra).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) }))))
+    const failed = clean(this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra))
     if (entity) return this.dataEntity(model, String(entity))
     if (store) return this.dataStore(model, String(store))
-    if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables) and no Drizzle snapshot in the indexed repositories.'
-    const out = [`Data stores (${model.stores.length}), read from migrations and snapshots:`]
+    if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot and no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource) in the indexed repositories.'
+    const out = [`Data stores (${model.stores.length}), read from migrations, snapshots and table declarations:`]
     for (const st of model.stores) {
       out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`)
       for (const d of st.declarations) {
@@ -336,10 +361,13 @@ export class Graph {
     if (hits.length > 1) return `"${spec}" names ${hits.length} stores; give one as repo:folder: ${hits.map((s) => s.id).join(', ')}`
     const [st] = hits
     const out = [`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`]
+    const kv = st.dialect === 'dynamodb'
     for (const e of st.entities) {
       const pk = e.keys.find((k) => k.role === 'primary')
       const conflicts = elementsOf(e).reduce((a, [, x]) => a + x.conflicts.length, 0)
-      const parts = [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.length ? `foreign keys → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null].filter(Boolean)
+      const count = (kind) => e.indexes.filter((i) => i.kind === kind).length
+      const parts = kv ? [plural(e.fields.length, 'attribute'), ...e.keys.map(kvKeyText), count('gsi') ? plural(count('gsi'), 'GSI') : null, count('lsi') ? plural(count('lsi'), 'LSI') : null, kvTableText(e)].filter(Boolean)
+        : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.length ? `foreign keys → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null].filter(Boolean)
       out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}`)
     }
     return out.join('\n')
@@ -352,13 +380,17 @@ export class Graph {
     if (!hits.length) return `No entity "${spec}" in the data model. Try graph_data with no argument for the stores, or with a store for its entities.`
     if (hits.length > 1) return `"${spec}" names ${hits.length} entities; give store/entity or repo:store/entity: ${hits.map(([, e]) => e.id).join(', ')}`
     const [[st, e]] = hits
-    const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}]`).join(' · ')}`]
+    const kv = st.dialect === 'dynamodb'
+    const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}${s.as ? `, ${s.as}` : ''}]`).join(' · ')}`]
+    if (kv) out.push(`  ${kvTableText(e)}`)
     const section = (title, list, line) => { if (list.length) out.push(`${title} (${list.length}):`, ...list.map((x) => `  ${line(x)}  — ${this.sources(st.repo, x.sources)}`)) }
-    section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}`)
-    section('Keys', e.keys, (k) => `${k.role} (${k.parts.join(', ')})`)
-    section('Indexes', e.indexes, (i) => `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}`)
+    if (kv) section('Attributes', e.fields, (f) => `${f.name}  ${f.type.raw}${f.nullable ? '' : '  a key of the table'}`)
+    else section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}`)
+    section('Keys', e.keys, (k) => (kv ? kvKeyText(k) : `${k.role} (${k.parts.join(', ')})`))
+    section('Indexes', e.indexes, (i) => (kvIndex(i) ? `${i.name}  ${kvIndexText(i)}` : `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}`))
     section('Foreign keys', e.relations, (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
-    const conflicts = elementsOf(e).flatMap(([label, x]) => x.conflicts.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${v.value} — ${v.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
+    const shown = (attr, v) => (kv ? changeVal(attr, v) : v)
+    const conflicts = elementsOf(e).flatMap(([label, x]) => x.conflicts.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${shown(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
     out.push(conflicts.length ? `Conflicts (${conflicts.length}): the declarations disagree; each side is kept` : 'Conflicts: none', ...conflicts)
     return out.join('\n')
   }
@@ -371,7 +403,7 @@ export class Graph {
     return reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL AND repo IN (${list.map(() => '?').join(',')}) ORDER BY repo, key, extractor`, ...list).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
   }
   changes(base, at) {
-    const d = diffModels(at.model, this.currentModel(base.repos.map((r) => r.name)))
+    const d = clean(diffModels(at.model, this.currentModel(base.repos.map((r) => r.name))))
     const k = d.counts
     const out = [`Data model against ${baseText(base)}: ${d.stores.length ? `${plural(k.stores, 'store')} changed · ${k.added} added · ${k.removed} removed · ${k.modified} modified · ${plural(k.renames, 'possible rename')}` : 'no change.'}`]
     for (const s of d.stores) {
@@ -379,9 +411,9 @@ export class Graph {
       for (const a of s.attrs) out.push(`  ~ ${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`)
       for (const c of s.changes) {
         const was = c.before && `was ${this.sources(s.repo, c.before.sources)}`, now = c.after && this.sources(s.repo, c.after.sources)
-        if (c.change === 'added') out.push(`  + ${describe(c, c.after)}  — ${now}`)
-        else if (c.change === 'removed') out.push(`  - ${describe(c, c.before)}  — ${was}`)
-        else out.push(`  ~ ${describe(c, c.after)}  ${c.attrs.map((a) => `${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`).join('; ')}  — ${was}; now ${now}`)
+        if (c.change === 'added') out.push(`  + ${describe(c, c.after, s.dialect)}  — ${now}`)
+        else if (c.change === 'removed') out.push(`  - ${describe(c, c.before, s.dialect)}  — ${was}`)
+        else out.push(`  ~ ${describe(c, c.after, s.dialect)}  ${c.attrs.map((a) => `${a.attr}${a.in ? ` in ${this.dloc({ repo: s.repo, path: a.in })}` : ''}: ${changeVal(a.attr, a.before, (p) => this.dloc({ repo: s.repo, path: p }))} → ${changeVal(a.attr, a.after, (p) => this.dloc({ repo: s.repo, path: p }))}`).join('; ')}  — ${was}; now ${now}`)
       }
       for (const r of s.renames) out.push(`  ${renameText(s, r)}`)
     }
@@ -400,13 +432,13 @@ export class Graph {
     const model = this.currentModel(names)
     const base = against.base ? against.at.model : null
     const diff = against.base ? diffModels(base, this.currentModel(against.base.repos.map((r) => r.name).filter((n) => !repo || n === repo))) : null
-    const s = deltaStates({ ...delta, data: delta.data.filter((c) => !repo || parseTarget(c.target).repo === repo) }, model, { base, diff })
+    const s = clean(deltaStates({ ...delta, data: delta.data.filter((c) => !repo || parseTarget(c.target).repo === repo) }, model, { base, diff }))
     const ackText = (r) => (r.ack === 'acked' ? `acknowledged by ${r.change.ack.by} at ${r.change.ack.at}` : r.ack === 'stale' ? `stale: acknowledged by ${r.change.ack.by} at ${r.change.ack.at}, edited since` : 'not acknowledged')
-    const out = [`Delta ${file.shown} (the design: ${delta.spec}), against the model${against.base ? ` and the branch against ${baseText(against.base)}` : ` (no base: ${against.why}; unplanned changes not listed)`}: ${plural(s.changes.length, 'data change')}`]
+    const out = [`Delta ${file.shown} (the design: ${clean(delta.spec)}), against the model${against.base ? ` and the branch against ${baseText(against.base)}` : ` (no base: ${against.why}; unplanned changes not listed)`}: ${plural(s.changes.length, 'data change')}`]
     for (const r of s.changes) {
       out.push(`  ${STATE_TEXT[r.state]}  ${r.id}  ${changeText(r.change)}${r.el && r.state !== 'pending' && r.el.sources ? `  — ${this.sources(r.st.repo, r.el.sources)}` : ''}`)
-      if (r.diffs.length) out.push(`    planned → built: ${r.diffs.map((x) => x.text).join('; ')}`)
-      if (r.proposed.length) out.push(`    proposed: ${r.proposed.map((x) => x.text).join('; ')}`)
+      if (r.diffs.length) out.push(`    planned → built: ${r.diffs.map((x) => diffText(x, (p) => this.dloc({ repo: r.st.repo, path: p }))).join('; ')}`)
+      if (r.proposed.length) out.push(`    proposed: ${r.proposed.map((x) => diffText(x, (p) => this.dloc({ repo: r.st.repo, path: p }))).join('; ')}`)
       if (r.warn) out.push(`    ⚠ ${r.warn}`)
       out.push(`    why: ${r.change.why}${r.change.slice !== undefined ? ` · slice ${r.change.slice}` : ''}${r.change.origin === 'unplanned' ? ' · unplanned, kept by the implementer' : ''} · ${ackText(r)}`)
     }
@@ -414,9 +446,9 @@ export class Graph {
       out.push(s.unplanned.length ? `Unplanned (${s.unplanned.length}): in the branch, in no change of the delta` : 'Unplanned: none, every change of the branch is in the delta')
       for (const { st, c, target, on } of s.unplanned) {
         const was = c.before && `was ${this.sources(st.repo, c.before.sources)}`, now = c.after && this.sources(st.repo, c.after.sources)
-        if (c.change === 'added') out.push(`  + ${target}  ${describe(c, c.after)}  — ${now}${on ? `  (on the table ${on} adds, beyond what it states)` : ''}`)
-        else if (c.change === 'removed') out.push(`  - ${target}  ${describe(c, c.before)}  — ${was}`)
-        else out.push(`  ~ ${target}  ${c.attrs.map((a) => `${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`).join('; ')}  — ${was}; now ${now}`)
+        if (c.change === 'added') out.push(`  + ${target}  ${describe(c, c.after, st.dialect)}  — ${now}${on ? `  (on the table ${on} adds, beyond what it states)` : ''}`)
+        else if (c.change === 'removed') out.push(`  - ${target}  ${describe(c, c.before, st.dialect)}  — ${was}`)
+        else out.push(`  ~ ${target}  ${c.attrs.map((a) => `${a.attr}${a.in ? ` in ${this.dloc({ repo: st.repo, path: a.in })}` : ''}: ${changeVal(a.attr, a.before, (p) => this.dloc({ repo: st.repo, path: p }))} → ${changeVal(a.attr, a.after, (p) => this.dloc({ repo: st.repo, path: p }))}`).join('; ')}  — ${was}; now ${now}`)
       }
       for (const x of against.base.skipped) out.push(`Not compared: ${x.name} (${x.why}).`)
     }

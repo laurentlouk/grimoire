@@ -14,7 +14,7 @@
 // conflicts. A file does not describe the whole store (a table it lacks is no disagreement), but it
 // describes each table it states whole (`whole`), unless a part of it is a reference.
 import { DOC, documents, at as lineIn } from '../readers/documents.mjs'
-import { LEVEL, readTable, isObj, isRef, textOf } from '../readers/dynamodb.mjs'
+import { LEVEL, readTable, isObj, isRef, textOf, capNotes, NOTES } from '../readers/dynamodb.mjs'
 
 export const STORE = 'dynamodb'
 const isInput = (x) => isObj(x) && 'KeySchema' in x && ('TableName' in x || 'AttributeDefinitions' in x)
@@ -53,7 +53,7 @@ export default {
       source: { path: file, line: entities[0].line ?? 1, kind: 'infra', confidence: 'declared' },
       complete: false, partial: false, status: 'read',
       label: `CreateTable input${entities.length > 1 ? `, ${entities.length} tables` : ''}`,
-      notes, entities,
+      notes: capNotes(notes, 4 * NOTES), entities,
     }] }
   },
 }

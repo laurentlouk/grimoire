@@ -38,6 +38,11 @@ export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some(
 // it holds a key schema, a CreateTable input; 0: neither). A change to what this computes moves the
 // store's SCHEMA_VERSION, so no stale level survives in an index.
 export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : DOC.test(p) ? tableLevel(text) : null)
+// A text worth keeping once inspected (an extractor may read it): every JSON and YAML file is a
+// candidate, but one only the table extractors want and that declares no table is never read again,
+// so the index and a base keep no copy of it.
+const TABLE_EXTRACTORS = new Set([dynamodbTable, cloudformation])
+export const keeps = (p, text) => !DOC.test(p) || tableLevel(text) > 0 || EXTRACTORS.some((ex) => !TABLE_EXTRACTORS.has(ex) && ex.wants(p))
 // A job reads YAML (its context needs ctx.yaml): one of its inputs is a YAML file, or a .template
 // that is not JSON (the extractors decide by the text: readers/documents.mjs).
 export const readsYaml = (job) => job.inputs.some((p) => /\.(?:ya?ml|template)$/i.test(p))

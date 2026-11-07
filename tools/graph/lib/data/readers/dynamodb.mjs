@@ -43,7 +43,9 @@ export function fnOf(v) {
   return ks.length === 1 && (ks[0] === 'Ref' || ks[0] === 'Condition' || ks[0].startsWith('Fn::')) ? ks[0].replace(/^Fn::/, '') : null
 }
 const argOf = (v) => (tagOf(v) ? v.value : v[Object.keys(v)[0]])
-export const isRef = (v) => fnOf(v) !== null || (typeof v === 'string' && /\$\{[^}]*\}/.test(v))
+// (a `${` with a `}` after it, found by two scans, never a regular expression that backtracks)
+const holdsVar = (s) => { const i = s.indexOf('${'); return i >= 0 && s.indexOf('}', i + 2) >= 0 }
+export const isRef = (v) => fnOf(v) !== null || (typeof v === 'string' && holdsVar(v))
 
 // A value as text: a reference in its short form, at most MAX characters (a reference may nest
 // others, and aliases may make it large: the walk stops once the text is long enough).
@@ -169,6 +171,10 @@ export function readTable(p, { name, at, label = name, simple = false, extra = {
     })
   }
 
+  // an attribute AttributeDefinitions types and nothing keys (CreateTable takes only key attributes): a lead
+  const keying = new Set([...keys.filter((k) => k.role !== 'ttl'), ...indexes].flatMap((x) => x.parts || x.columns))
+  if (!unread.length) for (const f of fields) if (!keying.has(f.name)) notes.push(`${label}: ${f.name} is in AttributeDefinitions and keys neither the table nor an index`)
+
   const ss = p.StreamSpecification
   let stream = null
   if (ss !== undefined && ss !== null) {
@@ -182,6 +188,9 @@ export function readTable(p, { name, at, label = name, simple = false, extra = {
 
   return {
     entity: { name: String(name), kind: 'table', billing: billing === null ? null : String(billing), stream: stream === null ? null : String(stream), whole: !unread.length, ...extra, ...at(), fields, keys, indexes, relations: [] },
-    notes,
+    notes: capNotes(notes),
   }
 }
+// at most NOTES notes, then how many more: a file cannot flood graph_data with them
+export const NOTES = 50
+export const capNotes = (notes, max = NOTES) => (notes.length > max ? [...notes.slice(0, max), `… and ${notes.length - max} more notes`] : notes)

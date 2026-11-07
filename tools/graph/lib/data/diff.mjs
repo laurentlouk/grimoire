@@ -11,7 +11,15 @@
 //     parentheses (normDefault);
 //   - a key by its role and its columns, as a whole (a key whose columns change is another key).
 // An element whose declarations disagree (a reconcile conflict) is compared by its merged value, the
-// most trusted declaration's.
+// most trusted declaration's. In a key-value store (model.mjs KV_DIALECTS: its declarations are files
+// of equal standing, a local-dev table file and a template) each declaration is compared on its own
+// (`per`): an attribute is modified when any declaration that states the element on both sides
+// says another value, one change when they all moved alike, else one per declaration, `in` naming
+// its file; a declaration stating it on one side only changes where it is `declared in` (a file that
+// left pairs with one that came, so a change made while the file moved is still seen: changedPer). A key-value
+// element's identity is the SQL one: a table and a GSI or an LSI by name, a key by its role and its
+// attributes (partition, sort, ttl), an attribute by name; a table's billing and stream, a TTL's
+// enabled, an index's kind, keys and projection are its attributes.
 //
 // Rename candidates: a removed and an added element of the same kind and the same shape are paired,
 // never decided (drizzle-kit asks; this only flags). Shapes: a table or view, its columns (names and
@@ -30,10 +38,11 @@
 //                side, null where absent), owner: { before, after } (its entity's index in the
 //                store's entities on each side; null for an entity), before: element | null,
 //                after: element | null, attrs: [Attr], rename: index into renames | null }
-//   Attr       { attr, before, after }   (values as declared)
+//   Attr       { attr, before, after, in? }   (values as declared; in: the file of the one key-value
+//              declaration that changed it)
 //   Rename     { kind, entity: null for entities, shape: 'same columns' | 'same type and position',
 //                from: [index into changes], to: [index into changes], ambiguous }
-import { normType, normDefault, kvIndex, kvTable, projectionText } from './model.mjs'
+import { normType, normDefault, kvIndex, kvTable, projectionText, declPath } from './model.mjs'
 
 // Dialects whose identifiers compare in any letter case.
 const CASELESS = new Set(['sqlite'])
@@ -124,8 +133,36 @@ function pairs(xs, ys, key) {
 }
 
 function changed(kind, x, y, fold) {
+  if (x.per && y.per) return changedPer(x.per, y.per)
   const bx = ATTRS[kind](x, fold), by = ATTRS[kind](y, fold)
   return Object.keys(bx).filter((k) => JSON.stringify(bx[k][0]) !== JSON.stringify(by[k][0])).map((k) => ({ attr: k, before: bx[k][1], after: by[k][1] }))
+}
+// A key-value element, declaration by declaration (`per`, reconcile.mjs): an attribute changed when any
+// declaration says another value than its counterpart on the other side. A declaration's counterpart
+// is the same file; when a file left and another came (a declaration that moved to another file, or
+// a file of several tables split into one per table), the one that left pairs with the one that came;
+// when what is left on each side does not pair one to one and no file is on both sides, the merged
+// values (each side's first declaration's) are compared. One change when every pair moved alike, else
+// one per pair that moved, `in` naming its file (the branch's); a declaration that states the element
+// on one side only changes where it is declared (`declared in`).
+function changedPer(before, after) {
+  const B = new Map(before), A = new Map(after)
+  const pairs = [...B.keys()].filter((k) => A.has(k)).map((k) => [k, k])
+  const gone = [...B.keys()].filter((k) => !A.has(k)), came = [...A.keys()].filter((k) => !B.has(k))
+  if (gone.length === 1 && came.length === 1) pairs.push([gone[0], came[0]])
+  else if (!pairs.length && B.size && A.size) pairs.push([[...B.keys()][0], [...A.keys()][0]])
+  const out = []
+  const attrs = new Set([...B.values(), ...A.values()].flatMap((a) => Object.keys(a)))
+  const s = (v) => JSON.stringify(v ?? null)
+  for (const attr of attrs) {
+    const moved = pairs.filter(([b, a]) => s(B.get(b)[attr]) !== s(A.get(a)[attr]))
+    if (!moved.length) continue
+    const alike = moved.length === pairs.length && new Set(moved.map(([b]) => s(B.get(b)[attr]))).size === 1 && new Set(moved.map(([, a]) => s(A.get(a)[attr]))).size === 1
+    if (alike) out.push({ attr, before: B.get(moved[0][0])[attr] ?? null, after: A.get(moved[0][1])[attr] ?? null })
+    else for (const [b, a] of moved) out.push({ attr, before: B.get(b)[attr] ?? null, after: A.get(a)[attr] ?? null, in: declPath(a) })
+  }
+  if (gone.length || came.length) out.push({ attr: 'declared in', before: [...B.keys()].map(declPath), after: [...A.keys()].map(declPath) })
+  return out
 }
 
 function renames(changes, fold) {

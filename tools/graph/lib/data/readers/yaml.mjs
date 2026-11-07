@@ -19,12 +19,24 @@
 // interpreted: what it means is the format's business (readers/dynamodb.mjs). Everything is
 // plain, JSON-safe data. An alias is the anchored value itself, not a copy, so reading stays linear
 // in the text; what aliases and merges stand for is counted against MAX_NODES, so a document that
-// expands without bound (a billion laughs) is refused rather than walked. An alias's own members
-// have no line of their own: lineAt gives the alias's.
+// expands without bound (a billion laughs) is refused rather than walked; the cap holds across the
+// documents of a text, and a node's children are counted against it before they are listed. An
+// alias's own members have no line of their own: lineAt gives the alias's.
+//
+// Bounded: a text past YAML_MAX (512 KB) is refused before it is parsed. CloudFormation takes a
+// template body of 51 200 bytes inline and 1 MB from S3, and a YAML file holding table declarations
+// is far smaller; at 512 KB the worst cases measured (a flow list of 100 000 numbers, 128 000 aliases)
+// read in under a second and under 400 MB, where 8 MB took tens of seconds and gigabytes. Reading also
+// stops past a deadline (opts.deadline, a Date.now() value; READ_MS from the call by default). Each is
+// an error of its own: the index stores it with the file's hash, so the file is not read again until
+// it changes.
+// Every scan of a scalar is linear (no regular expression that backtracks on a long run of blanks).
 import { pathKey } from './json-lines.mjs'
 
 export const TAG = '\u0000tag'
 export const MAX_NODES = 1_000_000
+export const YAML_MAX = 512 << 10
+export const READ_MS = 10_000
 const MAX_DEPTH = 200
 export const tagOf = (v) => (v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v[TAG] === 'string' ? v[TAG] : null)
 
@@ -33,23 +45,33 @@ export function lineAt(lines, path, fallback = null) {
   return fallback
 }
 
-export function readYaml(parser, text) {
+export function readYaml(parser, text, { deadline = Date.now() + READ_MS } = {}) {
+  if (text.length > YAML_MAX) throw new Error(`the YAML is larger than ${YAML_MAX >> 10} KB: not read`)
+  const budget = { count: 0, ticks: 0, deadline }
+  if (Date.now() > deadline) throw late()
   const tree = parser.parse(text)
   try {
     const bad = firstError(tree.rootNode)
     if (bad) throw new Error(`the YAML does not parse at line ${bad.startPosition.row + 1}`)
     const docs = []
-    for (const d of kids(tree.rootNode)) {
+    for (const d of kids(tree.rootNode, budget)) {
       if (d.type !== 'document') continue
-      const body = kids(d).find((c) => c.type === 'block_node' || c.type === 'flow_node') || null
-      const r = new Reader(text)
+      const body = kids(d, budget).find((c) => c.type === 'block_node' || c.type === 'flow_node') || null
+      const r = new Reader(text, budget)
       docs.push({ value: r.node(body, [], 0), lines: r.lines, line: (body || d).startPosition.row + 1 })
     }
     return docs
   } finally { tree.delete() }
 }
+const late = () => new Error('the YAML took too long to read: not read')
 
-const kids = (n) => { const out = []; for (let i = 0; i < n.namedChildCount; i++) out.push(n.namedChild(i)); return out }
+// a node's named children, counted against the budget before they are listed (namedChildren lists
+// them in one call: namedChild(i) in a loop costs a walk each)
+function kids(n, budget) {
+  const k = n.namedChildCount
+  if (budget) { if (budget.count + k > MAX_NODES) throw new Error(`the YAML expands past ${MAX_NODES} values (aliases and merges counted): not read`); if (Date.now() > budget.deadline) throw late() }
+  return k ? n.namedChildren : []
+}
 const lineOf = (n) => n.startPosition.row + 1
 
 function firstError(root) {
@@ -58,7 +80,8 @@ function firstError(root) {
   while (stack.length) {
     const n = stack.pop()
     if (n.type === 'ERROR' || n.isMissing) return n
-    for (let i = n.childCount - 1; i >= 0; i--) { const c = n.child(i); if (c.hasError || c.isMissing) stack.push(c) }
+    const cs = n.children
+    for (let i = cs.length - 1; i >= 0; i--) { const c = cs[i]; if (c.hasError || c.isMissing) stack.push(c) }
   }
   return root
 }
@@ -68,15 +91,21 @@ const put = (o, k, v) => { if (k === '__proto__') Object.defineProperty(o, k, { 
 const isMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && tagOf(v) === null
 
 class Reader {
-  constructor(src) { this.src = src; this.lines = new Map(); this.anchors = new Map(); this.count = 0 }
-  grow(n) { this.count += n; if (this.count > MAX_NODES) throw new Error(`the YAML expands past ${MAX_NODES} values (aliases and merges counted): not read`) }
+  // budget: { count, ticks, deadline }, shared by the documents of one text
+  constructor(src, budget) { this.src = src; this.lines = new Map(); this.anchors = new Map(); this.b = budget }
+  get count() { return this.b.count }
+  grow(n) {
+    this.b.count += n
+    if (this.b.count > MAX_NODES) throw new Error(`the YAML expands past ${MAX_NODES} values (aliases and merges counted): not read`)
+    if ((++this.b.ticks & 1023) === 0 && Date.now() > this.b.deadline) throw late()
+  }
 
   // a block_node or flow_node (or null: an empty value) → its value
   node(n, path, depth) {
     if (!n) return null
     if (depth > MAX_DEPTH) throw new Error(`the YAML nests deeper than ${MAX_DEPTH} levels at line ${lineOf(n)}: not read`)
     let tag = null, anchor = null, body = null
-    for (const c of kids(n)) {
+    for (const c of kids(n, this.b)) {
       if (c.type === 'tag') tag = c.text
       else if (c.type === 'anchor') anchor = (kids(c).find((x) => x.type === 'anchor_name') || c).text.replace(/^&/, '')
       else if (c.type !== 'comment') body = c
@@ -112,7 +141,7 @@ class Reader {
 
   mapping(m, path, depth) {
     const o = {}, merges = []
-    for (const p of kids(m)) {
+    for (const p of kids(m, this.b)) {
       if (p.type === 'comment') continue
       let k, v
       if (p.type === 'block_mapping_pair' || p.type === 'flow_pair') {
@@ -139,7 +168,7 @@ class Reader {
 
   sequence(s, path, depth) {
     const out = []
-    for (const it of kids(s)) {
+    for (const it of kids(s, this.b)) {
       if (it.type === 'comment') continue
       const at = [...path, out.length]
       this.lines.set(pathKey(...at), lineOf(it))
@@ -179,40 +208,43 @@ function fold(t) {
 }
 
 const ESC = { 0: '\0', a: '\x07', b: '\b', t: '\t', '\t': '\t', n: '\n', v: '\v', f: '\f', r: '\r', e: '\x1b', ' ': ' ', '"': '"', '/': '/', '\\': '\\', N: '\x85', _: '\xa0', L: ' ', P: ' ' }
+// (built as a list of pieces: a break drops the blanks before it from the list's end, each blank once)
 function doubleQuoted(s) {
-  let out = '', i = 0
+  const out = []
+  let i = 0
   while (i < s.length) {
     const c = s[i]
     if (c === '\\') {
       const e = s[i + 1]
       if (e === '\n' || e === '\r') { i += e === '\r' && s[i + 2] === '\n' ? 3 : 2; while (s[i] === ' ' || s[i] === '\t') i++; continue } // an escaped break joins the lines
       const hex = e === 'x' ? 2 : e === 'u' ? 4 : e === 'U' ? 8 : 0
-      if (hex) { const cp = parseInt(s.slice(i + 2, i + 2 + hex), 16); out += Number.isFinite(cp) ? String.fromCodePoint(cp) : ''; i += 2 + hex; continue }
-      out += ESC[e] ?? e ?? ''
+      if (hex) { const cp = parseInt(s.slice(i + 2, i + 2 + hex), 16); if (Number.isFinite(cp)) out.push(String.fromCodePoint(cp)); i += 2 + hex; continue }
+      out.push(ESC[e] ?? e ?? '')
       i += 2
       continue
     }
-    if (c === '\n' || c === '\r') { const r = breakAt(s, i, out); out = r.out; i = r.i; continue }
-    out += c
+    if (c === '\n' || c === '\r') { i = breakAt(s, i, out); continue }
+    out.push(c)
     i++
   }
-  return out
+  return out.join('')
 }
 function singleQuoted(s) {
-  let out = '', i = 0
+  const out = []
+  let i = 0
   while (i < s.length) {
     const c = s[i]
-    if (c === "'" && s[i + 1] === "'") { out += "'"; i += 2; continue }
-    if (c === '\n' || c === '\r') { const r = breakAt(s, i, out); out = r.out; i = r.i; continue }
-    out += c
+    if (c === "'" && s[i + 1] === "'") { out.push("'"); i += 2; continue }
+    if (c === '\n' || c === '\r') { i = breakAt(s, i, out); continue }
+    out.push(c)
     i++
   }
-  return out
+  return out.join('')
 }
 // an unescaped line break inside quotes, at s[i]: the blanks before it go, the lines after it that
-// are blank count as newlines, the next line's indentation goes
+// are blank count as newlines, the next line's indentation goes. → where reading goes on
 function breakAt(s, i, out) {
-  out = out.replace(/[ \t]+$/, '')
+  while (out.length && (out[out.length - 1] === ' ' || out[out.length - 1] === '\t')) out.pop()
   let breaks = 0
   for (;;) {
     if (s[i] === '\r') i++
@@ -221,13 +253,18 @@ function breakAt(s, i, out) {
     i++
     while (s[i] === ' ' || s[i] === '\t') i++
   }
-  return { out: out + (breaks > 1 ? '\n'.repeat(breaks - 1) : ' '), i }
+  out.push(breaks > 1 ? '\n'.repeat(breaks - 1) : ' ')
+  return i
 }
 
 function blockScalar(b, src) {
   const text = b.text
   const nl = text.indexOf('\n')
-  const head = (nl < 0 ? text : text.slice(0, nl)).replace(/\s+#.*$/, '').trim()
+  // the header, less a comment (a # after a blank), found by one scan
+  const line = nl < 0 ? text : text.slice(0, nl)
+  let cut = line.length
+  for (let k = 1; k < line.length; k++) if (line[k] === '#' && (line[k - 1] === ' ' || line[k - 1] === '\t')) { cut = k; break }
+  const head = line.slice(0, cut).trim()
   const folded = head[0] === '>'
   const chomp = head.includes('-') ? 'strip' : head.includes('+') ? 'keep' : 'clip'
   const digit = /[1-9]/.exec(head)

@@ -33,15 +33,27 @@
 // <repo>:<store> is the store's id as graph_data names it (its folder in its repository, `.` at the
 // root, which may hold `/`); the entity is the segment after the store's last `/`, cut at its first
 // `.` for a column. A table whose name holds `/` or `.` cannot be addressed.
+// A key-value store's (the repository's `dynamodb`) elements take the same grammar: a table
+// `api:dynamodb/loans`, an attribute `…/loans.memberId`, a GSI or an LSI `…/loans/index:ByBook`, a key
+// `…/key:partition(memberId)`, `…/key:sort(loanId)` (several attributes: a multi-attribute key) and the
+// TTL `…/key:ttl(expiresAt)`; a table's billing and stream are changed on the table itself.
 //
 // `after` is the intended element in the model's own words:
 //   a column      { type, nullable, default?, generated? }      (add: type and nullable)
 //   a table       { kind?: table | view, fields: [{ name, type, nullable, default?, generated? }],
 //                   keys?: [{ role, parts }], indexes?: [{ name, columns, unique?, partial? }],
-//                   relations?: [{ columns, to, toColumns, onDelete?, onUpdate? }] }
+//                   relations?: [{ columns, to, toColumns, onDelete?, onUpdate? }],
+//                   billing?, stream? (a key-value table's) }
 //   an index      { columns, unique?, partial? }                (add: columns)
+//                 a GSI or an LSI: { kind: gsi | lsi, partition?, sort?, projection?: ALL | KEYS_ONLY |
+//                 INCLUDE, include? }  (add: kind, and a GSI's partition, an LSI's sort)
 //   a foreign key { onDelete?, onUpdate? }                      a key: nothing (its target is its shape)
+//   a TTL         { enabled }                                   (change: enabled; add: optional)
+//   a table's own { kind } | { billing: PAY_PER_REQUEST | PROVISIONED, stream: a view type | null }
+//                 (a change)
 //   a rename      { name }: the new name (a table, a column or an index; a key has none)
+// A key-value element several declarations state (reconcile.mjs `per`) is planned and built only
+// when every one of them has it as planned; a difference that only some have names their file.
 // `add` describes the whole element: what it states is compared (an index's unique and partial are
 // false unless stated; a table's columns, keys, indexes and foreign keys each as a set: one planned
 // and not built, or built in another shape, is a difference). What the branch builds on a table it
@@ -71,7 +83,7 @@
 // The loop's ship step appends the unplanned changes implementers kept (appendChanges), with
 // origin `unplanned` and the implementer's reason as `why`, never acknowledged: the user does that.
 import { createHash } from 'node:crypto'
-import { normType, normDefault, kvIndex, projectionText } from './model.mjs'
+import { normType, normDefault, kvIndex, projectionText, declPath } from './model.mjs'
 import { KEY, NAME, foldOf } from './diff.mjs'
 import { TYPES, VARIANTS, BOUNDARY_KINDS, ID } from '../arch.mjs'
 
@@ -370,6 +382,34 @@ function shapeDiffs(kind, after, el, fold, whole, pre = '') {
   }
   return out
 }
+// A key-value element as each of its declarations states it (reconcile.mjs `per`): [[file, element]],
+// or null when one declaration states it (the element is then as it is).
+function views(kind, el) {
+  if (!el || !el.per || el.per.length < 2) return null
+  const of = (a) => {
+    if (kind === 'entity') return { ...el, kind: a.kind ?? el.kind, billing: a.billing ?? null, stream: a.stream ?? null }
+    if (kind === 'key') return 'enabled' in a ? { ...el, enabled: a.enabled } : el
+    if (kind === 'field') return { ...el, type: a.type, nullable: a.nullable }
+    if (kind === 'index' && kvIndex(el)) {
+      const m = /^INCLUDE \((.*)\)$/.exec(a.projection || '')
+      return { ...el, kind: a.kind, partition: a.partition ? a.partition.split(', ') : [], sort: a.sort ? a.sort.split(', ') : [], projection: m ? 'INCLUDE' : a.projection ?? null, include: m ? m[1].split(', ') : [] }
+    }
+    return el
+  }
+  return el.per.map(([k, a]) => [declPath(k), of(a)])
+}
+// A difference in words, naming the declaration it is in when there is one (`at` shows a file as
+// its caller cites paths: graph_changes and the page prefix the repository's folder).
+export const diffText = (x, at = (p) => p) => (x.in ? `${x.text} in ${at(x.in)}` : x.text)
+// shapeDiffs against every declaration of a key-value element: built only when each has it; where
+// they differ among themselves, each difference names its declaration's file (`in`).
+function diffsPer(kind, after, el, fold, whole) {
+  const vs = views(kind, el)
+  if (!vs) return shapeDiffs(kind, after, el, fold, whole)
+  const each = vs.map(([p, v]) => [p, shapeDiffs(kind, after, v, fold, whole)])
+  if (new Set(each.map(([, ds]) => JSON.stringify(ds.map((x) => x.text)))).size === 1) return each[0][1]
+  return each.flatMap(([p, ds]) => ds.map((x) => ({ ...x, in: p })))
+}
 // The parts of a built table its `add` does not state: [{ kind, el, pos }] (pos: its index in its list).
 export function extrasOf(after, el, fold) {
   const out = []
@@ -405,17 +445,17 @@ export function deltaStates(delta, model, { base = null, diff = null } = {}) {
     if (!cur.st && !(was && was.st)) out.warn = 'the store is not in the model'
     else if (t.kind !== 'entity' && !cur.e && !(c.op === 'remove' && was && was.e) && !(c.op === 'add' && adds.has(`${t.storeId}\0${t.entity.toLowerCase()}`))) out.warn = `the table ${t.entity} is not in the model`
     if (c.op === 'add') {
-      if (cur.el) { out.diffs = shapeDiffs(t.kind, c.after || {}, cur.el, cur.fold, true); out.state = out.diffs.length ? 'built-differently' : 'planned-built' }
+      if (cur.el) { out.diffs = diffsPer(t.kind, c.after || {}, cur.el, cur.fold, true); out.state = out.diffs.length ? 'built-differently' : 'planned-built' }
     } else if (c.op === 'remove') {
       if (!cur.el) { out.state = 'planned-built'; if (!out.warn && !(was && was.el) && base) out.warn = 'not in the model, nor at the base: check the target' }
     } else if (c.op === 'change') {
       if (!cur.el) {
         if (was && was.el) { out.state = 'built-differently'; out.diffs = [d(KIND_WORD[t.kind], 'changed', 'absent')] } else if (!out.warn) out.warn = 'not in the model: check the target'
       } else {
-        const diffs = shapeDiffs(t.kind, c.after, cur.el, cur.fold, false)
+        const diffs = diffsPer(t.kind, c.after, cur.el, cur.fold, false)
         out.touched = branchTouched(out.keys[0])
         if (!diffs.length) out.state = 'planned-built'
-        else if (diff ? out.touched : c.before ? shapeDiffs(t.kind, c.before, cur.el, cur.fold, false).length > 0 : false) { out.state = 'built-differently'; out.diffs = diffs }
+        else if (diff ? out.touched : c.before ? diffsPer(t.kind, c.before, cur.el, cur.fold, false).length > 0 : false) { out.state = 'built-differently'; out.diffs = diffs }
         else out.proposed = diffs.map((x) => ({ ...x, text: `${x.attr}: ${say(x.attr, x.built)} → ${say(x.attr, x.planned)}` }))
       }
     } else {

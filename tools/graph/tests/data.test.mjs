@@ -30,6 +30,18 @@
 //  11. the Data tab draws a delta over the model against a git base: each state's marks, the legend,
 //      the lists and passports (why, slice, acknowledgement), the picker, escaping; read-only when
 //      static, acknowledging through the server when served
+//  18. key-value tables declared, in JSON: a CreateTable input and a CloudFormation template read into
+//      the model (keys, multi-attribute keys, TTL, GSIs, projections, billing, stream, each at its
+//      line; long-form intrinsics kept as references), found by content, two declarations of one
+//      table and their conflicts, the diff by identity, the delta's targets, validation and states
+//  19. YAML through the pinned grammar (needs the parser runtime): scalars, block scalars, anchors,
+//      aliases and merges, tags kept, several documents, errors and the expansion cap; a SAM template
+//      in YAML with short-form tags, Serverless resources and SimpleTables, CreateTable inputs in YAML;
+//      hostile YAML in bounded time (long blanks, 20 000 documents, the size cap, aliases, a deadline,
+//      a timeout parsed aside failing alone)
+//  21. hostile JSON in bounded time (nesting past the cap refused, a wide file, a long "${" run), a
+//      byte order mark; a declaration that moves to another file or splits: its changes still seen,
+//      in the diff and the delta states
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
@@ -48,6 +60,12 @@
 //      between two components no line joins → a new link no line draws against the base checkout's
 //      index, unplanned with the delta; appended by delta-append.mjs (to `architecture`), pending;
 //      the diagram updated in the branch, planned and built
+//  20. a key-value service (fixtures/kv): a SAM template and local-dev CreateTable files found by
+//      content → graph_data (both declarations, the conflicts), the key cards (rows, sources,
+//      search, escaping), a branch against its base compared declaration by declaration (the base's
+//      YAML parsed aside), a delta's states against every declaration, both overlays on the cards; a
+//      name holding a line break quoted in graph_data and graph_changes; a YAML template past the cap
+//      failing its job once, not read again until it changes
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -505,7 +523,7 @@ CREATE INDEX posts_body_index ON posts (body);`
 // ── 8 · the model at a git ref ──
 console.log('\n8 · the model at a git ref (data/base.mjs): read through git, nothing checked out')
 const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' })
-const commit = (dir, m) => { git(dir, 'add', '-A'); git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', m); return git(dir, 'rev-parse', 'HEAD').stdout.trim() }
+const commit = (dir, m) => { git(dir, 'add', '-A'); git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m); return git(dir, 'rev-parse', 'HEAD').stdout.trim() }
 {
   const { resolveBase, modelAt } = await import('../lib/data/base.mjs')
   const { extractAll } = await import('../lib/data/registry.mjs')
@@ -1292,6 +1310,8 @@ const kvTable = (e) => [`${e.name}@${e.line} ${e.billing} stream=${e.stream} who
     'every JSON, YAML and .template file is a candidate, but for test folders, dependencies and lock files')
   eq(dynamodbTable.extract('[{ "TableName": "a", "KeySchema": [{ "AttributeName": "id", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "id", "AttributeType": "S" }] }, { "KeySchema": [], "AttributeDefinitions": [] }]', 'x.json').declarations.map((d) => [d.label, d.entities.map((e) => e.name), d.notes]),
     [['CreateTable input', ['a'], ['a key schema with no TableName at line 1: not read']]], 'a list of CreateTable inputs: each table read; a key schema with no TableName noted, not read')
+  eq(dynamodbTable.extract('{ "TableName": "c", "KeySchema": [{ "AttributeName": "id", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "id", "AttributeType": "S" }, { "AttributeName": "created_at", "AttributeType": "S" }] }', 'c.json').declarations[0].notes,
+    ['c: created_at is in AttributeDefinitions and keys neither the table nor an index'], 'an attribute defined that keys nothing is noted, a lead (CreateTable takes key attributes only)')
   eq(dynamodbTable.extract('{ "Table": { "TableName": "b", "KeySchema": [{ "AttributeName": "k", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "k", "AttributeType": "N" }], "BillingModeSummary": { "BillingMode": "PROVISIONED" }, "StreamSpecification": { "StreamEnabled": false, "StreamViewType": "KEYS_ONLY" } } }', 'y.json').declarations[0].entities.map((e) => [e.name, e.billing, e.stream]),
     [['b', 'PROVISIONED', null]], 'describe-table\'s answer ({ Table }) reads the same; a stream not enabled is no stream')
 
@@ -1378,6 +1398,187 @@ const kvTable = (e) => [`${e.name}@${e.line} ${e.billing} stream=${e.stream} who
     'holds-stream pending proposed stream: none → KEYS_ONLY', 'by-tenant pending proposed projection: KEYS_ONLY → ALL',
   ], 'states against the branch: a TTL removed, a GSI added in its planned shape, a projection and a stream changed as planned; the others pending, with what they propose')
   eq(s.unplanned.map((u) => u.target), ['app:dynamodb/loans.branchId'], '… and the attribute the branch added that no change states is unplanned')
+}
+
+// ── 19 · YAML through the pinned grammar ──
+console.log('\n19 · YAML read through the pinned tree-sitter grammar (readers/yaml.mjs), and templates in YAML')
+{
+  const deps = await import('../lib/deps.mjs')
+  if (!deps.findDeps()) {
+    if (process.env.CI) { FAIL++; console.log('   ✗ FAIL: parser runtime missing (run npm ci --prefix tools/graph)') } else console.log('   - skipped: parser runtime not installed (npm ci --prefix tools/graph)')
+  } else {
+    const { readYaml, TAG } = await import('../lib/data/readers/yaml.mjs')
+    const { pathKey } = await import('../lib/data/readers/json-lines.mjs')
+    const yp = await (await deps.loadRuntime({ install: false })).parserFor('yaml')
+    ok(!!yp, "the pinned YAML grammar loads (its C++ scanner's operator new and delete renamed to the runtime's malloc and free)")
+    const ctx = { yaml: (t) => readYaml(yp, t) }
+    const one = (t) => readYaml(yp, t)[0].value
+    eq(one(`plain: hello world
+int: 42
+hex: 0x1F
+float: 1.5
+on: true
+nothing: ~
+empty:
+quoted: "a\\tb \\u0041 \\"q\\""
+single: 'it''s'
+folded: >
+  one
+  two
+
+  three
+literal: |-
+  x
+    y
+flow: [a, 'b', 1, { k: v }]
+block:
+  - a
+  - b: 1
+    c: [2]
+multi: first
+  second
+`), { plain: 'hello world', int: 42, hex: 31, float: 1.5, on: true, nothing: null, empty: null, quoted: 'a\tb A "q"', single: "it's", folded: 'one two\nthree\n', literal: 'x\n  y', flow: ['a', 'b', 1, { k: 'v' }], block: ['a', { b: 1, c: [2] }], multi: 'first second' },
+    'scalars by the core schema (null, booleans, integers, floats; quoted ones strings, escapes applied), block scalars literal and folded with their chomping, flow and block collections, a plain scalar folded across lines')
+    const anchored = one(`defaults: &defaults
+  BillingMode: PAY_PER_REQUEST
+  Tags: &tags [lending]
+table:
+  <<: *defaults
+  BillingMode: PROVISIONED
+again: *tags
+both:
+  <<: [*defaults, { Extra: 1 }]
+`)
+    eq(anchored, { defaults: { BillingMode: 'PAY_PER_REQUEST', Tags: ['lending'] }, table: { BillingMode: 'PROVISIONED', Tags: ['lending'] }, again: ['lending'], both: { BillingMode: 'PAY_PER_REQUEST', Tags: ['lending'], Extra: 1 } },
+      'anchors and aliases; `<<` merges a mapping or a list of them, the mapping\'s own keys first')
+    ok(anchored.again === anchored.defaults.Tags, 'an alias is the anchored value itself, not a copy (reading stays linear)')
+    eq(one('ref: !Ref LoansTable\nsub: !Sub "${AWS::StackName}-holds"\natt: !GetAtt LoansTable.Arn\ncond: !If [IsProd, !Ref A, { Ref: B }]\nstr: !!str 123\nnum: !!int "7"\n'), {
+      ref: { [TAG]: '!Ref', value: 'LoansTable' }, sub: { [TAG]: '!Sub', value: '${AWS::StackName}-holds' }, att: { [TAG]: '!GetAtt', value: 'LoansTable.Arn' },
+      cond: { [TAG]: '!If', value: ['IsProd', { [TAG]: '!Ref', value: 'A' }, { Ref: 'B' }] }, str: '123', num: 7,
+    }, 'a tag of its own (!Ref, !Sub, !GetAtt, !If) keeps its value under the tag, never interpreted; the core tags convert')
+    const docs = readYaml(yp, '# first\na:\n  b: [x, y]\n---\nc: 1\n...\n---\n- d\n')
+    eq(docs.map((d) => [d.value, d.line, d.lines.get(pathKey('a', 'b', 1)) ?? null]), [[{ a: { b: ['x', 'y'] } }, 2, 3], [{ c: 1 }, 5, null], [['d'], 8, null]],
+      'several documents, each with its own value and lines: a member at the line of its key, a list item where it starts')
+    const fails = (t) => { try { readYaml(yp, t); return 'read' } catch (e) { return e.message } }
+    const laughs = ['a: &a [x, x, x, x, x, x, x, x, x, x]', ...'bcdefgh'.split('').map((c, i) => `${c}: &${c} [${Array(10).fill(`*${'abcdefgh'[i]}`).join(', ')}]`)].join('\n')
+    eq([fails('a: [1, 2\nb: {'), fails('x: *nowhere'), fails(laughs)], ['the YAML does not parse at line 1', 'the YAML aliases *nowhere at line 1, which no anchor before it names', 'the YAML expands past 1000000 values (aliases and merges counted): not read'],
+      'a text that does not parse, an alias to no anchor, and one expanding past the cap (a billion laughs) are refused, each saying why')
+
+    // a SAM template in YAML: short-form tags, anchors, the other resources ignored
+    const SAM = readFileSync(path.join(HERE, 'fixtures', 'kv', 'lending', 'template.yaml'), 'utf8')
+    eq(inspect('lending/template.yaml', SAM), 3, 'found by content: the template names a table resource type')
+    const sam = cloudformation.extract(SAM, 'template.yaml', ctx).declarations[0]
+    eq([sam.label, sam.notes, sam.entities.map(kvTable)], ['SAM template, 2 tables', ['HoldsTable: its TableName is !Sub ${AWS::StackName}-holds, a reference, not resolved: named by its logical id'], [[
+      'loans@16 PAY_PER_REQUEST stream=NEW_AND_OLD_IMAGES whole=true as LoansTable (AWS::DynamoDB::Table)',
+      '  partition(memberId) @30', '  sort(loanId) @32', '  ttl(expiresAt) enabled=true @42',
+      '  memberId S not null @21', '  loanId S not null @23', '  bookId S nullable @25', '  dueAt N nullable @27',
+      '  gsi ByBook (bookId)(dueAt) INCLUDE [title,dueAt] @35',
+    ], [
+      'HoldsTable@49 PAY_PER_REQUEST stream=null whole=true as HoldsTable (AWS::DynamoDB::Table), TableName !Sub ${AWS::StackName}-holds',
+      '  partition(bookId) @60', '  sort(placedAt) @62',
+      '  bookId S not null @55', '  placedAt N not null @57',
+    ]]], 'its two tables at their lines, the function and outputs beside them ignored; the billing an alias reuses; a TableName given by !Sub kept as written, the table named by its logical id')
+    const sls = cloudformation.extract(`service: lending
+provider:
+  name: aws
+resources:
+  Resources:
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: \${self:service}-users-\${sls:stage}
+        AttributeDefinitions: [{ AttributeName: userId, AttributeType: S }]
+        KeySchema: [{ AttributeName: userId, KeyType: HASH }]
+        BillingMode: PAY_PER_REQUEST
+---
+Resources:
+  Members:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey: { Name: memberId, Type: String }
+  Branches:
+    Type: AWS::Serverless::SimpleTable
+`, 'serverless.yml', ctx).declarations[0]
+    eq([sls.label, sls.entities.map((e) => `${e.name} ${e.as} ${e.billing} ${e.keys.map((k) => `${k.role}(${k.parts})`)} ${e.fields.map((f) => `${f.name}:${f.type}`)}`), sls.notes], ['Serverless Framework resources and SAM template, 3 tables', [
+      'UsersTable UsersTable (AWS::DynamoDB::Table), TableName ${self:service}-users-${sls:stage} PAY_PER_REQUEST partition(userId) userId:S',
+      'Members Members (AWS::Serverless::SimpleTable) PAY_PER_REQUEST partition(memberId) memberId:S',
+      'Branches Branches (AWS::Serverless::SimpleTable) PAY_PER_REQUEST partition(id) id:S',
+    ], [
+      'UsersTable: its TableName is ${self:service}-users-${sls:stage}, a reference, not resolved: named by its logical id',
+      'Members: no TableName (the table is named at deploy): named by its logical id',
+      'Branches: no TableName (the table is named at deploy): named by its logical id',
+      "Branches: no PrimaryKey, so SAM's default: id, a string",
+    ]], 'the Serverless Framework\'s resources.Resources with a ${…} variable kept as written; a second document; SAM SimpleTables, their PrimaryKey and SAM\'s documented defaults')
+    const local = dynamodbTable.extract('TableName: fines\nAttributeDefinitions:\n  - { AttributeName: memberId, AttributeType: S }\nKeySchema:\n  - { AttributeName: memberId, KeyType: HASH }\n---\nTableName: holds\nAttributeDefinitions: [{ AttributeName: bookId, AttributeType: S }]\nKeySchema: [{ AttributeName: bookId, KeyType: HASH }]\n', 'local/tables.yml', ctx).declarations[0]
+    eq([inspect('local/tables.yml', 'TableName: x\nKeySchema: []\nAttributeDefinitions: []\n'), local.label, local.entities.map((e) => `${e.name}@${e.line}`)], [2, 'CreateTable input, 2 tables', ['fines@1', 'holds@7']], 'CreateTable inputs in YAML (--cli-input-yaml), one per document')
+    eq((() => { try { dynamodbTable.extract('TableName: x\nKeySchema: []\n', 'x.yml', {}); return 'read' } catch (e) { return e.message } })(), 'no YAML reader: the pinned YAML grammar did not load', 'without the grammar, a YAML file fails its job with the reason (graph_status says it), never read by guess')
+
+    // hostile YAML: bounded time and size, each failure an error of its own
+    const timed = (f) => { const t0 = Date.now(); let err = null, v; try { v = f() } catch (e) { err = String(e.message) } return { ms: Date.now() - t0, err, v } }
+    const SLOW = 4000
+    const { YAML_MAX } = await import('../lib/data/readers/yaml.mjs')
+    for (const [what, text] of [['a block scalar header followed by 500 000 blanks', `a: |${' '.repeat(500000)}\n  x\n`], ['a double-quoted scalar of 500 000 blanks, then a break', `a: "${' '.repeat(500000)}x\n  y"\n`], ['a single-quoted one', `a: '${' '.repeat(500000)}x\n  y'\n`]]) {
+      const r = timed(() => readYaml(yp, text))
+      ok(r.ms < SLOW && r.err === null, `${what}: read in linear time (${r.ms} ms)`)
+    }
+    const docs20k = Array.from({ length: 20000 }, (_, i) => `---\nk: ${i}`).join('\n') + '\n'
+    const many = timed(() => readYaml(yp, docs20k))
+    ok(many.ms < SLOW && many.v.length === 20000, `20 000 documents read in bounded time (${many.ms} ms)`)
+    const big = `Resources: {}\n# ${'x'.repeat(YAML_MAX)}\n`
+    const capped = timed(() => readYaml(yp, big))
+    ok(capped.ms < SLOW && capped.err === `the YAML is larger than ${YAML_MAX >> 10} KB: not read`, `a YAML text past ${YAML_MAX >> 10} KB is refused before it is parsed (${capped.ms} ms)`)
+    const wide = timed(() => readYaml(yp, `[${Array.from({ length: 110000 }, () => '*a').join(', ')}]`.replace('[', '[&a [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], ')))
+    ok(wide.ms < SLOW && /expands past|nests|aliases/.test(wide.err || ''), `aliases past the cap are refused, counted before the nodes are walked (${wide.ms} ms: ${wide.err})`)
+    eq(timed(() => readYaml(yp, 'a: 1\n', { deadline: Date.now() - 1 })).err, 'the YAML took too long to read: not read', 'reading past its deadline stops with an error of its own (the index stores it with the file\'s hash and skips the file until it changes)')
+    const { parseAside } = await import('../lib/data/readers/yaml-aside.mjs')
+    const good = 'Resources:\n  T:\n    Type: AWS::DynamoDB::Table\n'
+    const aside = parseAside([docs20k, good, big], { timeout: (t) => (t === docs20k ? 1 : 30000) })
+    eq([...aside.values()].map((v) => (v instanceof Error ? v.message : `${v.length} document`)), ['the YAML took longer than 1 ms to read: not read', '1 document', `the YAML is larger than ${YAML_MAX >> 10} KB: not read`],
+      'parsed aside, one text per process: one that times out fails alone, the others still read, one past the cap is refused without a process')
+  }
+}
+
+// ── 21 · hostile files, and declarations that move ──
+console.log('\n21 · key-value declarations: hostile files read in bounded time, a declaration that moves or splits')
+{
+  const { jsonLines } = await import('../lib/data/readers/json-lines.mjs')
+  const { isRef } = await import('../lib/data/readers/dynamodb.mjs')
+  // the time a call takes, and what it threw (never a fatal error: each is caught, the process lives)
+  const timed = (f) => { const t0 = Date.now(); let err = null; try { f() } catch (e) { err = String(e.message) } return { ms: Date.now() - t0, err } }
+  const SLOW = 4000 // generous, for a loaded machine: the quadratic versions took tens of seconds or died
+  const MARK = '"KeySchema":1,"AttributeDefinitions":2,'
+  const deep = timed(() => dynamodbTable.extract(`{${MARK}"a":${'['.repeat(100000)}${']'.repeat(100000)}}`, 'deep.json'))
+  ok(deep.ms < SLOW && deep.err === 'the JSON nests deeper than 200 levels at line 1: not read', `a JSON nested 100 000 deep is refused, an error of its own, in bounded time (${deep.ms} ms: ${deep.err})`)
+  const shallow = timed(() => jsonLines(`{"a":${'['.repeat(150)}1${']'.repeat(150)}}`))
+  ok(shallow.err === null, 'nesting within the cap reads as before')
+  const wide = timed(() => dynamodbTable.extract(`{${MARK}${Array.from({ length: 300000 }, (_, i) => `"k${i}":{"v":[${i}]}`).join(',')}}`, 'wide.json'))
+  ok(wide.ms < SLOW && wide.err === null, `a wide JSON of 300 000 members, each nested, reads in linear time (${wide.ms} ms)`)
+  const dollars = '${'.repeat(500000)
+  const ref = timed(() => isRef(dollars)), refT = timed(() => dynamodbTable.extract(JSON.stringify({ TableName: dollars, KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }] }), 'refs.json'))
+  ok(ref.ms < SLOW && refT.ms < SLOW && refT.err === null, `a 1 MB run of "\${" with no "}" is no reference, found in linear time (${ref.ms} ms; the table read in ${refT.ms} ms)`)
+  eq([isRef('${Stage}-x'), isRef('a${b'), isRef('}${'), isRef('x${y}'), isRef('plain')], [true, false, false, true, false], '… and isRef still tells a ${…} reference from a string')
+  eq(dynamodbTable.extract(`﻿${JSON.stringify({ TableName: 'b', KeySchema: [{ AttributeName: 'k', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'k', AttributeType: 'S' }] }, null, 2)}`, 'bom.json').declarations[0].entities.map((e) => `${e.name}@${e.line}`), ['b@2'], 'a JSON file that starts with a byte order mark reads')
+
+  // a declaration that moves (renamed), splits (one file per table): its changes are still seen
+  const tbl = (name, billing, proj) => ({ TableName: name, BillingMode: billing, KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }, { AttributeName: 'g', AttributeType: 'S' }], GlobalSecondaryIndexes: [{ IndexName: 'gi', KeySchema: [{ AttributeName: 'g', KeyType: 'HASH' }], Projection: { ProjectionType: proj } }] })
+  const model = (...files) => reconcile(files.map(([file, v]) => ({ repo: 'r', extractor: 'dynamodb-table@1', facts: dynamodbTable.extract(JSON.stringify(v, null, 2), file) })))
+  const moved = diffModels(model(['seed/loans.json', tbl('loans', 'PAY_PER_REQUEST', 'ALL')]), model(['local/loans.json', tbl('loans', 'PROVISIONED', 'KEYS_ONLY')]))
+  eq(changeLines(moved).filter((l) => /entity|index/.test(l)), [
+    '  ~ entity loans  billing: PAY_PER_REQUEST → PROVISIONED; declared in: seed/loans.json → local/loans.json',
+    '  ~ index loans gi  projection: ALL → KEYS_ONLY; declared in: seed/loans.json → local/loans.json',
+  ], 'a declaration that moved to another file: what changed with the move is reported beside where it is declared now')
+  const split = diffModels(model(['db/tables.json', [tbl('loans', 'PAY_PER_REQUEST', 'ALL'), tbl('holds', 'PAY_PER_REQUEST', 'ALL')]]), model(['db/loans.json', tbl('loans', 'PAY_PER_REQUEST', 'ALL')], ['db/holds.json', tbl('holds', 'PROVISIONED', 'ALL')]))
+  eq(changeLines(split).filter((l) => /entity/.test(l)), [
+    '  ~ entity holds  billing: PAY_PER_REQUEST → PROVISIONED; declared in: db/tables.json → db/holds.json',
+    '  ~ entity loans  declared in: db/tables.json → db/loans.json',
+  ], 'a file of several tables split into one per table: each table paired with its new file, its own changes reported')
+  const many = diffModels(model(['a.json', tbl('t', 'PAY_PER_REQUEST', 'ALL')], ['b.json', tbl('t', 'PAY_PER_REQUEST', 'ALL')]), model(['c.json', tbl('t', 'PROVISIONED', 'ALL')], ['d.json', tbl('t', 'PROVISIONED', 'ALL')]))
+  eq(changeLines(many).filter((l) => /entity/.test(l)), ['  ~ entity t  billing: PAY_PER_REQUEST → PROVISIONED; declared in: a.json,b.json → c.json,d.json'], 'declarations that do not pair one to one: their merged values are compared')
+  const ds = deltaStates({ data: [
+    { id: 'p', op: 'change', target: 'r:dynamodb/loans/index:gi', after: { projection: 'INCLUDE', include: ['x'] }, why: 'w', origin: 'planned' },
+    { id: 'b', op: 'change', target: 'r:dynamodb/loans', after: { billing: 'PROVISIONED' }, why: 'w', origin: 'planned' },
+  ] }, model(['local/loans.json', tbl('loans', 'PROVISIONED', 'KEYS_ONLY')]), { base: model(['seed/loans.json', tbl('loans', 'PAY_PER_REQUEST', 'ALL')]), diff: moved })
+  eq(ds.changes.map((r) => `${r.id} ${r.state}${r.diffs.length ? ` ${r.diffs.map((x) => x.text).join('; ')}` : ''}`), ['p built-differently projection: INCLUDE (x) → KEYS_ONLY', 'b planned-built'], '… and a delta against it: what the move changed counts as touched (built differently), what it built as planned is built')
 }
 
 // ════ Part 2 · through call(), on an indexed project ════
@@ -1665,6 +1866,186 @@ async function indexed() {
     ok(staleDelta.some((l) => l.startsWith('Unplanned: none in what was compared (diagram files only, the code not compared (base index not at the fork point): ')), `with the delta too: nothing unplanned is claimed from the code (${staleDelta.find((l) => l.startsWith('Unplanned'))})`)
     // a data-only project pays for no architecture and reads as on main: the data footer, untouched
     ok((await call('graph_changes', {}, { root: BR })).endsWith('\n\nLeads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate. Open path:line before relying on any of it.'), 'a project with no diagram: no architecture part, and the footer as before')
+
+    // ── 20 · a key-value service: a SAM template and the local-dev table files ──
+    console.log('\n20 · key-value tables through call(): a SAM template and local-dev CreateTable files (fixtures/kv), the key cards, a branch, a delta')
+    const KV = path.join(SANDBOX, 'kv')
+    cpSync(path.join(HERE, 'fixtures', 'kv'), KV, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const kq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: KV })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const kidx = await kq('index')
+    ok(/lending: /.test(kidx) && !kidx.includes('failure'), `index: the YAML template and the JSON tables read, no extractor failure (${kidx.split('\n').find((l) => l.startsWith('lending')) || kidx})`)
+    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@1\nlocal/tables/loans.json\tdynamodb-table@1\ntemplate.yaml\tcloudformation@1',
+      'found by content: the template and the two CreateTable files are jobs; the CI workflow and the settings file (JSON and YAML declaring no table) are not')
+    const klist = await kq('data')
+    eq(klist.split('\n').slice(1), [
+      'lending:dynamodb  dynamodb  3 tables · 2 GSIs · 1 LSI · 4 conflicts',
+      '  infra  dynamodb-table@1  CreateTable input  lending/local/tables/fines.json',
+      '  infra  dynamodb-table@1  CreateTable input  lending/local/tables/loans.json',
+      '  infra  cloudformation@1  SAM template, 2 tables  lending/template.yaml',
+      '    note: HoldsTable: its TableName is !Sub ${AWS::StackName}-holds, a reference, not resolved: named by its logical id',
+    ], 'graph_data: the repository\'s key-value store, every declaration labelled with its kind and format, the reference noted as unresolved')
+    eq(await kq('data', { store: 'lending:dynamodb' }), [
+      'lending:dynamodb  dynamodb  3 tables · 2 GSIs · 1 LSI · 4 conflicts',
+      '  HoldsTable  table  2 attributes · partition (bookId) · sort (placedAt) · PAY_PER_REQUEST · no stream  lending/template.yaml:49',
+      '  fines  table  3 attributes · partition (memberId) · sort (fineId) · 1 LSI · PROVISIONED · no stream  lending/local/tables/fines.json:2',
+      '  loans  table  5 attributes · partition (memberId) · sort (loanId) · TTL (expiresAt) off · 2 GSIs · PAY_PER_REQUEST · no stream  lending/local/tables/loans.json:2 · lending/template.yaml:16  [4 conflicts]',
+    ].join('\n'), 'graph_data store: each table with its keys, indexes, TTL, billing and stream (where two declarations disagree, the first\'s, by kind then path, as for SQL; the conflicts say the rest), citing every declaration')
+    eq(await kq('data', { entity: 'loans' }), [
+      'lending:dynamodb/loans  table  (dynamodb)',
+      '  declared at lending/local/tables/loans.json:2 [infra dynamodb-table@1] · lending/template.yaml:16 [infra cloudformation@1, LoansTable (AWS::DynamoDB::Table)]',
+      '  PAY_PER_REQUEST · no stream',
+      'Attributes (5):',
+      '  memberId  S  a key of the table  — lending/local/tables/loans.json:4 · lending/template.yaml:21',
+      '  loanId  S  a key of the table  — lending/local/tables/loans.json:5 · lending/template.yaml:23',
+      '  bookId  S  — lending/local/tables/loans.json:6 · lending/template.yaml:25',
+      '  dueAt  N  — lending/local/tables/loans.json:7 · lending/template.yaml:27',
+      '  branchId  S  — lending/local/tables/loans.json:8',
+      'Keys (3):',
+      '  partition (memberId)  — lending/local/tables/loans.json:11 · lending/template.yaml:30',
+      '  sort (loanId)  — lending/local/tables/loans.json:12 · lending/template.yaml:32',
+      '  TTL (expiresAt) off  — lending/local/tables/loans.json:29 · lending/template.yaml:42',
+      'Indexes (2):',
+      '  ByBook  global · partition (bookId) · sort (dueAt) · INCLUDE (dueAt, title)  — lending/local/tables/loans.json:15 · lending/template.yaml:35',
+      '  ByBranch  global · partition (branchId) · KEYS_ONLY  — lending/local/tables/loans.json:23',
+      'Conflicts (4): the declarations disagree; each side is kept',
+      '  loans  stream: none — lending/local/tables/loans.json:2 [infra] | NEW_AND_OLD_IMAGES — lending/template.yaml:16 [infra]',
+      '  loans.branchId  presence: declared — lending/local/tables/loans.json:8 [infra] | absent — lending/template.yaml:16 [infra]',
+      '  loans ttl (expiresAt)  enabled: off — lending/local/tables/loans.json:29 [infra] | on — lending/template.yaml:42 [infra]',
+      '  loans index ByBranch  presence: declared — lending/local/tables/loans.json:23 [infra] | absent — lending/template.yaml:16 [infra]',
+    ].join('\n'), 'graph_data entity: both declarations kept and labelled; the differences (an extra GSI and its attribute, TTL off, no stream) are conflicts with each side\'s path:line')
+
+    // the page: a key card per table, not an ERD
+    const { renderGraph: renderKv } = await import('../lib/render.mjs')
+    const { loadProject: loadKv } = await import('../lib/project.mjs')
+    const kpage = await renderKv(loadKv(KV))
+    const KD = dataOf(kpage).data
+    eq(KD.stores.map((s) => [s.id, s.cards, s.layout, s.summary]), [['lending:dynamodb', true, null, '3 tables · 2 GSIs · 1 LSI · 4 conflicts']], 'the Data tab packs the store as key cards (no ERD layout), in graph_data\'s words')
+    const kpg = await stubPage(kpage, '#data-0')
+    const cards = kpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
+    const loansCard = cards.find((c) => kpg.textOf(c).startsWith('loans'))
+    eq([cards.length, !kpg.erd(), cards.map((c) => kpg.textOf(c.kids[0]))], [3, true, ['HoldsTablePAY_PER_REQUESTno stream', 'finesPROVISIONEDno stream', 'loansPAY_PER_REQUESTno stream≠4']],
+      '#data-0: a key card per table (no ERD), its header naming the table, its billing, its stream and its conflicts')
+    const under = (n, pred, out = []) => { if (n && typeof n === 'object') { if (pred(n)) out.push(n); for (const k of n.kids || []) under(k, pred, out) } return out }
+    const krows = (pg, card) => under(card, (n) => n.tagName === 'LI' && /\bkrow\b/.test(n.attrs.class || ''))
+    eq(cards.map((c) => krows(kpg, c).map((r) => kpg.textOf(r)).filter((t) => !t.startsWith('A'))), [
+      ['PKbookId S', 'SKplacedAt N'],
+      ['PKmemberId S', 'SKfineId S', 'LSIByIssued · PK memberId S · SK issuedAt N · KEYS_ONLY'],
+      ['PKmemberId S', 'SKloanId S', 'TTLexpiresAt · off≠ enabled', 'GSIByBook · PK bookId S · SK dueAt N · INCLUDE (title, dueAt)', 'GSIByBranch · PK branchId S · KEYS_ONLY≠ presence'],
+    ], 'the rows: partition and sort keys with their attribute types, the TTL on or off, each GSI and LSI with its keys and projection; a row whose declarations disagree is badged')
+    eq(krows(kpg, loansCard).filter((r) => kpg.textOf(r).startsWith('A')).map((r) => [kpg.textOf(r), r.attrs.title]), [['AmemberId S', 'lending/local/tables/loans.json:4 · lending/template.yaml:21'], ['AloanId S', 'lending/local/tables/loans.json:5 · lending/template.yaml:23'], ['AbookId S', 'lending/local/tables/loans.json:6 · lending/template.yaml:25'], ['AdueAt N', 'lending/local/tables/loans.json:7 · lending/template.yaml:27'], ['AbranchId S≠ presence', 'lending/local/tables/loans.json:8']],
+      'the attributes with their types, each row citing the path:line of every declaration on hover')
+    const kt = kpg.textOf(loansCard)
+    ok(kt.includes('lending/template.yaml:16 LoansTable (AWS::DynamoDB::Table)') && kt.includes('lending/local/tables/loans.json:2') && kt.includes('Conflicts (4): each side kept, none resolved'), `the card cites both declarations, the template's labelled with its logical id and type, and lists its conflicts (${kt.slice(0, 400)})`)
+    const holds = kpg.textOf(cards.find((c) => kpg.textOf(c).startsWith('HoldsTable')))
+    ok(holds.includes('HoldsTable (AWS::DynamoDB::Table), TableName !Sub ${AWS::StackName}-holds'), 'a table named by its logical id shows its TableName expression as written, unresolved')
+    kpg.search('branch')
+    eq(kpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || '')).map((c) => kpg.textOf(c.kids[0]).split('PAY')[0]), ['loans'], 'search narrows the cards to the tables whose name, attributes or indexes match')
+
+    // escaping: a name from the file is text, never markup
+    writeFileSync(path.join(KV, 'lending/local/tables/odd.json'), JSON.stringify({ TableName: 'odd</script><img src=x onerror=alert(1)>', AttributeDefinitions: [{ AttributeName: 'a"b<i>', AttributeType: 'S' }], KeySchema: [{ AttributeName: 'a"b<i>', KeyType: 'HASH' }] }))
+    await kq('index')
+    const opage = await renderKv(loadKv(KV))
+    ok(!/<\/script><img/.test(opage) && opage.includes('odd\\u003c/script>\\u003cimg'), 'the page blob escapes a table name holding markup')
+    const opg = await stubPage(opage, '#data-0')
+    const oddCard = opg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || '')).find((c) => opg.textOf(c).startsWith('odd'))
+    ok(!!oddCard && oddCard.kids[0].kids.some((k) => k.tagName === 'B' && k.kids[0] === 'odd</script><img src=x onerror=alert(1)>') && !opg.all((n) => /<img|<script/i.test(n.html || '')).length, 'the card shows it as text: no element of the cards holds it as markup')
+    rmSync(path.join(KV, 'lending/local/tables/odd.json'))
+    // in the text answers, a name holding a line break cannot forge a line: it is quoted
+    const FORGED = 'forged\n  + forged line'
+    const forgedTable = (extra = {}) => JSON.stringify({ TableName: FORGED, KeySchema: [{ AttributeName: 'k\tey', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'k\tey', AttributeType: 'S' }], ...extra })
+    writeFileSync(path.join(KV, 'lending/local/tables/forged.json'), forgedTable())
+    await kq('index')
+    const fstore = await kq('data', { store: 'lending:dynamodb' })
+    ok(fstore.includes('  "forged\\n  + forged line"  table  1 attribute · partition ("k\\tey")') && !fstore.split('\n').includes('  + forged line'), `graph_data quotes a name holding a control character, as JSON, on its line (${fstore.split('\n').find((l) => l.includes('forged')) || fstore})`)
+    rmSync(path.join(KV, 'lending/local/tables/forged.json'))
+    // a YAML file past the cap fails its job, and is not read again until it changes
+    const HUGE = path.join(KV, 'lending/infra/huge.yaml')
+    mkdirSync(path.dirname(HUGE), { recursive: true })
+    writeFileSync(HUGE, `Resources:\n  T:\n    Type: AWS::DynamoDB::Table\n# ${'x'.repeat(2 << 20)}\n`)
+    const hidx = await kq('index')
+    ok(hidx.includes('infra/huge.yaml (cloudformation@1): the YAML is larger than 512 KB: not read') && (await kq('status')).includes('extractor failure(s): cloudformation@1 on lending/infra/huge.yaml: the YAML is larger than 512 KB: not read'), `a YAML template past the cap: its job fails with the reason, graph_status says it (${hidx.split('\n').find((l) => l.includes('lending')) || hidx})`)
+    utimesSync(HUGE, new Date(Date.now() + 5000), new Date(Date.now() + 5000))
+    const again = await kq('index')
+    ok(!/huge\.yaml|data job\(s\) run|failure/.test(again) && (await kq('status')).includes('lending/infra/huge.yaml: the YAML is larger than 512 KB'), `indexed again, unchanged (its mtime moved, its content did not): its failure stands with its hash, the job is not run again (${again.split('\n').find((l) => l.includes('lending'))})`)
+    rmSync(path.join(KV, 'lending/infra'), { recursive: true, force: true })
+    await kq('index')
+
+    // a branch against its base: the template's tables changed (graph_changes), the base's YAML read aside
+    git(KV, 'init', '-q', '-b', 'main')
+    writeFileSync(path.join(KV, '.gitignore'), '.grimoire/\n')
+    commit(KV, 'the lending service')
+    git(KV, 'switch', '-q', '-c', 'feat')
+    const T = path.join(KV, 'lending/template.yaml')
+    writeFileSync(T, readFileSync(T, 'utf8').replace('            ProjectionType: INCLUDE\n            NonKeyAttributes: [title, dueAt]', '            ProjectionType: ALL\n        - IndexName: ByBranch\n          KeySchema:\n            - { AttributeName: branchId, KeyType: HASH }\n          Projection: { ProjectionType: KEYS_ONLY }')
+      .replace('        - AttributeName: dueAt\n          AttributeType: N\n', '        - AttributeName: dueAt\n          AttributeType: N\n        - AttributeName: branchId\n          AttributeType: S\n').replace('        Enabled: true', '        Enabled: false').replace('      StreamSpecification:\n        StreamViewType: NEW_AND_OLD_IMAGES\n', ''))
+    commit(KV, 'lending: a GSI per branch, the book GSI projects all, TTL off, no stream')
+    await kq('index')
+    const kch = await kq('changes')
+    ok(/^Data model against main \(the index's base branch\) at [0-9a-f]{10}: 1 store changed · 0 added · 0 removed · 5 modified · 0 possible renames$/.test(kch.split('\n')[0]), `graph_changes: one line to sum it up (${kch.split('\n')[0]})`)
+    const LJ = 'lending/local/tables/loans.json', TY = 'lending/template.yaml'
+    eq(kch.split('\n').slice(1), [
+      'lending:dynamodb  dynamodb  modified',
+      `  ~ loans  table, 5 attributes, PAY_PER_REQUEST · no stream  stream in ${TY}: NEW_AND_OLD_IMAGES → none  — was ${LJ}:2 · ${TY}:16; now ${LJ}:2 · ${TY}:16`,
+      `  ~ loans.branchId  attribute S  declared in: ${LJ} → ${LJ}, ${TY}  — was ${LJ}:8; now ${LJ}:8 · ${TY}:29`,
+      `  ~ loans TTL (expiresAt) off  enabled in ${TY}: on → off  — was ${LJ}:29 · ${TY}:42; now ${LJ}:29 · ${TY}:47`,
+      `  ~ loans index ByBook global · partition (bookId) · sort (dueAt) · INCLUDE (dueAt, title)  projection in ${TY}: INCLUDE (dueAt, title) → ALL  — was ${LJ}:15 · ${TY}:35; now ${LJ}:15 · ${TY}:37`,
+      `  ~ loans index ByBranch global · partition (branchId) · KEYS_ONLY  declared in: ${LJ} → ${LJ}, ${TY}  — was ${LJ}:23; now ${LJ}:23 · ${TY}:43`,
+    ], 'the branch against its base, compared declaration by declaration: what only the template changed is named with its file (the local file still says the old value), what the template now declares too is a change of where it is declared; the base\'s template read through git and parsed aside')
+
+    // the branch against a design's delta: targets address the key-value elements
+    const kplan = (id, op, target, extra) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
+    const KDELTA = { schema: 1, spec: 'docs/specs/2026-11-07-lending-design.md', data: [
+      kplan('ttl-off', 'change', 'lending:dynamodb/loans/key:ttl(expiresAt)', { after: { enabled: false }, slice: 1 }),
+      kplan('by-branch', 'add', 'lending:dynamodb/loans/index:ByBranch', { after: { kind: 'gsi', partition: ['branchId'], projection: 'KEYS_ONLY' }, slice: 1 }),
+      kplan('branch-attr', 'add', 'lending:dynamodb/loans.branchId', { after: { type: 'S', nullable: true }, slice: 1 }),
+      kplan('holds-ttl', 'add', 'lending:dynamodb/HoldsTable/key:ttl(releasedAt)', { after: { enabled: true }, slice: 2 }),
+    ], architecture: [] }
+    mkdirSync(path.join(KV, 'docs/specs'), { recursive: true })
+    writeFileSync(path.join(KV, 'docs/specs/2026-11-07-lending.delta.json'), JSON.stringify(KDELTA, null, 2) + '\n')
+    const kdl = await kq('changes', { delta: 'docs/specs/2026-11-07-lending.delta.json' })
+    eq(kdl.split('\n').slice(1), [
+      `  planned and built  ttl-off  change lending:dynamodb/loans/key:ttl(expiresAt)  — ${LJ}:29 · ${TY}:47`,
+      '    why: because ttl-off · slice 1 · not acknowledged',
+      `  planned and built  by-branch  add lending:dynamodb/loans/index:ByBranch  — ${LJ}:23 · ${TY}:43`,
+      '    why: because by-branch · slice 1 · not acknowledged',
+      `  planned and built  branch-attr  add lending:dynamodb/loans.branchId  — ${LJ}:8 · ${TY}:29`,
+      '    why: because branch-attr · slice 1 · not acknowledged',
+      '  pending  holds-ttl  add lending:dynamodb/HoldsTable/key:ttl(releasedAt)',
+      '    why: because holds-ttl · slice 2 · not acknowledged',
+      'Unplanned (2): in the branch, in no change of the delta',
+      `  ~ lending:dynamodb/loans  stream in ${TY}: NEW_AND_OLD_IMAGES → none  — was ${LJ}:2 · ${TY}:16; now ${LJ}:2 · ${TY}:16`,
+      `  ~ lending:dynamodb/loans/index:ByBook  projection in ${TY}: INCLUDE (dueAt, title) → ALL  — was ${LJ}:15 · ${TY}:35; now ${LJ}:15 · ${TY}:37`,
+      'Summary: 3 planned and built · 1 pending · 0 built differently · 2 unplanned · 0 acknowledged · 0 stale · 4 not acknowledged',
+    ], 'graph_changes --delta: each key-value change\'s state against every declaration (a TTL off in both, a GSI and its attribute in both, a TTL pending), then the branch\'s changes no change covers, each named as a target')
+    // a planned change one declaration has and the other not is not built
+    const half = { ...KDELTA, data: [kplan('book-all', 'change', 'lending:dynamodb/loans/index:ByBook', { after: { projection: 'ALL' } })] }
+    writeFileSync(path.join(KV, 'docs/specs/2026-11-07-half.delta.json'), JSON.stringify(half, null, 2) + '\n')
+    eq((await kq('changes', { delta: 'docs/specs/2026-11-07-half.delta.json' })).split('\n').slice(1, 3), ['  built differently  book-all  change lending:dynamodb/loans/index:ByBook  — ' + `${LJ}:15 · ${TY}:37`, `    planned → built: projection: ALL → INCLUDE (dueAt, title) in ${LJ}`],
+      'a change built in the template and not in the local file is built differently, the declaration that differs named')
+    rmSync(path.join(KV, 'docs/specs/2026-11-07-half.delta.json'))
+
+    // the page's overlays on the key cards
+    const vpage = await renderKv(loadKv(KV))
+    const vpg = await stubPage(vpage, '#data-0')
+    const cardOf = (pg, name) => pg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || '')).find((c) => pg.textOf(c.kids[0]).startsWith(name))
+    // a card's marked rows: { its marker and first words: its classes }
+    const rowCls = (pg, card) => Object.fromEntries(under(card, (n) => n.tagName === 'LI' && /\bkrow /.test(n.attrs.class || '')).map((n) => [n.kids.slice(0, 2).map((k) => pg.textOf(k).split(' · ')[0]).join(''), n.attrs.class.replace('krow ', '')]))
+    vpg.press('data-changes')
+    const chLoans = cardOf(vpg, 'loans')
+    eq([chLoans.attrs.class, rowCls(vpg, chLoans)], ['kcard ch-mod', { 'TTLexpiresAt': 'ch-mod', 'GSIByBook': 'ch-mod', 'GSIByBranch': 'ch-mod', 'AbranchId S': 'ch-mod' }],
+      'Changes vs main: the card modified (amber), and every row the branch changed in one of its declarations')
+    ok(vpg.textOf(chLoans).includes(`was: stream in ${TY}: NEW_AND_OLD_IMAGES → none`) && vpg.textOf(chLoans).includes(`was: projection in ${TY}: INCLUDE (dueAt, title) → ALL`) && vpg.textOf(chLoans).includes(`was: declared in: ${LJ} → ${LJ}, ${TY}`), 'each modified element says before → after, and in which declaration')
+    vpg.press('data-delta')
+    const dLoans = cardOf(vpg, 'loans'), dHolds = cardOf(vpg, 'HoldsTable')
+    eq([rowCls(vpg, dLoans), rowCls(vpg, dHolds)], [{ 'TTLexpiresAt': 'dl-built', 'GSIByBook': 'dl-unpl', 'GSIByBranch': 'dl-built', 'AbranchId S': 'dl-built' }, { 'TTLreleasedAt': 'dl-prop' }],
+      'Delta: what is planned and built green, the change no delta change covers in its own colour, the TTL the delta proposes for holds as a dashed row')
+    ok(vpg.textOf(dLoans).includes('Delta: 3 changes, 2 not in the plan') && vpg.textOf(dHolds).includes('add lending:dynamodb/HoldsTable/key:ttl(releasedAt)'), 'each card lists the delta changes it carries, with their why and acknowledgement')
+    // graph_changes quotes such a name too: an added table holding a line break forges no line
+    writeFileSync(path.join(KV, 'lending/local/tables/forged.json'), forgedTable())
+    await kq('index')
+    const fch = await kq('changes')
+    ok(fch.includes('  + "forged\\n  + forged line"  table, 1 attribute, billing not said · no stream  — lending/local/tables/forged.json:1') && !fch.split('\n').includes('  + forged line"  table, 1 attribute') && fch.split('\n').filter((l) => l.startsWith('  + forged line')).length === 0, `graph_changes quotes it on its line (${fch.split('\n').find((l) => l.includes('forged')) || fch})`)
+    rmSync(path.join(KV, 'lending/local/tables/forged.json'))
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

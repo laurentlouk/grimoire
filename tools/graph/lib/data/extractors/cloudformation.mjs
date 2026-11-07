@@ -15,7 +15,7 @@
 // table is named by its logical id, and its name expression is kept on its `as` and in the notes:
 // binding a name template to the names other declarations state is not done here.
 import { DOC, documents, at as lineIn } from '../readers/documents.mjs'
-import { LEVEL, TABLE_TYPES, readTable, isObj, isRef, textOf } from '../readers/dynamodb.mjs'
+import { LEVEL, TABLE_TYPES, readTable, isObj, isRef, textOf, capNotes, NOTES } from '../readers/dynamodb.mjs'
 import { STORE } from './dynamodb-table.mjs'
 
 // a document's resource maps: [[resources, path]]
@@ -82,7 +82,7 @@ export default {
       source: { path: file, line: entities[0].line ?? 1, kind: 'infra', confidence: 'declared' },
       complete: false, partial: false, status: 'read',
       label: `${kind}, ${entities.length} table${entities.length === 1 ? '' : 's'}`,
-      notes, entities,
+      notes: capNotes(notes, 4 * NOTES), entities,
     }] }
   },
 }

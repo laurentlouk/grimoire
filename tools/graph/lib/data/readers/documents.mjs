@@ -5,21 +5,26 @@
 //   DOC: the files read so (.json, .yaml, .yml, .template)
 //   documents(text, file, ctx) → [{ value, lines: Map(pathKey → line), line }]
 //     JSON by its extension, a .template by its first character ({ or [ is JSON), the rest YAML,
-//     through ctx.yaml(text) (the index's parser, or the base's, parsed aside: data/base.mjs).
+//     through ctx.yaml(text) (the index's parser, or the base's, parsed aside: data/base.mjs). A
+//     leading byte order mark is dropped; JSON nested past json-lines.mjs MAX_DEPTH is refused.
 //   at(doc, ...path) → { line }: the member's line, else its nearest ancestor's, else the document's
 import { jsonLines, pathKey } from './json-lines.mjs'
 import { lineAt } from './yaml.mjs'
 
 export const DOC = /\.(?:json|ya?ml|template)$/i
 
+export const stripBom = (text) => (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) // a byte order mark is no part of the text
+
 export function documents(text, file, ctx = {}) {
+  text = stripBom(text)
   const json = /\.json$/i.test(file) || (/\.template$/i.test(file) && /^\s*[[{]/.test(text))
   if (json) {
+    const lines = jsonLines(text) // first: it refuses a text nested past its cap, before JSON.parse walks it
     let value
     try { value = JSON.parse(text) } catch (e) { throw new Error(`not JSON: ${String(e.message).split('\n')[0]}`) }
-    return [{ value, lines: jsonLines(text), line: 1 }]
+    return [{ value, lines, line: 1 }]
   }
-  if (typeof ctx.yaml !== 'function') throw new Error('no YAML reader here: the parser runtime is not installed')
+  if (typeof ctx.yaml !== 'function') throw new Error('no YAML reader: the pinned YAML grammar did not load')
   return ctx.yaml(text)
 }
 

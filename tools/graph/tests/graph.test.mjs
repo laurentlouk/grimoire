@@ -496,11 +496,11 @@ has(r, 'report  function  web/src/report.ts:3  [import]', 'a new file is picked 
 has(await q('search', { query: 'slug' }), 'Nothing named like', 'a deleted file leaves the graph')
 has(await q('status'), 'files: python 4', 'status counts follow')
 { // an index built by another grimoire version rebuilds on the next query, not only on the next write
-  const { openStore } = await import('../lib/store.mjs')
+  const { openStore, SCHEMA_VERSION } = await import('../lib/store.mjs')
   const old = await openStore(path.join(PROJ, '.grimoire/graph/graph.db'))
   old.prepare("UPDATE meta SET value = '2' WHERE key = 'schema'").run(); old.close()
   await q('search', { query: 'Circle' })
-  has(await q('sql', { sql: "SELECT value FROM meta WHERE key = 'schema'" }), 'value\n5', 'a query on an older schema rebuilds the index first')
+  has(await q('sql', { sql: "SELECT value FROM meta WHERE key = 'schema'" }), `value\n${SCHEMA_VERSION}`, 'a query on an older schema rebuilds the index first')
   has(await q('sql', { sql: 'SELECT count(*) AS n FROM churn' }), 'n\n0', 'the rebuilt index has the churn table (empty: the fixture is not a git repository)')
 }
 
@@ -538,13 +538,13 @@ writeFileSync(path.join(MAIN, 'grimoire.config.json'), '{ "graph": {} }\n')
 writeFileSync(path.join(MAIN, '.gitignore'), '.grimoire/\n')
 writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  return 1\n}\n')
 const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' })
-git(MAIN, 'init', '-q', '-b', 'main'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init')
+git(MAIN, 'init', '-q', '-b', 'main'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init')
 const refresh = (root) => spawnSync(process.execPath, ['--no-warnings', path.join(ROOT, 'graph.mjs'), 'refresh', '--root', root], { encoding: 'utf8' })
-writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  return 2\n}\n'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'two')
-writeFileSync(path.join(MAIN, 'src/c.ts'), 'export const c = 1\n'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'three')
+writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  return 2\n}\n'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qam', 'two')
+writeFileSync(path.join(MAIN, 'src/c.ts'), 'export const c = 1\n'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'three')
 mkdirSync(path.join(MAIN, 'gen'))
 for (let i = 0; i < 26; i++) writeFileSync(path.join(MAIN, `gen/g${i}.ts`), `export const g${i} = ${i}\n`)
-git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'a sweep of 26 files')
+git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'a sweep of 26 files')
 let rf = refresh(MAIN)
 ok(rf.status === 0 && existsSync(path.join(MAIN, '.grimoire/graph/graph.db')), `refresh builds the first index when grimoire.config.json has a graph block (${rf.stdout.trim() || rf.stderr.trim()})`)
 const BARE = path.join(SANDBOX, 'bare'); mkdirSync(BARE)
@@ -560,7 +560,7 @@ git(MAIN, 'worktree', 'add', '-q', '-b', 'feat', WT)
   const DR = path.join(SANDBOX, 'drop')
   for (const r of ['keep', 'gone']) {
     mkdirSync(path.join(DR, r), { recursive: true }); writeFileSync(path.join(DR, r, 'x.ts'), 'export const x = 1\n')
-    git(path.join(DR, r), 'init', '-q', '-b', 'main'); git(path.join(DR, r), 'add', '-A'); git(path.join(DR, r), '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'one')
+    git(path.join(DR, r), 'init', '-q', '-b', 'main'); git(path.join(DR, r), 'add', '-A'); git(path.join(DR, r), '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'one')
   }
   const cfg = (names) => writeFileSync(path.join(DR, 'grimoire.config.json'), JSON.stringify({ repos: names.map((n) => ({ name: n, path: n })), graph: {} }))
   cfg(['keep', 'gone']); await call('graph_index', {}, { root: DR })
@@ -576,7 +576,7 @@ lacks(await call('graph_search', { query: 'onBranch' }, { root: MAIN }), 'src/b.
 { // the base a worktree's index starts from, and re-basing onto it once the base moves
   const { baseOf } = await import('../lib/freshness.mjs')
   const { loadProject } = await import('../lib/project.mjs')
-  const commit = (dir, m) => { git(dir, 'add', '-A'); git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', m) }
+  const commit = (dir, m) => { git(dir, 'add', '-A'); git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m) }
   const DEV = path.join(SANDBOX, 'dev'), STACK = path.join(SANDBOX, 'stack')
   git(MAIN, 'worktree', 'add', '-q', '-b', 'dev', DEV)
   writeFileSync(path.join(DEV, 'src/d.ts'), 'export function onDev(): number {\n  return 4\n}\n'); commit(DEV, 'dev work')
@@ -603,7 +603,7 @@ lacks(await call('graph_search', { query: 'onBranch' }, { root: MAIN }), 'src/b.
   mkdirSync(path.join(RM, 'merged'))
   for (let i = 0; i < 30; i++) writeFileSync(path.join(RM, `merged/m${i}.ts`), `export function merged${i}(): number {\n  return ${i}\n}\n`)
   commit(RM, 'a feature merged into main'); refresh(RM)
-  git(RW, '-c', 'user.email=t@t', '-c', 'user.name=t', 'merge', '-q', '--no-edit', 'main')
+  git(RW, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'merge', '-q', '--no-edit', 'main')
   const rb = refresh(RW)
   ok(/re-based on main/.test(rb.stderr), `once main has the work, the worktree re-bases onto main's index instead of parsing it (${rb.stderr.trim().replace(/\n/g, ' | ')})`)
   has(await call('graph_search', { query: 'merged29' }, { root: RW }), 'merged/m29.ts', 'the re-based index has what main merged')
@@ -628,7 +628,7 @@ ok(/default-src 'none'/.test(page) && !/<script[^>]+src=/.test(page) && !/https?
   ok(!!row('src/a.ts') && !!row('src/c.ts') && row('src/a.ts')[7] === 2 && row('src/c.ts')[7] === 1, `files carry their churn for the hotspot map (${JSON.stringify(row('src/a.ts'))})`)
   // a later commit recounts: each file one row, never a stale or a doubled one; a non-ASCII path counts too
   writeFileSync(path.join(MAIN, 'src/a.ts'), 'export function base(): number {\n  return 3\n}\n'); writeFileSync(path.join(MAIN, 'src/café.ts'), 'export const c = 2\n')
-  git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'four')
+  git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'four')
   refresh(MAIN)
   const again = (await call('graph_sql', { sql: "SELECT path, n FROM churn WHERE path LIKE 'src/%' ORDER BY path" }, { root: MAIN })).trim()
   ok(again === 'path\tn\nsrc/a.ts\t3\nsrc/c.ts\t1\nsrc/café.ts\t1', `churn after a new commit: recounted, one row a file, non-ASCII paths included (${JSON.stringify(again)})`)
