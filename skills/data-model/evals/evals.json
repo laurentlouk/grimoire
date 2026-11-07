@@ -1,0 +1,55 @@
+[
+  {
+    "id": 1,
+    "query": "Our mobile app keeps events in SQLite and the backend stores them in a DynamoDB table. Map how the data flows between the stores, and document the Redis search index too: nothing reads it yet.",
+    "should_trigger": true,
+    "expected_output": "Checks grimoire.config.json and the index, reads the extracted map with graph_data (stores, logical tables, item types, access leads, and the Gaps part listing the Redis client), then reads the code at each lead before claiming anything: the sync code that copies the device's events into the backend table (which field goes where), the code that creates the search index and its fields. Writes docs/architecture/<slug>.data.json with a lineage claim from the SQLite events entity to the DynamoDB table, field pairs and a citation to the sync line, and a stores entry describing the search index entity by entity with a repo:path:line per field and the client package in imports. Runs node <root>/tools/graph/graph.mjs data check until no claim drifts, renders the page and points to the Data tab (lineage drawn, the store as a card, each fact labelled refined), and reports the file, what it adds, and the gaps left.",
+    "expectations": [
+      { "text": "Reads the extracted map (graph_data or graph.mjs data) before writing claims", "passed": null, "evidence": "" },
+      { "text": "Reads the sync code and the index-creation code before writing the lineage and the store", "passed": null, "evidence": "" },
+      { "text": "Writes the claims in docs/architecture/<slug>.data.json: a lineage with field pairs and a stores entry with a path:line citation per field", "passed": null, "evidence": "" },
+      { "text": "Runs graph.mjs data check and fixes any drift before showing it", "passed": null, "evidence": "" },
+      { "text": "Points the user at the Data tab of the rendered page", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 2,
+    "query": "graph_data says my data map has drift: 'indexes[0] (line 25) index ... ByOwner: backend/src/events.ts line 3 names none of: ByOwner'. Fix it.",
+    "should_trigger": true,
+    "expected_output": "Treats the drift as the refine file disagreeing with the code, never as a reason to silence the check. Runs graph.mjs data check to list every drift, opens the cited file to find where the index is now queried (or learns it is no longer used), then edits the existing refine file in place: moves the citation to the line that names the index, or removes the claim if the code no longer supports it. Never cites an unrelated line just to pass. Runs data check again until it passes and tells the user what drifted and what was changed.",
+    "expectations": [
+      { "text": "Edits the existing refine file in place rather than writing a new one", "passed": null, "evidence": "" },
+      { "text": "Reads the code to find where the index is queried now before moving the citation", "passed": null, "evidence": "" },
+      { "text": "Re-runs graph.mjs data check until no claim drifts", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 3,
+    "query": "The local-dev table file dynamodb/tables/orders.json declares Orders, and prod Terraform has {env}-{project}-order. They're the same table: make the map compare them.",
+    "should_trigger": true,
+    "expected_output": "Looks for the line that ties the two names before claiming anything (where the local table name is set: a compose file, an env example, a test setup or seed script), reading graph_data's entity for both (the local one may say 'declared, no code uses this name'). With that evidence, adds an equivalences claim naming each declaration as written: { repo, name: Orders, path: dynamodb/tables/orders.json } and { repo, template: {env}-{project}-order }, with a why and the citation. Runs graph.mjs data check, then shows graph_data for the table: one logical table, refined, whose differences (billing, an index only one side declares) are conflicts with each declaration's path:line. Without such a line, says the local declaration may be stale and does not pair them by a guess unless the user confirms.",
+    "expectations": [
+      { "text": "Writes an equivalences claim naming one side by its exact name and the other by its template", "passed": null, "evidence": "" },
+      { "text": "Grounds the equivalence in code or config read, or says the local table may be stale rather than pairing by a guess", "passed": null, "evidence": "" },
+      { "text": "Shows the resulting conflicts across the two declarations after data check passes", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Draw the architecture of our services and how they call each other.",
+    "should_trigger": false,
+    "expected_output": "An architecture diagram of services and calls is the architecture skill's job; no data refine file is written.",
+    "expectations": [
+      { "text": "Does not write a docs/architecture/*.data.json refine file", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 5,
+    "query": "Add a nullable `archived_at` column to the events table with a migration.",
+    "should_trigger": false,
+    "expected_output": "A schema change is code work (a migration, through implement or the migration engineer); the data model refine skill is not used and no refine file is edited.",
+    "expectations": [
+      { "text": "Does not run graph.mjs data check or edit a refine file as the way to make the change", "passed": null, "evidence": "" }
+    ]
+  }
+]
