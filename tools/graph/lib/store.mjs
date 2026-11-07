@@ -4,12 +4,13 @@
 //   files    one row per indexed file; node_id = its `file` node
 //   nodes    kind: file | function | method | constructor | class | struct | interface | trait |
 //            protocol | enum | type | module | namespace | macro; qualname = Container.name;
-//            parent_id = the enclosing type or module (NULL at top level); is_test
+//            parent_id = the enclosing type or module (NULL at top level); is_test; signature = the
+//            first line up to the body, each literal's text shown as `…` (extract.mjs)
 //   edges    src → dst, kind: CALLS | IMPORTS | EXTENDS | IMPLEMENTS; confidence: how the name
 //            was resolved (same-class, qualified, import, same-file, same-package, unique-name,
 //            ambiguous, path)
-//   refs     unresolved names as extracted (call sites with the receiver's stated type when the
-//            syntax gives it, supertypes); imports: import statements
+//   refs     unresolved names as extracted (call sites with the receiver's text, literals as `…`,
+//            and its stated type when the syntax gives it, supertypes); imports: import statements
 //   cochange files that changed in the same commits (from git log), n = commits shared
 //   churn    per file, n = recent commits that touched it (same window as cochange)
 //   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
@@ -30,7 +31,7 @@
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '12'
+export const SCHEMA_VERSION = '13'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
