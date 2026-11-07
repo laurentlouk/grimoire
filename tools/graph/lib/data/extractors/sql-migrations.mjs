@@ -35,7 +35,7 @@ import { readDdl } from '../readers/ddl.mjs'
 import { sniffDialect } from '../readers/sql-dialect.mjs'
 import { normDialect, lineOf } from '../model.mjs'
 import { parseJson } from '../readers/json-lines.mjs'
-import { dumpHeader } from '../readers/sql-split.mjs'
+import { dumpHeader, schemaLevel } from '../readers/sql-split.mjs'
 
 const P = path.posix
 const SQL = /\.sql$/i
@@ -114,7 +114,8 @@ export default {
   extract({ key, files, override }, { DatabaseSync }) {
     const configs = new Map(files.filter((f) => CONFIG.test(f.path)).map((f) => [f.path, f.text]))
     const sql = files.filter((f) => !CONFIG.test(f.path))
-    const dumps = sql.filter((f) => isDump(f.path, !!dumpHeader(f.text)))
+    // (as discover found them: a dump states a table)
+    const dumps = sql.filter((f) => isDump(f.path, !!dumpHeader(f.text)) && schemaLevel(upOnly(f.text)) >= 2)
     const members = sql.filter((f) => !dumps.includes(f)).map((f) => ({ path: f.path, text: upSection(f.text) }))
     const journal = readJournal(key, configs)
     const out = []
