@@ -124,7 +124,7 @@ async function archAndData(project, db, files, repos, changes, deltas) {
   })
   for (const a of arch) delete a.doc
   const removed = impact && impact.diagrams ? impact.diagrams.files.filter((f) => f.change === 'removed').map((f) => ({ file: f.file, title: f.title, n: f.changes.length })) : []
-  const archCh = impact ? { base: { ref: refName(changes.base.ref), text: baseText(changes.base) }, diagramsWhy: impact.diagramsWhy, codeWhy: impact.why, where: impact.where, removed, skipped: impact.diagrams ? impact.diagrams.skipped : [] } : { base: null, why }
+  const archCh = impact ? { base: { ref: refName(changes.base.ref), text: baseText(changes.base) }, diagramsWhy: impact.diagramsWhy, codeWhy: impact.why, removed, skipped: impact.diagrams ? impact.diagrams.skipped : [] } : { base: null, why }
   return { arch, archCh, data }
 }
 
@@ -691,7 +691,7 @@ svg.arch .conn.ch-add{stroke:var(--ok);stroke-width:2.4}svg.arch .conn.ch-mod{st
 svg.arch .newlink{fill:none;stroke-width:2.2;stroke-dasharray:2 5;stroke-linecap:round}svg.arch .newlink.d-unpl{stroke:var(--t-worker)}svg.arch .newlink.ch-add{stroke:var(--ok)}
 svg.arch .bound.d-prop rect{stroke:var(--ok);stroke-width:1.8}svg.arch .bound.d-built rect{stroke:var(--ok);stroke-width:2.2}svg.arch .bound.d-diff rect{stroke:var(--warn);stroke-width:2}svg.arch .bound.d-pend rect,svg.arch .bound.d-rm rect{stroke:var(--warn);stroke-width:1.8}svg.arch .bound.d-unpl rect{stroke:var(--t-worker);stroke-width:2}
 svg.arch .bound.ch-add rect{stroke:var(--ok);stroke-width:2}svg.arch .bound.ch-mod rect{stroke:var(--warn);stroke-width:2}svg.arch .bound.ch-del rect{stroke:var(--err);stroke-width:1.6}
-svg.arch .stalemk circle{fill:var(--warn)}svg.arch .stalemk text{font:700 10px ui-sans-serif,system-ui,sans-serif;fill:var(--panel)}
+svg.arch .stalemk circle{fill:var(--warn)}svg.arch .stalemk text{font:700 10px ui-sans-serif,system-ui,sans-serif;fill:var(--panel)}.chsw.newl{height:0;border-radius:0;border-top:2px dotted var(--ok)}
 .dstores{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-bottom:14px}
 .dstore{font:inherit;color:inherit;text-align:left;cursor:pointer;background:var(--panel);border:1px solid var(--line);border-left:4px solid color-mix(in srgb,var(--t-database) 55%,var(--line));border-radius:12px;padding:9px 12px;display:flex;flex-direction:column;gap:3px}
 .dstore:hover{border-color:color-mix(in srgb,var(--t-database) 55%,var(--line))}.dstore b{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}.dstore span{color:var(--muted);font-size:12px}

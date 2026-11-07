@@ -359,7 +359,7 @@ export function archClient(ctx) {
     return [
       h('div', { class: 'legend dlegend chlegend', role: 'note', 'aria-label': 'Change overlay legend' }, h('b', null, `Changes since ${REF}:`),
         h('span', null, h('i', { class: 'chsw add' }), 'added'), h('span', null, h('i', { class: 'chsw del' }), h('s', null, 'removed'), ' (drawn where it stood)'),
-        h('span', null, h('i', { class: 'chsw mod' }), 'modified: before → after'), h('span', null, h('i', { class: 'chsw ren' }), 'in the code, not drawn: a new link (dotted)')),
+        h('span', null, h('i', { class: 'chsw mod' }), 'modified: before → after'), h('span', null, h('i', { class: 'chsw newl' }), 'in the code, not drawn: a new link (dotted)')),
       h('div', { class: 'toolbar' }, a.change === 'added' ? h('span', { class: 'pill add' }, `diagram added since ${REF}`) : null, h('span', { class: 'muted' }, `${k.added} added · ${k.removed} removed · ${k.modified} modified · ${CH.codeWhy ? 'the code not compared' : `${plural(k.findings, 'new finding')} in the code`}`)),
       CH.codeWhy ? h('p', { class: 'note' }, `Only the diagram files were compared: the code was not (${CH.codeWhy}).`) : null,
       a.list.length || a.findings.length ? h('ul', { class: 'links dlist' }, a.list.map(chItem), a.findings.map(findItem)) : h('p', { class: 'muted' }, `No change to this diagram, nor in the code it draws, since ${REF}.`)]
