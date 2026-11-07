@@ -2811,6 +2811,14 @@ console.log('\n28 · code-declared SQL models: the schema-language reader (reade
     eq([drizzleLevel(SQLITE), drizzleLevel("import { sqliteTable } from 'drizzle-orm/sqlite-core'\nexport type T = 1\n"), drizzleLevel("export * from './a'\n"), drizzleLevel("export * from 'pkg'\n")], [4, 0, 8, 0], 'the level: the core module imported and a table builder called; a barrel of relative modules')
     const broken = dzx({ 's/schema.ts': "import { sqliteTable, text } from 'drizzle-orm/sqlite-core'\nexport const a = sqliteTable('a', { id: text('id').primaryKey() })\nexport const b = sqliteTable('b', { id: text('id' })\n" }, 's')[0]
     eq([broken.complete, broken.entities.map((e) => e.name).includes('a'), broken.notes.some((n) => /^s\/schema\.ts:3: the file does not parse cleanly/.test(n))], [false, true, true], 'a file that does not parse cleanly: what parsed is kept, noted at its line, and the schema is no longer complete')
+    // hostile text, in bounded time: braces never closed, a chain of thousands of calls, a member path of thousands of names
+    const t1 = Date.now()
+    const lvl = drizzleLevel('export { a,\n'.repeat(60000))
+    const cfgHostile = readConfig('migrations: {\n'.repeat(30000))
+    const [hz] = dzx({ 'h/schema.ts': `import { sqliteTable, text } from 'drizzle-orm/sqlite-core'\nexport const t = sqliteTable('t', { a: text('a')${'.notNull()'.repeat(5000)}, b: x${'.y'.repeat(20000)}(), c: text('c') })\n` }, 'h')
+    const took1 = Date.now() - t1
+    eq([lvl, cfgHostile.schema, hz.entities[0].fields.map((f) => f.name), !!hz.entities[0].part], [0, null, ['c'], true], 'a barrel brace never closed is no barrel; a config of unclosed blocks names no schema; a column past the chain cap or built by an unknown path is not read, its table stated in part')
+    ok(took1 < 5000, `… all in bounded time (${took1} ms)`)
   }
 }
 

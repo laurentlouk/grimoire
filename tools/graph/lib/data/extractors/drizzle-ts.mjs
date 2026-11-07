@@ -46,7 +46,8 @@ const CORE = /^drizzle-orm\/(sqlite|pg|mysql)-core$/
 const CORE_DIALECT = { sqlite: 'sqlite', pg: 'postgres', mysql: 'mysql' }
 const LEVEL_IMPORT = /\bfrom\s*['"]drizzle-orm\/(?:sqlite|pg|mysql)-core['"]/
 const LEVEL_CALL = /\b(?:sqliteTable|pgTable|mysqlTable|sqliteTableCreator|pgTableCreator|mysqlTableCreator|pgSchema|mysqlSchema|pgEnum|sqliteView|pgView|pgMaterializedView|mysqlView)\s*[(<.]/
-const BARREL = /^[ \t]*export[ \t]+(?:\*(?:[ \t]+as[ \t]+[\w$]+)?|\{[^}]*\})[ \t]*from[ \t]*['"](\.{1,2}\/[^'"\n]+)['"]/gm
+// (each attempt bounded: a brace never closed costs 2 000 characters, not the rest of the file)
+const BARREL = /^[ \t]*export[ \t]+(?:\*(?:[ \t]+as[ \t]+[\w$]+)?|\{[^}]{0,2000}\})[ \t]*from[ \t]*['"](\.{1,2}\/[^'"\n]{1,400})['"]/gm
 // A source file's level bits (registry.mjs): 4 it declares tables through the builders, 8 it re-exports
 // relative modules (a barrel a config may name).
 export function drizzleLevel(text) {
@@ -163,10 +164,10 @@ export function readSchemaFile(tree, file) {
     } else if (s.type === 'expression_statement') tops.push({ bareCall: bare(named(s)[0]) })
   }
   const schemaVars = new Map() // var → dialect
-  const resolve = (n, param = null) => {
-    // what a callee names: { kind: builder | schema | ns, name } or null
+  const resolve = (n, param = null, depth = 0) => {
+    // what a callee names (a builder's imported name, `schemaVar.table`), or null
     n = bare(n)
-    if (!n) return null
+    if (!n || depth > 4) return null
     if (n.type === 'identifier') {
       if (imported.has(n.text)) return imported.get(n.text)
       if (KNOWN.has(n.text) && !relationsLocal.has(n.text)) return n.text
@@ -178,7 +179,7 @@ export function readSchemaFile(tree, file) {
       if (o.type === 'identifier' && (spaces.has(o.text) || (param && o.text === param))) return p
       // a pgSchema's own builders: declared in this file, or in another (the unit checks it is one)
       if (o.type === 'identifier' && (schemaVars.has(o.text) || (!param && SCHEMA_MEMBERS.has(p)))) return `${o.text}.${p}`
-      const inner = resolve(o, param)
+      const inner = resolve(o, param, depth + 1)
       if (inner && TABLES[inner] && p === 'withRLS') return inner
     }
     return null
@@ -490,7 +491,7 @@ export default {
 // out, dialect, casing }. A `migrations: { … }` or `dbCredentials: { … }` member is set aside first
 // (the migrations table's `schema` is not the schema files').
 export function readConfig(text) {
-  const t = String(text).replace(/\b(?:migrations|dbCredentials)["']?\s*:\s*\{[^}]*\}/g, '')
+  const t = String(text).replace(/\b(?:migrations|dbCredentials)["']?\s*:\s*\{[^}]{0,4000}\}/g, '')
   const key = (k) => new RegExp(`(?:^|[\\s{,])["']?${k}["']?\\s*:\\s*`, 'm')
   const at = (k) => { const m = key(k).exec(t); return m ? m.index + m[0].length : -1 }
   const strAt = (i) => { const m = /^(['"`])([^'"`\n]*)\1/.exec(t.slice(i)); return m ? m[2] : null }

@@ -201,12 +201,13 @@ function pickConfig(configs, root) {
   for (const c of configs) {
     const dir = P.dirname(c.path)
     const at = (rel) => P.normalize(P.join(dir, rel)).replace(/\/+$/, '') || '.'
-    const schema = /\bschema\s*:\s*(['"`])([^'"`\n]+)\1/.exec(c.text)
+    const schema = /\bschema\s*:\s*(['"`])([^'"`\n]{1,400})\1/.exec(c.text)
     if (schema) {
       const s = at(schema[2])
       if (!(s === root || P.dirname(s) === root || root.startsWith(`${s}/`) || s === '.')) continue
     }
-    const mig = /\bmigrations\s*:\s*\{[^}]*?\bpath\s*:\s*(['"`])([^'"`\n]+)\1/.exec(c.text)
+    // (each attempt bounded: a brace never closed costs 2 000 characters, not the rest of the file)
+    const mig = /\bmigrations\s*:\s*\{[^}]{0,2000}?\bpath\s*:\s*(['"`])([^'"`\n]{1,400})\1/.exec(c.text)
     if (mig) return { migrations: at(mig[2]), note: `migrations path stated in ${c.path}` }
     return null
   }
