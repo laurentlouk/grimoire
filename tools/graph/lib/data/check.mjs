@@ -215,12 +215,10 @@ export function readRefines(dir, root = dir) {
   return out
 }
 
-// The equivalences reconcile.mjs groups by: those of the files that validate.
-export const equivalencesOf = (refines) => refines.filter((r) => r.doc).flatMap((r) => (r.doc.equivalences || []).map((q, i) => ({ ref: `${r.file} equivalences[${i}]`, file: r.file, sides: q.tables })))
-
 // ── citations ──────────────────────────────────────────────────────────────────────────────
 // What a citation must name, for a name: itself; a template (`{env}-{project}-event`) by its longest
-// literal part (`event`); a field path (`lines[].sku`) by itself or its last part (`sku`).
+// literal part (`event`); a field path (`lines[].sku`) by itself or its last part (`sku`). A template
+// with no literal part of two characters or more gives nothing to look for ([]).
 export function citeNames(name) {
   const s = String(name)
   if (/\{[^{}]*\}/.test(s)) {
@@ -230,17 +228,56 @@ export function citeNames(name) {
   const last = s.split('.').pop().replace(/\[\]|\{\}/g, '')
   return last && last !== s ? [s, last] : [s]
 }
+// One expression per list of names (a lineage's may hold a thousand): the text is scanned once.
 const reCache = new Map()
-const nameRe = (n) => {
-  if (!reCache.has(n)) { if (reCache.size > 5000) reCache.clear(); reCache.set(n, new RegExp(`(?<![A-Za-z0-9_])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i')) }
-  return reCache.get(n)
+const namesRe = (names) => {
+  const k = names.join('\0')
+  if (!reCache.has(k)) {
+    if (reCache.size > 2000) reCache.clear()
+    const alt = [...new Set(names.filter(Boolean))].sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+    reCache.set(k, alt ? new RegExp(`(?<![A-Za-z0-9_])(?:${alt})(?![A-Za-z0-9_])`, 'i') : null)
+  }
+  return reCache.get(k)
 }
-// Does a text name one of the names: { hit } or null.
-export const named = (text, names) => names.find((n) => n && nameRe(n).test(text)) ?? null
+// Does a text name one of the names: the name found, or null.
+export function named(text, names) {
+  const re = namesRe(names)
+  const m = re ? re.exec(text) : null
+  if (!m) return null
+  const got = m[0].toLowerCase()
+  return names.find((n) => n && n.toLowerCase() === got) ?? m[0]
+}
 const say = (names) => { const u = [...new Set(names)]; return u.length > 6 ? `${u.slice(0, 6).join(', ')} or ${u.length - 6} more` : u.join(', ') }
+const sizeText = (n) => (n >= 1 << 20 ? `${Math.round(n / (1 << 20))} MB` : `${n} bytes`)
 
-// A citation checked: { cite, ok, repo?, path?, start?, end?, why? }. The file is read once per check
-// (ctx.cache), confined to its repository (a link leading out of it is no file of it).
+// What one check reads, at most: the cited files (each read once, by its real path, whatever the
+// spelling: `./src/a.ts`, `src/../src/a.ts`), their bytes, and the characters scanned for names (a
+// line is scanned up to MAX_LINE characters: a minified file cannot make every check slow). Past a
+// limit a citation is drift, saying so; a test may pass smaller ones (`limits`).
+export const MAX_CITED_FILES = 1000
+export const MAX_CITED_TOTAL = 64 << 20
+export const MAX_SCAN = 64 << 20
+export const MAX_LINE = 4096
+export function citeContext(roots = [], limits = {}) {
+  return { roots, repoNames: roots.map((x) => x.name), files: new Map(), real: new Map(), stats: { files: 0, reads: 0, bytes: 0, scanned: 0 }, limits: { files: MAX_CITED_FILES, bytes: MAX_CITED_TOTAL, scan: MAX_SCAN, ...limits } }
+}
+
+// A file as a check keeps it: its text and where each line starts.
+function readCited(real, size, ctx) {
+  const L = ctx.limits, S = ctx.stats
+  if (S.files >= L.files) return { why: `too many cited files (more than ${L.files}): not read` }
+  if (S.bytes + size > L.bytes) return { why: `the cited text is past the check's budget (${sizeText(L.bytes)}): not read` }
+  let text
+  try { text = readFileSync(real, 'utf8') } catch { return { why: 'cannot be read' } }
+  S.files++; S.reads++; S.bytes += size
+  const starts = [0]
+  for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) starts.push(i + 1)
+  const n = starts[starts.length - 1] === text.length ? starts.length - 1 : starts.length // a last newline ends the last line
+  return { text, starts: Uint32Array.from(starts), n }
+}
+
+// A citation checked: { cite, ok, repo?, path?, start?, end?, why? }. Confined to its repository (a link
+// or a path leading out of it is no file of it).
 function cite(s, names, ctx) {
   const p = parseSource(s, ctx.repoNames)
   const single = ctx.roots.length === 1 ? ctx.roots[0] : ctx.roots.find((r) => r.rel === '.') || null
@@ -248,9 +285,11 @@ function cite(s, names, ctx) {
   if (!p || p.start === undefined) return { cite: s, ok: false, why: `${s}: cite repo:path:line` }
   if (!root) return { cite: s, ok: false, why: `${s}: name its repository (repo:path:line)` }
   const shown = `${root.rel && root.rel !== '.' ? `${root.rel}/` : ''}${p.path}`
-  let file = ctx.cache.get(`${root.name}\0${p.path}`)
-  if (!file) {
-    file = (() => {
+  const out = { cite: s, repo: root.name, path: p.path, start: p.start, end: p.end }
+  // the real path of a spelling, once; the file of a real path, once
+  const k = `${root.name}\0${p.path}`
+  if (!ctx.real.has(k)) {
+    ctx.real.set(k, (() => {
       let real, rootReal
       try { real = realpathSync(path.resolve(root.abs, p.path)); rootReal = realpathSync(root.abs) } catch { return { why: `no such file in ${root.name}` } }
       if (!(real === rootReal || real.startsWith(rootReal + path.sep))) return { why: `no such file in ${root.name}` }
@@ -258,18 +297,50 @@ function cite(s, names, ctx) {
       try { st = statSync(real) } catch { return { why: `no such file in ${root.name}` } }
       if (!st.isFile()) return { why: `no such file in ${root.name}` }
       if (st.size > MAX_CITED) return { why: `the file is larger than ${MAX_CITED >> 20} MB: not read` }
-      try { return { lines: readFileSync(real, 'utf8').split('\n') } } catch { return { why: 'cannot be read' } }
-    })()
-    ctx.cache.set(`${root.name}\0${p.path}`, file)
+      return { real, size: st.size }
+    })())
   }
-  const out = { cite: s, repo: root.name, path: p.path, start: p.start, end: p.end }
+  const at = ctx.real.get(k)
+  if (at.why) return { ...out, ok: false, why: `${shown}: ${at.why}` }
+  let file = ctx.files.get(at.real)
+  if (!file) { file = readCited(at.real, at.size, ctx); if (!file.why || file.why === 'cannot be read') ctx.files.set(at.real, file) }
   if (file.why) return { ...out, ok: false, why: `${shown}: ${file.why}` }
-  const n = file.lines.length - (file.lines[file.lines.length - 1] === '' ? 1 : 0)
+  const n = file.n
   if (p.start < 1 || p.end < p.start) return { ...out, ok: false, why: `${shown}: lines ${p.start}-${p.end} are no range` }
   if (p.end > n) return { ...out, ok: false, why: `${shown} has ${n} line${n === 1 ? '' : 's'}: ${p.start === p.end ? `line ${p.start} is` : `lines ${p.start}-${p.end} are`} past its end` }
   if (p.end - p.start >= MAX_SPAN) return { ...out, ok: false, why: `${shown}: a citation spans ${MAX_SPAN} lines at most` }
-  if (!named(file.lines.slice(p.start - 1, p.end).join('\n'), names)) return { ...out, ok: false, why: `${shown} ${p.start === p.end ? `line ${p.start}` : `lines ${p.start}-${p.end}`} name${p.start === p.end ? 's' : ''} none of: ${say(names)}` }
+  const where = `${shown} ${p.start === p.end ? `line ${p.start}` : `lines ${p.start}-${p.end}`}`
+  if (!names.filter(Boolean).length) return { ...out, ok: false, why: `${where}: the template has no literal part to look for` }
+  // the lines, each up to MAX_LINE characters, within the check's scan budget
+  let text = '', cut = false
+  for (let i = p.start; i <= p.end; i++) {
+    const a = file.starts[i - 1], b = i < file.starts.length ? file.starts[i] - 1 : file.text.length
+    if (b - a > MAX_LINE) cut = true
+    text += (text ? '\n' : '') + file.text.slice(a, Math.min(b, a + MAX_LINE))
+  }
+  if (ctx.stats.scanned + text.length > ctx.limits.scan) return { ...out, ok: false, why: `${where}: the check's scan budget (${sizeText(ctx.limits.scan)}) is spent: not read` }
+  ctx.stats.scanned += text.length
+  if (!named(text, names)) return { ...out, ok: false, why: `${where} name${p.start === p.end ? 's' : ''} none of: ${say(names)}${cut ? ` (a line is read up to ${MAX_LINE} characters)` : ''}` }
   return { ...out, ok: true }
+}
+
+// The equivalences a model is grouped by: those whose citations hold, checked before any model is
+// built (a failing claim is drift, never trusted, not even to group); its sides are found by reconcile
+// against the model it groups (binding.mjs resolveSide), and one that is not found groups nothing.
+// → { equivalences: [{ ref, file, sides }], cited: Map(ref → [citation]) }
+const sideNames = (tables) => tables.flatMap((s) => citeNames(s.name ?? s.template))
+export function heldEquivalences(refines, ctx) {
+  const equivalences = [], cited = new Map()
+  for (const r of refines) {
+    if (!r.doc) continue
+    ;(r.doc.equivalences || []).forEach((q, i) => {
+      const ref = `${r.file} equivalences[${i}]`
+      const sources = (q.sources || []).map((s) => cite(s, sideNames(q.tables), ctx))
+      cited.set(ref, sources)
+      if (sources.every((s) => s.ok)) equivalences.push({ ref, file: r.file, sides: q.tables })
+    })
+  }
+  return { equivalences, cited }
 }
 
 // ── the check ──────────────────────────────────────────────────────────────────────────────
@@ -319,7 +390,8 @@ function checkFile(r, ctx) {
     // a foreign key on the same columns: the same relation (said), or another one (drift)
     const fk = A && A.e ? A.e.relations.find((r) => r.columns.join('\0').toLowerCase() === cols.join('\0').toLowerCase()) : null
     if (fk && B) {
-      if (fk.to.toLowerCase() === B.name.toLowerCase() && fk.toColumns.join('\0').toLowerCase() === toCols.join('\0').toLowerCase()) notes.push('a foreign key now states it')
+      // the foreign key's target is a table of A's own store: the same relation only when B is that table
+      if (`${A.store}/${fk.to}`.toLowerCase() === B.id.toLowerCase() && fk.toColumns.join('\0').toLowerCase() === toCols.join('\0').toLowerCase()) notes.push('a foreign key now states it')
       else why.push(`a foreign key on (${fk.columns.join(', ')}) references ${fk.to}(${fk.toColumns.join(', ')}): the claim disagrees with it`)
     }
     const names = [...citeNames(A ? A.name : x.from), ...citeNames(B ? B.name : x.to), ...cols, ...toCols]
@@ -328,7 +400,7 @@ function checkFile(r, ctx) {
   ;(doc.indexes || []).forEach((x, i) => {
     const E = ent(x.entity), why = []
     if (!E) why.push(missing(x.entity))
-    else if (!E.e || !E.e.indexes.some((ix) => ix.name === x.index)) why.push(`no index ${x.index} on ${E.id}`)
+    else if (!E.e || !E.e.indexes.some((ix) => ix.name === x.index || (!E.kv && ix.name.toLowerCase() === x.index.toLowerCase()))) why.push(`no index ${x.index} on ${E.id}`) // a SQL store's in any letter case
     add('index', ['indexes', i], { text: `${x.entity} index ${x.index}: ${x.purpose}`, entity: x.entity, store: E?.store ?? null, index: x.index, purpose: x.purpose, reasons: why, sources: sources(x.sources, [x.index]) })
   })
   ;(doc.bindings || []).forEach((x, i) => {
@@ -352,10 +424,11 @@ function checkFile(r, ctx) {
   ;(doc.equivalences || []).forEach((x, i) => {
     const ref = `${r.file} equivalences[${i}]`
     const q = (ctx.model.equivalences || []).find((y) => y.ref === ref)
-    const why = !q ? [ctx.model.itemsError || 'not resolved'] : q.ok ? [] : q.why
+    const cited = ctx.cited.get(ref) || sources(x.sources, sideNames(x.tables))
+    const why = !cited.every((c) => c.ok) ? ['not grouped: a claim whose citations do not hold groups nothing'] : !q ? [ctx.model.itemsError || 'not resolved'] : q.ok ? [] : q.why
     const sideText = (s) => `${s.repo}:${s.store || 'dynamodb'}/${s.name ?? s.template}`
     const g = q && q.ok ? ctx.model.logical.find((lg) => q.ids.every((id) => lg.members.includes(id))) : null
-    add('equivalence', ['equivalences', i], { text: x.tables.map(sideText).join(' ≡ '), sides: x.tables.map(sideText), members: q && q.ok ? q.ids : [], group: g ? g.name : null, conflicts: g ? g.conflicts.length : 0, why: x.why, reasons: why, sources: sources(x.sources, x.tables.flatMap((s) => citeNames(s.name ?? s.template))) })
+    add('equivalence', ['equivalences', i], { text: x.tables.map(sideText).join(' ≡ '), sides: x.tables.map(sideText), members: q && q.ok ? q.ids : [], group: g ? g.name : null, conflicts: g ? g.conflicts.length : 0, why: x.why, reasons: why, sources: cited })
   })
   return claims
 }
@@ -380,13 +453,15 @@ function checkStores(r, ctx) {
   })
 }
 
-// Every refine file checked against a model (reconciled with their equivalences: refineModel below).
-// roots: docRoots(project); imports: the production code's [{ repo, path, source }] (for the gaps).
-// → { files: [{ file, title, summary, errors, claims }], claims, stores, drift: [Drift], gaps: [Gap] }
+// Every refine file checked against a model reconciled with the equivalences that hold (refineCheck
+// below is the one way in). roots: docRoots(project); imports: the production code's [{ repo, path,
+// source }] (for the gaps); cite: the citation context and the equivalences' citations already checked.
+// → { files: [{ file, title, summary, errors, claims }], claims, stores, drift: [Drift], gaps: [Gap],
+//     cited: { files, reads, bytes } (what the check read) }
 //   Drift { file, at, line?, kind, text, why: [reasons] }
 //   Gap   { id, label, sources: [import], files: [{ repo, path }] (the first FILES_SHOWN), n }
-export function checkRefines(refines, model, { roots = [], imports = [] } = {}) {
-  const ctx = { model, roots, repoNames: roots.map((x) => x.name), cache: new Map(), entities: entitiesOf(model) }
+export function checkRefines(refines, model, { roots = [], imports = [], cite: cc = null, cited = new Map(), limits = {} } = {}) {
+  const ctx = { ...(cc || citeContext(roots, limits)), model, cited, entities: entitiesOf(model) }
   // the refined stores first: a lineage may end in one of their entities
   const stores = refines.filter((r) => r.doc).flatMap((r) => checkStores(r, ctx))
   for (const s of stores) {
@@ -398,7 +473,8 @@ export function checkRefines(refines, model, { roots = [], imports = [] } = {}) 
     return { file: r.file, title: r.doc?.title ?? null, summary: r.doc?.summary ?? null, errors: r.errors, claims }
   })
   const claims = files.flatMap((f) => f.claims)
-  return { files, claims, stores, drift: claims.flatMap(driftOf), gaps: gapsOf(model, stores, imports) }
+  const { files: nf, reads, bytes } = ctx.stats
+  return { files, claims, stores, drift: claims.flatMap(driftOf), gaps: gapsOf(model, stores, imports), cited: { files: nf, reads, bytes } }
 }
 
 // A claim's drift: the claim's own reasons and its failing citations; a store's, per entity and field.
@@ -440,12 +516,24 @@ export function gapsOf(model, stores, imports) {
 }
 
 // ── for the tools and the page ─────────────────────────────────────────────────────────────
-// The model a project's facts give, its refine files' equivalences applied, and the refine check:
-// { model, refines, refine } (refine null when there is no refine file and no gap to say). The same
-// equivalences apply to a base's model (data/base.mjs modelAt), so the branch's diff compares the code.
+// The one way every caller (graph_data, graph_changes, `data check`, the page) checks refine files:
+// the equivalences' citations first, so only those that hold group the model; then the model; then
+// every claim against it, through one citation context (each file read once, within the budget).
+// → { model, refine, equivalences: the ones that held (for a base's model: data/base.mjs modelAt, so
+//   the branch's diff compares the code) }
+export function refineCheck(rows, refines, { roots = [], imports = [], limits = {} } = {}) {
+  const cc = citeContext(roots, limits)
+  const held = heldEquivalences(refines, cc)
+  const model = reconcile(rows, { equivalences: held.equivalences })
+  const refine = checkRefines(refines, model, { roots, imports, cite: cc, cited: held.cited })
+  return { model, refine, equivalences: held.equivalences }
+}
+// A project's: its refine files read beside the diagrams → { model, refines, refine } (refine null when
+// there is no refine file and no gap to say).
 export function refineModel(rows, project, { imports = [], roots = [] } = {}) {
   const refines = project && project.root ? readRefines(project.architectureDir, project.root) : []
-  const model = reconcile(rows, { equivalences: equivalencesOf(refines) })
-  const r = checkRefines(refines, model, { roots, imports })
-  return { model, refines, refine: refines.length || r.gaps.length ? r : null }
+  const { model, refine } = refineCheck(rows, refines, { roots, imports })
+  return { model, refines, refine: refines.length || refine.gaps.length ? refine : null }
 }
+// The equivalences a base's model is grouped by: those that hold now (their citations checked).
+export const groupingFor = (refines, roots = []) => ({ equivalences: heldEquivalences(refines, citeContext(roots)).equivalences })

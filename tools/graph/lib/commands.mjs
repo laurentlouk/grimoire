@@ -17,7 +17,8 @@ import { candidates } from './data/registry.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
 import { confinedDelta } from './docs.mjs'
 import { parseDelta } from './data/delta.mjs'
-import { readRefines, equivalencesOf } from './data/check.mjs'
+import { readRefines, groupingFor } from './data/check.mjs'
+import { docRoots } from './docs.mjs'
 import { loadIndex } from './arch.mjs'
 import { archScope, archImpact, archLines, archDeltaStates, archDeltaLines } from './arch-change.mjs'
 import { Graph, sql, baseText, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER, ARCH_CHANGES_FOOTER, ARCH_DELTA_FOOTER } from './query.mjs'
@@ -115,7 +116,7 @@ export const TOOLS = [
       // the refine files' equivalences group both sides alike (a diff compares the code), and their
       // claims are re-checked on this branch after the data model's part (no `repo`: they span them)
       const refines = readRefines(ctx.project.architectureDir, ctx.project.root)
-      const eq = { equivalences: equivalencesOf(refines) }
+      const eq = groupingFor(refines, docRoots(ctx.project)) // the equivalences that hold: their citations checked
       const refined = () => (a.repo ? '' : g.refinedChanges(ctx.project, refines))
       // the architecture's part (arch-change.mjs), after the data model's, when there is anything to
       // say: a saved diagram now or at the base, or a change the delta proposes, found before any

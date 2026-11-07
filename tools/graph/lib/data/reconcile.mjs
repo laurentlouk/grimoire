@@ -77,7 +77,7 @@ export function reconcile(rows, opts = {}) {
 }
 
 // what the note on a key-value table no code reaches says
-export const UNUSED = 'declared, no code uses this name: in the indexed code no item type is bound to it, no key-value call reaches it, nothing builds its name, and the infra sets no variable to it (it may be stale, or used by code not indexed)'
+export const UNUSED = 'declared, no code uses this name: in the indexed code no item type is bound to it, no key-value call reaches it, nothing builds its name, and the infra sets no variable to it (it may be stale, or used by code the data extractors do not read)'
 
 // ── key-value tables across stores, and the item shapes bound to them (binding.mjs) ──
 // model gains: logical (the groups of two declarations or more, each with its conflicts across them),

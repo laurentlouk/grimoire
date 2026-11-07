@@ -9,7 +9,7 @@ import { byFunction, siteHow, isRead, isWrite, isUnknown, capList, CAP, LABELS, 
 import { kvIndex, projectionText } from './data/model.mjs'
 import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
-import { refineModel, checkRefines, equivalencesOf } from './data/check.mjs'
+import { refineModel, refineCheck } from './data/check.mjs'
 import { docRoots } from './docs.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
@@ -648,8 +648,7 @@ export class Graph {
   // ── the refine files re-checked on this branch (graph_changes): refined claims, what drifts ──
   refinedChanges(project, refines) {
     if (!refines.length) return ''
-    const model = reconcile(this.factRows(), { equivalences: equivalencesOf(refines) })
-    const r = clean(checkRefines(refines, model, { roots: docRoots(project), imports: this.prodImports() }))
+    const r = clean(refineCheck(this.factRows(), refines, { roots: docRoots(project), imports: this.prodImports() }).refine)
     const holds = r.claims.filter((c) => c.ok).length, bad = r.files.filter((f) => f.errors.length)
     const out = [`Refined (${plural(r.files.length, 'refine file')} beside the diagrams), re-checked on this branch: ${plural(holds, 'claim')} hold${holds === 1 ? 's' : ''} · ${plural(r.drift.length, 'drift')}${bad.length ? ` · ${plural(bad.length, 'file')} not validating` : ''} (refined, never extracted)`]
     for (const f of bad) out.push(`  ${f.file}  does not validate: ${f.errors.slice(0, 3).join('; ')}`)

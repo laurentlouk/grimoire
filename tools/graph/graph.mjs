@@ -40,8 +40,7 @@ import { analyze, draftArch, loadIndex, readDiagrams, docRoots, SUFFIX } from '.
 import { openStore } from './lib/store.mjs'
 import { readDelta } from './lib/docs.mjs'
 import { Graph, clean } from './lib/query.mjs'
-import { reconcile } from './lib/data/reconcile.mjs'
-import { readRefine, readRefines, equivalencesOf, checkRefines } from './lib/data/check.mjs'
+import { readRefine, readRefines, refineCheck } from './lib/data/check.mjs'
 
 const argv = process.argv.slice(2)
 const cmd = argv.shift()
@@ -174,7 +173,7 @@ if (cmd === 'data' && argv[0] === 'check') {
     // a file is named from the project root, as graph_data and an equivalence's reference name it
     const named = (abs) => path.relative(project.root, abs).split(path.sep).join('/')
     const refines = positional.length ? positional.map((f) => readRefine(path.resolve(f), named(path.resolve(f)))) : readRefines(project.architectureDir, project.root)
-    const res = clean(checkRefines(refines, reconcile(rows, { equivalences: equivalencesOf(refines) }), { roots: docRoots(project), imports }))
+    const res = clean(refineCheck(rows, refines, { roots: docRoots(project), imports }).refine)
     if (!refines.length) console.log(`no refine file in ${shown(project.architectureDir)} yet: /grimoire:data-model writes one (<name>.data.json)`)
     let bad = 0
     for (const f of res.files) {

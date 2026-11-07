@@ -643,7 +643,7 @@ export function dataClient(ctx) {
       h('header', { class: 'khead' }, h('span', { class: 'tdot t-database' }), h('b', { class: 'kname mono' }, s.id), h('span', { class: 'pill' }, s.kind), REFINED('a store no extractor reads yet, described by citation in a refine file: each entity and field re-checked at its line on every render')),
       s.label ? h('div', { class: 'kas muted' }, s.label) : null, s.why ? h('p', { class: 'note' }, s.why) : null,
       s.imports.length ? h('div', { class: 'srcline' }, `reached through ${s.imports.join(', ')}`) : null,
-      s.entities.flatMap((e) => [h('div', { class: 'ksub' }, h('span', { class: 'mono' }, e.name), e.kind ? h('span', { class: 'muted' }, ` · ${e.kind}`) : null, ' ', cite(e.src)), e.note ? h('div', { class: 'srcline' }, e.note) : null,
+      s.entities.flatMap((e) => [h('div', { class: 'rent' }, h('span', { class: 'mono' }, e.name), e.kind ? h('span', { class: 'muted' }, ` · ${e.kind}`) : null, ' ', cite(e.src)), e.note ? h('div', { class: 'srcline' }, e.note) : null,
         h('ul', { class: 'krows', 'aria-label': `${e.name}: its fields` }, e.fields.map((f) => h('li', { class: 'krow' }, h('span', { class: 'mkl k-i' }, '·'), h('span', { class: 'mono' }, f.name), f.type ? h('span', { class: 'muted' }, ` ${f.type}`) : null, ' ', cite(f.src), f.note ? h('span', { class: 'muted' }, ` (${f.note})`) : null)))]),
       h('div', { class: 'srcline' }, `described in ${s.file}`))
     let lineage = null
@@ -669,20 +669,20 @@ export function dataClient(ctx) {
   // lineage: each claim a row, its two entities as boxes (the store's when it is drawn here, a refined
   // store's marked), a line from the one that mirrors to the one mirrored, the field pairs under it
   function lineageSvg(rows) {
-    const W = 820, BW = 270, GAP = 14, x2 = W - 8 - BW
+    const W = 880, BW = 230, GAP = 14, x2 = W - 8 - BW
     const parts = []
     let y = 8
     const box = (x, y0, id, pk, refined) => {
       const k = id.lastIndexOf("/"), name = id.slice(k + 1), store = id.slice(0, k)
       pk = Number.isInteger(pk) ? pk : -1
-      return `<g class="lbox${refined ? ' rf' : ''}${pk >= 0 ? ' go' : ''}"${pk >= 0 ? ` data-store="${pk}"` : ''}><rect x="${x}" y="${y0}" width="${BW}" height="40" rx="8"/><text class="ln" x="${x + 12}" y="${y0 + 17}">${esc(cut(name, 34))}</text><text class="ls" x="${x + 12}" y="${y0 + 32}">${esc(cut(store, 30))}${refined ? ' · described' : ''}</text><title>${esc(`${id}${pk >= 0 ? ' (click: its store)' : ''}`)}</title></g>`
+      return `<g class="lbox${refined ? ' rf' : ''}${pk >= 0 ? ' go' : ''}"${pk >= 0 ? ` data-store="${pk}"` : ''}><rect x="${x}" y="${y0}" width="${BW}" height="40" rx="8"/><text class="ln" x="${x + 12}" y="${y0 + 17}">${esc(cut(name, 28))}</text><text class="ls" x="${x + 12}" y="${y0 + 32}">${esc(cut(store, 32))}${refined ? ' · described' : ''}</text><title>${esc(`${id}${pk >= 0 ? ' (click: its store)' : ''}`)}</title></g>`
     }
     for (const l of rows) {
       const hgt = Math.max(40, 30 + 15 * l.fields.length), ym = y + 20
       parts.push(box(8, y, l.from, l.fs, l.fr), box(x2, y, l.to, l.ts, l.tr))
       parts.push(`<path class="lin" d="M${8 + BW},${ym} L${x2 - 3},${ym}" marker-end="url(#lin-to)"><title>${esc(`refined: ${l.from} mirrors ${l.to}\n${l.why}`)}</title></path>`)
       parts.push(`<text class="lt" x="${W / 2}" y="${ym - 6}" text-anchor="middle">mirrors · refined</text>`)
-      l.fields.forEach(([a, b], k) => parts.push(`<text class="lf" x="${W / 2}" y="${ym + 16 + 15 * k}" text-anchor="middle">${esc(cut(`${a} → ${b}`, 38))}</text>`))
+      l.fields.forEach(([a, b], k) => parts.push(`<text class="lf" x="${W / 2}" y="${ym + 16 + 15 * k}" text-anchor="middle">${esc(cut(`${a} → ${b}`, 56))}<title>${esc(`${a} → ${b}`)}</title></text>`))
       y += hgt + GAP
     }
     return `<svg viewBox="0 0 ${W} ${y}" width="${W}" height="${y}" class="lineage" role="img" aria-label="Lineage across stores: ${plural(rows.length, 'refined line')}"><defs><marker id="lin-to" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="9" markerHeight="9" orient="auto"><path d="M0,-4L9,0L0,4" class="linm"/></marker></defs>${parts.join('')}</svg>`
