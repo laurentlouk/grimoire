@@ -77,6 +77,22 @@
 //      lines, the module's beside; an input from dependency.*.outputs unknown; a table grouped with
 //      the CreateTable file of its exact name, and their conflicts), secrets in neither graph.db nor
 //      the page, the key cards (the unknown drawn), a name template, a branch against its base
+//  25. item shapes and binding (fixtures/bind): Terraform tables named by a template in an infra
+//      repository, a function given two of them in its environment; an api repository with serde
+//      structs and conversions building `format!("{}-shop-…")` names, a TypeScript service reading
+//      ORDERS_TABLE, a test naming a table, a type no table pairs with, and local-dev CreateTable
+//      files (one named so its template matches, one not) → graph_data (the logical table and its
+//      local-dev against prod conflicts, each binding's confidence, evidence and rivals, the item
+//      tree, the unbound type), the key cards (item tree, bindings dashed below convention, rivals,
+//      conflicts across declarations, the item types list), a branch adding an item field and
+//      changing one (the base's code read aside), an item field addressed by a delta
+//
+//  (Part 1, continued) 24. item shapes and binding: names matched on a template's literal parts, no
+//      fuzzy matching; serde's case rules; logical tables; each binding rule on hand-written facts
+//      (env chain, name template in a function and in a file, a constant of another file, an exact
+//      name, the mapper hook, ambiguous with rivals, unbound, unresolved); then, with the parser
+//      runtime, the serde and TypeScript extractors (every serde attribute, TypeScript's optional,
+//      unions, extends and intersections, the uses per function) and the shapes as stored
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -2108,7 +2124,7 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
     const order = rc.types.find((t) => t.name === 'Order')
     eq(order.fields.map((f) => [f.name, f.ident ?? null, f.nullable, f.default, !!f.flatten]), [
       ['orderId', 'order_id', false, null, false], ['pk', 'key', false, null, false], ['type', null, false, null, false], ['note', null, true, null, false], ['tags', null, true, null, false],
-      ['gift', null, false, 'default', false], ['retries', null, false, 'zero', false], ['computed', null, false, null, false], ['audit', null, false, null, true], ['lines', null, false, null, false],
+      ['gift', null, false, 'Default::default()', false], ['retries', null, false, 'zero', false], ['computed', null, false, null, false], ['audit', null, false, null, true], ['lines', null, false, null, false],
       ['prices', null, false, null, false], ['shipping', null, false, null, false], ['st', 'status', false, null, false], ['pay', null, false, null, false], ['legacy', null, false, null, false], ['ext', null, false, null, false],
     ], 'serde: rename_all camelCase, rename (and its serialize half), r#type stored as type, Option and skip_serializing_if nullable, default bare and with its function, skip_deserializing kept, flatten marked')
     eq(order.skipped, [{ ident: 'cache', why: 'skip' }, { ident: 'digest', why: 'skip_serializing' }], 'skip and skip_serializing: never stored, so not in the shape (listed)')
@@ -2761,6 +2777,134 @@ async function indexed() {
     const lstored = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => readFileSync(path.join(GD, f)).toString('latin1'))
     ok(!llist.includes('leaked') && (await tq('data', { store: 'shop:dynamodb' })).includes('  prod-shop-orders  table') && lstored.every((t) => !t.includes(OUTSECRET)) && !(await renderTf(loadTf(TFP))).includes(OUTSECRET), 'not followed: the outside file sets no name, and its secret is in neither graph.db nor the page')
     rmSync(LINK)
+
+    // ── 25 · item shapes bound to tables, across two repositories ──
+    console.log('\n25 · item shapes and binding through call(): Terraform tables in one repository, a Rust and a TypeScript service and a local-dev CreateTable file in another (fixtures/bind)')
+    const BP = path.join(SANDBOX, 'bind')
+    cpSync(path.join(HERE, 'fixtures', 'bind'), BP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const bq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: BP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const bidx2 = await bq('index')
+    ok(/infra: 3 files/.test(bidx2) && /api: 7 files/.test(bidx2) && !bidx2.includes('failure'), `index: both repositories, no extractor failure (${bidx2.replace(/\n/g, ' | ')})`)
+    eq(await bq('sql', { sql: "SELECT repo, key, extractor FROM data_facts WHERE extractor LIKE 'serde%' OR extractor LIKE 'ts-types%' ORDER BY repo, key" }),
+      'repo\tkey\textractor\napi\tnode/src/orders.ts\tts-types@1\napi\tnode/src/types.ts\tts-types@1\napi\tsrc/carts.rs\tserde@1\napi\tsrc/customers.rs\tserde@1\napi\tsrc/model.rs\tserde@1\napi\tsrc/orders.rs\tserde@1\napi\tsrc/reviews.rs\tserde@1',
+      'found by content: each Rust and TypeScript file with a serde derive, a type, a conversion or an environment read is a job of its own')
+    const ORD = '{env}-{project}-orders', TFMAIN = 'infra/modules/shop-tables/main.tf'
+    eq((await bq('data')).split('\n').filter((l) => !/^ {2}(infra|  note)/.test(l)), [
+      'Data stores (2), read from migrations, snapshots and table declarations:',
+      'api:dynamodb  dynamodb  2 tables · 1 GSI · 2 item types bound · 2 conflicts',
+      'infra:dynamodb  dynamodb  5 tables · 0 GSIs · 5 item types bound · 2 conflicts',
+      'Logical tables (1), one table declared in several places (matched on a name template\'s literal parts, or the same name; never by a guess):',
+      `  ${ORD}  api:dynamodb/local-shop-orders + infra:dynamodb/${ORD}  (an exact name its template matches)  [2 conflicts across them]`,
+      'Item types (6), the types code converts to or from an item: 5 bound to a table, 1 unbound',
+      '  api:Cart  ambiguous: {env}-{project}-carts | {env}-{project}-saved_carts (a name the table\'s name or template matches, in one function)  api/src/model.rs:63',
+      '  api:Coupon  unbound: no table name or environment variable pairs with its conversions  api/src/model.rs:77',
+      '  api:Customer  → {env}-{project}-customers  convention (an environment variable the infra sets, in one function)  api/src/model.rs:55',
+      `  api:Order  → ${ORD}  name-match (a name the table's name or template matches, in one function)  api/src/model.rs:7`,
+      `  api:OrderView  → ${ORD}  convention (an environment variable the infra sets, in one function)  api/node/src/types.ts:2`,
+      '  api:Review  → {env}-{project}-reviews  name-match (a name the table\'s name or template matches, in one file)  api/src/model.rs:69',
+    ], 'graph_data: the infra repository\'s tables bound to the api repository\'s types; the local-dev file\'s orders and the prod template one logical table, the local-dev Customers apart; each item type with its table and confidence, the ambiguous one with both tables, the unbound one listed')
+    const oe = await bq('data', { entity: `infra:dynamodb/${ORD}` })
+    const sect = (text, head) => { const ls = text.split('\n'), i = ls.findIndex((l) => l.startsWith(head)); if (i < 0) return []; const out = [ls[i]]; for (const l of ls.slice(i + 1)) { if (!l.startsWith(' ')) break; out.push(l) } return out }
+    eq(sect(oe, 'Item ('), [
+      'Item (17 fields, as Order and OrderView store them; nested by dotted path):',
+      '  customerId  Order: String · OrderView: string  [partition key]  — api/src/model.rs:8 · api/node/src/types.ts:3',
+      '  orderId  Order: String · OrderView: string  [sort key]  — api/src/model.rs:9 · api/node/src/types.ts:4',
+      "  status  Order: OrderStatus (OPEN | PAID | ON_HOLD) · OrderView: 'OPEN' | 'PAID' | 'ON_HOLD'  — api/src/model.rs:10 · api/node/src/types.ts:5",
+      '  total  Order: u64 · OrderView: number  — api/src/model.rs:12 · api/node/src/types.ts:6',
+      '  note  Order: Option<String>, nullable · OrderView: string | null, nullable  — api/src/model.rs:13 · api/node/src/types.ts:7',
+      '  lines  Order: Vec<LineItem> · OrderView: { sku: string; qty: number }[]  — api/src/model.rs:14 · api/node/src/types.ts:8',
+      '    lines[].sku  Order: String · OrderView: string  — api/src/model.rs:35 · api/node/src/types.ts:8',
+      '    lines[].qty  Order: u32 · OrderView: number  — api/src/model.rs:36 · api/node/src/types.ts:8',
+      '  coupons  HashMap<String, u32>  — api/src/model.rs:15',
+      '  created_at  String  — api/src/model.rs:41',
+      '  updated_at  Option<String>, nullable  — api/src/model.rs:43',
+      '  gift  bool, default Default::default()  — api/src/model.rs:19',
+      '  payment  Payment  — api/src/model.rs:22',
+      '    payment.method  tag (card | gift-card | invoice)  — api/src/model.rs:48',
+      '    payment.details  content  — api/src/model.rs:48',
+      '      payment.details.last4  String  — api/src/model.rs:49',
+      '      payment.details.code  String  — api/src/model.rs:50',
+    ], 'graph_data entity: the item tree, as both bound types store it (serde\'s rename_all, rename, flatten with the flattened type\'s own names, default, skip; TypeScript\'s `?` and literal union), the keys marked, each field at its code line in the other repository')
+    eq(sect(oe, 'Bound item types'), [
+      'Bound item types (2): how code pairs each with this table (below convention, a lead: its rivals listed)',
+      '  Order  name-match  a name the table\'s name or template matches, in one function, 2 sites  api/src/model.rs:7',
+      '    converts  Order (to_item) in put_order  api/src/orders.rs:5',
+      '    builds  {}-shop-orders  api/src/orders.rs:8',
+      '  OrderView  convention  an environment variable the infra sets, in one function  api/node/src/types.ts:2',
+      '    converts  OrderView (Item) in saveOrder  api/node/src/orders.ts:7',
+      '    const  TABLE  api/node/src/orders.ts:4',
+      '    reads  ORDERS_TABLE  api/node/src/orders.ts:4',
+      `    sets  ORDERS_TABLE = ${ORD}  ${TFMAIN}:31`,
+    ], 'each binding with its confidence and evidence: the Rust conversion beside the format! name its template matches; the TypeScript one through a constant reading the variable the Terraform function sets to the table')
+    eq(sect(oe, 'Conflicts across them'), [
+      'Conflicts across them (2): each declaration kept',
+      `  ${ORD}.status  presence: declared — api/dynamodb/tables/orders.json:10 [infra] | absent — infra/live/prod/terragrunt.hcl:8 [infra]`,
+      `  ${ORD} index ByStatus  presence: declared — api/dynamodb/tables/orders.json:13 [infra] | absent — infra/live/prod/terragrunt.hcl:8 [infra]`,
+    ], 'local-dev against prod: the CreateTable file\'s GSI and its attribute, absent from the Terraform table its template matches, are conflicts with both sides')
+    ok(oe.includes(`One logical table: api:dynamodb/local-shop-orders + infra:dynamodb/${ORD} (an exact name its template matches); their differences are conflicts`) && oe.includes('Conflicts: none'), 'the table says which declarations are one, and keeps its own conflicts apart')
+    eq(sect(await bq('data', { entity: '{env}-{project}-carts' }), 'Bound item types'), [
+      'Bound item types (1): how code pairs each with this table (below convention, a lead: its rivals listed)',
+      '  Cart  ambiguous  a name the table\'s name or template matches, in one function  api/src/model.rs:63',
+      '    converts  Cart (to_item) in save_for_later  api/src/carts.rs:5',
+      '    builds  {}-shop-carts  api/src/carts.rs:7',
+      '    rivals: {env}-{project}-saved_carts (ambiguous, a name the table\'s name or template matches, in one function)',
+    ], 'the ambiguous case: one function names two tables, each binding lists the other as its rival')
+    const rv = await bq('data', { entity: '{env}-{project}-reviews' })
+    ok(rv.includes('  Review  name-match  a name the table\'s name or template matches, in one file, 2 sites  api/src/model.rs:69') && rv.includes('    builds  test-shop-reviews  api/src/reviews.rs:27  (test code)'), 'co-occurrence in one file: the conversion, and the name its test builds (said to be test code)')
+    const cu = await bq('data', { entity: 'Customers' })
+    ok(cu.includes('Bound item types: none') && !cu.includes('logical') && (await bq('data', { entity: '{env}-{project}-customers' })).includes('  Customer  convention  an environment variable the infra sets, in one function'),
+      'the local-dev Customers (another naming) binds to nothing and joins no logical table: no rule states it; the prod table takes the type through its variable')
+    eq((await bq('data', { store: 'api:dynamodb' })).split('\n')[2], '  local-shop-orders  table  3 attributes · 14 item fields · partition (customerId) · sort (orderId) · 1 GSI · PAY_PER_REQUEST · no stream  api/dynamodb/tables/orders.json:2  items: Order (name-match), OrderView (convention)  [one table with infra:dynamodb/{env}-{project}-orders]',
+      'graph_data store: the local-dev table carries the item of the logical table it is one declaration of')
+
+    // the page: the item tree on each card, the bindings (dashed below convention), the rivals, the conflicts across declarations, the unbound type
+    const { renderGraph: renderBind } = await import('../lib/render.mjs')
+    const { loadProject: loadBind } = await import('../lib/project.mjs')
+    const bpage2 = await renderBind(loadBind(BP))
+    const bdata = dataOf(bpage2).data
+    const infraAt = bdata.stores.findIndex((s) => s.id === 'infra:dynamodb'), apiAt = bdata.stores.findIndex((s) => s.id === 'api:dynamodb')
+    eq(bdata.items.map((it) => [it.id, it.bound.map((b) => `${b.table} ${b.conf}`)]), [['api:Cart', ['{env}-{project}-carts ambiguous', '{env}-{project}-saved_carts ambiguous']], ['api:Coupon', []], ['api:Customer', ['{env}-{project}-customers convention']], ['api:Order', [`${ORD} name-match`]], ['api:OrderView', [`${ORD} convention`]], ['api:Review', ['{env}-{project}-reviews name-match']]],
+      'the page packs the item types with their tables, in graph_data\'s words')
+    const bpg = await stubPage(bpage2, `#data-${infraAt}`)
+    const kcards = bpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
+    const kcard = (name) => kcards.find((c) => bpg.textOf(c.kids[0]).startsWith(name))
+    const ocard = kcard(ORD)
+    const rowsOf = (card, cls) => bpg.all((n) => n.tagName === 'UL' && (n.attrs.class || '').includes(cls)).filter((u) => within(card, u)).flatMap((u) => u.kids.filter((k) => k && k.tagName === 'LI').map((k) => bpg.textOf(k)))
+    const within = (root, target) => { if (root === target) return true; for (const k of root.kids || []) if (k && typeof k === 'object' && within(k, target)) return true; return false }
+    eq(rowsOf(ocard, 'kitem').slice(0, 3), ['PKcustomerId Order: String · OrderView: string', 'SKorderId Order: String · OrderView: string', "Estatus Order: OrderStatus (OPEN | PAID | ON_HOLD) · OrderView: 'OPEN' | 'PAID' | 'ON_HOLD'"], 'the card\'s item tree: each field as each bound type stores it, the keys marked')
+    ok(rowsOf(ocard, 'kitem').length === 17 && bpg.all((n) => n.tagName === 'LI' && /\bd2\b/.test(n.attrs.class || '') && within(ocard, n)).length === 2, 'nested fields indented by depth (payment.details.last4 and .code two levels down)')
+    const binds = bpg.all((n) => n.tagName === 'DIV' && /\bkbind\b/.test(n.attrs.class || '') && within(ocard, n))
+    eq(binds.map((b) => [b.attrs['data-conf'], /\bdash\b/.test(b.attrs.class)]), [['name-match', true], ['convention', false]], 'the bindings: below convention dashed, a convention solid')
+    const ccard = kcard('{env}-{project}-carts')
+    ok(bpg.textOf(ccard).includes('rivals: {env}-{project}-saved_carts (ambiguous'), 'the ambiguous binding lists its rival on the card')
+    ok(bpg.textOf(ocard).includes('One logical table: 2 declarations, 2 conflicts across them') && bpg.textOf(ocard).includes('index ByStatus'), 'the card says it is one table with the local-dev declaration, and lists the conflicts across them')
+    const items = bpg.ctl('data-items')
+    ok(!!items && bpg.textOf(items).includes('Item types (6), from code: 5 bound to a table, 1 unbound') && bpg.textOf(items).includes('api:Coupon unbound'), 'the Data tab lists the item types, the unbound one badged')
+    const apg = await stubPage(bpage2, `#data-${apiAt}`)
+    const acards = apg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
+    ok(apg.textOf(acards.find((c) => apg.textOf(c.kids[0]).startsWith('local-shop-orders'))).includes('≡ 2 declarations') && !apg.textOf(acards.find((c) => apg.textOf(c.kids[0]).startsWith('Customers'))).includes('≡'), 'the local-dev card: one of two declarations; Customers, one alone')
+
+    // a branch against its base: the item gains a field and one changes (the base's code read aside)
+    git(BP, 'init', '-q', '-b', 'main')
+    writeFileSync(path.join(BP, '.gitignore'), '.grimoire/\n')
+    commit(BP, 'the shop')
+    git(BP, 'switch', '-q', '-c', 'feat')
+    const MR = path.join(BP, 'api/src/model.rs')
+    writeFileSync(MR, readFileSync(MR, 'utf8').replace('    pub gift: bool,\n', '    pub gift: bool,\n    pub currency: String,\n').replace('    pub qty: u32,', '    pub qty: Option<u32>,'))
+    commit(BP, 'orders: a currency; a quantity may be absent')
+    await bq('index')
+    const bch = (await bq('changes')).split('\n')
+    ok(bch.includes(`  + ${ORD}.currency  item field, Order: String  — api/src/model.rs:20`) && bch.some((l) => l.startsWith(`  ~ ${ORD}.lines[].qty  item field, Order: Option<u32>, nullable · OrderView: number  item: Order: u32 · OrderView: number → Order: Option<u32>, nullable · OrderView: number`)),
+      `graph_changes: the item field added and the one changed, addressed <table>.<field path> (${bch.filter((l) => /currency|qty/.test(l)).join(' | ')})`)
+    ok(bch.includes('  + local-shop-orders.currency  item field, Order: String  — api/src/model.rs:20'), 'the local-dev declaration of the same table, bound the same way, changes alike')
+    const { parseTarget: pt, findTarget: findT } = await import('../lib/data/delta.mjs')
+    const { reconcile: rec } = await import('../lib/data/reconcile.mjs')
+    const { openStore } = await import('../lib/store.mjs')
+    const bdb = await openStore(path.join(BP, '.grimoire/graph/graph.db'))
+    const bmodel = rec(bdb.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })))
+    bdb.close()
+    const tgt = pt(`infra:dynamodb/${ORD}.lines[].qty`)
+    eq([tgt.entity, tgt.kind, tgt.el.name, findT(bmodel, tgt).el?.name], [ORD, 'field', 'lines[].qty', 'lines[].qty'], 'a delta addresses an item field as <table>.<field path>: it resolves')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

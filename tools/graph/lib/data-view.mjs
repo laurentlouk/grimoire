@@ -431,7 +431,7 @@ export function dataClient(ctx) {
       h('div', null, h('b', { class: 'mono' }, b.type), ' ', h('span', { class: `pill c-${b.conf}`, title: b.dash ? 'below convention: a lead, read the code before relying on it' : 'a convention the code and the infra both state' }, b.conf), h('span', { class: 'muted' }, ` ${b.how}${b.sites > 1 ? ` · ${b.sites} sites` : ''}`)),
       h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'declared '), srcEl(s, b.at)),
       b.ev.map((x) => h('div', { class: 'srcline' }, h('span', { class: 'muted' }, `${x.what} `), h('span', { class: 'mono' }, x.text), ' ', srcEl(s, x.src), x.test ? h('span', { class: 'muted' }, ' (test code)') : null)),
-      b.riv.length ? h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'rivals: '), b.riv.map((r, k) => [k ? ' · ' : '', h('span', { class: 'mono' }, r.table), h('span', { class: 'muted' }, ` (${r.conf}, ${r.how})`)])) : null))
+      b.riv.length ? h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'rivals: '), b.riv.flatMap((r, k) => [k ? ' · ' : '', h('span', { class: 'mono' }, r.table), h('span', { class: 'muted' }, ` (${r.conf}, ${r.how})`)])) : null))
     const lg = t.lg
     const lgConflicts = lg ? lg.cf : []
     const conflicts = [[`table ${t.name}`, t], ...t.fields.map((f) => [`attribute ${f.name}`, f]), ...t.keys.map((k) => [`${ROLE[k.role] || k.role} (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x])].flatMap(([label, x]) => cfs(x).map((c) => [label, c]))
@@ -449,7 +449,7 @@ export function dataClient(ctx) {
       t.indexes.length ? [h('div', { class: 'ksub' }, `Indexes (${t.indexes.length})`), h('ul', { class: 'krows' }, idx)] : null,
       h('div', { class: 'ksub' }, `Attributes (${declared.length})`), h('ul', { class: 'krows kattrs' }, attrs),
       items.length ? [h('div', { class: 'ksub' }, `Item (${plural(items.length, 'field')}, as ${itemTypes.join(' and ')} ${itemTypes.length === 1 ? 'stores it' : 'store them'})`), h('ul', { class: 'krows kitem', 'aria-label': `${t.name}: the item's fields` }, items)] : null,
-      binds.length ? [h('div', { class: 'ksub' }, `Bound item types (${binds.length})`), binds] : null,
+      binds.length ? [h('div', { class: 'ksub' }, `Bound item types (${binds.length})`), ...binds] : null,
       t.lnote ? h('p', { class: 'note' }, t.lnote) : null,
       lg ? [h('div', { class: `ksub${lgConflicts.length ? ' warn' : ''}` }, `One logical table: ${plural(lg.members.length, 'declaration')}${lgConflicts.length ? `, ${plural(lgConflicts.length, 'conflict')} across them` : ''}`),
         h('div', { class: 'srcline' }, `${lg.members.join(' + ')} (${lg.via}): their differences are conflicts, each side kept`),
@@ -552,7 +552,7 @@ export function dataClient(ctx) {
     const unbound = its.filter((it) => !it.bound.length)
     const itemsList = its.length ? h('details', { class: 'problems', 'data-ctl': 'data-items' }, h('summary', null, `Item types (${its.length}), from code: ${its.length - unbound.length} bound to a table, ${unbound.length} unbound`),
       h('ul', { class: 'links' }, its.map((it) => h('li', null, h('b', { class: 'mono' }, it.id), ' ',
-        it.bound.length ? it.bound.map((b, k) => [k ? ' | ' : '', h('span', { class: `pill c-${b.conf}` }, b.conf), ' ', b.cards.length ? h('a', { class: 'jump mono', href: `#data-${b.cards[0][0]}` }, b.table) : h('span', { class: 'mono' }, b.table)])
+        it.bound.length ? it.bound.flatMap((b, k) => [k ? ' | ' : '', h('span', { class: `pill c-${b.conf}` }, b.conf), ' ', b.cards.length ? h('a', { class: 'jump mono', href: `#data-${b.cards[0][0]}` }, b.table) : h('span', { class: 'mono' }, b.table)])
           : h('span', { class: 'pill warn', title: 'no table name and no environment variable the infra sets pairs with its conversions' }, 'unbound'),
         h('span', { class: 'muted' }, ` · ${plural(it.fields, 'field')} · `), path(it)))),
       h('p', null, 'An item type is one the code converts to or from an item; its binding is how the code names the table where it converts it (an environment variable the infra sets, a name the table\'s template matches, in one function or one file), with a confidence. Below convention, a binding is a lead.')) : null

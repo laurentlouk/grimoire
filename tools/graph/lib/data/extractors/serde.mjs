@@ -191,7 +191,7 @@ function fieldsOf(list, rule, containerDefault, skipped, notes) {
     const rename = said(s.get('rename'))
     const name = rename ?? (rule ? renameField(ident, rule) : ident)
     const d = s.get('default')
-    const def = d ? (d.value ?? 'default') : containerDefault ? 'default' : null
+    const def = d ? (d.value ?? 'Default::default()') : containerDefault ? 'Default::default()' : null
     if (s.has('serialize_with') || s.has('with')) push(notes, `${ident}: serialized by ${said(s.get('serialize_with')) ?? said(s.get('with'))}, its stored type not read`, MAX.notes)
     push(out, { name, ...(name !== ident ? { ident } : {}), raw: cap(tn ? tn.text.replace(/\s+/g, ' ') : ''), t, nullable: nullable || s.has('skip_serializing_if'), default: def, ...(s.has('flatten') ? { flatten: true } : {}), line: lineOf(c) }, MAX.fields)
   }
