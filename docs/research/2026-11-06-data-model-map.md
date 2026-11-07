@@ -4,7 +4,7 @@ Research input for a data-model map beside the code graph and the architecture d
 
 > **Policy.** Code and infra are the source of truth; documentation helps discovery and planning, never decides. No third-party tool is adopted as a dependency: permissive code or the principle may be copied and adapted, with attribution in the files that borrow it. Everything runs in Node (≥ 22.5, the graph's floor), on the pinned parser runtime the graph already installs.
 
-**Probed on 2026-11-06:** the odyyy project (`~/Awesome/odyyy-orchestrator`, grimoire's main user): `odyyy-backend` (Rust, DynamoDB, Redis/RediSearch), `cloud` (Terraform + Terragrunt), `odyyy-app` (Expo, Drizzle on expo-sqlite), `webapp` (Redis), plus `odyyy-old` (Amplify Gen 1 GraphQL `@model`) and `odyyy-generative-ai-content` (Drizzle on better-sqlite3). Commands and scripts are in *Probes*.
+**Probed on 2026-11-06:** a real multi-repository project (anonymised; *the probed project* below): `backend` (Rust, DynamoDB, Redis/RediSearch), `infra` (Terraform + Terragrunt), `app` (Expo, Drizzle on expo-sqlite), `webapp` (Redis), plus `legacy-api` (Amplify Gen 1 GraphQL `@model`) and `backoffice` (Drizzle on better-sqlite3). Commands and scripts are in *Probes*.
 
 ---
 
@@ -13,7 +13,7 @@ Research input for a data-model map beside the code graph and the architecture d
 1. **No mature project does this.** Liam ERD (Apache-2.0) is static and diffs, but is SQL only, with no IaC. Azimutt (MIT) models NoSQL only by sampling a live database. tbls (MIT) reads DynamoDB and Mongo only live. **Nobody joins an IaC key schema with a code item shape statically.** Grimoire builds it, borrowing Liam's keyed model and JSON-patch diff, Azimutt's nested attributes and provenance, tbls's virtual relations and typeshare's serde rules (§4).
 2. **The bottleneck has an answer per store, in six kinds of source** (§5): a generated *artifact*, *migrations* replayed, *infra*, the *code model*, *inferred* access patterns, *observed* samples, in that order of trust. Every fact keeps its source and line; where sources disagree, the disagreement is the finding.
 3. **SQL is the easy half.**
-   - For SQLite (odyyy's device database, libSQL, D1), replaying migrations into `node:sqlite` is exact and needs no parser: 25 Drizzle migrations gave the snapshot's 23 tables, 7 FKs and 34 indexes (§2).
+   - For SQLite (the probed app's device database, libSQL, D1), replaying migrations into `node:sqlite` is exact and needs no parser: 25 Drizzle migrations gave the snapshot's 23 tables, 7 FKs and 34 indexes (§2).
    - Drizzle and MikroORM snapshots are plain JSON.
    - Postgres and MySQL DDL need a small interpreter for about 12 statement kinds.
 4. **NoSQL is a four-part join** (§5):
@@ -22,8 +22,8 @@ Research input for a data-model map beside the code graph and the architecture d
    - a binding between them (mapper, env var, name template, call site);
    - access patterns from the SDK calls.
    
-   In odyyy the binding is a naming convention (`<stage>-odyyy-<table>` ↔ `${env}-${project}-${key}`), and the access patterns already flag 8 prod GSIs with no `index_name("…")` call (§1).
-5. **Drift is the norm** (§1): odyyy's local-dev table JSON declares two GSIs prod dropped (ODY-385), names tables differently, and lacks six prod tables.
+   In the probed project the binding is a naming convention (`<stage>-acme-<table>` ↔ `${env}-${project}-${key}`), and the access patterns already flag 8 prod GSIs with no `index_name("…")` call (§1).
+5. **Drift is the norm** (§1): the probed project's local-dev table JSON declares two GSIs prod dropped (a past ticket), names tables differently, and lacks six prod tables.
 6. **The parser runtime lacks SQL, HCL, GraphQL and Prisma grammars** (§3): hand readers for the declarative subsets (as `lib/md.mjs` did for Markdown), or vendored WASMs.
 7. **Candidate shape** (§6), mirroring the architecture diagrams: the script extracts and reconciles inside `graph_index`; an agent refines what no file declares into a checked file; three diffs (ref vs ref, source vs source, proposal vs current); a *Data* tab; `graph_data` tools; fresh after every commit through the existing hook.
 
@@ -31,28 +31,28 @@ Research input for a data-model map beside the code graph and the architecture d
 
 ## 1. What one real project looks like
 
-One logical entity, *an orbit*, is declared in six places across four repositories, and they do not all agree.
+One logical entity, *an event*, is declared in six places across four repositories, and they do not all agree.
 
 | Where | What it says | Kind |
 | --- | --- | --- |
-| `cloud/infra/prod/dynamodb/terragrunt.hcl:42` | table `orbit`, hash key `id`, one GSI `OwnerIdIndex`, stream off (ODY-443) | infra (prod) |
-| `cloud/modules/dynamodb/1-dynamodb.tf:1` | `for_each` over that map; name `"${env}-${project}-${key}"`, every key attribute typed `S`, TTL on `_ttl` | infra (module) |
-| `odyyy-backend/dynamodb/tables/orbits.json` | table `Orbits`, GSIs `OwnerIdIndex`, `SearchIndex`, `UnifiedSearchIndex` | infra (local dev) |
-| `odyyy-backend/lib/src/db/entities/orbit.rs:97` | `struct Orbit`: ~25 serde fields, nested `Location`, `Photo`, `Vec<Room>`, `#[skip_dynamo]` on one | code (item shape) |
-| `odyyy-backend/lib/src/infra/redis/redisearch.rs` | a RediSearch index built from `PublicOrbit`, its schema assembled in code (`FT.CREATE` / `FT.ALTER`, `TAG`, `GEO`) | code (secondary store) |
-| `odyyy-app/db/schema.ts:110` · `drizzle/0000…0024.sql` · `drizzle/meta/0024_snapshot.json` | SQLite table `orbits` on the device, 25 migrations | code + migration + generated snapshot |
+| `infra/live/prod/dynamodb/terragrunt.hcl:42` | table `event`, hash key `id`, one GSI `ByOwnerIndex`, stream off (a past ticket) | infra (prod) |
+| `infra/modules/dynamodb/main.tf:1` | `for_each` over that map; name `"${env}-${project}-${key}"`, every key attribute typed `S`, TTL on `_ttl` | infra (module) |
+| `backend/local/tables/events.json` | table `Events`, GSIs `ByOwnerIndex`, `ByTitleIndex`, `ByTitleFullIndex` | infra (local dev) |
+| `backend/core/src/model/event.rs:97` | `struct Event`: ~25 serde fields, nested `Location`, `Photo`, `Vec<Session>`, `#[skip_store]` on one | code (item shape) |
+| `backend/core/src/search/index.rs` | a RediSearch index built from `PublicEvent`, its schema assembled in code (`FT.CREATE` / `FT.ALTER`, `TAG`, `GEO`) | code (secondary store) |
+| `app/db/schema.ts:110` · `drizzle/0000…0024.sql` · `drizzle/meta/0024_snapshot.json` | SQLite table `events` on the device, 25 migrations | code + migration + generated snapshot |
 
 What that shows:
 
-- **Divergence is the norm, and it is the valuable part.** The local-dev JSON still declares `SearchIndex` and `UnifiedSearchIndex`; prod dropped `UnifiedSearchIndex` (ODY-385, "dead ALL-projection GSI, zero Rust references") and never had `SearchIndex`. Table names differ too (`Orbits`, `users`, `polls`, `messages` locally; `orbit`, `user`, `poll`, `message` in prod), and prod has tables the local JSON lacks (`purchases`, `subscriptions`, `events`, `force_updates`, `queue_events_notification`, `like`).
-- **For DynamoDB, the key schema and the item shape live apart.** Infra declares only key attributes, GSIs, TTL and streams. The item's shape is a Rust struct. Nothing in either file says the struct belongs to the table: the code binds them at runtime through a table name it formats (`format!("{:}-odyyy-trending_orbits", stage)`), which matches the Terraform convention `${env}-${project}-${key}` (55 uses of `-odyyy-orbit_participants`, 43 of `-odyyy-orbit`, … in the backend).
-- **Access patterns are in the code, and they reveal waste.** The backend names GSIs in `index_name("…")` calls. Prod declares eight GSIs with no such call: `ActorIdCreatedIndex`, `EventsTrackIdIndex`, `PhoneIndex`, `ReportedSenderIdIndex`, `StatusSizeIndex`, `TransactionIdIndex`, `UserTargetIndex`, `UsernameIndex`. These are leads, not proof: `SuspectIndex` is reached through a constant, and another repository or a Lambda may query the rest. ODY-385 removed exactly such an index for its write amplification.
-- **Some schemas exist only as code that builds them.** The RediSearch index is assembled by functions (`IndexFieldType::schema_args`), so a static reader gets the field list only by reading the code, which is the refinement step's job, not the extractor's.
-- **The same entity crosses stores.** The device's SQLite `orbits` table mirrors the backend's DynamoDB `orbit`. That lineage is the map's most useful line and the one no file declares.
+- **Divergence is the norm, and it is the valuable part.** The local-dev JSON still declares `ByTitleIndex` and `ByTitleFullIndex`; prod dropped `ByTitleFullIndex` (a past ticket: "dead ALL-projection GSI, zero Rust references") and never had `ByTitleIndex`. Table names differ too (`Events`, `members`, `tickets`, `comments` locally; `event`, `member`, `ticket`, `comment` in prod), and prod has tables the local JSON lacks (`payments`, `plans`, `audit_log`, `app_versions`, `notification_queue`, `reaction`).
+- **For DynamoDB, the key schema and the item shape live apart.** Infra declares only key attributes, GSIs, TTL and streams. The item's shape is a Rust struct. Nothing in either file says the struct belongs to the table: the code binds them at runtime through a table name it formats (`format!("{:}-acme-trending_events", stage)`), which matches the Terraform convention `${env}-${project}-${key}` (55 uses of `-acme-event_participants`, 43 of `-acme-event`, … in the backend).
+- **Access patterns are in the code, and they reveal waste.** The backend names GSIs in `index_name("…")` calls. Prod declares eight GSIs with no such call: `ByAuthorCreatedIndex`, `ByEmailIndex`, `ByHandleIndex`, `ByPaymentIndex`, `ByReporterIndex`, `ByStatusCreatedIndex`, `ByTargetIndex`, `ByTrackIndex`. These are leads, not proof: `ByFlagIndex` is reached through a constant, and another repository or a Lambda may query the rest. A past ticket removed exactly such an index for its write amplification.
+- **Some schemas exist only as code that builds them.** The RediSearch index is assembled by functions (`FieldKind::schema_args`), so a static reader gets the field list only by reading the code, which is the refinement step's job, not the extractor's.
+- **The same entity crosses stores.** The device's SQLite `events` table mirrors the backend's DynamoDB `event`. That lineage is the map's most useful line and the one no file declares.
 
 ## 2. SQL: replaying migrations is exact and needs no parser (SQLite)
 
-`node:sqlite` (already the graph's store) can replay a migration folder into `:memory:` and read the result back with `PRAGMA table_info`, `foreign_key_list` and `index_list`. On `odyyy-app/drizzle` (split on Drizzle's `--> statement-breakpoint`):
+`node:sqlite` (already the graph's store) can replay a migration folder into `:memory:` and read the result back with `PRAGMA table_info`, `foreign_key_list` and `index_list`. On `app/drizzle` (split on Drizzle's `--> statement-breakpoint`):
 
 > 25 migrations → 23 tables, 7 foreign keys, 34 indexes. Columns, types, `NOT NULL` and primary keys match `drizzle/meta/0024_snapshot.json` table for table. The only differences came from the comparison script: the snapshot keeps composite primary keys apart (`compositePrimaryKeys`), and PRAGMA marks each column.
 
@@ -64,7 +64,7 @@ So, for SQLite, three representations exist and can be checked against each othe
 | `drizzle/meta/NNNN_snapshot.json` | the model as of migration NNNN, as JSON | ↔ replay: a hand-edited migration |
 | `drizzle/*.sql` replayed | what a fresh database actually gets | the reference |
 
-Not every project keeps migrations. `odyyy-generative-ai-content` uses Drizzle with no `drizzle/` folder at all (schema pushed, never generated): its only artifact is `lib/db/schema.ts`, seven `sqliteTable("name", { col: text("col").notNull()… })` calls. That shape is declarative enough for a tree-sitter TypeScript walk (table name, column names and types, `notNull`, `primaryKey`, `references(() => t.id)`, `unique`, indexes in the third argument); a `$defaultFn(() => …)` is code and is recorded as a computed default, not evaluated.
+Not every project keeps migrations. `backoffice` uses Drizzle with no `drizzle/` folder at all (schema pushed, never generated): its only artifact is `src/db/schema.ts`, seven `sqliteTable("name", { col: text("col").notNull()… })` calls. That shape is declarative enough for a tree-sitter TypeScript walk (table name, column names and types, `notNull`, `primaryKey`, `references(() => t.id)`, `unique`, indexes in the third argument); a `$defaultFn(() => …)` is code and is recorded as a computed default, not evaluated.
 
 The replay trick does not carry over to Postgres or MySQL DDL (SQLite accepts some of it, rejects much, and silently misreads types). Those need a DDL reader, or a generated artifact.
 
@@ -121,7 +121,7 @@ Compiled by a research agent on 2026-11-06 from current docs and source (URLs in
 | --- | --- | --- | --- |
 | **SQL** | Drizzle snapshots (v7 `tables{…}`; v1 beta `version:"9"`, flat `ddl[]`, `prevIds[]` DAG), MikroORM snapshot, SQLite replay via `node:sqlite` | `schema.prisma` (7) and `contract.prisma` (8), Drizzle TS, `schema.rb`, EF ModelSnapshot, Diesel `table!` (token tree), Ent `migrate/schema.go`, GORM tags, JPA, SeaORM, Supabase `database.types.ts`, Postgres/MySQL DDL through a DDL interpreter | TypeORM entities (types inferred from TS), SQLAlchemy models (mixins, `declared_attr`), Knex and SeaQuery builder chains, `RunPython` |
 | **DynamoDB** | `CreateTable` JSON, CloudFormation JSON | Terraform literal blocks, CloudFormation / SAM YAML (with `!Ref`, `!Sub`), SST, Pulumi, Amplify Gen 1 `@model` / Gen 2 `a.model`, ElectroDB, OneTable, Dynamoose, mapper annotations | Terraform `for_each` over Terragrunt `inputs` (needs a small evaluator: `var.*`, tfvars, `inputs` through `include`, `locals`, `each.*`, `lookup` / `try` / `merge`, `for`, `dynamic` blocks; `dependency.*.outputs`, `get_env`, data sources stay unknown), CDK with helpers or loops, dynamodb-toolbox `computeKey` |
-| **Other** | Firestore indexes JSON, Elasticsearch mappings, `$jsonSchema` validators | Mongoose / Typegoose, Beanie, Spring Data, Convex, PocketBase migrations, Cassandra CQL (own tokenizer), Neo4j constraints, RediSearch `FT.CREATE` literals, `firestore.rules` paths | Redis key templates built in code, RediSearch schemas assembled by functions (odyyy), Mongoose plugins and discriminators |
+| **Other** | Firestore indexes JSON, Elasticsearch mappings, `$jsonSchema` validators | Mongoose / Typegoose, Beanie, Spring Data, Convex, PocketBase migrations, Cassandra CQL (own tokenizer), Neo4j constraints, RediSearch `FT.CREATE` literals, `firestore.rules` paths | Redis key templates built in code, RediSearch schemas assembled by functions (the probed project), Mongoose plugins and discriminators |
 
 Pitfalls worth carrying into the design:
 
@@ -138,7 +138,7 @@ No file states a DynamoDB model. It is assembled:
 
 1. **Key schema** from infra: hash and range keys, GSIs and LSIs with their projections, TTL, streams.
 2. **Item shape** from code: a single-table mapper (ElectroDB, OneTable, Dynamoose, PynamoDB, the Java Enhanced Client) declares attributes *and* key composition; otherwise a language type (serde struct, Go `dynamodbav` tags, a TS type) is the shape.
-3. **Binding** of shape to table, in falling confidence: declared in the mapper; an env-var chain (code reads `USERS_TABLE`, infra sets it); a name template (`"${var.env}-${var.project}-users"` matched on its literal segments, as in odyyy); the call-site type (`PutCommand({ TableName, Item: x as User })`).
+3. **Binding** of shape to table, in falling confidence: declared in the mapper; an env-var chain (code reads `USERS_TABLE`, infra sets it); a name template (`"${var.env}-${var.project}-users"` matched on its literal segments, as in the probed project); the call-site type (`PutCommand({ TableName, Item: x as User })`).
 4. **Access patterns** from code: which index each query uses, which attributes act as keys, which attributes each update writes. That gives the map its edges and finds dead indexes.
 
 Mongo, Firestore and Redis follow the same pattern with fewer declared parts: a declared shape when a mapper or validator exists, otherwise inference from access patterns, with sampling of repo-resident fixtures as the last resort.
@@ -160,7 +160,7 @@ Inspired by Liam ERD's keyed model and diff, Azimutt's nested attributes and pro
 
 - **Extract** (script, deterministic, inside `graph_index`, incremental by file hash): extractors emit one keyed model, `Store → Entity → Field / Key / Index / Relation / Binding`, every element carrying its `sources` (`repo:path:line`, kind, extractor, confidence) and its `conflicts`.
 - **Reconcile** (script): group the declarations of one logical store across sources and repositories (dev JSON, prod Terraform, Rust struct, app SQLite) through bindings with a confidence (`declared` · `convention` · `name-match` · `ambiguous`, as the graph does for call edges), and list the conflicts.
-- **Refine** (an agent, through a skill): what no file declares, such as a binding the script cannot resolve, lineage across stores (device `orbits` mirrors DynamoDB `orbit`), relations with no foreign key (`orbit_participants.orbit_id → orbit.id`), what an index is for. It is written to a checked file. Every claim is re-checked against the extracted model on each render; one the code no longer supports is reported as drift, never trusted.
+- **Refine** (an agent, through a skill): what no file declares, such as a binding the script cannot resolve, lineage across stores (device `events` mirrors DynamoDB `event`), relations with no foreign key (`event_participants.event_id → event.id`), what an index is for. It is written to a checked file. Every claim is re-checked against the extracted model on each render; one the code no longer supports is reported as drift, never trusted.
 - **Diff**, three kinds: *ref against ref* (a branch or PR against its base: re-extract from `git show <ref>:<path>`, JSON-patch the two models, per-element added / removed / modified, rename candidates flagged); *source against source* (the conflicts); *proposal against current* (an exploration or a roast writes a proposed delta, drawn over the current model; after the build, the check says which proposed changes the code now has).
 - **View**: a *Data* tab in the graph page: an ERD per SQL store; DynamoDB tables as key cards (PK / SK, each index with the code that queries it or "no access found"); item shapes as trees; lineage lines across stores; diff colouring; conflict badges; every fact a link to its `path:line`. Architecture `database` components link to it.
 - **Tools**: `graph_data` (stores, entities, one entity with its sources and the code that reads or writes it) and `graph_data_diff` (ref against ref) for scouts, `roast`, `to-plan`, `to-issues`, the `reviewer` (a destructive change in the same slice that stops reading it) and `migration-engineer` (the delta and its deploy order).
@@ -198,4 +198,4 @@ for (const f of sqlFiles) for (const stmt of read(f).split('--> statement-breakp
 // then PRAGMA table_info / foreign_key_list / index_list per table, compared with meta/<last>_snapshot.json
 ```
 
-Greps behind §1: `-odyyy-<table>` literals in `odyyy-backend/{lib,odyyy_gql,odyyy_stream}/src`; `index_name("…")` calls there; `name = "…Index"` in `cloud/infra/prod/dynamodb/terragrunt.hcl`.
+Greps behind §1: `-acme-<table>` literals in `backend/{core,api,stream}/src`; `index_name("…")` calls there; `name = "…Index"` in `infra/live/prod/dynamodb/terragrunt.hcl`.

@@ -4,11 +4,11 @@
 
 ## The problem, in the user's words
 
-> Like we do with the graph in grimoire today, we would like to create a map of the data models: the SQLite in odyyy, the NoSQL like DynamoDB and others, the PGSQL in a project (usually with something like Drizzle and SQL-like tables). For NoSQL it's harder to define. We would like visuals like we do today with architecture, to see where it differs when there are updates to be done or explorations, and to update it as the code updates. The source of truth is always the code and infra, not the documentation.
+> Like we do with the graph in grimoire today, we would like to create a map of the data models: the SQLite in [our mobile app], the NoSQL like DynamoDB and others, the PGSQL in a project (usually with something like Drizzle and SQL-like tables). For NoSQL it's harder to define. We would like visuals like we do today with architecture, to see where it differs when there are updates to be done or explorations, and to update it as the code updates. The source of truth is always the code and infra, not the documentation.
 
 ## The solution, in the user's words
 
-- **Agnostic.** "Take example on the odyyy stack, but the tool must be agnostic and used everywhere else as well."
+- **Agnostic.** "Take example on [our app's] stack, but the tool must be agnostic and used everywhere else as well."
 - **It works like the graph and the architecture.** "This should work like grimoire architecture and graph."
 - **A visual of what we plan to change.** "A view of what we consider changing with the plan before adding a feature", with "a visual that shows differences so we can visually validate and acknowledge what changes".
 - **Never blocking.** "You should be able to solve it by yourself and update the mapped data after; just send a message to make sure the user has been aware. It's not a blocking point."
@@ -22,7 +22,7 @@
 4. As the owner, I want every PR's data-model and architecture changes listed as planned, pending or unplanned, with the agent's reason for each unplanned one, so that I stay aware without being blocked.
 5. As `roast`, `to-plan` and `to-issues`, I want the model and the change view as tools, so that a plan names exactly which tables, fields, keys and components each slice touches.
 6. As an implementer, the `migration-engineer` or the `reviewer`, I want the branch's model diff against base and against the acknowledged delta, so that I build and judge the change as a model change, not as lines.
-7. As a user of grimoire on any stack (Prisma on Postgres, SAM on DynamoDB, Supabase, Drizzle), I want the same map, so that it is not an odyyy feature.
+7. As a user of grimoire on any stack (Prisma on Postgres, SAM on DynamoDB, Supabase, Drizzle), I want the same map, so that it is not a one-project feature.
 8. As the owner of a stack no extractor reads yet, I want an agent to describe the store from the code with citations the check keeps honest, and the map to list what it does not cover, so that the map is useful and never pretends to be complete.
 9. As anyone, I want the map to stay current after every implementer commit with no step of mine, so that it is never a stale document.
 
@@ -37,7 +37,7 @@ Four seams, all already exercised by the suite. No new kind of test harness.
 | **C. `serve` over HTTP** | `lib/serve.mjs` | acknowledgement writes: token, host and origin, `*.delta.json` only, 409 on a stale base | `arch-docs.test.mjs` §4's pattern, extended |
 | **D. The engine and the skills** | `workflows/orchestrate-loop.js` (`draftBody` `:5938`, `withShipLock` `:1977`, `shipPrompt` `:1997`), `workflows/briefs/{hydrate,implement,review,ship}.md`, `skills/{roast,to-plan,to-issues,implement,review,architecture}/SKILL.md` | the delta in briefs, the PR section, the ship step's delta append, the skills' instructions | `workflows/tests/*.test.mjs`; `skills/*/evals/evals.json` through `npm run evals:check` |
 
-**Fixtures are synthetic.** They are written for the tests and shaped like the stacks they stand for (a Drizzle SQLite app, a Supabase Postgres app, a SAM DynamoDB service, a Rust and Terraform/Terragrunt backend, a Prisma app). Nothing is copied from odyyy, which is private: grimoire is a public repository. No token-like literals (harness memory). odyyy is where each slice is *demoed*, by hand, never where it is tested.
+**Fixtures are synthetic.** They are written for the tests and shaped like the stacks they stand for (a Drizzle SQLite app, a Supabase Postgres app, a SAM DynamoDB service, a Rust and Terraform/Terragrunt backend, a Prisma app). Nothing is copied from the project the research probed, which is private: grimoire is a public repository. No token-like literals (harness memory). That project is where each slice is *demoed*, by hand, never where it is tested.
 
 ## Shape of the code
 
@@ -80,7 +80,7 @@ Numbers in brackets are the spec's slice numbers. The spec's slice 1 is split in
   - SQLite folders are replayed into `node:sqlite` `:memory:` (`readers/sqlite-replay.mjs`, `readers/sql-split.mjs` for Drizzle's `--> statement-breakpoint` and plain `;`). Postgres and MySQL folders are recorded as *found, not yet read* until slice 12.
   - `graph_data` (stores, entities, one entity with sources) and `graph.mjs data list | show`.
   - `graph_status` reports extractor failures.
-- **Done:** on a Drizzle SQLite fixture, the replay and the snapshot agree element for element and each table cites its migration line. A deliberately hand-edited migration shows as a conflict. On odyyy-app: 23 tables, 7 FKs, 34 indexes.
+- **Done:** on a Drizzle SQLite fixture, the replay and the snapshot agree element for element and each table cites its migration line. A deliberately hand-edited migration shows as a conflict. On the probed app: 23 tables, 7 FKs, 34 indexes.
 - **Seam:** A (parts 1 and 2).
 
 ### 2. The Data tab [spec 1, part 2]
@@ -142,7 +142,7 @@ Numbers in brackets are the spec's slice numbers. The spec's slice 1 is split in
   - Unknowns (`dependency.*.outputs`, `get_env`, data sources) are marked, never guessed.
   - One table per `for_each` key. The name template is kept for binding.
   - Only store-related values are retained.
-- **Done:** a Terragrunt fixture (a module with `for_each` over a map, inputs in a child folder) yields its tables, GSIs and TTL. On odyyy: the prod tables, with the local-dev conflicts.
+- **Done:** a Terragrunt fixture (a module with `for_each` over a map, inputs in a child folder) yields its tables, GSIs and TTL. On the probed project: the prod tables, with the local-dev conflicts.
 - **Seam:** A (part 1 for the evaluator, part 2 end to end).
 
 ### 9. Item shapes and binding [spec 8]
@@ -156,7 +156,7 @@ Numbers in brackets are the spec's slice numbers. The spec's slice 1 is split in
     
     each with a confidence, rivals listed, and sub-convention bindings drawn dashed.
   - Item trees on the key cards.
-- **Done:** Rust and TS fixtures bind as designed, including one ambiguous case listing its rivals. On odyyy: the co-occurrence measurement (13 of 16 repository files) reproduced or bettered.
+- **Done:** Rust and TS fixtures bind as designed, including one ambiguous case listing its rivals. On the probed project: the co-occurrence measurement (13 of 16 repository files) reproduced or bettered.
 - **Seams:** A, B.
 
 ### 10. Access patterns [spec 9]
@@ -166,7 +166,7 @@ Numbers in brackets are the spec's slice numbers. The spec's slice 1 is split in
 
 ### 11. Code-declared SQL models [spec 10]
 - **What:** Drizzle TS (`sqliteTable` / `pgTable` / `mysqlTable`: columns, types, `notNull`, `primaryKey`, `references`, `unique`, the indexes in the third argument; `$defaultFn` recorded as computed) and `schema.prisma` (`readers/prisma.mjs`: models, `@id`, `@unique`, `@relation`, `@map` / `@@map`, enums), plus the conflict "schema edited, migration not generated".
-- **Done:** a push-only Drizzle fixture and a Prisma fixture. On odyyy: `odyyy-generative-ai-content`'s seven tables.
+- **Done:** a push-only Drizzle fixture and a Prisma fixture. On the probed project: `backoffice`'s seven tables.
 - **Seam:** A.
 
 ### 12. Postgres and MySQL DDL [spec 11]
@@ -181,7 +181,7 @@ Numbers in brackets are the spec's slice numbers. The spec's slice 1 is split in
   - Refined facts are labelled.
   - The gaps list: client imports with no extractor and no refine entry.
   - The skill's evals; the roster and the `AGENTS.md` docs store row.
-- **Done:** a fixture refine file with one valid lineage, one stale citation (reported as drift) and one Mongoose store described by citation. On odyyy: the device-to-backend `orbits` lineage and the RediSearch index.
+- **Done:** a fixture refine file with one valid lineage, one stale citation (reported as drift) and one Mongoose store described by citation. On the probed project: the device-to-backend `events` lineage and the RediSearch index.
 - **Seams:** A, B, D (evals).
 
 ### After v1

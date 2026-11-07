@@ -4,16 +4,16 @@
 
 ## Problem
 
-In the user's words: like the code graph and the architecture diagrams, grimoire should keep a **map of the data models**: SQLite on the device (odyyy), DynamoDB and other NoSQL stores, Postgres with Drizzle-style tables. It should have visuals, show **where it differs when changes are planned or explored**, and **update as the code updates**. The code and the infra are the source of truth; documentation helps discovery and planning, never decides.
+In the user's words: like the code graph and the architecture diagrams, grimoire should keep a **map of the data models**: SQLite on the device (a mobile app), DynamoDB and other NoSQL stores, Postgres with Drizzle-style tables. It should have visuals, show **where it differs when changes are planned or explored**, and **update as the code updates**. The code and the infra are the source of truth; documentation helps discovery and planning, never decides.
 
-Today the graph indexes `.sql`, `.tf`, `.hcl` and `.graphql` as file nodes only (`tools/graph/lib/langs.mjs:345`), and nothing in grimoire knows what a table, a key or an index is. A roast that touches stored data finds the model by grep. A PR that adds a field, drops an index or changes a key is reviewed as lines of code. Nobody sees the model change as a model change, and nobody sees two declarations of one table disagreeing. odyyy's local-dev table JSON still declares two GSIs prod dropped, under different table names, and lacks six prod tables (research §1).
+Today the graph indexes `.sql`, `.tf`, `.hcl` and `.graphql` as file nodes only (`tools/graph/lib/langs.mjs:345`), and nothing in grimoire knows what a table, a key or an index is. A roast that touches stored data finds the model by grep. A PR that adds a field, drops an index or changes a key is reviewed as lines of code. Nobody sees the model change as a model change, and nobody sees two declarations of one table disagreeing. In the project the research probed, the local-dev table JSON still declares two GSIs prod dropped, under different table names, and lacks six prod tables (research §1).
 
 No mature open-source project solves this. Liam ERD is static and diffs, but is SQL only, with no IaC. Azimutt models NoSQL only by sampling a live database. tbls reads DynamoDB only live. No project joins an IaC key schema with a code item shape (research §4). Grimoire builds its own, under its rules: no dependency, Node only, never running the project's code, never connecting to its databases.
 
 ## Goals (v1)
 
 - **One model of every datastore, read from code, migrations, generated artifacts and infra.** Every element (store, entity, field, key, index, relation) carries the `repo:path:line` of each place that declares it.
-- **Stack-agnostic.** Extractors are written per *format*, never per project, and plug into one registry. odyyy is the proving ground, not the target.
+- **Stack-agnostic.** Extractors are written per *format*, never per project, and plug into one registry. The probed project is the proving ground, not the target.
 - **A Data tab** in the graph page: an ERD per SQL store, a key card per NoSQL table (keys, indexes, TTL, streams, item shapes), lineage across stores, and every fact linking to its code.
 - **A change view, for the data model and the architecture.**
   - A proposed delta written at design time, drawn over the current model, validated visually and acknowledged change by change.
@@ -36,9 +36,9 @@ No mature open-source project solves this. Liam ERD is static and diffs, but is 
 **D1. An agnostic core with a registry of per-format extractors.**
 - An extractor is `{ id, version, kind, discover(repoFiles), extract(text, path, ctx) → facts }`. Its `kind` is one of: artifact · migration · infra · code · inferred.
 - It names a format: "a SQL migration folder", "Drizzle snapshot", "Terraform `aws_dynamodb_table`", "Rust serde struct", "TS interface". Never a project.
-- Conventions come from what the project declares. A table-name binding uses the infra's own name expression (`"${var.env}-${var.project}-${each.key}"`), matched against the literals the code builds. Nothing like `-odyyy-` is ever written into grimoire.
+- Conventions come from what the project declares. A table-name binding uses the infra's own name expression (`"${var.env}-${var.project}-${each.key}"`), matched against the literals the code builds. Nothing like `-acme-` is ever written into grimoire.
 - Each extractor ships with fixtures from at least two ecosystems.
-- **Rejected: odyyy's stack as the target.** The user asked for a tool usable everywhere.
+- **Rejected: the probed project's stack as the target.** The user asked for a tool usable everywhere.
 
 **D2. The model is keyed, nested and sourced, with conflicts kept and never resolved.**
 - The shape, inspired by Liam's name-keyed records, Azimutt's nested attributes and provenance, and tbls's virtual relations:
@@ -111,18 +111,18 @@ No mature open-source project solves this. Liam ERD is static and diffs, but is 
 **D8. The script extracts, an agent refines, the script checks: the architecture diagrams' split.**
 - A skill, `/grimoire:data-model`, refines what no file declares, in a checked file `docs/architecture/<name>.data.json`, beside the diagrams, under `graph.architectureDir`:
   - bindings the script left ambiguous;
-  - lineage across stores (the device's `orbits` mirrors the backend's `orbit`);
-  - relations no foreign key states (`orbit_participants.orbit_id → orbit.id`);
+  - lineage across stores (the device's `events` mirrors the backend's `event`);
+  - relations no foreign key states (`event_participants.event_id → event.id`);
   - what an index is for;
   - **stores with no extractor yet**, described entity by entity with a `path:line` citation per field.
 - The check re-verifies every claim on each render: each citation's lines must exist, contain the field's name, and agree with any extracted fact. A claim the code no longer supports is drift, never trusted.
 - Refined facts are labelled *refined*, never *extracted*.
 - Datastores detected through client imports (`lib/arch.mjs`'s known services) but neither extracted nor refined are listed as **gaps**.
-- **Rejected: extraction only.** No file says the device's `orbits` mirrors the backend's `orbit`, and that is the map's most useful line.
+- **Rejected: extraction only.** No file says the device's `events` mirrors the backend's `event`, and that is the map's most useful line.
 - **Rejected: fields inside the architecture JSON.** It is a different granularity, so the files link through component ids instead.
 
 **D9. Parsing: no vendored grammars.**
-- SQLite DDL is replayed into `node:sqlite` `:memory:` and read back with PRAGMA: exact, measured on odyyy (research §2).
+- SQLite DDL is replayed into `node:sqlite` `:memory:` and read back with PRAGMA: exact, measured on the probed project (research §2).
 - Postgres and MySQL DDL: a statement splitter and an interpreter for about twelve statement kinds; everything else is counted as skipped.
 - HCL: a reader for the declarative subset, plus a small evaluator for literals, `var.*` from defaults, tfvars and Terragrunt `inputs`, `locals`, `each.*`, `lookup` / `try` / `merge`, `for` and `dynamic` blocks. Anything else is *unknown*, never guessed.
 - Prisma and GraphQL SDL: small hand readers.
@@ -138,9 +138,9 @@ No mature open-source project solves this. Liam ERD is static and diffs, but is 
 
 ## Vertical slices (smallest first)
 
-Each slice is demoed on odyyy and on a fixture from a second ecosystem.
+Each slice is demoed on the probed project and on a fixture from a second ecosystem.
 
-1. **SQL migrations into a Data tab.** Discover SQL migration folders **by content, whatever tool wrote them**: any folder of ordered `.sql` files containing DDL, whatever its name. The dialect comes from config when stated, else is sniffed from the SQL, else is unknown and not replayed; a `graph.data.migrations` override covers the rest. Conventional names (`drizzle/`, `migrations/`, `prisma/migrations/`, `supabase/migrations/`) are only a fast path. Replay SQLite ones. Read Drizzle snapshots (v7 and the v1 `ddl[]` format). Store facts, render an ERD per store, add `graph_data` and `graph.mjs data`. *Demo:* odyyy-app's 23 tables, 7 foreign keys and 34 indexes, each linking to its migration line.
+1. **SQL migrations into a Data tab.** Discover SQL migration folders **by content, whatever tool wrote them**: any folder of ordered `.sql` files containing DDL, whatever its name. The dialect comes from config when stated, else is sniffed from the SQL, else is unknown and not replayed; a `graph.data.migrations` override covers the rest. Conventional names (`drizzle/`, `migrations/`, `prisma/migrations/`, `supabase/migrations/`) are only a fast path. Replay SQLite ones. Read Drizzle snapshots (v7 and the v1 `ddl[]` format). Store facts, render an ERD per store, add `graph_data` and `graph.mjs data`. *Demo:* the probed app's 23 tables, 7 foreign keys and 34 indexes, each linking to its migration line.
 2. **Branch against base.** Add `graph.mjs changes --base` and `graph_changes` for the data model, and the overlay in the Data tab. *Demo:* a branch adding a column and dropping an index is drawn green and red.
 3. **Proposals and acknowledgement.** The delta format and its computed states, `roast` and `to-plan` drafting it, the overlay drawing it, acknowledgement through `serve`. *Demo:* a roast's delta drawn over today's model, acknowledged change by change, then a branch turning one change "planned and built".
 4. **The pipeline.**
@@ -150,17 +150,17 @@ Each slice is demoed on odyyy and on a fixture from a second ecosystem.
    
    *Demo:* an unattended slice that adds an unplanned field ships with it listed, reasoned and badged.
 5. **The architecture change view.** D7 on the Architecture tab, reusing slices 2–4. *Demo:* a roast proposing a new component, and a PR whose new cross-module link shows as an unplanned architectural change with the diagram updated.
-6. **DynamoDB key schemas, declared.** Raw `CreateTable` JSON, plus CloudFormation, SAM and Serverless templates in JSON and YAML. Draw key cards, and source-against-source conflicts. *Demo:* odyyy's local-dev tables, plus a SAM fixture.
-7. **Terraform and Terragrunt.** The HCL reader and evaluator; one table per `for_each` key; unknowns marked. *Demo:* odyyy's prod tables, with the local-dev versus prod conflicts (the `SearchIndex` / `UnifiedSearchIndex` GSIs, the table names, six tables missing locally).
+6. **DynamoDB key schemas, declared.** Raw `CreateTable` JSON, plus CloudFormation, SAM and Serverless templates in JSON and YAML. Draw key cards, and source-against-source conflicts. *Demo:* the probed project's local-dev tables, plus a SAM fixture.
+7. **Terraform and Terragrunt.** The HCL reader and evaluator; one table per `for_each` key; unknowns marked. *Demo:* the probed project's prod tables, with the local-dev versus prod conflicts (the `ByTitleIndex` / `ByTitleFullIndex` GSIs, the table names, six tables missing locally).
 8. **Item shapes and binding.**
    - Item shapes from code types: Rust serde (typeshare's rules: `rename`, `rename_all`, `flatten`, `default`, `skip`) and TS interfaces and types.
    - Binding by mapper, env-var chain, name template and call site, with confidence.
    
-   *Demo:* odyyy's backend structs bound to their tables. Measured: 13 of 16 repository files pair the types they convert with a table by co-occurrence alone, 10 of them one-to-one (research §1; spec *Sources*).
+   *Demo:* the probed backend's structs bound to their tables. Measured: 13 of 16 repository files pair the types they convert with a table by co-occurrence alone, 10 of them one-to-one (research §1; spec *Sources*).
 9. **Access patterns.** DynamoDB SDK calls (`IndexName`, `KeyConditionExpression`, `UpdateExpression` with `ExpressionAttributeNames`) in Rust, TS, Python and Go. Each index shows the code that queries it, or "no access found" as a lead. *Demo:* the 8 prod GSIs with no `index_name("…")` call.
-10. **Code-declared SQL models.** Drizzle TS (`sqliteTable` / `pgTable` / `mysqlTable`, for push-only projects) and `schema.prisma`, plus the conflict "schema edited, migration not generated". *Demo:* `odyyy-generative-ai-content`'s seven tables, plus a Prisma fixture.
+10. **Code-declared SQL models.** Drizzle TS (`sqliteTable` / `pgTable` / `mysqlTable`, for push-only projects) and `schema.prisma`, plus the conflict "schema edited, migration not generated". *Demo:* `backoffice`'s seven tables, plus a Prisma fixture.
 11. **Postgres and MySQL DDL.** The splitter and interpreter for migration folders (Flyway, golang-migrate, goose, dbmate, sqlx, Supabase) and for `structure.sql` and `db/schema.sql` dumps. *Demo:* a Supabase fixture.
-12. **The refine skill.** `/grimoire:data-model` and the checked `*.data.json`: bindings, lineage, FK-less relations, agent-described stores with citations re-verified, and the gaps list. *Demo:* odyyy's device `orbits` ↔ backend `orbit` lineage, and its RediSearch index described by citation.
+12. **The refine skill.** `/grimoire:data-model` and the checked `*.data.json`: bindings, lineage, FK-less relations, agent-described stores with citations re-verified, and the gaps list. *Demo:* the probed project's device `events` ↔ backend `event` lineage, and its RediSearch index described by citation.
 
 **After v1, extractor-only slices on the same model**, in an order the owner can change: Mongoose and Typegoose; ElectroDB, OneTable and Dynamoose; Firestore indexes and rules; Redis key templates and RediSearch `FT.CREATE` literals; CDK and SST literals; Rails `schema.rb`; EF Core model snapshots; Django and Alembic operations; JPA; GORM; Elasticsearch mappings; Cassandra CQL; Convex; Supabase types.
 
@@ -191,7 +191,7 @@ Each slice is demoed on odyyy and on a fixture from a second ecosystem.
   - `lib/arch.mjs` (`validate`, `bindCode`, `checkSources`, `analyze`, `draftArch`, `readDiagrams`; known services by import), `render.mjs:69-87,430` (the tabs, diagrams checked on render), `lib/serve.mjs` (the token-protected write path), `lib/freshness.mjs` (base index);
   - `hooks/hooks.json:46` (the refresh hook), `scripts/version-check.mjs:35` (`git show <ref>:<path>`), `scripts/build-ship-lock.mjs`, `workflows/orchestrate-loop.js:1373` (the ship step's PR);
   - the pinned grammar list in the graph-deps cache (no SQL, HCL, GraphQL or Prisma).
-- odyyy (`~/Awesome/odyyy-orchestrator/repositories`): `odyyy-backend/dynamodb/tables/*.json`, `lib/src/db/entities/*.rs`, `lib/src/db/repositories/*.rs`, `lib/src/infra/redis/redisearch.rs`, `custom_macros/src/lib.rs`; `cloud/modules/dynamodb/1-dynamodb.tf`, `cloud/infra/prod/dynamodb/terragrunt.hcl`; `odyyy-app/db/schema.ts`, `drizzle/`, `drizzle.config.ts`; `odyyy-generative-ai-content/lib/db/schema.ts`; `odyyy-old/amplify/backend/api/odyyy/schema.graphql`; `grimoire.config.json` (all four repos indexed).
+- The probed project (research §1): `backend/local/tables/*.json`, `core/src/model/*.rs`, `core/src/repositories/*.rs`, `core/src/search/index.rs`, `macros/src/lib.rs`; `infra/modules/dynamodb/main.tf`, `infra/live/prod/dynamodb/terragrunt.hcl`; `app/db/schema.ts`, `drizzle/`, `drizzle.config.ts`; `backoffice/src/db/schema.ts`; `legacy-api/amplify/backend/api/<api>/schema.graphql`; `grimoire.config.json` (all four repos indexed).
 - Scouts: a `reference-scout` (OSS survey) and a research agent (extraction per store); their reports are folded into the research doc's §4 and §5.
 - Measured:
   - migration replay against the Drizzle snapshot: exact, research §2;
@@ -205,9 +205,9 @@ Each slice is demoed on odyyy and on a fixture from a second ecosystem.
 | Is there a mature tool to adopt? | No, and adopting one is against policy anyway; borrow Liam, Azimutt, tbls and typeshare's patterns | research §4; memory *build our own* |
 | Live database or sampling? | Never in v1 | user: "source of truth is always the code and infra" |
 | Where does extraction run, and how does it stay fresh? | Inside `graph_index`, so the existing hook and worktree machinery apply | `lib/indexer.mjs`, `hooks/hooks.json:46`, `lib/freshness.mjs` |
-| SQLite without a parser? | Replay into `node:sqlite`; exact on 25 odyyy migrations | research §2 |
+| SQLite without a parser? | Replay into `node:sqlite`; exact on the probed app's 25 migrations | research §2 |
 | Vendor SQL or HCL grammars? | No: hand readers for the subsets (D9) | graph-deps grammar list; `lib/md.mjs` precedent |
-| How does a NoSQL struct bind to its table? | Mapper, env var, the infra's name template, call site, with confidence; measured on odyyy | research §5; measurement above |
+| How does a NoSQL struct bind to its table? | Mapper, env var, the infra's name template, call site, with confidence; measured on the probed project | research §5; measurement above |
 | Where does the view live? | A Data tab in the graph page; overlays in the Architecture tab | `render.mjs:430` |
 | Where do refine files live? | `docs/architecture/<name>.data.json`, beside the diagrams | the architecture skill's convention |
 | How are acknowledgements written? | The `serve` page's token-protected write path, limited to `*.delta.json`, 409 on a stale base | `lib/serve.mjs` |
