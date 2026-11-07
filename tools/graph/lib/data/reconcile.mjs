@@ -53,13 +53,24 @@ export function reconcile(rows) {
 // ── key-value tables across stores, and the item shapes bound to them (binding.mjs) ──
 // model gains: logical (the groups of two declarations or more, each with its conflicts across them),
 // items, bindings, unresolved; a member entity gains `logical` (its group, the conflicts across it),
-// `bound` (its bindings) and its bound item types' fields (binding.mjs says how).
+// `bound` (its bindings) and its bound item types' fields (binding.mjs says how). Whatever a project's
+// code holds, the stores are answered: the whole computation is planned first, without touching the
+// model, and a failure in it leaves the model as merged, with `itemsError` saying why.
 function items(model, rows, decls) {
+  Object.assign(model, { logical: [], items: [], bindings: [], unresolved: [] })
+  let p
+  try { p = plan(model, rows, decls) } catch (e) { model.itemsError = `the item shapes were not bound: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`; return }
+  for (const [e, patch] of p.entities) Object.assign(e, patch)
+  Object.assign(model, p.model)
+}
+function plan(model, rows, decls) {
   const kv = model.stores.filter((s) => KV_DIALECTS.has(s.dialect))
   const entities = new Map(kv.flatMap((s) => s.entities.map((e) => [e.id, e])))
+  const patches = new Map() // entity → what it gains
+  const patch = (e) => { if (!patches.has(e)) patches.set(e, {}); return patches.get(e) }
   const { groups, notes } = logicalTables([...entities.values()].map((e) => ({ id: e.id, name: e.name })))
-  for (const [id, note] of notes) entities.get(id).logicalNote = note
-  model.logical = []
+  for (const [id, note] of notes) patch(entities.get(id)).logicalNote = note
+  const out = { logical: [] }
   for (const g of groups.filter((x) => x.members.length > 1)) {
     const members = new Set(g.members)
     // every declaration stating a member, that member renamed to the group's name and marked, merged
@@ -73,34 +84,36 @@ function items(model, rows, decls) {
     const strip = (s) => { const { member, ...rest } = s; return rest }
     const conflicts = merged ? elementsOf(merged).flatMap(([label, x]) => x.conflicts.filter(across).map((c) => ({ label, attr: c.attr, values: c.values.map((v) => ({ value: v.value, sources: v.sources.map(strip) })) }))) : []
     const logical = { id: g.id, name: g.name, via: g.via, members: g.members, conflicts }
-    model.logical.push(logical)
-    for (const m of g.members) entities.get(m).logical = logical
+    out.logical.push(logical)
+    for (const m of g.members) patch(entities.get(m)).logical = logical
   }
   // what the infra sets each environment variable to (a function's environment naming a table)
   const wiring = decls.flatMap((d) => (d.env || []).map((w) => ({ name: w.name, entity: `${d.repo}:${d.store}/${w.table}`, repo: d.repo, path: w.path, line: w.line }))).filter((w) => entities.has(w.entity))
   const code = rows.filter((r) => r.facts?.code).map((r) => ({ repo: r.repo, extractor: r.extractor, code: r.facts.code }))
   const b = bindItems(code, groups, entities, wiring)
-  model.items = b.items
-  model.bindings = b.bindings
-  model.unresolved = b.unresolved
+  Object.assign(out, { items: b.items, bindings: b.bindings, unresolved: b.unresolved })
   const byId = new Map(b.items.map((it) => [it.id, it]))
+  const indexes = new Map() // entity → its fields by name
   for (const bd of b.bindings) {
     for (const id of bd.entities) {
-      const e = entities.get(id)
-      ;(e.bound ||= []).push(bd)
+      const e = entities.get(id), pe = patch(e)
+      ;(pe.bound ||= []).push(bd)
       if (bd.confidence === 'ambiguous') continue
       // the item's fields on the table: one element per stored path, the attribute definition's when
-      // the infra types it too
+      // the infra types it too (a copy: the model is touched only once all is planned)
+      const fields = (pe.fields ||= e.fields.slice())
+      const index = (indexes.has(e) ? indexes : indexes.set(e, new Map(fields.map((x, i) => [x.name, i])))).get(e)
       const it = byId.get(bd.item)
       for (const f of it.fields) {
-        const have = e.fields.find((x) => x.name === f.path)
-        if (!have) { e.fields.push(itemField(f, bd, it.extractor)); continue }
-        if ((have.item ||= []).some((x) => x.type === bd.type)) continue
-        have.item.push(itemOf(f, bd))
-        have.sources.push({ repo: f.repo, path: f.file, line: f.line, kind: 'code', extractor: it.extractor, confidence: bd.confidence })
+        const at = index.has(f.path) ? index.get(f.path) : -1
+        if (at < 0) { index.set(f.path, fields.length); fields.push(itemField(f, bd, it.extractor)); continue }
+        const have = fields[at]
+        if ((have.item || []).some((x) => x.type === bd.type)) continue
+        fields[at] = { ...have, item: [...(have.item || []), itemOf(f, bd)], sources: [...have.sources, { repo: f.repo, path: f.file, line: f.line, kind: 'code', extractor: it.extractor, confidence: bd.confidence }] }
       }
     }
   }
+  return { entities: patches, model: out }
 }
 
 function leaves(decls) {

@@ -554,13 +554,14 @@ export function dataClient(ctx) {
     // the item types code converts, per repository: each bound table, and the unbound ones listed
     const its = (DD.items || []).filter((it) => !st.repo || it.repo === st.repo)
     const unbound = its.filter((it) => !it.bound.length)
+    const itemsErr = DD.itemsError ? h('p', { class: 'note err' }, `Item shapes: ${DD.itemsError}; the stores are drawn as declared.`) : null
     const itemsList = its.length ? h('details', { class: 'problems', 'data-ctl': 'data-items' }, h('summary', null, `Item types (${its.length}), from code: ${its.length - unbound.length} bound to a table, ${unbound.length} unbound`),
-      h('ul', { class: 'links' }, its.map((it) => h('li', null, h('b', { class: 'mono' }, it.id), ' ',
+      h('ul', { class: 'links' }, its.map((it) => h('li', { title: (it.notes || []).join('\n') || null }, h('b', { class: 'mono' }, it.id), ' ',
         it.bound.length ? it.bound.flatMap((b, k) => [k ? ' | ' : '', h('span', { class: `pill c-${b.conf}` }, b.conf), ' ', b.cards.length ? h('a', { class: 'jump mono', href: `#data-${b.cards[0][0]}` }, b.table) : h('span', { class: 'mono' }, b.table)])
           : h('span', { class: 'pill warn', title: 'no table name and no environment variable the infra sets pairs with its conversions' }, 'unbound'),
         h('span', { class: 'muted' }, ` · ${plural(it.fields, 'field')} · `), path(it)))),
       h('p', null, 'An item type is one the code converts to or from an item; its binding is how the code names the table where it converts it (an environment variable the infra sets, a name the table\'s template matches, in one function or one file), with a confidence. Below convention, a binding is a lead.')) : null
-    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsList, list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
+    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsErr, itemsList, list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
   }
   function open(n) { if (st.data !== n) { st.data = n; st.dataSel = null; st.dataAll = false; st.dataScroll = null } }
   return { view, has: (n) => !!S[n], open }

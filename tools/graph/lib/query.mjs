@@ -73,6 +73,7 @@ export function baseText(base) {
   return `${refName(base.ref)} (${base.from})${at}`
 }
 const CLASSY = "'class','struct','interface','trait','enum','protocol','module','object','type','namespace'"
+const FAILED_SHOWN = 20
 const MAX_TARGETS = 5
 
 export class Graph {
@@ -354,9 +355,10 @@ export class Graph {
   // the logical tables declared in several places, and the item types code converts, bound or not
   dataItems(model) {
     const out = []
+    if (model.itemsError) out.push(`Item shapes: ${model.itemsError}; the stores above are as declared`)
     const lg = model.logical || []
     if (lg.length) {
-      out.push(`Logical tables (${lg.length}), one table declared in several places (matched on a name template's literal parts, or the same name; never by a guess):`)
+      out.push(`Logical tables (${lg.length}), one table declared in several places (the same name template, or an exact name a template matches on its literal parts; never by a guess, never by a bare name across repositories):`)
       for (const g of lg) out.push(`  ${g.name}  ${g.members.join(' + ')}  (${g.via})${g.conflicts.length ? `  [${plural(g.conflicts.length, 'conflict')} across them]` : ''}`)
     }
     const items = model.items || []
@@ -372,6 +374,7 @@ export class Graph {
           : bs[0].confidence === 'ambiguous' ? `ambiguous: ${bs.map((b) => b.table).join(' | ')} (${bindingHow(bs[0])})`
           : `→ ${bs[0].table}  ${bs[0].confidence} (${bindingHow(bs[0])})`
         out.push(`  ${it.id}  ${what}  ${this.dloc(it)}`)
+        for (const n of it.notes || []) out.push(`    note: ${n}`)
       }
     }
     if (model.unresolved?.length) out.push(`  (${plural(model.unresolved.length, 'conversion')} of a type with no single definition: ${[...new Set(model.unresolved.map((u) => u.type))].slice(0, 6).join(', ')})`)
@@ -481,7 +484,8 @@ export class Graph {
       for (const r of s.renames) out.push(`  ${renameText(s, r)}`)
     }
     for (const x of base.skipped) out.push(`Not compared: ${x.name} (${x.why}).`)
-    if (at.failed.length) out.push(`At the base, extractor failures (${at.failed.length}), their facts are missing from the comparison:`, ...at.failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
+    // (each failure on a line, the first FAILED_SHOWN of them: a base whose code could not be read at all fails file by file)
+    if (at.failed.length) out.push(`At the base, extractor failures (${at.failed.length}), their facts are missing from the comparison:`, ...at.failed.slice(0, FAILED_SHOWN).map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`), ...(at.failed.length > FAILED_SHOWN ? [`  … and ${at.failed.length - FAILED_SHOWN} more`] : []))
     return out.join('\n')
   }
 

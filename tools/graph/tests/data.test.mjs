@@ -90,7 +90,11 @@
 //  (Part 1, continued) 24. item shapes and binding: names matched on a template's literal parts, no
 //      fuzzy matching; serde's case rules; logical tables; each binding rule on hand-written facts
 //      (env chain, name template in a function and in a file, a constant of another file, an exact
-//      name, the mapper hook, ambiguous with rivals, unbound, unresolved); then, with the parser
+//      name, the mapper hook, ambiguous with rivals, unbound, unresolved); types that hold themselves
+//      (newtypes, aliases), a wide graph of types and a file of many functions in bounded time, a
+//      failure while binding leaving the stores answered; serde's tagging of newtype variants in
+//      each mode; resolution within one language; two repositories' tables of one name kept apart;
+//      a table named only in test code; then, with the parser
 //      runtime, the serde and TypeScript extractors (every serde attribute, TypeScript's optional,
 //      unions, extends and intersections, the uses per function) and the shapes as stored
 import { spawnSync, spawn } from 'node:child_process'
@@ -1975,7 +1979,7 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
 {
   const { namesMatch, codeName, lastWord } = await import('../lib/data/readers/names.mjs')
   const { renameField, renameVariant, RULES } = await import('../lib/data/extractors/serde.mjs')
-  const { logicalTables, bindItems, dashed } = await import('../lib/data/binding.mjs')
+  const { logicalTables, bindItems, dashed, bindingHow } = await import('../lib/data/binding.mjs')
   const T = '{env}-{project}-orders'
   // the template's literal parts, its unknown parts wildcards; the code's {} anything it fills in
   eq([['{}-shop-orders', T], ['test-shop-orders', T], ['{}-orders', T], ['{}-{}-orders', '{env}-shop-orders'], ['{}-shop-orders', 'local-shop-orders'], ['Orders', 'Orders']].map(([c, t]) => namesMatch(c, t)), [true, true, true, true, true, true],
@@ -1996,10 +2000,11 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
     ['infra:dynamodb/{env}-{project}-carts', '{env}-{project}-carts'], ['infra:dynamodb/{env}-carts', '{env}-carts'], ['api:dynamodb/dev-shop-carts', 'dev-shop-carts'], ['a:dynamodb/Reviews', 'Reviews'], ['b:dynamodb/Reviews', 'Reviews']].map(([id, name]) => ({ id, name }))
   const lt = logicalTables(ents)
   eq(lt.groups.filter((g) => g.members.length > 1).map((g) => [g.name, g.members, g.via]), [
-    ['Reviews', ['a:dynamodb/Reviews', 'b:dynamodb/Reviews'], 'the same name'],
     [T, ['api:dynamodb/local-shop-orders', 'infra:dynamodb/{env}-{project}-orders', 'web:dynamodb/{env}-{project}-orders'], 'an exact name its template matches'],
-  ], 'grouped: one template in two stores, an exact name it matches, one exact name in two stores; Orders and orders stay apart (no case folding)')
-  eq([...lt.notes], [['api:dynamodb/dev-shop-carts', 'its name matches 2 name templates ({env}-carts, {env}-{project}-carts): grouped with none']], 'an exact name two templates match joins neither, and says why')
+  ], 'grouped: one template in two stores, an exact name it matches; Orders and orders stay apart (no case folding), and so do two repositories\' Reviews (a bare name is no evidence across repositories)')
+  eq([...lt.notes].sort(), [['a:dynamodb/Reviews', 'b:dynamodb/Reviews also names a table Reviews: not grouped (the same name in two repositories is no evidence they are one table)'], ['api:dynamodb/dev-shop-carts', 'its name matches 2 name templates ({env}-carts, {env}-{project}-carts): grouped with none'], ['b:dynamodb/Reviews', 'a:dynamodb/Reviews also names a table Reviews: not grouped (the same name in two repositories is no evidence they are one table)']],
+    'an exact name two templates match joins neither, and two repositories\' tables of one name stay apart: each says why')
+  eq(lt.groups.filter((g) => g.name === 'Reviews').map((g) => [g.id, g.label]), [['table:a:dynamodb/Reviews', 'a:dynamodb/Reviews'], ['table:b:dynamodb/Reviews', 'b:dynamodb/Reviews']], 'two logical tables of one name are told apart by where they are declared')
 
   // bindings, from hand-written code facts: each rule with its evidence, its confidence and its rivals
   const groups = logicalTables([...[T, '{env}-{project}-customers', '{env}-{project}-carts', '{env}-{project}-saved_carts', '{env}-{project}-reviews'].map((n) => ({ id: `infra:dynamodb/${n}`, name: n })), { id: 'api:dynamodb/Orders', name: 'Orders' }]).groups
@@ -2036,6 +2041,78 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
   eq(by('api:Ledger'), [['{env}-{project}-reviews', 'name-match', 'nameTemplate', 'function', ['{env}-{project}-carts name-match']]], 'a conversion in test code ranks below the code it tests: the test that builds a ledger item for the carts fixture is a rival, not a tie')
   eq(B.items.filter((it) => !it.bound.length).map((it) => [it.id, it.converts.map((c) => c.how)]), [['api:Coupon', ['implements a conversion']]], 'a type implementing a conversion that no table name pairs with is unbound')
   eq(B.unresolved.map((u) => [u.type, u.path]), [['Thing', 'src/other.rs']], 'a conversion of a name with two definitions and none in its file is not resolved, and said')
+
+  // ── the review's round: cycles, work bounds, serde tagging of newtype variants, languages, repositories ──
+  const types1 = (lang, path, types) => ({ repo: 'r', extractor: lang === 'rust' ? 'serde@1' : 'ts-types@1', code: { path, lang, types, consts: [], fns: [], notes: [] } })
+  const st = (name, fields, extra = {}) => ({ name, kind: 'struct', line: 1, end: 2, serde: true, fields, ...extra })
+  const fl = (name, t, extra = {}) => ({ name, raw: name, t, nullable: false, default: null, line: 1, ...extra })
+  const R = (n) => ({ k: 'ref', n })
+  const shapeOf = (rows, name) => { const it = bindItems(rows, [], new Map(), []).items.find((x) => x.name === name); return it ? it.fields.map((f) => `${f.path} ${f.kind}${f.nullable ? '?' : ''}${f.values ? ` [${f.values.join(',')}]` : ''}`) : null }
+  const cycles = [
+    ['a Rust newtype holding itself', 'rust', [st('Node', [], { newtype: { k: 'ref', n: 'Node', nullable: true } }), st('Z', [fl('n', R('Node'))], { converts: 9 })]],
+    ['two Rust newtypes holding each other', 'rust', [st('A', [], { newtype: R('B') }), st('B', [], { newtype: R('A') }), st('Z', [fl('n', R('A'))], { converts: 9 })]],
+    ['a Rust newtype of a list of itself', 'rust', [st('L', [], { newtype: { k: 'list', of: R('L') } }), st('Z', [fl('n', R('L'))], { converts: 9 })]],
+    ['a TypeScript alias of itself', 'ts', [{ name: 'A', kind: 'alias', line: 1, end: 1, serde: true, fields: [], alias: R('A') }, { name: 'Z', kind: 'interface', line: 2, end: 2, serde: true, fields: [fl('f', R('A'))], converts: 9 }]],
+    ['two TypeScript aliases of each other', 'ts', [{ name: 'A', kind: 'alias', line: 1, end: 1, serde: true, fields: [], alias: R('B') }, { name: 'B', kind: 'alias', line: 2, end: 2, serde: true, fields: [], alias: R('A') }, { name: 'Z', kind: 'interface', line: 3, end: 3, serde: true, fields: [fl('f', R('A'))], converts: 9 }]],
+  ]
+  for (const [what, lang, ts] of cycles) {
+    let got
+    try { got = shapeOf([types1(lang, lang === 'rust' ? 'a.rs' : 'a.ts', ts)], 'Z') } catch (e) { got = `throws ${e.constructor.name}: ${String(e.message).slice(0, 60)}` }
+    ok(Array.isArray(got) && got.length >= 1 && got.length <= 2 && /^[nf] /.test(got[0]), `${what}: the shape stops at the type already followed, a leaf (${JSON.stringify(got)})`)
+  }
+  // whatever a project's code says, reconcile answers: an unexpected failure of the binding is a note
+  const broken = reconcile([{ repo: 'app', extractor: 'dynamodb-table@1', facts: dynamodbTable.extract('{ "TableName": "a", "KeySchema": [{ "AttributeName": "id", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "id", "AttributeType": "S" }] }', 'a.json') }, { repo: 'app', extractor: 'serde@1', facts: { declarations: [], code: { path: 'x.rs', lang: 'rust', types: 7, consts: [], fns: [] } } }])
+  eq([broken.stores.map((s) => s.entities.map((e) => e.name)), broken.items, broken.bindings, /^the item shapes were not bound: /.test(broken.itemsError || '')], [[['a']], [], [], true], 'a failure while binding item shapes leaves the stores answered, and says so')
+
+  // work bounds: a wide graph of types, and a file of many functions, each in bounded time
+  const dag = Array.from({ length: 10 }, (_, i) => st(`T${i}`, Array.from({ length: 12 }, (_, k) => fl(`f${k}`, R(`T${i + 1}`))), i === 0 ? { converts: 9 } : {})).concat([st('T10', [fl('leaf', { k: 'number' })])])
+  let t0 = Date.now()
+  const wide = bindItems([types1('rust', 'dag.rs', dag)], [], new Map(), []).items.find((x) => x.name === 'T0')
+  const wideMs = Date.now() - t0
+  ok(wideMs < 3000 && wide.fields.length === 400 && wide.notes.some((n) => /cut at 400 fields/.test(n)), `ten types of twelve fields each holding the next: expanded once per type, cut at 400 fields and said so (${wideMs} ms, ${wide.fields.length} fields, ${JSON.stringify(wide.notes)})`)
+  const many = { repo: 'r', extractor: 'serde@1', code: { path: 'many.rs', lang: 'rust', types: Array.from({ length: 40 }, (_, k) => st(`C${k}`, [fl('id', { k: 'string' })])), consts: [], notes: [],
+    fns: Array.from({ length: 300 }, (_, i) => fn(`f${i}`, i * 10, { converts: Array.from({ length: 40 }, (_, k) => ({ type: `C${k}`, line: i * 10 + 1, how: 'to_item' })), names: Array.from({ length: 40 }, (_, k) => ({ text: `{}-shop-t${k}`, line: i * 10 + 2 })) })) } }
+  const tgroups = logicalTables(Array.from({ length: 40 }, (_, k) => ({ id: `infra:dynamodb/{env}-{project}-t${k}`, name: `{env}-{project}-t${k}` }))).groups
+  t0 = Date.now()
+  const mb = bindItems([many], tgroups, new Map(tgroups.flatMap((g) => g.members).map((id) => [id, { id, name: id.slice(id.indexOf('/') + 1) }])), [])
+  const manyMs = Date.now() - t0
+  ok(manyMs < 3000 && mb.bindings.length === 40 * 40 && mb.bindings.every((b) => b.confidence === 'ambiguous' && b.sites === 300), `300 functions each converting 40 types and naming 40 tables: paired per type and table, not per conversion and name (${manyMs} ms, ${mb.bindings.length} bindings)`)
+
+  // serde's tagging of newtype variants (internally tagged: the variant's struct beside the tag;
+  // adjacently tagged: the variant's type at the content key; untagged: inline; externally: under its name)
+  const ev = (name, variants, extra) => ({ name, kind: 'enum', line: 3, end: 4, serde: true, fields: [], variants, converts: 9, ...extra })
+  const V = (name, x = {}) => ({ name, line: 3, ...x })
+  const tagRows = [types1('rust', 'ev.rs', [st('Created', [fl('id', { k: 'string' }), fl('at', { k: 'number' })]), st('Deleted', [fl('id', { k: 'string' })]),
+    ev('Internal', [V('Created', { t: R('Created') }), V('Deleted', { t: R('Deleted') }), V('Bare', { t: { k: 'string' } }), V('Gone', { unit: true })], { tag: 'type' }),
+    ev('Adjacent', [V('Created', { t: R('Created') }), V('Note', { t: { k: 'string' } }), V('Moved', { fields: [fl('to', { k: 'string' })] })], { tag: 'kind', content: 'payload' }),
+    ev('Untagged', [V('Created', { t: R('Created') }), V('Deleted', { t: R('Deleted') })], { untagged: true }),
+    ev('External', [V('Made', { t: R('Created') }), V('Count', { t: { k: 'number' } }), V('Off', { unit: true }), V('Moved', { fields: [fl('to', { k: 'string' })] })]),
+  ])]
+  eq(shapeOf(tagRows, 'Internal'), ['type enum [Created,Deleted,Bare,Gone]', 'id string', 'at number'], 'internally tagged: a newtype variant\'s struct stored beside the tag')
+  ok(bindItems(tagRows, [], new Map(), []).items.find((x) => x.name === 'Internal').notes.some((n) => n.includes('Internal::Bare') && n.includes('serde rejects')), 'internally tagged, a newtype of a string: serde rejects it, and the shape says so')
+  eq(shapeOf(tagRows, 'Adjacent'), ['kind enum [Created,Note,Moved]', 'payload any', 'payload.id string', 'payload.at number', 'payload.to string'], 'adjacently tagged: each variant\'s value at the content key (a struct\'s fields under it, a string the value itself, so its kind is any)')
+  eq(shapeOf(tagRows, 'Untagged'), ['id string', 'at number'], 'untagged: the newtype variants\' structs inline')
+  eq(shapeOf(tagRows, 'External'), ['Made object?', 'Made.id string', 'Made.at number', 'Count number?', 'Moved object?', 'Moved.to string'], 'externally tagged: one member per variant (a unit variant none)')
+
+  // languages: a name resolves among the types of its own language
+  const homRows = [types1('rust', 'src/model.rs', [st('Order', [fl('id', { k: 'string' })]), st('Wrapper', [fl('status', R('Status')), fl('id', { k: 'string' })], { converts: 9 })]),
+    { repo: 'r', extractor: 'serde@1', code: { path: 'src/puts.rs', lang: 'rust', types: [], consts: [], notes: [], fns: [fn('put', 1, { converts: [{ type: 'Order', line: 2, how: 'to_item' }] })] } },
+    types1('ts', 'web/order.ts', [{ name: 'Order', kind: 'interface', line: 1, end: 1, serde: true, fields: [fl('orderId', { k: 'string' })] }, { name: 'Status', kind: 'alias', line: 2, end: 2, serde: true, fields: [], values: ['draft', 'sent'] }])]
+  const hom = bindItems(homRows, [], new Map(), [])
+  eq([hom.unresolved, hom.items.map((it) => [it.id, it.lang, it.path])], [[], [['r:Order', 'rust', 'src/model.rs'], ['r:Wrapper', 'rust', 'src/model.rs']]], 'a Rust conversion of Order resolves to the Rust Order, never the TypeScript one of the same repository')
+  eq(shapeOf(homRows, 'Wrapper'), ['status ref', 'id string'], 'a Rust field typed by a type serde does not shape stays its name: never the TypeScript type of that name')
+
+  // repositories: a bare name is no evidence across them (two repositories' own sessions tables)
+  const sess = (repo) => ({ repo, extractor: 'dynamodb-table@1', facts: dynamodbTable.extract(`{ "TableName": "sessions", "KeySchema": [{ "AttributeName": "${repo === 'api' ? 'sid' : 'invoice'}", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "${repo === 'api' ? 'sid' : 'invoice'}", "AttributeType": "S" }] }`, 'tables/sessions.json') })
+  const two = reconcile([sess('api'), sess('billing'), { repo: 'api', extractor: 'serde@1', facts: { declarations: [], code: { path: 'src/sess.rs', lang: 'rust', notes: [], consts: [], types: [st('LoginSession', [fl('sid', { k: 'string' }), fl('user', { k: 'string' })])], fns: [fn('save', 3, { converts: [{ type: 'LoginSession', line: 4, how: 'to_item' }], names: [{ text: 'sessions', line: 5 }] })] } } }])
+  const sOf = (id) => two.stores.flatMap((s) => s.entities).find((e) => e.id === id)
+  eq([two.logical, two.bindings.map((b) => [b.type, b.table, b.confidence, b.entities]), sOf('billing:dynamodb/sessions').fields.map((f) => f.name), (sOf('billing:dynamodb/sessions').bound || []).length, sOf('api:dynamodb/sessions').fields.map((f) => f.name)],
+    [[], [['LoginSession', 'api:dynamodb/sessions', 'name-match', ['api:dynamodb/sessions']]], ['invoice'], 0, ['sid', 'user']],
+    'two repositories each with their own sessions table: not one table, no conflict between them; the api code\'s literal binds its own repository\'s table only, and its fields stay off the other')
+
+  // a table named only in test code says so, and ranks no higher than a name-match
+  const tq = bindItems([types1('rust', 'src/probe.rs', [st('Probe', [fl('id', { k: 'string' })])]), { repo: 'r', extractor: 'serde@1', code: { path: 'src/probe_repo.rs', lang: 'rust', types: [], consts: [], notes: [], fns: [fn('put', 1, { converts: [{ type: 'Probe', line: 2, how: 'to_item' }] }), fn('tests::reads_the_table', 9, { test: true, env: [{ name: 'CUSTOMERS_TABLE', line: 10 }] })] } }], groups, entities, wiring)
+  eq(tq.bindings.map((b) => [b.table, b.confidence, b.via, b.pairing, b.testOnly, bindingHow(b)]), [['{env}-{project}-customers', 'name-match', 'env', 'file', true, 'an environment variable the infra sets, in one file, named only in test code']], 'the variable is read only in a test: name-match, said to be named only in test code')
 
   // the extractors, through the pinned grammars
   const deps = await import('../lib/deps.mjs')
@@ -2182,6 +2259,13 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
     eq(shape(tsRows, 'Order'), ['id string', 'createdAt string', 'status enum [open,paid]', 'note string?', 'total number?', 'lines list', 'lines[].sku string', 'lines[].qty number', 'tags list', 'prices map', 'prices{}.cents number', 'shipping object', 'shipping.city string', 'shipping.zip string?', 'at string'],
       'the TypeScript item as stored: what it extends first, nested object types, list elements and map values by path')
     eq(shape(tsRows, 'Named'), ['id string', 'createdAt string', 'name string', 'status enum [a,b]'], 'an intersection inlines the type it names; a field typed by an alias of literals is an enum')
+    // a base's code is read aside in batches; a file that kills the reader fails alone
+    const { extractAside } = await import('../lib/data/readers/code-aside.mjs')
+    process.env.GRIMOIRE_TEST_ASIDE_CRASH = 'src/b.rs'
+    let aside
+    try { aside = extractAside([{ id: 'serde', path: 'src/a.rs', text: RS }, { id: 'serde', path: 'src/b.rs', text: RS }, { id: 'ts-types', path: 'src/c.ts', text: TSX }]) } finally { delete process.env.GRIMOIRE_TEST_ASIDE_CRASH }
+    eq([aside.get('src/a.rs')?.code?.types?.length, aside.get('src/b.rs') instanceof Error ? aside.get('src/b.rs').message : null, aside.get('src/c.ts')?.code?.types?.length], [rc.types.length, 'the code reader stopped (70): not read', tc.types.length],
+      'a batch the reader dies on is read again file by file: the file that killed it fails alone, the others are read')
   }
 }
 
@@ -2795,7 +2879,7 @@ async function indexed() {
       'Data stores (2), read from migrations, snapshots and table declarations:',
       'api:dynamodb  dynamodb  2 tables · 1 GSI · 2 item types bound · 2 conflicts',
       'infra:dynamodb  dynamodb  5 tables · 0 GSIs · 5 item types bound · 2 conflicts',
-      'Logical tables (1), one table declared in several places (matched on a name template\'s literal parts, or the same name; never by a guess):',
+      'Logical tables (1), one table declared in several places (the same name template, or an exact name a template matches on its literal parts; never by a guess, never by a bare name across repositories):',
       `  ${ORD}  api:dynamodb/local-shop-orders + infra:dynamodb/${ORD}  (an exact name its template matches)  [2 conflicts across them]`,
       'Item types (6), the types code converts to or from an item: 5 bound to a table, 1 unbound',
       '  api:Cart  ambiguous: {env}-{project}-carts | {env}-{project}-saved_carts (a name the table\'s name or template matches, in one function)  api/src/model.rs:63',
@@ -2803,7 +2887,7 @@ async function indexed() {
       '  api:Customer  → {env}-{project}-customers  convention (an environment variable the infra sets, in one function)  api/src/model.rs:55',
       `  api:Order  → ${ORD}  name-match (a name the table's name or template matches, in one function)  api/src/model.rs:7`,
       `  api:OrderView  → ${ORD}  convention (an environment variable the infra sets, in one function)  api/node/src/types.ts:2`,
-      '  api:Review  → {env}-{project}-reviews  name-match (a name the table\'s name or template matches, in one file)  api/src/model.rs:69',
+      '  api:Review  → {env}-{project}-reviews  name-match (a name the table\'s name or template matches, in one file, named only in test code)  api/src/model.rs:69',
     ], 'graph_data: the infra repository\'s tables bound to the api repository\'s types; the local-dev file\'s orders and the prod template one logical table, the local-dev Customers apart; each item type with its table and confidence, the ambiguous one with both tables, the unbound one listed')
     const oe = await bq('data', { entity: `infra:dynamodb/${ORD}` })
     const sect = (text, head) => { const ls = text.split('\n'), i = ls.findIndex((l) => l.startsWith(head)); if (i < 0) return []; const out = [ls[i]]; for (const l of ls.slice(i + 1)) { if (!l.startsWith(' ')) break; out.push(l) } return out }
@@ -2852,7 +2936,7 @@ async function indexed() {
       '    rivals: {env}-{project}-saved_carts (ambiguous, a name the table\'s name or template matches, in one function)',
     ], 'the ambiguous case: one function names two tables, each binding lists the other as its rival')
     const rv = await bq('data', { entity: '{env}-{project}-reviews' })
-    ok(rv.includes('  Review  name-match  a name the table\'s name or template matches, in one file, 2 sites  api/src/model.rs:69') && rv.includes('    builds  test-shop-reviews  api/src/reviews.rs:27  (test code)'), 'co-occurrence in one file: the conversion, and the name its test builds (said to be test code)')
+    ok(rv.includes('  Review  name-match  a name the table\'s name or template matches, in one file, named only in test code  api/src/model.rs:69') && rv.includes('    builds  test-shop-reviews  api/src/reviews.rs:27  (test code)'), 'co-occurrence in one file: the conversion, and the name its test builds (said to be test code)')
     const cu = await bq('data', { entity: 'Customers' })
     ok(cu.includes('Bound item types: none') && !cu.includes('logical') && (await bq('data', { entity: '{env}-{project}-customers' })).includes('  Customer  convention  an environment variable the infra sets, in one function'),
       'the local-dev Customers (another naming) binds to nothing and joins no logical table: no rule states it; the prod table takes the type through its variable')
@@ -2907,6 +2991,14 @@ async function indexed() {
     bdb.close()
     const tgt = pt(`infra:dynamodb/${ORD}.lines[].qty`)
     eq([tgt.entity, tgt.kind, tgt.el.name, findT(bmodel, tgt).el?.name], [ORD, 'field', 'lines[].qty', 'lines[].qty'], 'a delta addresses an item field as <table>.<field path>: it resolves')
+    // a type that holds itself, in Rust and in TypeScript: every data tool still answers
+    writeFileSync(path.join(BP, 'api/src/tree.rs'), ['use serde::{Deserialize, Serialize};', '#[derive(Serialize, Deserialize)]', 'pub struct Node(Option<Box<Node>>);', '#[derive(Serialize, Deserialize)]', 'pub struct Tree { pub root: Node }', 'impl Tree { pub fn to_item(&self) -> Item { serde_dynamo::to_item(self).unwrap() } }', ''].join('\n'))
+    writeFileSync(path.join(BP, 'api/node/src/loop.ts'), 'export type A = B\nexport type B = Partial<A>\nexport interface Looped { f: A }\nexport function put(x: Looped) { return marshall(x) }\n')
+    await bq('index')
+    const cyc = await bq('data')
+    const cent = await bq('data', { entity: `infra:dynamodb/${ORD}` }), cch = await bq('changes'), cpage = dataOf(await renderBind(loadBind(BP))).data
+    ok(cyc.includes('  api:Tree  unbound') && cyc.includes('  api:Looped  unbound'), `a newtype holding itself and two aliases holding each other: graph_data answers (${cyc.split('\n').filter((l) => /Tree|Looped/.test(l)).join(' | ')})`)
+    ok(cent.includes('Item (18 fields') && cch.includes('currency') && cpage.items.some((it) => it.id === 'api:Tree'), `… and so do graph_data entity, graph_changes and the page (${cent.split('\n').find((l) => l.startsWith('Item')) || cent.slice(0, 200)})`)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

@@ -225,9 +225,10 @@ export function dataData(db, files, repos, changes = null, deltas = []) {
   const where = new Map(out.stores.flatMap((s, i) => s.tables.map((t, j) => [`${s.id}/${t.name}`, [i, j]])))
   out.items = (model.items || []).map((it) => {
     const bs = (model.bindings || []).filter((b) => b.item === it.id)
-    return { id: it.id, repo: it.repo, name: it.name, kind: it.kind, at: `${shown(it.repo, it.path)}:${it.line}`, file: fileId.get(`${it.repo}\0${it.path}`) ?? -1, fields: it.fields.length,
+    return { id: it.id, repo: it.repo, name: it.name, kind: it.kind, at: `${shown(it.repo, it.path)}:${it.line}`, file: fileId.get(`${it.repo}\0${it.path}`) ?? -1, fields: it.fields.length, notes: it.notes || [],
       bound: bs.map((b) => ({ table: b.table, conf: b.confidence, cards: b.entities.map((id) => where.get(id)).filter(Boolean) })) }
   })
+  out.itemsError = model.itemsError || null
   const packedAt = new Map(out.stores.map((s, i) => [s.id, i]))
   out.deltas = deltas.map((d) => packDelta(d, { model, base: changes?.base ? changes.at.model : null, diff: whole, why: changes?.why || null, stores: out.stores, packedAt, shown }))
   out.delta = Math.max(0, deltas.findIndex((d) => d.selected))
