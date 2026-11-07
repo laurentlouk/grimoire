@@ -78,13 +78,13 @@ export function renameField(name, rule) {
 }
 
 // ── attributes ──
-const strOf = (n) => {
+export const strOf = (n) => {
   const t = n.text
   if (n.type === 'raw_string_literal') { const m = /^r(#*)"([\s\S]*)"\1$/.exec(t); return m ? m[2] : null }
   if (n.type !== 'string_literal') return null
   try { return JSON.parse(t.replace(/\\'/g, "'").replace(/\\0/g, '\\u0000').replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, (_, h) => String.fromCodePoint(parseInt(h, 16)).replace(/["\\]/g, '\\$&'))) } catch { return t.slice(1, -1) }
 }
-const isStr = (n) => n.type === 'string_literal' || n.type === 'raw_string_literal'
+export const isStr = (n) => n.type === 'string_literal' || n.type === 'raw_string_literal'
 // a token tree's meta items: [{ key, value?: string, list?: [meta] }] (`a`, `a = "x"`, `a(…)`)
 function metas(tt) {
   const out = []
@@ -105,7 +105,7 @@ function metas(tt) {
   return out
 }
 // an attribute_item → { name, args: token_tree | null }
-function attrOf(item) {
+export function attrOf(item) {
   const a = named(item)[0]
   if (!a || a.type !== 'attribute') return null
   const head = named(a)[0]
@@ -120,7 +120,7 @@ function serdeOf(attrs) {
 // a name meta's stored value: `rename = "x"`, or `rename(serialize = "x", deserialize = "y")`'s serialize
 const said = (m) => (!m ? null : m.value !== undefined ? m.value : m.list ? (m.list.find((x) => x.key === 'serialize')?.value ?? null) : null)
 const derivesSerde = (attrs) => attrs.some((a) => a && (a.name === 'derive' || a.name === 'cfg_attr') && a.args && /\b(?:Serialize|Deserialize)\b/.test(a.args.text))
-const isTestAttr = (attrs) => attrs.some((a) => a && (/(^|::)test$/.test(a.name) || a.name === 'rstest' || (a.name === 'cfg' && a.args && /^\(\s*test\s*\)$/.test(a.args.text))))
+export const isTestAttr = (attrs) => attrs.some((a) => a && (/(^|::)test$/.test(a.name) || a.name === 'rstest' || (a.name === 'cfg' && a.args && /^\(\s*test\s*\)$/.test(a.args.text))))
 
 // ── types ──
 const NUM = new Set(['i8', 'i16', 'i32', 'i64', 'i128', 'isize', 'u8', 'u16', 'u32', 'u64', 'u128', 'usize', 'f32', 'f64', 'Decimal', 'BigDecimal', 'NonZeroU32', 'NonZeroU64', 'NonZeroUsize'])
@@ -259,7 +259,7 @@ function enumOf(node, attrs, notes) {
 // ── uses ──
 const FORMAT = new Set(['format', 'format_args'])
 // a format string's parts: literal text and null for each {…} the code fills in
-function formatParts(s) {
+export function formatParts(s) {
   const parts = []
   let lit = ''
   for (let i = 0; i < s.length; i++) {
@@ -273,7 +273,7 @@ function formatParts(s) {
 }
 const ENV_CALL = /(?:^|::)env::var(?:_os)?$|^(?:dotenvy?|dotenv)::var$/
 
-function scanUses(root, ctx, sink) {
+export function scanUses(root, ctx, sink) {
   // sink: { names, env, uses, converts?, vars? }
   const consumed = new Set()
   each(root, (n) => {
@@ -453,7 +453,7 @@ export default {
   lang: 'rust',
   wants: (p) => RS.test(p),
   level: (p, text) => rustLevel(text),
-  discover: (info) => [...info].filter(([p, i]) => RS.test(p) && i.ddl === 1).map(([p]) => ({ key: p, inputs: [p] })),
+  discover: (info) => [...info].filter(([p, i]) => RS.test(p) && (i.ddl & 1)).map(([p]) => ({ key: p, inputs: [p] })),
   extract(text, file, ctx) {
     if (ctx.aside) return ctx.aside('serde', file, text)
     const tree = ctx.tree('rust', text)

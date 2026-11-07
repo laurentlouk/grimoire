@@ -274,29 +274,31 @@ function shaper(find) {
   }
 }
 
-// ── binding ──
-// codeRows: [{ repo, extractor, code }]; groups from logicalTables; entities: Map(id → entity);
-// wiring: [{ name: the variable, entity: id, repo, path, line }] (what the infra sets)
-export function bindItems(codeRows, groups, entities, wiring) {
+// ── what names a table: shared by the item binding and the access patterns (data/access.mjs) ──
+// codeRows: [{ repo, code: { lang, path, consts } }] (more rows only add constants: one of a path
+// and name already listed is not listed again); groups from logicalTables; entities: Map(id →
+// entity); wiring: [{ name: the variable, entity: id, repo, path, line }] (what the infra sets).
+//   groupOf(entity id) → its logical table
+//   refsOf(sink { names, env }, at { repo, path }, test, via0?) → [{ group, via, test, evidence }]
+//   constRefs(name, at { repo, path, lang }, test) → the refs of the constant `name` resolves to
+//   findConst(name, at) → { c, path, repo } | null: its file's, else its repository's one, else the
+//                          project's one, in its language
+//   collapse(refs) → one ref per logical table (an environment read over a name, production code
+//                    over a test)
+const addTo = (m, k, v) => { if (!m.has(k)) m.set(k, []); m.get(k).push(v) }
+export function tableResolver(codeRows, groups, entities, wiring) {
   const groupOf = new Map()
   for (const g of groups) for (const m of g.members) groupOf.set(m, g)
-  // types by name, per language: (repo, language, name) and (language, name)
-  const defs = new Map(), all = new Map()
-  const addDef = (m, k, v) => { if (!m.has(k)) m.set(k, []); m.get(k).push(v) }
-  for (const r of codeRows) for (const t of r.code.types || []) { const v = { def: t, path: r.code.path, repo: r.repo, lang: r.code.lang, extractor: r.extractor }; addDef(defs, `${r.repo}\0${r.code.lang}\0${t.name}`, v); addDef(all, `${r.code.lang}\0${t.name}`, v) }
-  // a name from a file: its own, else its repository's one, else the project's one, in its language
-  const find = (name, at) => {
-    const list = defs.get(`${at.repo}\0${at.lang}\0${name}`) || []
-    const own = list.filter((v) => v.path === at.path)
-    if (own.length) return own[0]
-    if (list.length === 1) return list[0]
-    if (list.length) return null
-    const proj = all.get(`${at.lang}\0${name}`) || []
-    return proj.length === 1 ? proj[0] : null
+  const consts = new Map(), constsAll = new Map(), seen = new Set()
+  for (const r of codeRows) {
+    for (const c of r.code.consts || []) {
+      const k = `${r.repo}\0${r.code.path}\0${c.name}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      const v = { c, path: r.code.path, repo: r.repo }
+      addTo(consts, `${r.repo}\0${r.code.lang}\0${c.name}`, v); addTo(constsAll, `${r.code.lang}\0${c.name}`, v)
+    }
   }
-  // constants by name, as types are
-  const consts = new Map(), constsAll = new Map()
-  for (const r of codeRows) for (const c of r.code.consts || []) { const v = { c, path: r.code.path, repo: r.repo }; addDef(consts, `${r.repo}\0${r.code.lang}\0${c.name}`, v); addDef(constsAll, `${r.code.lang}\0${c.name}`, v) }
   const findConst = (name, at) => {
     const list = consts.get(`${at.repo}\0${at.lang}\0${name}`) || []
     const own = list.filter((v) => v.path === at.path)
@@ -307,7 +309,7 @@ export function bindItems(codeRows, groups, entities, wiring) {
     return proj.length === 1 ? proj[0] : null
   }
   const setBy = new Map() // variable → [wiring]
-  for (const w of wiring) addDef(setBy, w.name, w)
+  for (const w of wiring) addTo(setBy, w.name, w)
   const tables = [...entities.values()]
   // the logical tables a built name matches, once per name and repository (code repeats its names): a
   // literal equal to an exact table name is evidence in its own repository only
@@ -348,6 +350,27 @@ export function bindItems(codeRows, groups, entities, wiring) {
   // a function's refs, one per logical table: an environment read over a name, production code over a test
   const better = (x, y) => (x.via === 'env' && y.via !== 'env') || (x.via === y.via && !x.test && y.test)
   const collapse = (refs) => { const m = new Map(); for (const x of refs) { const cur = m.get(x.group.id); if (!cur || better(x, cur)) m.set(x.group.id, x) } return [...m.values()] }
+  return { groupOf, refsOf, constRefs, findConst, collapse, tables }
+}
+
+// ── binding ──
+// codeRows: [{ repo, extractor, code }]; groups, entities and wiring as tableResolver takes them; R:
+// the resolver, when one is shared (its rows may hold more constants than codeRows)
+export function bindItems(codeRows, groups, entities, wiring, R = tableResolver(codeRows, groups, entities, wiring)) {
+  const { groupOf, refsOf, constRefs, collapse, tables } = R
+  // types by name, per language: (repo, language, name) and (language, name)
+  const defs = new Map(), all = new Map()
+  for (const r of codeRows) for (const t of r.code.types || []) { const v = { def: t, path: r.code.path, repo: r.repo, lang: r.code.lang, extractor: r.extractor }; addTo(defs, `${r.repo}\0${r.code.lang}\0${t.name}`, v); addTo(all, `${r.code.lang}\0${t.name}`, v) }
+  // a name from a file: its own, else its repository's one, else the project's one, in its language
+  const find = (name, at) => {
+    const list = defs.get(`${at.repo}\0${at.lang}\0${name}`) || []
+    const own = list.filter((v) => v.path === at.path)
+    if (own.length) return own[0]
+    if (list.length === 1) return list[0]
+    if (list.length) return null
+    const proj = all.get(`${at.lang}\0${name}`) || []
+    return proj.length === 1 ? proj[0] : null
+  }
 
   // item types and their conversions
   const items = new Map() // def → item

@@ -22,14 +22,21 @@ import cloudformation from './extractors/cloudformation.mjs'
 import terraform, { wantsTf, tfLevel } from './extractors/terraform.mjs'
 import serde from './extractors/serde.mjs'
 import tsTypes from './extractors/ts-types.mjs'
+import dynamoAccess from './extractors/dynamo-access.mjs'
 import { DOC } from './readers/documents.mjs'
 import { tableLevel } from './readers/dynamodb.mjs'
 import { skipped } from '../project.mjs'
 
-export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes]
+export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess]
 // the code extractors (kind code): they read a source file through the pinned grammars (ctx.tree)
 export const CODE = EXTRACTORS.filter((ex) => ex.kind === 'code')
-const codeOf = (p) => CODE.find((ex) => ex.wants(p)) || null
+// the inferred ones (the access patterns) read source files through them too
+export const SOURCE = EXTRACTORS.filter((ex) => ex.kind === 'code' || ex.kind === 'inferred')
+export const codeOf = (p) => CODE.find((ex) => ex.wants(p)) || null
+// A source file's level, bits: 1 what the item binding reads (its code extractor's level), 2 a
+// key-value SDK call shape (extractors/dynamo-access.mjs).
+export const sourceLevel = (p, text) => { let l = 0; for (const ex of SOURCE) if (ex.wants(p)) l |= ex.level(p, text); return l }
+const isSource = (p) => SOURCE.some((ex) => ex.wants(p))
 export const MAX_BYTES = 8 << 20 // an input past this is not read (its job reports it)
 export const idOf = (ex) => `${ex.id}@${ex.version}`
 
@@ -46,21 +53,22 @@ export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some(
 // it holds a key schema, a CreateTable input; 0: neither); for Terraform and Terragrunt files
 // (.tf, .tfvars, .tfvars.json, .hcl), extractors/terraform.mjs tfLevel (4: a module declaring a
 // table resource, 5: a terragrunt.hcl Terragrunt runs, 6: a module out of reach, 1: other); for a
-// source file a code extractor reads (.rs, .ts), its level (1: it holds what the item binding reads:
-// a serde derive, a type declaration, a conversion, an environment read, a string constant; 0: none).
-// A change to what this computes moves the store's SCHEMA_VERSION, so no stale level survives in an
-// index.
-export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : wantsTf(p) ? tfLevel(p, text) : DOC.test(p) ? tableLevel(text) : codeOf(p) ? codeOf(p).level(p, text) : null)
+// source file (.rs, .ts, .js, .py, .go), sourceLevel's bits (1: what the item binding reads: a serde
+// derive, a type declaration, a conversion, an environment read, a string constant; 2: a key-value
+// SDK call shape; 0: none). A change to what this computes moves the store's SCHEMA_VERSION, so no
+// stale level survives in an index.
+export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : wantsTf(p) ? tfLevel(p, text) : DOC.test(p) ? tableLevel(text) : isSource(p) ? sourceLevel(p, text) : null)
 // A text worth keeping once inspected (an extractor may read it): every JSON and YAML file is a
 // candidate, but one only the table extractors want and that declares no table is never read again,
-// so the index and a base keep no copy of it; nor is a source file with nothing for the binding.
+// so the index and a base keep no copy of it; nor is a source file with nothing for the binding or
+// the access patterns.
 const TABLE_EXTRACTORS = new Set([dynamodbTable, cloudformation])
-export const keeps = (p, text) => (codeOf(p) ? codeOf(p).level(p, text) > 0 : !DOC.test(p) || tableLevel(text) > 0 || EXTRACTORS.some((ex) => !TABLE_EXTRACTORS.has(ex) && ex.wants(p)))
+export const keeps = (p, text) => (isSource(p) ? sourceLevel(p, text) > 0 : !DOC.test(p) || tableLevel(text) > 0 || EXTRACTORS.some((ex) => !TABLE_EXTRACTORS.has(ex) && ex.wants(p)))
 // A job reads YAML (its context needs ctx.yaml): one of its inputs is a YAML file, or a .template
 // that is not JSON (the extractors decide by the text: readers/documents.mjs).
 export const readsYaml = (job) => job.inputs.some((p) => /\.(?:ya?ml|template)$/i.test(p))
 // A job parses source code (its context needs ctx.tree(lang, text) → a tree-sitter tree).
-export const readsCode = (job) => job.extractor.kind === 'code'
+export const readsCode = (job) => job.extractor.kind === 'code' || job.extractor.kind === 'inferred'
 
 export const plan = (info, opts = {}) => EXTRACTORS.flatMap((ex) => ex.discover(info, opts).map((job) => ({ ...job, extractor: ex })))
 

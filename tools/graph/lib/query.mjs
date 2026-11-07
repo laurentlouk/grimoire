@@ -5,6 +5,7 @@
 import { langOf } from './langs.mjs'
 import { reconcile, elementsOf, storeSummary } from './data/reconcile.mjs'
 import { bindingHow } from './data/binding.mjs'
+import { byFunction, opText, siteHow, isRead } from './data/access.mjs'
 import { kvIndex, projectionText } from './data/model.mjs'
 import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
@@ -75,6 +76,19 @@ export function baseText(base) {
 const CLASSY = "'class','struct','interface','trait','enum','protocol','module','object','type','namespace'"
 const FAILED_SHOWN = 20
 const MAX_TARGETS = 5
+
+// The code graph's symbol around a key-value call (data/access.mjs): the innermost function, method or
+// constructor of the index holding its line, with its callers counted; null when none holds it.
+export function symbolAt(db) {
+  const st = db.prepare("SELECT n.id, n.qualname, n.line FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND f.path = ? AND n.kind IN ('function','method','constructor') AND n.line <= ? AND n.end_line >= ? ORDER BY (n.end_line - n.line) ASC, n.line DESC LIMIT 1")
+  const callers = db.prepare("SELECT count(*) c FROM edges WHERE dst = ? AND kind = 'CALLS'")
+  const memo = new Map()
+  return (s) => {
+    const k = `${s.repo}\0${s.path}\0${s.line}`
+    if (!memo.has(k)) { const n = st.get(s.repo, s.path, s.line, s.line); memo.set(k, n ? { key: `#${n.id}`, name: n.qualname, line: n.line, callers: callers.get(n.id).c } : null) }
+    return memo.get(k)
+  }
+}
 
 export class Graph {
   constructor(db) {
@@ -195,8 +209,9 @@ export class Graph {
         const facts = data.map((x) => (x.facts ? JSON.parse(x.facts) : null))
         const decls = facts.flatMap((f) => (f ? f.declarations : []))
         const code = facts.filter((f) => f && f.code).length // source files read for item shapes (data/binding.mjs)
+        const calls = facts.filter((f) => f && f.access).length // and for access patterns (data/access.mjs)
         const stopped = decls.filter((d) => d.partial).length, failed = data.filter((x) => x.error)
-        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${code ? `, ${code} source file(s) read for item shapes` : ''}${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
+        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${code ? `, ${code} source file(s) read for item shapes` : ''}${calls ? `, ${calls} for access patterns` : ''}${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
       }
     }
     const base = (() => { try { return JSON.parse(this.one("SELECT value FROM meta WHERE key = 'base'")?.value || 'null') } catch { return null } })()
@@ -348,7 +363,7 @@ export class Graph {
       }
       if (st.dialectFrom) out.push(`  dialect: ${this.dialectFrom(st.repo, st.dialectFrom)}`)
     }
-    out.push(...this.dataItems(model))
+    out.push(...this.dataItems(model), ...this.dataAccess(model))
     if (failed.length) out.push(`Extractor failures (${failed.length}), their facts are missing:`, ...failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
     return out.join('\n')
   }
@@ -378,6 +393,43 @@ export class Graph {
       }
     }
     if (model.unresolved?.length) out.push(`  (${plural(model.unresolved.length, 'conversion')} of a type with no single definition: ${[...new Set(model.unresolved.map((u) => u.type))].slice(0, 6).join(', ')})`)
+    return out
+  }
+  // the access patterns (data/access.mjs), in one line: graph_data with an entity says the rest
+  dataAccess(model) {
+    if (model.accessError) return [`Access patterns: ${model.accessError}`]
+    const a = model.access
+    if (!a) return []
+    const lost = a.sites.length - a.placed
+    return [`Access patterns (inferred from key-value SDK calls; leads, never verdicts): ${plural(a.sites.length, 'call')} in ${plural(a.files, 'file')}, ${a.placed} reaching a table${lost ? `, ${lost} no table found for` : ''}; ${plural(a.leads, 'index', 'indexes')} with no access found (graph_data with a table lists them)`]
+  }
+  // a key-value table's access: each index with the functions that query it, or a lead; the functions
+  // reading and writing it, through the code graph's symbols
+  dataEntityAccess(model, e) {
+    const a = e.access, sites = model.access?.sites || []
+    if (!a) return []
+    const sym = symbolAt(this.db)
+    const fnLine = (f) => {
+      const via = [...new Set(f.sites.map(siteHow))].join(' · ')
+      const at = f.sites.map((s) => s.line).join(', ')
+      return `${f.name}  ${f.ops.join(' · ')}${f.writes.length ? ` (writes ${f.writes.join(', ')})` : ''}  ${this.dloc({ repo: f.repo, path: f.path, line: f.line })}  (${f.sites.length === 1 ? 'the call at line' : 'the calls at lines'} ${at}; ${via})${f.callers !== null ? ` · ${plural(f.callers, 'caller')}` : ''}${f.test ? '  (test code)' : ''}`
+    }
+    const out = ['Access (inferred from the key-value SDK calls of the indexed repositories; leads, never verdicts):']
+    for (const i of a.indexes) {
+      const fns = byFunction(i.sites.map((k) => sites[k]), sym)
+      if (i.lead && !fns.length) { out.push(`  index ${i.name}  ${i.lead}`); continue }
+      out.push(`  index ${i.name}  ${i.lead ? `${i.lead}; ` : ''}queried by ${plural(fns.length, 'function')}:`)
+      for (const f of fns) {
+        const via = f.sites.find((s) => s.indexAt)?.indexAt
+        out.push(`    ${fnLine(f)}${via ? `; its name from ${via.text} at ${this.dloc(via)}` : ''}`)
+      }
+    }
+    if (!a.indexes.length) out.push('  no secondary index declared')
+    const all = byFunction(a.sites.map((k) => sites[k]), sym)
+    const reads = all.filter((f) => f.sites.some(isRead)), writes = all.filter((f) => f.sites.some((s) => !isRead(s)))
+    out.push(all.length ? `Reads and writes (${plural(all.length, 'function')}: ${reads.length} reading, ${writes.length} writing), each with what its calls do:` : 'Reads and writes: no key-value call found reaching this table')
+    for (const f of all) out.push(`  ${fnLine(f)}`)
+    if (a.note) out.push(`  note: ${a.note}`)
     return out
   }
   dialectFrom(repo, f) {
@@ -448,10 +500,13 @@ export class Graph {
           if (b.rivals.length) out.push(`    rivals: ${b.rivals.map((r) => `${r.table} (${r.confidence}, ${bindingHow(r)})`).join(' · ')}`)
         }
       } else if (model.items?.length) out.push('Bound item types: none (no code converting a type names this table)')
+      out.push(...this.dataEntityAccess(model, e))
     }
     const shown = (attr, v) => (kv ? changeVal(attr, v) : v)
-    const conflicts = elementsOf(e).flatMap(([label, x]) => x.conflicts.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${shown(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
-    out.push(conflicts.length ? `Conflicts (${conflicts.length}): the declarations disagree; each side is kept` : 'Conflicts: none', ...conflicts)
+    // the declarations' conflicts, then what a call writes that the bound item does not state (inferred)
+    const conflicts = [...elementsOf(e).map(([label, x]) => [label, x.conflicts]), ...(e.access?.conflicts || []).map((c) => [c.label, [c]])]
+      .flatMap(([label, list]) => list.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${shown(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc({ repo: s.repo ?? st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
+    out.push(conflicts.length ? `Conflicts (${conflicts.length}): the declarations disagree${e.access?.conflicts.length ? ', or a call writes an attribute the bound item does not state (inferred, never overriding it)' : ''}; each side is kept` : 'Conflicts: none', ...conflicts)
     if (kv && e.logical) {
       const g = e.logical
       out.push(`One logical table: ${g.members.join(' + ')} (${g.via}); their differences are conflicts`)

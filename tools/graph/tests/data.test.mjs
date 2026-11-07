@@ -2269,6 +2269,194 @@ console.log('\n24 · item shapes and binding: names matched on a template\'s lit
   }
 }
 
+console.log('\n26 · access patterns: key-value SDK calls read per language (extractors/dynamo-access.mjs), resolved to the tables they reach, each index with its queries or a lead, writes the item does not state (data/access.mjs)')
+{
+  const { updatePaths, keyAttrs, projectionPaths, normPath, accessLevel } = await import('../lib/data/extractors/dynamo-access.mjs')
+  const { covered, NO_ACCESS } = await import('../lib/data/access.mjs')
+  // the expressions: what an update writes, a key condition's attributes, a projection
+  const N = { '#s': 'status', '#a': 'audit', '#t': 'tags' }
+  eq(updatePaths('SET #s = :s, lastSeen = if_not_exists(lastSeen, :now), #a.updatedBy = :u, #t = list_append(#t, :t) REMOVE draft, lines[2].note ADD visits :one DELETE labels :l', N),
+    { writes: [{ path: 'status', clause: 'SET' }, { path: 'lastSeen', clause: 'SET' }, { path: 'audit.updatedBy', clause: 'SET' }, { path: 'tags', clause: 'SET' }, { path: 'draft', clause: 'REMOVE' }, { path: 'lines[].note', clause: 'REMOVE' }, { path: 'visits', clause: 'ADD' }, { path: 'labels', clause: 'DELETE' }], open: 0 },
+    'an update: every SET, REMOVE, ADD and DELETE path, #names through the map, a list index as [], functions and their commas in values skipped')
+  eq([updatePaths('set #x = :x, y = :y', {}), updatePaths('SET a=:a,b=:b', null).writes.map((w) => w.path), updatePaths('', {}).writes], [{ writes: [{ path: 'y', clause: 'SET' }], open: 1 }, ['a', 'b'], []], 'a #name the map lacks leaves its path open (not compared, counted); keywords in any case; no blank needed')
+  eq([keyAttrs('#o = :o AND begins_with(placedAt, :p)', { '#o': 'ownerId' }), keyAttrs('pk = :pk AND sk BETWEEN :a AND :b', {}), projectionPaths('id, #o, lines[0].sku', { '#o': 'ownerId' }), normPath('#a.b[1][2].c', { '#a': 'x' })],
+    [['ownerId', 'placedAt'], ['pk', 'sk'], ['id', 'ownerId', 'lines[].sku'], 'x.b[][].c'], 'a key condition\'s attributes (functions, keywords and :values left out), a projection\'s paths')
+  // a written path against a shape: absent at the top, absent inside a struct whose fields are known; a map, an unexpanded type or a declared attribute not compared
+  const shape = new Map([['id', new Set(['string'])], ['audit', new Set(['object'])], ['audit.by', new Set(['string'])], ['lines', new Set(['list'])], ['lines[].sku', new Set(['string'])], ['prices', new Set(['map'])], ['pay', new Set(['ref'])], ['gsiKey', new Set(['any'])]])
+  const parents = new Set(['audit', 'lines[]'])
+  eq(['id', 'nope', 'audit.by', 'audit.when', 'lines[].sku', 'lines[].qty', 'lines[]', 'prices.k.cents', 'pay.whatever', 'gsiKey.x', 'audit.by.deep'].map((p) => covered(p, shape, parents)),
+    [true, false, true, false, true, false, true, true, true, true, true], 'a written path: absent at the top or inside a struct whose fields are known; a map\'s keys, a type not expanded and an attribute only the declarations type are not compared')
+  eq(['src/a.rs', 'web/a.ts', 'web/a.mjs', 'jobs/a.py', 'svc/a.go', 'svc/b.go'].map((p, i) => accessLevel(p, ['x.index_name("I")', 'const p = { TableName: T }', "f({ 'IndexName': 'I' })", 'table = res.Table(name)', 'q := dynamodb.QueryInput{TableName: aws.String(t)}', 'func main() {}'][i])), [2, 2, 2, 2, 2, 0], 'found by content, per language (bit 2 of a source file\'s level)')
+
+  // resolved on hand-written facts: a CreateTable table with four GSIs, an item type bound to it, the calls of two files
+  const tableJson = JSON.stringify({ TableName: 'local-shop-orders', KeySchema: [{ AttributeName: 'customerId', KeyType: 'HASH' }, { AttributeName: 'orderId', KeyType: 'RANGE' }], AttributeDefinitions: ['customerId', 'orderId', 'status', 'sku', 'region', 'owner'].map((a) => ({ AttributeName: a, AttributeType: 'S' })),
+    GlobalSecondaryIndexes: [['ByStatus', 'status'], ['BySku', 'sku'], ['ByRegion', 'region'], ['ByOwner', 'owner']].map(([n, a]) => ({ IndexName: n, KeySchema: [{ AttributeName: a, KeyType: 'HASH' }], Projection: { ProjectionType: 'KEYS_ONLY' } })) }, null, 1)
+  const other = JSON.stringify({ TableName: 'local-shop-carts', KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }, { AttributeName: 'owner', AttributeType: 'S' }], GlobalSecondaryIndexes: [{ IndexName: 'ByOwner', KeySchema: [{ AttributeName: 'owner', KeyType: 'HASH' }], Projection: { ProjectionType: 'ALL' } }] })
+  const sink = (names = [], env = [], uses = []) => ({ names: names.map((text) => ({ text, line: 1 })), env, uses })
+  const s0 = (line, x) => ({ line, fn: 0, op: 'query', table: null, index: null, key: null, writes: [], open: 0, item: null, projection: null, ...x })
+  const rows = [
+    { repo: 'api', extractor: 'dynamodb-table@1', facts: dynamodbTable.extract(tableJson, 'tables/orders.json') },
+    { repo: 'api', extractor: 'dynamodb-table@1', facts: dynamodbTable.extract(other, 'tables/carts.json') },
+    { repo: 'api', extractor: 'serde@1', facts: { declarations: [], code: { path: 'src/model.rs', lang: 'rust', notes: [], consts: [{ name: 'BY_SKU', line: 2, names: [{ text: 'BySku', line: 2 }], env: [] }],
+      types: [{ name: 'Order', kind: 'struct', line: 4, end: 9, serde: true, fields: ['customerId', 'orderId', 'status', 'sku'].map((n, i) => ({ name: n, raw: 'String', t: { k: 'string' }, nullable: false, default: null, line: 5 + i })) }],
+      fns: [{ name: 'save', line: 12, end: 16, converts: [{ type: 'Order', line: 13, how: 'to_item' }], names: [{ text: '{}-shop-orders', line: 14 }], env: [], uses: [] }] } } },
+    { repo: 'api', extractor: 'dynamo-access@1', facts: { declarations: [], access: { lang: 'rust', path: 'src/orders.rs', notes: [], consts: [],
+      fns: [{ name: 'by_status', line: 1, end: 5, ...sink(['{}-shop-orders']) }, { name: 'by_sku', line: 6, end: 9, ...sink([], [], ['BY_SKU']) }, { name: 'touch', line: 10, end: 14, ...sink() }, { name: 'tests::t', line: 20, end: 25, test: true, ...sink(['{}-shop-orders']) }],
+      sites: [s0(2, { table: sink(['{}-shop-orders']), index: 'ByStatus', key: ['status'] }), s0(7, { fn: 1, table: sink(['{}-shop-orders']), indexConst: 'BY_SKU' }), s0(11, { fn: 2, op: 'update', table: sink(['{}-shop-orders']), writes: [{ path: 'status', clause: 'SET' }, { path: 'flagged', clause: 'SET' }] }),
+        s0(21, { fn: 3, test: true, table: sink(['{}-shop-orders']), index: 'ByRegion' })] } } },
+    { repo: 'api', extractor: 'dynamo-access@1', facts: { declarations: [], access: { lang: 'rust', path: 'src/owners.rs', notes: [], consts: [], fns: [{ name: 'any_owner', line: 1, end: 4, ...sink() }], sites: [s0(2, { index: 'ByOwner' })] } } },
+  ]
+  const M = reconcile(rows)
+  const ord = M.stores[0].entities.find((e) => e.name === 'local-shop-orders'), cart = M.stores[0].entities.find((e) => e.name === 'local-shop-carts')
+  const S = M.access.sites
+  eq(S.map((s) => [s.fn, s.op, s.index, s.labels, s.pairing, s.ambiguous, s.test]), [['by_status', 'query', 'ByStatus', ['local-shop-orders'], 'call', false, false], ['by_sku', 'query', 'BySku', ['local-shop-orders'], 'call', false, false], ['touch', 'update', null, ['local-shop-orders'], 'call', false, false], ['tests::t', 'query', 'ByRegion', ['local-shop-orders'], 'call', false, true], ['any_owner', 'query', 'ByOwner', ['local-shop-carts', 'local-shop-orders'], 'index', true, false]],
+    'each call\'s table: the name at the call matched on the table\'s literal parts; an index from a constant of another file (the binding\'s resolution); a call naming no table found by its index alone, the tables declaring it, ambiguous')
+  eq(S[1].indexAt, { repo: 'api', path: 'src/model.rs', line: 2, text: 'BY_SKU' }, 'the constant the index name came from, at its line')
+  eq(ord.access.indexes.map((i) => [i.name, i.sites.length, i.lead]), [['ByStatus', 1, null], ['BySku', 1, null], ['ByRegion', 1, 'no access found outside test code (lead): only tests name it; it may be reached through a constant built elsewhere, another repository, or a script'], ['ByOwner', 1, null]],
+    'each index with the calls that query it; one only a test queries is a lead')
+  eq(NO_ACCESS, 'no access found (lead): no IndexName or index_name naming it in the indexed repositories; it may be reached through a constant built elsewhere, another repository, or a script', 'the lead says what was searched and what it may have missed: never a verdict')
+  const M2 = reconcile(rows.slice(0, 4).map((r) => (r.facts.access ? { ...r, facts: { ...r.facts, access: { ...r.facts.access, sites: r.facts.access.sites.slice(0, 3) } } } : r)))
+  const ord2 = M2.stores[0].entities.find((e) => e.name === 'local-shop-orders')
+  eq([ord2.access.indexes.map((i) => [i.name, i.lead === NO_ACCESS]), M2.access.leads], [[['ByStatus', false], ['BySku', false], ['ByRegion', true], ['ByOwner', true]], 3], 'an index no call names: "no access found", labelled a lead; counted once per table and index')
+  eq([ord.access.conflicts.map((c) => [c.label, c.values.map((v) => [v.value, v.sources.map((s) => `${s.path}:${s.line} ${s.kind}`)])]), cart.access.conflicts],
+    [[['local-shop-orders.flagged', [['written (SET)', ['src/orders.rs:11 inferred']], ['absent from the item (Order)', ['src/model.rs:4 code']]]]], []],
+    'an attribute an update writes that the bound item does not state: a conflict, inferred against code, both sides cited; one the item states (status) is none')
+  ok(ord.fields.every((f) => f.name !== 'flagged') && M.stores[0].entities.every((e) => e.fields.every((f) => f.sources.every((s) => s.kind !== 'inferred'))), 'the inferred write never becomes a field: the declared shape is never overridden')
+  eq(storeSummary(M.stores[0]), '2 tables · 5 GSIs · 1 item type bound · 1 conflict', 'the store counts it with its conflicts')
+  // an index declared on two tables, the call's own table naming one: narrowed to it, the other's lead says where it was named
+  const M3 = reconcile([...rows.slice(0, 3), { repo: 'api', extractor: 'dynamo-access@1', facts: { declarations: [], access: { lang: 'rust', path: 'src/carts.rs', notes: [], consts: [], fns: [{ name: 'mine', line: 1, end: 4, ...sink() }], sites: [s0(2, { table: sink(['{}-shop-carts']), index: 'ByOwner' })] } } }])
+  eq([M3.access.sites[0].labels, M3.stores[0].entities.find((e) => e.name === 'local-shop-orders').access.indexes.find((i) => i.name === 'ByOwner').lead], [['local-shop-carts'], 'no access found on this table (lead): 1 call names an index ByOwner of another table (local-shop-carts); it may be reached through a constant built elsewhere, another repository, or a script'],
+    'a call naming its table and an index both tables declare: that table only; the other\'s index is a lead saying the name was queried elsewhere')
+  // a failure while resolving leaves the binding answered
+  const broken = reconcile([...rows.slice(0, 3), { repo: 'api', extractor: 'dynamo-access@1', facts: { declarations: [], access: { lang: 'rust', path: 'src/x.rs', notes: [], consts: [], fns: null, sites: [s0(1, { fn: 0 })] } } }])
+  ok(/^the access patterns were not resolved: /.test(broken.accessError) && broken.bindings.length === 1 && !broken.access, `a failure while resolving: said, and the binding stands (${broken.accessError})`)
+
+  // the readers, through the pinned grammars
+  const deps = await import('../lib/deps.mjs')
+  if (!deps.findDeps()) {
+    if (process.env.CI) { FAIL++; console.log('   ✗ FAIL: parser runtime missing (run npm ci --prefix tools/graph)') } else console.log('   - readers skipped: parser runtime not installed (npm ci --prefix tools/graph)')
+  } else {
+    const rt = await deps.loadRuntime({ install: false })
+    const { default: access, ACCESS_LANGS } = await import('../lib/data/extractors/dynamo-access.mjs')
+    const ps = {}
+    for (const l of ACCESS_LANGS) ps[l] = await rt.parserFor(l)
+    const ctx = { tree: (lang, t) => ps[lang].parse(t) }
+    const read = (file, lines) => access.extract(lines.join('\n'), file, ctx).access
+    const brief = (a) => a.sites.map((s) => [a.fns[s.fn]?.name ?? null, s.op, s.index ?? s.indexConst ?? s.indexExpr ?? null, s.table ? [...s.table.names.map((n) => n.text), ...s.table.env.map((e) => `$${e.name}`), ...s.table.uses] : null, s.key, s.writes.map((w) => `${w.clause} ${w.path}`), s.item, !!s.test])
+    const rs = read('src/orders.rs', [
+      'const BY_OWNER: &str = "ByOwner";',
+      'impl Repo {',
+      '    pub async fn list(&self, stage: &str) -> Result<(), Error> {',
+      '        self.client.query().table_name(format!("{}-shop-orders", stage)).index_name(BY_OWNER)',
+      '            .key_condition_expression("#o = :o").expression_attribute_names("#o", "ownerId").send().await?;',
+      '        Ok(())',
+      '    }',
+      '    pub async fn touch(&self) {',
+      '        self.client.update_item().table_name(&self.table).update_expression("SET #n = :n REMOVE old")',
+      '            .set_expression_attribute_names(Some(HashMap::from([("#n".to_string(), "note".to_string())]))).send().await;',
+      '        let leg = Update::builder().table_name(TABLE).update_expression(OTHER).build();',
+      '        self.client.put_item().table_name(&self.table).item("id", a).item("kind", b).send().await;',
+      '        eb.set_index_name(SHARED_INDEX).set_key_condition_expression("pk = :p");',
+      '        let n = update.update_expression();',
+      '        let d = client.describe_table().table_name(TABLE).send().await;',
+      '    }',
+      '}',
+      '#[cfg(test)]',
+      'mod tests { #[test] fn t() { client.query().table_name("test-shop-orders").index_name("ByStatus").send(); } }',
+    ])
+    eq(brief(rs), [
+      ['Repo::list', 'query', 'ByOwner', ['{}-shop-orders'], ['ownerId'], [], null, false],
+      ['Repo::touch', 'update', null, null, null, ['SET note', 'REMOVE old'], null, false],
+      ['Repo::touch', 'update', null, ['TABLE'], null, [], null, false],
+      ['Repo::touch', 'put', null, null, null, [], ['id', 'kind'], false],
+      ['Repo::touch', 'query', 'SHARED_INDEX', null, ['pk'], [], null, false],
+      ['t', 'query', 'ByStatus', ['test-shop-orders'], null, [], null, true],
+    ], 'Rust: builder chains from the client or a builder type, their set_ forms, Some(…) unwrapped, a HashMap::from of names; an index through a constant of the file followed, one of another kept by name; a chain of the project\'s own naming an index; an accessor, and a chain on another operation, are no calls; test code marked')
+    eq([rs.sites[0].table.names[0].line, rs.sites[4].indexConst, rs.sites[2].updateFrom], [4, 'SHARED_INDEX', 'OTHER'], 'each at its line; an expression from a constant of another file named, not read')
+    const ts = read('src/orders.ts', [
+      "import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'",
+      'const TABLE = process.env.ORDERS_TABLE',
+      "const BY_OWNER = 'ByOwner'",
+      "const Indexes = { ByStatus: 'ByStatus' } as const",
+      "enum Idx { Sku = 'BySku' }",
+      "export async function list(doc: Doc) { return doc.send(new QueryCommand({ TableName: TABLE, IndexName: BY_OWNER, KeyConditionExpression: '#o = :o', ExpressionAttributeNames: { '#o': 'ownerId' }, ProjectionExpression: 'id, #o' })) }",
+      'export class Repo {',
+      '  private table = `${process.env.STAGE}-shop-orders`',
+      "  async byStatus() { const params: QueryCommandInput = { TableName: this.table, IndexName: Indexes.ByStatus, KeyConditionExpression: 'status = :s' }; return this.doc.send(new QueryCommand(params)) }",
+      '  async bySku() { const p = { TableName: this.table, IndexName: Idx.Sku }; return this.doc.query(p).promise() }',
+      "  async tx() { return this.doc.send(new TransactWriteCommand({ TransactItems: [{ Update: { TableName: TABLE, Key: { id: 1 }, UpdateExpression: 'SET #s = :s, extra = :e', ExpressionAttributeNames: { '#s': 'status' } } }, { Put: { TableName: TABLE, Item: { id: 2, kind: 'x', note } } }] })) }",
+      '}',
+    ])
+    eq(brief(ts), [
+      ['list', 'query', 'ByOwner', ['TABLE'], ['ownerId'], [], null, false],
+      ['Repo.byStatus', 'query', 'ByStatus', ['Repo.table'], ['status'], [], null, false],
+      ['Repo.bySku', 'query', 'BySku', ['Repo.table'], null, [], null, false],
+      ['Repo.tx', 'update', null, ['TABLE'], null, ['SET status', 'SET extra'], null, false],
+      ['Repo.tx', 'put', null, ['TABLE'], null, [], ['id', 'kind', 'note'], false],
+    ], 'TypeScript: a v3 command\'s input, one declared with its input type, one given to a DocumentClient method by name, a transaction\'s legs; constants, an object\'s and an enum\'s members followed; a class field naming the table kept for the binding')
+    const js = read('lambda/handler.mjs', ["const docClient = new AWS.DynamoDB.DocumentClient()", "export const handler = async (e) => docClient.query({ TableName: process.env.EVENTS_TABLE, IndexName: 'ByDay', KeyConditionExpression: 'day = :d' }).promise()"])
+    eq(brief(js), [['handler', 'query', 'ByDay', ['$EVENTS_TABLE'], ['day'], [], null, false]], 'JavaScript: the DocumentClient (SDK v2), its table from the environment')
+    const py = read('reports/orders.py', [
+      'import os',
+      'import boto3',
+      'from boto3.dynamodb.conditions import Key',
+      'BY_OWNER = "ByOwner"',
+      'dynamodb = boto3.resource("dynamodb")',
+      'orders = dynamodb.Table(f"{os.environ[\'STAGE\']}-shop-orders")',
+      'class Orders:',
+      '    INDEX = "ByStatus"',
+      '    def __init__(self):',
+      '        self.table = dynamodb.Table(os.environ["ORDERS_TABLE"])',
+      '    def by_owner(self, owner):',
+      '        return orders.query(IndexName=BY_OWNER, KeyConditionExpression=Key("ownerId").eq(owner) & Key("placedAt").gt(0))',
+      '    def by_status(self, s):',
+      '        return self.table.query(IndexName=self.INDEX, KeyConditionExpression="#s = :s", ExpressionAttributeNames={"#s": "status"})',
+      '    def touch(self, oid):',
+      '        self.table.update_item(Key={"id": oid}, UpdateExpression="SET #n = :n, flagged = :t", ExpressionAttributeNames={"#n": "note"})',
+      '        self.table.put_item(Item={"id": oid, "kind": "x"})',
+      'def raw(client):',
+      '    return client.query(TableName="prod-shop-orders", IndexName=SHARED, KeyConditionExpression="a = :a")',
+      'def listing(session):',
+      '    return session.query(User).all()',
+      'def test_it():',
+      '    orders.get_item(Key={"id": "1"})',
+    ])
+    eq(brief(py), [
+      ['Orders.by_owner', 'query', 'ByOwner', ['{}-shop-orders', '$STAGE'], ['ownerId', 'placedAt'], [], null, false],
+      ['Orders.by_status', 'query', 'ByStatus', ['$ORDERS_TABLE'], ['status'], [], null, false],
+      ['Orders.touch', 'update', null, ['$ORDERS_TABLE'], null, ['SET note', 'SET flagged'], null, false],
+      ['Orders.touch', 'put', null, ['$ORDERS_TABLE'], null, [], ['id', 'kind'], false],
+      ['raw', 'query', 'SHARED', ['prod-shop-orders'], ['a'], [], null, false],
+      ['test_it', 'get', null, ['{}-shop-orders', '$STAGE'], null, [], null, true],
+    ], 'Python: boto3 on a Table (made in place, or through what it was assigned to, a module name or self.table; an f-string\'s name and the environment it reads) and on a client (TableName=); Key(…) conditions; module and class constants followed; a query with no key-value argument (an ORM\'s) is none; a test marked')
+    eq(py.fns.map((f) => f.name), ['Orders.__init__', 'Orders.by_owner', 'Orders.by_status', 'Orders.touch', 'raw', 'test_it'], 'a function naming nothing and holding no call is left out, the calls still pointing at theirs')
+    const go = read('store/orders.go', [
+      'package store',
+      'const byOwner = "ByOwner"',
+      'var table = fmt.Sprintf("%s-shop-orders", os.Getenv("STAGE"))',
+      'func (r *Repo) List(ctx context.Context) error {',
+      '\t_, err := r.client.Query(ctx, &dynamodb.QueryInput{',
+      '\t\tTableName: aws.String(table), IndexName: aws.String(byOwner), KeyConditionExpression: aws.String("#o = :o"),',
+      '\t\tExpressionAttributeNames: map[string]string{"#o": "ownerId"},',
+      '\t})',
+      '\treturn err',
+      '}',
+      'func (r *Repo) Touch(ctx context.Context) {',
+      '\tr.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{Update: &types.Update{TableName: &table, UpdateExpression: aws.String("SET seen = :s REMOVE draft")}}}})',
+      '\tr.client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(table), Item: map[string]types.AttributeValue{"id": v, "kind": w}})',
+      '}',
+    ])
+    eq(brief(go), [
+      ['Repo.List', 'query', 'ByOwner', ['table'], ['ownerId'], [], null, false],
+      ['Repo.Touch', 'update', null, ['table'], null, ['SET seen', 'REMOVE draft'], null, false],
+      ['Repo.Touch', 'put', null, ['table'], null, [], ['id', 'kind'], false],
+    ], 'Go: an input literal through aws.String and &, a transaction\'s types.Update leg, a literal item\'s keys; a package constant followed')
+    eq([go.consts.map((c) => [c.name, c.names.map((n) => n.text), c.env.map((e) => e.name)])], [[['byOwner', ['ByOwner'], []], ['table', ['{}-shop-orders'], ['STAGE']]]], 'Go constants and variables naming a table: Sprintf\'s verbs as parts filled in, the environment it reads')
+    const { inspect } = await import('../lib/data/registry.mjs')
+    eq([inspect('src/a.rs', 'const X: &str = "x";\nfn f() { c.query().index_name("I"); }'), inspect('src/b.rs', 'fn f() { c.query().index_name("I"); }'), inspect('src/c.rs', '#[derive(Serialize)] struct A {}'), inspect('jobs/a.py', 'x = 1'), inspect('jobs/b.py', 't.query(IndexName="I")')], [3, 2, 1, 0, 2], 'a source file\'s level: 1 for the binding, 2 for the access patterns, both at once')
+  }
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()
@@ -2888,7 +3076,8 @@ async function indexed() {
       `  api:Order  → ${ORD}  name-match (a name the table's name or template matches, in one function)  api/src/model.rs:7`,
       `  api:OrderView  → ${ORD}  convention (an environment variable the infra sets, in one function)  api/node/src/types.ts:2`,
       '  api:Review  → {env}-{project}-reviews  name-match (a name the table\'s name or template matches, in one file, named only in test code)  api/src/model.rs:69',
-    ], 'graph_data: the infra repository\'s tables bound to the api repository\'s types; the local-dev file\'s orders and the prod template one logical table, the local-dev Customers apart; each item type with its table and confidence, the ambiguous one with both tables, the unbound one listed')
+      'Access patterns (inferred from key-value SDK calls; leads, never verdicts): 7 calls in 5 files, 7 reaching a table; 1 index with no access found (graph_data with a table lists them)',
+    ], 'graph_data: the infra repository\'s tables bound to the api repository\'s types; the local-dev file\'s orders and the prod template one logical table, the local-dev Customers apart; each item type with its table and confidence, the ambiguous one with both tables, the unbound one listed; the access patterns in one line')
     const oe = await bq('data', { entity: `infra:dynamodb/${ORD}` })
     const sect = (text, head) => { const ls = text.split('\n'), i = ls.findIndex((l) => l.startsWith(head)); if (i < 0) return []; const out = [ls[i]]; for (const l of ls.slice(i + 1)) { if (!l.startsWith(' ')) break; out.push(l) } return out }
     eq(sect(oe, 'Item ('), [
@@ -2999,6 +3188,72 @@ async function indexed() {
     const cent = await bq('data', { entity: `infra:dynamodb/${ORD}` }), cch = await bq('changes'), cpage = dataOf(await renderBind(loadBind(BP))).data
     ok(cyc.includes('  api:Tree  unbound') && cyc.includes('  api:Looped  unbound'), `a newtype holding itself and two aliases holding each other: graph_data answers (${cyc.split('\n').filter((l) => /Tree|Looped/.test(l)).join(' | ')})`)
     ok(cent.includes('Item (18 fields') && cch.includes('currency') && cpage.items.some((it) => it.id === 'api:Tree'), `… and so do graph_data entity, graph_changes and the page (${cent.split('\n').find((l) => l.startsWith('Item')) || cent.slice(0, 200)})`)
+
+    console.log('\n27 · access patterns through call(): a Rust service and a Python job reaching one table (fixtures/access): each index with the functions querying it or a lead, a write the item does not state, the readers and writers')
+    const AP = path.join(SANDBOX, 'access')
+    cpSync(path.join(HERE, 'fixtures', 'access'), AP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const aq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: AP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const aidx = await aq('index')
+    ok(/catalog: 3 files/.test(aidx) && /reports: 1 files/.test(aidx) && !aidx.includes('failure'), `index: both repositories, no extractor failure (${aidx.replace(/\n/g, ' | ')})`)
+    eq(await aq('sql', { sql: "SELECT repo, key, extractor FROM data_facts WHERE extractor LIKE 'dynamo-access%' ORDER BY repo, key" }), 'repo\tkey\textractor\ncatalog\tsrc/books.rs\tdynamo-access@1\nreports\treports/genres.py\tdynamo-access@1',
+      'found by content: the Rust and the Python file making key-value calls (the model and the index names hold none)')
+    const alist = (await aq('data')).split('\n')
+    eq([alist[1], alist[alist.length - 1]], ['catalog:dynamodb  dynamodb  1 table · 4 GSIs · 1 item type bound · 1 conflict', 'Access patterns (inferred from key-value SDK calls; leads, never verdicts): 7 calls in 2 files, 7 reaching a table; 1 index with no access found (graph_data with a table lists them)'],
+      'graph_data: the store counts the inferred conflict with its own; the access patterns in one line')
+    const BK = 'catalog/src/books.rs', GP = 'reports/reports/genres.py'
+    const ae = await aq('data', { entity: 'local-catalog-books' })
+    eq(sect(ae, 'Access ('), [
+      'Access (inferred from the key-value SDK calls of the indexed repositories; leads, never verdicts):',
+      '  index ByAuthor  queried by 1 function:',
+      `    by_author  query  ${BK}:16  (the call at line 17; the table named at the call) · 0 callers`,
+      '  index ByIsbn  queried by 1 function:',
+      `    by_isbn  query  ${BK}:28  (the call at line 29; the table named at the call) · 0 callers; its name from BY_ISBN at catalog/src/indexes.rs:2`,
+      '  index ByGenre  queried by 1 function:',
+      `    by_genre  query  ${GP}:11  (the call at line 12; the table named at the call) · 0 callers`,
+      '  index ByStatus  no access found (lead): no IndexName or index_name naming it in the indexed repositories; it may be reached through a constant built elsewhere, another repository, or a script',
+    ], 'graph_data entity: each GSI with the function that queries it (directly; through a constant of another file, the slice-9 resolution; through a module constant in another language and repository), and the one no call names as a lead saying what was searched')
+    eq(sect(ae, 'Reads and writes'), [
+      'Reads and writes (7 functions: 4 reading, 3 writing), each with what its calls do:',
+      `  save  put  ${BK}:5  (the call at line 7; the table named at the call) · 0 callers`,
+      `  by_author  query  ${BK}:16  (the call at line 17; the table named at the call) · 0 callers`,
+      `  by_isbn  query  ${BK}:28  (the call at line 29; the table named at the call) · 0 callers`,
+      `  shelve  update (writes status, shelvedAt)  ${BK}:39  (the call at line 40; the table named at the call) · 0 callers`,
+      `  remove  delete  ${BK}:51  (the call at line 52; the table named at the call) · 0 callers`,
+      `  by_genre  query  ${GP}:11  (the call at line 12; the table named at the call) · 0 callers`,
+      `  count_copies  query  ${GP}:15  (the call at line 16; the table named at the call) · 0 callers`,
+    ], 'graph_data entity: the functions that read and write the table, each with its kind, through the code graph\'s symbols, across both repositories')
+    eq(sect(ae, 'Conflicts'), [
+      'Conflicts (1): the declarations disagree, or a call writes an attribute the bound item does not state (inferred, never overriding it); each side is kept',
+      `  local-catalog-books.shelvedAt  presence: written (SET) — ${BK}:40 [inferred] | absent from the item (Book) — catalog/src/model.rs:6 [code]`,
+    ], 'an update writing an attribute the bound item type does not state: a conflict, inferred against code; the attribute it writes through #s (status) is stated, and none')
+    ok(!sect(ae, 'Item (').some((l) => l.includes('shelvedAt')) && sect(ae, 'Attributes (').length === 7, 'never overriding: the item and the attributes stay as declared')
+    ok((await aq('symbol', { symbol: 'by_genre' })).includes(`${GP}:11`) && (await aq('callers', { symbol: 'shelve' })).includes('none found'), 'the functions are the code graph\'s symbols, at the lines graph_symbol gives')
+    has(await aq('status'), '1 for access patterns', 'graph_status counts the files read for access patterns')
+
+    // the page: each index's queries or its lead on the key card, the readers and writers, the inferred conflict
+    const { renderGraph: renderAcc } = await import('../lib/render.mjs')
+    const { loadProject: loadAcc } = await import('../lib/project.mjs')
+    const apage = await renderAcc(loadAcc(AP))
+    const adata = dataOf(apage).data
+    eq([adata.access, adata.stores[0].tables[0].acc.ix.map((i) => [i.n, i.q.map((f) => f.n), !!i.lead])], [{ files: 2, calls: 7, placed: 7, leads: 1 }, [['ByAuthor', ['by_author'], false], ['ByIsbn', ['by_isbn'], false], ['ByGenre', ['by_genre'], false], ['ByStatus', [], true]]], 'the page packs the access patterns per table, in graph_data\'s words')
+    const accPg = await stubPage(apage, '#data-0')
+    const acard = accPg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))[0]
+    const atext = accPg.textOf(acard)
+    ok(atext.includes('queried by by_author query') && atext.includes('queried by by_genre query') && atext.includes('no access found (lead)'), `the key card: each index with the function querying it, the unqueried one with its lead (${atext.slice(0, 600)})`)
+    const arows = accPg.all((n) => n.tagName === 'UL' && /\bkaccess\b/.test(n.attrs.class || '')).flatMap((u) => u.kids.filter((k) => k && k.tagName === 'LI').map((k) => accPg.textOf(k)))
+    eq(arows.map((r) => r.split(' ')[0]), ['Wsave', 'Rby_author', 'Rby_isbn', 'Wshelve', 'Wremove', 'Rby_genre', 'Rcount_copies'], 'the key card lists the functions reading and writing the table, each marked')
+    ok(atext.includes('written shelvedAt (inferred)') && atext.includes('absent from the item (Book)') && !!accPg.ctl('data-access'), 'the inferred conflict on the card, both sides; the tab says what the access patterns are')
+    const lead = accPg.find((n) => n.tagName === 'SPAN' && /\bpill\b/.test(n.attrs.class || '') && (n.attrs.title || '').startsWith('no access found (lead): no IndexName'))
+    ok(!!lead, 'the lead pill carries what was searched')
+
+    // incremental: the job starts querying the index the lead was about, and the service stops writing the stray attribute
+    const aedit = (rel, fn) => { const f = path.join(AP, rel); writeFileSync(f, fn(readFileSync(f, 'utf8'))); const t = new Date(Date.now() + 60_000); utimesSync(f, t, t) }
+    aedit('reports/reports/genres.py', (t) => `${t}\n\ndef shelved(status):\n    return books.query(IndexName="ByStatus", KeyConditionExpression=Key("status").eq(status))["Items"]\n`)
+    aedit('catalog/src/books.rs', (t) => t.replace('SET #s = :s, shelvedAt = :t', 'SET #s = :s'))
+    await aq('index')
+    const ae2 = await aq('data', { entity: 'local-catalog-books' })
+    ok(sect(ae2, 'Access (').includes(`    shelved  query  ${GP}:20  (the call at line 21; the table named at the call) · 0 callers`) && !ae2.includes('no access found') && ae2.includes('Conflicts: none'),
+      `re-indexed: the index is queried now, its lead gone; the write the item lacked is gone, and its conflict (${sect(ae2, 'Access (').slice(-2).join(' | ')})`)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 
