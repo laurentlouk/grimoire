@@ -15,7 +15,10 @@
 //                         that root, else the system user, at: now, hash: the change's hash
 //                         (data/delta.mjs) }, never what the request says, and edits only those `ack`
 //                         members in the file (setAcks): its layout and every other change stay. A
-//                         delta that does not validate is never written (422).
+//                         delta that does not validate is never written (422). The read, the check
+//                         and the write run under the delta's lock (data/delta-lock.mjs), the one the
+//                         loop's ship step takes to append unplanned changes: neither writes over the
+//                         other. Held past its wait: 503, busy, try again; nothing written.
 //
 // It listens on the loopback interface only, and every request must name it as its host (a page
 // elsewhere cannot rebind a domain to it). Every request carries the token printed at start: in the
@@ -33,6 +36,7 @@ import path from 'node:path'
 import { renderGraph } from './render.mjs'
 import { resolveDoc, resolveDelta, docHash } from './docs.mjs'
 import { parseDelta, changeHash, setAcks } from './data/delta.mjs'
+import { withDeltaLock } from './data/delta-lock.mjs'
 import { runIndex } from './run.mjs'
 
 const MAX_BODY = 8 * 1024 * 1024
@@ -56,8 +60,9 @@ function whoAcks(dir) {
   try { return oneLine(userInfo().username, 120) || 'unknown' } catch { return 'unknown' }
 }
 
-// opts.delta: the delta the Data tab shows first (graph.mjs serve --delta), as render.mjs takes it
-export async function serve(project, { port = 0, log = () => {}, refresh = true, delta = null } = {}) {
+// opts.delta: the delta the Data tab shows first (graph.mjs serve --delta), as render.mjs takes it;
+// opts.deltaLock: the delta lock's { waitMs, staleMs } (data/delta-lock.mjs defaults; tests shorten them)
+export async function serve(project, { port = 0, log = () => {}, refresh = true, delta = null, deltaLock = {} } = {}) {
   const token = randomBytes(24).toString('base64url')
   const tok = Buffer.from(token)
   const same = (v) => { const b = Buffer.from(String(v || '')); return b.length === tok.length && timingSafeEqual(b, tok) }
@@ -130,19 +135,24 @@ export async function serve(project, { port = 0, log = () => {}, refresh = true,
         if (r.error) return send(res, 400, { error: r.error })
         try { accessSync(r.abs, constants.W_OK) } catch { return send(res, 403, { error: 'the delta is read-only' }) }
         if (statSync(r.abs).size > project.maxBytes) return send(res, 413, { error: 'too large to write here' })
-        const disk = readFileSync(r.abs, 'utf8')
-        if (docHash(disk) !== body.base) return send(res, 409, { error: 'changed on disk since it was loaded', text: disk, hash: docHash(disk) })
-        const { delta: doc, errors } = parseDelta(disk)
-        if (errors.length) return send(res, 422, { error: `the delta does not validate: ${errors.join('; ')}` })
-        const at = new Map(doc.data.map((c, i) => [c.id, i]))
-        const missing = [...new Set(body.ids)].filter((id) => !at.has(id))
-        if (missing.length) return send(res, 400, { error: `no data change with the id ${missing.map((x) => JSON.stringify(x)).join(', ')}` })
-        const by = whoAcks(r.root.abs), when = new Date().toISOString()
-        const edits = new Map(body.ids.map((id) => [at.get(id), body.ack ? { by, at: when, hash: changeHash(doc.data[at.get(id)]) } : null]))
-        const text = setAcks(disk, edits)
-        writeAtomic(r.abs, text, statSync(r.abs).mode & 0o777)
-        log(`${body.ack ? 'acknowledged' : 'removed the acknowledgement of'} ${body.ids.slice(0, 20).map((x) => JSON.stringify(x.slice(0, 80))).join(', ')}${body.ids.length > 20 ? ` and ${body.ids.length - 20} more` : ''} in ${JSON.stringify(path.relative(project.root, r.abs)).slice(1, -1)}`)
-        return send(res, 200, { hash: docHash(text), changes: [...new Set(body.ids)].map((id) => ({ id, ack: edits.get(at.get(id)) })) })
+        const by = whoAcks(r.root.abs) // before the lock: a git call, not the file's business
+        const done = await withDeltaLock(r.abs, () => {
+          const disk = readFileSync(r.abs, 'utf8')
+          if (docHash(disk) !== body.base) return [409, { error: 'changed on disk since it was loaded', text: disk, hash: docHash(disk) }]
+          const { delta: doc, errors } = parseDelta(disk)
+          if (errors.length) return [422, { error: `the delta does not validate: ${errors.join('; ')}` }]
+          const at = new Map(doc.data.map((c, i) => [c.id, i]))
+          const missing = [...new Set(body.ids)].filter((id) => !at.has(id))
+          if (missing.length) return [400, { error: `no data change with the id ${missing.map((x) => JSON.stringify(x)).join(', ')}` }]
+          const when = new Date().toISOString()
+          const edits = new Map(body.ids.map((id) => [at.get(id), body.ack ? { by, at: when, hash: changeHash(doc.data[at.get(id)]) } : null]))
+          const text = setAcks(disk, edits)
+          writeAtomic(r.abs, text, statSync(r.abs).mode & 0o777)
+          log(`${body.ack ? 'acknowledged' : 'removed the acknowledgement of'} ${body.ids.slice(0, 20).map((x) => JSON.stringify(x.slice(0, 80))).join(', ')}${body.ids.length > 20 ? ` and ${body.ids.length - 20} more` : ''} in ${JSON.stringify(path.relative(project.root, r.abs)).slice(1, -1)}`)
+          return [200, { hash: docHash(text), changes: [...new Set(body.ids)].map((id) => ({ id, ack: edits.get(at.get(id)) })) }]
+        }, deltaLock)
+        if (done.busy) return send(res, 503, { error: 'busy: another writer has the delta (the loop recording a change); try again in a moment' })
+        return send(res, ...done.value)
       }
       return send(res, 404, { error: 'not found' })
     } catch (e) {

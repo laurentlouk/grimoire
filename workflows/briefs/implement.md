@@ -92,6 +92,34 @@ the task is there, finish the rest as a normal change (its commits in `commits`)
 earlier attempt's commits for this task sit under yours, also list them in `landedBefore`: the
 loop then reviews them with your own, instead of only your commits.
 
+## Data model changes
+The header's "Data model changes" section says whether the design has a delta (beside the spec,
+what the design changes in stored data: tables, columns, keys, indexes, foreign keys) and which
+of its changes this task builds. Build those as the delta states them. Then, before you return,
+read what your commits did to stored data:
+- Run `graph_changes` with `base` = your `startSha` (and `delta` = the path the header names,
+  when there is one). It gives each planned change its state (planned and built, pending, built
+  differently) and lists under Unplanned every change your commits made that the delta does not
+  plan, including what you built on a table the delta adds beyond what its `add` states. In a
+  parallel lane the graph serves the shared checkout, not your worktree: read your own diff of
+  the migration and schema files instead and report the same way; so too where the project has
+  no code graph.
+- `deltaStates`: `{id, state, note}` for each planned change the header lists (`note`: what
+  `graph_changes` says differs, when it is built differently).
+- `modelChanges`: one `{target, op, kept, reason, after}` per unplanned change (with no delta:
+  per change your commits made to stored data), `target` as `graph_changes` names it. You decide
+  each one; it is never a reason to stop or to ask, and nothing waits on it. Keep it when the task
+  needs it and say why in `reason` (it becomes its `why` in the delta, for the owner to
+  acknowledge), with `after` = the element as built, in the delta's words; or revert it in a
+  commit and say why. A change that would drop something another repository still reads, or lose
+  data, is reverted or made safe, like any defect.
+- In a fix round, or a retry after a replan, the header names the task's own start as the base
+  (not this dispatch's start, which would show only the fix) and lists the task's earlier report.
+  Return the full current list for the whole task: every change still in it, kept with its
+  reason, and one you reverted since with `kept: false`. It replaces the earlier report.
+- Never edit the delta yourself: once your task lands the loop appends the changes you kept, and
+  the PR lists every change, planned or not.
+
 ## Parallel lane (only when the header says PARALLEL LANE)
 Other implementers are working in the shared checkout RIGHT NOW: do not touch that checkout,
 its branch, or its index. Work ONLY in your worktree; if it already exists (an earlier attempt

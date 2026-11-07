@@ -409,9 +409,9 @@ export class Graph {
     }
     if (against.base) {
       out.push(s.unplanned.length ? `Unplanned (${s.unplanned.length}): in the branch, in no change of the delta` : 'Unplanned: none, every change of the branch is in the delta')
-      for (const { st, c, target } of s.unplanned) {
+      for (const { st, c, target, on } of s.unplanned) {
         const was = c.before && `was ${this.sources(st.repo, c.before.sources)}`, now = c.after && this.sources(st.repo, c.after.sources)
-        if (c.change === 'added') out.push(`  + ${target}  ${describe(c, c.after)}  — ${now}`)
+        if (c.change === 'added') out.push(`  + ${target}  ${describe(c, c.after)}  — ${now}${on ? `  (on the table ${on} adds, beyond what it states)` : ''}`)
         else if (c.change === 'removed') out.push(`  - ${target}  ${describe(c, c.before)}  — ${was}`)
         else out.push(`  ~ ${target}  ${c.attrs.map((a) => `${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`).join('; ')}  — ${was}; now ${now}`)
       }

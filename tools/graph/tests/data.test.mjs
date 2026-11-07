@@ -24,7 +24,9 @@
 //      absent without a base, escaping
 //  10. proposals (data/delta.mjs): the delta file's validation, the hash of a change, the target
 //      grammar against the diff's identity, each computed state on hand-built models, the unplanned
-//      changes, acknowledgements edited into the file in place
+//      changes (the parts built on a planned table beyond what its `add` states among them),
+//      acknowledgements edited into the file in place, the unplanned changes the loop's ship step
+//      appends (appendChanges and the delta-append.mjs CLI: its lock, two writers at once)
 //  11. the Data tab draws a delta over the model against a git base: each state's marks, the legend,
 //      the lists and passports (why, slice, acknowledgement), the picker, escaping; read-only when
 //      static, acknowledging through the server when served
@@ -42,7 +44,7 @@
 //      graph_changes and graph.mjs changes; a ref that does not resolve; a base without the folder
 //  16. that branch against a design's delta: graph_changes --delta (each change's state, the
 //      unplanned, the summary), graph.mjs changes and render --delta
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -778,7 +780,7 @@ console.log('\n9 · the Data tab\'s change overlay, against a git base')
 
 // ── 10 · proposals: the delta file and its states ──
 console.log('\n10 · proposals: the delta file, its targets and its computed states (delta.mjs)')
-const { parseDelta, parseTarget, targetOf, changeHash, deltaStates, findTarget, setAcks, changeText, STATE_TEXT } = await import('../lib/data/delta.mjs')
+const { parseDelta, parseTarget, targetOf, changeHash, deltaStates, findTarget, setAcks, appendChanges, changeText, STATE_TEXT } = await import('../lib/data/delta.mjs')
 {
   const ch = (id, op, target, extra = {}) => ({ id, op, target, why: `why ${id}`, origin: 'planned', ...extra })
   const errs = (doc) => parseDelta(JSON.stringify(doc)).errors
@@ -893,9 +895,37 @@ CREATE VIEW recent AS SELECT id FROM books;`
     'reviews-stars pending',
     'stray pending (the table nowhere is not in the model)',
   ], 'each change\'s state: built in the intended shape, pending, or built differently (planned → built); a change the branch has not touched is pending (now → planned), one it touched another way is built differently; a removal is built once its target is gone, a rename once only the new name is there; a target in another letter case resolves; the acknowledgement apart, stale once the change was edited; a column for a table the delta adds is pending, one for a table nowhere is flagged')
-  eq(s.unplanned.map((u) => `${u.c.change} ${u.target}`), ['removed app:db/books/key:unique(isbn)', 'removed app:db/books/index:books_title_idx', 'modified app:db/books/fk:(author_id)->authors(id)', 'added app:db/recent'],
-    'unplanned: what the branch changed against its base that no change of the delta covers, each named as a target (a change built another way, a rename\'s two names and a table added whole count as covered)')
-  eq(s.counts, { changes: 17, 'planned-built': 7, pending: 8, 'built-differently': 2, acked: 1, stale: 1, unacked: 15, unplanned: 4 }, '… counted')
+  eq(s.unplanned.map((u) => `${u.c.change} ${u.target}${u.on ? ` (on ${u.on})` : ''}`), ['removed app:db/books/key:unique(isbn)', 'removed app:db/books/index:books_title_idx', 'modified app:db/books/fk:(author_id)->authors(id)', 'added app:db/loans/key:primary(id) (on loans)', 'added app:db/loans/fk:(book_id)->books(id) (on loans)', 'added app:db/recent'],
+    'unplanned: what the branch changed against its base that no change of the delta covers, each named as a target (a change built another way, a rename\'s two names count as covered); on a table the delta adds, the key and the foreign key its `add` does not state')
+  eq(s.counts, { changes: 17, 'planned-built': 7, pending: 8, 'built-differently': 2, acked: 1, stale: 1, unacked: 15, unplanned: 6 }, '… counted')
+
+  // a planned table built with more than its `add` states: the table is planned and built, every part
+  // beyond it (a column, a key, an index, a cascading foreign key) is unplanned, as any change of the
+  // branch outside the delta: reported, never a failure. A part another change of the delta adds is
+  // covered by it.
+  {
+    const B0 = 'CREATE TABLE authors (id INTEGER PRIMARY KEY);'
+    const B1 = `${B0}
+CREATE TABLE loans (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES authors(id) ON DELETE CASCADE, due TEXT, note TEXT, shelf TEXT);
+CREATE INDEX loans_due_idx ON loans (due);
+CREATE INDEX loans_shelf_idx ON loans (shelf);`
+    const b0 = modelOf(B0), b1 = modelOf(B1)
+    const fields = [{ name: 'id', type: 'INTEGER', nullable: true }, { name: 'a_id', type: 'INTEGER', nullable: true }, { name: 'due', type: 'TEXT', nullable: true }]
+    const shelf = ch('shelf-idx', 'add', 'app:db/loans/index:loans_shelf_idx', { after: { columns: ['shelf'] } })
+    const only = { schema: 1, spec: 's', architecture: [], data: [ch('loans', 'add', 'app:db/loans', { after: { fields } }), ch('shelf', 'add', 'app:db/loans.shelf', { after: { type: 'TEXT', nullable: true } }), shelf] }
+    const r = deltaStates(only, b1, { base: b0, diff: diffModels(b0, b1) })
+    eq([r.changes.map(line), r.unplanned.map((u) => `${u.c.kind} ${u.target} on ${u.on}`)], [
+      ['loans planned-built', 'shelf planned-built', 'shelf-idx planned-built'],
+      ['field app:db/loans.note on loans', 'key app:db/loans/key:primary(id) on loans', 'index app:db/loans/index:loans_due_idx on loans', 'relation app:db/loans/fk:(a_id)->authors(id) on loans'],
+    ], 'a table added with fields only, built with a key, an index, a cascading foreign key and one more column: the table is planned and built, and the four parts it does not state are unplanned, each named as a target (the column and the index other changes add are theirs)')
+    const stated = { ...only, data: [ch('loans', 'add', 'app:db/loans', { after: { fields: [...fields, { name: 'note', type: 'TEXT', nullable: true }, { name: 'shelf', type: 'TEXT', nullable: true }], keys: [{ role: 'primary', parts: ['id'] }], indexes: [{ name: 'loans_due_idx', columns: ['due'] }, { name: 'loans_shelf_idx', columns: ['shelf'] }], relations: [{ columns: ['a_id'], to: 'authors', toColumns: ['id'], onDelete: 'restrict' }] } })] }
+    const r2 = deltaStates(stated, b1, { base: b0, diff: diffModels(b0, b1) })
+    eq([r2.changes.map(line), r2.unplanned.length], [['loans built-differently [foreign key (a_id) → authors on delete: restrict → cascade]'], 0],
+      'the same table with its keys, indexes and foreign keys stated: nothing unplanned, and a foreign key built with another action is built differently (planned → built)')
+    eq(deltaStates(only, b1).unplanned, [], 'with no base there is no branch to compare: the parts are not listed')
+    const old = deltaStates(only, b1, { base: b1, diff: diffModels(b1, b1) })
+    eq(old.unplanned, [], 'a table already at the base is not one the branch adds: its parts are not the branch\'s')
+  }
   eq(deltaStates(delta, base, { base, diff: diffModels(base, base) }).changes.map(line).slice(2, 11),
     ['index pending', 'loans pending', 'title-default pending {default: \'untitled\' → \'draft\'}', 'name-type pending {type: TEXT → VARCHAR(120)}', 'bio-default pending {default: none → \'none\'}', 'drop-notes pending', 'drop-key planned-built (not in the model, nor at the base: check the target)', 'tags pending {rename to labels}', 'writers pending {rename to writers}'],
     'at design time (the branch is its base): every change not in the code yet is pending, with what it proposes; a removal whose target was never there reads as done, with a warning')
@@ -955,6 +985,47 @@ CREATE VIEW recent AS SELECT id FROM books;`
     'members sharing a line: the ack goes in at that line\'s indentation, every other line kept byte for byte')
   const long = parseDelta(JSON.stringify({ schema: 1, spec: 's', data: [{ id: 'a', op: `grow\n${'x'.repeat(500)}`, target: 'app:db/t', why: 'w', origin: 'planned' }], architecture: [] })).errors[0]
   ok(long.length < 200 && !long.includes('\n') && long.startsWith('data[0] (a): op "grow\\n'), `a value echoed in a problem is cut short and shown escaped (${long})`)
+
+  // appending: the unplanned changes an implementer kept, written by the loop's ship step
+  const kept = (id, target, after, extra = {}) => ({ id, op: 'add', target, after, why: `kept: ${id}`, origin: 'unplanned', slice: 2, ...extra })
+  const sub = kept('unplanned-PROJ-1-1', 'app:db/books.subtitle', { type: 'TEXT', nullable: true })
+  const ap = appendChanges(FILE, [sub, kept('one', 'app:db/books.isbn', { type: 'TEXT', nullable: true }), kept('bad', 'app:db/books.x', { type: 'TEXT' }), { ...kept('planned', 'app:db/books.y', { type: 'TEXT', nullable: true }), origin: 'planned' }, { ...kept('acked', 'app:db/books.z', { type: 'TEXT', nullable: true }), ack: A }])
+  eq([ap.added, ap.already, ap.refused, ap.errors], [['unplanned-PROJ-1-1'], ['one'], [{ id: 'bad', errors: ['after: a column needs its nullable'] }, { id: 'planned', errors: ['origin "planned": only an unplanned change is appended'] }, { id: 'acked', errors: ['ack: an appended change is not acknowledged yet'] }], []],
+    'appending: a new unplanned change goes in; an id the file holds is left out (a ship sent again); one that would not validate, one planned or one acknowledged is refused with why, and the others still go in')
+  eq([JSON.parse(ap.text).data.map((c) => c.id), parseDelta(ap.text).errors], [['one', 'two', 'three', 'four', 'unplanned-PROJ-1-1'], []], '… after the last change, and the file still validates')
+  ok(ap.text.startsWith(FILE.slice(0, FILE.indexOf('{"id": "four"'))) && ap.text.includes('{"id": "four", "op": "remove", "target": "app:db/older", "why": "gone too", "origin": "planned"},\n    { "id": "unplanned-PROJ-1-1", "op": "add", "target": "app:db/books.subtitle", "after": { "type": "TEXT", "nullable": true }, "why": "kept: unplanned-PROJ-1-1", "origin": "unplanned", "slice": 2 }\n  ],'),
+    '… every byte before it kept; written on one line, as the change before it is, at its indentation')
+  const spreadOut = appendChanges(FILE.replace('    {"id": "four", "op": "remove", "target": "app:db/older", "why": "gone too", "origin": "planned"}', '    {\n      "id": "four",\n      "op": "remove",\n      "target": "app:db/older",\n      "why": "gone too",\n      "origin": "planned"\n    }'), [sub]).text
+  ok(spreadOut.includes('      "origin": "planned"\n    },\n    {\n      "id": "unplanned-PROJ-1-1",\n      "op": "add",\n      "target": "app:db/books.subtitle",\n      "after": {\n        "type": "TEXT",\n        "nullable": true\n      },'), 'after a change spread over lines, spread the same way')
+  const empty = appendChanges('{\n  "schema": 1,\n  "spec": "s",\n  "data": [],\n  "architecture": []\n}\n', [sub]).text
+  eq([empty.split('\n').slice(3, 6), JSON.parse(empty).data.length, empty.endsWith('  "architecture": []\n}\n')], [['  "data": [', '    {', '      "id": "unplanned-PROJ-1-1",'], 1, true], 'into an empty list: spread, in the file\'s indentation, the rest kept')
+  eq([appendChanges(FILE, [kept('one', 'x', {})]).text === FILE, appendChanges('{"schema":1,"spec":"s","data":{},"architecture":[]}', [sub]).errors.length > 0, appendChanges('{"schema":1,"spec":"s","data":{},"architecture":[]}', [sub]).text],
+    [true, true, null], 'nothing new: the text as it was; a delta that does not validate: its problems, nothing written')
+
+  // the CLI the ship step runs: under a lock beside the file, through a temporary file renamed over it
+  const DIR = mkdtempSync(path.join(tmpdir(), 'grim-delta-'))
+  try {
+    const dfile = path.join(DIR, 'x.delta.json'), cfile = (n, list) => { const f = path.join(DIR, `c${n}.json`); writeFileSync(f, JSON.stringify(list)); return f }
+    const cli = (...a) => spawnSync(process.execPath, [path.join(ROOT, 'delta-append.mjs'), ...a], { encoding: 'utf8' })
+    eq(cli(dfile, cfile(0, [sub])).stdout, 'DELTA none\n', 'no delta at that path: DELTA none, nothing written')
+    writeFileSync(dfile, FILE)
+    eq(cli(dfile, cfile(1, [sub, kept('bad', 'app:db/books.x', { type: 'TEXT' })])).stdout, 'DELTA ok added=1 already=0 refused=1\nDELTA refused bad: after: a column needs its nullable\n', 'DELTA ok with its counts, then each refusal')
+    eq(cli(dfile, cfile(2, [sub])).stdout, 'DELTA ok added=0 already=1 refused=0\n', 'sent again: nothing written twice')
+    eq(readdirSync(DIR).filter((f) => !/^c\d\.json$/.test(f)), ['x.delta.json'], 'no lock and no temporary file left behind')
+    // two ships of two repositories at once: both changes written, neither lost
+    const both = await Promise.all([3, 4].map((n) => new Promise((res) => { const p = spawn(process.execPath, [path.join(ROOT, 'delta-append.mjs'), dfile, cfile(n, [kept(`k${n}`, `app:db/books.k${n}`, { type: 'TEXT', nullable: true })])]); let o = ''; p.stdout.on('data', (x) => (o += x)); p.on('close', () => res(o)) })))
+    eq([both, JSON.parse(readFileSync(dfile, 'utf8')).data.map((c) => c.id).slice(-3).sort()], [['DELTA ok added=1 already=0 refused=0\n', 'DELTA ok added=1 already=0 refused=0\n'], ['k3', 'k4', 'unplanned-PROJ-1-1']], 'two writers at once: one after the other under the lock, both changes in the file')
+    // the lock `serve` takes to write an acknowledgement (lib/data/delta-lock.mjs): the append waits for it
+    mkdirSync(`${dfile}.lock`)
+    const t0 = Date.now()
+    const waiting = new Promise((res) => { const p = spawn(process.execPath, [path.join(ROOT, 'delta-append.mjs'), dfile, cfile(6, [kept('k6', 'app:db/books.k6', { type: 'TEXT', nullable: true })])]); let o = ''; p.stdout.on('data', (x) => (o += x)); p.on('close', () => res(o)) })
+    await new Promise((res) => setTimeout(res, 400))
+    const untouched = !JSON.parse(readFileSync(dfile, 'utf8')).data.some((c) => c.id === 'k6')
+    rmSync(`${dfile}.lock`, { recursive: true })
+    eq([await waiting, untouched, Date.now() - t0 >= 400, JSON.parse(readFileSync(dfile, 'utf8')).data.some((c) => c.id === 'k6'), existsSync(`${dfile}.lock`)], ['DELTA ok added=1 already=0 refused=0\n', true, true, true, false], 'the lock an acknowledgement holds: the append waits for it, then writes, and leaves no lock')
+    writeFileSync(dfile, '{"schema": 2}')
+    ok(cli(dfile, cfile(5, [sub])).stdout.startsWith('DELTA bad the delta does not validate: '), 'a delta that does not validate: DELTA bad, the file left as it is')
+  } finally { rmSync(DIR, { recursive: true, force: true }) }
 }
 
 // ── 11 · the Data tab draws a delta ──

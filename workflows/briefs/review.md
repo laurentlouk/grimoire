@@ -42,6 +42,16 @@ be agreeable.
 A FAIL must carry at least one blocker/major finding naming `path:line` — a FAIL with no
 actionable finding cannot be acted on and is treated as gating anyway, so be specific.
 
+## Changes to stored data outside the plan
+The design's delta (beside the spec, when the design changes stored data) plans what the work
+changes in tables, columns, keys, indexes and foreign keys. The implementer reports every change
+outside it, kept with a reason or reverted; the loop adds the kept ones to the delta and lists
+them in the PR, and the owner acknowledges them. An unplanned change is
+never a finding by itself, whatever its size: nothing waits on it. A change that is wrong is a
+finding on its merits, at its severity: it drops a column, an index or a table another
+repository still reads or queries; it loses data (a narrowed type, a column dropped with nothing
+moved); its kept reason does not hold.
+
 ## A fix that weakened a test
 Only when your header has a "Did the fix weaken a test?" section: you are the one reviewer of
 this round who judges it, whatever your lens. Run it once and judge each candidate. A test that

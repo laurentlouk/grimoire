@@ -62,7 +62,7 @@ Create one from `templates/team-agent.md` per repository. Interactive dispatches
 
 ## Specialists
 
-Implementers with a narrower lens than the repo's owner, dispatched into that repo with the same brief and the same return contract (`DONE` / `DONE_WITH_CONCERNS` / `DONE_PENDING_GATE` (a gated repo's DONE) / `NEEDS_CONTEXT` / `BLOCKED`, `baseSha` / `startSha` / `commits` / `headSha`). They follow the repo's own conventions. Off by default: enable one per repo in `grimoire.config.json`, e.g. `"specialists": [{ "agent": "migration-engineer", "repos": ["api"] }]`.
+Implementers with a narrower lens than the repo's owner, dispatched into that repo with the same brief and the same return contract (`DONE` / `DONE_WITH_CONCERNS` / `DONE_PENDING_GATE` (a gated repo's DONE) / `NEEDS_CONTEXT` / `BLOCKED`, `baseSha` / `startSha` / `commits` / `headSha`, and `modelChanges` / `deltaStates`: what the work did to stored data, as `graph_changes` shows it against the design's delta, every change outside it kept with a reason or reverted, never a reason to stop). They follow the repo's own conventions. Off by default: enable one per repo in `grimoire.config.json`, e.g. `"specialists": [{ "agent": "migration-engineer", "repos": ["api"] }]`.
 
 | Agent | Default model | Owns |
 | --- | --- | --- |
