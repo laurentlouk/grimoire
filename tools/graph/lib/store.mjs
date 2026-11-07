@@ -22,14 +22,15 @@
 //            bits: 1 what the item binding reads (a serde derive or a type, a conversion, an
 //            environment read, a string constant), 2 a key-value SDK call shape (the access
 //            patterns), 4 a table-builder schema, 8 a barrel re-exporting relative modules, 16 a
-//            schema-language file's models, 32 its datasource; 0 none
+//            schema-language file's models, 32 its datasource, 64 a query call beside SQL text or a
+//            SQL client import (the queries the code sends); 0 none
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '11'
+export const SCHEMA_VERSION = '12'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.

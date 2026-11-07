@@ -148,6 +148,24 @@
 //      breaking a citation, re-checked by graph_changes (the equivalence grouping the base alike); the
 //      Data tab: the lineage drawn, the described store's card, the relation on the ERD, drift as a
 //      badge and a list never drawn as fact, the gap, everything escaped
+//
+//  (Part 1, continued) 34. the SQL code sends, read statement by statement (readers/sql-query.mjs): each
+//      statement kind, aliases, joins (composite, self, USING, implicit, correlated), CTEs (a name, never a
+//      table), subqueries, derived tables, quoted and qualified names, every parameter style, casts, SELECT *,
+//      a table in a parameter, what is no column, dialect markers; hostile text bounded and inert, errors
+//      by line, never a literal's value
+//  35. the SQL code sends against the model (data/queries.mjs), on hand-built facts: a store deduced and
+//      named by its client and dialect (types, nullability, defaults unknown), attached to a declared
+//      store only on evidence (adding only [inferred] conflicts and access sites), kept apart and why,
+//      repositories never grouped, dialects apart, gaps, the diff; then each language's call sites through
+//      the pinned grammars (TypeScript, Go, Python, Rust; test code counted), and a file's bounds
+//
+//  (Part 2, continued) 36. a store deduced from the SQL code sends (fixtures/sqlq: a TypeScript service's
+//      tagged templates and a Go service's parameterised queries, no migration) through call(): the
+//      tables, columns, a relation from a join, unique keys from ON CONFLICT, lookups, readers and
+//      writers, each at its path:line; unknown stays unknown; the Data tab's dashed ERD and banner,
+//      escaping; then migrations added: the declared model wins, a column only the code names an
+//      [inferred] conflict
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -3474,6 +3492,346 @@ console.log('\n32 · the refine file (data/check.mjs): its format, each claim re
   rmSync(RD, { recursive: true, force: true })
 }
 
+// ── 34 · the SQL code sends: the statement reader ──
+console.log('\n34 · the SQL code sends, read statement by statement (readers/sql-query.mjs): tables, columns, joins, ON CONFLICT keys, lookups, casts; parameters of every style; what stays unknown; hostile text bounded and inert')
+{
+  const { readQueries, PARAM, QLIMITS, isSql } = await import('../lib/data/readers/sql-query.mjs')
+  const R = (sql, dialect = 'postgres', line = 1) => readQueries(sql, { dialect, line }).statements
+  const S = (sql, dialect) => R(sql, dialect)[0]
+  const T = (s) => s.tables.map((x) => `${x.name}:${x.role}`)
+  const C = (s) => s.columns.map((c) => `${c.table}.${c.name}:${c.how}`)
+  const J = (s) => s.joins.map((j) => `${j.a.table}(${j.a.columns}) = ${j.b.table}(${j.b.columns})`)
+  const L = (s) => s.lookups.map((l) => `${l.table}.${l.column}:${l.how}`)
+  // a SELECT: aliases, a join, a lookup, an ordering, an output alias
+  const sel = S('SELECT u.id, u.email, o.total AS amount\nFROM users u\nJOIN orders AS o ON o.user_id = u.id\nWHERE u.email = $1\nORDER BY o.created_at DESC')
+  eq([sel.kind, T(sel), C(sel), J(sel), L(sel)], ['select', ['users:read', 'orders:read'], ['orders.user_id:join', 'users.id:join', 'users.id:select', 'users.email:select', 'orders.total:select', 'users.email:where', 'orders.created_at:order'], ['orders(user_id) = users(id)'], ['users.email:where', 'orders.created_at:order']],
+    'SELECT: aliases resolved within the statement (u, AS o), the join from its ON, a WHERE equality and an ORDER BY as lookups; an output alias (amount) is no column')
+  eq([sel.tables.map((x) => x.line), sel.joins[0].line, sel.lookups.map((l) => l.line)], [[2, 3], 3, [4, 5]], '… each fact at its line')
+  // INSERT … ON CONFLICT … RETURNING
+  const ins = S('INSERT INTO users (email, name) VALUES ($1, $2)\nON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name\nRETURNING id')
+  eq([ins.kind, T(ins), C(ins), ins.conflict], ['insert', ['users:write'], ['users.email:insert', 'users.name:insert', 'users.email:conflict', 'users.name:set', 'users.name:expr', 'users.id:returning'], { table: 'users', columns: ['email'], line: 2 }],
+    'INSERT: its column list, ON CONFLICT (email) a unique key of the target, EXCLUDED.name the target\'s, RETURNING read')
+  eq(S('INSERT INTO members (tenant_id, slug) VALUES ($1, $2) ON CONFLICT (tenant_id, slug) DO NOTHING').conflict.columns, ['tenant_id', 'slug'], 'a composite ON CONFLICT target: one key, both columns')
+  const onExpr = readQueries('INSERT INTO users (email) VALUES ($1) ON CONFLICT (lower(email)) DO NOTHING', { dialect: 'postgres' })
+  eq([onExpr.statements[0].conflict, onExpr.statements[0].notes], [null, ['line 1: an ON CONFLICT target holding an expression: no unique key read']], 'an ON CONFLICT on an expression: no key read, and it says so by line')
+  // UPDATE and DELETE
+  const upd = S('UPDATE orders SET status = $1, updated_at = now() WHERE id = $2 RETURNING id, status')
+  eq([upd.kind, T(upd), C(upd), L(upd)], ['update', ['orders:write'], ['orders.status:set', 'orders.updated_at:set', 'orders.id:where', 'orders.id:returning', 'orders.status:returning'], ['orders.id:where']], 'UPDATE: SET columns written, a WHERE equality a lookup, RETURNING read')
+  const ufrom = S('UPDATE orders o SET total = i.sum FROM invoices i WHERE i.order_id = o.id')
+  eq([T(ufrom), C(ufrom), J(ufrom)], [['orders:write', 'invoices:read'], ['orders.total:set', 'invoices.sum:expr', 'invoices.order_id:where', 'orders.id:where'], ['invoices(order_id) = orders(id)']], 'UPDATE … FROM: the target written, the other table read, the join in WHERE')
+  const del = S('DELETE FROM sessions s WHERE s.expires_at < NOW() AND s.user_id = ?', 'mysql')
+  eq([del.kind, T(del), C(del), L(del)], ['delete', ['sessions:write'], ['sessions.expires_at:where', 'sessions.user_id:where'], ['sessions.user_id:where']], 'DELETE: the table written, a comparison seen but only an equality a lookup (MySQL\'s ?)')
+  eq(T(S('DELETE s FROM sessions s JOIN accounts a ON a.id = s.account_id WHERE a.banned = 1', 'mysql')), ['sessions:read', 'accounts:read', 'sessions:write'], "MySQL's DELETE t FROM …: the table named before FROM written")
+  eq([T(S('TRUNCATE TABLE audit_log, events')), S('INSERT INTO t SET a = 1, b = ?', 'mysql').columns.map((c) => `${c.name}:${c.how}`)], [['audit_log:write', 'events:write'], ['a:set', 'b:set']], 'TRUNCATE writes each table; MySQL\'s INSERT … SET names its columns')
+  // CTEs, subqueries, derived tables
+  const cte = S('WITH recent AS (SELECT user_id FROM orders WHERE created_at > $1)\nSELECT u.id FROM users u JOIN recent r ON r.user_id = u.id')
+  eq([T(cte), C(cte), J(cte), cte.ctes], [['orders:read', 'users:read'], ['orders.user_id:select', 'orders.created_at:where', 'users.id:join', 'users.id:select'], [], 1], 'a CTE: its body read, its name never a table, a join through it none')
+  eq(T(S('WITH RECURSIVE tree(id) AS (SELECT id FROM nodes UNION ALL SELECT n.id FROM nodes n JOIN tree t ON n.parent_id = t.id) SELECT id FROM tree')), ['nodes:read'], 'a recursive CTE refers to itself: still no table')
+  const sub = S('SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > 100)')
+  eq([T(sub), C(sub), L(sub)], [['users:read', 'orders:read'], ['users.id:select', 'users.id:where', 'orders.user_id:select', 'orders.total:where'], ['users.id:where']], 'a subquery: its own table, a bare column resolved within it; IN (…) a lookup')
+  const corr = S('SELECT u.id FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)')
+  eq([J(corr), L(corr)], [['orders(user_id) = users(id)'], []], 'a correlated subquery sees the aliases around it: its equality is a join')
+  eq([T(S('SELECT t.n FROM (SELECT count(*) AS n FROM orders) t')), C(S('SELECT t.n FROM (SELECT count(*) AS n FROM orders) t'))], [['orders:read'], []], 'a derived table: its body read, its columns no table\'s')
+  eq([T(S('SELECT id FROM a UNION ALL SELECT id FROM b')), C(S('SELECT id FROM a UNION ALL SELECT id FROM b'))], [['a:read', 'b:read'], ['a.id:select', 'b.id:select']], 'UNION: each block in its own scope')
+  // joins: composite, self, USING, implicit
+  eq([J(S('SELECT 1 FROM a JOIN b ON a.x = b.x AND a.y = b.y')), J(S('SELECT e.name, m.name FROM employees e JOIN employees m ON e.manager_id = m.id')), J(S('SELECT a.x FROM a JOIN b USING (k)')), J(S('SELECT * FROM orders o, users u WHERE o.user_id = u.id AND u.active = true'))],
+    [['a(x,y) = b(x,y)'], ['employees(manager_id) = employees(id)'], ['a(k) = b(k)'], ['orders(user_id) = users(id)']], 'joins: composite as one, a self join between two aliases, USING (k), an implicit join in WHERE')
+  eq(L(S('SELECT * FROM orders o, users u WHERE o.user_id = u.id AND u.active = true')), ['users.active:where'], '… and beside it, an equality with a value is a lookup')
+  eq(J(S('SELECT 1 FROM a JOIN b ON LEFT(a.code, 3) = b.prefix')), [], 'a function on one side (LEFT(…), never a join word) is no column join')
+  // names: quoted, folded, schema-qualified, unresolved
+  const q = S('SELECT "Account"."Name", "Account".id FROM "Account" WHERE "Account"."Email" = $1')
+  eq([T(q), C(q)], [['Account:read'], ['Account.Name:select', 'Account.id:select', 'Account.Email:where']], 'quoted names kept as written')
+  eq([C(S('SELECT Id FROM Users')), C(S('SELECT Id FROM Users', 'mysql')), T(S('SELECT `id`, `Total` FROM `Orders`', 'mysql'))], [['users.id:select'], ['Users.Id:select'], ['Orders:read']], 'Postgres folds unquoted names to lower case; MySQL keeps them; backticks are names')
+  eq([T(S('SELECT a FROM public.users')), T(S('SELECT a FROM audit.events')), C(S('SELECT audit.events.kind FROM audit.events'))], [['users:read'], ['audit.events:read'], ['audit.events.kind:select']], 'a public. qualifier dropped, another schema kept; schema.table.column resolved')
+  const amb = S('SELECT name FROM users, orders')
+  eq([C(amb), amb.unresolved], [[], 1], 'a bare column two tables could hold: unresolved, counted, never guessed')
+  // what is no column: *, output aliases, functions, keywords, types, units
+  eq([C(S('SELECT * FROM users')), C(S('SELECT u.* FROM users u'))], [[], []], 'SELECT * and t.* reveal no column')
+  eq([C(S('SELECT u.id uid FROM users u ORDER BY uid')), L(S('SELECT u.id uid FROM users u ORDER BY uid'))], [['users.id:select'], []], 'an implicit output alias is no column, and ordering by it no lookup')
+  const grp = S('SELECT status, count(*) AS n FROM orders GROUP BY status HAVING count(*) > 1 ORDER BY n DESC')
+  eq([C(grp), L(grp)], [['orders.status:select', 'orders.status:group'], []], 'GROUP BY and HAVING read; count(*) and the alias n are no columns')
+  eq(C(S('SELECT lower(email), count(*) FROM users GROUP BY lower(email)')), ['users.email:select', 'users.email:group'], 'a function\'s name is no column, its argument is')
+  eq([C(S("SELECT id FROM events WHERE created_at > now() - interval '1 day'")), C(S('SELECT id FROM events WHERE created_at > NOW() - INTERVAL 1 DAY', 'mysql')), C(S("SELECT id FROM events WHERE day = DATE '2024-01-01' AND at AT TIME ZONE 'UTC' > $1"))],
+    [['events.id:select', 'events.created_at:where'], ['events.id:select', 'events.created_at:where'], ['events.id:select', 'events.day:where', 'events.at:where']], 'an interval\'s unit, a typed literal\'s type and AT TIME ZONE are no columns (a column named day is)')
+  // casts: the only type the code states
+  const cast = S('SELECT id::text, CAST(total AS numeric(10, 2)), created_at::timestamp with time zone FROM orders')
+  eq([C(cast), cast.casts.map((x) => `${x.table}.${x.column} ${x.type}`)], [['orders.id:select', 'orders.total:select', 'orders.created_at:select'], ['orders.id text', 'orders.total numeric(10,2)', 'orders.created_at timestamp with time zone']], 'casts: `::type` and CAST(… AS type) on a column, the type never read as a column')
+  eq(S('SELECT $1::int, a FROM t WHERE id::text = $2').casts.map((x) => `${x.column} ${x.type}`), ['id text'], 'a parameter\'s cast is no column\'s; a cast column compared is still a lookup')
+  eq(L(S('SELECT $1::int, a FROM t WHERE id::text = $2')), ['t.id:where'], '… (the lookup)')
+  // parameters, every style: never a name
+  const styles = [['?', 'sqlite'], ['?1', 'sqlite'], ['$1', 'postgres'], [':id', 'sqlite'], ['@id', 'sqlite'], ['$id', 'sqlite'], ['%s', 'postgres'], ['%(id)s', 'postgres'], [PARAM, 'postgres'], ['?', null]]
+  eq(styles.map(([p, d]) => L(S(`SELECT a FROM t WHERE id = ${p} AND b=${p}`, d))), styles.map(() => ['t.id:where', 't.b:where']), 'parameters of every style (?, ?1, $1, :name, @name, $name, %s, %(name)s, a template\'s ${…}), glued to an operator or not: values, so each comparison is a lookup')
+  eq(styles.map(([p, d]) => S(`SELECT a FROM t WHERE id = ${p}`, d).columns.length), styles.map(() => 2), '… and never a column')
+  // a table name in a parameter is never a table
+  const dyn = [`SELECT * FROM ${PARAM} WHERE id = $1`, `SELECT a FROM t_${PARAM}`, `SELECT a FROM ${PARAM}.users`, `INSERT INTO ${PARAM} (a) VALUES ($1)`, `UPDATE "${PARAM}" SET a = 1`, `SELECT ${PARAM}_name FROM users`]
+  eq(dyn.map((x) => [T(S(x)), S(x).dynamic, C(S(x))]), [[[], 1, []], [[], 1, []], [[], 1, []], [[], 1, []], [[], 1, []], [['users:read'], 1, []]], 'a table or a column named by code (a parameter, or a name glued to one): never a table or a column, counted as dynamic')
+  // several statements in one text, other kinds counted, lines
+  const many = readQueries('SELECT 1; DELETE FROM t WHERE id = $1;\nBEGIN;\nCREATE TABLE IF NOT EXISTS t (a int)', { dialect: 'postgres', line: 10 })
+  eq(many.statements.map((s) => [s.line, s.kind, s.verb || null]), [[10, 'select', null], [10, 'delete', null], [11, 'other', 'BEGIN'], [12, 'other', 'CREATE']], 'several statements in one text, each at its line in the file; other statements counted by their first word, never read')
+  eq([readQueries('SELECT a\nFROM t\nWHERE b = $1', { dialect: 'postgres', line: 40 }).statements[0].tables[0].line, readQueries('SELECT a\nFROM t\nWHERE b = $1', { dialect: 'postgres', line: 40 }).statements[0].lookups[0].line], [41, 42], 'lines are the file\'s')
+  eq(['SELECT 1', '  -- c\n select 1', '(SELECT 1)', 'users', 'hello world', 'UPDATE x SET a = 1', 'create table x (a int)', '', `${PARAM} FROM x`].map(isSql), [true, true, true, false, false, true, true, false, false], 'isSql: a text is SQL when its first word is a statement\'s')
+  // what the SQL says of its dialect
+  eq([readQueries('SELECT a::int FROM t WHERE b ILIKE $1').markers.map((m) => m.marker), readQueries('SELECT a FROM t WHERE b ILIKE $1').markers.map((m) => m.marker), readQueries('INSERT INTO c (n) VALUES (?) ON DUPLICATE KEY UPDATE n = n + 1', { dialect: 'mysql' }).markers.map((m) => m.marker), readQueries('INSERT OR REPLACE INTO c (n) VALUES (?)', { dialect: 'sqlite' }).markers.map((m) => m.marker), readQueries('SELECT data FROM t WHERE (data->>0)::jsonb ? $1').markers[0].dialect],
+    [['::', '$1 parameters'], ['ILIKE', '$1 parameters'], ['ON DUPLICATE KEY'], ['INSERT OR REPLACE'], 'postgres'], 'dialect markers, the first of each dialect: a cast, ILIKE, $1 (weak), ON DUPLICATE KEY, INSERT OR …')
+  const dup = S('INSERT INTO counters (name, hits) VALUES (?, 1) ON DUPLICATE KEY UPDATE hits = hits + 1', 'mysql')
+  eq([C(dup), dup.conflict], [['counters.name:insert', 'counters.hits:insert', 'counters.hits:set', 'counters.hits:expr'], null], 'ON DUPLICATE KEY UPDATE: its columns, no key (the engine picks which unique key)')
+  const insSel = S("INSERT INTO archive (id, total) SELECT id, total FROM orders WHERE status = 'done'")
+  eq([T(insSel), C(insSel), L(insSel)], [['archive:write', 'orders:read'], ['archive.id:insert', 'archive.total:insert', 'orders.id:select', 'orders.total:select', 'orders.status:where'], ['orders.status:where']], 'INSERT … SELECT: the target written, the source read')
+  // inert: never a literal's value, errors by position only
+  const secret = ['correct', 'horse', 'battery'].join(' ')
+  const lit = readQueries(`SELECT * FROM accounts WHERE pass = '${secret}' AND note = $1;\nSELECT a FROM t WHERE b = '${secret}`, { dialect: 'postgres' })
+  ok(!JSON.stringify(lit).includes('horse') && lit.statements[0].tables[0].name === 'accounts', 'a literal\'s value is never kept, only identifiers')
+  eq(lit.notes, ['line 2: an unterminated string'], '… and an error says where, never the text')
+  // hostile: bounded and inert
+  const t0 = Date.now()
+  const huge = readQueries(`SELECT a FROM t WHERE b = '${'x'.repeat(QLIMITS.bytes)}'`, { line: 7 })
+  eq([huge.statements, huge.notes], [[], [`line 7: a SQL text of more than ${QLIMITS.bytes >> 10} KB: not read`]], 'a text past the cap: not read, said by line')
+  const params = readQueries(`SELECT a FROM t WHERE id IN (${'?,'.repeat(100000)}?)`, { dialect: 'mysql' })
+  eq([params.statements[0].tables.map((x) => x.name), params.notes], [['t'], [`line 1: a statement of more than ${QLIMITS.tokens} tokens: its first ${QLIMITS.tokens} read`]], 'a hundred thousand parameters: its first tokens read, said')
+  const deep = readQueries(`SELECT ${'('.repeat(5000)}a${')'.repeat(5000)} FROM t WHERE ${'('.repeat(3000)}`, { dialect: 'postgres' })
+  eq([deep.statements[0].tables.map((x) => x.name), deep.statements[0].notes], [['t'], [`line 1: nested deeper than ${QLIMITS.depth}: the inner part not read`]], 'nesting past the cap and parentheses that never close: the rest read, said')
+  const wide = readQueries(`SELECT ${Array.from({ length: 3000 }, (_, i) => `c${i}`).join(', ')} FROM t`, { dialect: 'postgres' })
+  eq(wide.statements[0].columns.length, QLIMITS.facts, 'facts per statement capped')
+  const longChain = readQueries(`SELECT ${'a.'.repeat(9000)}b FROM t`, { dialect: 'postgres' })
+  ok(longChain.statements.length === 1, 'a name of thousands of parts: read in bounded time')
+  ok(Date.now() - t0 < 4000, `hostile texts in bounded time (${Date.now() - t0} ms)`)
+  eq(T(S('WITH gone AS (DELETE FROM jobs WHERE done = true RETURNING *) INSERT INTO job_log SELECT * FROM gone')), ['jobs:write', 'job_log:write'], 'a data-modifying CTE: its table written; the INSERT\'s source sees the CTE, never as a table')
+  // a value is never a name: "…" is a string in MySQL and, where no column has its name, in SQLite;
+  // a quoted token in a value position is never read as a column, in any dialect (#106 review)
+  const SEC = ['tok', 'SECRET', '7'].join('')
+  const leaks = (x) => JSON.stringify(x).includes('SECRET')
+  for (const d of [null, 'sqlite', 'postgres']) {
+    const vals = [`UPDATE accounts SET token = "${SEC}" WHERE id = ?`, `SELECT name FROM people WHERE name = 'x' AND note = "${SEC}"`, `INSERT INTO t (a) VALUES ("${SEC}")`, `SELECT a FROM t WHERE a IN ("${SEC}", "${SEC}")`, `SELECT lower("${SEC}") FROM t`,
+      `SELECT CASE WHEN a = 1 THEN "${SEC}" ELSE "${SEC}" END FROM t`, `SELECT a FROM t WHERE a LIKE "${SEC}"`, `SELECT a FROM t WHERE a BETWEEN "${SEC}" AND "${SEC}"`, `UPDATE t SET a = coalesce(b, "${SEC}")`, `SELECT a FROM t WHERE a <> "${SEC}" OR a = "${SEC}" || "x"`]
+    ok(vals.every((v) => !leaks(readQueries(v, { dialect: d }))), `"…" in a value position (the right of a comparison, IN, VALUES, SET, LIKE, BETWEEN, a function's argument, a CASE result) is never a name (${d || 'dialect unknown'})`)
+  }
+  eq([C(S(`UPDATE accounts SET token = "${SEC}" WHERE id = ?`, null)), L(S(`SELECT name FROM people WHERE name = 'x' AND note = "${SEC}"`, 'sqlite'))], [['accounts.token:set', 'accounts.id:where'], ['people.name:where', 'people.note:where']], '… the columns around it still read, and a comparison with it is still a lookup')
+  eq([leaks(readQueries(`SELECT "${SEC}" FROM t`, { dialect: null })), leaks(readQueries(`SELECT "${SEC}" FROM t`, { dialect: 'sqlite' })), C(S('SELECT "Total" FROM orders', 'postgres'))], [false, false, ['orders.Total:select']], 'a lone "…" in a select list: a string where the dialect may make it one (unknown, SQLite), a name only in Postgres')
+  eq([C(S('INSERT INTO "Accounts" ("Token") VALUES ($1)', null)), C(S('SELECT a FROM "Accounts" WHERE "Email" = $1', 'sqlite')), J(S('SELECT 1 FROM a JOIN b ON a."x" = "b"."y"', null))], [['Accounts.Token:insert'], ['Accounts.a:select', 'Accounts.Email:where'], ['a(x) = b(y)']], 'quoted names where only a name can stand (a column list, a predicate\'s left side, a qualified name) are still read')
+  for (const d of [null, 'sqlite', 'postgres']) {
+    const r = readQueries(`SELECT a FROM t WHERE b = 'it\\'s a ${SEC} here' AND c = 1`, { dialect: d })
+    eq([leaks(r), r.statements[0].tables.map((x) => x.name), r.statements[0].notes], [false, ['t'], ['line 1: a backslash before a closing quote: read up to it (the database\'s dialect may escape the quote and go on)']], `a backslash before a quote (\\'), which only some dialects read as an escape: the statement read up to it, no word past it a name (${d || 'dialect unknown'})`)
+  }
+  eq([leaks(readQueries(`SELECT a FROM t WHERE b = 'it\\'s a ${SEC} here' AND c = 1`, { dialect: 'mysql' })), C(S(`SELECT a FROM t WHERE b = 'it\\'s a ${SEC} here' AND c = 1`, 'mysql'))], [false, ['t.a:select', 't.b:where', 't.c:where']], '… MySQL reads it as an escape: the whole statement read')
+  ok(!leaks(readQueries(`SELECT "${SEC} FROM t`, { dialect: null })) && !leaks(readQueries(`SELECT a FROM t WHERE b = "x\\"${SEC}"`, { dialect: 'sqlite' })), 'a quoted name that never closes, or a backslash before its closing quote: never a name')
+  // a table named like a keyword (groups, range, rows, key) is a table; its alias never one
+  eq([T(S('SELECT g.name FROM groups g JOIN users u ON u.gid = g.id')), J(S('SELECT g.name FROM groups g JOIN users u ON u.gid = g.id'))], [['groups:read', 'users:read'], ['users(gid) = groups(id)']], 'a table named groups: read as one, its alias never a table, the join right')
+  eq([T(S('SELECT * FROM range r, users u WHERE u.id = r.uid')), J(S('SELECT * FROM range r, users u WHERE u.id = r.uid')), T(S('SELECT r.id FROM rows r WHERE r.x = $1'))], [['range:read', 'users:read'], ['users(id) = range(uid)'], ['rows:read']], '… range and rows too')
+  eq([T(S('UPDATE groups g SET name = $1 WHERE g.id = $2')), C(S('UPDATE groups g SET name = $1 WHERE g.id = $2')), T(S('DELETE FROM groups g WHERE g.id = 1')), T(S('INSERT INTO groups (name) VALUES ($1)')), J(S('SELECT * FROM users u JOIN groups ON groups.id = u.gid'))],
+    [['groups:write'], ['groups.name:set', 'groups.id:where'], ['groups:write'], ['groups:write'], ['groups(id) = users(gid)']], '… as the target of UPDATE, DELETE and INSERT, and as a qualifier')
+  const kv = S('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value')
+  eq([C(kv), kv.conflict.columns, L(S('SELECT key FROM settings WHERE key = $1'))], [['settings.key:insert', 'settings.value:insert', 'settings.key:conflict', 'settings.value:set', 'settings.value:expr'], ['key'], ['settings.key:where']], 'a column named key: in the column list, the ON CONFLICT key and a lookup')
+  eq([T(S('SELECT a FROM t PARTITION (p1) WHERE b = 1', 'mysql')), T(S('SELECT a FROM t WITH (NOLOCK) WHERE b = 1'))], [['t:read'], ['t:read']], 'what does not read as a table factor ends the FROM list: no word after it taken for a table')
+  // never tables: the system catalogs
+  eq(['SELECT table_name FROM information_schema.tables WHERE table_schema = $1', 'SELECT * FROM pg_catalog.pg_tables', 'SELECT relname FROM pg_class c JOIN users u ON u.id = c.oid', "SELECT name FROM sqlite_master WHERE type = 'table'", 'SELECT 1 FROM dual', 'SELECT * FROM mysql.user', 'SELECT * FROM performance_schema.threads', 'SELECT * FROM sys.objects'].map((x) => T(S(x))),
+    [[], [], ['users:read'], [], [], [], [], []], 'the system catalogs (information_schema, pg_*, sqlite_*, dual, mysql.*, performance_schema.*, sys.*) are never tables')
+  // an OR between equalities is no join
+  eq([J(S('SELECT 1 FROM a JOIN b ON a.x = b.x OR a.y = b.y')), J(S('SELECT 1 FROM a JOIN b ON (a.x = b.x OR a.y = b.y)')), J(S('SELECT 1 FROM a JOIN b ON a.x = b.x AND (a.t = 1 OR a.t = 2)'))], [[], [], ['a(x) = b(x)']], 'only a conjunction of equalities is a join: with an OR between them, none')
+  // prose is no SQL
+  eq(['Select a user from the list', 'Delete from cart', 'Update your profile', 'Insert coin to continue'].map((x) => R(x).length), [0, 0, 0, 0], 'prose starting with a capitalised verb is no statement')
+  eq([T(S('Select Id From Users Where Id = $1')), T(S('select id from users')), T(S('SELECT id FROM users'))], [['users:read'], ['users:read'], ['users:read']], '… while SQL in one case style throughout is read')
+  const ex = readQueries(`${'EXPLAIN '.repeat(20000)}SELECT a FROM t`, { dialect: 'postgres' })
+  ok(ex.statements.length === 1 && !(ex.notes || []).some((n) => /could not be read/.test(n)), 'EXPLAIN on EXPLAIN: bounded, never a stack overflow')
+}
+
+// ── 35 · the SQL code sends, against the model: deduced or attached, never overriding ──
+console.log('\n35 · the SQL code sends, against the model (data/queries.mjs): a store deduced from the queries, named by its client and dialect; attached to a declared store only on evidence, adding only [inferred] conflicts and access sites; repositories never grouped; gaps; the diff; then each language\'s call sites (extractors/sql-queries.mjs)')
+{
+  const { readQueries } = await import('../lib/data/readers/sql-query.mjs')
+  const { gapsOf } = await import('../lib/data/check.mjs')
+  const { diffModels } = await import('../lib/data/diff.mjs')
+  const { storeSummary: summary } = await import('../lib/data/reconcile.mjs')
+  const site = (line, sql, dialect = 'postgres', fn = 0, call = 'query') => ({ line, fn, call, statements: readQueries(sql, { dialect, line }).statements })
+  const qf = (repo, p, clients, sites, extra = {}) => ({ repo, extractor: 'sql-queries@1', facts: { declarations: [], queries: { lang: 'ts', path: p, clients: clients.map(([source, dialect, line = 1]) => ({ source, dialect, line })), hints: [], markers: [], sites, fns: [{ name: 'save', line: 3, end: 20 }], notes: [], tests: 0, ...extra } } })
+  const web = qf('shop', 'web/users.ts', [['pg', 'postgres']], [
+    site(5, 'SELECT u.id, u.email FROM users u WHERE u.email = $1'),
+    site(9, 'INSERT INTO users (email, name) VALUES ($1, $2)\nON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name RETURNING id'),
+  ])
+  const worker = qf('shop', 'worker/orders.go', [['database/sql', null]], [site(12, 'SELECT o.id, o.total::numeric FROM orders o JOIN users u ON o.user_id = u.id WHERE o.status = $1 ORDER BY o.created_at')], { lang: 'go', fns: [{ name: 'Repo.Open', line: 10, end: 30 }] })
+  const M = reconcile([web, worker])
+  const S0 = M.stores[0]
+  eq([M.stores.map((s) => s.id), S0.dialect, S0.dialectFrom.how, S0.dialectFrom.source, S0.inferred.clients], [['shop:sql (inferred, postgres)'], 'postgres', 'client', 'pg', ['database/sql', 'pg']], 'no declaration: one store deduced from the repository\'s queries, named by its client and dialect; a generic driver\'s file joins it through the repository\'s client')
+  eq(summary(S0), '2 tables · 1 relation from joins · 1 unique key from ON CONFLICT · 3 lookup columns · inferred from queries in code, not declared (3 statements)', 'its summary: deduced, never declared')
+  const users = S0.entities.find((e) => e.name === 'users'), orders = S0.entities.find((e) => e.name === 'orders')
+  eq([users.fields.map((f) => f.name), orders.fields.map((f) => f.name)], [['id', 'email', 'name'], ['user_id', 'id', 'total', 'status', 'created_at']], 'the columns each statement names, on their tables (aliases resolved)')
+  eq(users.sources.map((s) => `${s.path}:${s.line} ${s.kind}`), ['web/users.ts:5', 'web/users.ts:9', 'worker/orders.go:12'].map((x) => `${x} inferred`), 'each table cites every statement that names it, path:line, kind inferred')
+  eq([users.keys.map((k) => [k.role, k.parts, k.from, k.sources.map((s) => s.line)]), orders.relations.map((r) => [r.kind, r.columns, r.to, r.toColumns, r.direction, r.sources.map((s) => `${s.path}:${s.line}`)])],
+    [[['unique', ['email'], 'ON CONFLICT', [10]]], [['join', ['user_id'], 'users', ['id'], 'id', ['worker/orders.go:12']]]], 'a unique key from ON CONFLICT; a relation inferred from a join (the side holding id referenced), never a foreign key')
+  eq([users.lookups.map((l) => [l.columns, l.how]), orders.lookups.map((l) => [l.columns, l.how])], [[[['email'], ['where']]], [[['status'], ['where']], [['created_at'], ['order']]]], 'lookups: WHERE equality and ORDER BY columns, leads for an index (never in indexes)')
+  ok(S0.entities.every((e) => !e.indexes.length && e.fields.every((f) => f.nullable === null && f.default === null && f.unstated.join() === 'type,nullable,default')), 'unknown stays unknown: no index, every column\'s nullability and default unknown, its type not stated')
+  eq(orders.fields.map((f) => [f.name, f.type.raw, f.casts.map((c) => c.type)]).filter(([, , c]) => c.length), [['total', null, ['numeric']]], '… a cast is the only type the code states, kept as a cast, never as the column\'s type')
+  eq(M.queries.sites.map((s) => [s.path, s.line, s.fn, s.reads.map((x) => x.split('/').pop()), s.writes.map((x) => x.split('/').pop())]), [['web/users.ts', 5, 'save', ['users'], []], ['web/users.ts', 9, 'save', [], ['users']], ['worker/orders.go', 12, 'Repo.Open', ['orders', 'users'], []]], 'readers and writers: each call with its function and the tables it reads and writes')
+  // a declared store: the queries attach, adding only [inferred] conflicts and access sites
+  const D = (repo, store, dialect, tables, extractor = 'sql-migrations@2') => ({ repo, extractor, facts: { declarations: [{ store, dialect, dialectFrom: { how: 'sniffed', marker: 'x', path: `${store}/0001.sql`, line: 1 }, source: { path: `${store}/0001.sql`, line: null, kind: 'migration', confidence: 'declared' }, complete: true, status: 'read', label: 'replayed 1 file', notes: [], entities: tables.map(([name, cols], i) => ({ name, kind: 'table', path: `${store}/0001.sql`, line: 1 + i * 10, fields: cols.map((c, j) => ({ name: c, type: 'text', nullable: false, default: null, generated: null, path: `${store}/0001.sql`, line: 2 + i * 10 + j })), keys: [], indexes: [], relations: [] })) }] } })
+  const mig = D('shop', 'db/migrations', 'postgres', [['users', ['id', 'email']], ['orders', ['id', 'total', 'user_id', 'status', 'created_at']]])
+  const audit = qf('shop', 'web/audit.ts', [['pg', 'postgres']], [site(4, 'DELETE FROM audit_log WHERE user_id IN (SELECT id FROM users WHERE email = $1)')])
+  const analytics = qf('shop', 'analytics/events.ts', [['pg', 'postgres']], [site(2, 'INSERT INTO events (name, at) VALUES ($1, now())'), site(3, 'SELECT name FROM page_views WHERE at > $1')])
+  const MA = reconcile([mig, web, worker, audit, analytics])
+  const A0 = MA.stores.find((s) => s.id === 'shop:db/migrations'), au = A0.entities.find((e) => e.name === 'users')
+  eq([MA.stores.map((s) => s.id), MA.queries.attached], [['shop:db/migrations', 'shop:sql (inferred, postgres)'], [{ store: 'shop:db/migrations', files: 3, why: 'the only declared SQL store in the repository; 2 of 3 tables named are declared' }]], 'migrations declare the store: the queries naming a table it declares attach to it, saying how many of the tables they name it declares')
+  eq([MA.stores[1].entities.map((e) => e.name), MA.stores[1].inferred.why], [['events', 'page_views'], 'not attached: no table it names is declared in shop:db/migrations'], '… and queries naming none of its tables are no evidence for it: a store of their own, and why (the only declared store is evidence by elimination, never alone)')
+  eq([au.fields.map((f) => f.name), au.fields.every((f) => f.sources.every((s) => s.kind === 'migration'))], [['id', 'email'], true], 'the declared model wins: no column added, no inferred source on a declared element')
+  eq(au.queries.conflicts.map((c) => [c.label, c.values.map((v) => [v.value, v.sources.map((s) => `${s.path}:${s.line} ${s.kind}`)])]), [['users.name', [['named in code (inferred)', ['web/users.ts:9 inferred', 'web/users.ts:10 inferred']], ['absent from the declarations', ['db/migrations/0001.sql:1 migration']]]]],
+    'a column only the code names: an [inferred] conflict, both sides cited')
+  eq([A0.queries.conflicts.map((c) => [c.label, c.values[0].sources.map((s) => `${s.path}:${s.line}`)]), au.queries.sites.map((k) => `${MA.queries.sites[k].path}:${MA.queries.sites[k].line}`), summary(A0)], [[['audit_log', ['web/audit.ts:4']]], ['web/users.ts:5', 'web/users.ts:9', 'worker/orders.go:12', 'web/audit.ts:4'], '2 tables · 0 foreign keys · 0 indexes · 2 conflicts'], 'a table only the code names: an [inferred] conflict on the store; the access sites on the declared tables (each call reading or writing users); counted with the conflicts')
+  // two declared stores and no evidence: kept apart, and why; the module they share is evidence
+  const two = reconcile([D('shop', 'db/main', 'postgres', [['users', ['id']]]), D('shop', 'db/reports', 'postgres', [['totals', ['day']]]), web])
+  eq([two.stores.map((s) => s.id), two.stores.find((s) => s.inferred).inferred.why], [['shop:db/main', 'shop:db/reports', 'shop:sql (inferred, postgres)'], 'not attached: the repository declares 2 SQL stores (shop:db/main, shop:db/reports) and nothing ties these queries to one'], 'two declared SQL stores, nothing tying the queries to one: a store of their own, saying why')
+  const mod = reconcile([D('shop', 'web/db', 'postgres', [['users', ['id', 'email', 'name']]]), D('shop', 'reports/db', 'postgres', [['totals', ['day']]]), web])
+  eq(mod.queries.attached, [{ store: 'shop:web/db', files: 1, why: 'the same module (web/); 1 of 1 table named is declared' }], '… the folder they share ties them: attached')
+  const lite = reconcile([D('shop', 'mobile/drizzle', 'sqlite', [['users', ['id']]]), web])
+  eq([lite.stores.map((s) => s.id), lite.stores[1].inferred.why], [['shop:mobile/drizzle', 'shop:sql (inferred, postgres)'], 'not attached: its client speaks postgres, the declared SQL store of the repository shop:mobile/drizzle (sqlite)'], 'a declared store of another dialect: never attached')
+  const prismaDecl = D('shop', 'prisma', 'postgres', [['users', ['id', 'email']]], 'prisma@2')
+  eq(reconcile([prismaDecl, D('shop', 'db/other', 'postgres', [['logs', ['id']]]), qf('shop', 'web/raw.ts', [['@prisma/client', null]], [site(3, 'SELECT id FROM users', 'postgres', 0, '$queryRaw')])]).queries.attached, [{ store: 'shop:prisma', files: 1, why: 'the same client (prisma); 1 of 1 table named is declared' }], 'the same client: a Prisma client\'s $queryRaw attaches to the Prisma schema\'s store')
+  // repositories never grouped; dialects told apart within one
+  const twoRepos = reconcile([web, { ...web, repo: 'admin' }])
+  eq(twoRepos.stores.map((s) => s.id), ['admin:sql (inferred, postgres)', 'shop:sql (inferred, postgres)'], 'two repositories querying tables of one name: two stores, never grouped without evidence')
+  const dialects = reconcile([web, qf('shop', 'app/local.ts', [['better-sqlite3', 'sqlite']], [site(2, 'SELECT id FROM drafts', 'sqlite')]), qf('shop', 'lib/q.ts', [], [site(2, 'SELECT id FROM notes')])])
+  eq([dialects.stores.map((s) => s.id), dialects.stores.map((s) => s.entities.map((e) => e.name))], [['shop:sql (inferred, dialect unknown)', 'shop:sql (inferred, postgres)', 'shop:sql (inferred, sqlite)'], [['notes'], ['users'], ['drafts']]], 'two clients of two dialects in one repository: a store each; a file with no client and no marker apart, its dialect unknown')
+  eq(reconcile([qf('shop', 'lib/q.ts', [], [site(2, 'SELECT id::text FROM notes')], { markers: readQueries('SELECT id::text FROM notes').markers })]).stores.map((s) => [s.id, s.dialectFrom.how, s.dialectFrom.marker]), [['shop:sql (inferred, postgres)', 'sniffed', '::']], 'no client: the dialect sniffed from the SQL itself')
+  // gaps: a client whose queries are read is no gap; the diff never compares a deduced store
+  const imports = [{ repo: 'shop', path: 'web/users.ts', source: 'pg' }]
+  eq([gapsOf(M, [], imports), gapsOf({ stores: [] }, [], imports).map((g) => g.label)], [[], ['PostgreSQL']], 'a client import whose queries are read is no longer a gap')
+  // a client whose queries are not read keeps its gap; a deduced store covers its own repository only
+  const p5 = reconcile([qf('app', 'src/pg.ts', [['pg', 'postgres']], [site(3, 'SELECT id FROM users WHERE id = $1')]), qf('app', 'src/legacy.ts', [['mysql2/promise', 'mysql']], [])])
+  const p5gaps = gapsOf(p5, [], [{ repo: 'app', path: 'src/legacy.ts', source: 'mysql2/promise' }, { repo: 'app', path: 'src/pg.ts', source: 'pg' }, { repo: 'web', path: 'src/db.ts', source: 'pg' }])
+  eq(p5gaps.map((g) => [g.label, g.files.map((f) => `${f.repo}:${f.path}`)]), [['PostgreSQL', ['web:src/db.ts']], ['MySQL', ['app:src/legacy.ts']]], 'a MySQL client sending only SQL built elsewhere stays a gap beside the Postgres queries read; another repository\'s Postgres client too (a deduced store covers its own repository, never the model)')
+  // p4: a second Postgres database queried from analytics/, beside the migrations of the main one
+  const p4 = reconcile([D('svc', 'db/migrations', 'postgres', [['users', ['id', 'email']], ['orders', ['id', 'user_id', 'total']]]),
+    qf('svc', 'src/main/repo.ts', [['pg', 'postgres']], [site(3, 'SELECT id, email, nickname FROM users WHERE id = $1'), site(4, 'SELECT o.id, o.total, o.coupon FROM orders o JOIN users u ON u.id = o.user_id WHERE u.email = $1'), site(5, 'SELECT id FROM ghosts WHERE id = $1')]),
+    qf('svc', 'src/analytics/events.ts', [['pg', 'postgres']], [site(3, 'INSERT INTO events (name, at) VALUES ($1, now())'), site(4, 'SELECT id, segment FROM users WHERE segment = $1')])])
+  const p4s = p4.stores.find((s) => s.id === 'svc:db/migrations')
+  eq([p4.stores.map((s) => s.id), p4.queries.attached.map((a) => a.why), p4s.queries.conflicts.map((c) => c.label), p4s.entities.find((e) => e.name === 'users').queries.conflicts.map((c) => c.label)],
+    [['svc:db/migrations'], ['the only declared SQL store in the repository; 2 of 4 tables named are declared'], ['ghosts', 'events'], ['users.nickname', 'users.segment']], 'p4: queries naming a declared table attach (the only declared store, and a table it declares), the coverage said, and what the declarations lack shown as [inferred] conflicts')
+  eq(diffModels({ stores: [] }, M).stores, [], 'the branch diff compares declarations: a deduced store is never "added"')
+  const hostile = reconcile([qf('shop', 'x.ts', [['pg', 'postgres']], Array.from({ length: 400 }, (_, i) => site(i + 1, `SELECT ${Array.from({ length: 40 }, (_, j) => `c${j}`).join(', ')} FROM t${i % 7} JOIN u ON u.id = t${i % 7}.u_id WHERE c1 = $1`)))])
+  ok(hostile.stores[0].entities.every((e) => e.sources.length <= 8 && e.fields.every((f) => f.sources.length <= 8)), 'sources per element capped, however many statements cite it')
+}
+
+// the call sites, per language, through the pinned grammars
+{
+  const deps = await import('../lib/deps.mjs')
+  if (!deps.findDeps()) {
+    if (process.env.CI) { FAIL++; console.log('   ✗ FAIL: parser runtime missing (run npm ci --prefix tools/graph)') } else console.log('   - call sites skipped: parser runtime not installed (npm ci --prefix tools/graph)')
+  } else {
+    const rt = await deps.loadRuntime({ install: false })
+    const { default: queries, queryLevel } = await import('../lib/data/extractors/sql-queries.mjs')
+    const { PARAM } = await import('../lib/data/readers/sql-query.mjs')
+    const ps = {}
+    for (const l of ['typescript', 'tsx', 'javascript', 'python', 'go', 'rust']) ps[l] = await rt.parserFor(l)
+    const ctx = { tree: (lang, t) => ps[lang].parse(t) }
+    const read = (file, lines) => queries.extract(lines.join('\n'), file, ctx).queries
+    const brief = (q) => q.sites.map((s) => [s.line, s.call, q.fns[s.fn]?.name ?? null, s.statements.map((x) => `${x.kind} ${x.tables.map((t) => `${t.name}:${t.role}`).join(',')}`)])
+    const ts = read('api/users.ts', [
+      "import { Pool } from 'pg'",
+      "import sql from './db'",
+      'const BY_EMAIL = `SELECT id FROM users WHERE email = $1`',
+      'export async function find(pool: Pool, email: string, table: string) {',
+      '  await pool.query(BY_EMAIL, [email])',
+      '  await sql`SELECT u.id, o.total FROM users u JOIN orders o ON o.user_id = u.id WHERE u.id = ${email}`',
+      '  await pool.query(`SELECT * FROM ${table} WHERE id = $1`, [1])',
+      "  await pool.query('UPDATE users SET name = $1 ' + 'WHERE id = $2', ['n', 1])",
+      "  await pool.query({ text: 'DELETE FROM sessions WHERE user_id = $1', values: [1] })",
+      '  await db.select().from(users).where(sql`${users.id} = 1`)',
+      "  await fetch('https://example.com/select')",
+      '}',
+      'class Repo { async save(x) { return this.db.execute("INSERT INTO orders (total) VALUES (?)", [x]) } }',
+      'export const remove = (k: Knex) => k.raw(`DELETE FROM drafts`)',
+    ])
+    eq(brief(ts), [[5, 'query', 'find', ['select users:read']], [6, 'sql', 'find', ['select users:read,orders:read']], [7, 'query', 'find', ['select ']], [8, 'query', 'find', ['update users:write']], [9, 'query', 'find', ['delete sessions:write']], [13, 'execute', 'Repo.save', ['insert orders:write']], [14, 'raw', 'remove', ['delete drafts:write']]],
+      'TypeScript: a constant named at the call, a tagged template, a template with a table in ${…} (no table), a concatenation, a config object\'s text, a class method, knex.raw; a query builder\'s sql fragment and a fetch are no SQL')
+    eq([ts.clients, ts.sites[0].statements[0].tables[0].line, ts.sites[1].statements[0].dynamic], [[{ source: 'pg', dialect: 'postgres', line: 1 }], 3, 0], '… the client it imports; a constant\'s statement at the constant\'s line')
+    eq(read('api/users.test.ts', ["import { Pool } from 'pg'", "test('x', () => pool.query('SELECT 1 FROM users'))"]).tests, 1, 'test code: not read for the model, counted')
+    const go = read('worker/repo.go', [
+      'package worker',
+      'import (',
+      '\t"database/sql"',
+      '\t"fmt"',
+      ')',
+      'const getOrder = `SELECT o.id, o.total',
+      '  FROM orders o WHERE o.id = $1`',
+      'func (r *Repo) Get(ctx context.Context, id int) error {',
+      '\trow := r.db.QueryRowContext(ctx, getOrder, id)',
+      '\t_, err := r.db.ExecContext(ctx, "UPDATE orders SET status = $1 "+',
+      '\t\t"WHERE id = $2", "paid", id)',
+      '\tr.db.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = $1", r.table), id)',
+      '\treturn row.Scan(&id)',
+      '}',
+      'func TestGet(t *testing.T) { db.Query("SELECT 1 FROM orders") }',
+    ])
+    eq([brief(go), go.sites[0].statements[0].lookups.map((l) => [l.column, l.line]), go.sites[1].statements[0].lookups.map((l) => [l.column, l.line]), go.tests], [[[9, 'QueryRowContext', 'Repo.Get', ['select orders:read']], [10, 'ExecContext', 'Repo.Get', ['update orders:write']], [12, 'Exec', 'Repo.Get', ['delete ']]], [['id', 7]], [['id', 11]], 1],
+      'Go: the SQL after the context, a constant (each fact at its line in the raw string), a concatenation across lines, fmt.Sprintf\'s %s a parameter (no table); a test function counted, not read')
+    const py = read('jobs/report.py', [
+      'import psycopg2',
+      'Q = "SELECT id, total FROM orders WHERE status = %s"',
+      'def run(cur, table):',
+      '    cur.execute(Q, ("paid",))',
+      '    cur.execute("""',
+      '        SELECT u.id FROM users u',
+      '        WHERE u.email = %(email)s""", {"email": "x"})',
+      '    cur.execute(f"SELECT * FROM {table}")',
+      '    cur.execute("SELECT a " "FROM b " + table)',
+      '    cur.execute("INSERT INTO log (msg) VALUES (%s)".format(table))',
+    ])
+    eq([brief(py), py.sites[1].statements[0].tables[0].line, py.clients.map((c) => c.source)], [[[4, 'execute', 'run', ['select orders:read']], [5, 'execute', 'run', ['select users:read']], [8, 'execute', 'run', ['select ']], [9, 'execute', 'run', ['select b:read']], [10, 'execute', 'run', ['insert log:write']]], 6, ['psycopg2']],
+      'Python: a module constant, a triple-quoted string (each fact at its line), an f-string\'s {…} a parameter (no table), implicit and + concatenation read from their literal parts, .format')
+    const rs = read('core/src/repo.rs', [
+      'use sqlx::PgPool;',
+      'const Q: &str = "SELECT id FROM users";',
+      'pub async fn load(pool: &PgPool, id: i64) {',
+      '    let r = sqlx::query!("SELECT id, email FROM users WHERE id = $1", id).fetch_one(pool).await;',
+      '    let s = sqlx::query_as!(User, r#"SELECT id FROM "users" WHERE "email" = $1"#, e).fetch_all(pool).await;',
+      '    let t = sqlx::query(Q).execute(pool).await;',
+      '    let u = sqlx::query_as::<_, User>("DELETE FROM sessions WHERE user_id = $1").bind(id).execute(pool).await;',
+      '    conn.execute("INSERT INTO drafts (body) VALUES (?1)", params![b]);',
+      '    let v = sqlx::query(&format!("SELECT * FROM {}", table));',
+      '}',
+      '#[cfg(test)]',
+      'mod tests { #[test] fn t() { sqlx::query("SELECT 1 FROM users"); } }',
+    ])
+    eq([brief(rs), rs.hints.map((h) => [h.dialect, h.why]), rs.tests], [[[4, 'query!', 'load', ['select users:read']], [5, 'query_as!', 'load', ['select users:read']], [6, 'query', 'load', ['select users:read']], [7, 'query_as', 'load', ['delete sessions:write']], [8, 'execute', 'load', ['insert drafts:write']], [9, 'query', 'load', ['select ']]], [['postgres', 'PgPool']], 1],
+      'Rust: query! and query_as! (after its type, a raw string), sqlx::query with a constant, a turbofish, rusqlite\'s execute, format!\'s {} a parameter; PgPool says the database; a #[cfg(test)] module counted, not read')
+    eq(['web/a.ts', 'web/b.ts', 'svc/c.go', 'jobs/d.py', 'core/e.rs', 'web/f.ts'].map((p, i) => queryLevel(p, ['db.query(`SELECT 1 FROM t`)', "import { Pool } from 'pg'", 'import _ "github.com/lib/pq"', 'cur.execute("""\n  select 1 from t""")', 'use rusqlite::Connection;', 'const config = { dialect: "pg" }'][i])), [64, 64, 64, 64, 64, 0], 'found by content: a query call beside SQL text, or a SQL client import (bit 64)')
+    eq(read('web/noop.ts', ["export const s = sql`${PARAM}`"]), undefined, 'a file with no query and no client keeps no facts')
+    ok(!JSON.stringify(read('web/secret.ts', ["import { Pool } from 'pg'", "pool.query(\"SELECT id FROM accounts WHERE pass = 'correct horse battery'\")"])).includes('horse'), 'the facts hold identifiers only, never a literal\'s value')
+    const t1 = Date.now()
+    const wideQ = read('web/many.ts', ["import { Pool } from 'pg'", `const Q = 'SELECT ${Array.from({ length: 400 }, (_, i) => `c${i}`).join(', ')} FROM t'`, ...Array.from({ length: 500 }, () => 'pool.query(Q)')])
+    eq([wideQ.sites.length, wideQ.notes], [50, ['more than 20000 names read: the statements after them not kept']], 'a file\'s facts capped: a constant of 400 columns sent by 500 calls, read once, kept until 20 000 names')
+    const manyQ = read('web/calls.ts', ["import { Pool } from 'pg'", ...Array.from({ length: 500 }, (_, i) => `pool.query('SELECT a FROM t${i}')`)])
+    eq([manyQ.sites.length, manyQ.notes], [400, ['more than 400 query calls: the first 400 read']], '… and its calls: the first 400')
+    ok(Date.now() - t1 < 40000, `in bounded time (${Date.now() - t1} ms)`)
+    // a value is never a name, whatever the file's dialect (a Go file importing only database/sql; SQLite)
+    const SEC2 = ['tok', 'SECRET', '7'].join('')
+    const goVal = read('worker/acct.go', ['package worker', 'import "database/sql"', 'func Reset(db *sql.DB) {', `\tdb.Exec(\`UPDATE accounts SET token = "${SEC2}" WHERE id = ?\`, 1)`, `\tdb.QueryRow("SELECT name FROM users WHERE name = \\"${SEC2}\\"")`, `\tdb.Exec("SELECT a FROM t WHERE b = 'it\\\\'s ${SEC2}'")`, '}'])
+    const pyVal = read('jobs/notes.py', ['import sqlite3', 'def run(cur):', `    cur.execute("SELECT name FROM people WHERE name = 'x' AND note = \\"${SEC2}\\"")`, `    cur.execute("UPDATE users SET pw = \\"${SEC2}\\" WHERE id = 1")`])
+    eq([JSON.stringify(goVal).includes('SECRET'), JSON.stringify(pyVal).includes('SECRET'), goVal.sites.map((s) => s.statements[0].columns.map((c) => `${c.table}.${c.name}`)), pyVal.sites.map((s) => s.statements[0].columns.map((c) => `${c.table}.${c.name}`))],
+      [false, false, [['accounts.token', 'accounts.id'], ['users.name', 'users.name'], ['t.a', 't.b']], [['people.name', 'people.name', 'people.note'], ['users.pw', 'users.id']]], 'a "…" value and a backslashed quote, in a file whose dialect is unknown or SQLite: no value kept, the columns around it read')
+    // same-file constants: a const, a Go const, a Python module-level ALL_CAPS name assigned once; never one a function shadows
+    const consts = read('web/consts.ts', ["import { Pool } from 'pg'", "let L = 'SELECT a FROM let_table'", "var V = 'SELECT a FROM var_table'", "const C = 'SELECT a FROM const_table'", "export const E = 'SELECT a FROM exported_table'",
+      'export async function f(pool: Pool) { await pool.query(L); await pool.query(V); await pool.query(C); await pool.query(E) }',
+      'export async function g(pool: Pool, C: string) { await pool.query(C) }',
+      "export async function h(pool: Pool) { const C = 'SELECT a FROM local_table'; await pool.query(C) }",
+      'export const k = (pool: Pool) => [1].map((C) => pool.query(C))'])
+    eq(brief(consts), [[6, 'query', 'f', ['select const_table:read']], [6, 'query', 'f', ['select exported_table:read']]], 'TypeScript: a const inlined, never a let or a var; never where a parameter or a local of the function around the call (a callback\'s too) shadows it')
+    const pyConsts = read('jobs/consts.py', ['import psycopg2', 'Q = "SELECT a FROM caps_table"', 'q = "SELECT a FROM lower_table"', 'TWICE = "SELECT a FROM one"', 'TWICE = "SELECT a FROM two"', 'def f(cur):', '    cur.execute(Q)', '    cur.execute(q)', '    cur.execute(TWICE)', 'def g(cur, Q):', '    cur.execute(Q)', 'def h(cur):', '    Q = "SELECT a FROM local_table"', '    cur.execute(Q)'])
+    const goConsts = read('worker/consts.go', ['package worker', 'import "database/sql"', 'const getA = "SELECT a FROM go_const"', 'var getB = "SELECT a FROM go_var"', 'func F(db *sql.DB) {', '\tdb.Query(getA)', '\tdb.Query(getB)', '}', 'func G(db *sql.DB, getA string) {', '\tdb.Query(getA)', '}'])
+    eq([brief(pyConsts), brief(goConsts)], [[[7, 'execute', 'f', ['select caps_table:read']]], [[6, 'Query', 'F', ['select go_const:read']]]], 'Python: a module-level ALL_CAPS name assigned once (never a lowercase one, one assigned twice, or one a parameter or a local shadows); Go: a const, never a var or a shadowed one')
+    // bounded: whitespace that would make the content filter backtrack, code nested thousands deep
+    const t2 = Date.now()
+    eq([queryLevel('web/a.ts', `db.query("${' '.repeat(200000)}x"`), queryLevel('web/b.ts', `query${' '.repeat(200000)}x`), queryLevel('web/c.ts', `db.query("${' '.repeat(100000)}(${' '.repeat(100000)}x"`), queryLevel('web/d.ts', `import${' ('.repeat(100000)}x`), queryLevel('jobs/e.py', `${' \t'.repeat(100000)}x`), queryLevel('web/f.ts', `db.query(\`${' '.repeat(200000)}SELECT a FROM t\`)`)], [0, 0, 0, 0, 0, 64],
+      'the content filter on runs of 200 000 blanks: linear (no overlapping repetition to backtrack through), and still finding SQL after them')
+    const tReDoS = Date.now() - t2
+    ok(tReDoS < 10000, `… in bounded time (${tReDoS} ms)`)
+    const t3 = Date.now()
+    const deep = read('web/deep.ts', ["import { Pool } from 'pg'", 'const pool = new Pool()', `export const f = () => ${'('.repeat(20000)}pool.query("SELECT a FROM t")${')'.repeat(20000)}`])
+    const wideDeep = read('web/deep2.ts', ["import { Pool } from 'pg'", 'const pool = new Pool()', `export const f = () => ${'['.repeat(5000)}${Array.from({ length: 40 }, () => 'pool.query("SELECT a FROM t")').join(', ')}${']'.repeat(5000)}`])
+    const goDeep = read('worker/fmt.go', ['package worker', 'import "database/sql"', 'func F(db *sql.DB) {', `\tdb.Exec(fmt.Sprintf("DELETE FROM t WHERE a = %${'0'.repeat(100000)}d", 1))`, '}'])
+    const tDeep = Date.now() - t3
+    eq([deep.sites.length, deep.fns.map((f) => f.name), wideDeep.sites.length, goDeep.sites.length], [1, ['f'], 40, 1], 'code nested 20 000 deep, and 40 calls 5 000 deep: each call\'s function found in one walk down the tree (never a walk up from each call)')
+    ok(tDeep < 30000, `… in bounded time (${tDeep} ms, parsing included)`)
+  }
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()
@@ -4642,6 +5000,110 @@ async function indexed() {
     ok(lin.includes('<title>owner_id → ownerId</title>'), 'each field pair carries its whole text, however the drawing cuts it')
     ok(!!dpg.find((n) => n.attrs && n.attrs.class === 'rent') && !dpg.all((n) => n.attrs && /\bksub\b/.test(n.attrs.class || '')).some((n) => dpg.textOf(n).includes('model.ts')), 'a described entity\'s row keeps its path as written (not a section heading, which is upper-cased)')
     ok(!dpg.find((n) => n.tagName === 'IMG') && dtext.includes('<img src=x onerror=alert(1)> the device pushes'), '… and in the lists, a text node, never an element')
+
+    // ── 36 · the SQL code sends, through call() and the page ──
+    console.log('\n36 · a store deduced from the SQL code sends (fixtures/sqlq: a TypeScript service with tagged templates, a Go service with parameterised queries, no migration): graph_data, the Data tab, then migrations added and winning')
+    const QP = path.join(SANDBOX, 'sqlq')
+    cpSync(path.join(HERE, 'fixtures', 'sqlq'), QP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const qq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: QP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const qidx = await qq('index')
+    ok(/shop: 4 files/.test(qidx) && !qidx.includes('failure'), `index: the repository, no extractor failure (${qidx.replace(/\n/g, ' | ')})`)
+    const qlist = await qq('data')
+    eq(qlist.split('\n'), [
+      'Data stores (1), read from migrations, snapshots, schemas and table declarations, or deduced from the SQL the code sends (inferred):',
+      'shop:sql (inferred, postgres)  postgres  4 tables · 2 relations from joins · 2 unique keys from ON CONFLICT · 6 lookup columns · inferred from queries in code, not declared (8 statements)',
+      '  inferred  sql-queries@1  deduced from 8 statements in 2 files, not declared  shop/web/src/users.ts',
+      '  reached through: database/sql, github.com/lib/pq, postgres',
+      '  not declared: deduced from the SQL the code sends; types (but for casts), nullability, defaults and other constraints unknown; relations inferred from joins, never foreign keys; lookup columns are leads for an index, never indexes',
+      "  dialect: the repository's client: postgres at shop/web/src/db.ts:1",
+      'Queries in code (inferred from the SQL the code sends; leads, never verdicts): 8 statements in 2 files, 1 store deduced, 0 stores declared they attach to',
+    ], 'graph_data: no migration, so one store deduced from both services\' queries, named by its clients and dialect, labelled inferred; the Postgres clients are no gap')
+    eq((await qq('data', { store: 'shop:sql (inferred, postgres)' })).split('\n').slice(2), [
+      '  order_lines  table  3 columns seen · unique (order_id, product_id) · joins → products · 1 lookup column  shop/worker/orders.go:23 · shop/worker/orders.go:31',
+      '  orders  table  6 columns seen · joins → users · 3 lookup columns  shop/web/src/users.ts:24 · shop/worker/orders.go:9 · shop/worker/orders.go:18',
+      '  products  table  2 columns seen  shop/worker/orders.go:31',
+      '  users  table  3 columns seen · unique (email) · 2 lookup columns  shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25',
+    ], 'graph_data store: the tables, each at every statement naming it (a table in a parameter is none; SELECT * reveals nothing)')
+    const qusers = await qq('data', { entity: 'users' })
+    has(qusers, 'shop:sql (inferred, postgres)/users  table  (postgres; deduced from the queries in code, not declared)\n  seen at shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25 [inferred sql-queries@1]\nColumns seen in code (3): type, nullability and default unknown:', 'graph_data entity: a deduced table, every statement that names it')
+    has(qusers, '  display_name  type unknown  seen in select, insert, set, expr  — shop/web/src/users.ts:5 · shop/web/src/users.ts:14 · shop/web/src/users.ts:16', '… each column with the statements that name it, its type unknown')
+    has(qusers, 'Unique keys from ON CONFLICT (1):\n  unique (email)  — shop/web/src/users.ts:16\nLookup columns (2): used in lookups, a lead for an index, never one:\n  email  where  — shop/web/src/users.ts:7\n  id  where  — shop/web/src/users.ts:26', '… a unique key from ON CONFLICT, the lookup columns (leads)')
+    has(qusers, 'Reads and writes, from the SQL the code sends (inferred; 3 functions: 2 reading, 1 writing):\n  findUser  reads (select)  shop/web/src/users.ts:3  (the call at line 4) · 0 callers\n  upsertUser  writes (insert)  shop/web/src/users.ts:12  (the call at line 13) · 0 callers\n  recentOrders  reads (select)  shop/web/src/users.ts:21  (the call at line 22) · 0 callers', '… its readers and writers, the code graph\'s functions')
+    ok(qusers.includes('Unknown: deduced from the SQL the code sends; types (but for casts), nullability, defaults and other constraints unknown') && !/not null|nullable/.test(qusers), 'unknown stays unknown: no nullability, no default, no type but what a cast states')
+    const qorders = await qq('data', { entity: 'orders' })
+    has(qorders, '  total  cast to numeric  seen in select  — shop/web/src/users.ts:23 · shop/worker/orders.go:8', 'a cast is the only type the code states (Go\'s ::numeric)')
+    has(qorders, 'Relations inferred from a join (1), never a foreign key:\n  (user_id) → users(id)  — shop/web/src/users.ts:25', 'a relation inferred from the TypeScript join, never a foreign key')
+    has(qorders, '  Repo.Pending  reads (select)  shop/worker/orders.go:13  (the call at line 14) · 0 callers\n  Repo.MarkShipped  writes (update)  shop/worker/orders.go:17  (the call at line 18) · 1 caller', '… and the Go service\'s readers and writers of the same table, a caller counted through the code graph')
+    has(await qq('data', { entity: 'order_lines' }), 'Unique keys from ON CONFLICT (1):\n  unique (order_id, product_id)  — shop/worker/orders.go:25\nRelations inferred from a join (1), never a foreign key:\n  (product_id) → products(id)  — shop/worker/orders.go:31', 'the Go service: a composite unique key from ON CONFLICT, a join to products')
+    has(await qq('status'), 'data: 0 store(s) (graph_data), 2 source file(s) read for the SQL they send', 'graph_status counts the files whose SQL was read')
+    // the page: a dashed ERD under its banner
+    const { renderGraph: renderQ } = await import('../lib/render.mjs')
+    const { loadProject: loadQ } = await import('../lib/project.mjs')
+    const qpage = await renderQ(loadQ(QP))
+    const QS = dataOf(qpage).data.stores[0]
+    eq([QS.id, QS.inf.clients, QS.inf.statements, QS.tables.map((t) => [t.name, t.inf, t.fields.map((f) => `${f.name}:${f.type}`)])], ['shop:sql (inferred, postgres)', ['database/sql', 'github.com/lib/pq', 'postgres'], 8, [
+      ['order_lines', 1, ['order_id:seen in code', 'product_id:seen in code', 'quantity:seen in code']], ['orders', 1, ['user_id:seen in code', 'id:seen in code', 'total:numeric (cast)', 'created_at:seen in code', 'status:seen in code', 'shipped_at:seen in code']], ['products', 1, ['id:seen in code', 'name:seen in code']], ['users', 1, ['id:seen in code', 'email:seen in code', 'display_name:seen in code']]]],
+      'the page packs the deduced store: each table inferred, each column "seen in code" or its cast')
+    const qpg = await stubPage(qpage, '#data-0')
+    const qsvg = qpg.erd().html
+    ok(qpg.text().includes('Deduced from the queries in code, not declared') && !!qpg.ctl('data-inferred') && qpg.text().includes('reached through database/sql, github.com/lib/pq, postgres'), 'the Data tab: a banner saying the model is deduced from queries, not declared, and its clients')
+    eq([(qsvg.match(/<g class="tbl inf/g) || []).length, (qsvg.match(/<path class="fk jn/g) || []).length, (qsvg.match(/class="unk"/g) || []).length], [4, 2, 14], '… an ERD of dashed table frames, the relations dashed lines, every column\'s nullability unknown')
+    ok(qsvg.includes('inferred from a join: orders (user_id) → users (id), never a foreign key') && qsvg.includes('seen in code (select, where, insert, conflict) · type unknown · nullability unknown · default unknown · used in lookups (where): a lead for an index') && !qsvg.includes('>FK<'), '… a join line titled "inferred from a join", a column "seen in code" with what stays unknown, no FK marker')
+    ok(!!qpg.ctl('data-queries') && qpg.text().includes('1 store deduced from them'), '… and the queries in one line above the stores')
+    qpg.click(QS.tables.findIndex((t) => t.name === 'orders'))
+    const qpass = qpg.text()
+    ok(qpass.includes('Columns seen in code (6)') && qpass.includes('Relations inferred from a join, never a foreign key (1)') && qpass.includes('Lookup columns: a lead for an index, never one (3)') && qpass.includes('Reads and writes (3 functions, from the SQL the code sends: inferred)') && qpass.includes('Repo.MarkShipped'), 'a table\'s passport: its columns, joins, lookups, readers and writers, labelled inferred')
+    // everything escaped: names the code quotes
+    writeFileSync(path.join(QP, 'shop/web/src/odd.ts'), "import { sql } from './db'\nexport const odd = () => sql`SELECT n.\"x<img src=y>\" FROM \"notes<b>\" n`\n")
+    await qq('index')
+    const qopg = await stubPage(await renderQ(loadQ(QP)), '#data-0')
+    const qosvg = qopg.erd().html
+    ok(qosvg.includes('notes&lt;b&gt;') && qosvg.includes('x&lt;img src=y&gt;') && !qosvg.includes('<img') && !qosvg.includes('<b>'), 'names holding markup: escaped in the drawing')
+    rmSync(path.join(QP, 'shop/web/src/odd.ts'))
+    // no literal value reaches graph.db, graph_data or the page: "…" values and a backslashed quote in a
+    // Go file importing only database/sql (its dialect unknown), a SQLite Python file, a Postgres TypeScript one
+    const VP = path.join(SANDBOX, 'values')
+    const VSV = ['tok', 'SECRET', '7'].join(''), VSP = ['py', 'SECRET', '9'].join(''), VSQ = ['quote', 'SECRET'].join(''), VST = ['abc', 'SECRET', '2'].join('')
+    mkdirSync(path.join(VP, 'app/go'), { recursive: true }); mkdirSync(path.join(VP, 'app/py'), { recursive: true }); mkdirSync(path.join(VP, 'app/src'), { recursive: true })
+    writeFileSync(path.join(VP, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'app', path: 'app' }], graph: { dir: '.grimoire/graph' } }))
+    writeFileSync(path.join(VP, 'app/go/acct.go'), ['package main', 'import "database/sql"', 'func reset(db *sql.DB) {', `\tdb.Exec(\`UPDATE accounts SET token = "${VSV}" WHERE id = ?\`, 1)`, `\tdb.QueryRow("SELECT name FROM users WHERE name = \\"${VSV}\\"")`, `\tdb.Exec("SELECT a FROM t WHERE b = 'it\\\\'s ${VSQ} here' AND c = 1")`, '}', ''].join('\n'))
+    writeFileSync(path.join(VP, 'app/py/notes.py'), ['import sqlite3', 'def run(cur):', `    cur.execute("UPDATE users SET pw = \\"${VSP}\\" WHERE id = 1")`, `    cur.execute("SELECT name FROM people WHERE name = 'x' AND note = \\"${VSP}\\"")`, ''].join('\n'))
+    writeFileSync(path.join(VP, 'app/src/a.ts'), ["import { Pool } from 'pg'", 'const pool = new Pool()', 'export const f = () =>', `  pool.query("SELECT id FROM api_keys WHERE api_key = '${VST}'")`, ''].join('\n')) // (the call on a line of its own: the code graph keeps each definition's first line as its signature)
+    const vq = async (tool, args = {}) => call(`graph_${tool}`, args, { root: VP })
+    ok(!(await vq('index')).includes('failure'), 'index: the values project, no extractor failure')
+    const vanswers = [await vq('data'), ...(await Promise.all(['accounts', 'users', 'people', 't'].map((e) => vq('data', { entity: e })))), await vq('status')]
+    const { renderGraph: renderV } = await import('../lib/render.mjs')
+    const { loadProject: loadV } = await import('../lib/project.mjs')
+    const vhtml = await renderV(loadV(VP))
+    const dbFiles = readdirSync(path.join(VP, '.grimoire/graph')).filter((f) => /^graph\.db/.test(f)).map((f) => readFileSync(path.join(VP, '.grimoire/graph', f)).toString('latin1'))
+    const { DatabaseSync: VDB } = await driver()
+    const vdb = new VDB(path.join(VP, '.grimoire/graph/graph.db'), { readOnly: true })
+    const dataRows = vdb.prepare("SELECT key, facts, error FROM data_facts WHERE extractor LIKE 'sql-queries%'").all().map((r) => `${r.key} ${r.facts} ${r.error}`)
+    vdb.close()
+    eq([[VSV, VSP, VSQ, VST].filter((x) => vanswers.some((a) => a.includes(x))), [VSV, VSP, VSQ, VST].filter((x) => vhtml.includes(x)), [VSV, VSP, VSQ, VST].filter((x) => dataRows.some((d) => d.includes(x))), [VSV, VSP, VSQ, VST].filter((x) => dbFiles.some((d) => d.includes(x))), dataRows.length, dbFiles.length > 0],
+      [[], [], [], [], 3, true], 'no literal value reaches graph_data, the page, the extractor\'s facts or graph.db (its every file): "…" values, a backslashed quote, a string, whatever the dialect')
+    has(vanswers[1], 'Columns seen in code (2)', '… while the columns around them are read (accounts: token, id)')
+    // migrations added to the same store: the declared model wins, a column only the code names an [inferred] conflict
+    mkdirSync(path.join(QP, 'shop/db/migrations'), { recursive: true })
+    writeFileSync(path.join(QP, 'shop/db/migrations/0001_init.sql'), [
+      'CREATE TABLE users (', '  id BIGSERIAL PRIMARY KEY,', '  email TEXT NOT NULL UNIQUE', ');',
+      'CREATE TABLE orders (', '  id BIGSERIAL PRIMARY KEY,', '  user_id BIGINT NOT NULL REFERENCES users (id),', '  total NUMERIC(10, 2) NOT NULL,', '  status TEXT NOT NULL,', '  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),', '  shipped_at TIMESTAMPTZ', ');',
+      'CREATE TABLE products (', '  id BIGSERIAL PRIMARY KEY,', '  name TEXT NOT NULL', ');',
+      'CREATE TABLE order_lines (', '  order_id BIGINT NOT NULL REFERENCES orders (id),', '  product_id BIGINT NOT NULL REFERENCES products (id),', '  quantity INT NOT NULL,', '  PRIMARY KEY (order_id, product_id)', ');', ''].join('\n'))
+    await qq('index')
+    const mlist = await qq('data')
+    eq(mlist.split('\n').filter((l) => /^\S+:/.test(l) || l.includes('queries in code attached')), [
+      'shop:db/migrations  postgres  4 tables · 3 foreign keys · 0 indexes · 1 conflict',
+      '  inferred  queries in code attached (the only declared SQL store in the repository; 4 of 4 tables named are declared): 8 statements in 2 files, 1 [inferred] conflict where they name what the declarations lack',
+    ], 'migrations added: the declared store wins, no store is deduced; the queries attach to it')
+    const musers = await qq('data', { entity: 'users' })
+    ok(/Fields \(2\):\n {2}id {2}BIGSERIAL {2}not null {2}— shop\/db\/migrations\/0001_init\.sql:2\n {2}email {2}TEXT {2}not null {2}— shop\/db\/migrations\/0001_init\.sql:3/.test(musers), `… the declared columns as the migration states them, nothing the code names added (${musers.split('\n').slice(2, 5).join(' | ')})`)
+    has(musers, 'Conflicts (1): the declarations disagree, or the queries in code name a column the declarations lack (inferred, never overriding them; they attach as the only declared SQL store in the repository; 4 of 4 tables named are declared); each side is kept\n  [inferred] users.display_name  presence: named in code (inferred) — shop/web/src/users.ts:5 [inferred] · shop/web/src/users.ts:14 [inferred] · shop/web/src/users.ts:16 [inferred] | absent from the declarations — shop/db/migrations/0001_init.sql:1 [migration]', 'a column only the code names: an [inferred] conflict, both sides cited, never resolved')
+    has(musers, 'Reads and writes, from the SQL the code sends (inferred; 3 functions: 2 reading, 1 writing):', '… and the access sites on the declared table')
+    const MD = dataOf(await renderQ(loadQ(QP))).data
+    const mu = MD.stores[0].tables.find((t) => t.name === 'users')
+    eq([MD.stores.map((s) => s.id), MD.stores[0].inf || null, mu.cf.map((c) => [c.label, c.inf, c.values.map((v) => v.value)]), mu.sq.rw.map((f) => f.n)], [['shop:db/migrations'], null, [['display_name', 1, ['named in code (inferred)', 'absent from the declarations']]], ['findUser', 'upsertUser', 'recentOrders']],
+      'the page: the declared store drawn solid, the column only the code names among its table\'s conflicts as [inferred], its readers and writers')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

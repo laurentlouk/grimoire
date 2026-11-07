@@ -10,10 +10,11 @@ import { kvIndex, projectionText } from './data/model.mjs'
 import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
 import { refineModel, refineCheck } from './data/check.mjs'
+import { NOT_DECLARED, sqlFunctions, queryConflicts } from './data/queries.mjs'
 import { docRoots } from './docs.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
-export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files, never from a database. Open path:line before relying on any of it.'
+export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files (or deduced from the SQL the code sends, labelled inferred), never from a database. Open path:line before relying on any of it.'
 export const CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate. Open path:line before relying on any of it.'
 // with an architecture part (arch-change.mjs): what it reads, said too
 export const ARCH_CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate; the architecture from the saved diagrams and the check, by name. Open path:line before relying on any of it.'
@@ -212,8 +213,9 @@ export class Graph {
         const decls = facts.flatMap((f) => (f ? f.declarations : []))
         const code = facts.filter((f) => f && f.code).length // source files read for item shapes (data/binding.mjs)
         const calls = facts.filter((f) => f && f.access?.sites?.length).length // and for access patterns (data/access.mjs)
+        const sql = facts.filter((f) => f && f.queries?.sites?.length).length // and for the SQL they send (data/queries.mjs)
         const stopped = decls.filter((d) => d.partial).length, failed = data.filter((x) => x.error)
-        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${code ? `, ${code} source file(s) read for item shapes` : ''}${calls ? `, ${calls} for access patterns` : ''}${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
+        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${code ? `, ${code} source file(s) read for item shapes` : ''}${calls ? `, ${calls} for access patterns` : ''}${sql ? `, ${sql} source file(s) read for the SQL they send` : ''}${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
       }
     }
     const base = (() => { try { return JSON.parse(this.one("SELECT value FROM meta WHERE key = 'base'")?.value || 'null') } catch { return null } })()
@@ -371,9 +373,9 @@ export class Graph {
     const failed = clean(this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra))
     if (entity) return this.dataEntity(model, String(entity), refine)
     if (store) return this.dataStore(model, String(store), refine)
-    const NONE = 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot, no Drizzle TypeScript schema, no Prisma schema and no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table) in the indexed repositories.'
+    const NONE = 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot, no Drizzle TypeScript schema, no Prisma schema, no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table) and no SQL sent from code in the indexed repositories.'
     if (!model.stores.length && !failed.length && !refine) return NONE
-    const out = model.stores.length || failed.length ? [`Data stores (${model.stores.length}), read from migrations, snapshots, schemas and table declarations:`] : [NONE]
+    const out = model.stores.length || failed.length ? [`Data stores (${model.stores.length}), read from migrations, snapshots, schemas and table declarations${model.stores.some((s) => s.inferred) ? ', or deduced from the SQL the code sends (inferred)' : ''}:`] : [NONE]
     for (const st of model.stores) {
       out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`)
       for (const d of st.declarations) {
@@ -381,9 +383,11 @@ export class Graph {
         out.push(`  ${d.kind}  ${d.extractor}  ${how}  ${this.dloc({ repo: st.repo, path: d.path })}`)
         for (const n of d.notes) out.push(`    note: ${n}`)
       }
+      if (st.inferred) out.push(`  reached through: ${st.inferred.clients.join(', ') || 'no client import read'}`, `  ${NOT_DECLARED}`)
+      if (st.queries) out.push(`  inferred  queries in code attached (${st.queries.why}): ${plural(st.queries.statements, 'statement')} in ${plural(st.queries.files, 'file')}${queryConflicts(st) ? `, ${plural(queryConflicts(st), '[inferred] conflict')} where they name what the declarations lack` : ', naming nothing the declarations lack'}`)
       if (st.dialectFrom) out.push(`  dialect: ${this.dialectFrom(st.repo, st.dialectFrom)}`)
     }
-    out.push(...this.dataItems(model), ...this.dataAccess(model))
+    out.push(...this.dataItems(model), ...this.dataAccess(model), ...this.dataQueries(model))
     if (failed.length) out.push(`Extractor failures (${failed.length}), their facts are missing:`, ...failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
     out.push(...this.dataRefine(refine))
     return out.join('\n')
@@ -513,7 +517,39 @@ export class Graph {
   }
   dialectFrom(repo, f) {
     const at = f.path ? this.dloc({ repo, path: f.path, line: f.line }) : ''
-    return f.how === 'stated' ? `stated at ${at}` : f.how === 'sniffed' ? `sniffed: ${f.marker} at ${at}` : f.how === 'supabase' ? 'Supabase migrations are Postgres' : 'set in grimoire.config.json (graph.data.migrations)'
+    return f.how === 'stated' ? `stated at ${at}` : f.how === 'sniffed' ? `sniffed: ${f.marker} at ${at}` : f.how === 'supabase' ? 'Supabase migrations are Postgres'
+      : f.how === 'client' ? `its client: ${f.source} at ${at}` : f.how === 'repository' ? `the repository's client: ${f.source} at ${at}` : f.how === 'hint' ? `a type naming it: ${f.marker} at ${at}` : 'set in grimoire.config.json (graph.data.migrations)'
+  }
+  // the SQL the code sends (data/queries.mjs), in one line: graph_data with a store or a table says the rest
+  dataQueries(model) {
+    if (model.queriesError) return [`Queries in code: ${model.queriesError}`]
+    const q = model.queries
+    if (!q) return []
+    const deduced = model.stores.filter((s) => s.inferred).length
+    return [`Queries in code (inferred from the SQL the code sends; leads, never verdicts): ${plural(q.statements, 'statement')} in ${plural(q.files, 'file')}, ${plural(deduced, 'store')} deduced, ${plural(q.attached.length, 'store')} declared they attach to${q.tests ? `; ${plural(q.tests, 'call')} in test code not read` : ''}`]
+  }
+  // the functions reading and writing a table through the SQL they send, through the code graph's symbols
+  dataEntityQueries(model, e) {
+    const all = (e.queries?.sites || []).map((k) => model.queries.sites[k]).filter(Boolean)
+    if (!e.queries) return []
+    const fns = sqlFunctions(all, symbolAt(this.db), e.id)
+    const reads = fns.filter((f) => f.reads).length, writes = fns.filter((f) => f.writes).length
+    const out = [fns.length ? `Reads and writes, from the SQL the code sends (inferred; ${plural(fns.length, 'function')}: ${reads} reading, ${writes} writing):` : 'Reads and writes: no query in code reaches this table']
+    for (const f of fns.slice(0, CAP)) out.push(`  ${f.name}  ${[f.reads ? 'reads' : null, f.writes ? 'writes' : null].filter(Boolean).join(' · ') || 'names it'} (${f.kinds.join(', ')})  ${this.dloc({ repo: f.repo, path: f.path, line: f.line })}  (${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')})${f.callers !== null ? ` · ${plural(f.callers, 'caller')}` : ''}`)
+    if (fns.length > CAP) out.push(`  … and ${plural(fns.length - CAP, 'more function')} (the first ${CAP} listed)`)
+    return out
+  }
+  // a table deduced from the queries in code: what the code shows of it, and what stays unknown
+  dataInferredEntity(model, st, e) {
+    const cites = (x) => `${this.sources(st.repo, x.sources)}${x.more ? ` and ${plural(x.more, 'more statement')}` : ''}`
+    const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'}; deduced from the queries in code, not declared)`, `  seen at ${cites(e)} [inferred ${st.declarations[0].extractor}]`]
+    out.push(`Columns seen in code (${e.fields.length}): type, nullability and default unknown${e.fields.some((f) => f.casts.length) ? ' (a cast is the only type the code states)' : ''}:`)
+    for (const f of e.fields) out.push(`  ${f.name}  ${f.casts.length ? `cast to ${f.casts.map((c) => c.type).join(' | ')}` : 'type unknown'}  seen in ${f.seen.join(', ') || 'a statement'}${f.lookup ? `  used in lookups (${f.lookup.join(', ')})` : ''}  — ${cites(f)}`)
+    if (e.keys.length) out.push(`Unique keys from ON CONFLICT (${e.keys.length}):`, ...e.keys.map((k) => `  unique (${k.parts.join(', ')})  — ${cites(k)}`))
+    if (e.relations.length) out.push(`Relations inferred from a join (${e.relations.length}), never a foreign key:`, ...e.relations.map((r) => `  (${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})${r.direction === 'as written' ? '  (direction as written: neither side is an id)' : ''}  — ${cites(r)}`))
+    if (e.lookups.length) out.push(`Lookup columns (${e.lookups.length}): used in lookups, a lead for an index, never one:`, ...e.lookups.map((l) => `  ${l.columns.join(', ')}  ${l.how.join(', ')}  — ${cites(l)}`))
+    out.push(...this.dataEntityQueries(model, e), `Unknown: ${NOT_DECLARED.replace(/^not declared: /, '')}`, 'Conflicts: none (a deduced store compares with nothing)')
+    return out.join('\n')
   }
   sources(repo, list) { return list.map((s) => this.dloc({ repo: s.repo ?? repo, path: s.path, line: s.line })).join(' · ') }
   findStore(model, spec) {
@@ -529,6 +565,16 @@ export class Graph {
     const [st] = hits
     const out = [`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`]
     const kv = st.dialect === 'dynamodb'
+    if (st.inferred) {
+      // deduced from the queries in code: what each table shows, never what it declares
+      out.push(`  ${NOT_DECLARED}`)
+      for (const e of st.entities) {
+        const parts = [plural(e.fields.length, 'column') + ' seen', ...e.keys.map((k) => `unique (${k.parts.join(', ')})`), e.relations.length ? `joins → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null, e.lookups.length ? plural(e.lookups.length, 'lookup column') : null].filter(Boolean)
+        out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${e.more ? ` and ${plural(e.more, 'more statement')}` : ''}`)
+      }
+      return out.join('\n')
+    }
+    if (st.queries) for (const c of st.queries.conflicts) out.push(`  [inferred] ${c.label}  named in code, absent from the declarations  — ${this.sources(st.repo, c.values[0].sources)}`)
     for (const e of st.entities) {
       const pk = e.keys.find((k) => k.role === 'primary')
       const conflicts = elementsOf(e).reduce((a, [, x]) => a + x.conflicts.length, 0)
@@ -563,6 +609,7 @@ export class Graph {
     if (!hits.length) return `No entity "${spec}" in the data model. Try graph_data with no argument for the stores, or with a store for its entities.`
     if (hits.length > 1) return `"${spec}" names ${hits.length} entities; give store/entity or repo:store/entity: ${hits.map(([, e]) => e.id).join(', ')}`
     const [[st, e]] = hits
+    if (st.inferred) return [this.dataInferredEntity(model, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
     const kv = st.dialect === 'dynamodb'
     const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}${s.as ? `, ${s.as}` : ''}]`).join(' · ')}`]
     if (kv) out.push(`  ${kvTableText(e)}`)
@@ -598,13 +645,22 @@ export class Graph {
       } else if (model.items?.length) out.push('Bound item types: none (no code converting a type names this table)')
       out.push(...this.dataEntityAccess(model, e))
     }
+    // the SQL the code sends, attached to this declared table (data/queries.mjs, inferred)
+    if (!kv) out.push(...this.dataEntityQueries(model, e))
     const shown = (attr, v) => (kv ? changeVal(attr, v) : v)
-    // the declarations' conflicts, then what a call writes that the bound item does not state (inferred)
-    const conflicts = [...elementsOf(e).map(([label, x]) => [label, x.conflicts]), ...(e.access?.conflicts || []).map((c) => [c.label, [c]])]
-      .flatMap(([label, list]) => list.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${shown(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc({ repo: s.repo ?? st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
-    const moreCf = e.access?.moreConflicts || 0
+    // the declarations' conflicts, then what a call writes that the bound item does not state, and what
+    // the queries in code name that the declarations lack (both inferred, never overriding them)
+    const qcf = e.queries?.conflicts || []
+    const conflicts = [...elementsOf(e).map(([label, x]) => [label, x.conflicts]), ...(e.access?.conflicts || []).map((c) => [c.label, [c]]), ...qcf.map((c) => [`[inferred] ${c.label}`, [c]])]
+      .flatMap(([label, list]) => list.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${shown(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc({ repo: s.repo ?? st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}${v.more ? ` and ${plural(v.more, 'more')}` : ''}`).join(' | ')}`))
+    const moreCf = (e.access?.moreConflicts || 0) + (e.queries?.more || 0)
     const drift = elementsOf(e).some(([, x]) => x.conflicts.some(schemaDrift))
-    out.push(conflicts.length ? `Conflicts (${conflicts.length + moreCf}): the declarations disagree${e.access?.conflicts.length ? ', or a call writes an attribute the bound item does not state (inferred, never overriding it)' : ''}; each side is kept` : 'Conflicts: none', ...(drift ? [`  (${SCHEMA_DRIFT})`] : []), ...conflicts, ...(moreCf ? [`  … and ${moreCf} more written attribute${moreCf === 1 ? '' : 's'} the item does not state (the first ${CAP} listed)`] : []))
+    const why = [e.access?.conflicts.length ? 'a call writes an attribute the bound item does not state' : null, qcf.length ? 'the queries in code name a column the declarations lack' : null].filter(Boolean)
+    const moreAcc = e.access?.moreConflicts || 0, moreQ = e.queries?.more || 0
+    // (the queries' coverage of the store said where their conflicts are: how they attach, how many of the tables they name it declares)
+    const attachedAs = qcf.length && st.queries ? `; they attach as ${st.queries.why}` : ''
+    out.push(conflicts.length ? `Conflicts (${conflicts.length + moreCf}): the declarations disagree${why.length ? `, or ${why.join(', or ')} (inferred, never overriding ${why.length === 1 && !qcf.length ? 'it' : 'them'}${attachedAs})` : ''}; each side is kept` : 'Conflicts: none', ...(drift ? [`  (${SCHEMA_DRIFT})`] : []), ...conflicts,
+      ...(moreAcc ? [`  … and ${moreAcc} more written attribute${moreAcc === 1 ? '' : 's'} the item does not state (the first ${CAP} listed)`] : []), ...(moreQ ? [`  … and ${plural(moreQ, 'more column')} only the queries in code name (the first ${CAP} listed)`] : []))
     if (kv && e.logical) {
       const g = e.logical
       out.push(`One logical table: ${g.members.join(' + ')} (${g.via}); their differences are conflicts`)

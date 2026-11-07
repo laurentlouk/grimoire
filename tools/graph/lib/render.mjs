@@ -54,6 +54,7 @@ import { resolveBase, modelAt } from './data/base.mjs'
 import { parseDelta, deltaStates, findTarget, changeText, diffText } from './data/delta.mjs'
 import { changeVal, renameText, baseText, refName, CHANGE_KIND, symbolAt } from './query.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, CAP, LABELS } from './data/access.mjs'
+import { sqlFunctions, NOT_DECLARED } from './data/queries.mjs'
 import { dataClient } from './data-view.mjs'
 import { stageClient } from './stage-view.mjs'
 
@@ -219,6 +220,10 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
   const acc = model.access ? { sites: model.access.sites, sym: symbolAt(db), how: (t) => { if (!howAt.has(t)) { howAt.set(t, how.length); how.push(t) } return howAt.get(t) } } : null
   out.access = model.access ? { files: model.access.files, calls: model.access.sites.length, placed: model.access.placed, spread: model.access.spread || 0, leads: model.access.leads, how } : null
   out.accessError = model.accessError || null
+  // the SQL the code sends (data/queries.mjs), its calls placed in the code graph's functions
+  const qacc = model.queries ? { sites: model.queries.sites, sym: acc?.sym || symbolAt(db) } : null
+  out.queries = model.queries ? { files: model.queries.files, statements: model.queries.statements, deduced: model.stores.filter((s) => s.inferred).length, attached: model.queries.attached.length, tests: model.queries.tests } : null
+  out.queriesError = model.queriesError || null
   let diff = null, whole = null
   if (changes?.base) {
     const compared = new Set(changes.base.repos.map((r) => r.name))
@@ -230,7 +235,7 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
   }
   for (const st of model.stores) {
     const n = st.entities.length ? out.stores.length : -1
-    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc, rrel.get(st.id) || []))
+    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc, rrel.get(st.id) || [], qacc))
     for (const d of st.declarations) {
       if (n >= 0 && d.status !== 'not-read') continue
       const reason = d.status === 'not-read' ? d.label : d.stopped ? `replayed to ${shown(st.repo, d.stopped.path)}:${d.stopped.line}: ${d.error}` : `${d.label}: no table`
@@ -545,7 +550,16 @@ const CARDS = new Set(['dynamodb'])
 // rr: the refined relations between two of its tables (dataData), drawn as lines no foreign key states
 // (`rf`: dashed, labelled refined, its why and citations), after the store's own, so the overlays'
 // positions hold.
-function packStore(st, shown, fileId, sd = null, acc = null, rr = []) {
+// qacc: the SQL the code sends (data/queries.mjs, inferred), { sites, sym }. A store deduced from it
+// is packed `inf` { clients, why, notes, files, statements, unknown }, each table `inf: 1` (a dashed
+// frame), each column typed by its casts or "seen in code", nullability unknown (nullable: null), its
+// hows `seen` and lookups `lk`, each unique key `from` ON CONFLICT, each relation `jn: 1` (a dashed
+// line "inferred from a join", never a foreign key: no FK marker), the table's lookup columns `lk`
+// [{ col, how, src }]. A declared store the queries attach to carries `q` { why, files, statements,
+// cf: the tables only the code names } and, on a table, the columns only the code names in its
+// conflicts (`label`, `inf: 1`). Either way a table the code reads or writes carries `sq` { rw: [{ n,
+// at, r, wr, k: the statement kinds, lines, c: callers }], more }.
+function packStore(st, shown, fileId, sd = null, acc = null, rr = [], qacc = null) {
   const paths = [], at = new Map()
   // a path of the store's repository, or of another (the code an item type is bound from)
   const P = (p, kind = null, repo = st.repo) => {
@@ -561,10 +575,29 @@ function packStore(st, shown, fileId, sd = null, acc = null, rr = []) {
   // the logical table it is one declaration of with the conflicts across it
   if (CARDS.has(st.dialect)) st.entities.forEach((e, i) => Object.assign(tables[i], packItems(e, src, cf), packAccess(e, src, cf, acc)))
   else for (const r of rr) { const t = tables.find((x) => x.name === r.from); if (t) t.rels.push({ columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: null, onUpdate: null, src: [], cf: [], rf: 1, why: r.why, at: r.at }) }
+  // the SQL the code sends: a deduced store's tables as the queries show them, a declared one's
+  // readers, writers and [inferred] conflicts
+  if (st.inferred) st.entities.forEach((e, i) => {
+    const t = tables[i]
+    t.inf = 1
+    if (e.more) t.more = e.more
+    t.fields.forEach((f, j) => { const x = e.fields[j]; Object.assign(f, { type: x.casts.length ? `${x.casts.map((c) => c.type).join(' | ')} (cast)` : 'seen in code', nullable: null, fk: 0, seen: x.seen, ...(x.lookup ? { lk: x.lookup } : {}), ...(x.casts.length ? { cast: x.casts.map((c) => c.type) } : {}), ...(x.more ? { more: x.more } : {}) }) })
+    t.keys.forEach((k) => { k.from = 'ON CONFLICT' })
+    t.rels.forEach((r, j) => { if (j < e.relations.length) { r.jn = 1; r.dir = e.relations[j].direction } }) // (a refined relation after them stays refined)
+    t.lk = e.lookups.map((l) => ({ col: l.columns[0], how: l.how, src: src(l.sources) }))
+  })
+  else st.entities.forEach((e, i) => { if (e.queries?.conflicts?.length) tables[i].cf.push(...cf(e.queries.conflicts).map((c, j) => ({ ...c, label: e.queries.conflicts[j].path, inf: 1 }))) })
+  if (qacc) st.entities.forEach((e, i) => {
+    if (!e.queries?.sites?.length) return
+    const fns = sqlFunctions(e.queries.sites.map((k) => qacc.sites[k]).filter(Boolean), qacc.sym, e.id)
+    tables[i].sq = { rw: fns.slice(0, CAP).map((x) => ({ n: x.name, at: src([{ repo: x.repo, path: x.path, line: x.line, kind: 'code' }])[0], r: x.reads ? 1 : 0, wr: x.writes ? 1 : 0, k: x.kinds, lines: x.lines, c: x.callers })), more: Math.max(0, fns.length - CAP) }
+  })
   const f = st.dialectFrom, cards = CARDS.has(st.dialect), collapsed = !cards && tables.length > DATA_COLLAPSE
   return {
     id: st.id, repo: st.repo, name: st.name, dialect: st.dialect, summary: storeSummary(st),
-    how: f ? { how: f.how, marker: f.marker ?? null, at: f.path ? [P(f.path), f.line ?? null] : null } : null,
+    how: f ? { how: f.how, marker: f.marker ?? f.source ?? null, at: f.path ? [P(f.path), f.line ?? null] : null } : null,
+    ...(st.inferred ? { inf: { clients: st.inferred.clients, why: st.inferred.why, notes: st.inferred.notes, files: st.inferred.files, statements: st.inferred.statements, unknown: NOT_DECLARED } } : {}),
+    ...(st.queries ? { q: { why: st.queries.why, files: st.queries.files, statements: st.queries.statements, cf: st.queries.conflicts.map((c) => ({ label: c.label, src: src(c.values[0].sources), more: c.values[0].more || 0 })), more: st.queries.more || 0 } } : {}),
     decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: [P(d.path, d.kind), null], stopped: d.stopped ? [P(d.stopped.path, d.kind), d.stopped.line] : null, error: d.error, notes: d.notes })),
     ...(st.enums ? { enums: st.enums.map((en) => ({ name: en.name, values: en.values, src: src(en.sources) })) } : {}),
     paths, tables, collapsed, ...(cards ? { cards: true, layout: null } : { layout: layoutErd(tables, { collapsed }) }),
@@ -849,6 +882,8 @@ ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4
 .mkl.k-i{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 10%,var(--panel))}ul.kitem .krow.d1{padding-left:20px}ul.kitem .krow.d2{padding-left:34px}ul.kitem .krow.d3{padding-left:48px}ul.kitem .krow.d4,ul.kitem .krow.d5,ul.kitem .krow.d6{padding-left:62px}
 .krow .kacc{margin:1px 0 2px 30px;font-size:12px}.krow .kacc .pill{margin:0 4px 0 0}.kfn{overflow-wrap:anywhere}.mkl.k-r{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,var(--panel))}.mkl.k-w{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel))}.mkl.k-u{color:var(--muted);background:var(--hover)}ul.kaccess .krow.test{opacity:.8}
 .pill.refined{color:var(--t-worker);border-color:currentColor;border-style:dashed}.rent{font-size:12.5px;margin:10px 0 3px;overflow-wrap:anywhere}.rent .mono{font-weight:600}.krow .kpur{margin:1px 0 2px 30px}.note.unused{color:var(--warn)}svg.erd .fk.rf{stroke:var(--t-worker);stroke-dasharray:4 4}
+svg.erd .tbl.inf .tframe{stroke-dasharray:6 4;stroke-width:1.5}svg.erd .tbl.inf .thead{fill:color-mix(in srgb,var(--t-database) 5%,var(--panel))}svg.erd .fk.jn{stroke-dasharray:6 4}svg.erd .unk{fill:var(--panel);stroke:var(--muted);stroke-width:1;stroke-dasharray:2 1.6}svg.erd .row.inf .ctype{font-style:italic}
+.pill.inferred{color:var(--muted);border-color:currentColor;border-style:dashed}.dia.unk{border-style:dashed;background:transparent}.dlegend .jnline{display:inline-block;width:22px;border-top:1.6px dashed var(--link);margin:0 3px}.dlegend .infbox{display:inline-block;width:16px;height:10px;border:1.4px dashed var(--muted);border-radius:3px;margin:0 3px}
 details.refine{margin:0 0 14px}details.refine h2{font-size:14px;margin:14px 0 6px}.lineagebox{margin:6px 0}.lineagebox svg{min-width:640px;max-width:900px}svg.lineage .lbox rect{fill:var(--panel);stroke:color-mix(in srgb,var(--t-database) 55%,var(--line));stroke-width:1.3}svg.lineage .lbox.rf rect{stroke:var(--t-worker);stroke-dasharray:5 4}svg.lineage .lbox.go{cursor:pointer}
 svg.lineage .ln{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink)}svg.lineage .ls,svg.lineage .lt{font-size:11px;fill:var(--muted)}svg.lineage .lf{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink)}svg.lineage .lin{fill:none;stroke:var(--t-worker);stroke-width:1.8;stroke-dasharray:7 4}svg.lineage .linm{fill:var(--t-worker)}
 .kbind{border:1px solid var(--border);border-radius:8px;padding:6px 8px;margin:4px 0}.kbind.dash{border-style:dashed}.kbind .srcline{margin:2px 0 0}.pill.c-declared,.pill.c-convention{color:var(--ok);border-color:currentColor}.pill.c-name-match,.pill.c-ambiguous{color:var(--warn);border-color:currentColor;border-style:dashed}

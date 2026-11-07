@@ -92,9 +92,11 @@ const SHAPE = {
   relation: (r, f) => [`${r.columns.map(f).join(',')}|${r.toColumns.map(f).join(',')}`, 'same columns'],
 }
 
+// A store deduced from the queries in code (queries.mjs, inferred) is never compared: a base reads no
+// query (data/base.mjs), and the diff is between declarations.
 export function diffModels(before, after) {
-  const B = new Map((before?.stores || []).map((s) => [s.id, s]))
-  const A = new Map((after?.stores || []).map((s) => [s.id, s]))
+  const B = new Map((before?.stores || []).filter((s) => !s.inferred).map((s) => [s.id, s]))
+  const A = new Map((after?.stores || []).filter((s) => !s.inferred).map((s) => [s.id, s]))
   const stores = [...new Set([...B.keys(), ...A.keys()])].sort().map((id) => diffStore(B.get(id) || null, A.get(id) || null)).filter(Boolean)
   const n = (c) => stores.reduce((a, s) => a + s.changes.filter((x) => x.change === c).length, 0)
   return { stores, counts: { stores: stores.length, added: n('added'), removed: n('removed'), modified: n('modified'), renames: stores.reduce((a, s) => a + s.renames.length, 0) } }

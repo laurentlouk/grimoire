@@ -47,6 +47,16 @@
 // bindings and equivalences listed. A refined relation within a store is a dashed line on its ERD; an
 // index's purpose sits under its row; a key card says when its logical table is refined, and when no
 // code uses its name.
+//
+// A store deduced from the queries in code (render.mjs packStore `inf`, data/queries.mjs) is drawn as an
+// ERD under a banner saying so ("deduced from the queries in code, not declared", its clients, why it
+// is attached to no declared store): dashed table frames, each column "seen in code" (or the type the
+// code casts it to), its nullability a dashed diamond (unknown), each relation a dashed line "inferred
+// from a join, never a foreign key", a unique key from ON CONFLICT; its passport lists every column with
+// the statements that name it, the joins, the lookup columns (a lead, never an index), and the functions
+// reading and writing it. A declared store the queries attach to lists the tables only the code names,
+// a column only the code names joins its table's conflicts as `[inferred]`, and its passport lists the
+// functions reading and writing it.
 export function dataClient(ctx) {
   const { D, h, st, render, activate, stage, nav } = ctx
   const DD = D.data || { stores: [], unread: [], failed: [] }
@@ -163,12 +173,12 @@ export function dataClient(ctx) {
   function table(s, ti, b, g, cls, sc) {
     const t = s.tables[ti], { x, y, w } = b
     const fkTo = new Map()
-    for (const r of t.rels) r.columns.forEach((c, j) => { if (!fkTo.has(c)) fkTo.set(c, `${r.to} (${r.toColumns[j] || r.toColumns[0] || '?'})`) })
+    for (const r of t.rels) r.columns.forEach((c, j) => { if (!fkTo.has(c)) fkTo.set(c, `${r.jn ? 'joined with ' : ''}${r.to} (${r.toColumns[j] || r.toColumns[0] || '?'})`) })
     const ov = s.ov && t.ch ? ` ${CLS[t.ch]}${t.ch === 'removed' ? ' ghost' : ''}` : ''
     const dv = dcls(s, t)
-    const label = `${t.name}, ${t.kind}, ${plural(t.fields.length, 'column')}${g.conflicts ? `, ${plural(g.conflicts, 'conflict')}` : ''}${ov ? `, ${SINCE[t.ch]}` : ''}${dv ? `, ${t.dl.gone && t.dl.s === 'built' ? 'removed as planned' : t.dl.gone ? 'removed, not in the plan' : DSAY[t.dl.s]}${stale(s, t) ? ', acknowledgement stale' : ''}` : ''}: open its passport`
-    const tip = `${t.name} · ${t.kind} · ${plural(t.fields.length, 'column')}${t.indexes.length ? ` · ${t.indexes.length} ${t.indexes.length === 1 ? 'index' : 'indexes'}` : ''}${g.conflicts ? `\n${plural(g.conflicts, 'conflict')}: the declarations disagree` : ''}${chTip(s, t)}${dTip(s, t)}${sc.names ? '\nclick to draw it with its columns and neighbours' : ''}`
-    const out = [`<g class="tbl${t.kind === 'view' ? ' tview' : ''}${ov}${dv}${cls}" data-tbl="${ti}" tabindex="0" role="button" aria-label="${esc(label)}"><title>${esc(tip)}</title>`]
+    const label = `${t.name}, ${t.kind}${t.inf ? ' deduced from the queries in code' : ''}, ${plural(t.fields.length, t.inf ? 'column seen' : 'column', t.inf ? 'columns seen' : 'columns')}${g.conflicts ? `, ${plural(g.conflicts, 'conflict')}` : ''}${ov ? `, ${SINCE[t.ch]}` : ''}${dv ? `, ${t.dl.gone && t.dl.s === 'built' ? 'removed as planned' : t.dl.gone ? 'removed, not in the plan' : DSAY[t.dl.s]}${stale(s, t) ? ', acknowledgement stale' : ''}` : ''}: open its passport`
+    const tip = `${t.name} · ${t.kind}${t.inf ? ' · deduced from the queries in code, not declared' : ''} · ${plural(t.fields.length, t.inf ? 'column seen' : 'column', t.inf ? 'columns seen' : 'columns')}${t.indexes.length ? ` · ${t.indexes.length} ${t.indexes.length === 1 ? 'index' : 'indexes'}` : ''}${g.conflicts ? `\n${plural(g.conflicts, 'conflict')}: the declarations disagree` : ''}${chTip(s, t)}${dTip(s, t)}${sc.names ? '\nclick to draw it with its columns and neighbours' : ''}`
+    const out = [`<g class="tbl${t.kind === 'view' ? ' tview' : ''}${t.inf ? ' inf' : ''}${ov}${dv}${cls}" data-tbl="${ti}" tabindex="0" role="button" aria-label="${esc(label)}"><title>${esc(tip)}</title>`]
     const glyph = `<path class="tglyph" d="M${x + 11},${y + 10}h13v10h-13z M${x + 11},${y + 13.5}h13 M${x + 15.5},${y + 13.5}v6.5"/>`
     const struck = (s.ov && t.ch === 'removed') || struckD(s, t) ? `<line class="strike${s.dv ? ` d-${t.dl.s}` : ''}" x1="${x + 28}" x2="${Math.round(x + 32 + Math.min(g.name.length * 7.6, w - 44))}" y1="${y + 15.5}" y2="${y + 15.5}"/>` : ''
     // a stale acknowledgement: a badge beside the row or the header it concerns (outside the box)
@@ -201,12 +211,13 @@ export function dataClient(ctx) {
       if (r.kind === 'field') {
         const f = t.fields[r.i]
         mid.set(f, ry + 10)
-        const ftip = `${f.name} ${f.type} · ${f.nullable ? 'nullable' : 'not null'}${f.def !== null && f.def !== undefined ? ` · default ${f.def}` : ''}${f.gen ? ` · generated ${f.gen}` : ''}${f.pk ? ' · primary key' : ''}${fkTo.has(f.name) ? ` · foreign key → ${fkTo.get(f.name)}` : ''}${chTip(s, f)}${dTip(s, f)}`
-        out.push(`<g class="row${sc.colHit(f) ? ' hit' : ''}${rc}" data-col="${esc(f.name)}"><title>${esc(ftip)}</title><rect class="rowbg" x="${x + 1}" y="${ry}" width="${w - 2}" height="20"/>`, bar,
+        const ftip = t.inf ? `${f.name} · seen in code (${(f.seen || []).join(', ')}) · ${f.cast ? `cast to ${f.cast.join(' | ')}` : 'type unknown'} · nullability unknown · default unknown${f.lk ? ` · used in lookups (${f.lk.join(', ')}): a lead for an index` : ''}${fkTo.has(f.name) ? ` · ${fkTo.get(f.name)}` : ''}`
+          : `${f.name} ${f.type} · ${f.nullable ? 'nullable' : 'not null'}${f.def !== null && f.def !== undefined ? ` · default ${f.def}` : ''}${f.gen ? ` · generated ${f.gen}` : ''}${f.pk ? ' · primary key' : ''}${fkTo.has(f.name) ? ` · foreign key → ${fkTo.get(f.name)}` : ''}${chTip(s, f)}${dTip(s, f)}`
+        out.push(`<g class="row${t.inf ? ' inf' : ''}${sc.colHit(f) ? ' hit' : ''}${rc}" data-col="${esc(f.name)}"><title>${esc(ftip)}</title><rect class="rowbg" x="${x + 1}" y="${ry}" width="${w - 2}" height="20"/>`, bar,
           f.pk ? `<text class="mk mpk" x="${x + 8}" y="${ry + 13.5}">PK</text>` : '',
           f.fk ? `<text class="mk mfk" x="${x + (f.pk ? 25 : 8)}" y="${ry + 13.5}">FK</text>` : '',
           `<text class="cname${f.pk ? ' key' : ''}" x="${x + 43}" y="${ry + 14}">${esc(r.name)}</text><text class="ctype" x="${x + w - 24}" y="${ry + 14}" text-anchor="end">${esc(r.type)}</text>`,
-          `<path class="${f.nullable ? 'nul' : 'nn'}" d="M${x + w - 13},${ry + 6}l4,4l-4,4l-4,-4z"/>`,
+          `<path class="${f.nullable === null ? 'unk' : f.nullable ? 'nul' : 'nn'}" d="M${x + w - 13},${ry + 6}l4,4l-4,4l-4,-4z"/>`,
           (r.ch === 'removed' && s.ov) || struckD(s, f) ? `<line class="strike${s.dv ? ` d-${f.dl.s}` : ''}" x1="${x + 40}" x2="${x + w - 20}" y1="${ry + 10}" y2="${ry + 10}"/>` : '', '</g>')
       } else {
         const el = r.kind === 'index' ? t.indexes[r.i] : t.keys[r.i]
@@ -246,8 +257,9 @@ export function dataClient(ctx) {
       const from = sc.list[l.from], to = sc.list[l.to], t = s.tables[from], r = t.rels[l.k]
       const on = lit && (from === sc.sel || to === sc.sel)
       const tip = r.rf ? `refined: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), no foreign key states it\n${r.why}${r.at.length ? `\n${r.at.join(' · ')}` : ''}`
-        : `${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')})\non delete ${r.onDelete} · on update ${r.onUpdate}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
-      parts.push(`<path class="fk${r.rf ? ' rf' : ''}${s.ov && r.ch ? ` ${CLS[r.ch]}` : ''}${dcls(s, r)}${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`)
+        : r.jn ? `inferred from a join: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), never a foreign key${r.dir === 'as written' ? '\ndirection as written: neither side is an id' : ''}${r.src.length ? `\n${r.src.map((p) => srcText(s, p)).join(' · ')}` : ''}`
+          : `${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')})\non delete ${r.onDelete} · on update ${r.onUpdate}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
+      parts.push(`<path class="fk${r.rf ? ' rf' : ''}${r.jn ? ' jn' : ''}${s.ov && r.ch ? ` ${CLS[r.ch]}` : ''}${dcls(s, r)}${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`)
     }
     if (s.ov) sc.list.forEach((ti, j) => {
       const t = s.tables[ti]
@@ -277,15 +289,41 @@ export function dataClient(ctx) {
     return box
   }
 
+  // the functions reading and writing a table through the SQL they send (inferred): one item each
+  const sqList = (s, t) => (t.sq ? [h('h2', null, `Reads and writes (${plural(t.sq.rw.length + (t.sq.more || 0), 'function')}, from the SQL the code sends: inferred)`),
+    h('ul', { class: 'links dlist', 'aria-label': `${t.name}: the functions reading and writing it` }, t.sq.rw.map((f) => h('li', null, h('div', null, h('span', { class: `mkl k-${f.wr ? 'w' : 'r'}` }, f.wr && f.r ? 'RW' : f.wr ? 'W' : 'R'), ' ', h('b', { class: 'mono' }, f.n), h('span', { class: 'muted' }, ` ${f.k.join(', ')} `), srcEl(s, f.at), f.c !== null && f.c !== undefined ? h('span', { class: 'muted' }, ` · ${plural(f.c, 'caller')}`) : null),
+      h('div', { class: 'srcline' }, `${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')}`)))),
+    t.sq.more ? h('p', { class: 'muted' }, `… and ${plural(t.sq.more, 'more function')} (graph_data lists the first ones)`) : null] : null)
+  // a table deduced from the queries in code: what they show of it, and what stays unknown
+  function inferredPassport(s, ti) {
+    const t = s.tables[ti]
+    const go = (name) => h('button', { class: 'linkbtn mono', onclick: () => { st.dataSel = name; st.focusMain = true; rerender(!s.collapsed) } }, name)
+    const known = new Set(s.tables.map((o) => o.name))
+    const by = s.tables.flatMap((o) => o.rels.filter((r) => r.jn && r.to === t.name && o !== t).map((r) => [o, r]))
+    const section = (title, list, row) => [h('h2', null, `${title} (${list.length})`), list.length ? h('ul', { class: 'links dlist' }, list.map(row)) : h('div', { class: 'muted' }, 'none')]
+    const more = (x) => (x.more ? h('span', { class: 'muted' }, ` and ${plural(x.more, 'more statement')}`) : null)
+    return h('div', { class: 'detail passport' },
+      h('h3', null, h('span', { class: 'tdot t-database' }), t.name, h('span', { class: 'pill' }, t.kind), h('span', { class: 'pill inferred', title: 'deduced from the SQL the code sends, never declared' }, 'inferred')),
+      h('div', { class: 'muted' }, `${s.id} · ${s.dialect || 'dialect unknown'}`),
+      h('p', { class: 'note' }, 'Deduced from the queries in code, not declared: types (but for casts), nullability, defaults and other constraints are unknown.'),
+      h('h2', null, 'Seen at'), h('div', null, srcs(s, t.src), more(t)),
+      section('Columns seen in code', t.fields, (f) => h('li', null, h('div', null, h('b', { class: 'mono' }, f.name), ' ', h('span', { class: 'mono muted' }, f.cast ? `cast to ${f.cast.join(' | ')}` : 'type unknown'), h('span', { class: 'muted' }, ` · seen in ${(f.seen || []).join(', ')}`), f.lk ? h('span', { class: 'pill', title: 'a lead for an index, never an index' }, `used in lookups (${f.lk.join(', ')})`) : null), h('div', { class: 'srcline' }, srcs(s, f.src), more(f)))),
+      t.keys.length ? section('Unique keys from ON CONFLICT', t.keys, (k) => h('li', null, h('div', null, h('span', { class: 'mono' }, `unique (${k.parts.join(', ')})`)), h('div', { class: 'srcline' }, srcs(s, k.src)))) : null,
+      section('Relations inferred from a join, never a foreign key', t.rels.filter((r) => r.jn), (r) => h('li', null, h('div', null, h('span', { class: 'mono' }, `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), r.dir === 'as written' ? h('span', { class: 'muted' }, ' · direction as written') : null), h('div', { class: 'srcline' }, srcs(s, r.src)))),
+      section('Joined from', by, ([o, r]) => h('li', null, go(o.name), h('span', { class: 'mono muted' }, ` (${r.columns.join(', ')}) → (${r.toColumns.join(', ')})`))),
+      (t.lk || []).length ? section('Lookup columns: a lead for an index, never one', t.lk, (l) => h('li', null, h('div', null, h('span', { class: 'mono' }, l.col), h('span', { class: 'muted' }, ` · ${l.how.join(', ')}`)), h('div', { class: 'srcline' }, srcs(s, l.src)))) : null,
+      sqList(s, t))
+  }
   // ── a table's passport: every column with its sources, keys, indexes, foreign keys both ways ──
   function passport(s, ti) {
     const t = s.tables[ti]
+    if (t.inf) return inferredPassport(s, ti)
     const go = (name) => h('button', { class: 'linkbtn mono', onclick: () => { st.dataSel = name; st.focusMain = true; rerender(!s.collapsed) } }, name)
     const known = new Set(s.tables.map((o) => o.name))
     const warn = (x) => (x.cf.length ? h('span', { class: 'pill warn', title: x.cf.map((c) => cfTip(s, c)).join('\n') }, plural(x.cf.length, 'conflict')) : null)
     const by = s.tables.flatMap((o) => o.rels.filter((r) => r.to === t.name && o !== t).map((r) => [o, r]))
     const conflicts = [[t.kind, t], ...t.fields.map((f) => [`column ${f.name}`, f]), ...t.keys.map((k) => [`${k.role} key (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x]), ...t.rels.map((r) => [`foreign key (${r.columns.join(', ')}) → ${r.to}`, r])]
-      .flatMap(([label, x]) => x.cf.map((c) => [label, c]))
+      .flatMap(([label, x]) => x.cf.map((c) => [c.inf ? `[inferred] column ${c.label}` : label, c])) // a column only the queries in code name
     const section = (title, list, row) => [h('h2', null, `${title} (${list.length})`), list.length ? h('ul', { class: 'links dlist' }, list.map(row)) : h('div', { class: 'muted' }, 'none')]
     // in the overlay: what changed since the base, its before → after, and where it stood there
     const ov = (x) => s.ov && x.ch
@@ -322,7 +360,8 @@ export function dataClient(ctx) {
       t.rels.some((r) => r.rf) ? section('Relations no foreign key states', t.rels.filter((r) => r.rf), (r) => h('li', null, h('div', null, h('span', { class: 'mono' }, `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), REFINED()),
         h('div', { class: 'srcline' }, r.why), r.at.length ? h('div', { class: 'srcline' }, r.at.join(' · ')) : null)) : null,
       section('Referenced by', by, ([o, r]) => h('li', null, go(o.name), h('span', { class: 'mono muted' }, ` (${r.columns.join(', ')}) → (${r.toColumns.join(', ')})`), r.rf ? REFINED() : null)),
-      conflicts.length ? [h('h2', null, `Conflicts (${conflicts.length})`), h('p', { class: 'note' }, 'The declarations disagree; each side is kept, none is resolved.'),
+      sqList(s, t),
+      conflicts.length ? [h('h2', null, `Conflicts (${conflicts.length})`), h('p', { class: 'note' }, `The declarations disagree${conflicts.some(([, c]) => c.inf) ? `, or the queries in code name a column they lack (inferred, never overriding them${s.q ? `; they attach as ${s.q.why}` : ''})` : ''}; each side is kept, none is resolved.`),
         conflicts.some(([, c]) => c.drift) ? h('p', { class: 'note' }, 'The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.') : null,
         h('ul', { class: 'links dlist' }, conflicts.map(([label, c]) => h('li', null, h('div', null, h('b', null, label), h('span', { class: 'muted' }, ` · ${c.attr}`)),
           c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src))))))] : null)
@@ -547,20 +586,34 @@ export function dataClient(ctx) {
     const cols = s.collapsed && (sc.mode === 'names' || sc.mode === 'columns') ? h('div', { class: 'seg', role: 'group', 'aria-label': 'Tables drawn as' },
       h('button', { 'data-ctl': 'data-names', 'aria-pressed': String(!st.dataAll), onclick: () => { st.dataAll = false; rerender(false) } }, 'Names'),
       h('button', { 'data-ctl': 'data-columns', 'aria-pressed': String(!!st.dataAll), onclick: () => { st.dataAll = true; rerender(false) } }, 'Columns')) : null
-    const how = s.how ? (s.how.how === 'stated' ? ['stated at ', srcEl(s, s.how.at)] : s.how.how === 'sniffed' ? [`sniffed: ${s.how.marker} at `, srcEl(s, s.how.at)] : s.how.how === 'supabase' ? ['Supabase migrations are Postgres'] : ['set in grimoire.config.json (graph.data.migrations)']) : ['unknown']
+    const HOW = { stated: 'stated at ', sniffed: 'sniffed: ', client: 'its client: ', repository: 'the repository\'s client: ', hint: 'a type naming it: ' }
+    const how = s.how ? (s.how.how === 'supabase' ? ['Supabase migrations are Postgres'] : HOW[s.how.how] ? [HOW[s.how.how], s.how.how === 'stated' ? null : `${s.how.marker} at `, s.how.at ? srcEl(s, s.how.at) : null] : ['set in grimoire.config.json (graph.data.migrations)']) : ['unknown']
     const decls = declList(s)
-    const legend = h('div', { class: 'legend dlegend' }, h('span', null, h('span', { class: 'mkl pk' }, 'PK'), 'primary key'), h('span', null, h('span', { class: 'mkl fk' }, 'FK'), 'foreign key'),
-      h('span', null, h('i', { class: 'dia nn' }), 'not null'), h('span', null, h('i', { class: 'dia nul' }), 'nullable'), h('span', null, h('span', { class: 'pill warn' }, 'a ≠ b'), ' the declarations disagree, both values shown'),
-      h('span', { class: 'muted' }, 'a line runs from the referencing column (many) to the column it references (one)'))
+    const inf = s.inf || null
+    const legend = inf ? h('div', { class: 'legend dlegend' }, h('span', null, h('i', { class: 'infbox' }), 'a table the queries name (dashed: deduced, not declared)'), h('span', null, h('span', { class: 'mono muted' }, 'seen in code'), ' a column a statement names, its type unknown (a cast says what the code casts it to)'),
+      h('span', null, h('i', { class: 'dia unk' }), 'nullability unknown'), h('span', null, h('i', { class: 'jnline' }), 'inferred from a join, never a foreign key'), h('span', { class: 'muted' }, 'unique (…): an ON CONFLICT target'))
+      : h('div', { class: 'legend dlegend' }, h('span', null, h('span', { class: 'mkl pk' }, 'PK'), 'primary key'), h('span', null, h('span', { class: 'mkl fk' }, 'FK'), 'foreign key'),
+        h('span', null, h('i', { class: 'dia nn' }), 'not null'), h('span', null, h('i', { class: 'dia nul' }), 'nullable'), h('span', null, h('span', { class: 'pill warn' }, 'a ≠ b'), ' the declarations disagree, both values shown'),
+        h('span', { class: 'muted' }, 'a line runs from the referencing column (many) to the column it references (one)'))
+    // a store deduced from the queries in code: said before anything is drawn
+    const banner = inf ? h('div', { class: 'callout callout-warning banner', 'data-ctl': 'data-inferred' }, h('div', { class: 'callout-title' }, 'Deduced from the queries in code, not declared'),
+      h('p', null, `Read from ${plural(inf.statements, 'statement')} the code sends, in ${plural(inf.files, 'file')}${inf.clients.length ? `, reached through ${inf.clients.join(', ')}` : ''}. No migration, snapshot, dump or schema declares this store: ${inf.unknown.replace(/^not declared: deduced from the SQL the code sends; /, '')}.`),
+      inf.why ? h('p', { class: 'note' }, inf.why) : null, inf.notes.filter((x) => x !== inf.why).map((x) => h('p', { class: 'note' }, x))) : null
+    // the tables the queries in code name that the declarations lack: [inferred] conflicts of the store
+    const qcf = s.q && s.q.cf.length ? h('div', { class: 'callout callout-warning banner', 'data-ctl': 'data-inferred-conflicts' }, h('div', { class: 'callout-title' }, `Named in code, absent from the declarations (${s.q.cf.length + (s.q.more || 0)}): [inferred] conflicts`),
+      h('ul', { class: 'links' }, s.q.cf.map((c) => h('li', null, h('b', { class: 'mono' }, c.label), ' ', srcs(s, c.src), c.more ? h('span', { class: 'muted' }, ` and ${plural(c.more, 'more')}`) : null))),
+      h('p', null, `The queries in code attach to this store (${s.q.why}); where they name what no declaration states, both sides are kept, never resolved.`)) : null
     const overlay = changesHead(s, '(a removed table drawn as a ghost)')
     const sel = st.dataSel !== null && sc.sel >= 0 ? passport(s, sc.sel) : null
     const draw = stage('data', 'ERD', diagram(s, n, sc), zoomSeg, sel)
     return h('section', null,
-      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect || 'dialect unknown'), h('span', { class: 'muted' }, s.summary), cols, what),
-      h('details', { class: 'problems' }, h('summary', null, `Read from ${plural(s.decls.length, 'declaration')} · dialect: `, ...how), decls),
+      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect || 'dialect unknown'), inf ? h('span', { class: 'pill inferred' }, 'inferred') : null, h('span', { class: 'muted' }, s.summary), cols, what),
+      banner, qcf,
+      h('details', { class: 'problems' }, h('summary', null, inf ? `Deduced from ${plural(inf.statements, 'statement')} in ${plural(inf.files, 'file')} · dialect: ` : `Read from ${plural(s.decls.length, 'declaration')} · dialect: `, ...how), decls),
       legend, overlay, s.dv ? deltaPanel(s) : null,
       sel && st.full !== 'data' ? h('section', { class: 'split rev' }, h('div', null, draw), h('aside', { class: 'side' }, sel)) : draw,
-      h('p', { class: 'note' }, 'Read from migrations and schema snapshots, never from a database. Scroll to zoom, drag to pan; with the drawing focused, the arrow keys pan (Shift: a page), + and − zoom, 0 fits. Click a table for its passport: every column with the files that declare it, and its foreign keys both ways. Search names tables and columns. A map, not the database: read the code at the path:line.'))
+      h('p', { class: 'note' }, inf ? 'Deduced from the SQL the code sends, never from a database and never run. Scroll to zoom, drag to pan; with the drawing focused, the arrow keys pan (Shift: a page), + and − zoom, 0 fits. Click a table for its passport: every column with the statements that name it, its joins, lookups, readers and writers. A map, not the database: read the code at the path:line.'
+        : 'Read from migrations and schema snapshots, never from a database. Scroll to zoom, drag to pan; with the drawing focused, the arrow keys pan (Shift: a page), + and − zoom, 0 fits. Click a table for its passport: every column with the files that declare it, and its foreign keys both ways. Search names tables and columns. A map, not the database: read the code at the path:line.'))
   }
   function view() {
     const inRepo = (id) => !st.repo || id.startsWith(`${st.repo}:`)
@@ -611,7 +664,10 @@ export function dataClient(ctx) {
     // the access patterns, in one line: each key card says the rest
     const AC = DD.access
     const accLine = DD.accessError ? h('p', { class: 'note err' }, `Access patterns: ${DD.accessError}.`) : AC ? h('p', { class: 'note', 'data-ctl': 'data-access' }, `Access patterns, inferred from ${plural(AC.calls, 'key-value SDK call')} in ${plural(AC.files, 'file')} (${AC.placed} reaching a table): each index lists the functions that query it, or ${plural(AC.leads, 'lead')} "no access found" (it may be reached through a constant built elsewhere, another repository, or a script). Leads, never verdicts.`) : null
-    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsErr, itemsList, accLine, refineView(RF, pick), list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
+    // the SQL the code sends, in one line: each store says the rest
+    const Q = DD.queries
+    const qLine = DD.queriesError ? h('p', { class: 'note err' }, `Queries in code: ${DD.queriesError}.`) : Q ? h('p', { class: 'note', 'data-ctl': 'data-queries' }, `Queries in code, inferred from ${plural(Q.statements, 'statement')} in ${plural(Q.files, 'file')}: ${plural(Q.deduced, 'store')} deduced from them (dashed, never declared), ${plural(Q.attached, 'declared store')} they attach to (what they name that the declarations lack is an [inferred] conflict)${Q.tests ? `; ${plural(Q.tests, 'call')} in test code not read` : ''}. Leads, never verdicts.`) : null
+    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsErr, itemsList, accLine, qLine, refineView(RF, pick), list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
   }
   // ── the refine files (render.mjs packRefine): refined facts, re-checked on every render, never
   // extracted; drift listed and never drawn; the gaps
