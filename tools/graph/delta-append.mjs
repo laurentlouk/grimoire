@@ -9,15 +9,13 @@
 //   DELTA bad <why>                              the delta does not validate, or cannot be read or
 //                                                written: nothing written
 //   DELTA refused <id>: <problems>               that change would not validate: left out
-// The only writer of the file while it runs: a lock directory beside it (<file>.lock, waited for at
-// most LOCK_WAIT_MS, broken once older than LOCK_STALE_MS), so the ships of two repositories never
-// interleave a read and a write; the file is replaced through a temporary file renamed over it. Exit
-// 0 whatever it printed (the ship reads the line), 2 on a usage error.
-import { readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, statSync, unlinkSync, existsSync } from 'node:fs'
+// The only writer of the file while it runs: the delta's lock (lib/data/delta-lock.mjs, the one `serve`
+// takes to write an acknowledgement), so neither the ships of two repositories nor an acknowledgement
+// interleave a read and a write with it; the file is replaced through a temporary file renamed over
+// it. Exit 0 whatever it printed (the ship reads the line), 2 on a usage error.
+import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync } from 'node:fs'
 import { appendChanges } from './lib/data/delta.mjs'
-
-const LOCK_WAIT_MS = 30_000
-const LOCK_STALE_MS = 60_000
+import { withDeltaLock } from './lib/data/delta-lock.mjs'
 const [file, changesFile] = process.argv.slice(2)
 if (!file || !changesFile) { console.error('usage: node tools/graph/delta-append.mjs <delta file> <changes file>'); process.exit(2) }
 const one = (s) => String(s).replace(/\s+/g, ' ').slice(0, 300)
@@ -28,16 +26,7 @@ let entries
 try { entries = JSON.parse(readFileSync(changesFile, 'utf8')) } catch (e) { say(`DELTA bad the changes cannot be read: ${one(e.message)}`); process.exit(0) }
 if (!Array.isArray(entries)) { say('DELTA bad the changes are not a JSON array'); process.exit(0) }
 
-const lock = `${file}.lock`
-const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-let held = false
-for (const t0 = Date.now(); !held;) {
-  try { mkdirSync(lock); held = true; break } catch (e) { if (e.code !== 'EEXIST') { say(`DELTA bad its lock cannot be made: ${one(e.message)}`); process.exit(0) } }
-  try { if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) { rmdirSync(lock); continue } } catch {}
-  if (Date.now() - t0 > LOCK_WAIT_MS) { say(`DELTA bad its lock ${lock} stayed busy`); process.exit(0) }
-  nap(100)
-}
-// read, append, write: the lines to print, the lock released first
+// read, append, write, under the lock: the lines to print
 const write = () => {
   let text
   try { text = readFileSync(file, 'utf8') } catch (e) { return [e.code === 'ENOENT' ? 'DELTA none' : `DELTA bad it cannot be read: ${one(e.message)}`] }
@@ -50,6 +39,8 @@ const write = () => {
   return [`DELTA ok added=${r.added.length} already=${r.already.length} refused=${r.refused.length}`, ...r.refused.map((x) => `DELTA refused ${x.id ?? '?'}: ${one(x.errors.join('; '))}`)]
 }
 let lines
-try { lines = write() } catch (e) { lines = [`DELTA bad ${one(e.message)}`] }
-try { rmdirSync(lock) } catch {}
+try {
+  const done = await withDeltaLock(file, write)
+  lines = done.busy ? [`DELTA bad its lock ${file}.lock stayed busy`] : done.value
+} catch (e) { lines = [`DELTA bad ${one(e.message)}`] }
 for (const l of lines) say(l)

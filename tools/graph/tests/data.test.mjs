@@ -1015,6 +1015,14 @@ CREATE INDEX loans_shelf_idx ON loans (shelf);`
     // two ships of two repositories at once: both changes written, neither lost
     const both = await Promise.all([3, 4].map((n) => new Promise((res) => { const p = spawn(process.execPath, [path.join(ROOT, 'delta-append.mjs'), dfile, cfile(n, [kept(`k${n}`, `app:db/books.k${n}`, { type: 'TEXT', nullable: true })])]); let o = ''; p.stdout.on('data', (x) => (o += x)); p.on('close', () => res(o)) })))
     eq([both, JSON.parse(readFileSync(dfile, 'utf8')).data.map((c) => c.id).slice(-3).sort()], [['DELTA ok added=1 already=0 refused=0\n', 'DELTA ok added=1 already=0 refused=0\n'], ['k3', 'k4', 'unplanned-PROJ-1-1']], 'two writers at once: one after the other under the lock, both changes in the file')
+    // the lock `serve` takes to write an acknowledgement (lib/data/delta-lock.mjs): the append waits for it
+    mkdirSync(`${dfile}.lock`)
+    const t0 = Date.now()
+    const waiting = new Promise((res) => { const p = spawn(process.execPath, [path.join(ROOT, 'delta-append.mjs'), dfile, cfile(6, [kept('k6', 'app:db/books.k6', { type: 'TEXT', nullable: true })])]); let o = ''; p.stdout.on('data', (x) => (o += x)); p.on('close', () => res(o)) })
+    await new Promise((res) => setTimeout(res, 400))
+    const untouched = !JSON.parse(readFileSync(dfile, 'utf8')).data.some((c) => c.id === 'k6')
+    rmSync(`${dfile}.lock`, { recursive: true })
+    eq([await waiting, untouched, Date.now() - t0 >= 400, JSON.parse(readFileSync(dfile, 'utf8')).data.some((c) => c.id === 'k6'), existsSync(`${dfile}.lock`)], ['DELTA ok added=1 already=0 refused=0\n', true, true, true, false], 'the lock an acknowledgement holds: the append waits for it, then writes, and leaves no lock')
     writeFileSync(dfile, '{"schema": 2}')
     ok(cli(dfile, cfile(5, [sub])).stdout.startsWith('DELTA bad the delta does not validate: '), 'a delta that does not validate: DELTA bad, the file left as it is')
   } finally { rmSync(DIR, { recursive: true, force: true }) }

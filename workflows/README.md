@@ -864,8 +864,10 @@ told.
   the delta as `{id: unplanned-<task>-<hash>, op, target, after, why: <the reason>, slice, origin:
   'unplanned'}`, never acknowledged, through `tools/graph/delta-append.mjs`: it validates each one
   with `data/delta.mjs` (one that would not validate is refused and said), skips an id already
-  there (a ship sent again writes nothing twice), takes a lock beside the delta (the ships of two
-  repositories never interleave) and replaces the file through a temporary file renamed over it.
+  there (a ship sent again writes nothing twice), takes the delta's lock (`data/delta-lock.mjs`,
+  the one `serve` takes to write an acknowledgement: neither the ships of two repositories nor an
+  acknowledgement write over each other) and replaces the file through a temporary file renamed
+  over it.
   It prints `DELTA ok added=… already=… refused=…`, `DELTA none` (no delta there), `DELTA bad …`
   or `DELTA skipped lock=0`; anything but `ok` or `none` leaves the changes for the next ship.
   Ships of one repo are chained and coalesce, so two lanes landing while a ship is in flight are

@@ -13,7 +13,7 @@
 //  5. the page: both tabs rendered by the page's own script in a stub DOM
 //
 //  Needs no parser runtime: indexes here are built by hand (sections 2) or empty (4, 5).
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, readdirSync, lstatSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, readdirSync, lstatSync, chmodSync, rmdirSync, utimesSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir, userInfo } from 'node:os'
 import path from 'node:path'
@@ -361,6 +361,42 @@ else {
         ok(logged.length === 2 && logged.every((m) => !/[\u0000-\u001f\u007f]/.test(m)) && logged[1].includes('"four\\u001b[2Jfive"'), `the server's log never prints a control character from a request (${JSON.stringify(logged[1])})`)
       } finally { spawnSync('git', ['config', 'user.name', 'Delta Tester'], { cwd: at('repos/api') }); await s3.close() }
     }
+    // the delta's lock, shared with the loop's ship step (tools/graph/delta-append.mjs, lib/data/delta-lock.mjs):
+    // one read → check → write at a time, so an acknowledgement and an appended change never undo each other
+    const LOCK = `${at(`repos/api/${REL}`)}.lock`
+    const s4 = await serve(dproj, { refresh: false, deltaLock: { waitMs: 1200, staleMs: 5000 } })
+    const put4 = (o) => fetch(`http://127.0.0.1:${s4.port}/api/delta`, { method: 'PUT', headers: { 'x-grimoire-token': s4.token, 'content-type': 'application/json' }, body: JSON.stringify(o) }).then(async (x) => ({ status: x.status, j: await x.json().catch(() => ({})) }))
+    try {
+      mkdirSync(LOCK)
+      const t0 = Date.now()
+      const pending = put4({ repo: 'api', path: REL, base: docHash(disk()), ids: ['one'], ack: true })
+      await new Promise((res) => setTimeout(res, 400))
+      const waited = disk()
+      rmdirSync(LOCK)
+      let r4 = await pending
+      ok(r4.status === 200 && Date.now() - t0 >= 400 && !JSON.parse(waited).data[0].ack && JSON.parse(disk()).data[0].ack && !existsSync(LOCK), 'a lock held by another writer: the acknowledgement waits (nothing written meanwhile), then goes through once it is released, and releases its own')
+      mkdirSync(LOCK)
+      const held = disk()
+      r4 = await put4({ repo: 'api', path: REL, base: docHash(held), ids: ['one'], ack: true })
+      ok(r4.status === 503 && /busy/.test(r4.j.error) && disk() === held && existsSync(LOCK), `held past the wait: 503, busy, try again (the page says it beside the control); nothing written, the other writer's lock left alone (${r4.status} ${r4.j.error})`)
+      const old = new Date(Date.now() - 60_000)
+      utimesSync(LOCK, old, old)
+      r4 = await put4({ repo: 'api', path: REL, base: docHash(disk()), ids: ['one'], ack: true })
+      ok(r4.status === 200 && JSON.parse(disk()).data[0].ack && !existsSync(LOCK), 'a stale lock (a writer that died holding it) is broken, and the acknowledgement written')
+      const lockOf = (p) => existsSync(`${at(p)}.lock`)
+      const paths = [
+        [409, await put4({ repo: 'api', path: REL, base: 'stale-hash', ids: ['one'], ack: true }), `repos/api/${REL}`],
+        [400, await put4({ repo: 'api', path: REL, base: docHash(disk()), ids: ['nope'], ack: true }), `repos/api/${REL}`],
+        [422, await put4({ repo: 'api', path: 'docs/specs/broken.delta.json', base: docHash(disk('repos/api/docs/specs/broken.delta.json')), ids: ['x'], ack: true }), 'repos/api/docs/specs/broken.delta.json'],
+      ]
+      if (!(process.getuid && process.getuid() === 0)) {
+        chmodSync(at(`repos/api/${REL}`), 0o200) // writable, not readable: the read inside the lock throws
+        paths.push([500, await put4({ repo: 'api', path: REL, base: 'x', ids: ['one'], ack: true }), `repos/api/${REL}`])
+        chmodSync(at(`repos/api/${REL}`), 0o644)
+      }
+      ok(paths.every(([want, got, p]) => got.status === want && !lockOf(p)), `the lock is released on every path: ${paths.map(([want, got]) => `${want}→${got.status}`).join(', ')}`)
+    } finally { if (existsSync(LOCK)) rmdirSync(LOCK); await s4.close() }
+
     ok(readdirTmp(DH).length === 0, 'no temporary file is left behind')
     const pageD = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec((await fetch(`http://127.0.0.1:${s2.port}/?t=${s2.token}`).then((x) => x.text())))[1].replace(/\\u003c/g, '<')).data
     ok(pageD.deltas.map((d) => `${d.repo}:${d.path}:${d.ackable}:${d.hash === docHash(disk(d.repo === 'api' ? `repos/api/${d.path}` : d.path))}`).sort().join(' ') === `api:${REL}:true:true api:docs/specs/broken.delta.json:true:true ${path.basename(DH)}:${REL}:true:true`,
