@@ -28,8 +28,23 @@
 //    M9  graph_changes compared the diagram files only (the base checkout's index not at the fork
 //        point): the implementer says so (architectureCompared, architectureWhy), and the PR does;
 //        then the engine's isArchTarget against delta.mjs's
+//  The delta committed on the run branch (#97): a delta inside a shipped repository is written in
+//  the ship worktree and committed there, never in the orchestrating checkout (M1, M8: one outside
+//  every repository is written in place, and the PR says so).
+//    M10 one kept change: exactly one new commit on the run branch, on the landed head, touching only
+//        the delta, pushed with it; the checkout's delta byte-identical, its run branch untouched
+//    M11 a later landing: the earlier ship's delta commit is carried forward (a merge that changes
+//        only the delta), the new entry committed on top; the gate's SYNC brings them into the
+//        checkout before its gate command, so its push is a fast-forward
+//    M12 two lanes landing together: one delta commit; with the lock held, nothing moves
+//    M13 a commit hook that fails: the ship and its push stay green, the entry pending; the next
+//        ship commits it
+//    M14 deliver: 'end': the seal commits the delta on what the gate pushed, and pushes it
+//    M15 the design's delta absent on the run branch: added from the checkout's copy, committed
+//        with the first entry
+//    M16 two repositories: the delta lives in one; the other's kept change goes to its ships
 //  Same stubbed runtime as the other loop tests (support/script-harness.mjs).
-import { run, by, T, impl, BLOCKED, QUIET, sandbox, scriptOf, realRepo, receipt, heredocs, PR_URL, tick, spawn, existsSync, readFileSync, writeFileSync, mkdirSync, join } from './support/script-harness.mjs'
+import { run, by, T, impl, BLOCKED, QUIET, sandbox, scriptOf, realRepo, receipt, heredocs, unb64, PR_URL, RUN_BRANCH, API, headOf, tick, spawn, existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, join } from './support/script-harness.mjs'
 
 let PASS = 0, FAIL = 0
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
@@ -50,12 +65,12 @@ const writeDelta = (X) => { mkdirSync(join(X.T0, 'docs/specs'), { recursive: tru
 const readDelta = (X) => JSON.parse(readFileSync(join(X.T0, DELTA_PATH), 'utf8'))
 // what the ship brief maps the script's DELTA lines to
 const deltaOf = (out) => {
-  const m = /^DELTA (ok|none|bad|skipped)(?: added=(\d+) already=(\d+) refused=(\d+))?/m.exec(out)
-  return m ? { delta: m[1], deltaAdded: +(m[2] || 0), deltaAlready: +(m[3] || 0), deltaRefused: +(m[4] || 0), deltaDetail: out.split('\n').filter((l) => /^DELTA (bad|refused)/.test(l)).join('\n') } : {}
+  const m = /^DELTA (ok|none|bad|skipped)(?: added=(\d+) already=(\d+) refused=(\d+))?(?: commit=([0-9a-f]+))?/m.exec(out)
+  return m ? { delta: m[1], deltaAdded: +(m[2] || 0), deltaAlready: +(m[3] || 0), deltaRefused: +(m[4] || 0), deltaCommit: m[5] || '', deltaDetail: out.split('\n').filter((l) => /^DELTA (bad|refused)/.test(l)).join('\n') } : {}
 }
 const shipFor = (X, seen) => (p) => { seen.push(p); const r = X.exec('bash', scriptOf(p)); seen.out = (seen.out || []).concat(r.out); return { ...receipt(r.out), ...deltaOf(r.out) } }
-// the delta entries a ship or seal script carries: the base64 payload of its DELTA step
-const deltaPayload = (p) => { const s = scriptOf(p); const at = s.indexOf("# 7 · the design's delta"); return at < 0 ? null : JSON.parse(heredocs(s.slice(at))[0]) }
+// the delta entries a ship or seal script carries: the base64 payload of its DELTA step (decoded to $E)
+const deltaPayload = (p) => { const m = /cat > "\$E\.b64" <<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/.exec(scriptOf(p)); return m ? JSON.parse(unb64(m[1])) : null }
 const hydrateOf = (calls) => (calls.find((c) => c.label.startsWith('hydrate:')) || {}).prompt || ''
 const section = (body) => { const i = body.indexOf('### Data model and architecture changes'); return i < 0 ? null : body.slice(i).split('\n<!-- grimoire:state')[0].trimEnd().split('\n') }
 
@@ -70,7 +85,7 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
   const { result, labels, logs, prompt, calls } = await run('M1 · an implementer keeps one unplanned column and reverts another', [T('PROJ-1', { deltaChanges: PLANNED.map(asTask) })], by({
     'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [kept, reverted], deltaStates: [{ id: 'isbn', state: 'planned-built' }, { id: 'due', state: 'pending' }, { id: 'loans', state: 'built-differently', note: 'column id: INTEGER, not null → absent' }] },
     'ship:api#1': shipFor(X, ships),
-  }), { args: { ...ARGS, repos: realRepo(X.W) }, index: { deltaFound: true } })
+  }), { args: { ...ARGS, root: X.T0, repos: realRepo(X.W) }, index: { deltaFound: true } })
 
   ok(prompt('parse-index').includes(`The design's delta, beside the spec (optional: only a design that changes stored data has one): ${DELTA_PATH} — return \`deltaFound\``), 'the index agent is asked whether the delta beside the spec exists')
   ok(hydrateOf(calls).includes(`## The design's delta: \`${DELTA_PATH}\``) && hydrateOf(calls).includes('set `deltaChanges` to the delta\'s `data` changes it builds'), 'the hydration copies each task\'s planned changes from the delta')
@@ -88,8 +103,9 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
     '- unplanned ⚠ kept `api:db/books.subtitle` (add) — the search page shows it · PROJ-1',
     '- unplanned ⚠ reverted `api:db/books.legacy_code` (remove) — dropped by mistake: restored · PROJ-1',
     '',
-    "Each kept unplanned change is added to the delta (`origin: unplanned`, its reason as `why`) for you to acknowledge in the graph page's Data tab (`graph.mjs serve`). Nothing here blocks the run.",
-  ], 'the draft PR (written by the real ship script, through the fake gh) lists planned ✓, pending, built differently, and unplanned ⚠ kept and reverted with their reasons')
+    "Each kept unplanned change is added to the delta (`origin: unplanned`, its reason as `why`) for you to acknowledge in the graph page's Data tab (`graph.mjs serve`). The delta lives outside the shipped repositories: written in place, not committed. Nothing here blocks the run.",
+  ], 'the draft PR (written by the real ship script, through the fake gh) lists planned ✓, pending, built differently, and unplanned ⚠ kept and reverted with their reasons; the delta outside the repository is said to be written in place, not committed')
+  eq([X.origin(), X.sh(`git --git-dir=origin.git rev-list --count ${c1}`)], [c1, X.sh(`git rev-list --count ${c1}`, X.W)], 'the delta outside every shipped repository: nothing is committed for it, the run branch holds the landed head only')
 
   const after = readDelta(X)
   const added = after.data.filter((c) => c.origin === 'unplanned')
@@ -269,7 +285,7 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
   const { result, prompt, calls } = await run('M8 · a planned component and an unplanned line, kept with the diagram updated', [T('PROJ-1', { deltaChanges: [asTask(PLANNED[0]), asTask(ARCH[0])] })], by({
     'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [line], deltaStates: [{ id: 'isbn', state: 'planned-built' }, { id: 'search', state: 'planned-built' }] },
     'ship:api#1': shipFor(X, ships),
-  }), { args: { ...ARGS, repos: realRepo(X.W) }, index: { deltaFound: true } })
+  }), { args: { ...ARGS, root: X.T0, repos: realRepo(X.W) }, index: { deltaFound: true } })
   ok(hydrateOf(calls).includes('and its `architecture` changes'), 'the hydration copies the delta\'s architecture changes too')
   const ip = prompt('impl:PROJ-1')
   ok(ip.includes('- `search` · add `component:search` — find books by title') && ip.includes('Unplanned lists (the data model\'s and the architecture\'s)') && ip.includes('with the diagram updated in your commits'), 'the implementer brief carries the planned component and asks for the architectural impact, kept with the diagram updated')
@@ -280,7 +296,7 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
     '- planned ✓ `component:search` — add `search`: find books by title · PROJ-1',
     '- unplanned ⚠ kept `connection:web->store` (add) — the page shows the stock as it is · PROJ-1',
     '',
-    "Each kept unplanned change is added to the delta (`origin: unplanned`, its reason as `why`), a kept architectural one with the diagram updated in this branch, for you to acknowledge in the graph page's Architecture tab (`graph.mjs serve`). Nothing here blocks the run.",
+    "Each kept unplanned change is added to the delta (`origin: unplanned`, its reason as `why`), a kept architectural one with the diagram updated in this branch, for you to acknowledge in the graph page's Architecture tab (`graph.mjs serve`). The delta lives outside the shipped repositories: written in place, not committed. Nothing here blocks the run.",
   ], 'the PR section lists the architecture under the same heading: the planned component ✓, the unplanned line kept with its reason, acknowledged in the Architecture tab')
   const after = readDelta(X)
   eq([after.data.length, after.architecture.map(({ id, ...c }) => c), /^unplanned-PROJ-1-[0-9a-f]{8}$/.test(after.architecture[1] && after.architecture[1].id)],
@@ -303,6 +319,193 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
   ], 'the PR says the architecture was compared on the diagram files only, and why: never read as no impact')
 }
 
+// ══════════════ the delta inside the shipped repository: committed on the run branch (#97) ══════════════
+// The repository is `<root>/work` and the spec `work/docs/specs/x.md`: its delta is the repository's
+// `docs/specs/x.delta.json`. Every ship and seal script runs for real (git sandbox, fake gh).
+const REL = 'docs/specs/x.delta.json'
+const inRepo = (X, extra = {}) => ({ ...ARGS, root: X.T0, specPath: 'work/docs/specs/x.md', repos: realRepo(X.W), runId: 'run-97', ...extra })
+const deltaInRepo = (X, { commit = true } = {}) => {
+  mkdirSync(join(X.W, 'docs/specs'), { recursive: true })
+  writeFileSync(join(X.W, REL), JSON.stringify(DELTA, null, 2) + '\n')
+  if (commit) X.sh(`git add -- ${REL} && git commit -q -m 'docs: the design delta'`, X.W)
+}
+const og = (X, cmd) => X.sh(`git --git-dir=origin.git ${cmd}`) // the remote
+const parentsOf = (X, sha) => og(X, `rev-list --parents -n 1 ${sha}`).split(' ').slice(1)
+const unplannedAt = (X, sha) => JSON.parse(og(X, `show ${sha}:${REL}`)).data.filter((c) => c.origin === 'unplanned')
+const blocksOf = (p) => [...p.matchAll(/```bash\n([\s\S]*?)\n[ \t]*```/g)].map((m) => m[1])
+const keptAs = (n, extra = {}) => ({ target: `api:db/books.k${n}`, op: 'add', kept: true, reason: `task ${n} needs it`, after: { type: 'TEXT', nullable: true }, ...extra })
+const CLOSING_COMMIT = "Each kept unplanned change is added to the delta (`origin: unplanned`, its reason as `why`) in its own commit on this branch, for you to acknowledge in the graph page's Data tab (`graph.mjs serve`). Nothing here blocks the run."
+
+// ══════════════ M10 · one kept change: one commit on the run branch, the checkout untouched ══════════════
+{
+  const X = sandbox()
+  deltaInRepo(X)
+  const c1 = X.commit('c1')
+  const before = readFileSync(join(X.W, REL), 'utf8')
+  const ships = []
+  const { result, logs } = await run('M10 · an implementer keeps one unplanned change: the ship commits the delta on the run branch', [T('PROJ-1', { deltaChanges: PLANNED.map(asTask) })], by({
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1, { reason: 'the search page shows it' })], deltaStates: [{ id: 'isbn', state: 'planned-built' }] },
+    'ship:api#1': shipFor(X, ships),
+  }), { args: inRepo(X), index: { deltaFound: true } })
+  const tip = X.origin()
+  eq([og(X, `rev-list --count ${c1}..${tip}`), parentsOf(X, tip), og(X, `diff --name-only ${c1} ${tip}`)], ['1', [c1], REL], 'exactly one new commit on the run branch, on the landed head, touching only the delta file')
+  eq(unplannedAt(X, tip).map(({ id, ...c }) => c), [{ op: 'add', target: 'api:db/books.k1', after: { type: 'TEXT', nullable: true }, why: 'the search page shows it', slice: 1, origin: 'unplanned' }], 'it holds the origin: "unplanned" entry, the reason as why')
+  eq([og(X, `log -1 --format=%s ${tip}`), og(X, `log -1 --format='%(trailers:key=Grimoire-Run,valueonly)' ${tip}`)], [`chore(data): record unplanned changes in ${REL} (PROJ-1)`, 'run-97'], 'its own commit: the subject names the delta and the task, the run in its trailer')
+  ok(readFileSync(join(X.W, REL), 'utf8') === before && X.sh(`git rev-parse refs/heads/${RUN_BRANCH}`, X.W) === c1 && X.sh('git status --porcelain -- docs', X.W) === '', "the orchestrating checkout is not modified: its delta byte-identical, its run branch where the landing left it")
+  const out = ships.out[0]
+  ok(new RegExp(`^PUSH ok=1 remote=${c1}$`, 'm').test(out) && new RegExp(`^DELTA ok added=1 already=0 refused=0 commit=${tip.slice(0, 7)}$`, 'm').test(out) && out.indexOf('LOCK ok') < out.indexOf('DELTA ok') && !existsSync(join(X.W, '.git', 'grimoire-ship-api.lock')),
+    'the push carried it (the receipt names the landed head the remote now holds), the DELTA line names the commit; under the ship lock, released after')
+  eq(result.dataModel.changes.map((c) => c.delta), ['added'], 'the run\'s result says it reached the delta')
+  ok(logs.includes(`◎ ship:api#1: the design's delta — 1 unplanned change(s) added, committed on ${RUN_BRANCH} (${tip.slice(0, 7)})`), 'the run log names the commit')
+  eq((section(X.pr.body()) || []).at(-1), CLOSING_COMMIT, 'the PR section says the delta is recorded in its own commit on this branch')
+  X.done()
+}
+
+// ══════════════ M11 · a later landing: the earlier delta commit carried forward; the gate brings it in ══════════════
+{
+  const X = sandbox()
+  deltaInRepo(X)
+  const c1 = X.commit('c1'), c2 = X.commit('c2')
+  const before = readFileSync(join(X.W, REL), 'utf8')
+  const ships = [], tips = []
+  const ship = (p) => { const r = shipFor(X, ships)(p); tips.push(X.origin()); return r }
+  const { result, prompt } = await run('M11 · two landings, each keeping a change: the second ship carries the first commit forward', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })], by({
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
+    'impl:PROJ-2': { ...impl(c2.slice(0, 7), c1.slice(0, 7)), modelChanges: [keptAs(2)] },
+    'ship:api#1': ship, 'ship:api#2': ship,
+  }), { args: inRepo(X), index: { deltaFound: true } })
+  const [d1, d2] = tips
+  const m = parentsOf(X, d2)[0]
+  eq([parentsOf(X, d1), parentsOf(X, d2).length, parentsOf(X, m), og(X, `log -1 --format=%s ${m}`), og(X, `log -1 --format=%s ${d2}`), og(X, `diff --name-only ${c2} ${d2}`)],
+    [[c1], 1, [c2, d1], `chore(data): carry ${REL} forward from the run branch`, `chore(data): record unplanned changes in ${REL} (PROJ-2)`, REL],
+    'the second ship merges the first delta commit into its landed head (a merge that changes only the delta), then commits its own entry on top: both pushes fast-forward')
+  eq(unplannedAt(X, d2).map((c) => c.target), ['api:db/books.k1', 'api:db/books.k2'], 'the run branch holds both entries')
+  ok(ships.out.every((o) => /^PUSH ok=1 /m.test(o) && /^DELTA ok added=1 already=0 refused=0 commit=/m.test(o)) && !result.halt && result.dataModel.changes.every((c) => c.delta === 'added'), 'both ships pushed and recorded; nothing failed or halted')
+  ok(readFileSync(join(X.W, REL), 'utf8') === before && X.sh(`git rev-parse refs/heads/${RUN_BRANCH}`, X.W) === c2, 'the checkout still has neither: its delta untouched, its run branch at the landed head')
+
+  // the terminal slot: a sweep commit on the checkout's run branch, then the gate's SYNC brings the
+  // recorded delta in before the gate command runs, and its push is a fast-forward of the remote
+  const gp = prompt('gate:api')
+  ok(gp.includes(`this repo holds the design's delta (\`${REL}\`)`) && /^- Before the gate command/m.test(gp) && gp.indexOf('SYNC ok') < gp.indexOf('Gate command:'), 'the gate prompt carries the SYNC script, before the gate command')
+  const B = blocksOf(gp), pick = (s) => B.find((b) => b.includes(s)) || ''
+  const s = X.commit('sweep')
+  const so = X.exec('bash', pick('SYNC ok')).out
+  const head = X.sh('git rev-parse HEAD', X.W)
+  eq([so.trim(), X.sh(`git rev-list --parents -n 1 ${head}`, X.W).split(' ').slice(1), X.sh(`git diff --name-only ${s} ${head}`, X.W)], [`SYNC ok head=${head}`, [s, d2], REL], "SYNC merges the remote's delta commits into the checkout's run branch: a merge that changes only the delta")
+  const take = X.exec('bash', pick('shiplock gate')).out, push = X.exec('bash', pick('push -u origin')).out
+  X.exec('bash', pick('lkrel'))
+  ok(/^LOCK ok/m.test(take) && /^PUSH exit=0$/m.test(push) && X.origin() === head, "the gate's push is a fast-forward: the remote holds the swept head with both entries")
+  ok(X.exec('bash', pick('SYNC ok')).out.trim() === 'SYNC none', 'run again: SYNC none, nothing to bring')
+  X.done()
+}
+
+// ══════════════ M12 · two lanes landing together: one delta commit; the lock held, nothing moves ══════════════
+{
+  const X = sandbox()
+  deltaInRepo(X)
+  const c0 = X.commit('c0'), c2 = X.commit('c2')
+  const L0 = T('PROJ-0', { files: ['src/zero.ts — add it'] })
+  const L1 = T('PROJ-1', { dependsOn: ['PROJ-0'], files: ['src/one.ts — add it'] }), L2 = T('PROJ-2', { dependsOn: ['PROJ-0'], files: ['src/two.ts — add it'] })
+  const ships = []
+  const { calls } = await run('M12 · two lanes land while the first ship is in flight: one delta commit', [L0, L1, L2], by({
+    'impl:PROJ-0': impl(c0.slice(0, 7)),
+    'impl:PROJ-1': { ...impl('1111111'), modelChanges: [keptAs(1)] },
+    'impl:PROJ-2': { ...impl('2222222'), modelChanges: [keptAs(2)] },
+    'integrate:PROJ-1': { status: 'MERGED', headSha: c2.slice(0, 7) },
+    'integrate:PROJ-2': { status: 'MERGED', headSha: c2.slice(0, 7) },
+    'ship:api#1': async (p) => { await tick(400); return shipFor(X, ships)(p) },
+    'ship:api#2': shipFor(X, ships),
+  }), { args: inRepo(X, { maxPerRepo: 2 }), index: { deltaFound: true } })
+  const tip = X.origin()
+  eq([calls.filter((c) => c.label.startsWith('ship:')).length, og(X, `rev-list --count ${c2}..${tip}`), parentsOf(X, tip), og(X, `diff --name-only ${c2} ${tip}`), unplannedAt(X, tip).map((c) => c.target), ships.out[1].match(/^DELTA .*/gm).length],
+    [2, '1', [c2], REL, ['api:db/books.k1', 'api:db/books.k2'], 1], 'the two landings coalesce into one ship: one delta commit on the landed head, both entries in it, one DELTA line')
+
+  // the same ship script with the lock held by a live ship of another session: it waits, then moves nothing
+  const s2 = scriptOf(calls.filter((c) => c.label === 'ship:api#2')[0].prompt)
+  const LK = join(X.W, '.git', 'grimoire-ship-api.lock')
+  const holder = spawn('sleep', ['30'])
+  mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `${holder.pid} ${Math.floor(Date.now() / 1000)} ship\n`)
+  const busy = X.exec('bash', s2, { GRIMOIRE_SHIP_LOCK_WAIT: '1' })
+  ok(/^LOCK busy/m.test(busy.out) && /^DELTA skipped lock=0$/m.test(busy.out) && X.origin() === tip, 'with the lock held by another: DELTA skipped, nothing committed or pushed')
+  holder.kill()
+  X.done()
+}
+
+// ══════════════ M13 · a commit hook that fails: the ship and the push stay green, the entry waits ══════════════
+{
+  const X = sandbox()
+  deltaInRepo(X)
+  const c1 = X.commit('c1'), c2 = X.commit('c2')
+  const hook = join(X.W, '.git', 'hooks', 'pre-commit')
+  const ships = [], tips = []
+  const { result, logs, prompt } = await run('M13 · the first delta commit is refused by a pre-commit hook; the next ship records it', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })], by({
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
+    'impl:PROJ-2': impl(c2.slice(0, 7), c1.slice(0, 7)),
+    'ship:api#1': (p) => { mkdirSync(join(X.W, '.git', 'hooks'), { recursive: true }); writeFileSync(hook, '#!/bin/sh\necho "lint: refused" >&2\nexit 1\n'); chmodSync(hook, 0o755); const r = shipFor(X, ships)(p); rmSync(hook); tips.push(X.origin()); return r },
+    'ship:api#2': (p) => { const r = shipFor(X, ships)(p); tips.push(X.origin()); return r },
+  }), { args: inRepo(X), index: { deltaFound: true } })
+  ok(new RegExp(`^PUSH ok=1 remote=${c1}$`, 'm').test(ships.out[0]) && /^DELTA bad step=commit$/m.test(ships.out[0]) && tips[0] === c1, 'the commit failed: the push of the landed head went through, nothing else reached the remote')
+  ok(logs.some((l) => /^⚠ ship:api#1: the design's delta was not written \(DELTA bad: DELTA bad step=commit.*\) — its 1 unplanned change\(s\) wait for the next ship$/.test(l)) && !logs.some((l) => /refuses incremental pushes/.test(l)), 'said in the run log; the push counts as green')
+  eq([deltaPayload(prompt('ship:api#2')).map((e) => e.target), parentsOf(X, tips[1]), og(X, `diff --name-only ${c2} ${tips[1]}`), unplannedAt(X, tips[1]).map((c) => c.target)], [['api:db/books.k1'], [c2], REL, ['api:db/books.k1']], 'the next ship carries the pending entry and commits it on its landed head')
+  ok(!result.halt && result.dataModel.changes[0].delta === 'added' && !result.dataModel.unrecorded.length, 'nothing halted; the change reached the delta in the end')
+  X.done()
+}
+
+// ══════════════ M14 · deliver: 'end' — the seal commits the delta on what the gate pushed ══════════════
+{
+  const X = sandbox()
+  deltaInRepo(X)
+  const c1 = X.commit('c1')
+  const before = readFileSync(join(X.W, REL), 'utf8')
+  let sealOut = '', sealPrompt = ''
+  const { result, labels } = await run('M14 · deliver: end — the seal writes, commits and pushes the delta', [T('PROJ-1')], by({
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
+    'gate:api': () => { X.sh(`git push -q origin ${c1}:refs/heads/${RUN_BRANCH}`, X.W); X.pr.set('url', PR_URL); return { status: 'DONE', summary: 'green', prUrl: PR_URL } },
+    'seal:api': (p) => { sealPrompt = p; sealOut = X.exec('bash', scriptOf(p)).out; return { sealed: /^SEAL ok=1/m.test(sealOut), prUrl: PR_URL, ...deltaOf(sealOut) } },
+  }), { args: inRepo(X, { deliver: 'end' }), index: { deltaFound: true } })
+  const tip = X.origin()
+  ok(!labels.some((l) => l.startsWith('ship:')) && sealPrompt.includes('Then return what its SEAL and DELTA lines say'), 'no land ship ran; the seal carries the change')
+  eq([parentsOf(X, tip), og(X, `diff --name-only ${c1} ${tip}`), unplannedAt(X, tip).map((c) => c.target), new RegExp(`^DELTA ok added=1 already=0 refused=0 commit=${tip.slice(0, 7)}$`, 'm').test(sealOut)], [[c1], REL, ['api:db/books.k1'], true],
+    'one commit on the head the gate pushed, touching only the delta, pushed by the seal')
+  ok(readFileSync(join(X.W, REL), 'utf8') === before && result.dataModel.changes[0].delta === 'added', "the checkout's delta untouched; the result says it reached the delta")
+  X.done()
+}
+
+// ══════════════ M15 · the design's delta not on the run branch yet: added from the checkout's copy ══════════════
+{
+  const X = sandbox()
+  deltaInRepo(X, { commit: false }) // written by the design in the checkout, never committed
+  const c1 = X.commit('c1')
+  const before = readFileSync(join(X.W, REL), 'utf8')
+  const ships = []
+  await run('M15 · the run branch has no delta at the landed head', [T('PROJ-1')], by({
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
+    'ship:api#1': shipFor(X, ships),
+  }), { args: inRepo(X), index: { deltaFound: true } })
+  const tip = X.origin()
+  const atTip = JSON.parse(og(X, `show ${tip}:${REL}`))
+  eq([parentsOf(X, tip), og(X, `diff --name-status ${c1} ${tip}`), atTip.data.map((c) => c.id).slice(0, 3), atTip.data.filter((c) => c.origin === 'unplanned').map((c) => c.target)], [[c1], `A\t${REL}`, ['isbn', 'due', 'loans'], ['api:db/books.k1']],
+    "one commit adds the design's delta, as the checkout holds it, with the unplanned entry appended")
+  ok(og(X, `log -1 --format=%b ${tip}`).includes("The design's delta was not on this branch yet: added as the orchestrating checkout holds it.") && /^DELTA ok added=1 /m.test(ships.out[0]), 'its message says so')
+  ok(readFileSync(join(X.W, REL), 'utf8') === before && X.sh(`git status --porcelain -- ${REL}`, X.W) === `?? ${REL}`, "the checkout's copy byte-identical, still uncommitted there")
+  X.done()
+}
+
+// ══════════════ M16 · two repositories: the delta lives in one; the other's kept change goes to its ships ══════════════
+{
+  const WEB = { name: 'web', path: 'repositories/web', agent: 'frontend-engineer', tags: ['frontend'], gate: null }
+  const webChange = { target: 'web:db/carts.note', op: 'add', kept: true, reason: 'the cart shows it', after: { type: 'TEXT', nullable: true } }
+  const { calls, prompt, result } = await run('M16 · a kept change in web; the delta in api', [T('PROJ-1'), T('PROJ-2', { repo: 'web', agent: 'frontend-engineer', dependsOn: ['PROJ-1'] })], by({
+    'impl:PROJ-2': { ...impl('bbbbbbb'), modelChanges: [webChange] },
+    'ship:api#2': (p) => ({ pushed: true, remoteHead: headOf(p), prUrl: PR_URL, draft: true, delta: 'ok', deltaAdded: 1, deltaAlready: 0, deltaRefused: 0, deltaCommit: 'ccccccc' }),
+  }), { args: { ...ARGS, specPath: 'repositories/api/docs/specs/x.md', repos: [API, WEB] }, index: { deltaFound: true } })
+  const withDelta = calls.filter((c) => /^(ship|seal):/.test(c.label) && deltaPayload(c.prompt)).map((c) => c.label)
+  eq([withDelta, deltaPayload(prompt('ship:api#2')).map((e) => e.target)], [['ship:api#2'], ['web:db/carts.note']], "web's kept change is recorded by a ship of api, the repository that holds the delta (one sent for it, its head already pushed); no web ship writes the delta")
+  ok(scriptOf(prompt('ship:api#2')).includes(`git -C "$W" add -- '${REL}'`), '… committed there, on api\'s run branch')
+  ok((section(heredocs(prompt('ship:web#1'))[0]) || []).at(-1).includes("in its own commit on `feat/proj-700-api` (api's run branch: the delta lives there)"), "web's PR says where the delta is committed")
+  eq(result.dataModel.changes.map((c) => [c.repo, c.delta]), [['web', 'added']], 'the result says it reached the delta')
+}
+
 // ══════════════ the engine and the graph tell an architecture target alike ══════════════
 // (the engine imports nothing: its one-line isArchTarget, matched in its own source, is evaluated here)
 {
@@ -322,7 +525,8 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
   ok(/## Data model changes/.test(read('workflows/briefs/implement.md')) && /never a reason to stop/i.test(read('workflows/briefs/implement.md')) && /Never edit the delta/.test(read('workflows/briefs/implement.md')), 'implement.md: run graph_changes, keep or revert each unplanned change with a reason, never stop for one, never edit the delta')
   ok(/## The design's delta/.test(read('workflows/briefs/hydrate.md')), 'hydrate.md: copy each task\'s planned changes')
   ok(/never a finding by itself/.test(read('workflows/briefs/review.md')) && /on its merits/.test(read('workflows/briefs/review.md')), 'review.md: an unplanned change is never a finding by itself; a wrong one is, on its merits')
-  ok(/DELTA/.test(read('workflows/briefs/ship.md')) && /deltaAdded/.test(read('workflows/briefs/ship.md')), 'ship.md maps the DELTA lines')
+  ok(/DELTA/.test(read('workflows/briefs/ship.md')) && /deltaAdded/.test(read('workflows/briefs/ship.md')) && /deltaCommit/.test(read('workflows/briefs/ship.md')), 'ship.md maps the DELTA lines, the commit included')
+  ok(/SYNC/.test(read('workflows/briefs/gate.md')), 'gate.md says when to run the SYNC script and what its lines mean')
   ok(['templates/team-agent.md', 'agents/migration-engineer.md', 'agents/test-engineer.md', 'AGENTS.md'].every((f) => /modelChanges/.test(read(f))), 'the team-agent template, both specialists and the roster\'s return contract name modelChanges')
 }
 
