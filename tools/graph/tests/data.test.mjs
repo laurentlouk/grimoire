@@ -1876,6 +1876,71 @@ resource "aws_dynamodb_table" "events" {
   const broken = tfRun({ 'live/prod/other/terragrunt.hcl': 'terraform {\n  source = "../../../modules/kv-tables"\n', 'modules/kv-tables/extra.tf': 'resource "x" {\n' })
   ok(!broken[1].error && broken[1].facts.declarations[0].entities.length === 3 && broken[1].facts.declarations[0].notes.includes('modules/kv-tables/extra.tf does not parse: an unterminated block: no closing } at line 2') && broken[1].facts.declarations[0].notes.some((n) => n.startsWith('live/prod/other/terragrunt.hcl does not parse (an unterminated block')),
     `a module file and a configuration that do not parse: each noted, the tables still read (${broken[1].error || broken[1].facts.declarations[0].notes.slice(0, 3).join(' | ')})`)
+  // ── the review's fix round: no repository text in a parse error, deep merges, values out of notes, hostile values ──
+  // a secret-looking value next to a syntax error, built at run time (no token sits in the repository)
+  const NEAR = ['sk', 'live', Array.from({ length: 22 }, (_, i) => 'mnopqrstuvwxyz234567'[(i * 7) % 20]).join('')].join('_')
+  const { parseJson } = await import('../lib/data/readers/json-lines.mjs')
+  const pj = (() => { try { parseJson(`{\n  "password": ${NEAR},\n  "env": "prod"\n}\n`); return null } catch (e) { return e.message } })()
+  eq(pj, 'not valid JSON at line 2', 'a JSON text that does not parse: its line, and none of its text (the engine\'s message quotes the characters around the error)')
+  eq((() => { try { parseJson(`[${'['.repeat(300)}1${']'.repeat(300)}]`); return null } catch (e) { return e.message } })(), 'the JSON nests deeper than 200 levels at line 1: not read', '… and one nested past the cap is refused before it is parsed')
+  eq(parseJson('{ "a": [1, "two", { "b": null }] }'), { a: [1, 'two', { b: null }] }, '… a text that does parse is the value JSON.parse reads')
+  const ctBad = timed(() => dynamodbTable.extract(`{\n  "TableName": "t",\n  "KeySchema": [], "AttributeDefinitions": [],\n  "Token": ${NEAR}\n}`, 'local/t.json'))
+  ok(ctBad.err === 'not valid JSON at line 4' && !ctBad.err.includes(NEAR.slice(0, 8)), `a CreateTable file that does not parse: its job's error is its line alone (${ctBad.err})`)
+  const tvBad = tfRun({ 'modules/kv-tables/terraform.tfvars.json': `{\n  "api_token": ${NEAR},\n  "app": "store"\n}\n` })
+  ok(!JSON.stringify(tvBad).includes(NEAR.slice(0, 8)) && tvBad[1].facts.declarations[0].notes.includes('modules/kv-tables/terraform.tfvars.json does not parse: not valid JSON at line 2'), `a tfvars.json that does not parse: noted at its line, none of its text in the facts (${tvBad[1].facts.declarations[0].notes.find((n) => n.includes('tfvars.json')) || ''})`)
+  const { default: drizzleSnap } = await import('../lib/data/extractors/drizzle-snapshot.mjs')
+  const dzBad = timed(() => drizzleSnap.extract(`{ "version": "7", "secret": ${NEAR} }`, 'drizzle/meta/0001_snapshot.json'))
+  ok(dzBad.err === 'not valid JSON at line 1', `a snapshot that does not parse: its line only (${dzBad.err})`)
+  const sqlBad = replay([{ path: 'db/0001_x.sql', text: `CREATE TABLE t (id INTEGER);\nINSERT INTO t VALUES ('${NEAR});\n` }], DatabaseSync)
+  ok(sqlBad.stopped && !sqlBad.stopped.error.includes(NEAR.slice(0, 8)), `a statement SQLite rejects inside a string literal: its error quotes no literal (${sqlBad.stopped?.error})`)
+  const hclBad = (() => { try { parseHcl(`x = "value %{ ${NEAR} }"\n`); return null } catch (e) { return e.message } })()
+  ok(hclBad === 'an unknown template directive at line 1', `HCL that does not parse: no text of it in the error (${hclBad})`)
+  const hclChar = (() => { try { parseHcl('x = 1 + @\n'); return null } catch (e) { return e.message } })()
+  eq(hclChar, 'an unexpected character at line 1', '… not even the character it stopped at')
+  ok(!parseDelta(`{ "schema": 1, "secret": ${NEAR} }`).errors.some((e) => e.includes(NEAR.slice(0, 8))), 'a delta file that does not parse: no text of it in the error either')
+
+  // values never in a note: a key that is not there, an include that is not found
+  const SECRETVAL = NEAR.toUpperCase()
+  const atNote = (src, values) => {
+    const mod = H.readModule([{ path: 'm/main.tf', body: parseHcl('variable "m" {}\nvariable "k" {}\nvariable "f" {}\n').body }])
+    const vals = new Map(Object.entries(values).map(([k, v]) => [k, { v, at: { path: 'in.hcl', line: 1 } }]))
+    return H.attrOf(parseHcl(`x = ${src}\n`).body, 'x', H.child(H.moduleScope(mod, vals).scope, {}, {}, 'm/main.tf'), new H.Evaluator()).v
+  }
+  const missing = [atNote('lookup(var.m, var.k)', { m: { a: 1 }, k: SECRETVAL }), atNote('var.m[var.k]', { m: { a: 1 }, k: SECRETVAL })]
+  eq(missing.map((u) => [u instanceof H.Unknown, u.why.includes(SECRETVAL)]), [[true, false], [true, false]], `a key that is not there: unknown, saying why without the key's value (${missing.map((u) => u.why).join(' | ')})`)
+  eq(missing[1].why, 'x: not evaluated (no attribute [var.k])', '… naming the expression that holds it')
+
+  // Terragrunt merges an include's inputs as it does (pkg/config/include.go): bottom-up, the child winning;
+  // `deep` merges maps key by key and appends lists (mergo WithAppendSlice), `shallow` replaces top-level keys
+  const tg = (files, child = 'live/app/terragrunt.hcl') => {
+    const parsedTg = new Map(Object.entries(files).map(([p, t]) => [p, parseHcl(t).body]))
+    return JSON.parse(JSON.stringify(new H.Terragrunt(child, { has: (p) => parsedTg.has(p), body: (p) => parsedTg.get(p) }, new H.Evaluator()).inputs().v))
+  }
+  const ROOT = 'inputs = {\n  tables = { orders = { hash = "id" } }\n  tags   = ["a"]\n  stage  = "dev"\n  cfg    = { a = { x = 1, y = 2 }, b = 3 }\n}\n'
+  const CHILD = (strategy) => `include "root" {\n  path = find_in_parent_folders("root.hcl")\n${strategy ? `  merge_strategy = "${strategy}"\n` : ''}}\ninputs = {\n  tables = { audit = { hash = "k" } }\n  tags   = ["b"]\n  stage  = "prod"\n  cfg    = { a = { x = 9 } }\n}\n`
+  eq(tg({ 'live/root.hcl': ROOT, 'live/app/terragrunt.hcl': CHILD('deep') }), { tables: { orders: { hash: 'id' }, audit: { hash: 'k' } }, tags: ['a', 'b'], stage: 'prod', cfg: { a: { x: 9, y: 2 }, b: 3 } },
+    'merge_strategy = "deep": the child\'s map gains a key the include declares, a nested map merges key by key with the child winning, a list is the include\'s then the child\'s')
+  eq(tg({ 'live/root.hcl': ROOT, 'live/app/terragrunt.hcl': CHILD(null) }), { tables: { audit: { hash: 'k' } }, tags: ['b'], stage: 'prod', cfg: { a: { x: 9 } } }, 'the default, shallow: each top-level input of the child replaces the include\'s')
+  eq(tg({ 'live/root.hcl': ROOT, 'live/app/terragrunt.hcl': CHILD('no_merge') }), { tables: { audit: { hash: 'k' } }, tags: ['b'], stage: 'prod', cfg: { a: { x: 9 } } }, 'no_merge: the include\'s inputs are not merged at all')
+  eq(tg({ 'live/root.hcl': 'inputs = { a = "root", b = "root" }\n', 'live/app/env.hcl': 'inputs = { a = "env", c = "env" }\n', 'live/app/terragrunt.hcl': 'include "root" {\n  path = find_in_parent_folders("root.hcl")\n}\ninclude "env" {\n  path = "env.hcl"\n}\ninputs = { c = "child" }\n' }), { a: 'env', b: 'root', c: 'child' }, 'two includes: the later one over the earlier, the child over both')
+  const deepRows = tfRun({ 'live/root.hcl': readFileSync(path.join(FIX, 'live/root.hcl'), 'utf8').replace('  app = "shop"\n', '  app = "shop"\n  tables = {\n    legacy = { hash_key = "id", indexes = [] }\n  }\n'), 'live/prod/tables/terragrunt.hcl': readFileSync(path.join(FIX, 'live/prod/tables/terragrunt.hcl'), 'utf8').replace('include "root" {\n  path = find_in_parent_folders("root.hcl")\n}', 'include "root" {\n  path           = find_in_parent_folders("root.hcl")\n  merge_strategy = "deep"\n}') })
+  eq(deepRows[1].facts.declarations[0].entities.map((e) => `${e.name} ${e.path}:${e.line}`), ['prod-shop-audit live/prod/tables/terragrunt.hcl:43', 'prod-shop-carts live/prod/tables/terragrunt.hcl:37', 'prod-shop-legacy live/root.hcl:17', 'prod-shop-orders live/prod/tables/terragrunt.hcl:23'], 'through the extractor: a table the root\'s inputs declare joins the child\'s under a deep merge, cited in the root (the child\'s lines one lower: its include gained a line)')
+
+  // hostile values fail no job: a string that would explode, a value nested past any use
+  const big = timed(() => evalIn('replace(var.big, "a", var.big)', 'variable "big" {}\n', { big: 'a'.repeat(400000) }))
+  eq(big.err, 'a string past 1024 KB', 'replace() that would build a string past the cap stops on the cap, before the engine runs out of room')
+  const deepJson = H.attrOf(parseHcl('x = jsondecode(var.j)\n').body, 'x', H.child(H.moduleScope(H.readModule([{ path: 'm/main.tf', body: parseHcl('variable "j" {}\n').body }]), new Map([['j', { v: `${'['.repeat(450000)}${']'.repeat(450000)}`, at: null }]])).scope, {}, {}, 'm/main.tf'), new H.Evaluator()).v
+  eq([deepJson instanceof H.Unknown, deepJson.why], [true, 'x: not evaluated (jsondecode(): the JSON nests deeper than 200 levels)'], 'jsondecode() of a value nested 450 000 deep: refused (unknown), not a stack overflow')
+  const nest = (n) => { let v = ['x']; for (let i = 0; i < n; i++) v = [v]; return v }
+  eq([timed(() => evalIn('flatten(var.d)', 'variable "d" {}\n', { d: nest(20000) })).err, timed(() => evalIn('var.d == var.e', 'variable "d" {}\nvariable "e" {}\n', { d: nest(20000), e: nest(20000) })).err, timed(() => evalIn('compact(var.d)', 'variable "d" {}\n', { d: nest(20000) })).err],
+    ['a value nests deeper than 256 levels', 'a value nests deeper than 256 levels', 'a value nests deeper than 256 levels'], 'flatten, a comparison and compact over a value nested 20 000 deep: stopped at the depth cap')
+  const bigMod = tfRun({ 'modules/kv-tables/terraform.tfvars': `big = "${'a'.repeat(400000)}"\n`, 'modules/kv-tables/variables.tf': `${readFileSync(path.join(FIX, 'modules/kv-tables/variables.tf'), 'utf8')}\nvariable "big" {\n  default = ""\n}\n`, 'modules/kv-tables/main.tf': readFileSync(path.join(FIX, 'modules/kv-tables/main.tf'), 'utf8').replace('  name         = "${var.stage}-${var.app}-${each.key}"', '  name         = replace(var.big, "a", var.big)') })
+  ok(!bigMod[1].error && bigMod[1].facts.declarations[0].notes.some((n) => n.startsWith('the evaluation stopped: a string past 1024 KB')), `through the extractor: the job is not failed, its declaration says where the evaluation stopped (${bigMod[1].error || bigMod[1].facts.declarations[0].notes.slice(-1)})`)
+
+  // a remote address keeps no credentials: everything up to the last @ before the host's first /
+  const PW = ['p', 'TOKENVALUE'].join('@')
+  eq([H.safeAddress(`git::https://user:${PW}@example.com/org/m.git//kv?ref=v1`), H.safeAddress(`user:${['tok', 'en'].join('')}@example.com/org/m.git`), H.safeAddress('git@example.com:org/m.git'), H.safeAddress('tfr:///terraform-aws-modules/dynamodb-table/aws?version=4.0.0')],
+    ['git::https://example.com/org/m.git//kv', 'example.com/org/m.git', 'example.com:org/m.git', 'tfr:///terraform-aws-modules/dynamodb-table/aws'], 'a password holding @, an address with no scheme, an scp-like one, a registry one: no user, no password, no query')
   // module addresses: a folder of the repository, or out of reach, shown without credentials or query
   const CRED = ['user', 'pw'].join(':')
   eq([H.moduleDir('../../modules//kv', 'live/prod/x'), H.moduleDir('/modules/kv', 'live/prod/x'), H.moduleDir('../../../../x', 'a/b'), H.moduleDir(`git::https://${CRED}@example.com/m.git//kv?ref=v1`, 'a'), H.repoPath('/.config/a.hcl')],
@@ -2426,6 +2491,26 @@ async function indexed() {
     const sk = under2(audit, (n) => n.tagName === 'LI' && /\bkrow\b/.test(n.attrs.class || '')).find((r) => tpg.textOf(r).startsWith('SK'))
     eq([tcards.length, tpg.textOf(sk), under2(sk, (n) => /\bunk\b/.test(n.attrs?.class || '')).length, sk.attrs.title], [3, 'SK${dependency.search.outputs.sort_attr} ?', 1, `${SH}:44 · ${MT}:8`], 'the card draws the unknown sort key as unknown (its expression, marked), citing the inputs line and the module\'s')
     ok(tpg.textOf(tcard('prod-shop-orders')).includes(`${SH}:22 aws_dynamodb_table.table["orders"]`) && tpg.textOf(tcard('prod-shop-orders')).includes(`${MT}:2 the resource in modules/kv-tables`), 'the orders card cites the inputs entry and the module\'s resource, each named')
+    // a file that does not parse keeps its text out: a tfvars.json and a CreateTable file broken next to a
+    // secret; and a symbolic link to a file out of the repository is not followed (an outside file's
+    // values would land in the model as an in-repository auto.tfvars; the directory walk lists no link,
+    // git does: below, once the project is a repository)
+    const BROKEN = fake('broken'), OUTSECRET = fake('outside')
+    writeFileSync(path.join(TFP, 'shop/modules/kv-tables/terraform.tfvars.json'), `{\n  "api_token": ${BROKEN},\n  "app": "shop"\n}\n`)
+    writeFileSync(path.join(TFP, 'shop/local/tables/broken.json'), `{\n  "TableName": "x",\n  "KeySchema": [], "AttributeDefinitions": [],\n  "Token": ${BROKEN}\n}\n`)
+    const OUTSIDE = path.join(SANDBOX, 'outside.tfvars')
+    writeFileSync(OUTSIDE, `app = "leaked"\napi_token = "${OUTSECRET}"\n`)
+    symlinkSync(OUTSIDE, path.join(TFP, 'shop/modules/kv-tables/zz.auto.tfvars'))
+    const bidx = await tq('index')
+    const blist = await tq('data')
+    ok(blist.includes('    note: modules/kv-tables/terraform.tfvars.json does not parse: not valid JSON at line 2') && blist.includes('  dynamodb-table@1 on shop/local/tables/broken.json: not valid JSON at line 4'),
+      `graph_data: the broken files at their line, none of their text (${blist.split('\n').filter((l) => /broken|tfvars|link/.test(l)).join(' | ')}; index: ${bidx.split('\n').find((l) => l.includes('shop'))})`)
+    ok(!blist.includes('leaked') && (await tq('data', { store: 'shop:dynamodb' })).includes('  prod-shop-orders  table'), 'the link not followed: what the outside file says sets nothing')
+    const stored2 = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => readFileSync(path.join(GD, f)).toString('latin1'))
+    const bpage = await renderTf(loadTf(TFP))
+    ok(stored2.every((t) => !t.includes(BROKEN) && !t.includes(OUTSECRET)) && !bpage.includes(BROKEN) && !bpage.includes(OUTSECRET) && !blist.includes(BROKEN) && !(await tq('status')).includes(BROKEN), 'neither the broken files\' secret nor the outside file\'s is in graph.db, graph_data, graph_status or the page')
+    for (const f of ['shop/modules/kv-tables/terraform.tfvars.json', 'shop/local/tables/broken.json', 'shop/modules/kv-tables/zz.auto.tfvars']) rmSync(path.join(TFP, f))
+    await tq('index')
     // a name with an unknown part: its template (the stage file gone)
     rmSync(STAGE)
     await tq('index')
@@ -2453,6 +2538,16 @@ async function indexed() {
       `  + prod-shop-carts index ByOwner global · partition (owner) · ALL  — ${SH}:38 · ${MT}:34`,
       `  ~ prod-shop-orders  table, 5 attributes, PAY_PER_REQUEST · no stream  stream in ${SH}: NEW_AND_OLD_IMAGES → none  — was ${SH}:22 · ${MT}:2 · ${OJ}:2; now ${SH}:22 · ${MT}:2 · ${OJ}:2`,
     ], 'graph_changes: what the branch changed in the Terragrunt inputs, element by element, the change in one declaration named with its file (the CreateTable file still says the old value)')
+    // in a repository, git lists the link: found, not read, and nothing of the outside file in the model
+    const LINK = path.join(TFP, 'shop/modules/kv-tables/zz.auto.tfvars')
+    symlinkSync(OUTSIDE, LINK)
+    const lidx = await tq('index')
+    const llist = await tq('data')
+    ok(lidx.includes('modules/kv-tables/zz.auto.tfvars: a symbolic link to a file out of the repository: not read') && llist.includes('  data-inputs on shop/modules/kv-tables/zz.auto.tfvars: a symbolic link to a file out of the repository: not read') && (await tq('status')).includes('zz.auto.tfvars: a symbolic link to a file out of the repository: not read'),
+      `a symbolic link to a file out of the repository: found, not read, said by the index, graph_data and graph_status (${llist.split('\n').find((l) => l.includes('zz.auto')) || lidx})`)
+    const lstored = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => readFileSync(path.join(GD, f)).toString('latin1'))
+    ok(!llist.includes('leaked') && (await tq('data', { store: 'shop:dynamodb' })).includes('  prod-shop-orders  table') && lstored.every((t) => !t.includes(OUTSECRET)) && !(await renderTf(loadTf(TFP))).includes(OUTSECRET), 'not followed: the outside file sets no name, and its secret is in neither graph.db nor the page')
+    rmSync(LINK)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

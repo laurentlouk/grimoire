@@ -8,7 +8,7 @@
 // After a repository's code, its data model (lib/data): the files data extractors read are tracked
 // the same way (data_inputs), and each extraction job (one file, or one folder) runs again only when
 // the hash of one of its inputs, or its extractor's version, changed (data_facts).
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, lstatSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { loadRuntime } from './deps.mjs'
@@ -84,9 +84,16 @@ export async function indexProject(project, { full = false, only = null, log = (
 }
 
 // A repository's data model: hash the inputs that moved, then run the jobs whose inputs changed. A
-// job that reads YAML gets the pinned YAML grammar (loaded once, the first time one runs).
+// job that reads YAML gets the pinned YAML grammar (loaded once, the first time one runs). A data
+// input that is a symbolic link to a file out of the repository is never followed (an outside file's
+// values would land in the model as the repository's): it is kept as found, not read, an error row
+// of its own (`data-inputs`), so graph_data and graph_status say so.
+export const OUTSIDE_LINK = 'a symbolic link to a file out of the repository: not read'
 async function indexData(db, project, repo, rels, runtime) {
   const out = { extracted: 0, failed: [] }
+  let root = null
+  try { root = realpathSync(repo.abs) } catch {}
+  const refused = []
   const prev = new Map(db.prepare('SELECT path, size, mtime, hash, ddl FROM data_inputs WHERE repo = ?').all(repo.name).map((r) => [r.path, r]))
   const info = new Map() // path → { size, hash, ddl }
   const texts = new Map()
@@ -101,7 +108,13 @@ async function indexData(db, project, repo, rels, runtime) {
   tx(db, () => {
     for (const p of candidates(rels, project)) {
       let st
-      try { st = statSync(path.join(repo.abs, p)) } catch { continue }
+      try { st = lstatSync(path.join(repo.abs, p)) } catch { continue }
+      if (st.isSymbolicLink()) {
+        let real = null
+        try { real = realpathSync(path.join(repo.abs, p)) } catch {}
+        if (!real || !root || (real !== root && !real.startsWith(root + path.sep))) { refused.push(p); continue }
+        try { st = statSync(path.join(repo.abs, p)) } catch { continue }
+      }
       if (!st.isFile()) continue
       const r = prev.get(p), mtime = Math.floor(st.mtimeMs)
       prev.delete(p)
@@ -140,8 +153,10 @@ async function indexData(db, project, repo, rels, runtime) {
   tx(db, () => {
     const put = db.prepare('INSERT OR REPLACE INTO data_facts(repo, scope, key, extractor, sig, facts, error) VALUES(?, ?, ?, ?, ?, ?, ?)')
     for (const [scope, key, id, sig, r] of results) put.run(repo.name, scope, key, id, sig, r.facts ? JSON.stringify(r.facts) : null, r.error || null)
+    for (const p of refused) { put.run(repo.name, 'file', p, 'data-inputs', 'refused', null, OUTSIDE_LINK); keep.add(`data-inputs|${p}`) }
     for (const [k, r] of done) if (!keep.has(k)) db.prepare('DELETE FROM data_facts WHERE repo = ? AND extractor = ? AND key = ?').run(repo.name, r.extractor, r.key)
   })
+  for (const p of refused) out.failed.push(`${p}: ${OUTSIDE_LINK}`)
   out.extracted = results.length
   return out
 }

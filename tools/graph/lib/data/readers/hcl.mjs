@@ -295,7 +295,7 @@ class Reader {
       if (name === 'null') return this.node('lit', s, { v: null })
       return this.node('var', s, { name })
     }
-    this.err(`an unexpected ${JSON.stringify(c)}`)
+    this.err('an unexpected character') // never the text: it may be part of a value
   }
   number() {
     const s = this.i, t = this.t
@@ -534,7 +534,7 @@ class Reader {
           close()
           const d = { t: 'for', k, v, coll, body: [], line: this.line(s) }
           cur.push(d); frames.push({ d, kind: 'for' }); cur = d.body
-        } else this.err(`an unknown template directive %{ ${kw || ''} }`, s)
+        } else this.err('an unknown template directive', s) // its word may be part of a string's value
         continue
       }
       // a run of plain characters
@@ -562,7 +562,7 @@ class Reader {
       this.i += 2 + n
       return String.fromCodePoint(cp)
     }
-    this.err(`an unknown escape \\${c ?? ''}`)
+    this.err('an unknown escape')
   }
 }
 

@@ -85,6 +85,7 @@
 import { createHash } from 'node:crypto'
 import { normType, normDefault, kvIndex, projectionText, declPath } from './model.mjs'
 import { KEY, NAME, foldOf } from './diff.mjs'
+import { parseJson } from './readers/json-lines.mjs'
 import { TYPES, VARIANTS, BOUNDARY_KINDS, ID } from '../arch.mjs'
 
 export const OPS = ['add', 'change', 'remove', 'rename']
@@ -188,7 +189,7 @@ export function archTargetOf(kind, el, label = null) {
 // → { delta, errors: [string] }: the JSON parsed and checked
 export function parseDelta(text) {
   let doc
-  try { doc = JSON.parse(text) } catch (e) { return { delta: null, errors: [`not JSON: ${e.message}`] } }
+  try { doc = parseJson(text) } catch (e) { return { delta: null, errors: [`not JSON: ${e.message.replace(/^not valid JSON ?/, '').replace(/^at /, 'it breaks at ') || 'it does not parse'}`] } }
   const errors = validateDelta(doc)
   return { delta: errors.length ? null : doc, errors }
 }

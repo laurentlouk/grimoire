@@ -30,6 +30,16 @@
 // definition that states them.
 import { split } from './sql-split.mjs'
 
+// SQLite's error as stored and shown, without the text it quotes when that is not a name: `near
+// "'…": syntax error`, `unrecognized token: "'…"` quote a string literal of the migration, which may
+// hold a secret (a seed's password); a name (`no such table: nope`, `near "FROM"`) stays.
+export function quotesNoLiteral(m) {
+  const s = String(m).split('\n')[0]
+  const a = s.indexOf('"'), b = s.lastIndexOf('"')
+  if (a < 0 || b <= a || /^[\w$.]{1,64}$/.test(s.slice(a + 1, b))) return s.slice(0, 240)
+  return `${s.slice(0, a)}"…"${s.slice(b + 1)}`.slice(0, 240) // from the first quote to the last: a literal may hold one
+}
+
 const ID = '(?:"(?:[^"]|"")+"|`[^`]+`|\\[[^\\]]+\\]|[\\w$]+)'
 const NAME = `(?:${ID}\\s*\\.\\s*)?(${ID})`
 const CREATE_TABLE = new RegExp(`^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?(?:VIRTUAL\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${NAME}`, 'i')
@@ -77,7 +87,7 @@ export function replay(files, DatabaseSync) {
         if (named) { stopped = { path: f.path, line: s.line, error: `refused: it names ${named[1].toUpperCase()}, and this Node cannot keep SQLite off the disk (no attach limit, no authorizer)` }; break run }
         try { if (guarded) db.exec(s.text); else db.prepare(s.text).run() } catch (e) {
           // a guarded refusal says why, not only SQLite's "not authorized"
-          const error = guarded && GUARD_REFUSAL.test(e.message) ? `refused: ${e.message} (it reaches files outside the replay)` : e.message
+          const error = guarded && GUARD_REFUSAL.test(e.message) ? `refused: ${e.message} (it reaches files outside the replay)` : quotesNoLiteral(e.message)
           stopped = { path: f.path, line: s.line, error }
           break run
         }

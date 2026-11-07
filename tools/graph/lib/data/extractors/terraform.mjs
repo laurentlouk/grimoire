@@ -33,21 +33,23 @@
 // a data source, another resource or module, a function the evaluator does not run, a file no input
 // holds. It is kept as `${<expression>}` and noted; the table is then not `whole`. A name with an
 // unknown part is named by its template, its literal parts kept and each unknown part `{label}`
-// (`"${var.env}-${var.project}-orbit"` → `{env}-{project}-orbit`, also its `nameTemplate`), for a
+// (`"${var.env}-${var.project}-orders"` → `{env}-{project}-orders`, also its `nameTemplate`), for a
 // later slice to bind; two instances whose names are unknown alike share that template, and so one
 // entity. A module out of reach (a git, registry or other remote source whose address names a
 // key-value table module: found per file, `remote`) is noted as found, not read.
 //
 // Secrets: only what lands in the model is kept (names, keys, attribute names and types, index
 // names, the TTL attribute, stream, billing); every other value is evaluated in memory, if at all,
-// and dropped with the evaluation. A note names expressions (readers/hcl.mjs refText), never values.
+// and dropped with the evaluation. A note names what the source writes (an expression, readers/hcl.mjs
+// refText; a literal file or variable name), never a value it evaluates to; a file that does not parse
+// is reported by its line alone (readers/json-lines.mjs parseJson, readers/hcl.mjs).
 import path from 'node:path'
 import { parseHcl, HclError, refText, HCL_MAX } from '../readers/hcl.mjs'
 import {
   Evaluator, BudgetError, Unknown, Partial, isUnk, readModule, moduleScope, instancesOf, attrOf, blocksOf,
   tfvarsValues, jsonValues, Terragrunt, moduleDir, safeAddress, memberAt, isObj, EVAL_MS,
 } from '../readers/hcl-eval.mjs'
-import { jsonLines, pathKey } from '../readers/json-lines.mjs'
+import { jsonLines, pathKey, parseJson } from '../readers/json-lines.mjs'
 import { capNotes, NOTES } from '../readers/dynamodb.mjs'
 import { STORE } from './dynamodb-table.mjs'
 
@@ -102,6 +104,9 @@ export default {
 }
 
 const msg = (e) => String(e?.message || e).split('\n')[0].slice(0, 200)
+// the engine running out of room (a call stack, a string or a list past its size) on a hostile value:
+// a stop like the budget's, said in a note, never the job's failure
+const bounded = (e) => (e instanceof BudgetError ? e : e instanceof RangeError ? new BudgetError('a value too large or too deep for the evaluator') : null)
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
 function moduleUnit(dir, files) {
@@ -139,7 +144,7 @@ function moduleUnit(dir, files) {
       if (m.dir === dir) instances.push({ kind: 'terragrunt', path: u, line: src.at.line, tg, ev })
     } catch (e) {
       if (e instanceof HclError) { if (UNIT.test(texts.get(u) || '')) unsure.push(`${u} does not parse (${msg(e)})`); continue }
-      if (e instanceof BudgetError) { unsure.push(`${u}: not evaluated (${msg(e)})`); continue }
+      if (bounded(e)) { unsure.push(`${u}: not evaluated (${msg(bounded(e))})`); continue }
       throw e
     }
   }
@@ -172,7 +177,7 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
       else if (isObj(v)) for (const k of Object.keys(v)) values.set(k, { v: v[k], at: memberAt(v, k) })
     }
     for (const p of [...auto, ...(inst.kind === 'tfvars' ? [inst.path] : [])]) {
-      try { for (const [k, x] of varsOf(p, body, texts, ev)) values.set(k, x) } catch (e) { if (e instanceof BudgetError) throw e; notes.push(`${p} does not parse: ${msg(e)}`) }
+      try { for (const [k, x] of varsOf(p, body, texts, ev)) values.set(k, x) } catch (e) { if (bounded(e)) throw e; notes.push(`${p} does not parse: ${msg(e)}`) }
     }
     const { scope } = moduleScope(mod, values, { dir })
     for (const res of resources) {
@@ -188,8 +193,8 @@ function declaration(dir, mod, resources, inst, { auto, body, texts, deadline, b
       }
     }
   } catch (e) {
-    if (!(e instanceof BudgetError)) throw e
-    notes.push(`the evaluation stopped: ${msg(e)}; the tables read before it are kept`)
+    if (!bounded(e)) throw e
+    notes.push(`the evaluation stopped: ${msg(bounded(e))}; the tables read before it are kept`)
   }
   // one note per reason a name is unknown, not one per table
   for (const [why, names] of templated) notes.unshift(names.length === 1 ? `${names[0]}: a part of its name is unknown (${why}): named by its template` : `${names.length} tables: a part of each name is unknown (${why}): each named by its template (${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''})`)
@@ -210,9 +215,7 @@ function varsOf(p, body, texts, ev) {
   if (/\.json$/i.test(p)) {
     const text = texts.get(p).replace(/^\ufeff/, '')
     const lines = jsonLines(text)
-    let value
-    try { value = JSON.parse(text) } catch (e) { throw new Error(`not JSON: ${msg(e)}`) }
-    return jsonValues(p, value, lines, pathKey, ev)
+    return jsonValues(p, parseJson(text), lines, pathKey, ev) // an error says where, never what the file holds there
   }
   return tfvarsValues(p, body(p), ev)
 }

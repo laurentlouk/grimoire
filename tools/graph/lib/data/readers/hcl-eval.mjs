@@ -38,6 +38,7 @@
 // model; nothing here writes, logs or returns a value in a note.
 import path from 'node:path'
 import { refText } from './hcl.mjs'
+import { deeperThan } from './json-lines.mjs'
 
 const P = path.posix
 export const STEPS = 1_000_000
@@ -206,21 +207,23 @@ export class Evaluator {
   }
 
   // x.name, an unknown relabelled (its label: the last name reached; its text: the whole path
-  // while the path is the one that met it, else where it came from)
-  attr(x, name, n) {
+  // while the path is the one that met it, else where it came from). An error names the attribute as
+  // the source writes it (`shown`): a key computed by x[expr] is named by its expression, never by
+  // its value, since a note keeps the error.
+  attr(x, name, n, shown = `"${name}"`) {
     if (x instanceof Lazy) {
-      if (!x.has(name)) throw new EvalError(`no attribute "${name}"`)
+      if (!x.has(name)) throw new EvalError(`no attribute ${shown}`)
       const v = x.fetch(name, this)
       return isUnk(v) ? this.relabel(v, name, n) : v
     }
     if (isUnk(x)) return this.relabel(x, name, n)
     if (isObj(x)) {
-      if (!(name in x)) throw new EvalError(`no attribute "${name}"`)
+      if (!(name in x)) throw new EvalError(`no attribute ${shown}`)
       const v = x[name]
       this.last = memberAt(x, name) ?? this.last
       return isUnk(v) ? this.relabel(v, name, n) : v
     }
-    throw new EvalError(`no attribute "${name}" on a ${kind(x)}`)
+    throw new EvalError(`no attribute ${shown} on a ${kind(x)}`)
   }
   relabel(v, label, n) {
     if (v instanceof Partial) return v
@@ -230,8 +233,10 @@ export class Evaluator {
   }
   index(x, k, n) {
     if (isUnk(k)) return seal(k)
-    if (x instanceof Lazy) return this.attr(x, String(k), n)
-    if (isUnk(x)) return this.relabel(x, typeof k === 'string' ? k : (x.label ?? null), n)
+    const lit = n.key && n.key.t === 'lit'
+    const shown = lit ? `"${n.key.v}"` : n.key ? `[${refText(n.key)}]` : '[…]'
+    if (x instanceof Lazy) return this.attr(x, String(k), n, shown)
+    if (isUnk(x)) return this.relabel(x, lit && typeof k === 'string' ? k : (x.label ?? null), n)
     if (Array.isArray(x)) {
       if (typeof k !== 'number' || !Number.isInteger(k)) throw new EvalError('a list index is a whole number')
       if (k < 0 || k >= x.length) throw new EvalError('a list index out of range')
@@ -241,7 +246,7 @@ export class Evaluator {
     if (isObj(x)) {
       const key = typeof k === 'number' || typeof k === 'boolean' ? String(k) : k
       if (typeof key !== 'string') throw new EvalError('an object key is a string')
-      return this.attr(x, key, n)
+      return this.attr(x, key, n, shown)
     }
     throw new EvalError(`no index into a ${kind(x)}`)
   }
@@ -361,8 +366,9 @@ export class Evaluator {
     throw new EvalError(`an unknown operator ${op}`)
   }
   // equal, not equal, or unknown when an unknown part decides it
-  equal(a, b) {
+  equal(a, b, d = 0) {
     this.tick()
+    deepest(d)
     if (isUnk(a)) return seal(a)
     if (isUnk(b)) return seal(b)
     a = this.mat(a); b = this.mat(b)
@@ -370,14 +376,14 @@ export class Evaluator {
     if (Array.isArray(a) && Array.isArray(b)) {
       if (a.length !== b.length) return false
       let unk = null
-      for (let i = 0; i < a.length; i++) { const e = this.equal(a[i], b[i]); if (e === false) return false; if (isUnk(e)) unk = e }
+      for (let i = 0; i < a.length; i++) { const e = this.equal(a[i], b[i], d + 1); if (e === false) return false; if (isUnk(e)) unk = e }
       return unk || true
     }
     if (isObj(a) && isObj(b)) {
       const ka = Object.keys(a), kb = Object.keys(b)
       if (ka.length !== kb.length || ka.some((k) => !(k in b))) return false
       let unk = null
-      for (const k of ka) { const e = this.equal(a[k], b[k]); if (e === false) return false; if (isUnk(e)) unk = e }
+      for (const k of ka) { const e = this.equal(a[k], b[k], d + 1); if (e === false) return false; if (isUnk(e)) unk = e }
       return unk || true
     }
     return false
@@ -412,13 +418,19 @@ function joinParts(parts) {
   return new Partial(out)
 }
 // a deep scan for an unknown inside a value (bounded by the evaluator's budget)
-function hasUnk(ev, v) {
+function hasUnk(ev, v, d = 0) {
   ev.tick()
+  deepest(d)
   if (isUnk(v)) return v
-  if (Array.isArray(v)) { for (const x of v) { const u = hasUnk(ev, x); if (u) return u } }
-  else if (isObj(v)) { for (const k in v) { const u = hasUnk(ev, v[k]); if (u) return u } }
+  if (Array.isArray(v)) { for (const x of v) { const u = hasUnk(ev, x, d + 1); if (u) return u } }
+  else if (isObj(v)) { for (const k in v) { const u = hasUnk(ev, v[k], d + 1); if (u) return u } }
   return null
 }
+// A value nested deeper than any table declaration nests (one from outside, say): refused, rather
+// than walked until the stack runs out
+export const VALUE_DEPTH = 256
+const JSON_DEPTH = 200
+const deepest = (d) => { if (d > VALUE_DEPTH) throw new BudgetError(`a value nests deeper than ${VALUE_DEPTH} levels`) }
 const listArg = (fn, v) => { if (!Array.isArray(v)) throw new EvalError(`${fn}() takes a list, not a ${kind(v)}`); return v }
 const strArg = (fn, v) => { if (typeof v === 'number' || typeof v === 'boolean') return String(v); if (typeof v !== 'string') throw new EvalError(`${fn}() takes a string, not a ${kind(v)}`); return v }
 const keyOfValue = (v) => (typeof v === 'string' ? `s${v}` : JSON.stringify(v))
@@ -451,7 +463,7 @@ export const FNS = {
     if (typeof k !== 'string') throw new EvalError('lookup() takes a string key')
     if (k in m) { this.last = memberAt(m, k) ?? this.last; return m[k] }
     if (d.length) { this.last = ats[2] ?? this.last; return d[0] }
-    throw new EvalError(`lookup(): no key "${k}" and no default`)
+    throw new EvalError('lookup(): the key is not in the map, and there is no default')
   }),
   merge: fn(function (ms) {
     const o = obj(), members = new Map()
@@ -480,13 +492,14 @@ export const FNS = {
   flatten: fn(function ([l]) {
     listArg('flatten', l)
     const out = [], ats = []
-    const walk = (x, a) => {
+    const walk = (x, a, d) => {
       this.tick()
+      deepest(d)
       if (isUnk(x)) throw x
-      if (Array.isArray(x)) x.forEach((y, i) => walk(y, itemAt(x, i)))
+      if (Array.isArray(x)) x.forEach((y, i) => walk(y, itemAt(x, i), d + 1))
       else { out.push(x); ats.push(a) }
     }
-    try { l.forEach((y, i) => walk(y, itemAt(l, i))) } catch (e) { if (e instanceof Unknown || e instanceof Partial) return seal(e); throw e }
+    try { l.forEach((y, i) => walk(y, itemAt(l, i), 1)) } catch (e) { if (e instanceof Unknown || e instanceof Partial) return seal(e); throw e }
     return listOut(out, ats)
   }),
   toset: fn(function ([l]) {
@@ -550,9 +563,10 @@ export const FNS = {
     s = strArg('replace', s); sub = strArg('replace', sub); rep = strArg('replace', rep)
     if (sub.length > 1 && sub.startsWith('/') && sub.endsWith('/')) return new Unknown('replace() with a regular expression: not evaluated', 'replace', 'replace(…)')
     if (!sub) return s
-    const out = s.split(sub).join(rep)
-    if (out.length > STR_MAX) throw new BudgetError(`a string past ${STR_MAX >> 10} KB`)
-    return out
+    let count = 0
+    for (let i = s.indexOf(sub); i >= 0; i = s.indexOf(sub, i + sub.length)) count++
+    if (s.length + count * (rep.length - sub.length) > STR_MAX) throw new BudgetError(`a string past ${STR_MAX >> 10} KB`) // before the engine builds it
+    return s.split(sub).join(rep)
   }),
   split: fn(function ([sep, s]) { const parts = strArg('split', s).split(strArg('split', sep)); return listOut(parts, parts.map(() => this.last)) }),
   join: fn(function ([sep, l]) {
@@ -589,10 +603,17 @@ export const FNS = {
   tobool: fn(function ([v]) { if (v === null || typeof v === 'boolean') return v; if (v === 'true' || v === 'false') return v === 'true'; throw new EvalError('tobool(): not a bool') }),
   jsondecode: fn(function ([s]) {
     s = strArg('jsondecode', s)
+    if (deeperThan(s, JSON_DEPTH) >= 0) throw new EvalError(`jsondecode(): the JSON nests deeper than ${JSON_DEPTH} levels`)
     let v
     try { v = JSON.parse(s) } catch { throw new EvalError('jsondecode(): not JSON') }
-    const conv = (x) => { this.tick(); if (Array.isArray(x)) return x.map(conv); if (x && typeof x === 'object') { const o = obj(); for (const k of Object.keys(x)) o[k] = conv(x[k]); return o } return x }
-    return conv(v)
+    const conv = (x, d) => {
+      this.tick()
+      if (d > JSON_DEPTH) throw new EvalError(`jsondecode(): the JSON nests deeper than ${JSON_DEPTH} levels`)
+      if (Array.isArray(x)) return x.map((y) => conv(y, d + 1))
+      if (x && typeof x === 'object') { const o = obj(); for (const k of Object.keys(x)) o[k] = conv(x[k], d + 1); return o }
+      return x
+    }
+    return conv(v, 0)
   }),
   dirname: fn(function ([p]) { return P.dirname(strArg('dirname', p)) }),
   basename: fn(function ([p]) { return P.basename(strArg('basename', p)) }),
@@ -887,7 +908,7 @@ export class Terragrunt {
       if (isUnk(p)) { inc.unknown = seal(p); continue }
       if (typeof p !== 'string') { inc.unknown = new Unknown(`include "${name}": its path is not a string`, name); continue }
       const file = repoPath(p.startsWith('/') ? p : P.join(P.dirname(this.file), p))
-      if (!this.fsx.has(file)) { inc.unknown = new Unknown(`include "${name}": ${file} is not among the repository's HCL files`, name); continue }
+      if (!this.fsx.has(file)) { inc.unknown = new Unknown(`include "${name}": its path ${said(a.get('path').expr)} names no HCL file of the repository`, name); continue }
       try { inc.cfg = new Terragrunt(file, this.fsx, this.ev, { cfg: this.cfg, includeDir: P.dirname(file), top: false }) } catch (e) {
         if (e instanceof EvalError || e instanceof BudgetError) throw e
         inc.unknown = new Unknown(`include "${name}": ${file} does not parse (${String(e.message).split('\n')[0]})`, name)
@@ -899,16 +920,24 @@ export class Terragrunt {
     const exposed = () => this.includes().filter((i) => i.expose)
     return new Lazy(() => exposed().map((i) => i.name), (k) => { const i = exposed().find((x) => x.name === k); return i.cfg ? i.cfg.view() : i.unknown })
   }
-  // the inputs, merged with each include's as its merge_strategy says (the configuration's own win):
-  // { v: object | Unknown, notes }
+  // the inputs, merged with each include's as Terragrunt merges them (pkg/config/include.go
+  // handleInclude): bottom-up, the last include's under the configuration's, then each earlier one's
+  // under that, so the configuration wins over every include and a later include over an earlier
+  // one; each step as that include's merge_strategy says: `shallow` (the default) replaces whole
+  // top-level inputs, `deep` merges maps key by key and appends lists, the include's items first
+  // (mergo.Merge WithAppendSlice, WithOverride), the configuration's scalars winning; `no_merge`
+  // takes nothing. → { v: object | Unknown, notes }
   inputs() {
     const ev = this.ev
     const own = this.topAttr('inputs')
-    let mine = obj()
-    if (own) mine = attrValue(ev, own, this.sc)
-    let merged = obj()
-    ORIGIN.set(merged, { path: this.file, line: own?.line ?? 1, members: new Map() })
-    for (const inc of this.includes()) {
+    let acc = obj()
+    if (own) acc = attrValue(ev, own, this.sc)
+    else ORIGIN.set(acc, { path: this.file, line: 1, members: new Map() })
+    if (isUnk(acc)) return { v: acc, notes: this.notes }
+    if (!isObj(acc)) return { v: new Unknown('inputs is not an object', 'inputs'), notes: this.notes }
+    const incs = this.includes()
+    for (let i = incs.length - 1; i >= 0; i--) {
+      const inc = incs[i]
       if (inc.strategy === 'no_merge') continue
       if (inc.unknown) { this.notes.push(`${inc.unknown.why}: its inputs, if any, are not known`); continue }
       const theirs = inc.cfg.topAttr('inputs')
@@ -916,11 +945,9 @@ export class Terragrunt {
       const v = attrValue(ev, theirs, inc.cfg.sc)
       if (isUnk(v)) { this.notes.push(`include "${inc.name}": its inputs are not known (${seal(v).why})`); continue }
       if (!isObj(v)) continue
-      merged = mergeInto(merged, v, inc.strategy === 'deep')
+      acc = mergeInto(v, acc, inc.strategy === 'deep', ev)
     }
-    if (isUnk(mine)) return { v: mine, notes: this.notes }
-    if (!isObj(mine)) return { v: new Unknown('inputs is not an object', 'inputs'), notes: this.notes }
-    return { v: mergeInto(merged, mine, false), notes: this.notes }
+    return { v: acc, notes: this.notes }
   }
   // the module this configuration runs: terraform { source }, its own or an include's: { v, at }
   source() {
@@ -934,7 +961,7 @@ export class Terragrunt {
     }
     const mine = find(this)
     if (mine) return mine
-    for (const inc of this.includes()) {
+    for (const inc of [...this.includes()].reverse()) { // a later include over an earlier one, as inputs merge
       if (inc.strategy === 'no_merge') continue
       if (inc.unknown) continue
       const s = find(inc.cfg)
@@ -946,7 +973,7 @@ export class Terragrunt {
     const self = this
     const unknown = (why, label) => new Unknown(why, label, `${label}(…)`)
     const F = {
-      find_in_parent_folders: fn(function ([name = 'terragrunt.hcl', ...fallback]) {
+      find_in_parent_folders: fn(function ([name = 'terragrunt.hcl', ...fallback], { n }) {
         name = strArg('find_in_parent_folders', name)
         for (let d = P.dirname(self.dir); self.dir !== '.'; d = P.dirname(d)) {
           const p = repoPath(P.join(d, name))
@@ -954,7 +981,7 @@ export class Terragrunt {
           if (d === '.' || d === '/' || d === '') break
         }
         if (fallback.length) return fallback[0]
-        return unknown(`find_in_parent_folders("${name.slice(0, 60)}"): no such file above ${self.dir} among the repository's HCL files`, 'find_in_parent_folders')
+        return unknown(`find_in_parent_folders(${n.args.length ? said(n.args[0]) : ''}): no such file above ${self.dir} among the repository's HCL files`, 'find_in_parent_folders')
       }),
       get_terragrunt_dir: fn(function () { return virt(self.dir) }),
       get_original_terragrunt_dir: fn(function () { return virt(self.dir) }),
@@ -964,10 +991,10 @@ export class Terragrunt {
       get_path_to_repo_root: fn(function () { return P.relative(virt(self.dir), '/') || '.' }),
       path_relative_to_include: fn(function () { return self.includeDir ? (P.relative(virt(self.includeDir), virt(self.dir)) || '.') : '.' }),
       path_relative_from_include: fn(function () { return self.includeDir ? (P.relative(virt(self.dir), virt(self.includeDir)) || '.') : '.' }),
-      read_terragrunt_config: fn(function ([p, ...fallback]) {
+      read_terragrunt_config: fn(function ([p, ...fallback], { n }) {
         p = strArg('read_terragrunt_config', p)
         const file = repoPath(p.startsWith('/') ? p : P.join(P.dirname(self.file), p))
-        if (!self.fsx.has(file)) return fallback.length ? fallback[0] : unknown(`read_terragrunt_config(): ${file} is not among the repository's HCL files`, 'read_terragrunt_config')
+        if (!self.fsx.has(file)) return fallback.length ? fallback[0] : unknown(`read_terragrunt_config(${said(n.args[0])}): it names no HCL file of the repository`, 'read_terragrunt_config')
         let c
         try { c = new Terragrunt(file, self.fsx, self.ev, { cfg: file, top: false }) } catch (e) {
           if (e instanceof BudgetError) throw e
@@ -975,7 +1002,13 @@ export class Terragrunt {
         }
         return c.view()
       }),
-      get_env: fn(function ([name]) { const n = typeof name === 'string' ? name.slice(0, 60) : '…'; return new Unknown(`get_env("${n}"): the environment it runs in`, n, `get_env("${n}")`) }, true),
+      // an environment variable named by a literal is that name (and labels a name template); one
+      // named by an expression is that expression, never its value
+      get_env: fn(function ([name], { n }) {
+        const a = n.args[0], lit = a && a.t === 'lit' && typeof name === 'string'
+        const text = `get_env(${lit ? JSON.stringify(name.slice(0, 60)) : a ? refText(a) : ''})`
+        return new Unknown(`${text}: the environment it runs in`, lit ? name.slice(0, 60) : 'get_env', text)
+      }, true),
     }
     return F
   }
@@ -988,18 +1021,25 @@ function attrValue(ev, x, sc) {
     return new Unknown(`${x.name}: not evaluated (${e.message})`, x.name, refText(x.expr))
   }
 }
-// b over a (b wins), shallow, or deep for nested objects; origins kept
-function mergeInto(a, b, deep) {
+// b over a (b wins), shallow, or deep: nested objects merged key by key, lists appended (a's items,
+// then b's), any other value b's; origins kept
+function mergeInto(a, b, deep, ev = null, d = 0) {
+  ev?.tick()
+  deepest(d)
   const o = obj(), members = new Map()
   for (const k of Object.keys(a)) { o[k] = a[k]; members.set(k, memberAt(a, k)) }
   for (const k of Object.keys(b)) {
-    if (deep && isObj(o[k]) && isObj(b[k])) o[k] = mergeInto(o[k], b[k], true)
+    if (deep && isObj(o[k]) && isObj(b[k])) o[k] = mergeInto(o[k], b[k], true, ev, d + 1)
+    else if (deep && Array.isArray(o[k]) && Array.isArray(b[k])) o[k] = listOut([...o[k], ...b[k]], [...o[k].map((_, i) => itemAt(o[k], i)), ...b[k].map((_, i) => itemAt(b[k], i))])
     else o[k] = b[k]
     members.set(k, memberAt(b, k))
   }
   ORIGIN.set(o, { ...(originOf(b) || {}), members })
   return o
 }
+// an argument or a path as the source writes it: a literal as written, else its expression (never a
+// value it evaluates to: a note keeps it)
+const said = (x) => (!x ? '' : x.t === 'lit' ? JSON.stringify(String(x.v).slice(0, 80)) : refText(x))
 
 // A module source address: a folder of this repository ({ dir }), or out of reach ({ remote }: a
 // git, registry or other remote address, kept without credentials or a query; { outside }: a path
@@ -1014,4 +1054,12 @@ export function moduleDir(source, fromDir) {
   return { remote: safeAddress(source) }
 }
 // an address as it can be shown: no user or password in it, no query string
-export const safeAddress = (s) => String(s).slice(0, 400).replace(/\?.*$/s, '').replace(/\/\/[^/@\s]*@/g, '//').replace(/^([\w.+-]+::)?[^/@\s:]+@/, '$1').slice(0, 160)
+export function safeAddress(s) {
+  const a = String(s).slice(0, 400).replace(/\?.*$/s, '')
+  const pre = /^(?:[a-z0-9.+-]+::)?(?:[a-z][a-z0-9.+-]*:\/\/)?/i.exec(a)[0] // a forced getter (git::), a scheme
+  let rest = a.slice(pre.length)
+  const slash = rest.indexOf('/')
+  const at = (slash < 0 ? rest : rest.slice(0, slash)).lastIndexOf('@') // a password may hold an @: the last one ends it
+  if (at >= 0) rest = rest.slice(at + 1)
+  return (pre + rest).slice(0, 160)
+}
