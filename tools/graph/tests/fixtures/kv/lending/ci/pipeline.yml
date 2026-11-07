@@ -1,0 +1,6 @@
+name: checks
+on: [push]
+jobs:
+  test:
+    steps:
+      - run: npm test

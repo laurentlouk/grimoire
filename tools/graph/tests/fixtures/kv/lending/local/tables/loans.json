@@ -1,0 +1,31 @@
+{
+  "TableName": "loans",
+  "AttributeDefinitions": [
+    { "AttributeName": "memberId", "AttributeType": "S" },
+    { "AttributeName": "loanId", "AttributeType": "S" },
+    { "AttributeName": "bookId", "AttributeType": "S" },
+    { "AttributeName": "dueAt", "AttributeType": "N" },
+    { "AttributeName": "branchId", "AttributeType": "S" }
+  ],
+  "KeySchema": [
+    { "AttributeName": "memberId", "KeyType": "HASH" },
+    { "AttributeName": "loanId", "KeyType": "RANGE" }
+  ],
+  "GlobalSecondaryIndexes": [
+    {
+      "IndexName": "ByBook",
+      "KeySchema": [
+        { "AttributeName": "bookId", "KeyType": "HASH" },
+        { "AttributeName": "dueAt", "KeyType": "RANGE" }
+      ],
+      "Projection": { "ProjectionType": "INCLUDE", "NonKeyAttributes": ["title", "dueAt"] }
+    },
+    {
+      "IndexName": "ByBranch",
+      "KeySchema": [{ "AttributeName": "branchId", "KeyType": "HASH" }],
+      "Projection": { "ProjectionType": "KEYS_ONLY" }
+    }
+  ],
+  "TimeToLiveSpecification": { "AttributeName": "expiresAt", "Enabled": false },
+  "BillingMode": "PAY_PER_REQUEST"
+}

@@ -13,7 +13,8 @@
 //   architecture  the diagrams in docs/architecture (arch.mjs: checked against the index, laid out
 //              here) and one drafted from the graph on every render; drawn by arch-view.mjs
 //   data       the data model (lib/data, reconciled as graph_data answers): an ERD per SQL store,
-//              laid out here (data/layout.mjs), with the folders found but not read, and two
+//              laid out here (data/layout.mjs), a key card per table of a key-value store (`cards`,
+//              no layout), with the folders found but not read, and two
 //              overlays packed here: the branch against its base, and a design's delta (the
 //              changes it proposes, each with its state against the code); drawn by data-view.mjs
 //   docs       the project's Markdown notes (docs.mjs), rendered in the page (md.mjs) as an
@@ -41,10 +42,11 @@ import { mdSlug, mdFront, mdToHtml } from './md.mjs'
 import { archClient } from './arch-view.mjs'
 import { docsClient } from './docs-view.mjs'
 import { reconcile, storeSummary } from './data/reconcile.mjs'
+import { kvIndex, kvTable, projectionText } from './data/model.mjs'
 import { layoutErd, erdBox } from './data/layout.mjs'
 import { diffModels } from './data/diff.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
-import { parseDelta, deltaStates, findTarget, changeText } from './data/delta.mjs'
+import { parseDelta, deltaStates, findTarget, changeText, diffText } from './data/delta.mjs'
 import { changeVal, renameText, baseText, refName, CHANGE_KIND } from './query.mjs'
 import { dataClient } from './data-view.mjs'
 import { stageClient } from './stage-view.mjs'
@@ -253,11 +255,11 @@ function packDelta(file, { model, base, diff, why, stores, packedAt, shown }) {
   const changes = s.changes.map((r) => ({
     id: r.id, text: changeText(r.change), op: r.change.op, kind: r.t.kind, state: r.state, ack: r.ack, by: r.change.ack?.by ?? null, at: r.change.ack?.at ?? null,
     why: r.change.why, slice: r.change.slice ?? null, origin: r.change.origin, after: afterText(r.t.kind, r.change),
-    diffs: r.diffs.map((x) => x.text), proposed: r.proposed.map((x) => x.text), warn: r.warn,
+    diffs: r.diffs.map((x) => diffText(x, (p) => shown(r.st.repo, p))), proposed: r.proposed.map((x) => diffText(x, (p) => shown(r.st.repo, p))), warn: r.warn,
     src: r.el && r.el.sources && r.state !== 'pending' ? at(r.st.repo, r.el.sources) : [], store: r.st && packedAt.has(r.st.id) ? packedAt.get(r.st.id) : -1, tbl: -1,
   }))
-  const unplanned = s.unplanned.map((u) => ({ text: describeChange(u.c), change: u.c.change, target: u.target, store: packedAt.has(u.st.id) ? packedAt.get(u.st.id) : -1, tbl: -1,
-    was: u.c.attrs.map((a) => `${a.attr === 'onDelete' ? 'on delete' : a.attr === 'onUpdate' ? 'on update' : a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`) }))
+  const unplanned = s.unplanned.map((u) => ({ text: describeChange(u.c, u.st.dialect), change: u.c.change, target: u.target, store: packedAt.has(u.st.id) ? packedAt.get(u.st.id) : -1, tbl: -1,
+    was: u.c.attrs.map((a) => `${a.attr === 'onDelete' ? 'on delete' : a.attr === 'onUpdate' ? 'on update' : a.attr}${a.in ? ` in ${shown(u.st.repo, a.in)}` : ''}: ${changeVal(a.attr, a.before, (p) => shown(u.st.repo, p))} → ${changeVal(a.attr, a.after, (p) => shown(u.st.repo, p))}`) }))
   const byStore = new Map()
   const slot = (n) => { if (!byStore.has(n)) byStore.set(n, { rs: [], us: [] }); return byStore.get(n) }
   s.changes.forEach((r, k) => { if (changes[k].store >= 0) slot(changes[k].store).rs.push([r, k]) })
@@ -265,17 +267,22 @@ function packDelta(file, { model, base, diff, why, stores, packedAt, shown }) {
   const overlay = stores.map((ps, n) => (byStore.has(n) ? packDeltaStore(ps, model.stores.find((x) => x.id === ps.id), byStore.get(n), { base, diff, changes, unplanned, shown }) : null))
   return { ...head, errors: [], spec: delta.spec, changes, unplanned, stores: overlay, unplWhy: diff ? null : why || 'no base was resolved' }
 }
-const describeChange = (c) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${CHANGE_KIND[c.kind]} ${c.entity} · ${c.name} ${c.change}`)
+const describeChange = (c, dialect = null) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${dialect === 'dynamodb' && c.kind === 'field' ? 'attribute' : CHANGE_KIND[c.kind]} ${c.entity} · ${c.name} ${c.change}`)
 // What `after` states, in a line (shown as text in the passport).
 function afterText(kind, c) {
   const a = c.after
   if (!a || c.op === 'remove') return null
   if (c.op === 'rename') return `named ${a.name}`
   const f = (x) => [x.type, 'nullable' in x ? (x.nullable ? 'nullable' : 'not null') : null, 'default' in x ? `default ${x.default === null ? 'none' : x.default}` : null, 'generated' in x ? `generated ${x.generated}` : null].filter(Boolean).join(', ')
+  // a GSI's or an LSI's keys and projection; a key-value table's billing and stream
+  const kv = (x) => [x.kind ? (x.kind === 'lsi' ? 'local' : 'global') : null, x.partition ? `partition (${x.partition.join(', ')})` : null, x.sort && x.sort.length ? `sort (${x.sort.join(', ')})` : null, x.projection ? projectionText({ projection: x.projection, include: x.include || [] }) : x.include ? `including ${x.include.join(', ')}` : null].filter(Boolean).join(' · ')
+  const own = (x) => ['billing' in x ? `billing ${x.billing}` : null, 'stream' in x ? (x.stream ? `stream ${x.stream}` : 'no stream') : null].filter(Boolean).join(' · ')
   if (kind === 'field') return f(a)
+  if (kind === 'index' && ['kind', 'partition', 'sort', 'projection', 'include'].some((k) => k in a)) return kv(a)
   if (kind === 'index') return [a.columns ? `(${a.columns.join(', ')})` : null, 'unique' in a ? (a.unique ? 'unique' : 'not unique') : null, 'partial' in a ? (a.partial ? 'partial' : 'whole') : null].filter(Boolean).join(' ')
   if (kind === 'relation') return [a.onDelete ? `on delete ${a.onDelete}` : null, a.onUpdate ? `on update ${a.onUpdate}` : null].filter(Boolean).join(' · ') || null
-  if (kind === 'entity') return a.fields ? `${a.kind || 'table'}: ${a.fields.map((x) => `${x.name} ${f(x)}`).join('; ')}` : a.kind
+  if (kind === 'key') return 'enabled' in a ? `TTL ${a.enabled ? 'on' : 'off'}` : null
+  if (kind === 'entity') return a.fields ? `${a.kind || 'table'}: ${a.fields.map((x) => `${x.name} ${f(x)}`).join('; ')}${own(a) ? ` · ${own(a)}` : ''}` : [a.kind, own(a)].filter(Boolean).join(' · ')
   return null
 }
 // One store's delta overlay: its tables, each an index into the store's own when untouched, else a
@@ -304,20 +311,22 @@ function packDeltaStore(ps, st, { rs, us }, { base, diff, changes, unplanned, sh
   const ghosts = [], proposed = [], where = [] // where: [the info, the table object it concerns]
   const entityAt = (e) => st.entities.indexOf(e)
   // a proposed table, from `after`, in the page's packed shape (no source: it is not in the code yet)
+  // an index as `after` states it: a SQL one's columns, a GSI's or an LSI's keys and projection
+  const indexOf = (name, x) => (x.kind === 'gsi' || x.kind === 'lsi' ? { name, unique: false, columns: [...(x.partition || []), ...(x.sort || [])], partial: false, ...kvPack(x) } : { name, unique: !!x.unique, columns: x.columns, partial: !!x.partial })
   const ghostOf = (name, a, c) => {
     const P = { s: 'prop', c }
-    const keys = (a.keys || []).map((k) => ({ role: k.role, parts: k.parts, src: [], cf: [], dl: P }))
+    const keys = (a.keys || []).map((k) => ({ role: k.role, parts: k.parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}), src: [], cf: [], dl: P }))
     const pk = new Set(keys.filter((k) => k.role === 'primary').flatMap((k) => k.parts.map(lower))), fk = new Set((a.relations || []).flatMap((r) => r.columns.map(lower)))
-    return { name, kind: a.kind || 'table', src: [], cf: [], dl: P,
+    return { name, kind: a.kind || 'table', ...(ps.cards ? { billing: a.billing ?? null, stream: a.stream ?? null } : {}), src: [], cf: [], dl: P,
       fields: a.fields.map((f) => ({ name: f.name, type: f.type, nullable: f.nullable, def: f.default ?? null, gen: f.generated ?? null, pk: pk.has(lower(f.name)) ? 1 : 0, fk: fk.has(lower(f.name)) ? 1 : 0, src: [], cf: [], dl: P })),
-      keys, indexes: (a.indexes || []).map((x) => ({ name: x.name, unique: !!x.unique, columns: x.columns, partial: !!x.partial, src: [], cf: [], dl: P })),
+      keys, indexes: (a.indexes || []).map((x) => ({ ...indexOf(x.name, x), src: [], cf: [], dl: P })),
       rels: (a.relations || []).map((r) => ({ columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: r.onDelete || 'no action', onUpdate: r.onUpdate || 'no action', src: [], cf: [], dl: P })) }
   }
   const proposedEl = (kind, t, a, c) => {
     const P = { s: 'prop', c }
     if (kind === 'field') return { name: t.el.name, type: a.type, nullable: a.nullable, def: a.default ?? null, gen: a.generated ?? null, pk: 0, fk: 0, src: [], cf: [], dl: P }
-    if (kind === 'index') return { name: t.el.name, unique: !!a.unique, columns: a.columns, partial: !!a.partial, src: [], cf: [], dl: P }
-    if (kind === 'key') return { role: t.el.role, parts: t.el.parts, src: [], cf: [], dl: P }
+    if (kind === 'index') return { ...indexOf(t.el.name, a), src: [], cf: [], dl: P }
+    if (kind === 'key') return { role: t.el.role, parts: t.el.parts, ...(t.el.role === 'ttl' ? { enabled: a?.enabled ?? null } : {}), src: [], cf: [], dl: P }
     return { columns: t.el.columns, to: t.el.to, toColumns: t.el.toColumns, onDelete: a?.onDelete || 'no action', onUpdate: a?.onUpdate || 'no action', src: [], cf: [], dl: P }
   }
   // an element of the base put back where it stood there (a removal built, or one not in the plan);
@@ -338,7 +347,7 @@ function packDeltaStore(ps, st, { rs, us }, { base, diff, changes, unplanned, sh
   const sorted = rs.slice().sort(([a], [b]) => (a.t.kind === 'entity' ? 0 : 1) - (b.t.kind === 'entity' ? 0 : 1))
   for (const [r, k] of sorted) {
     const c = [k], info = changes[k], kind = r.t.kind
-    const line = r.state === 'built-differently' ? `planned → built: ${r.diffs.map((x) => x.text).join('; ')}` : r.proposed.length ? `proposed: ${r.proposed.map((x) => x.text).join('; ')}` : null
+    const line = r.state === 'built-differently' ? `planned → built: ${r.diffs.map((x) => diffText(x, (p) => shown(ps.repo, p))).join('; ')}` : r.proposed.length ? `proposed: ${r.proposed.map((x) => diffText(x, (p) => shown(ps.repo, p))).join('; ')}` : null
     const s = r.state === 'planned-built' ? 'built' : r.state === 'built-differently' ? 'diff' : r.change.op === 'add' ? 'prop' : r.change.op === 'remove' ? 'rm' : 'pend'
     const place = (t) => { if (t) where.push([info, t]) }
     if (s === 'built' && r.change.op === 'remove') { place(fromBase(kind, r.t, 'built', c)); continue }
@@ -383,7 +392,7 @@ function packDeltaStore(ps, st, { rs, us }, { base, diff, changes, unplanned, sh
   const drawn = [...list.map((t) => (typeof t === 'number' ? tables[t] : t)), ...ghosts, ...proposed]
   const names = new Map(drawn.map((t) => [lower(t.name), t.name]))
   for (const t of drawn) for (const r of t.rels) if (r.dl && r.dl.s === 'prop' && names.has(lower(r.to))) r.to = names.get(lower(r.to))
-  return { tables: [...list, ...ghosts, ...proposed], layout: layoutErd(drawn, { collapsed: ps.collapsed }), ks: rs.map(([, k]) => k).sort((a, b) => a - b), us: us.map(([, j]) => j).sort((a, b) => a - b), bpaths }
+  return { tables: [...list, ...ghosts, ...proposed], layout: ps.cards ? null : layoutErd(drawn, { collapsed: ps.collapsed }), ks: rs.map(([, k]) => k).sort((a, b) => a - b), us: us.map(([, j]) => j).sort((a, b) => a - b), bpaths }
 }
 
 // The base the overlay compares against, and its model: { base, at }, or { why } when there is none.
@@ -411,36 +420,42 @@ function packer(entities, src, cf, bsrc = null) {
     const keys = e.keys.map((k) => ({ k, parts: k.parts.map((c) => column(e, c)) }))
     const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
     return {
-      name: e.name, kind: e.kind, ...cite(e),
+      name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...cite(e),
       fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, ...cite(f) })),
-      keys: keys.map(({ k, parts }) => ({ role: k.role, parts, ...cite(k) })),
-      indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, ...cite(x) })),
+      keys: keys.map(({ k, parts }) => ({ role: k.role, parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}), ...cite(k) })),
+      indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, ...(kvIndex(x) ? kvPack(x) : {}), ...cite(x) })),
       rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, ...cite(r) })),
     }
   }
 }
+// A GSI's or an LSI's keys and projection, as the key cards draw them.
+const kvPack = (x) => ({ kind: x.kind, partition: x.partition || [], sort: x.sort || [], projection: x.projection ?? null, include: x.include || [] })
+// A store drawn as key cards rather than an ERD: a key-value one (its tables have no foreign key to
+// draw, and keys, indexes, TTL and stream to show).
+const CARDS = new Set(['dynamodb'])
 function packStore(st, shown, fileId, sd = null) {
   const paths = [], at = new Map()
   const P = (p, kind = null) => {
     if (!at.has(p)) { at.set(p, paths.length); paths.push([shown(st.repo, p), fileId.get(`${st.repo}\0${p}`) ?? -1, kind]) } else if (kind && !paths[at.get(p)][2]) paths[at.get(p)][2] = kind
     return at.get(p)
   }
-  const src = (list) => list.map((s) => [P(s.path, s.kind), s.line ?? null])
+  // a source: [path index, line], and how the declaration names the element when it says (a template's logical id)
+  const src = (list) => list.map((s) => (s.as ? [P(s.path, s.kind), s.line ?? null, s.as] : [P(s.path, s.kind), s.line ?? null]))
   const cf = (list) => list.map((c) => ({ attr: c.attr, values: c.values.map((v) => ({ value: v.value, src: src(v.sources) })) }))
   const tables = st.entities.map(packer(st.entities, src, cf))
-  const f = st.dialectFrom, collapsed = tables.length > DATA_COLLAPSE
+  const f = st.dialectFrom, cards = CARDS.has(st.dialect), collapsed = !cards && tables.length > DATA_COLLAPSE
   return {
     id: st.id, repo: st.repo, name: st.name, dialect: st.dialect, summary: storeSummary(st),
     how: f ? { how: f.how, marker: f.marker ?? null, at: f.path ? [P(f.path), f.line ?? null] : null } : null,
     decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: [P(d.path, d.kind), null], stopped: d.stopped ? [P(d.stopped.path, d.kind), d.stopped.line] : null, error: d.error, notes: d.notes })),
-    paths, tables, collapsed, layout: layoutErd(tables, { collapsed }),
-    ...(sd ? { ch: packChanges(sd, tables, collapsed, shown) } : {}),
+    paths, tables, collapsed, ...(cards ? { cards: true, layout: null } : { layout: layoutErd(tables, { collapsed }) }),
+    ...(sd ? { ch: packChanges(sd, tables, collapsed, shown, cards) } : {}),
   }
 }
 
 // One store's overlay (see dataData). The marks sit on copies: the ERD's own tables stay as they are.
 const LIST = { field: 'fields', key: 'keys', index: 'indexes', relation: 'rels' }
-function packChanges(sd, tables, collapsed, shown) {
+function packChanges(sd, tables, collapsed, shown, cards = false) {
   const bpaths = [], bat = new Map()
   const bsrc = (list) => list.map((s) => { if (!bat.has(s.path)) { bat.set(s.path, bpaths.length); bpaths.push(shown(sd.repo, s.path)) } return [bat.get(s.path), s.line ?? null] })
   const packBase = sd.before ? packer(sd.before.entities, () => [], () => [], bsrc) : null
@@ -451,7 +466,7 @@ function packChanges(sd, tables, collapsed, shown) {
     if (!marked.has(i)) { const t = tables[i]; marked.set(i, { ...t, ch: 'modified', fields: t.fields.map((x) => ({ ...x })), keys: t.keys.map((x) => ({ ...x })), indexes: t.indexes.map((x) => ({ ...x })), rels: t.rels.map((x) => ({ ...x })), gone: { fields: [], keys: [], indexes: [], rels: [] } }) }
     return marked.get(i)
   }
-  const was = (c) => c.attrs.map((a) => `${a.attr === 'onDelete' ? 'on delete' : a.attr === 'onUpdate' ? 'on update' : a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`)
+  const was = (c) => c.attrs.map((a) => `${a.attr === 'onDelete' ? 'on delete' : a.attr === 'onUpdate' ? 'on update' : a.attr}${a.in ? ` in ${shown(sd.repo, a.in)}` : ''}: ${changeVal(a.attr, a.before, (p) => shown(sd.repo, p))} → ${changeVal(a.attr, a.after, (p) => shown(sd.repo, p))}`)
   const ghosts = []
   for (const c of sd.changes) {
     const ren = c.rename ?? null
@@ -476,7 +491,7 @@ function packChanges(sd, tables, collapsed, shown) {
     store: sd.change, n: { added: n('added'), removed: n('removed'), modified: n('modified'), renames: sd.renames.length },
     attrs: sd.attrs.map((a) => `${a.attr}: ${changeVal(a.attr, a.before)} → ${changeVal(a.attr, a.after)}`),
     renames: sd.renames.map((r) => ({ kind: r.kind, ambiguous: r.ambiguous, text: renameText(sd, r) })),
-    bpaths, tables: [...list, ...ghosts], layout: layoutErd(drawn, { collapsed }),
+    bpaths, tables: [...list, ...ghosts], layout: cards ? null : layoutErd(drawn, { collapsed }),
   }
 }
 
@@ -704,6 +719,19 @@ svg.arch .stalemk circle{fill:var(--warn)}svg.arch .stalemk text{font:700 10px u
 .banner ul.links{margin:4px 0}.banner li .pill{margin:0 6px}.err{color:var(--err)}ul.decls{margin:8px 0 2px}ul.decls .pill{margin:0}
 .mkl{display:inline-block;font:700 9.5px ui-sans-serif,system-ui,sans-serif;letter-spacing:.04em;padding:1px 4px;border-radius:4px;margin-right:5px;vertical-align:1px}
 .mkl.pk{color:var(--accent);background:var(--accent-soft)}.mkl.fk{color:var(--t-frontend);background:color-mix(in srgb,var(--t-frontend) 12%,var(--panel))}
+.kcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;margin:12px 0}
+.kcard{background:var(--panel);border:1px solid color-mix(in srgb,var(--t-database) 40%,var(--line));border-radius:12px;padding:10px 12px;min-width:0}
+.khead{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.khead .pill{margin:0}.kname{font-size:14px;overflow-wrap:anywhere}.kas{font-size:12px;margin-top:3px;overflow-wrap:anywhere}
+.ksub{font-size:11.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:10px 0 3px}.ksub.warn{color:var(--warn)}
+ul.krows{list-style:none;margin:0;padding:0}.krow{padding:3px 6px;border-radius:6px;font-size:13px;overflow-wrap:anywhere}.krow:hover{background:var(--hover)}.krow .pill{margin:0 0 0 6px}
+ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4px}
+.mkl.k-pk{color:var(--accent);background:var(--accent-soft)}.mkl.k-sk{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 12%,var(--panel))}.mkl.k-ttl{color:var(--t-messagebus);background:color-mix(in srgb,var(--t-messagebus) 12%,var(--panel))}
+.mkl.k-gsi,.mkl.k-lsi,.mkl.k-idx{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 12%,var(--panel))}.mkl.k-a{color:var(--muted);background:var(--hover)}
+.kcard.ch-add,.kcard.dl-built{border:2px solid var(--ok)}.kcard.ch-del{border:2px dashed var(--err);opacity:.85}.kcard.ch-mod,.kcard.dl-diff{border:2px solid var(--warn)}
+.kcard.dl-prop{border:2px dashed var(--ok)}.kcard.dl-pend,.kcard.dl-rm{border:2px dashed var(--warn)}.kcard.dl-unpl{border:2px solid var(--t-worker)}.kcard.gone{opacity:.85}
+.krow.ch-add,.krow.dl-built{box-shadow:inset 3px 0 0 var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent)}.krow.ch-del{box-shadow:inset 3px 0 0 var(--err);background:color-mix(in srgb,var(--err) 7%,transparent)}
+.krow.ch-mod,.krow.dl-diff{box-shadow:inset 3px 0 0 var(--warn);background:color-mix(in srgb,var(--warn) 9%,transparent)}.krow.dl-prop{outline:1px dashed var(--ok);background:color-mix(in srgb,var(--ok) 6%,transparent)}
+.krow.dl-pend,.krow.dl-rm{outline:1px dashed var(--warn)}.krow.dl-unpl{box-shadow:inset 3px 0 0 var(--t-worker);background:color-mix(in srgb,var(--t-worker) 9%,transparent)}
 .dlegend>span{display:inline-flex;align-items:center;gap:4px}.dia{display:inline-block;width:8px;height:8px;transform:rotate(45deg);border:1.5px solid var(--muted);margin:0 3px}.dia.nn{background:var(--muted)}
 ul.dlist li{padding:5px 0;border-bottom:1px solid var(--line)}ul.dlist li:last-child{border-bottom:0}.srcline{font-size:12px;color:var(--muted);margin-top:2px}.srcline .pill{margin:0 4px 0 0}
 svg.erd text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}

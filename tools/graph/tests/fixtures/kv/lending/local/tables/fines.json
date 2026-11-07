@@ -1,0 +1,23 @@
+{
+  "TableName": "fines",
+  "AttributeDefinitions": [
+    { "AttributeName": "memberId", "AttributeType": "S" },
+    { "AttributeName": "fineId", "AttributeType": "S" },
+    { "AttributeName": "issuedAt", "AttributeType": "N" }
+  ],
+  "KeySchema": [
+    { "AttributeName": "memberId", "KeyType": "HASH" },
+    { "AttributeName": "fineId", "KeyType": "RANGE" }
+  ],
+  "LocalSecondaryIndexes": [
+    {
+      "IndexName": "ByIssued",
+      "KeySchema": [
+        { "AttributeName": "memberId", "KeyType": "HASH" },
+        { "AttributeName": "issuedAt", "KeyType": "RANGE" }
+      ],
+      "Projection": { "ProjectionType": "KEYS_ONLY" }
+    }
+  ],
+  "ProvisionedThroughput": { "ReadCapacityUnits": 1, "WriteCapacityUnits": 1 }
+}

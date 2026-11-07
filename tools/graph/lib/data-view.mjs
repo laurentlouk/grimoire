@@ -7,6 +7,13 @@
 // but not read. A store of more than 60 tables starts as names only: a focus or a search draws the
 // tables it concerns with their columns, laid out by the same function render.mjs used.
 //
+// A key-value store (render.mjs packs it with `cards`) is drawn as a key card per table instead: its
+// partition and sort keys with their attribute types, its TTL (on, off, not said), each GSI and LSI
+// with its keys and projection, its attributes, billing and stream, the declarations that state it
+// (a template's logical id beside its file), its conflicts with every side, and, under an overlay,
+// the same marks as the ERD's (as classes on the card and its rows), before → after, and the delta
+// changes it carries. Search narrows the cards. Everything goes through h(): text, never markup.
+//
 // The change overlay (render.mjs dataData packs it against the base, in Node): a toggle "Changes vs
 // <base>", off by default and absent when no base resolved (the tab says why). On, a store that
 // changed is drawn from its overlay tables and layout: added elements green, removed ones struck in
@@ -77,7 +84,11 @@ export function dataClient(ctx) {
 
   // ── sources: a link to the file in the Files tab when it is indexed, else path:line as text ──
   const srcText = (s, p) => { const [shown] = s.paths[p[0]]; return p[1] ? `${shown}:${p[1]}` : shown }
-  const srcEl = (s, p) => { const [, file, kind] = s.paths[p[0]], t = srcText(s, p); return file >= 0 ? h('a', { class: 'jump mono', href: `#file-${file}`, title: kind ? `${kind}: open the file` : 'open the file' }, t) : h('code', { title: kind || null }, t) }
+  const srcEl = (s, p) => {
+    const [, file, kind] = s.paths[p[0]], t = srcText(s, p)
+    const el = file >= 0 ? h('a', { class: 'jump mono', href: `#file-${file}`, title: kind ? `${kind}: open the file` : 'open the file' }, t) : h('code', { title: kind || null }, t)
+    return p[2] ? h('span', null, el, h('span', { class: 'muted' }, ` ${p[2]}`)) : el // how that declaration names it (a template's logical id)
+  }
   const srcs = (s, list) => (list.length ? h('span', { class: 'srcs' }, list.flatMap((p, k) => (k ? [' · ', srcEl(s, p)] : [srcEl(s, p)]))) : h('span', { class: 'muted' }, 'no source'))
   // the base's sources: its lines, not the working tree's, so text, never a link to the file
   const bsrcText = (s, p) => `${(s.dv ? s.dl : s.ch).bpaths[p[0]]}${p[1] ? `:${p[1]}` : ''}`
@@ -359,8 +370,83 @@ export function dataClient(ctx) {
       outside.length ? [h('p', { class: 'note' }, `Not drawn: their store is not in the model (${outside.length})`), h('ul', { class: 'links dlist' }, outside.map(([, i]) => deltaItem(d, i, 'o')))] : null)
   }
 
+  // ── a store's declarations, and the change overlay's head (its legend, its counts), for both drawings ──
+  function declList(s) {
+    return h('ul', { class: 'links decls' }, s.decls.map((d) => h('li', null, h('span', { class: 'pill' }, d.kind), ' ', h('span', { class: 'mono muted' }, d.extractor), ' · ',
+      d.stopped ? h('span', { class: 'err' }, 'replayed to ', srcEl(s, d.stopped), `: ${d.error}`) : d.status === 'not-read' ? h('span', { class: 'err' }, `not read: ${d.label}`) : d.label, ' · ', srcEl(s, d.at),
+      d.notes && d.notes.length ? h('div', { class: 'note' }, d.notes.join(' · ')) : null)))
+  }
+  function changesHead(s, ghost) {
+    if (!s.ov) return null
+    const k = s.ch.n
+    return [
+      h('div', { class: 'legend dlegend chlegend', role: 'note', 'aria-label': 'Change overlay legend' }, h('b', null, `Changes since ${REF}:`),
+        h('span', null, h('i', { class: 'chsw add' }), 'added'), h('span', null, h('i', { class: 'chsw del' }), h('s', null, 'removed'), ` ${ghost}`),
+        h('span', null, h('i', { class: 'chsw mod' }), 'modified: before → after'), h('span', null, h('i', { class: 'chsw ren' }), 'possible rename, linked, never decided')),
+      h('div', { class: 'toolbar' }, s.ch.store === 'added' ? h('span', { class: 'pill add' }, `store added since ${REF}`) : null, h('span', { class: 'muted' }, `${k.added} added · ${k.removed} removed · ${k.modified} modified · ${plural(k.renames, 'possible rename')}`), ...s.ch.attrs.map((a) => h('span', { class: 'pill mod' }, a))),
+      s.ch.renames.length ? h('ul', { class: 'links renames' }, s.ch.renames.map((r) => h('li', { class: 'ch-ren' }, r.text))) : null]
+  }
+
+  // ── a key-value store: a key card per table, not an ERD (no foreign key to draw; keys, indexes,
+  // TTL and stream to show). A card holds what a passport would: each element with the files that
+  // declare it (on hover), the table's declarations linked, its conflicts with both sides, and under an
+  // overlay its marks (the ERD's classes, on rows), its before → after, the delta changes it carries.
+  const ROLE = { partition: 'PK', sort: 'SK', ttl: 'TTL', primary: 'PK', unique: 'UQ' }
+  const onOff = (v) => (v === true ? 'on' : v === false ? 'off' : 'not said')
+  const projOf = (x) => (x.projection === 'INCLUDE' && x.include && x.include.length ? `INCLUDE (${x.include.join(', ')})` : x.projection || 'projection not said')
+  function keyCard(s, ti) {
+    const t = s.tables[ti]
+    const types = new Map(t.fields.map((f) => [f.name, f.type]))
+    const typed = (a) => `${a} ${types.get(a) || '?'}`
+    const ov = (x) => !!(s.ov && x.ch)
+    const cls = (x) => (ov(x) ? ` ch-${CLS[x.ch]}` : s.dv && x.dl ? ` dl-${x.dl.s}${x.dl.gone ? ' gone' : ''}` : '')
+    const struck = (x) => (ov(x) && x.ch === 'removed') || struckD(s, x)
+    const dWord = (x) => (x.dl.gone && x.dl.s === 'built' ? 'removed as planned' : x.dl.gone ? 'removed, not in the plan' : DSAY[x.dl.s])
+    const cfs = (x) => x.cf || []
+    const pills = (x) => [ov(x) ? h('span', { class: `pill ${CLS[x.ch]}` }, SINCE[x.ch]) : null, s.dv && x.dl ? h('span', { class: `pill d-${x.dl.s}` }, dWord(x)) : null, stale(s, x) ? h('span', { class: 'pill dl-stale', title: 'acknowledgement stale: the change was edited after it was acknowledged' }, 'stale') : null,
+      cfs(x).length ? h('span', { class: 'pill warn', title: cfs(x).map((c) => cfTip(s, c)).join('\n') }, `≠ ${cfs(x).map((c) => c.attr).join(', ')}`) : null]
+    const was = (x) => (x.was && x.was.length && (s.ov || s.dv) ? h('div', { class: 'srcline chgline' }, s.ov ? `was: ${x.was.join(' · ')}` : x.was.join(' · ')) : null)
+    const where = (x) => ((x.src || []).length ? x.src.map((p) => srcText(s, p)).join(' · ') : x.bsrc && x.bsrc.length ? `at the base: ${x.bsrc.map((p) => bsrcText(s, p)).join(' · ')}` : s.dv && x.dl && x.dl.s === 'prop' ? 'proposed: not in the code yet' : null)
+    const row = (x, mk, ...body) => h('li', { class: `krow${cls(x)}`, title: where(x) }, h('span', { class: `mkl k-${mk.toLowerCase()}` }, mk), h('span', { class: `mono${struck(x) ? ' struck' : ''}` }, ...body), ...pills(x), was(x))
+    const keys = t.keys.map((k) => row(k, ROLE[k.role] || k.role, k.role === 'ttl' ? `${k.parts.join(', ')} · ${onOff(k.enabled)}` : k.parts.map(typed).join(' + ')))
+    const idx = t.indexes.map((x) => row(x, x.kind === 'lsi' ? 'LSI' : x.kind === 'gsi' ? 'GSI' : 'IDX', x.name, h('span', { class: 'muted' }, ` · ${[x.partition && x.partition.length ? `PK ${x.partition.map(typed).join(' + ')}` : null, x.sort && x.sort.length ? `SK ${x.sort.map(typed).join(' + ')}` : null, x.kind ? projOf(x) : `(${x.columns.join(', ')})`].filter(Boolean).join(' · ')}`)))
+    const attrs = t.fields.map((f) => row(f, 'A', f.name, h('span', { class: 'muted' }, ` ${f.type || '?'}`)))
+    const conflicts = [[`table ${t.name}`, t], ...t.fields.map((f) => [`attribute ${f.name}`, f]), ...t.keys.map((k) => [`${ROLE[k.role] || k.role} (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x])].flatMap(([label, x]) => cfs(x).map((c) => [label, c]))
+    const as = [...new Set((t.src || []).map((p) => p[2]).filter(Boolean))]
+    const dks = s.dv ? s.dl.ks.filter((k) => s.delta.changes[k].tbl === ti) : [], dus = s.dv ? s.dl.us.filter((j) => s.delta.unplanned[j].tbl === ti) : []
+    return h('article', { class: `kcard${cls(t)}`, 'data-tbl': String(ti), 'aria-label': `${t.name}: ${plural(t.keys.length, 'key')}, ${plural(t.indexes.length, 'index', 'indexes')}, ${plural(t.fields.length, 'attribute')}${conflicts.length ? `, ${plural(conflicts.length, 'conflict')}` : ''}` },
+      h('header', { class: 'khead' }, h('span', { class: 'tdot t-database' }), h('b', { class: `kname mono${struck(t) ? ' struck' : ''}` }, t.name),
+        h('span', { class: 'pill' }, t.billing || 'billing not said'), h('span', { class: 'pill' }, t.stream ? `stream ${t.stream}` : 'no stream'),
+        conflicts.length ? h('span', { class: 'pill warn', title: 'the declarations disagree: each side is kept, none is resolved' }, `≠${conflicts.length}`) : null, ...pills(t).slice(0, 3)),
+      as.length ? h('div', { class: 'kas muted' }, as.join(' · ')) : null,
+      was(t),
+      h('ul', { class: 'krows' }, keys),
+      t.indexes.length ? [h('div', { class: 'ksub' }, `Indexes (${t.indexes.length})`), h('ul', { class: 'krows' }, idx)] : null,
+      h('div', { class: 'ksub' }, `Attributes (${t.fields.length})`), h('ul', { class: 'krows kattrs' }, attrs),
+      h('div', { class: 'ksub' }, 'Declared at'), h('div', { class: 'srcline' }, ov(t) && t.ch === 'removed' ? ['at the base: ', bsrcs(s, t.bsrc)] : s.dv && t.dl && (t.dl.gone || t.dl.s === 'prop') ? (t.dl.gone ? ['at the base: ', bsrcs(s, t.bsrc)] : 'proposed: not in the code yet') : srcs(s, t.src)),
+      conflicts.length ? [h('div', { class: 'ksub warn' }, `Conflicts (${conflicts.length}): each side kept, none resolved`),
+        h('ul', { class: 'links dlist' }, conflicts.map(([label, c]) => h('li', null, h('div', null, h('b', null, label), h('span', { class: 'muted' }, ` · ${c.attr}`)),
+          c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src))))))] : null,
+      dks.length || dus.length ? [h('div', { class: 'ksub' }, `Delta: ${plural(dks.length, 'change')}${dus.length ? `, ${dus.length} not in the plan` : ''}`), h('ul', { class: 'links dlist' }, dks.map((k) => deltaItem(s.delta, k, 'p')), dus.map((j) => unplItem(s.delta, j)))] : null)
+  }
+  function cardsView(s) {
+    const q = lower(st.q.trim())
+    const hit = (t) => !q || lower(t.name).includes(q) || t.fields.some((f) => lower(f.name).includes(q)) || t.indexes.some((x) => lower(x.name).includes(q))
+    const shown = s.tables.map((t, i) => [t, i]).filter(([t]) => hit(t))
+    const legend = h('div', { class: 'legend dlegend' }, h('span', null, h('span', { class: 'mkl k-pk' }, 'PK'), 'partition key'), h('span', null, h('span', { class: 'mkl k-sk' }, 'SK'), 'sort key (several attributes: a multi-attribute key)'),
+      h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'time to live: on, off or not said'), h('span', null, h('span', { class: 'mkl k-gsi' }, 'GSI'), h('span', { class: 'mkl k-lsi' }, 'LSI'), 'global and local secondary indexes, with their keys and projection'),
+      h('span', null, h('span', { class: 'pill warn' }, 'a ≠ b'), ' the declarations disagree, both values kept'))
+    return h('section', null,
+      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect), h('span', { class: 'muted' }, s.summary), q ? h('span', { class: 'muted' }, `${plural(shown.length, 'table')} of ${s.tables.length} match “${st.q.trim()}”`) : null),
+      h('details', { class: 'problems' }, h('summary', null, `Read from ${plural(s.decls.length, 'declaration')}: each a table declaration (a CreateTable input, a template's table resource), references kept unresolved`), declList(s)),
+      legend, changesHead(s, '(a removed table drawn as a struck card)'), s.dv ? deltaPanel(s) : null,
+      h('div', { class: 'kcards', id: 'data-cards', role: 'list', 'aria-label': `${s.id}: ${plural(shown.length, 'key card')}` }, shown.map(([, i]) => keyCard(s, i))),
+      h('p', { class: 'note' }, 'Read from the files that declare each table (CreateTable inputs, CloudFormation, SAM and Serverless templates), never from a database. A table two files declare is one card citing both; where they disagree, both values are kept. A reference (!Ref, !Sub, ${…}) is shown as written, never evaluated. Hover a row for the path:line that declares it. A map, not the database: read the code at the path:line.'))
+  }
+
   // ── the tab ──
   function storeView(s, n) {
+    if (s.cards) return cardsView(s, n)
     const sc = scene(s, n)
     const cur = st.dataZoom === 'fit' ? 'fit' : st.dataZoom || 1
     const zoom = (z) => { st.dataZoom = z; rerender() }
@@ -380,20 +466,11 @@ export function dataClient(ctx) {
       h('button', { 'data-ctl': 'data-names', 'aria-pressed': String(!st.dataAll), onclick: () => { st.dataAll = false; rerender(false) } }, 'Names'),
       h('button', { 'data-ctl': 'data-columns', 'aria-pressed': String(!!st.dataAll), onclick: () => { st.dataAll = true; rerender(false) } }, 'Columns')) : null
     const how = s.how ? (s.how.how === 'stated' ? ['stated at ', srcEl(s, s.how.at)] : s.how.how === 'sniffed' ? [`sniffed: ${s.how.marker} at `, srcEl(s, s.how.at)] : s.how.how === 'supabase' ? ['Supabase migrations are Postgres'] : ['set in grimoire.config.json (graph.data.migrations)']) : ['unknown']
-    const decls = h('ul', { class: 'links decls' }, s.decls.map((d) => h('li', null, h('span', { class: 'pill' }, d.kind), ' ', h('span', { class: 'mono muted' }, d.extractor), ' · ',
-      d.stopped ? h('span', { class: 'err' }, 'replayed to ', srcEl(s, d.stopped), `: ${d.error}`) : d.status === 'not-read' ? h('span', { class: 'err' }, `not read: ${d.label}`) : d.label, ' · ', srcEl(s, d.at),
-      d.notes && d.notes.length ? h('div', { class: 'note' }, d.notes.join(' · ')) : null)))
+    const decls = declList(s)
     const legend = h('div', { class: 'legend dlegend' }, h('span', null, h('span', { class: 'mkl pk' }, 'PK'), 'primary key'), h('span', null, h('span', { class: 'mkl fk' }, 'FK'), 'foreign key'),
       h('span', null, h('i', { class: 'dia nn' }), 'not null'), h('span', null, h('i', { class: 'dia nul' }), 'nullable'), h('span', null, h('span', { class: 'pill warn' }, 'a ≠ b'), ' the declarations disagree, both values shown'),
       h('span', { class: 'muted' }, 'a line runs from the referencing column (many) to the column it references (one)'))
-    // the overlay's own legend, and what it says about the store as a whole
-    const k = s.ov ? s.ch.n : null
-    const overlay = s.ov ? [
-      h('div', { class: 'legend dlegend chlegend', role: 'note', 'aria-label': 'Change overlay legend' }, h('b', null, `Changes since ${REF}:`),
-        h('span', null, h('i', { class: 'chsw add' }), 'added'), h('span', null, h('i', { class: 'chsw del' }), h('s', null, 'removed'), ' (a removed table drawn as a ghost)'),
-        h('span', null, h('i', { class: 'chsw mod' }), 'modified: before → after'), h('span', null, h('i', { class: 'chsw ren' }), 'possible rename, linked, never decided')),
-      h('div', { class: 'toolbar' }, s.ch.store === 'added' ? h('span', { class: 'pill add' }, `store added since ${REF}`) : null, h('span', { class: 'muted' }, `${k.added} added · ${k.removed} removed · ${k.modified} modified · ${plural(k.renames, 'possible rename')}`), ...s.ch.attrs.map((a) => h('span', { class: 'pill mod' }, a))),
-      s.ch.renames.length ? h('ul', { class: 'links renames' }, s.ch.renames.map((r) => h('li', { class: 'ch-ren' }, r.text))) : null] : null
+    const overlay = changesHead(s, '(a removed table drawn as a ghost)')
     const sel = st.dataSel !== null && sc.sel >= 0 ? passport(s, sc.sel) : null
     const draw = stage('data', 'ERD', diagram(s, n, sc), zoomSeg, sel)
     return h('section', null,
@@ -408,7 +485,7 @@ export function dataClient(ctx) {
     const list = S.map((s, i) => [s, i]).filter(([s]) => inRepo(s.id))
     const unread = (DD.unread || []).filter((u) => inRepo(u.store)), failed = (DD.failed || []).filter((f) => !st.repo || f.repo === st.repo)
     const gone = CH.base ? (CH.removed || []).filter((g) => inRepo(g.id)) : []
-    if (!list.length && !unread.length && !failed.length && !gone.length) return h('section', null, h('p', { class: 'muted' }, 'No data store found: no folder of SQL migrations (.sql files that create or alter tables) and no schema snapshot in the indexed repositories. The data model is read from what declares it in the code, never from a database.'))
+    if (!list.length && !unread.length && !failed.length && !gone.length) return h('section', null, h('p', { class: 'muted' }, 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no schema snapshot and no table declaration (a CreateTable input, a table resource of a template) in the indexed repositories. The data model is read from what declares it in the code, never from a database.'))
     if (list.length && !list.some(([, i]) => i === st.data)) open(list[0][1])
     const pick = (i) => () => { open(i); rerender(false) }
     const on = !!st.dataChanges && !!CH.base

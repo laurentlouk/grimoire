@@ -17,12 +17,17 @@
 //     Each repository's files at its `at` commit (git ls-tree), the candidates read as blobs through
 //     one `git cat-file --batch` (git show <commit>:<path>, without a process per file; binary-safe,
 //     each capped as the index caps it). Memoised in this process per (repository, commit, extractor
-//     versions, the config that steers discovery); nothing is written to graph.db or to disk.
+//     versions, the config that steers discovery); nothing is written to graph.db or to disk. Its
+//     YAML that declares a table is parsed in a process of its own (readers/yaml-aside.mjs), with the
+//     indexer's flags, never in this one.
 //   treeAt(dir, commit), blobs(dir, list): those two git reads, shared with the architecture change
 //     view (arch-change.mjs), which reads the saved diagrams at the base the same way.
 import { spawnSync } from 'node:child_process'
-import { EXTRACTORS, MAX_BYTES, candidates, extractAll, idOf } from './registry.mjs'
+import { EXTRACTORS, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
 import { reconcile } from './reconcile.mjs'
+import { parseAside } from './readers/yaml-aside.mjs'
+import { tableLevel } from './readers/dynamodb.mjs'
+import { stripBom } from './readers/documents.mjs'
 import { baseCandidates } from '../freshness.mjs'
 import { driver } from '../store.mjs'
 
@@ -83,13 +88,23 @@ function extractAt(abs, commit, project, overrides, ctx) {
   const files = treeAt(abs, commit)
   const paths = [...files.keys()]
   const want = candidates(paths, { exclude: [], ...project }).filter((p) => files.get(p).size <= MAX_BYTES)
-  const text = blobs(abs, want.map((p) => files.get(p)))
-  return extractAll({
-    paths,
-    size: (p) => files.get(p).size,
-    read: (p) => { const b = text.get(files.get(p)?.oid); if (!b) throw new Error(`${p} could not be read at ${commit.slice(0, 10)}`); return b.toString('utf8') },
-  }, { exclude: [], ...project }, overrides, ctx)
+  // read in batches of at most BATCH bytes, keeping only what an extractor may read (registry.mjs
+  // keeps): every JSON and YAML file is a candidate, most declare nothing (an empty text inspects so)
+  const text = new Map()
+  for (let i = 0, n = 0, from = 0; i <= want.length; i++) {
+    if (i < want.length && (n === 0 || n + files.get(want[i]).size <= BATCH)) { n += files.get(want[i]).size; continue }
+    const batch = want.slice(from, i), got = blobs(abs, batch.map((p) => files.get(p)))
+    for (const p of batch) { const b = got.get(files.get(p).oid); if (b) { const t = b.toString('utf8'); text.set(p, keeps(p, t) ? t : '') } }
+    from = i; n = i < want.length ? files.get(want[i]).size : 0
+  }
+  const read = (p) => { if (!text.has(p)) throw new Error(`${p} could not be read at ${commit.slice(0, 10)}`); return text.get(p) }
+  // the YAML a table extractor will read, parsed in a process of its own (readers/yaml-aside.mjs)
+  const yaml = parseAside([...new Set(want.filter((p) => YAML.test(p) && text.has(p)).map((p) => stripBom(read(p))).filter((t) => tableLevel(t)))])
+  const yamlOf = (t) => { const v = yaml.get(t); if (v instanceof Error) throw v; if (!v) throw new Error('no YAML reader: the text was not parsed'); return v }
+  return extractAll({ paths, size: (p) => files.get(p).size, read }, { exclude: [], ...project }, overrides, { ...ctx, yaml: yamlOf })
 }
+const YAML = /\.(?:ya?ml|template)$/i
+const BATCH = 32 << 20
 
 // A commit's files under a directory, relative to it (git lists them so when run from inside it):
 // Map(path → { oid, size }). Symbolic links are left out: their blob is a target path, not a text.

@@ -12,19 +12,23 @@
 // it was partway. Drizzle v1 snapshots form a DAG through prevIds: only its leaves declare a store.
 //
 //   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store] }   (model.mjs)
-import { KINDS, keyOf, normType, normDefault } from './model.mjs'
+import { KINDS, keyOf, normType, normDefault, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
 
+// What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
+// an LSI's kind, key attributes and projection, beside what a SQL element says. A key-value
+// attribute's type compares as written (S, N, B).
 const ATTRS = {
-  entity: (e) => ({ kind: e.kind }),
-  field: (f) => ({ type: normType(f.type), nullable: f.nullable, default: normDefault(f.default), generated: f.generated ?? null }),
-  key: () => ({}),
-  index: (i) => ({ unique: !!i.unique, columns: i.columns.join(', '), partial: !!i.partial }),
+  entity: (e) => ({ kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}) }),
+  field: (f, kv) => ({ type: kv ? String(f.type ?? '') : normType(f.type), nullable: f.nullable, default: normDefault(f.default), generated: f.generated ?? null }),
+  key: (k) => (k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}),
+  index: (i) => (kvIndex(i) ? { kind: i.kind, partition: i.partition.join(', '), sort: i.sort.join(', '), projection: projectionText(i) } : { unique: !!i.unique, columns: i.columns.join(', '), partial: !!i.partial }),
   relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate }),
 }
 const SHAPE = {
+  entity: (e) => ({ name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}) }),
   field: (f) => ({ name: f.name, type: { raw: f.type, norm: normType(f.type) }, nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null }),
-  key: (k) => ({ role: k.role, parts: k.parts }),
-  index: (i) => ({ name: i.name, unique: !!i.unique, columns: i.columns, partial: !!i.partial }),
+  key: (k) => ({ role: k.role, parts: k.parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}) }),
+  index: (i) => (kvIndex(i) ? { name: i.name, kind: i.kind, partition: i.partition, sort: i.sort, projection: i.projection ?? null, include: i.include || [], columns: i.columns, unique: false, partial: false } : { name: i.name, unique: !!i.unique, columns: i.columns, partial: !!i.partial }),
   relation: (r) => ({ kind: 'fk', columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate }),
 }
 const PARTS = [['field', 'fields'], ['key', 'keys'], ['index', 'indexes'], ['relation', 'relations']]
@@ -46,21 +50,25 @@ function leaves(decls) {
 function merge(id, ds) {
   const compared = new Set(ds.some((d) => !d.partial) ? ds.filter((d) => !d.partial) : ds)
   const complete = ds.filter((d) => d.complete)
-  const source = (d, el) => ({ repo: d.repo, path: el?.path ?? d.source.path, line: el?.line ?? d.source.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence })
+  const source = (d, el) => ({ repo: d.repo, path: el?.path ?? d.source.path, line: el?.line ?? d.source.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(el?.as ? { as: el.as } : {}) })
   const slot = (map, key, make) => { if (!map.has(key)) map.set(key, { ...make(), sources: [], by: new Map() }); return map.get(key) }
   const note = (el, d, attrs, src) => { el.sources.push(src); el.by.set(d, { attrs, src }) }
 
+  const store = ds.find((d) => d.dialect) || ds[0]
+  const kv = KV_DIALECTS.has(store.dialect)
   const entities = new Map()
   for (const d of ds) {
     for (const e of d.entities || []) {
-      const E = slot(entities, e.name, () => ({ name: e.name, kind: e.kind, fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map() }))
+      const E = slot(entities, e.name, () => ({ ...SHAPE.entity(e), fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map(), whole: new Set() }))
       note(E, d, ATTRS.entity(e), source(d, e))
       E.at.set(d, source(d, e))
-      for (const [type, list] of PARTS) for (const x of e[list] || []) note(slot(E[list], keyOf[type](x), () => SHAPE[type](x)), d, ATTRS[type](x), source(d, x))
+      if (e.whole) E.whole.add(d)
+      for (const [type, list] of PARTS) for (const x of e[list] || []) note(slot(E[list], keyOf[type](x), () => SHAPE[type](x)), d, ATTRS[type](x, kv), source(d, x))
     }
   }
-  const done = (el, presence, absent) => { const { by, at, ...rest } = el; return { ...rest, conflicts: conflicts(el, compared, presence, absent) } }
-  const store = ds.find((d) => d.dialect) || ds[0]
+  // a key-value element keeps what each declaration says of it: [[declKey, attrs]] (model.mjs)
+  const per = (el) => (kv ? { per: [...el.by].map(([d, { attrs }]) => [declKey(d.extractor, d.source.path), attrs]) } : {})
+  const done = (el, presence, absent) => { const { by, at, whole, ...rest } = el; return { ...rest, ...per(el), conflicts: conflicts(el, compared, presence, absent) } }
   return {
     id,
     repo: ds[0].repo,
@@ -69,7 +77,8 @@ function merge(id, ds) {
     dialectFrom: store.dialectFrom ?? null,
     declarations: ds.map((d) => ({ extractor: d.extractor, kind: d.source.kind, path: d.source.path, line: d.source.line, status: d.status, label: d.label, stopped: d.stopped ?? null, error: d.error ?? null, notes: d.notes || [], files: d.files ?? null, implicitIndexes: d.implicitIndexes ?? 0, dialect: d.dialect ?? null, dialectFrom: d.dialectFrom ?? null })),
     entities: [...entities.values()].sort(byName).map((E) => {
-      const covering = complete.filter((d) => E.at.has(d)) // complete declarations that describe this entity
+      // the declarations that describe this entity whole: a complete one, or one stating it whole
+      const covering = ds.filter((d) => E.at.has(d) && (d.complete || E.whole.has(d)))
       const out = { id: `${id}/${E.name}`, ...done(E, complete, (d) => source(d, null)) }
       for (const [, list] of PARTS) out[list] = [...E[list].values()].map((x) => done(x, covering, (d) => E.at.get(d)))
       return out
@@ -87,6 +96,10 @@ export function storeSummary(st) {
   const tables = st.entities.filter((e) => e.kind === 'table'), views = st.entities.length - tables.length
   if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
   const conflicts = st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0)
+  if (st.dialect === 'dynamodb') {
+    const k = (kind) => tables.reduce((a, e) => a + e.indexes.filter((i) => i.kind === kind).length, 0)
+    return [n(tables.length, 'table'), n(k('gsi'), 'GSI'), k('lsi') && n(k('lsi'), 'LSI'), conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
+  }
   const implicit = Math.max(0, ...st.declarations.map((d) => d.implicitIndexes)) // the indexes SQLite builds for keys, beside the declared ones
   return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), `${n(tables.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
 }

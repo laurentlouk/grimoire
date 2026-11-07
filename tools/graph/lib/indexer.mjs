@@ -16,7 +16,8 @@ import { extract } from './extract.mjs'
 import { TEST_PATH } from './langs.mjs'
 import { scanRepo, gitHead, listPaths } from './project.mjs'
 import { openStore, tx, driver } from './store.mjs'
-import { candidates, inspect, plan, run, idOf, MAX_BYTES } from './data/registry.mjs'
+import { candidates, inspect, plan, run, idOf, readsYaml, keeps, MAX_BYTES } from './data/registry.mjs'
+import { readYaml } from './data/readers/yaml.mjs'
 import { resolveRepo } from './resolve.mjs'
 import { cochange } from './cochange.mjs'
 
@@ -73,7 +74,7 @@ export async function indexProject(project, { full = false, only = null, log = (
       const cc = db.prepare('SELECT cochange_head FROM repos WHERE name = ?').get(repo.name)
       if (head && (cc.cochange_head !== head || needsResolve)) { cochange(db, repo); db.prepare('UPDATE repos SET cochange_head = ? WHERE name = ?').run(head, repo.name) }
     })
-    rs.data = await indexData(db, project, repo, rels)
+    rs.data = await indexData(db, project, repo, rels, runtime)
     log(`${repo.name}: ${rs.files} files, ${rs.parsed} parsed, ${rs.removed} removed${rs.data.extracted ? `, ${rs.data.extracted} data job(s) run` : ''}`)
     summary.repos.push(rs)
   }
@@ -82,8 +83,9 @@ export async function indexProject(project, { full = false, only = null, log = (
   return summary
 }
 
-// A repository's data model: hash the inputs that moved, then run the jobs whose inputs changed.
-async function indexData(db, project, repo, rels) {
+// A repository's data model: hash the inputs that moved, then run the jobs whose inputs changed. A
+// job that reads YAML gets the pinned YAML grammar (loaded once, the first time one runs).
+async function indexData(db, project, repo, rels, runtime) {
   const out = { extracted: 0, failed: [] }
   const prev = new Map(db.prepare('SELECT path, size, mtime, hash, ddl FROM data_inputs WHERE repo = ?').all(repo.name).map((r) => [r.path, r]))
   const info = new Map() // path → { size, hash, ddl }
@@ -105,7 +107,13 @@ async function indexData(db, project, repo, rels) {
       prev.delete(p)
       if (r && r.size === st.size && r.mtime === mtime) { info.set(p, r); continue }
       let hash = null, ddl = null
-      if (st.size <= MAX_BYTES) { try { const text = read(p); hash = createHash('sha1').update(text).digest('hex'); ddl = inspect(p, text) } catch { continue } }
+      if (st.size <= MAX_BYTES) {
+        try {
+          const text = readFileSync(path.join(repo.abs, p), 'utf8')
+          hash = createHash('sha1').update(text).digest('hex'); ddl = inspect(p, text)
+          if (keeps(p, text)) texts.set(p, text) // a JSON or YAML file that declares no table is not kept
+        } catch { continue }
+      }
       info.set(p, { size: st.size, hash, ddl })
       upsert.run(repo.name, p, st.size, mtime, hash, ddl)
     }
@@ -120,6 +128,11 @@ async function indexData(db, project, repo, rels) {
     const sig = createHash('sha1').update([id, job.salt || '', ...job.inputs.map((p) => `${p} ${info.get(p)?.hash}`)].join('\n')).digest('hex')
     keep.add(`${id}|${job.key}`)
     if (done.get(`${id}|${job.key}`)?.sig === sig) continue
+    if (readsYaml(job) && !('yaml' in ctx)) {
+      let parser = null
+      try { parser = await (await runtime()).parserFor('yaml') } catch {}
+      ctx.yaml = parser ? (text) => readYaml(parser, text) : null
+    }
     const r = run(job, read, ctx)
     results.push([job.extractor.scope, job.key, id, sig, r])
     if (r.error) out.failed.push(`${job.key} (${id}): ${r.error}`)

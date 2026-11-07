@@ -16,6 +16,21 @@
 //   Relation    { columns, to, toColumns, onDelete, onUpdate } (a foreign key)
 // An element's path defaults to its declaration's source path.
 //
+// A key-value table (DynamoDB: readers/dynamodb.mjs; the store `dynamodb`, dialect `dynamodb`) says
+// more, in the same elements:
+//   Entity      + billing: PAY_PER_REQUEST | PROVISIONED | null, stream: its view type or null,
+//                 whole: the declaration states the table whole (no part of it is a reference, so a
+//                 part it lacks is a disagreement), as?: how the declaration names it (a template's
+//                 logical id and type, its name expression)
+//   Field       an attribute AttributeDefinitions types (S, N, B), not null when it keys the table
+//   Key         { role: partition | sort, parts: up to four attributes } · { role: ttl, parts: [attr],
+//                 enabled: true | false | null (not said) }
+//   Index       { name, kind: gsi | lsi, partition: [attr], sort: [attr], projection: ALL | KEYS_ONLY |
+//                 INCLUDE | null, include: [attr] (INCLUDE's), columns: partition then sort, unique:
+//                 false, partial: false }
+// A declaration that describes no store whole (complete: false) still describes each table it
+// states whole: its `whole` entities take part in presence conflicts.
+//
 // The merged model: Store { id: '<repo>:<folder>', repo, name, dialect, declarations, entities }, and
 // every element { …its attributes, sources[], conflicts[] }, a source being { repo, path, line, kind:
 // artifact | migration | infra | code | inferred, extractor: 'id@version', confidence }. Where the
@@ -46,6 +61,20 @@ export function normDefault(raw) {
 
 const DIALECTS = { sqlite: 'sqlite', turso: 'sqlite', libsql: 'sqlite', d1: 'sqlite', postgres: 'postgres', postgresql: 'postgres', pg: 'postgres', mysql: 'mysql', mysql2: 'mysql', mariadb: 'mysql' }
 export const normDialect = (d) => (d ? DIALECTS[String(d).toLowerCase()] || String(d).toLowerCase() : null)
+
+// A key-value index (a GSI or an LSI), and its projection as compared and shown: `INCLUDE (a, b)`
+// names the attributes it includes, in order.
+export const kvIndex = (i) => i.kind === 'gsi' || i.kind === 'lsi'
+export const projectionText = (i) => (i.projection === 'INCLUDE' && i.include?.length ? `INCLUDE (${[...i.include].sort().join(', ')})` : i.projection ?? null)
+// A key-value table: it states its billing and stream (each null or not).
+export const kvTable = (e) => 'stream' in e
+// Stores whose declarations are files of equal standing (a local-dev table file, a template): each
+// element keeps what every declaration says of it (`per`, reconcile.mjs), and the diff and the delta
+// states compare each declaration, not only the first (diff.mjs, delta.mjs).
+export const KV_DIALECTS = new Set(['dynamodb'])
+// A declaration as `per` names it: its extractor and its file (key-value extractors read one file each).
+export const declKey = (extractor, path) => `${extractor}|${path}`
+export const declPath = (key) => key.slice(key.indexOf('|') + 1)
 
 // Element keys within their entity (and the ids the change view will address: <store>/<entity>.<field>).
 export const keyOf = {
