@@ -1939,8 +1939,8 @@ resource "aws_dynamodb_table" "events" {
 
   // a remote address keeps no credentials: everything up to the last @ before the host's first /
   const PW = ['p', 'TOKENVALUE'].join('@')
-  eq([H.safeAddress(`git::https://user:${PW}@example.com/org/m.git//kv?ref=v1`), H.safeAddress(`user:${['tok', 'en'].join('')}@example.com/org/m.git`), H.safeAddress('git@example.com:org/m.git'), H.safeAddress('tfr:///terraform-aws-modules/dynamodb-table/aws?version=4.0.0')],
-    ['git::https://example.com/org/m.git//kv', 'example.com/org/m.git', 'example.com:org/m.git', 'tfr:///terraform-aws-modules/dynamodb-table/aws'], 'a password holding @, an address with no scheme, an scp-like one, a registry one: no user, no password, no query')
+  eq([H.safeAddress(`git::https://user:${PW}@example.com/org/m.git//kv?ref=v1`), H.safeAddress(`user:${['tok', 'en'].join('')}@example.com/org/m.git`), H.safeAddress('git@example.com:org/m.git'), H.safeAddress('tfr:///terraform-aws-modules/dynamodb-table/aws?version=4.0.0'), H.safeAddress(`https://example.com/m.zip#${['frag', 'value'].join('')}`)],
+    ['git::https://example.com/org/m.git//kv', 'example.com/org/m.git', 'example.com:org/m.git', 'tfr:///terraform-aws-modules/dynamodb-table/aws', 'https://example.com/m.zip'], 'a password holding @, an address with no scheme, an scp-like one, a registry one, a fragment: no user, no password, no query, no fragment')
   // module addresses: a folder of the repository, or out of reach, shown without credentials or query
   const CRED = ['user', 'pw'].join(':')
   eq([H.moduleDir('../../modules//kv', 'live/prod/x'), H.moduleDir('/modules/kv', 'live/prod/x'), H.moduleDir('../../../../x', 'a/b'), H.moduleDir(`git::https://${CRED}@example.com/m.git//kv?ref=v1`, 'a'), H.repoPath('/.config/a.hcl')],

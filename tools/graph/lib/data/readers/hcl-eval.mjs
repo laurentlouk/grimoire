@@ -1042,7 +1042,7 @@ function mergeInto(a, b, deep, ev = null, d = 0) {
 const said = (x) => (!x ? '' : x.t === 'lit' ? JSON.stringify(String(x.v).slice(0, 80)) : refText(x))
 
 // A module source address: a folder of this repository ({ dir }), or out of reach ({ remote }: a
-// git, registry or other remote address, kept without credentials or a query; { outside }: a path
+// git, registry or other remote address, kept without credentials, query or fragment; { outside }: a path
 // that leaves the repository).
 export function moduleDir(source, fromDir) {
   if (/^(?:\.\.?\/|\/)/.test(source) || source === '.' || source === '..') {
@@ -1055,7 +1055,7 @@ export function moduleDir(source, fromDir) {
 }
 // an address as it can be shown: no user or password in it, no query string
 export function safeAddress(s) {
-  const a = String(s).slice(0, 400).replace(/\?.*$/s, '')
+  const a = String(s).slice(0, 400).replace(/[?#].*$/s, '') // no query, no fragment: either may carry a token
   const pre = /^(?:[a-z0-9.+-]+::)?(?:[a-z][a-z0-9.+-]*:\/\/)?/i.exec(a)[0] // a forced getter (git::), a scheme
   let rest = a.slice(pre.length)
   const slash = rest.indexOf('/')
