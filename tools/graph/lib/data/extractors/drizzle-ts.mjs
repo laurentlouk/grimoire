@@ -95,8 +95,9 @@ function literal(n) {
   if (!n) return undefined
   const s = str(n)
   if (s !== null) return s
-  if (n.type === 'number') return Number(n.text)
-  if (n.type === 'unary_expression' && /^-\s*\d/.test(n.text)) return Number(n.text.replace(/\s+/g, ''))
+  // a number as the value it is: 1.0, 0.50, 1e3, 1_000, 0x10 (NaN for what Number does not read: 10n)
+  if (n.type === 'number') return Number(n.text.replace(/_/g, ''))
+  if (n.type === 'unary_expression' && /^-\s*\d/.test(n.text)) return Number(n.text.replace(/[\s_]+/g, ''))
   if (n.type === 'true') return true
   if (n.type === 'false') return false
   if (n.type === 'array') { const xs = named(n).map(str); return xs.every((x) => x !== null) ? xs : undefined }
@@ -253,7 +254,8 @@ export function readSchemaFile(tree, file) {
     if (!n) return null
     const v = literal(n)
     if (typeof v === 'string') return { k: 'str', v }
-    if (typeof v === 'number') return { k: 'num', v: bare(n).text.replace(/\s+/g, '') }
+    // as drizzle-kit writes it: the number's value (1.0 → 1, 1e3 → 1000), never the source text
+    if (typeof v === 'number') return Number.isFinite(v) ? { k: 'num', v: String(v) } : { k: 'expr', v: text1(n) }
     if (typeof v === 'boolean') return { k: 'bool', v: String(v) }
     if (n.type === 'call_expression') {
       const fn = bare(field(n, 'function'))
@@ -271,7 +273,7 @@ export function readSchemaFile(tree, file) {
     let opaque = 0
     for (const p of named(obj)) {
       if (cols.length >= MAX.columns) break
-      if (p.type === 'spread_element') { const id = bare(named(p)[0]); if (id?.type === 'identifier') spreads.push({ var: id.text, at: cols.length, line: lineOf(p) }); else opaque++; continue }
+      if (p.type === 'spread_element') { const id = bare(named(p)[0]); if (id?.type === 'identifier' && spreads.length < MAX.columns) spreads.push({ var: id.text, at: cols.length, line: lineOf(p) }); else opaque++; continue }
       if (p.type === 'shorthand_property_identifier') { cols.push({ ...blankCol(p.text, lineOf(p)), factory: p.text }); continue }
       if (p.type !== 'pair') continue
       const k = field(p, 'key')
@@ -338,7 +340,8 @@ export function readSchemaFile(tree, file) {
     const v = id.text
     const line = lineOf(value)
     // an object of columns, spread into tables
-    if (value.type === 'object') { const c = columnsOf(value, null); if (c.cols.some((x) => x.b)) out.objects.push({ var: v, cols: c.cols, spreads: c.spreads, opaque: c.opaque, line }); continue }
+    // (or one of objects that do: kept whatever it holds, read only when a table spreads it)
+    if (value.type === 'object') { const c = columnsOf(value, null); if (c.cols.some((x) => x.b) || c.spreads.length) out.objects.push({ var: v, cols: c.cols, spreads: c.spreads, opaque: c.opaque, line }); continue }
     // a helper building a column: `const id = () => integer('id').primaryKey()`, or a column itself
     if (value.type === 'arrow_function' || value.type === 'function_expression') {
       const body = bodyOf(value)
@@ -407,7 +410,7 @@ export function readSchemaFile(tree, file) {
 // ── the unit: a config and its schema files, or a folder of them ──
 export default {
   id: 'drizzle-ts',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'unit',
   tree: true,
@@ -507,19 +510,56 @@ export function readConfig(text) {
 }
 
 // A schema spec (resolved against the config's folder) as a test on a path: a glob, a file or a folder.
-function matcher(spec) {
+// A glob is matched folder by folder, never through a regular expression that backtracks: `**` (a run
+// of them is one) any number of folders, `*` and `?` within one, `{a,b}` its alternatives (16 at
+// most); a spec past 400 characters or 32 wildcards matches nothing. Polynomial in the folders and
+// the characters of a name, whatever the spec.
+export const GLOB = { length: 400, wildcards: 32, alternatives: 16 }
+export function matcher(spec) {
   if (!/[*?{]/.test(spec)) return (p) => p === spec || p.startsWith(`${spec}/`)
-  let re = ''
-  for (let i = 0; i < spec.length; i++) {
-    const c = spec[i]
-    if (c === '*' && spec[i + 1] === '*') { re += spec[i + 2] === '/' ? '(?:.*/)?' : '.*'; i += spec[i + 2] === '/' ? 2 : 1 }
-    else if (c === '*') re += '[^/]*'
-    else if (c === '?') re += '[^/]'
-    else if (c === '{') { const end = spec.indexOf('}', i); if (end < 0) { re += '\\{'; continue } re += `(?:${spec.slice(i + 1, end).split(',').map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`; i = end }
-    else re += c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  if (spec.length > GLOB.length || (spec.match(/[*?]/g) || []).length > GLOB.wildcards) return () => false
+  const globs = braces(spec).map((g) => g.split('/').filter((s, i, all) => !(s === '**' && all[i - 1] === '**')))
+  return (p) => { const parts = p.split('/'); return globs.some((g) => folders(g, parts)) }
+}
+// {a,b} expanded, left to right, capped
+function braces(spec) {
+  let out = [spec]
+  for (let k = 0; k < 8; k++) {
+    const next = []
+    let changed = false
+    for (const s of out) {
+      const a = s.indexOf('{'), b = a < 0 ? -1 : s.indexOf('}', a)
+      if (b < 0) { next.push(s); continue }
+      changed = true
+      for (const alt of s.slice(a + 1, b).split(',')) if (next.length < GLOB.alternatives) next.push(s.slice(0, a) + alt + s.slice(b + 1))
+    }
+    out = next
+    if (!changed) break
   }
-  const rx = new RegExp(`^${re}$`)
-  return (p) => rx.test(p)
+  return out
+}
+// the glob's folders against the path's, from the end: ok[j] says glob[i..] matches parts[j..]
+function folders(glob, parts) {
+  let ok = new Array(parts.length + 1).fill(false)
+  ok[parts.length] = true
+  for (let i = glob.length - 1; i >= 0; i--) {
+    const cur = new Array(parts.length + 1).fill(false)
+    for (let j = parts.length; j >= 0; j--) cur[j] = glob[i] === '**' ? ok[j] || (j < parts.length && cur[j + 1]) : j < parts.length && ok[j + 1] && name(glob[i], parts[j])
+    ok = cur
+  }
+  return ok[0]
+}
+// `*` and `?` within one name: the two-pointer wildcard match (back to the last `*` on a mismatch)
+function name(pat, s) {
+  let i = 0, j = 0, star = -1, mark = 0
+  while (j < s.length) {
+    if (i < pat.length && (pat[i] === '?' || pat[i] === s[j])) { i++; j++ }
+    else if (i < pat.length && pat[i] === '*') { star = i++; mark = j }
+    else if (star >= 0) { i = star + 1; j = ++mark }
+    else return false
+  }
+  while (i < pat.length && pat[i] === '*') i++
+  return i === pat.length
 }
 // A relative module specifier, as a file among the unit's.
 function resolveSpec(dir, spec, byPath) {
@@ -549,7 +589,8 @@ function sqlType(dialect, b, c, values) {
     if (b === 'varchar' || b === 'char') return len ? `${b}(${len})` : b
     if (b === 'doublePrecision') return 'double precision'
     if (b === 'numeric' || b === 'decimal') return num('numeric')
-    if (b === 'timestamp' || b === 'time') return `${b}${p !== undefined ? ` (${p})` : ''}${c.withTimezone ? ' with time zone' : ''}`
+    // drizzle-kit writes `timestamp (3)` with a blank, `time(2)` without
+    if (b === 'timestamp' || b === 'time') return `${b}${p !== undefined ? (b === 'timestamp' ? ` (${p})` : `(${p})`) : ''}${c.withTimezone ? ' with time zone' : ''}`
     if (b === 'interval') return `interval${c.fields ? ` ${c.fields}` : ''}${p !== undefined ? `(${p})` : ''}`
     if (['vector', 'halfvec', 'sparsevec', 'bit'].includes(b)) return c.dimensions !== undefined ? `${b}(${c.dimensions})` : b
     return ['text', 'integer', 'smallint', 'bigint', 'serial', 'smallserial', 'bigserial', 'boolean', 'real', 'date', 'json', 'jsonb', 'uuid', 'inet', 'cidr', 'macaddr', 'macaddr8', 'point', 'line'].includes(b) ? b : null
@@ -557,9 +598,9 @@ function sqlType(dialect, b, c, values) {
   if (dialect === 'mysql') {
     if (['int', 'tinyint', 'smallint', 'mediumint', 'bigint'].includes(b)) return `${b}${c.unsigned ? ' unsigned' : ''}`
     if (['varchar', 'char', 'binary', 'varbinary'].includes(b)) return len !== undefined ? `${b}(${len})` : b
-    if (['float', 'double', 'real', 'decimal'].includes(b)) return p !== undefined ? (s !== undefined ? `${b}(${p},${s})` : `${b}(${p})`) : b
+    if (['float', 'double', 'real', 'decimal'].includes(b)) return `${p !== undefined ? (s !== undefined ? `${b}(${p},${s})` : `${b}(${p})`) : b}${c.unsigned ? ' unsigned' : ''}`
     if (['datetime', 'timestamp', 'time'].includes(b)) return c.fsp ? `${b}(${c.fsp})` : b
-    if (b === 'mysqlEnum') return values ? `enum(${values.map((v) => `'${v}'`).join(',')})` : null
+    if (b === 'mysqlEnum') return values ? `enum(${values.map((v) => `'${String(v).replace(/'/g, "''")}'`).join(',')})` : null
     return ['serial', 'boolean', 'text', 'tinytext', 'mediumtext', 'longtext', 'json', 'date', 'year'].includes(b) ? b : null
   }
   return null
@@ -607,21 +648,40 @@ function declare(files, store, cfg, configPath) {
     if (t) return { ...c, factory: null, customVar: c.factory }
     return c
   }
+  // A table's columns, each object spread where it stands, as JavaScript builds the object: a key set
+  // twice is one column (at its first place, its last value). Bounded whatever the code: an object
+  // spreading itself (directly or not) is not expanded again within its own chain, four levels at
+  // most, and SPREADS expansions and MAX.columns columns per table; past either, the rest is cut
+  // (said, and the table stated in part).
+  const SPREADS = 256
   const colsOf = (t) => {
-    const out = []
-    let opaque = t.opaque
-    // the object's own columns in order, each spread where it stands
-    const add = (cols, spreads, depth) => {
-      for (let i = 0; i <= cols.length; i++) {
-        for (const s of spreads.filter((x) => x.at === i)) {
+    const out = [], at = new Map()
+    let opaque = t.opaque, budget = SPREADS, cut = false
+    const put = (c) => {
+      if (at.has(c.key)) { out[at.get(c.key)] = c; return }
+      if (out.length >= MAX.columns) { cut = true; return }
+      at.set(c.key, out.length); out.push(c)
+    }
+    const add = (cols, spreads, depth, chain) => {
+      const by = new Map() // position → the spreads standing there
+      for (const s of spreads) { if (!by.has(s.at)) by.set(s.at, []); by.get(s.at).push(s) }
+      for (let i = 0; i <= cols.length && !cut; i++) {
+        for (const s of by.get(i) || []) {
+          if (cut) break
           const o = objectVar.get(s.var)
-          if (o && depth < 4) { opaque += o.opaque; add(o.cols, o.spreads, depth + 1) } else opaque++
+          if (!o || depth >= 4 || chain.has(s.var)) { opaque++; continue }
+          if (--budget < 0) { cut = true; break }
+          opaque += o.opaque
+          chain.add(s.var)
+          add(o.cols, o.spreads, depth + 1, chain)
+          chain.delete(s.var)
         }
-        if (i < cols.length) out.push(resolveCol(cols[i]))
+        if (i < cols.length && !cut) put(resolveCol(cols[i]))
       }
     }
-    add(t.cols, t.spreads, 0)
-    return { cols: out, opaque }
+    add(t.cols, t.spreads, 0, new Set())
+    if (cut) note(`${t.file}:${t.line}: the columns spread into this table were cut past ${SPREADS} spreads or ${MAX.columns} columns`)
+    return { cols: out, opaque: opaque + (cut ? 1 : 0) }
   }
 
   const resolved = new Map() // table var → { entity, keyToName }
@@ -646,10 +706,14 @@ function declare(files, store, cfg, configPath) {
     const { cols, opaque } = colsOf(t)
     if (opaque) { e.part = true; note(`${t.file}:${t.line}: ${opaque} column${opaque === 1 ? '' : 's'} or entr${opaque === 1 ? 'y' : 'ies'} of ${ename} not read (built by code the reader does not follow): its keys and indexes are not compared for what they lack`) }
     const names = new Map() // key → column name
+    // key → the name the builder knows the column by (its own, else the key: casing comes later), which
+    // drizzle-orm names a unique constraint after
+    const built = new Map()
     const at = (line) => ({ path: t.file, line })
     for (const c of cols) {
       const cname = c.name ?? casing(c.key)
       names.set(c.key, cname)
+      built.set(c.key, c.name ?? c.key)
       const f = { name: cname, type: null, nullable: true, default: null, generated: null, ...at(c.line) }
       const unstated = []
       if (c.factory) { f.type = c.factory; unstated.push('type', 'nullable', 'default'); e.part = true }
@@ -667,7 +731,8 @@ function declare(files, store, cfg, configPath) {
         if (c.b === 'mysqlEnum' && c.values) f.enum = { name: null, values: c.values }
       }
       if (c.array) f.type = `${f.type}${'[]'.repeat(c.array)}`
-      if (!c.factory) f.nullable = !(c.notNull || c.pk || c.identity || (tdialect === 'postgres' && SERIALS.has(c.b)) || (tdialect === 'mysql' && c.b === 'serial'))
+      // a Postgres serial is not null; a MySQL one only as a primary key (drizzle-kit's snapshot)
+      if (!c.factory) f.nullable = !(c.notNull || c.pk || c.identity || (tdialect === 'postgres' && SERIALS.has(c.b)))
       if (c.dflt) {
         const d = defaultText(c.dflt, tdialect)
         f.default = d.text
@@ -679,7 +744,7 @@ function declare(files, store, cfg, configPath) {
       e.fields.push(f)
       if (c.pk) e.keys.push({ role: 'primary', parts: [cname], ...at(c.line) })
       if (c.unique) {
-        if (tdialect === 'sqlite') e.indexes.push({ name: c.unique.name || `${name}_${cname}_unique`, unique: true, columns: [cname], partial: false, ...at(c.line) })
+        if (tdialect === 'sqlite') e.indexes.push({ name: c.unique.name || `${name}_${c.name ?? c.key}_unique`, unique: true, columns: [cname], partial: false, ...at(c.line) })
         else e.keys.push({ role: 'unique', parts: [cname], ...at(c.line) })
       }
       if (c.ref) pending.push([e, { kind: 'ref', cols: [cname], ref: c.ref, line: c.line, file: t.file }])
@@ -689,6 +754,9 @@ function declare(files, store, cfg, configPath) {
       const columns = x.cols.map(nameOf)
       if (x.kind === 'index' || x.kind === 'uniqueIndex') e.indexes.push({ name: x.name || `${name}_${columns.join('_')}_index`, unique: x.kind === 'uniqueIndex', columns, partial: x.partial, ...at(x.line) })
       else if (x.kind === 'primaryKey') { e.keys = e.keys.filter((k) => k.role !== 'primary'); e.keys.push({ role: 'primary', parts: columns, ...at(x.line) }) }
+      // a table-level unique(): in SQLite, drizzle-kit creates a unique index (its snapshot keeps it among
+      // the indexes), named <table>_<builder names>_unique when unnamed; elsewhere a unique constraint
+      else if (x.kind === 'unique' && tdialect === 'sqlite') e.indexes.push({ name: x.name || `${name}_${x.cols.map((k) => (k === null ? 'expression' : built.get(k) ?? k)).join('_')}_unique`, unique: true, columns, partial: false, ...at(x.line) })
       else if (x.kind === 'unique') e.keys.push({ role: 'unique', parts: columns, ...at(x.line) })
       else if (x.kind === 'foreignKey' && x.foreign) pending.push([e, { kind: 'fk', cols: columns, ref: { var: x.foreign.var, keys: x.foreign.keys, onDelete: x.onDelete, onUpdate: x.onUpdate }, line: x.line, file: t.file }])
     }

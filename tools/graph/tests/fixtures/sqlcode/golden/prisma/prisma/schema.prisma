@@ -1,0 +1,32 @@
+// Synthetic. migrations/ beside it was generated from this file by prisma migrate diff 6.19: a golden expectation.
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id    Int    @id @default(autoincrement())
+  name  String
+  posts Post[]
+  liked Post[] @relation("likes")
+}
+
+model Post {
+  id       Int    @id @default(autoincrement())
+  authorId Int
+  author   User   @relation(fields: [authorId], references: [id])
+  likers   User[] @relation("likes")
+}
+
+model Org {
+  id      Int      @id @default(autoincrement())
+  members Member[] @relation("membership")
+  admins  Member[] @relation("admin")
+}
+
+model Member {
+  id    Int   @id @default(autoincrement())
+  orgId Int
+  org   Org   @relation("membership", fields: [orgId], references: [id])
+  adminOf Org[] @relation("admin")
+}

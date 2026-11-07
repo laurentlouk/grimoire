@@ -60,7 +60,7 @@ const cap = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
 export default {
   id: 'prisma',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'unit',
   wants: (p) => PRISMA.test(p) || CONFIG.test(p),
@@ -150,9 +150,15 @@ export default {
           if (fields && refs && target && !noFks && !mongo) {
             const del = rel.args.find((x) => x.name === 'onDelete')?.value, upd = rel.args.find((x) => x.name === 'onUpdate')?.value
             e.relations.push({ columns: fields.map((x) => columnOf(m, x)), to: qualified(schemaOf(target), tableOf(target)), toColumns: refs.map((x) => columnOf(target, x)), onDelete: (del?.k === 'id' && ACTIONS[del.v]) || (f.optional ? 'set null' : 'restrict'), onUpdate: (upd?.k === 'id' && ACTIONS[upd.v]) || 'cascade', ...at(f.line) })
-          } else if (f.list && target && !noFks && !mongo && target.fields.some((x) => x.type === m.name && x.list && x !== f)) {
-            // both sides a list and neither naming its fields: an implicit many-to-many relation
-            implicitJoin(joins, m, f, rel, target, models, (model, id) => typeOf(id, dialect, enums))
+          } else if (f.list && target && !noFks && !mongo) {
+            // the other side of this relation: the field of the target, of this model's type, with the
+            // same relation name (both unnamed alike). Both lists and neither naming its fields: an
+            // implicit many-to-many relation. A list whose other side names its fields is the back
+            // side of a one-to-many: no table of its own.
+            const name = relationName(rel)
+            const other = target.fields.find((x) => x !== f && x.type === m.name && relationName(x.attrs.find((a) => a.name === 'relation')) === name)
+            const otherRel = other && other.attrs.find((a) => a.name === 'relation')
+            if (other && other.list && !(otherRel && listArg(otherRel, 'fields'))) implicitJoin(joins, m, f, rel, target, models, (model, id) => typeOf(id, dialect, enums))
           }
           continue
         }
@@ -272,8 +278,13 @@ function valueText(v, depth = 0) {
 // An implicit many-to-many relation's join table: `_<A>To<B>` (the two models by name), or
 // `_<relation name>`, columns A and B, each a foreign key to its model's id, cascading. Stated in
 // part: its keys and indexes vary with the version.
+// A relation's name: @relation("name") or @relation(name: "name"), else null (unnamed).
+function relationName(rel) {
+  return rel?.args.find((x) => x.name === null && x.value.k === 'str')?.value.v || rel?.args.find((x) => x.name === 'name' && x.value.k === 'str')?.value.v || null
+}
+
 function implicitJoin(joins, m, f, rel, target, models, typeOfId) {
-  const relName = rel?.args.find((x) => x.name === null && x.value.k === 'str')?.value.v || rel?.args.find((x) => x.name === 'name' && x.value.k === 'str')?.value.v || null
+  const relName = relationName(rel)
   const [a, b] = [m.name, target.name].sort()
   const name = `_${relName || `${a}To${b}`}`
   if (joins.has(name)) return
