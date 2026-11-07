@@ -74,6 +74,8 @@ const deltaOf = (out) => {
 const shipFor = (X, seen) => (p) => { seen.push(p); const r = X.exec('bash', scriptOf(p)); seen.out = (seen.out || []).concat(r.out); return { ...receipt(r.out), ...deltaOf(r.out) } }
 // the delta entries a ship or seal script carries: the base64 payload of its DELTA step (decoded to $E)
 const deltaPayload = (p) => { const m = /cat > "\$E\.b64" <<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/.exec(scriptOf(p)); return m ? JSON.parse(unb64(m[1])) : null }
+// the PR description a ship script carries (decoded to $F)
+const bodyOf = (p) => { const m = /cat > "\$F\.b64" <<'GRIMOIRE_EOF'\n([\s\S]*?)\nGRIMOIRE_EOF/.exec(scriptOf(p)); return m ? unb64(m[1]) : '' }
 const hydrateOf = (calls) => (calls.find((c) => c.label.startsWith('hydrate:')) || {}).prompt || ''
 const section = (body) => { const i = body.indexOf('### Data model and architecture changes'); return i < 0 ? null : body.slice(i).split('\n<!-- grimoire:state')[0].trimEnd().split('\n') }
 
@@ -402,6 +404,70 @@ const CLOSING_COMMIT = "Each kept unplanned change is added to the delta (`origi
   X.done()
 }
 
+// ══════════════ M11b · later landings that keep nothing still carry the delta commit forward ══════════════
+{
+  const X = sandbox()
+  deltaInRepo(X)
+  const c1 = X.commit('c1'), c2 = X.commit('c2'), c3 = X.commit('c3')
+  const ships = [], tips = []
+  const ship = (p) => { const r = shipFor(X, ships)(p); tips.push(X.origin()); return r }
+  const { result, logs, calls } = await run('M11b · the first landing keeps a change, the next two keep none', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] }), T('PROJ-3', { dependsOn: ['PROJ-2'] })], by({
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
+    'impl:PROJ-2': impl(c2.slice(0, 7), c1.slice(0, 7)),
+    'impl:PROJ-3': impl(c3.slice(0, 7), c2.slice(0, 7)),
+    'ship:api#1': ship, 'ship:api#2': ship, 'ship:api#3': ship,
+  }), { args: inRepo(X), index: { deltaFound: true } })
+  const ff = (a, b) => X.sh(`git --git-dir=origin.git merge-base --is-ancestor ${a} ${b} && echo yes`) === 'yes'
+  eq([ships.out.map((o) => (/^PUSH ok=1 /m.test(o) ? 'pushed' : 'refused')), ff(tips[0], tips[1]) && ff(tips[1], tips[2]), parentsOf(X, tips[1]), parentsOf(X, tips[2]), unplannedAt(X, tips[2]).map((c) => c.target)],
+    [['pushed', 'pushed', 'pushed'], true, [c2, tips[0]], [c3, tips[1]], ['api:db/books.k1']], 'each later ship carries the delta commit forward (a merge that changes only the delta) and pushes a fast-forward, with nothing of its own to record')
+  const later = calls.filter((c) => c.label === 'ship:api#2' || c.label === 'ship:api#3')
+  ok(later.length === 2 && later.every((c) => deltaPayload(c.prompt) === null && scriptOf(c.prompt).includes('# 4a · the design\'s delta')) && !/^DELTA /m.test(ships.out[1] + ships.out[2]) && og(X, `diff --name-only ${c3} ${tips[2]}`) === REL, 'no DELTA step and no DELTA line, no seed commit: the carry-forward only')
+  ok(!logs.some((l) => /refuses incremental pushes|push of \S+ failed/.test(l)) && !result.halt, 'no failed push, the ships never stopped')
+  X.done()
+}
+
+// ══════════════ M11c · a resumed run: origin ahead of the local run branch by a delta commit ══════════════
+// The earlier session's ship committed PROJ-1's kept change on the remote; PROJ-2 then landed locally
+// and the session ended before its ship. Local and origin have diverged by the delta commit alone:
+// the reconcile says so (sync=delta-ahead) instead of refusing the run, and the first ship after the
+// resume carries the commit forward.
+{
+  const X = sandbox()
+  deltaInRepo(X)
+  const c1 = X.commit('c1'), c2 = X.commit('c2'), c3 = X.commit('c3')
+  const first = []
+  await run('M11c (earlier session) · PROJ-1 keeps a change; its ship commits it', [T('PROJ-1')], by({
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
+    'ship:api#1': shipFor(X, first),
+  }), { args: inRepo(X), index: { deltaFound: true } })
+  const d1 = X.origin()
+  ok(parentsOf(X, d1).join() === c1 && X.sh(`git rev-parse refs/heads/${RUN_BRANCH}`, X.W) === c3, '(the remote one delta commit past c1; the local run branch at c3, PROJ-2 landed there unshipped)')
+  const landed = (id, head) => ({ id, repo: 'api', status: 'DONE', ticket: id, title: `Title of ${id}`, runBranch: RUN_BRANCH, firstSha: head, headSha: head })
+  const resumeState = { version: 2, runId: 'run-97', attempt: 1, lastSeq: 1, landedTasks: [landed('PROJ-1', c1), landed('PROJ-2', c2)] }
+  const tasks = [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] }), T('PROJ-3', { dependsOn: ['PROJ-2'] })]
+  // the reconcile script this resume runs, for real against the sandbox
+  const probe = await run('M11c (the reconcile script)', tasks, by({}), { args: inRepo(X, { resumeState }), index: { deltaFound: true, inputProblems: ['stop after the index'] } })
+  const rs = (/## Also RECONCILE[\s\S]*?```bash\n([\s\S]*?)\n```/.exec(probe.prompt('parse-index')) || [])[1] || ''
+  const line = (X.exec('bash', rs).out.match(/^.*BRANCH repo=api .*$/m) || [''])[0]
+  ok(line.includes(`BRANCH repo=api local=${c3} remote=${d1} sync=delta-ahead fetch=ok`), `the reconcile: diverged by the delta's own commit alone → sync=delta-ahead (${line.trim()})`)
+  ok(X.sh(`git rev-parse refs/heads/${RUN_BRANCH}`, X.W) === c3, '… and it moved nothing')
+  // the resumed run: PROJ-1 and PROJ-2 absorbed, PROJ-3 built (keeping nothing)
+  const ships = [], tips = []
+  const ship = (p) => { const r = shipFor(X, ships)(p); tips.push(X.origin()); return r }
+  const TASK = (id, sha) => ({ id, repo: 'api', sha, local: true, origin: false, onBranch: true, inBase: 'no', first: 'none', firstOk: 'none' })
+  const { result, logs, labels } = await run('M11c · resumed: the first ships after the resume carry the delta commit forward', tasks, by({
+    'impl:PROJ-3': impl(c3.slice(0, 7), c2.slice(0, 7)),
+    'ship:api#1': ship, 'ship:api#2': ship,
+  }), { args: inRepo(X, { resumeState }), index: { deltaFound: true, reconcile: [TASK('PROJ-1', c1), TASK('PROJ-2', c2)], runBranches: [{ repo: 'api', local: c3, remote: d1, sync: 'delta-ahead', fetch: 'ok' }] } })
+  ok(!result.error && !labels.includes('impl:PROJ-1') && !labels.includes('impl:PROJ-2') && result.done.map((d) => d.id).join() === 'PROJ-3', `not refused: PROJ-1 and PROJ-2 absorbed, PROJ-3 built (${result.error || 'ok'})`)
+  ok(logs.some((l) => l.includes(`origin/${RUN_BRANCH} holds the design's delta commits the local run branch lacks`)), 'the log says why the branches differ')
+  const tip = X.origin()
+  eq([ships.out.length > 0 && ships.out.every((o) => /^PUSH ok=1 /m.test(o)), X.sh(`git --git-dir=origin.git merge-base --is-ancestor ${d1} ${tip} && echo yes`), X.sh(`git --git-dir=origin.git merge-base --is-ancestor ${c3} ${tip} && echo yes`), og(X, `diff --name-only ${c3} ${tip}`), unplannedAt(X, tip).map((c) => c.target)],
+    [true, 'yes', 'yes', REL, ['api:db/books.k1']], "the remote's delta commit is carried forward on the first ships after the resume: fast-forward pushes, the landed heads and the entry all there")
+  ok(!logs.some((l) => /refuses incremental pushes|push of \S+ failed/.test(l)), 'no failed push')
+  X.done()
+}
+
 // ══════════════ M12 · two lanes landing together: one delta commit; the lock held, nothing moves ══════════════
 {
   const X = sandbox()
@@ -530,6 +596,8 @@ const CLOSING_COMMIT = "Each kept unplanned change is added to the delta (`origi
   eq([ships.out.map((o) => /^PUSH ok=1 /m.test(o)), parentsOf(X, merge), og(X, `diff --name-only ${c2} ${tips[1]}`), atTip.data.find((c) => c.id === 'loans').ack && atTip.data.find((c) => c.id === 'loans').ack.by, atTip.data.filter((c) => c.origin === 'unplanned').map((c) => c.target)],
     [[true, true], [c2, tips[0]], REL, 'owner', ['api:db/books.k1', 'api:db/books.k2']],
     "the merge keeps the branch's version (the acknowledgement) and appends the remote's unplanned change; the push goes through, the new entry on top")
+  const mm = og(X, `log -1 --format=%B ${merge}`).trim().split('\n\n')
+  eq([mm[0], mm.at(-1), /Conflicts/.test(mm.join('\n'))], [`chore(data): carry ${REL} forward from the run branch`, 'Grimoire-Run: run-97', false], "the resolved merge's message: its subject, the run's trailer last, no conflict list")
   ok(!result.halt && result.dataModel.changes.every((c) => c.delta === 'added'), 'both reached the delta; nothing halted')
   X.done()
 }
@@ -546,6 +614,7 @@ const CLOSING_COMMIT = "Each kept unplanned change is added to the delta (`origi
   eq([withDelta, deltaPayload(prompt('ship:api#2')).map((e) => e.target)], [['ship:api#2'], ['web:db/carts.note']], "web's kept change is recorded by a ship of api, the repository that holds the delta (one sent for it, its head already pushed); no web ship writes the delta")
   ok(scriptOf(prompt('ship:api#2')).includes(`git -C "$W" add -- '${REL}'`), '… committed there, on api\'s run branch')
   ok((section(heredocs(prompt('ship:web#1'))[0]) || []).at(-1).includes("in its own commit on `feat/proj-700-api` (api's run branch: the delta lives there)"), "web's PR says where the delta is committed")
+  ok((section(bodyOf(prompt('ship:api#2'))) || []).includes('- the delta on this branch also records what web kept: `web:db/carts.note` · PROJ-2 (listed in web\'s PR)'), "api's PR says its delta commit also carries web's change")
   eq(result.dataModel.changes.map((c) => [c.repo, c.delta]), [['web', 'added']], 'the result says it reached the delta')
 }
 

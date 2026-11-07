@@ -402,7 +402,7 @@ const SLICE_INDEX_SCHEMA = {
           repo: { type: 'string' },
           local: { type: 'string', description: 'the local run branch head after the sync ("" when the line says none)' },
           remote: { type: 'string', description: 'origin/<run branch> ("" when the line says none)' },
-          sync: { type: 'string', enum: ['same', 'ahead', 'created', 'fast-forwarded', 'behind', 'diverged', 'local-only', 'remote-only', 'missing'] },
+          sync: { type: 'string', enum: ['same', 'ahead', 'created', 'fast-forwarded', 'behind', 'delta-ahead', 'diverged', 'local-only', 'remote-only', 'missing'] },
           fetch: { type: 'string', enum: ['ok', 'failed'], description: 'fetch= on the line' },
           ahead: { type: 'string', description: 'ahead= on the line, as printed: the commits origin/<run branch> holds that the base does not ("none": no origin branch; "unknown": not comparable with the base)' },
         },
@@ -1042,6 +1042,7 @@ const CHECKPOINT_TASK_CAP = 250 // checkpoint tasks the reconcile checks per rep
 const TASK_ID_RE = /^[A-Za-z0-9._#/-]{1,64}$/ // a landed task id the run will check and absorb (the script refuses any other)
 function reconcileBlock(known, afterProbe, readOnly) {
   const repos = [...repoConfig.values()]
+  const home = deltaHomeOf() // the repository the design's delta would be committed in (#97): its BRANCH line can say delta-ahead
   // The LAST marker of a body is the run's (draftBody writes it as the body's last line): text above it,
   // a title or a summary quoting a marker, never shadows it.
   const jq = `[.[] | select(.isCrossRepository == false)] | sort_by([(if .state == "OPEN" then 0 elif .state == "MERGED" then 1 else 2 end), -(.number // 0)]) | .[:3] | map(. + {m: (([(.body // "") | match("<!-- grimoire:state v1 ([A-Za-z0-9+/=]+) -->"; "g") | .captures[0].string] | last) // "none")}) | ([to_entries[] | select(.value.m != "none") | .key][0] // -1) as $k | to_entries[] | .key as $i | .value | (if $i == $k then .m else "none" end) as $m | ($m != "none" and ($m | length) > ${MARKER_MAX_CHARS}) as $big | (if $big then "toolong:" + ($m | length | tostring) else $m end) as $p | "P\\t\\(.url)\\t\\(.state)\\t\\(.isDraft)\\t\\($p)", (if $m == "none" or $big then empty else ($m | try (@base64d | fromjson | .landedTasks | if type == "array" then .[:${MARKER_TASK_CAP}][] else empty end | (if type == "array" then {id: .[0], headSha: .[1], firstSha: .[2]} else . end) | select(type == "object" and (.id | type) == "string" and (.headSha | type) == "string") | select((.id | test("^[A-Za-z0-9._#/-]{1,64}$")) and (.headSha | test("^[0-9a-f]{7,40}$"))) | "T\\t\\(.id)\\t\\(.headSha)\\t\\(if (.firstSha | type) == "string" and (.firstSha | test("^[0-9a-f]{7,40}$")) then .firstSha else "-" end)") catch empty) end)`
@@ -1052,7 +1053,7 @@ function reconcileBlock(known, afterProbe, readOnly) {
       .reverse()
       .slice(0, CHECKPOINT_TASK_CAP)
       .map((t) => `  c ${shq(t.id)} ${short(t.headSha)}${t.firstSha && !shaEq(t.firstSha, t.headSha) ? ` ${short(t.firstSha)}` : ''}`)
-    return [`{ JR=${shq(r.name)}; JP=${shq(r.path)}; JB=${shq(runBranchFor(r.name))}; rb "$JR" "$JP" "$JB"`, `  prs "$JR" "$JP" "$JB" ${i + 1}`, ...chks, `  mt "$JR" "$JP" "$JB" ${i + 1}`, `  echo END; } >"$W/${i + 1}" 2>/dev/null & P${i + 1}=$!`].join('\n')
+    return [`{ JR=${shq(r.name)}; JP=${shq(r.path)}; JB=${shq(runBranchFor(r.name))}; rb "$JR" "$JP" "$JB"${home && home.repo === r.name ? ` ${shq(home.rel)}` : ''}`, `  prs "$JR" "$JP" "$JB" ${i + 1}`, ...chks, `  mt "$JR" "$JP" "$JB" ${i + 1}`, `  echo END; } >"$W/${i + 1}" 2>/dev/null & P${i + 1}=$!`].join('\n')
   })
   const pids = repos.map((_, i) => `"$P${i + 1}"`).join(' ')
   const shows = repos.map((r, i) => `{ printf '%s\\t#NAME %s\\n' ${i + 1} ${shq(r.name)}; [ -f "$W/${i + 1}" ] && sed 's/^/${i + 1}\t/' "$W/${i + 1}"; }`).join('\n')
@@ -1089,7 +1090,7 @@ bgto() { # <seconds> <command…>, with no perl or timeout: in the background, i
 }
 cdir() { if command -v builtin >/dev/null 2>&1; then builtin cd "$1"; else cd "$1"; fi; }
 put() { printf '%s\\n' "$1"; }
-rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it from origin when missing, fast-forward it when strictly behind
+rb() { # <repo> <path> <run branch> [<the delta's path in it>]: fetch it; then (never when RO=1) create it from origin when missing, fast-forward it when strictly behind
   F=failed
   late || { to git -C "$2" fetch -q origin "+refs/heads/\${3}:refs/remotes/origin/\${3}" >/dev/null 2>&1 && F=ok; }
   case "$BASE" in origin/?*) late || to git -C "$2" fetch -q origin "+refs/heads/\${BASE#origin/}:refs/remotes/\${BASE}" >/dev/null 2>&1 ;; esac # a stale base would misjudge inBase and ahead
@@ -1106,6 +1107,8 @@ rb() { # <repo> <path> <run branch>: fetch it; then (never when RO=1) create it 
       else git -C "$2" branch -q -f "$3" "refs/remotes/origin/\${3}" >/dev/null 2>&1 && S=fast-forwarded
       fi
     fi
+  # origin holds, past the fork, only the design's delta commits the loop's ships made (#97): the next ship carries them forward
+  elif [ -n "\${4:-}" ] && DM=$(git -C "$2" merge-base "$L" "$R" 2>/dev/null) && [ -z "$(git -C "$2" diff --name-only "$DM" "$R" -- 2>/dev/null | grep -vxF -- "$4")" ]; then S=delta-ahead
   else S=diverged; fi
   L=$(git -C "$2" rev-parse -q --verify "refs/heads/\${3}^{commit}" 2>/dev/null)
   A=none; [ -n "$R" ] && { A=$(git -C "$2" rev-list --count "\${BASE}..\${R}" 2>/dev/null); case "$A" in ''|*[!0-9]*) A=unknown ;; esac; }
@@ -2190,9 +2193,11 @@ const deltaMsgOf = (delta) => {
     subject: `chore(data): record unplanned changes in ${delta.rel} (${(delta.tasks || []).join(', ') || 'this run'})`,
     body,
     seeded: `${body} The design's delta was not on this branch yet: added as the orchestrating checkout holds it.`,
-    trailer: runId ? ` -m ${shq(`Grimoire-Run: ${runId}`)}` : '',
+    trailer: runTrailer(),
   }
 }
+// The run's trailer on every commit the loop makes itself (the delta's, its carry-forward merges, the gate's SYNC)
+const runTrailer = () => (runId ? ` -m ${shq(`Grimoire-Run: ${runId}`)}` : '')
 // A merge of the remote run branch that stopped on the delta alone, changed on both sides (an
 // acknowledgement made in `serve` and committed on the branch, or the design's delta added on both):
 // the branch's version is kept and the remote's unplanned changes appended to it by delta-append.mjs
@@ -2203,19 +2208,22 @@ function deltaBothSides(dir, rel, to = '') {
   const f = `"${dir}"/${shq(rel)}`
   return [
     `    # the delta changed on both sides: this branch's version, the remote's unplanned changes appended to it`,
-    `    T=$(mktemp); if [ "$(git -C "${dir}" diff --name-only --diff-filter=U)" = ${shq(rel)} ] && git -C "${dir}" show "$R":${shq(rel)} >"$T" 2>/dev/null && git -C "${dir}" checkout -q --ours -- ${shq(rel)} >/dev/null 2>&1 && ${to}node ${shq(deltaCli())} ${f} "$T" 2>/dev/null | grep -q '^DELTA ok' && git -C "${dir}" add -- ${shq(rel)} >/dev/null 2>&1 && GIT_TERMINAL_PROMPT=0 ${to}git -C "${dir}" commit -q --no-edit >/dev/null 2>&1; then MG=1; else git -C "${dir}" merge --abort >/dev/null 2>&1; MG=0; fi; rm -f "$T"`,
+    `    T=$(mktemp); if [ "$(git -C "${dir}" diff --name-only --diff-filter=U)" = ${shq(rel)} ] && git -C "${dir}" show "$R":${shq(rel)} >"$T" 2>/dev/null && git -C "${dir}" checkout -q --ours -- ${shq(rel)} >/dev/null 2>&1 && ${to}node ${shq(deltaCli())} ${f} "$T" 2>/dev/null | grep -q '^DELTA ok' && git -C "${dir}" add -- ${shq(rel)} >/dev/null 2>&1 && GIT_TERMINAL_PROMPT=0 ${to}git -C "${dir}" commit -q --no-edit --cleanup=strip >/dev/null 2>&1; then MG=1; else git -C "${dir}" merge --abort >/dev/null 2>&1; MG=0; fi; rm -f "$T"`,
   ]
 }
-function deltaCarry(delta, h, branch) {
+// `rel`: the delta's path in this repository. Every ship of the repository that holds the delta runs
+// it, whether or not it has changes of its own to record: a landing that kept nothing still has to
+// carry the earlier ships' delta commits, or its push is refused (behind the remote).
+function deltaCarry(rel, h, branch) {
   return [
-    `# 4a · the design's delta, on the run branch: what the remote holds beyond the landed head, when that is the delta alone, carried forward; then this ship's kept changes`,
+    `# 4a · the design's delta, on the run branch: what the remote holds beyond the landed head, when that is the delta alone, carried forward`,
     `XH=${h}`,
     'if [ -n "$R" ] && [ "$R" != "$(git -C "$W" rev-parse HEAD 2>/dev/null)" ]; then',
     `  git -C "$P" cat-file -e "$R^{commit}" 2>/dev/null || GIT_TERMINAL_PROMPT=0 to 60 git -C "$P" fetch -q origin refs/heads/${branch} >/dev/null 2>&1`,
     `  if git -C "$P" merge-base --is-ancestor ${h} "$R" 2>/dev/null; then git -C "$W" checkout -f --detach -q "$R" >/dev/null 2>&1`,
-    `  elif ! git -C "$P" merge-base --is-ancestor "$R" ${h} 2>/dev/null && MB=$(git -C "$P" merge-base ${h} "$R" 2>/dev/null) && [ -z "$(git -C "$P" diff --name-only "$MB" "$R" -- 2>/dev/null | grep -vxF ${shq(delta.rel)})" ]; then`,
-    `    if ! to 60 git -C "$W" merge -q --no-ff -m ${shq(`chore(data): carry ${delta.rel} forward from the run branch`)}${deltaMsgOf(delta).trailer} "$R" >"$O" 2>&1; then`,
-    ...deltaBothSides('$W', delta.rel, 'to 60 ').map((l) => `  ${l}`),
+    `  elif ! git -C "$P" merge-base --is-ancestor "$R" ${h} 2>/dev/null && MB=$(git -C "$P" merge-base ${h} "$R" 2>/dev/null) && [ -z "$(git -C "$P" diff --name-only "$MB" "$R" -- 2>/dev/null | grep -vxF ${shq(rel)})" ]; then`,
+    `    if ! to 60 git -C "$W" merge -q --no-ff -m ${shq(`chore(data): carry ${rel} forward from the run branch`)}${runTrailer()} "$R" >"$O" 2>&1; then`,
+    ...deltaBothSides('$W', rel, 'to 60 ').map((l) => `  ${l}`),
     '    fi',
     '  fi',
     'fi',
@@ -2263,7 +2271,7 @@ function gateSyncScript(repo) {
     'elif git -C "$P" merge-base --is-ancestor "$R" "$H"; then echo "SYNC none"',
     'elif [ "$(git -C "$P" symbolic-ref -q --short HEAD)" != "$B" ]; then echo "SYNC bad step=branch: $B is not the checked-out branch"',
     `elif [ -n "$(git -C "$P" diff --name-only "$(git -C "$P" merge-base "$H" "$R")" "$R" -- | grep -vxF ${shq(rel)})" ]; then echo "SYNC bad step=other: the remote run branch holds more than the delta"`,
-    `elif git -C "$P" merge -q -m ${shq(`chore(data): bring the unplanned changes recorded in ${rel} into the run branch`)}${runId ? ` -m ${shq(`Grimoire-Run: ${runId}`)}` : ''} "$R" >/dev/null 2>&1; then echo "SYNC ok head=$(git -C "$P" rev-parse HEAD)"`,
+    `elif git -C "$P" merge -q -m ${shq(`chore(data): bring the unplanned changes recorded in ${rel} into the run branch`)}${runTrailer()} "$R" >/dev/null 2>&1; then echo "SYNC ok head=$(git -C "$P" rev-parse HEAD)"`,
     'else',
     ...deltaBothSides('$P', rel),
     '  if [ "$MG" = 1 ]; then echo "SYNC ok head=$(git -C "$P" rev-parse HEAD)"; else echo "SYNC bad step=merge"; fi',
@@ -2282,6 +2290,10 @@ function shipPrompt(repo, plan) {
   const known = str(plan.prUrl) || ''
   const cm = plan.comments || {}
   const record = !!plan.delta && plan.delta.mode === 'commit' // the delta is this repository's: committed on the run branch, carried by the push
+  // the delta's path in this repository when it holds it: EVERY ship carries the remote's delta commits
+  // forward, with changes of its own to record or not (#97: a landing that kept nothing pushed only its
+  // head, behind the remote's delta commit, and was refused)
+  const carry = str(plan.carry) || (record ? plan.delta.rel : '')
   // the head sets the limits and the helpers; the rest runs with the lock's functions (withShipLock)
   const H = [
     'set -u',
@@ -2330,21 +2342,21 @@ function shipPrompt(repo, plan) {
       // the lane setup is bounded like every other step: an unbounded one held the lock past its stale age
       `  elif git -C "$P" worktree add --detach -q ${shq(rel)} ${h} >"$O" 2>&1; then WT=1${setup ? `; to ${SHIP_SETUP_SEC} sh -c ${shq(setup.replace(/<lane>/g, wt))} </dev/null >/dev/null 2>&1 || true` : ''}`,
       '  fi',
-      `  # 4 · push exactly that SHA${record ? ", with the design's delta committed on top of it," : ''} to the run branch, fast-forward only (the pre-push hook runs), at most ${SHIP_PUSH_SEC} s`,
+      `  # 4 · push exactly that SHA${carry ? ", with the design's delta commits on top of it," : ''} to the run branch, fast-forward only (the pre-push hook runs), at most ${SHIP_PUSH_SEC} s`,
       `  if [ "$WT" = 1 ]; then GIT_TERMINAL_PROMPT=0 to 30 git -C "$P" ls-remote origin refs/heads/${branch} >"$O" 2>&1; RC=$?; else RC=1; fi`,
       '  R=$(cut -f1 "$O" | head -n 1)',
       '  if [ "$WT" != 1 ]; then echo "PUSH ok=0 hook=0 step=worktree"; tail -n 5 "$O"; PUSHOK=0',
       '  elif [ "$RC" -ne 0 ]; then echo "PUSH ok=0 hook=0 step=remote exit=$RC"; tail -n 5 "$O"; PUSHOK=0',
-      ...(record
+      ...(carry
         ? [
             // the push carries the worktree's head: the landed SHA, and the delta commits on top of it
             '  else',
-            ...deltaCarry(plan.delta, h, branch),
-            ...deltaRecord(plan.delta),
+            ...deltaCarry(carry, h, branch),
+            ...(record ? deltaRecord(plan.delta) : []),
             `XH=$(git -C "$W" rev-parse HEAD 2>/dev/null); [ -n "$XH" ] || XH=${h}`,
             `if [ -n "$R" ] && { [ "$R" = "$XH" ] || git -C "$P" merge-base --is-ancestor "$XH" "$R" 2>/dev/null; }; then echo "PUSH ok=1 remote=${h} already=1"`,
             `elif GIT_TERMINAL_PROMPT=0 to ${SHIP_PUSH_SEC} git -C "$W" push origin "$XH":refs/heads/${branch} >"$O" 2>&1; then echo "PUSH ok=1 remote=$(git -C "$W" rev-parse ${h})"`,
-            `else RC=$?; HK=0; grep -qiE 'pre-push|hook declined' "$O" && HK=1; echo "PUSH ok=0 hook=$HK exit=$RC"; tail -n 5 "$O"; PUSHOK=0; [ "$DS" = ok ] && { echo "DELTA bad step=push: the run branch did not take the push" >"$DO"; DS=bad; }; fi`,
+            `else RC=$?; HK=0; grep -qiE 'pre-push|hook declined' "$O" && HK=1; echo "PUSH ok=0 hook=$HK exit=$RC"; tail -n 5 "$O"; PUSHOK=0${record ? '; [ "$DS" = ok ] && { echo "DELTA bad step=push: the run branch did not take the push" >"$DO"; DS=bad; }' : ''}; fi`,
             '  fi',
           ]
         : [
@@ -4746,6 +4758,7 @@ for (const b of runBranchSeen) {
   const acting = execute && !FRESH_START // a launch that syncs branches (a preview and a fresh start never touch one)
   if (b.fetch === 'failed') log(`⚠ ${b.repo}: could not fetch origin/${where} (offline, no access, or it timed out) — checked against the last known origin/${where}; a warning, not a refusal`)
   if (b.sync === 'diverged') log(`⚠ ${b.repo}: the local run branch ${where} and origin/${where} have DIVERGED — nothing is absorbed from it; reconcile them by hand (the run never resets a branch)`)
+  else if (b.sync === 'delta-ahead') log(`◎ ${b.repo}: origin/${where} holds the design's delta commits the local run branch lacks (the loop's ships committed them there) — nothing to reconcile: the next ship carries them forward`)
   else if (b.sync === 'behind') log(`⚠ ${b.repo}: the local ${where} is BEHIND origin/${where}${acting ? ' and could not be fast-forwarded (uncommitted changes in its checkout, or it is checked out in another worktree)' : ' — a launch fast-forwards it when its checkout is clean'}`)
   else if (b.sync === 'remote-only') log(acting ? `⚠ ${b.repo}: ${where} exists only on origin and the local branch could not be created from it` : `◎ ${b.repo}: ${where} exists only on origin — a launch creates the local branch from it`)
   else if (b.sync === 'local-only') log(`⚠ ${b.repo}: ${where} exists only locally — origin has no copy (never pushed, or deleted there), so another machine could not resume from it`)
@@ -6495,12 +6508,19 @@ function modelLines(repo) {
   const archKept = reported.some(({ m }) => m.kept && isArchTarget(m.target)), dataKept = reported.some(({ m }) => m.kept && !isArchTarget(m.target))
   // where the delta records them (#97): this branch, the run branch of the repository that holds it, or in place
   const where = !deltaHome ? '' : deltaHome.repo === repo ? ' in its own commit on this branch' : ` in its own commit on \`${noTick(runBranchFor(deltaHome.repo))}\` (${deltaHome.repo}'s run branch: the delta lives there)`
+  // the delta's commits on this branch also hold what the other repositories' tasks kept: named here, listed in their PRs
+  const others = deltaHome && deltaHome.repo === repo ? doneTasks.filter((d) => d.repo !== repo).flatMap((d) => (d.model ? d.model.changes : []).filter((m) => m.kept && (m.delta === 'pending' || m.delta === 'added')).map((m) => ({ m, task: d.id, repo: d.repo }))) : []
+  const otherLines = [...new Set(others.map((o) => o.repo))].map((r) => {
+    const mine = others.filter((o) => o.repo === r)
+    return `- the delta on this branch also records what ${r} kept: ${mine.map((o) => tk(o.m.target)).join(', ')} · ${[...new Set(mine.map((o) => o.task))].join(', ')} (listed in ${r}'s PR)`
+  })
   if (!hasDelta)
     return [`No delta beside the design (\`${noTick(deltaPath || 'none')}\`): the changes this branch makes to stored data${reported.some(({ m }) => isArchTarget(m.target)) ? ' and to the architecture' : ''}, as its implementers reported them against their base.`, ...reported.map(changeLine), ...onlyLines]
   return [
     `Against the design's delta \`${noTick(deltaPath)}\`, each state as its task's implementer read it with \`graph_changes\`:`,
     ...(planned.length ? planned.map(plannedLine) : ["- no planned change recorded in this session's tasks"]),
     ...reported.map(changeLine),
+    ...otherLines,
     ...onlyLines,
     ...(dataKept || archKept ? ['', `Each kept unplanned change is added to the delta (\`origin: unplanned\`, its reason as \`why\`)${where}${archKept ? ', a kept architectural one with the diagram updated in this branch,' : where ? ',' : ''} for you to acknowledge in the graph page's ${dataKept && archKept ? 'Data and Architecture tabs' : archKept ? 'Architecture tab' : 'Data tab'} (\`graph.mjs serve\`).${deltaHome ? '' : ' The delta lives outside the shipped repositories: written in place, not committed.'} Nothing here blocks the run.`] : []),
   ]
@@ -6598,7 +6618,7 @@ async function shipOnce(repo, mode, stop) {
       : ready
         ? { ready: haltComment(repo, stop, 'ready') }
         : { ok: haltComment(repo, stop, 'ok', { head, pushed }), ready: haltComment(repo, stop, 'ready'), ...(push ? { failed: haltComment(repo, stop, 'failed', { head }) } : {}) }
-  const plan = { mode, head, ids, push, pr, edit: pr && !ready, ready, create: DRAFT_PR, prUrl: st.prUrl, title: prTitle(), gen, body: pr && !ready ? draftBody(repo, halting ? stop : null, pushed, gen) : '', comments, reviewPrefixes: halting ? reviewPrefixesOf(repo) : [], delta }
+  const plan = { mode, head, ids, push, pr, edit: pr && !ready, ready, create: DRAFT_PR, prUrl: st.prUrl, title: prTitle(), gen, body: pr && !ready ? draftBody(repo, halting ? stop : null, pushed, gen) : '', comments, reviewPrefixes: halting ? reviewPrefixesOf(repo) : [], delta, carry: deltaHome && deltaHome.repo === repo ? deltaHome.rel : null }
   const label = `ship:${repo}#${halting ? 'halt' : ++st.n}`
   st.ships++
   const ship = (lbl) =>
