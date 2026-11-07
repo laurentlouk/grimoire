@@ -42,6 +42,7 @@ import { mdSlug, mdFront, mdToHtml } from './md.mjs'
 import { archClient } from './arch-view.mjs'
 import { docsClient } from './docs-view.mjs'
 import { reconcile, storeSummary } from './data/reconcile.mjs'
+import { bindingHow, dashed } from './data/binding.mjs'
 import { kvIndex, kvTable, projectionText } from './data/model.mjs'
 import { layoutErd, erdBox } from './data/layout.mjs'
 import { diffModels } from './data/diff.mjs'
@@ -219,6 +220,14 @@ export function dataData(db, files, repos, changes = null, deltas = []) {
   }
   out.failed = db.prepare('SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL ORDER BY repo, key').all()
     .map((f) => ({ repo: f.repo, extractor: f.extractor, at: shown(f.repo, f.key), file: fileId.get(`${f.repo}\0${f.key}`) ?? -1, error: f.error }))
+  // the item types code converts (data/binding.mjs), each with the tables it is bound to: the unbound
+  // ones are listed per repository
+  const where = new Map(out.stores.flatMap((s, i) => s.tables.map((t, j) => [`${s.id}/${t.name}`, [i, j]])))
+  out.items = (model.items || []).map((it) => {
+    const bs = (model.bindings || []).filter((b) => b.item === it.id)
+    return { id: it.id, repo: it.repo, name: it.name, kind: it.kind, at: `${shown(it.repo, it.path)}:${it.line}`, file: fileId.get(`${it.repo}\0${it.path}`) ?? -1, fields: it.fields.length,
+      bound: bs.map((b) => ({ table: b.table, conf: b.confidence, cards: b.entities.map((id) => where.get(id)).filter(Boolean) })) }
+  })
   const packedAt = new Map(out.stores.map((s, i) => [s.id, i]))
   out.deltas = deltas.map((d) => packDelta(d, { model, base: changes?.base ? changes.at.model : null, diff: whole, why: changes?.why || null, stores: out.stores, packedAt, shown }))
   out.delta = Math.max(0, deltas.findIndex((d) => d.selected))
@@ -421,7 +430,8 @@ function packer(entities, src, cf, bsrc = null) {
     const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
     return {
       name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nt: e.nameTemplate } : {}), ...cite(e),
-      fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, ...cite(f) })),
+      fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, ...cite(f),
+        ...(f.item ? { it: f.item.map((i) => ({ t: i.type, raw: i.raw, kind: i.kind, nul: i.nullable ? 1 : 0, def: i.default ?? null, vals: i.values ?? null })), ...(f.sources.every((s) => s.kind === 'code') ? { code: 1 } : {}) } : {}) })),
       keys: keys.map(({ k, parts }) => ({ role: k.role, parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}), ...cite(k) })),
       indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, ...(kvIndex(x) ? kvPack(x) : {}), ...cite(x) })),
       rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, ...cite(r) })),
@@ -430,19 +440,38 @@ function packer(entities, src, cf, bsrc = null) {
 }
 // A GSI's or an LSI's keys and projection, as the key cards draw them.
 const kvPack = (x) => ({ kind: x.kind, partition: x.partition || [], sort: x.sort || [], projection: x.projection ?? null, include: x.include || [] })
+// A key-value table's bindings and logical table, as its key card draws them (data/binding.mjs):
+//   bound [{ type, conf, how, dash: drawn dashed (below convention), sites, at: [p, line], ev: [{ what,
+//          text, src: [p, line], test }], riv: [{ table, conf, how }] }]
+//   lg    { name, via, members, cf: [{ label, attr, values: [{ value, src }] }] }, lnote: why it joined none
+// and each field an item type states carries `it` [{ t: the type, raw, kind, nul, def, vals }] (its
+// source kind is code), `code: 1` when no declaration types it.
+function packItems(e, src, cf) {
+  const one = (x) => src([x])[0]
+  return {
+    ...(e.bound ? { bound: e.bound.map((b) => ({ type: b.type, conf: b.confidence, how: bindingHow(b), dash: dashed(b.confidence) ? 1 : 0, sites: b.sites, at: one(b), ev: b.evidence.map((x) => ({ what: x.what, text: x.text, src: one(x), ...(x.test ? { test: 1 } : {}) })), riv: b.rivals.map((r) => ({ table: r.table, conf: r.confidence, how: bindingHow(r) })) })) } : {}),
+    ...(e.logical ? { lg: { name: e.logical.name, via: e.logical.via, members: e.logical.members, cf: e.logical.conflicts.map((c) => ({ label: c.label, ...cf([c])[0] })) } } : {}),
+    ...(e.logicalNote ? { lnote: e.logicalNote } : {}),
+  }
+}
 // A store drawn as key cards rather than an ERD: a key-value one (its tables have no foreign key to
 // draw, and keys, indexes, TTL and stream to show).
 const CARDS = new Set(['dynamodb'])
 function packStore(st, shown, fileId, sd = null) {
   const paths = [], at = new Map()
-  const P = (p, kind = null) => {
-    if (!at.has(p)) { at.set(p, paths.length); paths.push([shown(st.repo, p), fileId.get(`${st.repo}\0${p}`) ?? -1, kind]) } else if (kind && !paths[at.get(p)][2]) paths[at.get(p)][2] = kind
-    return at.get(p)
+  // a path of the store's repository, or of another (the code an item type is bound from)
+  const P = (p, kind = null, repo = st.repo) => {
+    const k = `${repo}\0${p}`
+    if (!at.has(k)) { at.set(k, paths.length); paths.push([shown(repo, p), fileId.get(k) ?? -1, kind]) } else if (kind && !paths[at.get(k)][2]) paths[at.get(k)][2] = kind
+    return at.get(k)
   }
   // a source: [path index, line], and how the declaration names the element when it says (a template's logical id)
-  const src = (list) => list.map((s) => (s.as ? [P(s.path, s.kind), s.line ?? null, s.as] : [P(s.path, s.kind), s.line ?? null]))
+  const src = (list) => list.map((s) => (s.as ? [P(s.path, s.kind, s.repo ?? st.repo), s.line ?? null, s.as] : [P(s.path, s.kind, s.repo ?? st.repo), s.line ?? null]))
   const cf = (list) => list.map((c) => ({ attr: c.attr, values: c.values.map((v) => ({ value: v.value, src: src(v.sources) })) }))
   const tables = st.entities.map(packer(st.entities, src, cf))
+  // a key-value table's item types (data/binding.mjs): its bindings with their evidence and rivals,
+  // the logical table it is one declaration of with the conflicts across it
+  if (CARDS.has(st.dialect)) st.entities.forEach((e, i) => Object.assign(tables[i], packItems(e, src, cf)))
   const f = st.dialectFrom, cards = CARDS.has(st.dialect), collapsed = !cards && tables.length > DATA_COLLAPSE
   return {
     id: st.id, repo: st.repo, name: st.name, dialect: st.dialect, summary: storeSummary(st),
@@ -727,6 +756,8 @@ ul.krows{list-style:none;margin:0;padding:0}.krow{padding:3px 6px;border-radius:
 ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4px}.unk{text-decoration:underline dashed var(--warn);text-underline-offset:3px}.pill.unk{color:var(--warn);text-decoration:none}
 .mkl.k-pk{color:var(--accent);background:var(--accent-soft)}.mkl.k-sk{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 12%,var(--panel))}.mkl.k-ttl{color:var(--t-messagebus);background:color-mix(in srgb,var(--t-messagebus) 12%,var(--panel))}
 .mkl.k-gsi,.mkl.k-lsi,.mkl.k-idx{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 12%,var(--panel))}.mkl.k-a{color:var(--muted);background:var(--hover)}
+.mkl.k-i{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 10%,var(--panel))}ul.kitem .krow.d1{padding-left:20px}ul.kitem .krow.d2{padding-left:34px}ul.kitem .krow.d3{padding-left:48px}ul.kitem .krow.d4,ul.kitem .krow.d5,ul.kitem .krow.d6{padding-left:62px}
+.kbind{border:1px solid var(--border);border-radius:8px;padding:6px 8px;margin:4px 0}.kbind.dash{border-style:dashed}.kbind .srcline{margin:2px 0 0}.pill.c-declared,.pill.c-convention{color:var(--ok);border-color:currentColor}.pill.c-name-match,.pill.c-ambiguous{color:var(--warn);border-color:currentColor;border-style:dashed}
 .kcard.ch-add,.kcard.dl-built{border:2px solid var(--ok)}.kcard.ch-del{border:2px dashed var(--err);opacity:.85}.kcard.ch-mod,.kcard.dl-diff{border:2px solid var(--warn)}
 .kcard.dl-prop{border:2px dashed var(--ok)}.kcard.dl-pend,.kcard.dl-rm{border:2px dashed var(--warn)}.kcard.dl-unpl{border:2px solid var(--t-worker)}.kcard.gone{opacity:.85}
 .krow.ch-add,.krow.dl-built{box-shadow:inset 3px 0 0 var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent)}.krow.ch-del{box-shadow:inset 3px 0 0 var(--err);background:color-mix(in srgb,var(--err) 7%,transparent)}

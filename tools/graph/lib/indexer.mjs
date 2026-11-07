@@ -16,7 +16,8 @@ import { extract } from './extract.mjs'
 import { TEST_PATH } from './langs.mjs'
 import { scanRepo, gitHead, listPaths } from './project.mjs'
 import { openStore, tx, driver } from './store.mjs'
-import { candidates, inspect, plan, run, idOf, readsYaml, keeps, MAX_BYTES } from './data/registry.mjs'
+import { candidates, inspect, plan, run, idOf, readsYaml, readsCode, keeps, MAX_BYTES } from './data/registry.mjs'
+import { CODE_LANGS } from './data/readers/code-aside.mjs'
 import { readYaml } from './data/readers/yaml.mjs'
 import { resolveRepo } from './resolve.mjs'
 import { cochange } from './cochange.mjs'
@@ -145,6 +146,13 @@ async function indexData(db, project, repo, rels, runtime) {
       let parser = null
       try { parser = await (await runtime()).parserFor('yaml') } catch {}
       ctx.yaml = parser ? (text) => readYaml(parser, text) : null
+    }
+    if (readsCode(job) && !('tree' in ctx)) {
+      // the grammars the code index parsed with: a code extractor parses its file again (the code
+      // index keeps no tree), only when the file changed
+      const parsers = {}
+      for (const lang of CODE_LANGS) { try { parsers[lang] = await (await runtime()).parserFor(lang) } catch { parsers[lang] = null } }
+      ctx.tree = (lang, text) => { if (!parsers[lang]) throw new Error(`the pinned ${lang} grammar did not load`); return parsers[lang].parse(text) }
     }
     const r = run(job, read, ctx)
     results.push([job.extractor.scope, job.key, id, sig, r])

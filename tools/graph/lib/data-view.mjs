@@ -400,7 +400,8 @@ export function dataClient(ctx) {
   const mark = (v) => (typeof v === 'string' && v.includes('${') ? h('span', { class: 'unk', title: UNK }, v) : v)
   function keyCard(s, ti) {
     const t = s.tables[ti]
-    const types = new Map(t.fields.map((f) => [f.name, f.type]))
+    const declared = t.fields.filter((f) => !f.code) // what the declarations type; the item's own fields apart
+    const types = new Map(declared.map((f) => [f.name, f.type]))
     const typed = (a) => `${a} ${types.get(a) || '?'}`
     const ov = (x) => !!(s.ov && x.ch)
     const cls = (x) => (ov(x) ? ` ch-${CLS[x.ch]}` : s.dv && x.dl ? ` dl-${x.dl.s}${x.dl.gone ? ' gone' : ''}` : '')
@@ -414,20 +415,46 @@ export function dataClient(ctx) {
     const row = (x, mk, ...body) => h('li', { class: `krow${cls(x)}`, title: where(x) }, h('span', { class: `mkl k-${mk.toLowerCase()}` }, mk), h('span', { class: `mono${struck(x) ? ' struck' : ''}` }, ...body), ...pills(x), was(x))
     const keys = t.keys.map((k) => row(k, ROLE[k.role] || k.role, mark(k.role === 'ttl' ? `${k.parts.length ? k.parts.join(', ') : 'no attribute'} · ${typeof k.enabled === 'string' ? k.enabled : onOff(k.enabled)}` : k.parts.map(typed).join(' + '))))
     const idx = t.indexes.map((x) => row(x, x.kind === 'lsi' ? 'LSI' : x.kind === 'gsi' ? 'GSI' : 'IDX', mark(x.name), h('span', { class: 'muted' }, mark(` · ${[x.partition && x.partition.length ? `PK ${x.partition.map(typed).join(' + ')}` : null, x.sort && x.sort.length ? `SK ${x.sort.map(typed).join(' + ')}` : null, x.kind ? projOf(x) : `(${x.columns.join(', ')})`].filter(Boolean).join(' · ')}`))))
-    const attrs = t.fields.map((f) => row(f, 'A', mark(f.name), h('span', { class: 'muted' }, ` ${f.type || '?'}`)))
+    const attrs = declared.map((f) => row(f, 'A', mark(f.name), h('span', { class: 'muted' }, ` ${f.type || '?'}`)))
+    // the item: the bound types' fields as stored, a tree by dotted path, each key attribute marked
+    const keyOf = new Map(t.keys.filter((k) => k.role !== 'ttl').flatMap((k) => k.parts.map((p) => [p, ROLE[k.role] || k.role])))
+    const said = (i) => `${i.raw || i.kind}${i.nul ? ' · nullable' : ''}${i.def ? ` · default ${i.def}` : ''}${i.vals && !/^['"]/.test(i.raw || '') ? ` (${i.vals.join(' | ')})` : ''}`
+    const shapeMark = (i) => (i.kind === 'list' ? '[ ]' : i.kind === 'map' ? '{ }' : i.kind === 'object' ? '{…}' : i.kind === 'enum' ? 'E' : '·')
+    const items = t.fields.filter((f) => f.it).map((f) => {
+      const depth = Math.min(6, f.name.split('.').length - 1), leaf = depth ? f.name.slice(f.name.lastIndexOf('.') + 1) : f.name
+      return h('li', { class: `krow d${depth}${cls(f)}`, title: `${f.name}${where(f) ? `\n${where(f)}` : ''}` }, h('span', { class: `mkl k-${keyOf.has(f.name) ? keyOf.get(f.name).toLowerCase() : 'i'}` }, keyOf.get(f.name) || shapeMark(f.it[0])),
+        h('span', { class: `mono${struck(f) ? ' struck' : ''}` }, leaf), h('span', { class: 'muted' }, ` ${f.it.length === 1 ? said(f.it[0]) : f.it.map((i) => `${i.t}: ${said(i)}`).join(' · ')}`), ...pills(f), was(f))
+    })
+    const itemTypes = [...new Set(t.fields.flatMap((f) => (f.it || []).map((i) => i.t)))]
+    // how code pairs each type with this table: below convention dashed, its rivals listed
+    const binds = (t.bound || []).map((b) => h('div', { class: `kbind${b.dash ? ' dash' : ''}`, 'data-conf': b.conf },
+      h('div', null, h('b', { class: 'mono' }, b.type), ' ', h('span', { class: `pill c-${b.conf}`, title: b.dash ? 'below convention: a lead, read the code before relying on it' : 'a convention the code and the infra both state' }, b.conf), h('span', { class: 'muted' }, ` ${b.how}${b.sites > 1 ? ` · ${b.sites} sites` : ''}`)),
+      h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'declared '), srcEl(s, b.at)),
+      b.ev.map((x) => h('div', { class: 'srcline' }, h('span', { class: 'muted' }, `${x.what} `), h('span', { class: 'mono' }, x.text), ' ', srcEl(s, x.src), x.test ? h('span', { class: 'muted' }, ' (test code)') : null)),
+      b.riv.length ? h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'rivals: '), b.riv.map((r, k) => [k ? ' · ' : '', h('span', { class: 'mono' }, r.table), h('span', { class: 'muted' }, ` (${r.conf}, ${r.how})`)])) : null))
+    const lg = t.lg
+    const lgConflicts = lg ? lg.cf : []
     const conflicts = [[`table ${t.name}`, t], ...t.fields.map((f) => [`attribute ${f.name}`, f]), ...t.keys.map((k) => [`${ROLE[k.role] || k.role} (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x])].flatMap(([label, x]) => cfs(x).map((c) => [label, c]))
     const as = [...new Set((t.src || []).map((p) => p[2]).filter(Boolean))]
     const dks = s.dv ? s.dl.ks.filter((k) => s.delta.changes[k].tbl === ti) : [], dus = s.dv ? s.dl.us.filter((j) => s.delta.unplanned[j].tbl === ti) : []
     return h('article', { class: `kcard${cls(t)}`, 'data-tbl': String(ti), 'aria-label': `${t.name}: ${plural(t.keys.length, 'key')}, ${plural(t.indexes.length, 'index', 'indexes')}, ${plural(t.fields.length, 'attribute')}${conflicts.length ? `, ${plural(conflicts.length, 'conflict')}` : ''}` },
       h('header', { class: 'khead' }, h('span', { class: 'tdot t-database' }), h('b', { class: `kname mono${struck(t) ? ' struck' : ''}` }, t.name),
         t.nt ? h('span', { class: 'pill unk', title: 'a part of the name is unknown (each {…}): its template, the literal parts kept, never guessed' }, 'name template') : null,
+        lg ? h('span', { class: `pill${lgConflicts.length ? ' warn' : ''}`, title: `one logical table with ${lg.members.join(', ')} (${lg.via})${lgConflicts.length ? `: ${plural(lgConflicts.length, 'conflict')} across them` : ''}` }, `≡ ${plural(lg.members.length, 'declaration')}`) : null,
         h('span', { class: 'pill' }, mark(t.billing || 'billing not said')), h('span', { class: 'pill' }, mark(t.stream ? `stream ${t.stream}` : 'no stream')),
         conflicts.length ? h('span', { class: 'pill warn', title: 'the declarations disagree: each side is kept, none is resolved' }, `≠${conflicts.length}`) : null, ...pills(t).slice(0, 3)),
       as.length ? h('div', { class: 'kas muted' }, as.join(' · ')) : null,
       was(t),
       h('ul', { class: 'krows' }, keys),
       t.indexes.length ? [h('div', { class: 'ksub' }, `Indexes (${t.indexes.length})`), h('ul', { class: 'krows' }, idx)] : null,
-      h('div', { class: 'ksub' }, `Attributes (${t.fields.length})`), h('ul', { class: 'krows kattrs' }, attrs),
+      h('div', { class: 'ksub' }, `Attributes (${declared.length})`), h('ul', { class: 'krows kattrs' }, attrs),
+      items.length ? [h('div', { class: 'ksub' }, `Item (${plural(items.length, 'field')}, as ${itemTypes.join(' and ')} ${itemTypes.length === 1 ? 'stores it' : 'store them'})`), h('ul', { class: 'krows kitem', 'aria-label': `${t.name}: the item's fields` }, items)] : null,
+      binds.length ? [h('div', { class: 'ksub' }, `Bound item types (${binds.length})`), binds] : null,
+      t.lnote ? h('p', { class: 'note' }, t.lnote) : null,
+      lg ? [h('div', { class: `ksub${lgConflicts.length ? ' warn' : ''}` }, `One logical table: ${plural(lg.members.length, 'declaration')}${lgConflicts.length ? `, ${plural(lgConflicts.length, 'conflict')} across them` : ''}`),
+        h('div', { class: 'srcline' }, `${lg.members.join(' + ')} (${lg.via}): their differences are conflicts, each side kept`),
+        lgConflicts.length ? h('ul', { class: 'links dlist' }, lgConflicts.map((c) => h('li', null, h('div', null, h('b', null, c.label), h('span', { class: 'muted' }, ` · ${c.attr}`)),
+          c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, val(c.attr, v.value)), ' ', srcs(s, v.src)))))) : null] : null,
       h('div', { class: 'ksub' }, 'Declared at'), h('div', { class: 'srcline' }, ov(t) && t.ch === 'removed' ? ['at the base: ', bsrcs(s, t.bsrc)] : s.dv && t.dl && (t.dl.gone || t.dl.s === 'prop') ? (t.dl.gone ? ['at the base: ', bsrcs(s, t.bsrc)] : 'proposed: not in the code yet') : srcs(s, t.src)),
       conflicts.length ? [h('div', { class: 'ksub warn' }, `Conflicts (${conflicts.length}): each side kept, none resolved`),
         h('ul', { class: 'links dlist' }, conflicts.map(([label, c]) => h('li', null, h('div', null, h('b', null, label), h('span', { class: 'muted' }, ` · ${c.attr}`)),
@@ -436,7 +463,7 @@ export function dataClient(ctx) {
   }
   function cardsView(s) {
     const q = lower(st.q.trim())
-    const hit = (t) => !q || lower(t.name).includes(q) || t.fields.some((f) => lower(f.name).includes(q)) || t.indexes.some((x) => lower(x.name).includes(q))
+    const hit = (t) => !q || lower(t.name).includes(q) || t.fields.some((f) => lower(f.name).includes(q)) || t.indexes.some((x) => lower(x.name).includes(q)) || (t.bound || []).some((b) => lower(b.type).includes(q))
     const shown = s.tables.map((t, i) => [t, i]).filter(([t]) => hit(t))
     const legend = h('div', { class: 'legend dlegend' }, h('span', null, h('span', { class: 'mkl k-pk' }, 'PK'), 'partition key'), h('span', null, h('span', { class: 'mkl k-sk' }, 'SK'), 'sort key (several attributes: a multi-attribute key)'),
       h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'time to live: on, off or not said'), h('span', null, h('span', { class: 'mkl k-gsi' }, 'GSI'), h('span', { class: 'mkl k-lsi' }, 'LSI'), 'global and local secondary indexes, with their keys and projection'),
@@ -520,7 +547,16 @@ export function dataClient(ctx) {
       h('p', null, 'Listed so the map never pretends to be complete: these folders hold schema statements no reader has drawn yet.')) : null
     const fails = failed.length ? h('div', { class: 'callout callout-danger banner' }, h('div', { class: 'callout-title' }, `Extractor failures (${failed.length}): their facts are missing`),
       h('ul', { class: 'links' }, failed.map((f) => h('li', null, h('span', { class: 'mono' }, `${f.extractor} on `), path(f), `: ${f.error}`)))) : null
-    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
+    // the item types code converts, per repository: each bound table, and the unbound ones listed
+    const its = (DD.items || []).filter((it) => !st.repo || it.repo === st.repo)
+    const unbound = its.filter((it) => !it.bound.length)
+    const itemsList = its.length ? h('details', { class: 'problems', 'data-ctl': 'data-items' }, h('summary', null, `Item types (${its.length}), from code: ${its.length - unbound.length} bound to a table, ${unbound.length} unbound`),
+      h('ul', { class: 'links' }, its.map((it) => h('li', null, h('b', { class: 'mono' }, it.id), ' ',
+        it.bound.length ? it.bound.map((b, k) => [k ? ' | ' : '', h('span', { class: `pill c-${b.conf}` }, b.conf), ' ', b.cards.length ? h('a', { class: 'jump mono', href: `#data-${b.cards[0][0]}` }, b.table) : h('span', { class: 'mono' }, b.table)])
+          : h('span', { class: 'pill warn', title: 'no table name and no environment variable the infra sets pairs with its conversions' }, 'unbound'),
+        h('span', { class: 'muted' }, ` · ${plural(it.fields, 'field')} · `), path(it)))),
+      h('p', null, 'An item type is one the code converts to or from an item; its binding is how the code names the table where it converts it (an environment variable the infra sets, a name the table\'s template matches, in one function or one file), with a confidence. Below convention, a binding is a lead.')) : null
+    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsList, list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
   }
   function open(n) { if (st.data !== n) { st.data = n; st.dataSel = null; st.dataAll = false; st.dataScroll = null } }
   return { view, has: (n) => !!S[n], open }

@@ -1,0 +1,20 @@
+{
+  "TableName": "local-shop-orders",
+  "KeySchema": [
+    { "AttributeName": "customerId", "KeyType": "HASH" },
+    { "AttributeName": "orderId", "KeyType": "RANGE" }
+  ],
+  "AttributeDefinitions": [
+    { "AttributeName": "customerId", "AttributeType": "S" },
+    { "AttributeName": "orderId", "AttributeType": "S" },
+    { "AttributeName": "status", "AttributeType": "S" }
+  ],
+  "GlobalSecondaryIndexes": [
+    {
+      "IndexName": "ByStatus",
+      "KeySchema": [{ "AttributeName": "status", "KeyType": "HASH" }],
+      "Projection": { "ProjectionType": "KEYS_ONLY" }
+    }
+  ],
+  "BillingMode": "PAY_PER_REQUEST"
+}

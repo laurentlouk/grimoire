@@ -14,8 +14,13 @@
 // When TableName is a reference, or absent (CloudFormation then names the table at deploy), the
 // table is named by its logical id, and its name expression is kept on its `as` and in the notes:
 // binding a name template to the names other declarations state is not done here.
+//
+// The environment a template's functions are given, where a variable names one of its tables
+// (`ORDERS_TABLE: !Ref OrdersTable`), is kept on the declaration as `env`, for the item binding
+// (data/binding.mjs; `wiring` below says where it is read). No other variable is kept.
 import { DOC, documents, at as lineIn } from '../readers/documents.mjs'
-import { LEVEL, TABLE_TYPES, readTable, isObj, isRef, textOf, capNotes, NOTES } from '../readers/dynamodb.mjs'
+import { LEVEL, TABLE_TYPES, readTable, isObj, isRef, textOf, capNotes, NOTES, fnOf } from '../readers/dynamodb.mjs'
+import { tagOf } from '../readers/yaml.mjs'
 import { STORE } from './dynamodb-table.mjs'
 
 // a document's resource maps: [[resources, path]]
@@ -39,15 +44,16 @@ function kindOf(v, types) {
 
 export default {
   id: 'cloudformation',
-  version: 1,
+  version: 2,
   kind: 'infra',
   scope: 'file',
   wants: (p) => DOC.test(p),
   discover: (info) => [...info].filter(([p, i]) => DOC.test(p) && i.ddl === LEVEL.template).map(([p]) => ({ key: p, inputs: [p] })),
   extract(text, file, ctx) {
-    const notes = [], entities = [], kinds = []
+    const notes = [], entities = [], kinds = [], env = []
     for (const doc of documents(text, file, ctx)) {
       const types = []
+      const byId = new Map() // a table resource's logical id → its entity's name
       for (const [resources, rpath] of resourcesOf(doc.value)) {
         for (const id of Object.keys(resources)) {
           const res = resources[id]
@@ -61,6 +67,7 @@ export default {
           const as = `${id} (${res.Type})${literal || tn === undefined || tn === null ? '' : `, TableName ${textOf(tn)}`}`
           const own = lineIn(doc, ...rpath, id).line
           const at = (...p) => ({ path: file, line: p.length ? lineIn(doc, ...base, ...p).line : own })
+          byId.set(id, name)
           if (!isObj(props) || isRef(props)) {
             notes.push(`${id}: its Properties are ${textOf(props)}, a reference, not resolved`)
             entities.push({ name, kind: 'table', billing: null, stream: null, whole: false, as, ...at(), fields: [], keys: [], indexes: [], relations: [] })
@@ -74,6 +81,7 @@ export default {
         }
       }
       if (types.length) kinds.push(kindOf(doc.value, types))
+      env.push(...wiring(doc, byId, new Set(entities.map((e) => e.name)), file))
     }
     if (!entities.length) return { declarations: [] }
     const kind = [...new Set(kinds)].join(' and ')
@@ -83,6 +91,40 @@ export default {
       complete: false, partial: false, status: 'read',
       label: `${kind}, ${entities.length} table${entities.length === 1 ? '' : 's'}`,
       notes: capNotes(notes, 4 * NOTES), entities,
+      ...(env.length ? { env: env.slice(0, 200) } : {}),
     }] }
   },
+}
+
+// The environment variables a template sets to one of its tables, for the item binding
+// (data/binding.mjs): [{ name, table, path, line }]. Read from each function's
+// Properties.Environment.Variables (AWS::Lambda::Function, AWS::Serverless::Function), SAM's
+// Globals.Function, and the Serverless Framework's provider.environment and functions.*.environment.
+// A value names a table when it is `!Ref` (or `{ Ref }`) to a table resource of the document, or a
+// literal equal to a table's name. Only those variables are kept: no other variable, by name or value.
+const FUNCTION_TYPES = new Set(['AWS::Lambda::Function', 'AWS::Serverless::Function'])
+function wiring(doc, byId, names, file) {
+  const out = []
+  const v = doc.value
+  if (!isObj(v)) return out
+  const maps = [] // [vars, path]
+  for (const [resources, rpath] of resourcesOf(v)) {
+    for (const id of Object.keys(resources)) {
+      const r = resources[id]
+      if (isObj(r) && FUNCTION_TYPES.has(r.Type) && isObj(r.Properties) && isObj(r.Properties.Environment) && isObj(r.Properties.Environment.Variables)) maps.push([r.Properties.Environment.Variables, [...rpath, id, 'Properties', 'Environment', 'Variables']])
+    }
+  }
+  const g = isObj(v.Globals) && isObj(v.Globals.Function) && isObj(v.Globals.Function.Environment) ? v.Globals.Function.Environment.Variables : null
+  if (isObj(g)) maps.push([g, ['Globals', 'Function', 'Environment', 'Variables']])
+  if (isObj(v.provider) && isObj(v.provider.environment)) maps.push([v.provider.environment, ['provider', 'environment']])
+  if (isObj(v.functions)) for (const f of Object.keys(v.functions)) if (isObj(v.functions[f]) && isObj(v.functions[f].environment)) maps.push([v.functions[f].environment, ['functions', f, 'environment']])
+  for (const [vars, path] of maps) {
+    for (const k of Object.keys(vars)) {
+      const x = vars[k]
+      const ref = fnOf(x) === 'Ref' ? (tagOf(x) ? x.value : x.Ref) : null
+      const table = typeof ref === 'string' && byId.has(ref) ? byId.get(ref) : typeof x === 'string' && !isRef(x) && names.has(x) ? x : null
+      if (table) out.push({ name: k, table, path: file, line: lineIn(doc, ...path, k).line })
+    }
+  }
+  return out
 }

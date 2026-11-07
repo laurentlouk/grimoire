@@ -4,8 +4,9 @@
 // the source of truth for what code does: that is read in the code, at the path:line given here.
 import { langOf } from './langs.mjs'
 import { reconcile, elementsOf, storeSummary } from './data/reconcile.mjs'
+import { bindingHow } from './data/binding.mjs'
 import { kvIndex, projectionText } from './data/model.mjs'
-import { diffModels } from './data/diff.mjs'
+import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
@@ -45,7 +46,8 @@ export const kvTableText = (e) => `${e.billing || 'billing not said'} · ${e.str
 export function describe(c, el, dialect = null) {
   const kv = dialect === 'dynamodb'
   if (c.kind === 'entity') return `${el.name}  ${el.kind}${el.kind === 'table' || el.fields.length ? `, ${plural(el.fields.length, kv ? 'attribute' : 'column')}` : ''}${kv ? `, ${kvTableText(el)}` : ''}`
-  if (c.kind === 'field' && kv) return `${c.entity}.${el.name}  attribute ${typeOf(el)}${el.nullable ? '' : ', a key of the table'}`
+  if (c.kind === 'field' && kv && el.item && el.sources.every((s) => s.kind === 'code')) return `${c.entity}.${el.name}  item field, ${itemText(el)}`
+  if (c.kind === 'field' && kv) return `${c.entity}.${el.name}  attribute ${typeOf(el)}${el.nullable ? '' : ', a key of the table'}${el.item ? `; item: ${itemText(el)}` : ''}`
   if (c.kind === 'field') return `${c.entity}.${el.name}  column ${typeOf(el)}, ${el.nullable ? 'nullable' : 'not null'}${el.default !== null && el.default !== undefined ? `, default ${el.default}` : ''}${el.generated ? `, generated ${el.generated}` : ''}`
   if (c.kind === 'key' && kv) return `${c.entity} ${kvKeyText(el)}${el.role === 'ttl' ? '' : ' key'}`
   if (c.kind === 'key') return `${c.entity} ${el.role} key (${el.parts.join(', ')})`
@@ -343,14 +345,41 @@ export class Graph {
       }
       if (st.dialectFrom) out.push(`  dialect: ${this.dialectFrom(st.repo, st.dialectFrom)}`)
     }
+    out.push(...this.dataItems(model))
     if (failed.length) out.push(`Extractor failures (${failed.length}), their facts are missing:`, ...failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
     return out.join('\n')
+  }
+  // the logical tables declared in several places, and the item types code converts, bound or not
+  dataItems(model) {
+    const out = []
+    const lg = model.logical || []
+    if (lg.length) {
+      out.push(`Logical tables (${lg.length}), one table declared in several places (matched on a name template's literal parts, or the same name; never by a guess):`)
+      for (const g of lg) out.push(`  ${g.name}  ${g.members.join(' + ')}  (${g.via})${g.conflicts.length ? `  [${plural(g.conflicts.length, 'conflict')} across them]` : ''}`)
+    }
+    const items = model.items || []
+    if (!items.length) return out
+    const bound = items.filter((it) => it.bound.length)
+    out.push(`Item types (${items.length}), the types code converts to or from an item: ${bound.length} bound to a table, ${items.length - bound.length} unbound`)
+    const by = new Map()
+    for (const b of model.bindings || []) { if (!by.has(b.item)) by.set(b.item, []); by.get(b.item).push(b) }
+    for (const repo of [...new Set(items.map((it) => it.repo))]) {
+      for (const it of items.filter((x) => x.repo === repo)) {
+        const bs = by.get(it.id) || []
+        const what = !bs.length ? 'unbound: no table name or environment variable pairs with its conversions'
+          : bs[0].confidence === 'ambiguous' ? `ambiguous: ${bs.map((b) => b.table).join(' | ')} (${bindingHow(bs[0])})`
+          : `→ ${bs[0].table}  ${bs[0].confidence} (${bindingHow(bs[0])})`
+        out.push(`  ${it.id}  ${what}  ${this.dloc(it)}`)
+      }
+    }
+    if (model.unresolved?.length) out.push(`  (${plural(model.unresolved.length, 'conversion')} of a type with no single definition: ${[...new Set(model.unresolved.map((u) => u.type))].slice(0, 6).join(', ')})`)
+    return out
   }
   dialectFrom(repo, f) {
     const at = f.path ? this.dloc({ repo, path: f.path, line: f.line }) : ''
     return f.how === 'stated' ? `stated at ${at}` : f.how === 'sniffed' ? `sniffed: ${f.marker} at ${at}` : f.how === 'supabase' ? 'Supabase migrations are Postgres' : 'set in grimoire.config.json (graph.data.migrations)'
   }
-  sources(repo, list) { return list.map((s) => this.dloc({ repo, path: s.path, line: s.line })).join(' · ') }
+  sources(repo, list) { return list.map((s) => this.dloc({ repo: s.repo ?? repo, path: s.path, line: s.line })).join(' · ') }
   findStore(model, spec) {
     const hits = model.stores.filter((s) => s.id === spec || s.name === spec)
     return hits.length ? hits : model.stores.filter((s) => s.id.toLowerCase() === spec.toLowerCase() || s.name.toLowerCase() === spec.toLowerCase())
@@ -366,9 +395,11 @@ export class Graph {
       const pk = e.keys.find((k) => k.role === 'primary')
       const conflicts = elementsOf(e).reduce((a, [, x]) => a + x.conflicts.length, 0)
       const count = (kind) => e.indexes.filter((i) => i.kind === kind).length
-      const parts = kv ? [plural(e.fields.length, 'attribute'), ...e.keys.map(kvKeyText), count('gsi') ? plural(count('gsi'), 'GSI') : null, count('lsi') ? plural(count('lsi'), 'LSI') : null, kvTableText(e)].filter(Boolean)
+      const itemOnly = e.fields.filter((f) => f.item && f.sources.every((s) => s.kind === 'code')).length
+      const parts = kv ? [plural(e.fields.length - itemOnly, 'attribute'), itemOnly ? plural(itemOnly, 'item field') : null, ...e.keys.map(kvKeyText), count('gsi') ? plural(count('gsi'), 'GSI') : null, count('lsi') ? plural(count('lsi'), 'LSI') : null, kvTableText(e)].filter(Boolean)
         : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.length ? `foreign keys → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null].filter(Boolean)
-      out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}`)
+      const items = (e.bound || []).map((b) => `${b.type} (${b.confidence})`)
+      out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}${items.length ? `  items: ${items.join(', ')}` : ''}${e.logical ? `  [one table with ${e.logical.members.filter((m) => m !== e.id).join(', ')}]` : ''}`)
     }
     return out.join('\n')
   }
@@ -384,15 +415,44 @@ export class Graph {
     const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}${s.as ? `, ${s.as}` : ''}]`).join(' · ')}`]
     if (kv) out.push(`  ${kvTableText(e)}`)
     if (e.nameTemplate) out.push(`  name template ${e.nameTemplate}: a part of the name is unknown (each {…}), never guessed`)
-    const section = (title, list, line) => { if (list.length) out.push(`${title} (${list.length}):`, ...list.map((x) => `  ${line(x)}  — ${this.sources(st.repo, x.sources)}`)) }
-    if (kv) section('Attributes', e.fields, (f) => `${f.name}  ${f.type.raw}${f.nullable ? '' : '  a key of the table'}`)
+    if (e.logicalNote) out.push(`  ${e.logicalNote}`)
+    const section = (title, list, line, src = (x) => x.sources) => { if (list.length) out.push(`${title} (${list.length}):`, ...list.map((x) => `  ${line(x)}  — ${this.sources(st.repo, src(x))}`)) }
+    // a key-value table's attributes: what its declarations type (the item's fields are listed apart)
+    const declared = (f) => f.sources.filter((s) => s.kind !== 'code')
+    if (kv) section('Attributes', e.fields.filter((f) => declared(f).length), (f) => `${f.name}  ${f.type.raw}${f.nullable ? '' : '  a key of the table'}`, declared)
     else section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}`)
     section('Keys', e.keys, (k) => (kv ? kvKeyText(k) : `${k.role} (${k.parts.join(', ')})`))
     section('Indexes', e.indexes, (i) => (kvIndex(i) ? `${i.name}  ${kvIndexText(i)}` : `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}`))
     section('Foreign keys', e.relations, (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
+    if (kv) {
+      const item = e.fields.filter((f) => f.item)
+      const types = [...new Set(item.flatMap((f) => f.item.map((i) => i.type)))]
+      const keyRole = new Map(e.keys.filter((k) => k.role !== 'ttl').flatMap((k) => k.parts.map((p) => [p, k.role])))
+      const said = (i) => `${i.raw || i.kind}${i.nullable ? ', nullable' : ''}${i.default ? `, default ${i.default}` : ''}${i.values && !/^['"]/.test(i.raw || '') ? ` (${i.values.join(' | ')})` : ''}`
+      if (item.length) out.push(`Item (${plural(item.length, 'field')}, as ${types.join(' and ')} ${types.length === 1 ? 'stores it' : 'store them'}; nested by dotted path):`, ...item.map((f) => {
+        const depth = f.name.split('.').length - 1
+        const as = f.item.length === 1 ? said(f.item[0]) : f.item.map((i) => `${i.type}: ${said(i)}`).join(' · ')
+        return `  ${'  '.repeat(depth)}${f.name}  ${as}${keyRole.has(f.name) ? `  [${keyRole.get(f.name)} key]` : ''}  — ${this.sources(st.repo, f.sources.filter((s) => s.kind === 'code'))}`
+      }))
+      const bound = e.bound || []
+      if (bound.length) {
+        out.push(`Bound item types (${bound.length}): how code pairs each with this table (below convention, a lead: its rivals listed)`)
+        for (const b of bound) {
+          out.push(`  ${b.type}  ${b.confidence}  ${bindingHow(b)}${b.sites > 1 ? `, ${b.sites} sites` : ''}  ${this.dloc(b)}`)
+          for (const x of b.evidence) out.push(`    ${x.what}  ${x.text}  ${this.dloc(x)}${x.test ? '  (test code)' : ''}`)
+          if (b.rivals.length) out.push(`    rivals: ${b.rivals.map((r) => `${r.table} (${r.confidence}, ${bindingHow(r)})`).join(' · ')}`)
+        }
+      } else if (model.items?.length) out.push('Bound item types: none (no code converting a type names this table)')
+    }
     const shown = (attr, v) => (kv ? changeVal(attr, v) : v)
     const conflicts = elementsOf(e).flatMap(([label, x]) => x.conflicts.map((c) => `  ${label}  ${c.attr}: ${c.values.map((v) => `${shown(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
     out.push(conflicts.length ? `Conflicts (${conflicts.length}): the declarations disagree; each side is kept` : 'Conflicts: none', ...conflicts)
+    if (kv && e.logical) {
+      const g = e.logical
+      out.push(`One logical table: ${g.members.join(' + ')} (${g.via}); their differences are conflicts`)
+      if (g.conflicts.length) out.push(`Conflicts across them (${g.conflicts.length}): each declaration kept`, ...g.conflicts.map((c) => `  ${c.label}  ${c.attr}: ${c.values.map((v) => `${changeVal(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc(s)} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
+      else out.push('Conflicts across them: none')
+    }
     return out.join('\n')
   }
 

@@ -19,13 +19,15 @@
 //     each capped as the index caps it). Memoised in this process per (repository, commit, extractor
 //     versions, the config that steers discovery); nothing is written to graph.db or to disk. Its
 //     YAML that declares a table is parsed in a process of its own (readers/yaml-aside.mjs), with the
-//     indexer's flags, never in this one.
+//     indexer's flags, never in this one, and so is its source code the item binding reads
+//     (readers/code-aside.mjs).
 //   treeAt(dir, commit), blobs(dir, list): those two git reads, shared with the architecture change
 //     view (arch-change.mjs), which reads the saved diagrams at the base the same way.
 import { spawnSync } from 'node:child_process'
-import { EXTRACTORS, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
+import { EXTRACTORS, CODE, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
 import { reconcile } from './reconcile.mjs'
 import { parseAside } from './readers/yaml-aside.mjs'
+import { extractAside } from './readers/code-aside.mjs'
 import { tableLevel } from './readers/dynamodb.mjs'
 import { stripBom } from './readers/documents.mjs'
 import { baseCandidates } from '../freshness.mjs'
@@ -101,7 +103,11 @@ function extractAt(abs, commit, project, overrides, ctx) {
   // the YAML a table extractor will read, parsed in a process of its own (readers/yaml-aside.mjs)
   const yaml = parseAside([...new Set(want.filter((p) => YAML.test(p) && text.has(p)).map((p) => stripBom(read(p))).filter((t) => tableLevel(t)))])
   const yamlOf = (t) => { const v = yaml.get(t); if (v instanceof Error) throw v; if (!v) throw new Error('no YAML reader: the text was not parsed'); return v }
-  return extractAll({ paths, size: (p) => files.get(p).size, read }, { exclude: [], ...project }, overrides, { ...ctx, yaml: yamlOf })
+  // the source files a code extractor reads, read in a process of its own too (readers/code-aside.mjs)
+  const code = want.filter((p) => text.get(p) && CODE.some((ex) => ex.wants(p))).map((p) => ({ id: CODE.find((ex) => ex.wants(p)).id, path: p, text: text.get(p) }))
+  const facts = code.length ? extractAside(code) : new Map()
+  const aside = (id, p) => { const v = facts.get(p); if (v instanceof Error) throw v; if (!v) throw new Error('no code reader: the file was not read'); return v }
+  return extractAll({ paths, size: (p) => files.get(p).size, read }, { exclude: [], ...project }, overrides, { ...ctx, yaml: yamlOf, aside })
 }
 const YAML = /\.(?:ya?ml|template)$/i
 const BATCH = 32 << 20

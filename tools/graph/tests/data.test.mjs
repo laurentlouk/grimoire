@@ -429,7 +429,7 @@ CREATE TABLE \`shelf_books\` (
 console.log('\n6 · finding and ordering migration folders')
 {
   eq(candidates(['a/down.sql', 'a/0001_x.down.sql', 'a/0001_x.up.sql', 'tests/fixtures/db/0001_a.sql', 'node_modules/pkg/0001_a.sql', 'db/0007_tests.sql', 'src/app.ts', 'drizzle/meta/0003_snapshot.json'], { exclude: [] }),
-    ['a/0001_x.up.sql', 'db/0007_tests.sql', 'drizzle/meta/0003_snapshot.json'], 'inputs: SQL but no down migration, nothing under test-support folders or dependencies (a migration named …_tests.sql is still one)')
+    ['a/0001_x.up.sql', 'db/0007_tests.sql', 'src/app.ts', 'drizzle/meta/0003_snapshot.json'], 'inputs: SQL but no down migration, nothing under test-support folders or dependencies (a migration named …_tests.sql is still one); a TypeScript source, for the item shapes')
   const info = new Map(Object.entries({
     'drizzle.config.ts': {}, 'drizzle/0000_a.sql': { ddl: 2 }, 'drizzle/0001_b.sql': { ddl: 1 }, 'drizzle/meta/_journal.json': {},
     'prisma/schema.prisma': {}, 'prisma/migrations/migration_lock.toml': {}, 'prisma/migrations/20240105090000_init/migration.sql': { ddl: 2 },
@@ -1775,7 +1775,7 @@ resource "aws_dynamodb_table" "c" {
     return extractAll({ paths: [...files.keys()], size: (p) => files.get(p).length, read: (p) => files.get(p) }, { exclude: [] }, [], {})
   }
   const rows = tfRun()
-  eq(rows.map((r) => [r.extractor, r.key, r.error || null]), [['dynamodb-table@1', 'local/tables/orders.json', null], ['terraform@1', 'modules/kv-tables', null], ['terraform@1', 'live/prod/legacy/terragrunt.hcl', null]],
+  eq(rows.map((r) => [r.extractor, r.key, r.error || null]), [['dynamodb-table@1', 'local/tables/orders.json', null], ['terraform@2', 'modules/kv-tables', null], ['terraform@2', 'live/prod/legacy/terragrunt.hcl', null]],
     'found by content: the module folder declaring a table resource is a job, the configuration whose module is out of reach another; the configuration of a remote module that is no table module, and the root and stage files, are none')
   const decl = rows[1].facts.declarations
   eq(decl.map((d) => [d.source.path, d.label, d.status]), [['live/prod/tables/terragrunt.hcl', 'Terraform module modules/kv-tables through Terragrunt, 3 tables', 'read']], 'one declaration per configuration that runs the module, at that configuration')
@@ -1952,6 +1952,219 @@ resource "aws_dynamodb_table" "events" {
   eq([tfLevel('m/main.tf', 'resource "aws_dynamodb_table" "t" {}'), tfLevel('m/x.tf', '# resource "aws_dynamodb_table"\nvariable "a" {}'), tfLevel('a/terragrunt.hcl', 'include "root" {}'), tfLevel('a/root.hcl', 'inputs = {}'), tfLevel('a/terragrunt.hcl', 'terraform {\n  source = "git::https://example.com/m.git//dynamodb"\n}'), tfLevel('a/terragrunt.hcl', 'terraform {\n  source = "../modules/dynamodb"\n}'), tfLevel('m/c.tf', 'module "t" {\n  source = "terraform-aws-modules/dynamodb-table/aws"\n}')],
     [TF_LEVEL.module, 1, TF_LEVEL.unit, 1, TF_LEVEL.remote, TF_LEVEL.unit, TF_LEVEL.remote], 'tfLevel: a module declares a table resource (not in a comment); a terragrunt.hcl is a configuration Terragrunt runs; a remote source naming a table module is out of reach; a local one is no such thing')
   eq(candidates(['m/main.tf', 'm/terraform.tfvars', 'm/x.auto.tfvars.json', 'live/terragrunt.hcl', 'm/tests/plan.tftest.hcl', 'm/.terraform.lock.hcl', 'live/.terragrunt-cache/abc/main.tf', 'm/plan.tftest.hcl'], { exclude: [] }), ['m/main.tf', 'm/terraform.tfvars', 'm/x.auto.tfvars.json', 'live/terragrunt.hcl'], 'the candidates: .tf, .tfvars(.json), .hcl; never a test file, a lock file or Terragrunt\'s cache')
+}
+
+// ── 24 · item shapes and binding ──
+console.log('\n24 · item shapes and binding: names matched on a template\'s literal parts (readers/names.mjs), serde\'s case rules, logical tables, bindings with their confidence and rivals (data/binding.mjs)')
+{
+  const { namesMatch, codeName, lastWord } = await import('../lib/data/readers/names.mjs')
+  const { renameField, renameVariant, RULES } = await import('../lib/data/extractors/serde.mjs')
+  const { logicalTables, bindItems, dashed } = await import('../lib/data/binding.mjs')
+  const T = '{env}-{project}-orders'
+  // the template's literal parts, its unknown parts wildcards; the code's {} anything it fills in
+  eq([['{}-shop-orders', T], ['test-shop-orders', T], ['{}-orders', T], ['{}-{}-orders', '{env}-shop-orders'], ['{}-shop-orders', 'local-shop-orders'], ['Orders', 'Orders']].map(([c, t]) => namesMatch(c, t)), [true, true, true, true, true, true],
+    'a name the code builds matches a template on its literal parts (a format! string, a literal, a wildcard holding several parts), and an exact name')
+  eq([['{}-{}', T], ['{}', T], ['orders', T], ['{}-shop-orders-archive', T], ['{}-shop-orders', '{env}-{project}-archived_orders'], ['test-shop-orbit', '{env}-{project}-orbit_participants'], ['test-shop-orbit_participants', '{env}-{project}-orbit'], ['{}', '{name}']].map(([c, t]) => namesMatch(c, t)), [false, false, false, false, false, false, false, false],
+    'the table\'s last word must be spelt by the code\'s literal characters, the whole name matched: no wildcard alone, no prefix or suffix of another name, a name wholly unknown matches nothing')
+  eq([['orders', 'Orders'], ['Order', 'Orders'], ['{}-shop-order', T], ['{}-Shop-Orders', '{env}-shop-orders'], ['{}-shop_orders', T]].map(([c, t]) => namesMatch(c, t)), [false, false, false, false, false],
+    'no fuzzy matching: no letter case folded, no plural, no separator swapped')
+  eq([codeName([null, '-shop-orders']), codeName(['test-shop-orders']), codeName(['id']), codeName(['a b']), codeName([null]), codeName(['123']), codeName([null, '-', null, '-', null, '-', null, '-', null, '-x'])], ['{}-shop-orders', 'test-shop-orders', null, null, null, null, null],
+    'codeName: what could name a table (DynamoDB\'s characters, 3 literal characters and a letter at least, few parts filled in)')
+  eq([lastWord(T), lastWord('Orders'), lastWord('{env}-orbit_participants'), lastWord('{name}')], ['orders', 'Orders', 'participants', null], 'the distinctive part: the last word of the literal text')
+  // serde's case rules: a field's from snake_case, a variant's from PascalCase
+  eq(RULES.map((r) => renameField('created_at_utc', r)), ['created_at_utc', 'CREATED_AT_UTC', 'CreatedAtUtc', 'createdAtUtc', 'created_at_utc', 'CREATED_AT_UTC', 'created-at-utc', 'CREATED-AT-UTC'], 'rename_all on a field: every case style serde knows')
+  eq(RULES.map((r) => renameVariant('OnHold', r)), ['onhold', 'ONHOLD', 'OnHold', 'onHold', 'on_hold', 'ON_HOLD', 'on-hold', 'ON-HOLD'], 'rename_all on a variant: every case style serde knows')
+
+  // logical tables: one table declared in several places, grouped by its template, never by a guess
+  const ents = [['infra:dynamodb/{env}-{project}-orders', T], ['web:dynamodb/{env}-{project}-orders', T], ['api:dynamodb/local-shop-orders', 'local-shop-orders'], ['api:dynamodb/Orders', 'Orders'], ['api:dynamodb/orders', 'orders'],
+    ['infra:dynamodb/{env}-{project}-carts', '{env}-{project}-carts'], ['infra:dynamodb/{env}-carts', '{env}-carts'], ['api:dynamodb/dev-shop-carts', 'dev-shop-carts'], ['a:dynamodb/Reviews', 'Reviews'], ['b:dynamodb/Reviews', 'Reviews']].map(([id, name]) => ({ id, name }))
+  const lt = logicalTables(ents)
+  eq(lt.groups.filter((g) => g.members.length > 1).map((g) => [g.name, g.members, g.via]), [
+    ['Reviews', ['a:dynamodb/Reviews', 'b:dynamodb/Reviews'], 'the same name'],
+    [T, ['api:dynamodb/local-shop-orders', 'infra:dynamodb/{env}-{project}-orders', 'web:dynamodb/{env}-{project}-orders'], 'an exact name its template matches'],
+  ], 'grouped: one template in two stores, an exact name it matches, one exact name in two stores; Orders and orders stay apart (no case folding)')
+  eq([...lt.notes], [['api:dynamodb/dev-shop-carts', 'its name matches 2 name templates ({env}-carts, {env}-{project}-carts): grouped with none']], 'an exact name two templates match joins neither, and says why')
+
+  // bindings, from hand-written code facts: each rule with its evidence, its confidence and its rivals
+  const groups = logicalTables([...[T, '{env}-{project}-customers', '{env}-{project}-carts', '{env}-{project}-saved_carts', '{env}-{project}-reviews'].map((n) => ({ id: `infra:dynamodb/${n}`, name: n })), { id: 'api:dynamodb/Orders', name: 'Orders' }]).groups
+  const entities = new Map(groups.flatMap((g) => g.members).map((id) => [id, { id, name: id.slice(id.indexOf('/') + 1) }]))
+  const wiring = [{ name: 'CUSTOMERS_TABLE', entity: 'infra:dynamodb/{env}-{project}-customers', repo: 'infra', path: 'main.tf', line: 30 }, { name: 'ORDERS_TABLE', entity: `infra:dynamodb/${T}`, repo: 'infra', path: 'main.tf', line: 31 }]
+  const ty = (name, line, extra = {}) => ({ name, kind: 'struct', line, end: line + 2, serde: true, fields: [{ name: 'id', raw: 'String', t: { k: 'string' }, nullable: false, default: null, line: line + 1 }], ...extra })
+  const fn = (name, line, x = {}) => ({ name, line, end: line + 5, converts: [], names: [], env: [], uses: [], ...x })
+  const row = (path, code) => ({ repo: 'api', extractor: 'serde@1', code: { path, lang: 'rust', types: [], consts: [], fns: [], notes: [], ...code } })
+  const code = [
+    row('src/model.rs', { types: [ty('Order', 1), ty('Customer', 5), ty('Cart', 9), ty('Review', 13), ty('Coupon', 17, { converts: 20 }), ty('Promo', 21), ty('Thing', 25)] }),
+    row('src/orders.rs', { fns: [fn('put_order', 3, { converts: [{ type: 'Order', line: 4, how: 'to_item' }], names: [{ text: '{}-shop-orders', line: 5 }] })] }),
+    row('src/customers.rs', { fns: [fn('load', 3, { converts: [{ type: 'Customer', line: 6, how: 'from_item' }], env: [{ name: 'CUSTOMERS_TABLE', line: 4 }] }), fn('old', 10, { names: [{ text: '{}-shop-orders', line: 11 }] })] }),
+    row('src/carts.rs', { fns: [fn('save_for_later', 3, { converts: [{ type: 'Cart', line: 4, how: 'to_item' }], names: [{ text: '{}-shop-saved_carts', line: 5 }, { text: '{}-shop-carts', line: 6 }] })] }),
+    row('src/reviews.rs', { fns: [fn('put', 3, { converts: [{ type: 'Review', line: 4, how: 'to_item' }] }), fn('tests::names_its_table', 20, { test: true, names: [{ text: 'test-shop-reviews', line: 21 }] })] }),
+    row('src/config.rs', { consts: [{ name: 'ORDERS', line: 2, names: [], env: [{ name: 'ORDERS_TABLE', line: 2 }] }] }),
+    row('src/admin.rs', { types: [ty('Export', 1), ty('Thing', 4)], fns: [fn('export', 5, { converts: [{ type: 'Export', line: 6, how: 'to_item' }], uses: ['ORDERS'] })] }),
+    row('src/local.rs', { fns: [fn('seed', 12, { converts: [{ type: 'Promo', line: 13, how: 'to_item' }], names: [{ text: 'Orders', line: 14 }] })] }),
+    row('src/other.rs', { fns: [fn('x', 1, { converts: [{ type: 'Thing', line: 2, how: 'from_item' }] })] }),
+  ]
+  code.push({ repo: 'api', extractor: 'serde@1', code: { path: 'src/mapped.rs', lang: 'rust', types: [ty('Sku', 1)], consts: [], fns: [], notes: [], mappers: [{ type: 'Sku', table: '{env}-{project}-reviews', line: 1 }] } })
+  const B = bindItems(code, groups, entities, wiring)
+  const by = (item) => B.bindings.filter((b) => b.item === item).map((b) => [b.table, b.confidence, b.via, b.pairing, b.rivals.map((r) => `${r.table} ${r.confidence}`)])
+  eq(by('api:Customer'), [['{env}-{project}-customers', 'convention', 'env', 'function', [`${T} name-match`]]], 'env chain: the function reads the variable the infra sets to the table: convention; a name built in another function of the file is a weaker rival')
+  eq(B.bindings.find((b) => b.item === 'api:Customer').evidence.map((x) => [x.what, x.text, `${x.path}:${x.line}`]), [['converts', 'Customer (from_item) in load', 'src/customers.rs:6'], ['reads', 'CUSTOMERS_TABLE', 'src/customers.rs:4'], ['sets', `CUSTOMERS_TABLE = {env}-{project}-customers`, 'main.tf:30']], '… with its evidence: the conversion, the read, the infra line that sets it')
+  eq(by('api:Order'), [[T, 'name-match', 'nameTemplate', 'function', []]], 'name template: a format string its template matches, in the function that converts it: name-match')
+  eq(by('api:Cart'), [['{env}-{project}-carts', 'ambiguous', 'nameTemplate', 'function', ['{env}-{project}-saved_carts ambiguous']], ['{env}-{project}-saved_carts', 'ambiguous', 'nameTemplate', 'function', ['{env}-{project}-carts ambiguous']]], 'two tables at the best rank: each ambiguous, the other its rival')
+  ok(dashed('ambiguous') && dashed('name-match') && !dashed('convention') && !dashed('declared'), 'below convention a binding is drawn dashed')
+  eq([by('api:Review'), B.bindings.find((b) => b.item === 'api:Review').evidence.map((x) => [x.what, x.test || false])], [[['{env}-{project}-reviews', 'name-match', 'nameTemplate', 'file', []]], [['converts', false], ['builds', true]]], 'co-occurrence in one file only (a test names the table): name-match, the test code said')
+  eq(B.bindings.filter((b) => b.item === 'api:Export').map((b) => [b.table, b.via, b.pairing, b.confidence, b.evidence.map((x) => `${x.what} ${x.path}:${x.line}`)]), [[T, 'env', 'function', 'convention', ['converts src/admin.rs:6', 'const src/config.rs:2', 'reads src/config.rs:2', 'sets main.tf:31']]],
+    'a constant of another file the function reads counts as its own: the env chain through it, in one function')
+  eq(by('api:Promo'), [['Orders', 'name-match', 'nameTemplate', 'function', []]], 'an exact name the code spells binds the table of that name, and only it (Orders, never {env}-{project}-orders)')
+  eq(by('api:Sku'), [['{env}-{project}-reviews', 'declared', 'mapper', 'mapper', []]], 'the mapper hook: a binding a mapper declares is declared')
+  eq(B.items.filter((it) => !it.bound.length).map((it) => [it.id, it.converts.map((c) => c.how)]), [['api:Coupon', ['implements a conversion']]], 'a type implementing a conversion that no table name pairs with is unbound')
+  eq(B.unresolved.map((u) => [u.type, u.path]), [['Thing', 'src/other.rs']], 'a conversion of a name with two definitions and none in its file is not resolved, and said')
+
+  // the extractors, through the pinned grammars
+  const deps = await import('../lib/deps.mjs')
+  if (!deps.findDeps()) {
+    if (process.env.CI) { FAIL++; console.log('   ✗ FAIL: parser runtime missing (run npm ci --prefix tools/graph)') } else console.log('   - extractors skipped: parser runtime not installed (npm ci --prefix tools/graph)')
+  } else {
+    const rt = await deps.loadRuntime({ install: false })
+    const ps = { rust: await rt.parserFor('rust'), typescript: await rt.parserFor('typescript'), tsx: await rt.parserFor('tsx') }
+    const ctx = { tree: (lang, t) => ps[lang].parse(t) }
+    const { default: serde } = await import('../lib/data/extractors/serde.mjs')
+    const { default: tsTypes } = await import('../lib/data/extractors/ts-types.mjs')
+    const RS = [
+      'use serde::{Deserialize, Serialize};',
+      '#[derive(Debug, Serialize, Deserialize)]',
+      '#[serde(rename_all = "camelCase")]',
+      'pub struct Order {',
+      '    pub order_id: String,',
+      '    #[serde(rename = "pk")]',
+      '    pub key: String,',
+      '    pub r#type: Kind,',
+      '    pub note: Option<String>,',
+      '    #[serde(skip_serializing_if = "Vec::is_empty")]',
+      '    pub tags: Vec<String>,',
+      '    #[serde(default)]',
+      '    pub gift: bool,',
+      '    #[serde(default = "zero")]',
+      '    pub retries: u32,',
+      '    #[serde(skip)]',
+      '    pub cache: Option<u64>,',
+      '    #[serde(skip_serializing)]',
+      '    pub digest: String,',
+      '    #[serde(skip_deserializing)]',
+      '    pub computed: u32,',
+      '    #[serde(flatten)]',
+      '    pub audit: Audit,',
+      '    pub lines: Vec<Line>,',
+      '    pub prices: HashMap<String, Price>,',
+      '    pub shipping: Box<Address>,',
+      '    #[serde(rename(serialize = "st", deserialize = "state"))]',
+      '    pub status: Status,',
+      '    pub pay: Payment,',
+      '    pub legacy: Legacy,',
+      '    pub ext: External,',
+      '}',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(default)]',
+      'pub struct Audit { pub created_at: String, pub by: Option<UserId> }',
+      '#[derive(Serialize, Deserialize)]',
+      'pub struct UserId(String);',
+      '#[derive(Serialize, Deserialize)]',
+      'pub struct Line { pub sku: String }',
+      '#[derive(Serialize, Deserialize)]',
+      'pub struct Price { pub cents: i64 }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(transparent)]',
+      'pub struct Address { pub text: String }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(rename_all = "snake_case")]',
+      'pub enum Status { Open, OnHold }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(tag = "type", rename_all = "lowercase", rename_all_fields = "camelCase")]',
+      'pub enum Payment { Card { last_four: String }, #[serde(rename = "wire")] Bank { iban_hash: String }, Cash }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(untagged)]',
+      'pub enum Legacy { V1 { old: String }, V2 { new_name: String } }',
+      '#[derive(Serialize, Deserialize)]',
+      'pub enum External { A { x: u8 }, B(u8), C }',
+      '#[derive(Serialize, Deserialize)]',
+      '#[serde(tag = "kind")]',
+      'pub struct Event { pub id: String }',
+      'pub struct Plain { pub a: u8 }',
+      'const ORDERS: &str = "orders-v2";',
+      'static TABLE: Lazy<String> = Lazy::new(|| std::env::var("ORDERS_TABLE").unwrap());',
+      'impl Event { pub fn to_dynamo_item(&self) -> Item { serde_dynamo::to_item(self).unwrap() } }',
+      'pub async fn put(client: &Client, stage: &str, order: &Order) -> Result<Option<Line>, Error> {',
+      '    let item = serde_dynamo::to_item(order)?;',
+      '    client.put_item().table_name(format!("{}-shop-orders", stage)).table_name(ORDERS).send().await?;',
+      '    let e: Event = serde_dynamo::from_item(item.clone())?;',
+      '    let ps = serde_dynamo::from_items::<_, Price>(items)?;',
+      '    let a = Audit::from_dynamo_item(item.clone());',
+      '    let t = std::env::var("PRICES_TABLE")?;',
+      '    Ok(out.item.map(|i| serde_dynamo::from_item(i)).transpose()?)',
+      '}',
+      '#[cfg(test)]',
+      'mod tests { #[test] fn t() { let x = "test-shop-orders"; } }',
+    ].join('\n')
+    const rc = serde.extract(RS, 'src/model.rs', ctx).code
+    const order = rc.types.find((t) => t.name === 'Order')
+    eq(order.fields.map((f) => [f.name, f.ident ?? null, f.nullable, f.default, !!f.flatten]), [
+      ['orderId', 'order_id', false, null, false], ['pk', 'key', false, null, false], ['type', null, false, null, false], ['note', null, true, null, false], ['tags', null, true, null, false],
+      ['gift', null, false, 'default', false], ['retries', null, false, 'zero', false], ['computed', null, false, null, false], ['audit', null, false, null, true], ['lines', null, false, null, false],
+      ['prices', null, false, null, false], ['shipping', null, false, null, false], ['st', 'status', false, null, false], ['pay', null, false, null, false], ['legacy', null, false, null, false], ['ext', null, false, null, false],
+    ], 'serde: rename_all camelCase, rename (and its serialize half), r#type stored as type, Option and skip_serializing_if nullable, default bare and with its function, skip_deserializing kept, flatten marked')
+    eq(order.skipped, [{ ident: 'cache', why: 'skip' }, { ident: 'digest', why: 'skip_serializing' }], 'skip and skip_serializing: never stored, so not in the shape (listed)')
+    eq(rc.types.map((t) => t.name), ['Order', 'Audit', 'UserId', 'Line', 'Price', 'Address', 'Status', 'Payment', 'Legacy', 'External', 'Event'], 'the types serde shapes (a struct with no derive is left out)')
+    eq([rc.types.find((t) => t.name === 'Payment').variants.map((v) => [v.name, v.ident ?? null, (v.fields || []).map((f) => f.name)]), rc.types.find((t) => t.name === 'Status').variants.map((v) => v.name)],
+      [[['card', 'Card', ['lastFour']], ['wire', 'Bank', ['ibanHash']], ['cash', 'Cash', []]], ['open', 'on_hold']], 'an enum: rename_all on its variants, a variant\'s rename, rename_all_fields on its struct variants\' fields')
+    eq(rc.fns.map((f) => [f.name, f.converts.map((c) => `${c.type} ${c.how}`), f.names.map((n) => n.text), f.env.map((e) => e.name), f.uses, !!f.test]), [
+      ['Event::to_dynamo_item', ['Event to_item'], [], [], [], false],
+      ['put', ['Order to_item', 'Event from_item', 'Price from_items', 'Audit from_dynamo_item', 'Line from_item'], ['{}-shop-orders'], ['PRICES_TABLE'], ['ORDERS'], false],
+      ['t', [], ['test-shop-orders'], [], [], true],
+    ], 'uses per function (a method named by its type): each conversion\'s type (self in its impl, an argument\'s, a typed let, the turbofish, the path, the return type), the format! name, the environment read, the constant read; test code marked')
+    eq([rc.consts.map((c) => [c.name, c.names.map((n) => n.text), c.env.map((e) => e.name)]), rc.types.find((t) => t.name === 'Event').converts], [[['ORDERS', ['orders-v2'], []], ['TABLE', [], ['ORDERS_TABLE']]], 62], 'constants holding a name or reading the environment; a type implementing a conversion')
+    // the shape as stored, nested by path (data/binding.mjs)
+    const shape = (rows, item) => bindItems(rows, [], new Map(), []).items.find((it) => it.name === item).fields.map((f) => `${f.path} ${f.kind}${f.nullable ? '?' : ''}${f.values ? ` [${f.values.join(',')}]` : ''}`)
+    const rsRows = [{ repo: 'api', extractor: 'serde@1', code: rc }]
+    eq(shape(rsRows, 'Order'), ['orderId string', 'pk string', 'type ref', 'note string?', 'tags list?', 'gift bool', 'retries number', 'computed number', 'created_at string', 'by string?', 'lines list', 'lines[].sku string', 'prices map', 'prices{}.cents number',
+      'shipping string', 'st enum [open,on_hold]', 'pay object', 'pay.type enum [card,wire,cash]', 'pay.lastFour string', 'pay.ibanHash string', 'legacy object', 'legacy.old string', 'legacy.new_name string', 'ext object', 'ext.A object?', 'ext.A.x number', 'ext.B number?'],
+      'the item as stored: flatten inlines (the flattened type\'s own rules), a newtype and a transparent struct are what they hold, a unit enum its stored names, a list\'s elements under [], a map\'s values under {}, internal tagging (the tag beside the fields), untagged, external (one member per variant, a unit variant none); a type no file defines kept as its name')
+    eq([shape(rsRows, 'Event'), rc.types.find((t) => t.name === 'Event').tag], [['kind enum [Event]', 'id string'], 'kind'], 'a struct\'s tag stores its own name beside its fields')
+
+    const TSX = [
+      'export interface Base { id: string; createdAt: string }',
+      'export interface Order extends Base {',
+      "  status: 'open' | 'paid'",
+      '  note?: string',
+      '  total: number | null',
+      '  lines: Line[]',
+      '  tags: Array<string>',
+      '  prices: Record<string, Price>',
+      '  shipping: { city: string; zip?: string }',
+      '  at: Date',
+      '}',
+      'export interface Line { sku: string; qty: number }',
+      'export type Price = { cents: number }',
+      "export type Status = 'a' | 'b'",
+      'export type Named = Base & { name: string; status: Status }',
+      'const TABLE = process.env.ORDERS_TABLE',
+      'export async function save(o: Order) { await doc.send(new PutCommand({ TableName: TABLE, Item: o })) }',
+      'export const load = async (): Promise<Named> => { const r = await doc.send(new GetCommand({ TableName: `${process.env.STAGE}-shop-named`, Key: {} })); return r.Item as Named }',
+      "export function convert(item: Record<string, unknown>) { const l = unmarshall(item) as Line; return 'line-' + l.sku }",
+      'class Repo { private table = process.env.REPO_TABLE; async put(x: Price) { return this.client.send(new PutCommand({ TableName: this.table, Item: marshall(x) })) } }',
+    ].join('\n')
+    const tc = tsTypes.extract(TSX, 'src/orders.ts', ctx).code
+    eq(tc.types.map((t) => [t.name, t.kind, t.fields.map((f) => `${f.name}${f.nullable ? '?' : ''}`), t.extends ?? null, t.values ?? null]), [
+      ['Base', 'interface', ['id', 'createdAt'], null, null], ['Order', 'interface', ['status', 'note?', 'total?', 'lines', 'tags', 'prices', 'shipping', 'at'], ['Base'], null], ['Line', 'interface', ['sku', 'qty'], null, null],
+      ['Price', 'alias', ['cents'], null, null], ['Status', 'alias', [], null, ['a', 'b']], ['Named', 'alias', ['name', 'status'], ['Base'], null],
+    ], 'TypeScript: interfaces and type aliases, `?` and `| null` nullable, extends and & kept, a union of string literals an enum')
+    eq(tc.fns.map((f) => [f.name, f.converts.map((c) => `${c.type} ${c.how}`), f.names.map((n) => n.text), f.env.map((e) => e.name), f.uses]), [
+      ['save', ['Order Item'], [], [], ['TABLE']], ['load', ['Named Item as'], ['{}-shop-named'], ['STAGE'], []], ['convert', ['Line unmarshall'], ['line-{}'], [], []], ['Repo.put', ['Price marshall'], [], [], ['Repo.table']],
+    ], 'uses per function: an Item member, `.Item as T`, unmarshall(…) as T, marshall(x) of a typed parameter; a template literal\'s name and the environment it reads, a concatenation\'s name; a file constant and a class\'s own field read')
+    eq(tc.consts.map((c) => [c.name, c.env.map((e) => e.name)]), [['TABLE', ['ORDERS_TABLE']], ['Repo.table', ['REPO_TABLE']]], 'constants: a file-level const, a class field')
+    const tsRows = [{ repo: 'web', extractor: 'ts-types@1', code: tc }]
+    eq(shape(tsRows, 'Order'), ['id string', 'createdAt string', 'status enum [open,paid]', 'note string?', 'total number?', 'lines list', 'lines[].sku string', 'lines[].qty number', 'tags list', 'prices map', 'prices{}.cents number', 'shipping object', 'shipping.city string', 'shipping.zip string?', 'at string'],
+      'the TypeScript item as stored: what it extends first, nested object types, list elements and map values by path')
+    eq(shape(tsRows, 'Named'), ['id string', 'createdAt string', 'name string', 'status enum [a,b]'], 'an intersection inlines the type it names; a field typed by an alias of literals is an enum')
+  }
 }
 
 // ════ Part 2 · through call(), on an indexed project ════
@@ -2247,14 +2460,14 @@ async function indexed() {
     const kq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: KV })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const kidx = await kq('index')
     ok(/lending: /.test(kidx) && !kidx.includes('failure'), `index: the YAML template and the JSON tables read, no extractor failure (${kidx.split('\n').find((l) => l.startsWith('lending')) || kidx})`)
-    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@1\nlocal/tables/loans.json\tdynamodb-table@1\ntemplate.yaml\tcloudformation@1',
-      'found by content: the template and the two CreateTable files are jobs; the CI workflow and the settings file (JSON and YAML declaring no table) are not')
+    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@1\nlocal/tables/loans.json\tdynamodb-table@1\nsrc/handler.ts\tts-types@1\ntemplate.yaml\tcloudformation@2',
+      'found by content: the template and the two CreateTable files are jobs, and the handler for its item shapes; the CI workflow and the settings file (JSON and YAML declaring no table) are not')
     const klist = await kq('data')
     eq(klist.split('\n').slice(1), [
       'lending:dynamodb  dynamodb  3 tables · 2 GSIs · 1 LSI · 4 conflicts',
       '  infra  dynamodb-table@1  CreateTable input  lending/local/tables/fines.json',
       '  infra  dynamodb-table@1  CreateTable input  lending/local/tables/loans.json',
-      '  infra  cloudformation@1  SAM template, 2 tables  lending/template.yaml',
+      '  infra  cloudformation@2  SAM template, 2 tables  lending/template.yaml',
       '    note: HoldsTable: its TableName is !Sub ${AWS::StackName}-holds, a reference, not resolved: named by its logical id',
     ], 'graph_data: the repository\'s key-value store, every declaration labelled with its kind and format, the reference noted as unresolved')
     eq(await kq('data', { store: 'lending:dynamodb' }), [
@@ -2265,7 +2478,7 @@ async function indexed() {
     ].join('\n'), 'graph_data store: each table with its keys, indexes, TTL, billing and stream (where two declarations disagree, the first\'s, by kind then path, as for SQL; the conflicts say the rest), citing every declaration')
     eq(await kq('data', { entity: 'loans' }), [
       'lending:dynamodb/loans  table  (dynamodb)',
-      '  declared at lending/local/tables/loans.json:2 [infra dynamodb-table@1] · lending/template.yaml:16 [infra cloudformation@1, LoansTable (AWS::DynamoDB::Table)]',
+      '  declared at lending/local/tables/loans.json:2 [infra dynamodb-table@1] · lending/template.yaml:16 [infra cloudformation@2, LoansTable (AWS::DynamoDB::Table)]',
       '  PAY_PER_REQUEST · no stream',
       'Attributes (5):',
       '  memberId  S  a key of the table  — lending/local/tables/loans.json:4 · lending/template.yaml:21',
@@ -2336,7 +2549,7 @@ async function indexed() {
     mkdirSync(path.dirname(HUGE), { recursive: true })
     writeFileSync(HUGE, `Resources:\n  T:\n    Type: AWS::DynamoDB::Table\n# ${'x'.repeat(2 << 20)}\n`)
     const hidx = await kq('index')
-    ok(hidx.includes('infra/huge.yaml (cloudformation@1): the YAML is larger than 512 KB: not read') && (await kq('status')).includes('extractor failure(s): cloudformation@1 on lending/infra/huge.yaml: the YAML is larger than 512 KB: not read'), `a YAML template past the cap: its job fails with the reason, graph_status says it (${hidx.split('\n').find((l) => l.includes('lending')) || hidx})`)
+    ok(hidx.includes('infra/huge.yaml (cloudformation@2): the YAML is larger than 512 KB: not read') && (await kq('status')).includes('extractor failure(s): cloudformation@2 on lending/infra/huge.yaml: the YAML is larger than 512 KB: not read'), `a YAML template past the cap: its job fails with the reason, graph_status says it (${hidx.split('\n').find((l) => l.includes('lending')) || hidx})`)
     utimesSync(HUGE, new Date(Date.now() + 5000), new Date(Date.now() + 5000))
     const again = await kq('index')
     ok(!/huge\.yaml|data job\(s\) run|failure/.test(again) && (await kq('status')).includes('lending/infra/huge.yaml: the YAML is larger than 512 KB'), `indexed again, unchanged (its mtime moved, its content did not): its failure stands with its hash, the job is not run again (${again.split('\n').find((l) => l.includes('lending'))})`)
@@ -2434,14 +2647,14 @@ async function indexed() {
     const tq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: TFP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const tidx = await tq('index')
     ok(/shop: /.test(tidx) && !tidx.includes('failure'), `index: the module, its configurations and the CreateTable file read, no extractor failure (${tidx.split('\n').find((l) => l.includes('shop')) || tidx})`)
-    eq(await tq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlive/prod/legacy/terragrunt.hcl\tterraform@1\nlocal/tables/orders.json\tdynamodb-table@1\nmodules/kv-tables\tterraform@1',
+    eq(await tq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlive/prod/legacy/terragrunt.hcl\tterraform@2\nlocal/tables/orders.json\tdynamodb-table@1\nmodules/kv-tables\tterraform@2',
       'found by content: the module folder (its job reads every HCL file), the configuration whose module is out of reach, the CreateTable file; the root, the stage file and the other configurations are inputs, no jobs')
     const SH = 'shop/live/prod/tables/terragrunt.hcl', MT = 'shop/modules/kv-tables/main.tf', OJ = 'shop/local/tables/orders.json'
     eq((await tq('data')).split('\n').slice(1), [
       'shop:dynamodb  dynamodb  3 tables · 3 GSIs · 2 conflicts',
-      '  infra  terraform@1  not read: a module out of reach (tfr:///terraform-aws-modules/dynamodb-table/aws)  shop/live/prod/legacy/terragrunt.hcl',
+      '  infra  terraform@2  not read: a module out of reach (tfr:///terraform-aws-modules/dynamodb-table/aws)  shop/live/prod/legacy/terragrunt.hcl',
       '    note: live/prod/legacy/terragrunt.hcl:2: its module tfr:///terraform-aws-modules/dynamodb-table/aws is not in this repository (a remote source): the key-value tables it declares, if any, are unknown',
-      `  infra  terraform@1  Terraform module modules/kv-tables through Terragrunt, 3 tables  ${SH}`,
+      `  infra  terraform@2  Terraform module modules/kv-tables through Terragrunt, 3 tables  ${SH}`,
       '    note: prod-shop-audit: range_key is unknown (dependency.search: another configuration\'s output, known only once it is applied)',
       '    note: prod-shop-audit: its attribute blocks are unknown (dependency.search: another configuration\'s output, known only once it is applied)',
       `  infra  dynamodb-table@1  CreateTable input  ${OJ}`,
@@ -2454,7 +2667,7 @@ async function indexed() {
     ].join('\n'), 'graph_data store: a table per for_each key, named from the inputs merged through the includes, each citing its entry in the inputs and the module\'s resource')
     eq(await tq('data', { entity: 'prod-shop-orders' }), [
       'shop:dynamodb/prod-shop-orders  table  (dynamodb)',
-      `  declared at ${SH}:22 [infra terraform@1, aws_dynamodb_table.table["orders"]] · ${MT}:2 [infra terraform@1, the resource in modules/kv-tables] · ${OJ}:2 [infra dynamodb-table@1]`,
+      `  declared at ${SH}:22 [infra terraform@2, aws_dynamodb_table.table["orders"]] · ${MT}:2 [infra terraform@2, the resource in modules/kv-tables] · ${OJ}:2 [infra dynamodb-table@1]`,
       '  PAY_PER_REQUEST · stream NEW_AND_OLD_IMAGES',
       'Attributes (5):',
       `  customer_id  S  a key of the table  — ${SH}:23 · ${MT}:10 · ${OJ}:5`,

@@ -21,6 +21,10 @@
 // attributes (partition, sort, ttl), an attribute by name; a table's billing and stream, a TTL's
 // enabled, an index's kind, keys and projection are its attributes.
 //
+// A key-value table's item fields (data/binding.mjs: the fields of the item types bound to it, at
+// their dotted paths) are its fields like the attributes it declares: added, removed, and modified in
+// `item`, what each bound type stores there (its type as written, nullable, default).
+//
 // Rename candidates: a removed and an added element of the same kind and the same shape are paired,
 // never decided (drizzle-kit asks; this only flags). Shapes: a table or view, its columns (names and
 // types, in order; one with no column is never a candidate); a column, its type and position; an
@@ -133,10 +137,15 @@ function pairs(xs, ys, key) {
 }
 
 function changed(kind, x, y, fold) {
-  if (x.per && y.per) return changedPer(x.per, y.per)
+  // a key-value table's item field (data/binding.mjs): what each bound type stores there
+  const item = kind === 'field' && (x.item || y.item) ? (itemText(x) !== itemText(y) ? [{ attr: 'item', before: itemText(x), after: itemText(y) }] : []) : null
+  if (x.per && y.per) return [...changedPer(x.per, y.per), ...(item || [])]
+  if (item && !x.per && !y.per) return item // a field only an item states: its types are all it says
   const bx = ATTRS[kind](x, fold), by = ATTRS[kind](y, fold)
-  return Object.keys(bx).filter((k) => JSON.stringify(bx[k][0]) !== JSON.stringify(by[k][0])).map((k) => ({ attr: k, before: bx[k][1], after: by[k][1] }))
+  return [...Object.keys(bx).filter((k) => JSON.stringify(bx[k][0]) !== JSON.stringify(by[k][0])).map((k) => ({ attr: k, before: bx[k][1], after: by[k][1] })), ...(item || [])]
 }
+// an item field as compared and shown: each bound type's stored type, nullable and default
+export const itemText = (f) => (f.item && f.item.length ? f.item.map((i) => `${i.type}: ${i.raw || i.kind}${i.nullable ? ', nullable' : ''}${i.default ? `, default ${i.default}` : ''}`).join(' · ') : null)
 // A key-value element, declaration by declaration (`per`, reconcile.mjs): an attribute changed when any
 // declaration says another value than its counterpart on the other side. A declaration's counterpart
 // is the same file; when a file left and another came (a declaration that moved to another file, or
