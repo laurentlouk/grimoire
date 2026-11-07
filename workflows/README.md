@@ -137,7 +137,7 @@ ignored, with a warning.)
 | `agentTimeoutMin` | `40` | the SOFT limit per dispatch, in minutes (`0` disables every limit). Past it the dispatch is logged as late (event `late`, `telemetry.late`) and still awaited; a result that arrives later is accepted. An agent cannot be stopped, so a limit only decides how long the run waits. Mechanical kinds have shorter limits of their own (`timeouts`); `crystallize` has 90 minutes |
 | `agentHardTimeoutMin` | `180` | where waiting ends. A reader (reviewer, verifier, guard, replanner, …) is given up on at twice its soft limit, capped by this value (`telemetry.timedOut`). A writer (implementer, fix, integrate, gate) is never settled while it may still be running: it is marked wedged, its repo is fenced (nothing else is dispatched into that checkout, no replan requeues into it) and its result is still taken when it arrives. When only wedged work is left, the run waits out each wedged writer's grace window (`wedgeGraceMin`) and then halts with `kind: 'wedged'`. `0`: writers never wedge |
 | `wedgeGraceMin` | the hard limit, at most `60` | how long a wedged writer is still waited for once it is the only work left. Halting ends the run's agents, the wedged writer with them: one was minutes from done when its run halted, and the resume rebuilt its task for three hours. Other repos keep running meanwhile; a result that arrives inside the window is used as usual. `0`: halt as soon as only wedged work is left |
-| `deltaPath` | beside the spec | the design's delta, what it changes in stored data (`docs/specs/<date>-<topic>.delta.json` beside `<date>-<topic>-design.md`; any other spec `<stem>.md` has `<stem>.delta.json`). The index agent says whether it exists (`deltaFound`); none is normal: a design that changes no stored data has none. See "The data model: unplanned changes, resolved and reported" |
+| `deltaPath` | beside the spec | the design's delta, what it changes in stored data (`docs/specs/<date>-<topic>.delta.json` beside `<date>-<topic>-design.md`; any other spec `<stem>.md` has `<stem>.delta.json`). The index agent says whether it exists (`deltaFound`); none is normal: a design that changes no stored data has none. Inside one of `repos`, the kept unplanned changes are committed on that repository's run branch; outside them all, written in place. See "The data model: unplanned changes, resolved and reported" |
 | `root` | — | the workspace root, an absolute path (`/grimoire:orchestrate` passes it). Every brief names it and reads its file by absolute path, and every verbatim script (journal, ship, seal, environment check, reconcile) changes to it first, so an agent dispatched while the launching session sits in another folder still finds the run dir, the repos and the engine's scripts. Without it, prompts keep their relative paths |
 | `timeouts` | — | per dispatch kind, `{<kind>: {soft, hard, hedgeAfter}}` in minutes. Defaults: `writer` (soft `agentTimeoutMin`, hard `agentHardTimeoutMin`), `reader` (hard 2 × soft, capped by the hard limit), `hydrate` (hard 90), `preflight` 2/6 (hedge at 2), `precheck` 6/15 (hedge at 6), `journal` 4/8, `ship` 5/12 (the seal too; the ship script stops itself by 540 s), `env` 2/4, `status` 4/8, `crystallize` 90/180. `hedgeAfter` starts one duplicate of a side-effect-free dispatch and takes the first non-empty reply: it applies to `preflight`, `precheck`, and `hydrate` when `claim` is off (no default for hydrate), and is ignored with a warning for any other kind. Unknown kinds are ignored with a warning |
 | `deliver` | `'incremental'` | `'incremental'`: after each landing, push the landed SHA to the repo's run branch (fast-forward only, from a ship worktree, hooks never bypassed) and open or update its draft PR. `'end'`: nothing reaches the remote before the terminal slot. Per repo: `repos[].deliver` |
@@ -879,6 +879,28 @@ told.
   written by the next one, in one step. A repo delivered at the end has no land ship: the seal
   after its gate carries them, under the same lock; a halt ship does too. Lanes and implementers
   never write the delta.
+- **The delta is committed on the run branch** (from 0.33.0, spec D4 amended): when it is a file
+  of one of the run's repositories (its path under that repository's `path`, compared once `root`
+  makes both absolute), every kept change, whichever repository's task kept it, goes to that
+  repository's ships. The ship writes the delta in its ship worktree, before its push: it carries
+  forward the delta commits the remote run branch holds beyond the landed head (the checkout's run
+  branch never gets them, so a later landing diverges from the remote by exactly those: a merge
+  that changes only the delta), appends the changes, and commits the delta alone (`git add --
+  <path>`), `chore(data): record unplanned changes in <path> (<tasks>)`, with the repository's own
+  git identity, hooks and signing, and a `Grimoire-Run: <runId>` trailer. The push carries it:
+  `PUSH ok=1 remote=<landed head>`, then `DELTA ok … commit=<sha>`. The design's delta absent at
+  that commit (never committed on the branch) is copied from the orchestrating checkout first and
+  committed with the first entries. The orchestrating checkout is never written. A change kept
+  in another repository sends a ship of the delta's repository at once (its landed head is
+  pushed already: it only commits and pushes the delta). A refused append, a commit a hook
+  refuses (`DELTA bad step=commit`), a push that fails (`DELTA bad step=push`) or a step that did
+  not run (`DELTA skipped …`) never fails the ship or its push: the changes wait for the next
+  one. With `deliver: 'end'`, the seal commits them on what the gate pushed and pushes that commit.
+  The gate, before its gate command, runs a `SYNC` script that brings the remote's delta commits
+  into the checkout's run branch (a fast-forward, or a merge that changes only the delta), so it
+  certifies a tree that holds them and its push stays a fast-forward. A delta outside every
+  repository the run ships (a hub folder that is not one) is written in place, as before, and the
+  PR section says so.
 - **The PR body** gets a **Data model and architecture changes** section, rebuilt with every
   description (the delta's architecture changes and the architectural impact among them, under
   the same heading, to acknowledge in the Architecture tab): each planned change of the repo's tasks marked planned ✓, built differently (what
@@ -919,7 +941,9 @@ terminal-sweep finding on a harness file routed to crystallize; `replan` carries
 and `halt` its `kind`. From 0.31.0, `model` (`{task, repo, target, op, kept, reason, delta}`: a change to
 stored data a landed task's implementer reported, kept or reverted; `delta` says whether it waits
 for the delta, reached it, was refused, or why it is not recorded) and `delta` (`{repo, label,
-status, added, already, refused, detail}`: what a ship's or seal's delta step wrote). Each carries a `seq` (a resumed session continues the checkpoint's;
+status, added, already, refused, detail}`: what a ship's or seal's delta step wrote; from 0.33.0
+also `where`, `run-branch` or `in-place`, and `commit`, the commit that recorded them on the run
+branch). Each carries a `seq` (a resumed session continues the checkpoint's;
 one without a checkpoint starts at 1), the cumulative output tokens `tok`, and its fields
 (reasons included). The script has no clock and no filesystem, so events are buffered and one haiku
 writer per chunk (`briefs/journal.md`) runs a short script: it sets the run directory, the session,
