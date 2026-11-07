@@ -94,9 +94,11 @@ loop then reviews them with your own, instead of only your commits.
 
 ## Data model changes
 The header's "Data model changes" section says whether the design has a delta (beside the spec,
-what the design changes in stored data: tables, columns, keys, indexes, foreign keys) and which
-of its changes this task builds. Build those as the delta states them. Then, before you return,
-read what your commits did to stored data:
+what the design changes in stored data: tables, columns, keys, indexes, foreign keys; and in the
+architecture: components, connections, boundaries of the diagrams in `docs/architecture/`) and
+which of its changes this task builds. Build those as the delta states them (an architecture change
+is built by updating the diagram, as `/grimoire:architecture` does, with the code it draws). Then,
+before you return, read what your commits did to stored data and to the architecture:
 - Run `graph_changes` with `base` = your `startSha` (and `delta` = the path the header names,
   when there is one). It gives each planned change its state (planned and built, pending, built
   differently) and lists under Unplanned every change your commits made that the delta does not
@@ -106,8 +108,21 @@ read what your commits did to stored data:
   no code graph.
 - `deltaStates`: `{id, state, note}` for each planned change the header lists (`note`: what
   `graph_changes` says differs, when it is built differently).
-- `modelChanges`: one `{target, op, kept, reason, after}` per unplanned change (with no delta:
-  per change your commits made to stored data), `target` as `graph_changes` names it. You decide
+- The architecture: `graph_changes` adds an Architecture part when the project saves diagrams or
+  the delta proposes architecture changes: the diagrams against the base, and the check's findings
+  on this index and not on the base checkout's (a link no line draws, a module no component covers,
+  a new external service by import, a drawn line the code no longer shows). With the delta, each
+  architecture change has its state and the impact no change covers is listed as Unplanned. An
+  architectural impact you keep is drawn: update the diagram in this branch (the line, the
+  component, its `paths`) and run `graph.mjs architecture check`, then report it like a data change,
+  `target` as `graph_changes` names it (`connection:web->store`, `component:search`). The code is
+  compared only where the base checkout's index is at the commit the branch forked from; otherwise
+  the part says "diagram files only, the code not compared (<reason>)": return
+  `architectureCompared: "diagrams-only"` and that reason as `architectureWhy`, since the code's
+  impact was not read, which is not the same as none.
+- `modelChanges`: one `{target, op, kept, reason, after}` per unplanned change, of the data model or
+  the architecture (with no delta: per change your commits made to stored data, and per
+  architectural impact), `target` as `graph_changes` names it. You decide
   each one; it is never a reason to stop or to ask, and nothing waits on it. Keep it when the task
   needs it and say why in `reason` (it becomes its `why` in the delta, for the owner to
   acknowledge), with `after` = the element as built, in the delta's words; or revert it in a

@@ -34,6 +34,8 @@ import { openStore } from './store.mjs'
 import { layoutMap } from './layout.mjs'
 import { systemMap } from './modules.mjs'
 import { analyze, draftArch, loadIndex, readDiagrams } from './arch.mjs'
+import { archScope, archImpact, archDeltaStates, currentDiagrams } from './arch-change.mjs'
+import { packArchChanges, packArchDelta } from './arch-pack.mjs'
 import { scanDocs, docRoots, scanDeltas, readDelta } from './docs.mjs'
 import { mdSlug, mdFront, mdToHtml } from './md.mjs'
 import { archClient } from './arch-view.mjs'
@@ -90,8 +92,7 @@ export async function renderGraph(project, opts = {}) {
       confs,
       edges: edges.map((e) => [e.src, e.dst, KINDS.indexOf(e.kind), confs.indexOf(e.confidence || '')]),
       cochange: cochange.map((c) => [c.repo, c.a, c.b, c.n]),
-      arch: archData(project, loadIndex(db)),
-      data: dataData(db, files, repos, changes, deltas),
+      ...(await archAndData(project, db, files, repos, changes, deltas)),
       docs: project.root ? scanDocs(project).map((d) => [d.repo, d.root, d.path, d.text, d.hash, d.big ? 1 : 0]) : [],
       ...(opts.serve ? { serve: { token: opts.serve.token } } : {}),
     }
@@ -99,15 +100,54 @@ export async function renderGraph(project, opts = {}) {
   } finally { db.close() }
 }
 
+// The Architecture and Data tabs, and the architecture change view between them: the branch's
+// architectural impact against the base the Data tab compares against (arch-change.mjs archImpact,
+// when that base resolved), drawn per saved diagram (`ch`, the Changes overlay), and each delta's
+// architecture changes (`arch` on the Data tab's packed delta: one delta object, so an
+// acknowledgement written from either tab updates the hash both send). archCh: the base, why the code
+// was not compared (codeWhy: no base index, or one not at the fork point; codePart: compared in some
+// repositories only), and the diagrams the branch removed. Nothing here names a path outside the
+// project (whyPage): a rendered page may be shared. A project that draws no diagram and proposes no
+// architecture change loads no second index (archScope).
+async function archAndData(project, db, files, repos, changes, deltas) {
+  const idx = loadIndex(db)
+  let impact = null, why = changes?.why || 'no base was resolved'
+  const proposed = deltas.some((f) => { const { delta } = parseDelta(f.text); return !!(delta && delta.architecture.length) })
+  const scope = changes?.base && project.root ? archScope(project, changes.base, proposed) : null
+  if (scope && scope.has) { try { impact = await archImpact(project, changes.base, { idx, scope }) } catch { why = 'the base\'s diagrams could not be read' } }
+  const arch = archData(project, idx, impact)
+  const data = dataData(db, files, repos, changes, deltas)
+  const saved = arch.map((a, k) => ({ k, a, file: a.file, doc: a.doc })).filter((x) => x.doc)
+  const current = impact ? impact.current : scope ? scope.current : project.root ? currentDiagrams(project) : []
+  deltas.forEach((f, i) => {
+    const p = (data.deltas || [])[i]
+    const { delta } = p && !p.errors.length ? parseDelta(f.text) : {}
+    if (!delta) return
+    const st = archDeltaStates(delta.architecture, current, { base: impact ? impact.before : null, impact })
+    p.arch = packArchDelta(st, { saved, before: impact ? impact.before : null, why: impact ? null : why })
+    if (impact && impact.why) Object.assign(p.arch, { codeWhy: impact.whyPage, codePart: impact.findings !== null })
+  })
+  for (const a of arch) delete a.doc
+  const removed = impact && impact.diagrams ? impact.diagrams.files.filter((f) => f.change === 'removed').map((f) => ({ file: f.file, title: f.title, n: f.changes.length })) : []
+  const archCh = impact ? { base: { ref: refName(changes.base.ref), text: baseText(changes.base) }, diagramsWhy: impact.diagramsWhy, codeWhy: impact.whyPage, codePart: impact.findings !== null, removed, skipped: impact.diagrams ? impact.diagrams.skipped : [] } : { base: null, why }
+  return { arch, archCh, data }
+}
+
 // The architecture tab: every saved diagram, checked against the index, then one drafted from the
-// graph on this render. A diagram that fails its check carries its errors and is not drawn.
-function archData(project, idx) {
+// graph on this render. A diagram that fails its check carries its errors and is not drawn. With an
+// impact (above), each saved diagram that is drawn carries its Changes overlay (`ch`).
+function archData(project, idx, impact = null) {
   const out = []
   const roots = project.root ? docRoots(project) : null
   for (const { file, doc, error } of project.root ? readDiagrams(project.architectureDir) : []) {
     const rel = path.relative(project.root, path.join(project.architectureDir, file)).split(path.sep).join('/')
     // one broken diagram is reported in its own place, never takes the page down
-    try { out.push(error ? { file: rel, title: file, errors: [error] } : packArch(doc, analyze(doc, idx, roots), { file: rel })) } catch (e) { out.push({ file: rel, title: file, errors: [`could not be checked: ${e.message}`] }) }
+    try {
+      if (error) { out.push({ file: rel, title: file, errors: [error] }); continue }
+      const a = packArch(doc, analyze(doc, idx, roots), { file: rel })
+      if (a.comps) { Object.defineProperty(a, 'doc', { value: doc, enumerable: false, configurable: true }); const ch = packArchChanges(rel, doc, a, impact); if (ch) a.ch = ch }
+      out.push(a)
+    } catch (e) { out.push({ file: rel, title: file, errors: [`could not be checked: ${e.message}`] }) }
   }
   if (idx.files.some((f) => !f.is_test)) { const d = draftArch(idx, { title: 'From the graph' }); out.push(packArch(d, analyze(d, idx, null), { auto: true })) }
   return out
@@ -483,7 +523,7 @@ export function mapData(files, nodes, edges) {
 
 // ── pure helpers: exported for the tests, injected into the page as they are ──
 export const INITIAL = { tab: 'overview', repo: '', q: '', tests: false, guesses: false, mapMode: 'modules', module: null,
-  arch: 0, archSel: null, archTrace: null, archTo: null, archGhosts: false, archZoom: null, archScroll: null, sysZoom: null, full: null, doc: null, docMode: 'read', docAnchor: null, focusEditor: false, editorCaret: null,
+  arch: 0, archSel: null, archTrace: null, archTo: null, archGhosts: false, archChanges: false, archDelta: false, archZoom: null, archScroll: null, sysZoom: null, full: null, doc: null, docMode: 'read', docAnchor: null, focusEditor: false, editorCaret: null,
   data: 0, dataSel: null, dataAll: false, dataZoom: null, dataScroll: null, dataChanges: false, dataDelta: false, deltaSel: null, dlStatus: null, dlOpen: null }
 export const LANE_MAX = 14 // modules drawn per lane on the system map, the largest
 export const MAXCOL = 12 // items per column of a neighbourhood
@@ -647,6 +687,16 @@ svg.arch .ctag rect{fill:var(--panel);stroke:color-mix(in srgb,var(--c) 55%,var(
 svg.arch .comp:hover .cbox,svg.arch .comp.sel .cbox,svg.arch [tabindex]:focus-visible .cbox{stroke:var(--c);stroke-width:2.4}svg.arch .comp.sel .cbox{fill:color-mix(in srgb,var(--c) 14%,var(--panel))}
 svg.arch .dim{opacity:.22}svg.arch.hover .comp:not(.hov){opacity:.35}svg.arch.hover .conn:not(.hov),svg.arch.hover .clab{opacity:.25}
 @media (prefers-reduced-motion:reduce){svg.arch .conn.on{animation:none}svg.arch .conn,svg.arch .comp{transition:none}}
+svg.arch .comp.d-prop .cbox{fill:color-mix(in srgb,var(--ok) 5%,var(--panel));stroke:var(--ok);stroke-width:1.9;stroke-dasharray:7 4}svg.arch .comp.d-prop .clabel{fill:var(--ok)}svg.arch .comp.d-built .cbox{stroke:var(--ok);stroke-width:2.6}svg.arch .comp.d-diff .cbox{stroke:var(--warn);stroke-width:2.4}
+svg.arch .comp.d-pend .cbox,svg.arch .comp.d-rm .cbox{stroke:var(--warn);stroke-width:1.9;stroke-dasharray:7 4}svg.arch .comp.d-rm .clabel{fill:var(--warn)}svg.arch .comp.d-unpl .cbox{stroke:var(--t-worker);stroke-width:2.4}svg.arch .comp.gone{opacity:.8}svg.arch .comp.gone .cbox{stroke-dasharray:6 4}
+svg.arch .comp.ch-add .cbox{stroke:var(--ok);stroke-width:2.4}svg.arch .comp.ch-mod .cbox{stroke:var(--warn);stroke-width:2.2}svg.arch .comp.ch-del{opacity:.8}svg.arch .comp.ch-del .cbox{stroke:var(--err);stroke-width:1.8;stroke-dasharray:6 4}svg.arch .comp.ch-del .clabel{fill:var(--err)}
+svg.arch .strike{stroke:var(--err);stroke-width:1.5}svg.arch .comp.d-rm .strike{stroke:var(--warn);stroke-dasharray:4 3}svg.arch .comp.d-built .strike{stroke:var(--ok)}svg.arch .comp.d-unpl .strike{stroke:var(--t-worker)}
+svg.arch .conn.d-prop{stroke:var(--ok);stroke-width:2.2;stroke-dasharray:7 5}svg.arch .conn.d-built{stroke:var(--ok);stroke-width:2.4}svg.arch .conn.d-diff{stroke:var(--warn);stroke-width:2.4}svg.arch .conn.d-pend,svg.arch .conn.d-rm{stroke:var(--warn);stroke-width:2;stroke-dasharray:5 4}svg.arch .conn.d-unpl{stroke:var(--t-worker);stroke-width:2.4}svg.arch .conn.gone{stroke-dasharray:5 4;opacity:.8}
+svg.arch .conn.ch-add{stroke:var(--ok);stroke-width:2.4}svg.arch .conn.ch-mod{stroke:var(--warn);stroke-width:2.4}svg.arch .conn.ch-del{stroke:var(--err);stroke-width:1.8;stroke-dasharray:5 4}
+svg.arch .newlink{fill:none;stroke-width:2.2;stroke-dasharray:2 5;stroke-linecap:round}svg.arch .newlink.d-unpl{stroke:var(--t-worker)}svg.arch .newlink.ch-add{stroke:var(--ok)}
+svg.arch .bound.d-prop rect{stroke:var(--ok);stroke-width:1.8}svg.arch .bound.d-built rect{stroke:var(--ok);stroke-width:2.2}svg.arch .bound.d-diff rect{stroke:var(--warn);stroke-width:2}svg.arch .bound.d-pend rect,svg.arch .bound.d-rm rect{stroke:var(--warn);stroke-width:1.8}svg.arch .bound.d-unpl rect{stroke:var(--t-worker);stroke-width:2}
+svg.arch .bound.ch-add rect{stroke:var(--ok);stroke-width:2}svg.arch .bound.ch-mod rect{stroke:var(--warn);stroke-width:2}svg.arch .bound.ch-del rect{stroke:var(--err);stroke-width:1.6}
+svg.arch .stalemk circle{fill:var(--warn)}svg.arch .stalemk text{font:700 10px ui-sans-serif,system-ui,sans-serif;fill:var(--panel)}.chsw.newl{height:0;border-radius:0;border-top:2px dotted var(--ok)}
 .dstores{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-bottom:14px}
 .dstore{font:inherit;color:inherit;text-align:left;cursor:pointer;background:var(--panel);border:1px solid var(--line);border-left:4px solid color-mix(in srgb,var(--t-database) 55%,var(--line));border-radius:12px;padding:9px 12px;display:flex;flex-direction:column;gap:3px}
 .dstore:hover{border-color:color-mix(in srgb,var(--t-database) 55%,var(--line))}.dstore b{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}.dstore span{color:var(--muted);font-size:12px}

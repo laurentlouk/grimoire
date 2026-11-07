@@ -26,7 +26,7 @@ export const BOUNDARY_KINDS = ['repo', 'deploy', 'trust', 'region', 'network', '
 export const CARD_COLORS = ['cyan', 'emerald', 'violet', 'amber', 'rose', 'orange', 'slate']
 export const SUFFIX = '.architecture.json'
 const GUESSES = new Set(['ambiguous', 'unique-name'])
-const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
+export const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 
 // External services an import names. `imports` are package prefixes (see importMatches).
 export const KNOWN = [
@@ -494,6 +494,7 @@ export function analyze(doc, idx, roots) {
   if (code.ghosts.length > 15) warnings.push(`…and ${code.ghosts.length - 15} more undrawn links`)
   for (const [f, cs] of code.overlap) warnings.push(`${f} is in several components (${cs.join(', ')}): narrow their paths`)
   doc.components.forEach((c, i) => { if (!code.members[i].length && !(c.imports && c.imports.length) && !(c.sources && c.sources.length) && c.type !== 'external') warnings.push(`${c.id}: no paths, imports or sources: nothing ties it to the code`) })
+  for (const f of services(doc, idx, code)) warnings.push(`${f.text}: draw it with "imports", or name the package in the "imports" of the component that stands for it`)
   if (code.coverage.total) info.push(`${code.coverage.covered} of ${code.coverage.total} production files are in a component${code.coverage.uncovered.length ? `; not covered: ${code.coverage.uncovered.slice(0, 6).map(([d, n]) => `${d} (${n})`).join(', ')}${code.coverage.uncovered.length > 6 ? ', …' : ''}` : ''}`)
   // a line the graph could confirm: from code to code, unless it says it runs elsewhere (via) and the graph agrees
   const checkable = (doc.connections || []).map((e, k) => code.members[at.get(e.from)].length > 0 && isCode[at.get(e.to)] && (!e.via || code.evidence[k] > 0))
@@ -501,6 +502,55 @@ export function analyze(doc, idx, roots) {
   const checked = n ? `${seen} of ${n} connections between code components seen in the graph` : ''
   if (checked) info.push(checked)
   return { errors, warnings, info, code, layout: lay, checkable, checked }
+}
+
+// ── the check's findings about the code, as data (the architecture change view) ─────────────
+// What the check says about the code a diagram draws, one finding each, with a key that names the
+// same finding on another index (so the findings of a branch's index can be told from its base's:
+// newFindings) and the target of the diagram element it concerns (data/delta.mjs's grammar):
+//   undrawn    a code link no line draws                       connection:<a>-><b>
+//   unseen     a line between two code components the code does not show (or shows only the other
+//              way), unless it says what carries it (via)      connection:<a>-><b>[#<label>]
+//   uncovered  a module of production code no component covers  no target: `module` names it
+//   service    an external service (KNOWN) the code of a component imports, that no component
+//              reaches through its `imports`                    component:<the service's id>
+// → [{ kind, key, target, text, n?, module?, sources? }]. `doc` is a diagram that validates.
+export function findings(doc, idx, code = bindCode(doc, idx)) {
+  const comps = doc.components || [], conns = doc.connections || []
+  const at = new Map(comps.map((c, i) => [c.id, i]))
+  const isCode = comps.map((c, i) => code.members[i].length > 0 || !!(c.imports && c.imports.length))
+  const pairs = new Map()
+  for (const e of conns) pairs.set(`${e.from}>${e.to}`, (pairs.get(`${e.from}>${e.to}`) || 0) + 1)
+  const out = []
+  for (const [a, b, n] of code.ghosts) out.push({ kind: 'undrawn', key: `undrawn:${a}>${b}`, target: `connection:${a}->${b}`, n, text: `${a} uses ${b} (${n} file pair${n === 1 ? '' : 's'} in the graph), but no line is drawn between them` })
+  conns.forEach((e, k) => {
+    const a = at.get(e.from), b = at.get(e.to)
+    if (a === undefined || b === undefined || !isCode[a] || !code.members[a].length || !isCode[b] || code.evidence[k] || e.via) return
+    const label = pairs.get(`${e.from}>${e.to}`) > 1 ? e.label || '' : null
+    out.push({ kind: 'unseen', key: `unseen:${e.from}>${e.to}#${e.label || ''}`, target: `connection:${e.from}->${e.to}${label !== null ? `#${label}` : ''}`,
+      text: code.reverse[k] ? `${e.from} → ${e.to} is drawn, and the code links the other way (${e.to} uses ${e.from} in ${code.reverse[k]} file pair${code.reverse[k] === 1 ? '' : 's'})` : `${e.from} → ${e.to} is drawn, and the code does not show it` })
+  })
+  for (const [module, n] of code.coverage.uncovered) out.push({ kind: 'uncovered', key: `uncovered:${module}`, target: null, module, n, text: `${module} (${n} production file${n === 1 ? '' : 's'}) is in no component` })
+  out.push(...services(doc, idx, code))
+  return out
+}
+// The external services the code of a diagram's components imports and no component reaches.
+function services(doc, idx, code) {
+  const comps = doc.components || []
+  const reach = comps.flatMap((c) => c.imports || [])
+  const mine = new Set(code.members.flat())
+  const out = []
+  for (const k of KNOWN) {
+    const seen = [...new Set(idx.imports.filter((im) => mine.has(im.file_id) && k.imports.some((p) => importMatches(im.source, p)) && !reach.some((p) => importMatches(im.source, p))).map((im) => im.source))].sort()
+    if (seen.length) out.push({ kind: 'service', key: `service:${k.id}`, target: `component:${k.id}`, sources: seen, text: `the code imports ${k.label} (${seen.slice(0, 3).join(', ')}${seen.length > 3 ? ', …' : ''}), and no component reaches it` })
+  }
+  return out
+}
+// The findings on one index absent from another: the same diagram checked against both (a branch's
+// index and its base checkout's), so what differs is what the code did, never the diagram.
+export function newFindings(doc, idx, baseIdx) {
+  const before = new Set(findings(doc, baseIdx).map((f) => f.key))
+  return findings(doc, idx).filter((f) => !before.has(f.key))
 }
 
 // ── loading ────────────────────────────────────────────────────────────────────────────────

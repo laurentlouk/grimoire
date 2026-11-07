@@ -18,6 +18,8 @@
 //     one `git cat-file --batch` (git show <commit>:<path>, without a process per file; binary-safe,
 //     each capped as the index caps it). Memoised in this process per (repository, commit, extractor
 //     versions, the config that steers discovery); nothing is written to graph.db or to disk.
+//   treeAt(dir, commit), blobs(dir, list): those two git reads, shared with the architecture change
+//     view (arch-change.mjs), which reads the saved diagrams at the base the same way.
 import { spawnSync } from 'node:child_process'
 import { EXTRACTORS, MAX_BYTES, candidates, extractAll, idOf } from './registry.mjs'
 import { reconcile } from './reconcile.mjs'
@@ -91,8 +93,9 @@ function extractAt(abs, commit, project, overrides, ctx) {
 
 // A commit's files under a directory, relative to it (git lists them so when run from inside it):
 // Map(path → { oid, size }). Symbolic links are left out: their blob is a target path, not a text.
-function treeAt(abs, commit) {
-  const r = git(abs, ['ls-tree', '-r', '-l', '-z', commit])
+// `paths`: only those folders (relative to it), listed alone (the architecture's diagrams folder).
+export function treeAt(abs, commit, paths = null) {
+  const r = git(abs, ['ls-tree', '-r', '-l', '-z', commit, ...(paths && paths.length ? ['--', ...paths] : [])])
   if (r.status !== 0) throw new Error(`git ls-tree ${commit.slice(0, 10)} failed in ${abs}: ${(r.stderr || '').trim().split('\n')[0]}`)
   const files = new Map()
   for (const entry of r.stdout.split('\0')) {
@@ -106,7 +109,7 @@ function treeAt(abs, commit) {
 
 // Blobs ([{ oid, size }]) by object id, as bytes, from one `git cat-file --batch`: each answer is
 // "<oid> blob <size>\n<content>\n", or "<oid> missing\n".
-function blobs(abs, list) {
+export function blobs(abs, list) {
   const got = new Map()
   if (!list.length) return got
   const r = spawnSync('git', ['-C', abs, 'cat-file', '--batch'], { input: `${list.map((x) => x.oid).join('\n')}\n`, maxBuffer: list.reduce((a, x) => a + x.size + 128, 4096) })

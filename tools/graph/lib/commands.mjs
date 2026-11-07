@@ -16,7 +16,10 @@ import { seed } from './freshness.mjs'
 import { candidates } from './data/registry.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
 import { confinedDelta } from './docs.mjs'
-import { Graph, sql, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER } from './query.mjs'
+import { parseDelta } from './data/delta.mjs'
+import { loadIndex } from './arch.mjs'
+import { archScope, archImpact, archLines, archDeltaStates, archDeltaLines } from './arch-change.mjs'
+import { Graph, sql, baseText, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER, ARCH_CHANGES_FOOTER, ARCH_DELTA_FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
 let lastFresh = 0
@@ -104,17 +107,32 @@ export const TOOLS = [
   },
   {
     name: 'graph_changes',
-    description: 'The data model of this branch against its base, element by element: stores, tables, columns, keys, indexes and foreign keys added, removed or modified (before → after), each with the path:line that declares it on its side, and possible renames (a removed and an added element of the same shape), flagged and never decided. The base is read through git at its commit, nothing checked out: `base` when given, else baseBranch in grimoire.config.json, else the branch the index is based on, else main, compared at its merge base with HEAD. The branch side is the working tree as indexed. With `delta` (a design\'s docs/specs/<date>-<topic>.delta.json): each change it proposes with its state against the code (planned and built, pending, built differently: planned → built), its acknowledgement (acknowledged, stale once edited since, or not), then the branch\'s changes no change of the delta covers (unplanned), and a summary.',
+    description: 'The data model of this branch against its base, element by element: stores, tables, columns, keys, indexes and foreign keys added, removed or modified (before → after), each with the path:line that declares it on its side, and possible renames (a removed and an added element of the same shape), flagged and never decided. The base is read through git at its commit, nothing checked out: `base` when given, else baseBranch in grimoire.config.json, else the branch the index is based on, else main, compared at its merge base with HEAD. The branch side is the working tree as indexed. With `delta` (a design\'s docs/specs/<date>-<topic>.delta.json): each change it proposes with its state against the code (planned and built, pending, built differently: planned → built), its acknowledgement (acknowledged, stale once edited since, or not), then the branch\'s changes no change of the delta covers (unplanned), and a summary. The architecture follows, when the project saves diagrams (docs/architecture/*.architecture.json) or the delta proposes architecture changes: the diagrams against the base (components, connections, boundaries added, removed or modified), the check\'s findings on this index and not on the base checkout\'s (a new link no line draws, a module no component covers, a new external service by import, a drawn line the code no longer shows; with no base checkout index, only the diagram files are compared and it says so), and with `delta` each architecture change\'s state against the diagrams and the impact no change covers (unplanned). `repo` leaves the architecture out.',
     params: { base: { type: 'string', description: 'A branch, tag or commit to compare against (default: baseBranch, else the base branch, else main).' }, delta: { type: 'string', description: 'A design\'s delta beside the specs, as a path relative to the project root: docs/specs/<date>-<topic>.delta.json (or <repo folder>/docs/specs/… for a repository\'s own). Only such a file is read.' }, repo: repoParam },
     run: async (g, a, ctx) => {
       const base = resolveBase(ctx.project, { explicit: a.base || null, repo: a.repo || null })
+      // the architecture's part (arch-change.mjs), after the data model's, when there is anything to
+      // say: a saved diagram now or at the base, or a change the delta proposes, found before any
+      // index is loaded (archScope), so a data-only answer costs and reads as it did. Diagrams span
+      // the repositories: `repo` leaves it out. ctx.arch tells call() which footer to give.
+      const arch = async (delta) => {
+        if (a.repo) return ''
+        const scope = archScope(ctx.project, base.error ? null : base, !!(delta && delta.architecture.length))
+        if (!scope.has) return ''
+        ctx.arch = true
+        const impact = await archImpact(ctx.project, base.error ? null : base, { idx: () => loadIndex(g.db), scope })
+        if (!delta) return `\n\n${archLines(impact, baseText(base)).join('\n')}`
+        const s = archDeltaStates(delta.architecture, impact.current, { base: impact.before, impact: base.error ? null : impact })
+        return `\n\n${archDeltaLines(s, { against: !base.error, impact, baseText: base.error ? '' : baseText(base), why: base.error }).join('\n')}`
+      }
       if (!a.delta) {
         if (base.error) throw new Error(base.error)
-        return g.changes(base, await modelAt(ctx.project, base))
+        return g.changes(base, await modelAt(ctx.project, base)) + await arch(null)
       }
       const file = confinedDelta(ctx.project, String(a.delta))
       if (base.error && a.base) throw new Error(base.error)
-      return g.delta(file, base.error ? { why: base.error } : { base, at: await modelAt(ctx.project, base) }, a.repo || null)
+      const { delta } = parseDelta(file.text)
+      return g.delta(file, base.error ? { why: base.error } : { base, at: await modelAt(ctx.project, base) }, a.repo || null) + (delta ? await arch(delta) : '')
     },
     footer: CHANGES_FOOTER,
   },
@@ -186,7 +204,9 @@ export async function call(name, args = {}, { root, log = () => {} } = {}) {
     if (tool.raw) return sql(db, args.sql)
     const g = new Graph(db)
     const fresh = name === 'graph_status' ? staleness(project, db) : null
-    const footer = name === 'graph_changes' && args.delta ? DELTA_FOOTER : tool.footer || FOOTER
-    return `${note}${await tool.run(g, args, { fresh, project })}\n\n${footer}`
+    const ctx = { fresh, project, arch: false }
+    const text = await tool.run(g, args, ctx)
+    const footer = name === 'graph_changes' ? (args.delta ? (ctx.arch ? ARCH_DELTA_FOOTER : DELTA_FOOTER) : ctx.arch ? ARCH_CHANGES_FOOTER : CHANGES_FOOTER) : tool.footer || FOOTER
+    return `${note}${text}\n\n${footer}`
   } finally { db.close() }
 }

@@ -7,8 +7,20 @@
 //   { schema: 1, spec: 'docs/specs/<date>-<topic>-design.md', data: [Change], architecture: [Change] }
 //   Change { id, op: add | change | remove | rename, target, before?, after?, why, slice?,
 //            origin: planned | unplanned, ack?: { by, at, hash } }
-//   `architecture` holds the architecture's changes (component:<id>, connection:<from>-><to>,
-//   boundary:<label>), read by the architecture change view: here it is only checked to be an array.
+//   `architecture` holds the architecture's changes, in the same shape, its targets naming the
+//   elements of the saved diagrams (docs/architecture/*.architecture.json, lib/arch.mjs):
+//     component:<id>                      a component            component:search
+//     connection:<from>-><to>             a line, by its ends    connection:web->api
+//     connection:<from>-><to>#<label>     one of several lines joining the same two components,
+//                                         by its label           connection:web->api#HTTPS
+//     boundary:<label>                    a boundary             boundary:Backend (deploy)
+//   An id holds no `>` and no `#` (arch.mjs ID), so a connection's ends split at its one `>`, and
+//   the first `#` after them starts its label. Their `after`, in the diagram's own words: a component
+//   { label, type, sublabel?, paths?, imports?, sources?, note?, tag?, repo? } (add: label and
+//   type), a connection { label?, variant?, via?, note? }, a boundary { kind?, wraps } (add: wraps);
+//   a rename: a component's { id }, a boundary's { label } (a connection has no name: remove it and
+//   add the new one). Their states are computed by lib/arch-change.mjs, against the diagrams.
+//   Ids are unique across both lists: an acknowledgement names a change by its id alone.
 //
 // Targets address an element the way diff.mjs identifies it (KEY), so a target resolves exactly
 // where the diff matches: names in any letter case where the dialect's are (SQLite), a key by its
@@ -61,6 +73,7 @@
 import { createHash } from 'node:crypto'
 import { normType, normDefault } from './model.mjs'
 import { KEY, NAME, foldOf } from './diff.mjs'
+import { TYPES, VARIANTS, BOUNDARY_KINDS, ID } from '../arch.mjs'
 
 export const OPS = ['add', 'change', 'remove', 'rename']
 export const ORIGINS = ['planned', 'unplanned']
@@ -131,6 +144,34 @@ export function targetOf(storeId, entity, kind, el) {
 // A target with the element renamed (a rename's new name).
 const renamed = (t, name) => (t.kind === 'entity' ? { ...t, entity: name, el: { name } } : { ...t, el: { ...t.el, name } })
 
+// ── architecture targets (the header above) ──
+export const ARCH_KINDS = ['component', 'connection', 'boundary']
+// A target the architecture's: what the loop's ship step routes to `architecture` (appendChanges).
+export const isArchTarget = (t) => typeof t === 'string' && /^(component|connection|boundary):/.test(t)
+// → { kind: 'component', id } | { kind: 'connection', from, to, label: string | null } |
+//   { kind: 'boundary', label } | { error }
+export function parseArchTarget(t) {
+  if (typeof t !== 'string' || !t.trim()) return { error: 'a target is a non-empty string' }
+  const m = /^(component|connection|boundary):(.*)$/s.exec(t)
+  if (!m) return { error: `${q(t)} is no architecture target: component:<id>, connection:<from>-><to> or boundary:<label>` }
+  const [, kind, rest] = m
+  if (kind === 'component') return ID.test(rest) ? { kind, id: rest } : { error: `${q(t)}: a component's id is lower case, digits, . _ - (64 at most)` }
+  if (kind === 'boundary') return rest.trim() ? { kind, label: rest } : { error: `${q(t)}: boundary:<label>` }
+  const hash = rest.indexOf('#'), ends = hash < 0 ? rest : rest.slice(0, hash), label = hash < 0 ? null : rest.slice(hash + 1)
+  const gt = ends.indexOf('>')
+  const from = gt > 0 && ends[gt - 1] === '-' ? ends.slice(0, gt - 1) : null, to = gt > 0 ? ends.slice(gt + 1) : null
+  if (!from || !to || !ID.test(from) || !ID.test(to)) return { error: `${q(t)}: connection:<from>-><to>, each a component's id (#<label> after them for one of several lines)` }
+  if (from === to) return { error: `${q(t)}: a component does not connect to itself` }
+  if (label !== null && !label.trim()) return { error: `${q(t)}: #<label> names the line's label` }
+  return { kind, from, to, label }
+}
+// The target naming an element of a diagram (the inverse of parseArchTarget).
+export function archTargetOf(kind, el, label = null) {
+  if (kind === 'component') return `component:${el.id}`
+  if (kind === 'boundary') return `boundary:${el.label}`
+  return `connection:${el.from}->${el.to}${label !== null && label !== undefined ? `#${label}` : ''}`
+}
+
 // ── validation ──
 // → { delta, errors: [string] }: the JSON parsed and checked
 export function parseDelta(text) {
@@ -148,28 +189,68 @@ export function validateDelta(doc) {
   if (!Array.isArray(doc.data)) errors.push('data: an array of changes to the data model ([] when none)')
   if (!Array.isArray(doc.architecture)) errors.push('architecture: an array of changes to the architecture ([] when none)')
   const seen = new Map()
-  ;(Array.isArray(doc.data) ? doc.data : []).forEach((c, i) => {
-    const at = `data[${i}]${isObj(c) && str(c.id) ? ` (${c.id})` : ''}`
-    for (const e of changeErrors(c)) errors.push(`${at}: ${e}`)
-    if (isObj(c) && str(c.id)) { if (seen.has(c.id)) errors.push(`${at}: the id ${q(c.id)} is data[${seen.get(c.id)}]'s too: ids are unique`); else seen.set(c.id, i) }
-  })
+  for (const list of ['data', 'architecture']) {
+    ;(Array.isArray(doc[list]) ? doc[list] : []).forEach((c, i) => {
+      const at = `${list}[${i}]${isObj(c) && str(c.id) ? ` (${c.id})` : ''}`
+      for (const e of (list === 'data' ? changeErrors : archChangeErrors)(c)) errors.push(`${at}: ${e}`)
+      if (isObj(c) && str(c.id)) { if (seen.has(c.id)) errors.push(`${at}: the id ${q(c.id)} is ${seen.get(c.id)}'s too: ids are unique`); else seen.set(c.id, `${list}[${i}]`) }
+    })
+  }
   return errors
 }
-function changeErrors(c) {
-  if (!isObj(c)) return ['a change is an object { id, op, target, why, origin, … }']
+// What every change states, whatever it targets: [errors] (the target and `after` apart).
+function commonErrors(c) {
   const out = []
   for (const k of Object.keys(c)) if (!KEYS.includes(k)) out.push(`unknown key ${q(k)} (a change has ${KEYS.join(', ')})`)
   if (!str(c.id)) out.push('id: a non-empty string, unique in the file')
   if (!OPS.includes(c.op)) out.push(`op ${q(c.op)} is not one of ${OPS.join(', ')}`)
-  const t = parseTarget(c.target)
-  if (t.error) out.push(`target: ${t.error}`)
+  return out
+}
+function tailErrors(c) {
+  const out = []
   if (!str(c.why)) out.push('why: say why it changes')
   if (!ORIGINS.includes(c.origin)) out.push(`origin ${q(c.origin)} is not one of ${ORIGINS.join(', ')}`)
   if (c.slice !== undefined && !(Number.isInteger(c.slice) && c.slice > 0) && !str(c.slice)) out.push('slice: the plan slice that builds it, a number or a name')
   if (c.before !== undefined && !isObj(c.before)) out.push('before: an object, the element as the design saw it')
   if (c.ack !== undefined && !(isObj(c.ack) && str(c.ack.by) && str(c.ack.at) && str(c.ack.hash) && Object.keys(c.ack).every((k) => ['by', 'at', 'hash'].includes(k)))) out.push('ack: { by, at, hash }, written when the change is acknowledged')
+  return out
+}
+function changeErrors(c) {
+  if (!isObj(c)) return ['a change is an object { id, op, target, why, origin, … }']
+  const out = commonErrors(c)
+  const t = parseTarget(c.target)
+  if (t.error) out.push(`target: ${t.error}`)
+  out.push(...tailErrors(c))
   if (!t.error && OPS.includes(c.op)) out.push(...afterErrors(t.kind, c.op, c.after))
   return out
+}
+export function archChangeErrors(c) {
+  if (!isObj(c)) return ['a change is an object { id, op, target, why, origin, … }']
+  const out = commonErrors(c)
+  const t = parseArchTarget(c.target)
+  if (t.error) out.push(`target: ${t.error}`)
+  out.push(...tailErrors(c))
+  if (!t.error && OPS.includes(c.op)) out.push(...archAfterErrors(t.kind, c.op, c.after))
+  return out
+}
+// an architecture change's `after`, in the diagram's words (arch.mjs validate)
+const strs = (v) => Array.isArray(v) && v.every(str)
+const COMPONENT = { label: str, sublabel: (v) => typeof v === 'string', type: (v) => TYPES.includes(v), paths: strs, imports: strs, sources: strs, note: (v) => typeof v === 'string', tag: (v) => typeof v === 'string', repo: str }
+const CONNECTION = { label: (v) => typeof v === 'string', variant: (v) => VARIANTS.includes(v), via: (v) => typeof v === 'string', note: (v) => typeof v === 'string' }
+const BOUNDARY = { kind: (v) => BOUNDARY_KINDS.includes(v), wraps: (v) => Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string' && ID.test(x)) }
+function archAfterErrors(kind, op, after) {
+  if (op === 'remove') return after === undefined ? [] : ['a removal has no after']
+  if (op === 'rename') {
+    if (kind === 'connection') return ['a connection has no name to rename: remove it and add the new one']
+    const key = kind === 'component' ? 'id' : 'label'
+    const okName = kind === 'component' ? (v) => typeof v === 'string' && ID.test(v) : str
+    return isObj(after) && okName(after[key]) && Object.keys(after).length === 1 ? [] : [`after: { ${key} }, the new ${key === 'id' ? 'id' : 'label'}`]
+  }
+  const [what, allowed, need] = kind === 'component' ? ['a component', COMPONENT, ['label', 'type']] : kind === 'connection' ? ['a connection', CONNECTION, []] : ['a boundary', BOUNDARY, ['wraps']]
+  if (kind === 'connection' && op === 'add' && after === undefined) return []
+  if (after === undefined) return [`${op === 'add' ? 'an addition' : 'a change'} needs after: the ${kind} ${op === 'add' ? 'it adds' : 'as it becomes'}`]
+  if (op === 'change' && isObj(after) && !Object.keys(after).length) return [`after: what changes (${Object.keys(allowed).join(', ')})`]
+  return attrs(what, after, allowed, op === 'add' ? need : [])
 }
 const FIELD = { type: (v) => str(v), nullable: (v) => typeof v === 'boolean', default: (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v), generated: (v) => v === null || v === 'virtual' || v === 'stored' }
 const INDEX = { columns: (v) => Array.isArray(v) && v.length > 0 && v.every(str), unique: (v) => typeof v === 'boolean', partial: (v) => typeof v === 'boolean' }
@@ -344,20 +425,21 @@ export function deltaStates(delta, model, { base = null, diff = null } = {}) {
 export const changeText = (c) => `${c.op} ${c.target}${c.op === 'rename' && c.after ? ` → ${c.after.name}` : ''}`
 
 // ── acknowledging: the file edited in place ──
-// The acknowledgements set (an object) or removed (null) by change index in `data`, written into the
-// text itself: only the edited `ack` members move, every other byte stays as it was (the file's
-// indentation, line ends, final newline, key order and the other changes). Checked by parsing the
-// result; a file whose layout defeats the edit (a key written twice) is written whole instead, after
-// the same check, in its own indentation unit (2 spaces when it has none).
-export function setAcks(text, edits) {
+// The acknowledgements set (an object) or removed (null) by change index in `list` (`data`, or
+// `architecture`), written into the text itself: only the edited `ack` members move, every other
+// byte stays as it was (the file's indentation, line ends, final newline, key order and the other
+// changes). Checked by parsing the result; a file whose layout defeats the edit (a key written twice)
+// is written whole instead, after the same check, in its own indentation unit (2 spaces when it has
+// none). Acknowledgements in both lists: one call per list, the second on the first's text.
+export function setAcks(text, edits, list = 'data') {
   const doc = JSON.parse(text)
-  for (const [i, ack] of edits) { if (ack) doc.data[i].ack = ack; else delete doc.data[i].ack }
+  for (const [i, ack] of edits) { if (ack) doc[list][i].ack = ack; else delete doc[list][i].ack }
   const nl = text.includes('\r\n') ? '\r\n' : '\n'
   const unit = (/\n([ \t]+)"/.exec(text) || [, '  '])[1]
   const want = JSON.stringify(doc)
   try {
     const root = spans(text)
-    const data = [...root.members].reverse().find((m) => m.key === 'data').node
+    const data = [...root.members].reverse().find((m) => m.key === list).node
     const ops = []
     for (const [i, ack] of edits) {
       const obj = data.items[i]
@@ -387,51 +469,60 @@ export function setAcks(text, edits) {
 //   acknowledged (the user does that). One whose id the file holds already is left out (a ship sent
 //   again writes nothing twice); one that would not validate is refused with its problems, and the
 //   others still go in. `errors`: the file itself does not validate (nothing is written, text null).
-//   `text` is the file with the added changes after its last one, every other byte kept: one per line
-//   when its changes are written on one line each, else spread in its own indentation. A layout the
-//   edit cannot handle is written whole, after the same check (setAcks' fallback).
+//   An entry whose target is the architecture's (component:, connection:, boundary:, isArchTarget)
+//   goes to `architecture`, checked as one; the others to `data`. A repository named component,
+//   connection or boundary is therefore never the target of an appended data change.
+//   `text` is the file with the added changes after the last one of their list, every other byte
+//   kept: one per line when its changes are written on one line each, else spread in its own
+//   indentation. A layout the edit cannot handle is written whole, after the same check (setAcks'
+//   fallback).
 export function appendChanges(text, entries) {
   const { errors } = parseDelta(text)
   if (errors.length) return { text: null, added: [], already: [], refused: [], errors }
   const doc = JSON.parse(text)
-  const have = new Set(doc.data.map((c) => c.id))
+  const have = new Set([...doc.data, ...doc.architecture].map((c) => c.id))
   const added = [], already = [], refused = []
   for (const e of Array.isArray(entries) ? entries : []) {
     if (!isObj(e) || !str(e.id)) { refused.push({ id: isObj(e) && typeof e.id === 'string' ? e.id : null, errors: ['id: a non-empty string, unique in the file'] }); continue }
     if (have.has(e.id)) { already.push(e.id); continue }
-    const errs = e.origin !== 'unplanned' ? [`origin ${q(e.origin)}: only an unplanned change is appended`] : e.ack !== undefined ? ['ack: an appended change is not acknowledged yet'] : changeErrors(e)
+    const errs = e.origin !== 'unplanned' ? [`origin ${q(e.origin)}: only an unplanned change is appended`] : e.ack !== undefined ? ['ack: an appended change is not acknowledged yet'] : (isArchTarget(e.target) ? archChangeErrors : changeErrors)(e)
     if (errs.length) { refused.push({ id: e.id, errors: errs }); continue }
     have.add(e.id)
     added.push(e)
   }
   if (!added.length) return { text, added: [], already, refused, errors: [] }
-  const want = { ...doc, data: [...doc.data, ...added] }
+  const byList = { data: added.filter((x) => !isArchTarget(x.target)), architecture: added.filter((x) => isArchTarget(x.target)) }
+  const want = { ...doc, data: [...doc.data, ...byList.data], architecture: [...doc.architecture, ...byList.architecture] }
   const nl = text.includes('\r\n') ? '\r\n' : '\n'
   const unit = (/\n([ \t]+)"/.exec(text) || [, '  '])[1]
+  const ids = added.map((x) => x.id)
+  try {
+    let out = text
+    for (const list of ['data', 'architecture']) if (byList[list].length) out = appendTo(out, list, byList[list], nl, unit)
+    if (JSON.stringify(JSON.parse(out)) === JSON.stringify(want)) return { text: out, added: ids, already, refused, errors: [] }
+  } catch {}
+  const whole = (JSON.stringify(want, null, unit) + (/\r?\n$/.test(text) ? '\n' : '')).split('\n').join(nl)
+  return { text: whole, added: ids, already, refused, errors: [] }
+}
+// The changes written after the last one of `list` in the text, in its layout (appendChanges).
+function appendTo(text, list, added, nl, unit) {
   const lineInd = (at) => /^[ \t]*/.exec(text.slice(text.lastIndexOf('\n', at - 1) + 1, at))[0]
   const spread = (x, ind) => JSON.stringify(x, null, unit).split('\n').join(nl + ind)
   const flat = (x) => JSON.stringify(x, null, 1).replace(/\n\s*/g, ' ')
-  try {
-    const root = spans(text)
-    const data = [...root.members].reverse().find((m) => m.key === 'data')
-    const node = data.node, items = node.items
-    let out
-    if (items.length) {
-      const last = items[items.length - 1]
-      const own = /^[ \t]*$/.test(text.slice(text.lastIndexOf('\n', last.start - 1) + 1, last.start)) // the last change starts its line
-      const multi = text.slice(node.start, node.end).includes('\n') && own
-      const ind = multi ? lineInd(last.start) : ''
-      const one = !text.slice(last.start, last.end).includes('\n')
-      const put = added.map((x) => (multi ? `,${nl}${ind}${one ? flat(x) : spread(x, ind)}` : `, ${flat(x)}`)).join('')
-      out = text.slice(0, last.end) + put + text.slice(last.end)
-    } else {
-      const ind = lineInd(data.kstart)
-      out = `${text.slice(0, node.start)}[${nl}${added.map((x) => `${ind}${unit}${spread(x, ind + unit)}`).join(`,${nl}`)}${nl}${ind}]${text.slice(node.end)}`
-    }
-    if (JSON.stringify(JSON.parse(out)) === JSON.stringify(want)) return { text: out, added: added.map((x) => x.id), already, refused, errors: [] }
-  } catch {}
-  const whole = (JSON.stringify(want, null, unit) + (/\r?\n$/.test(text) ? '\n' : '')).split('\n').join(nl)
-  return { text: whole, added: added.map((x) => x.id), already, refused, errors: [] }
+  const root = spans(text)
+  const member = [...root.members].reverse().find((m) => m.key === list)
+  const node = member.node, items = node.items
+  if (items.length) {
+    const last = items[items.length - 1]
+    const own = /^[ \t]*$/.test(text.slice(text.lastIndexOf('\n', last.start - 1) + 1, last.start)) // the last change starts its line
+    const multi = text.slice(node.start, node.end).includes('\n') && own
+    const ind = multi ? lineInd(last.start) : ''
+    const one = !text.slice(last.start, last.end).includes('\n')
+    const put = added.map((x) => (multi ? `,${nl}${ind}${one ? flat(x) : spread(x, ind)}` : `, ${flat(x)}`)).join('')
+    return text.slice(0, last.end) + put + text.slice(last.end)
+  }
+  const ind = lineInd(member.kstart)
+  return `${text.slice(0, node.start)}[${nl}${added.map((x) => `${ind}${unit}${spread(x, ind + unit)}`).join(`,${nl}`)}${nl}${ind}]${text.slice(node.end)}`
 }
 
 // Where each value of a JSON text starts and ends (the text is valid JSON: JSON.parse read it).

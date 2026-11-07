@@ -11,9 +11,15 @@
 //  4. the server (serve.mjs): host, origin and token checks, reading, saving, conflicts, creating;
 //     acknowledging a design delta's changes (the one other file it writes)
 //  5. the page: both tabs rendered by the page's own script in a stub DOM
+//  6. the architecture change view (arch-change.mjs): the delta's architecture targets and their
+//     validation, acknowledgements and appended changes in their list, the diagram diff, the check's
+//     findings on two indexes, the states of the delta's architecture changes and the unplanned
+//  7. the Architecture tab draws it: a worktree branch against its base checkout (two hand-built
+//     indexes), the Changes and Delta overlays in a stub DOM, acknowledging through the server,
+//     the undrawn link kept, appended, then drawn (built), and no base index (diagram files only)
 //
 //  Needs no parser runtime: indexes here are built by hand (sections 2) or empty (4, 5).
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, readdirSync, lstatSync, chmodSync, rmdirSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, readdirSync, lstatSync, chmodSync, rmdirSync, utimesSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir, userInfo } from 'node:os'
 import path from 'node:path'
@@ -24,6 +30,7 @@ const { scanDocs, resolveDoc, docRoots, docHash } = await import('../lib/docs.mj
 const { loadProject } = await import('../lib/project.mjs')
 
 let PASS = 0, FAIL = 0
+const eq2 = (got, want, m) => ok(JSON.stringify(got) === JSON.stringify(want), `${m}${JSON.stringify(got) === JSON.stringify(want) ? '' : ` (got ${JSON.stringify(got)})`}`)
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
 
 // ── 1 · Markdown ──
@@ -327,7 +334,7 @@ else {
     r = await dput({ repo: 'api', path: REL, base: docHash(TEXT), ids: ['three'], ack: true })
     ok(r.status === 409 && r.j.text === before && r.j.hash === docHash(before) && disk() === before, 'a write against a delta that changed since it was loaded is refused, with the disk text, and nothing is written')
     r = await dput({ repo: 'api', path: REL, base: docHash(before), ids: ['three', 'nope'], ack: true })
-    ok(r.status === 400 && r.j.error === 'no data change with the id "nope"' && disk() === before, 'an id the delta does not hold: refused, nothing written (not even the ids it does hold)')
+    ok(r.status === 400 && r.j.error === 'no change with the id "nope"' && disk() === before, 'an id the delta does not hold: refused, nothing written (not even the ids it does hold)')
     r = await dput({ repo: 'api', path: 'docs/specs/broken.delta.json', base: docHash(disk('repos/api/docs/specs/broken.delta.json')), ids: ['x'], ack: true })
     ok(r.status === 422 && r.j.error.startsWith('the delta does not validate: data[0] (x): op undefined') && disk('repos/api/docs/specs/broken.delta.json').includes('"id": "x" }'), 'a delta that does not validate is never written: its problems say why')
     const refused = [['api', '../docs/specs/x.delta.json'], ['api', 'docs/specs/../specs/2026-11-06-loans.delta.json'], ['api', `${at('repos/api')}/${REL}`], ['api', 'docs/specs/notes.json'], ['api', 'docs/specs/notes.md'], ['api', 'docs/plans/2026-11-06-loans.delta.json'], ['api', 'docs/specs/out.delta.json'], ['api', 'docs/specs/pkg.delta.json'], ['api', 'docs/specs/none.delta.json'], [path.basename(DH), `repos/api/${REL}`], ['nope', REL], ['api', 'docs/specs/%2e%2e/%2e%2e/package.json'], ['api', 'docs/specs/%2e%2e%2f%2e%2e%2fpackage.delta.json'], ['api', REL.replace('.delta.json', '.DELTA.JSON')]]
@@ -397,9 +404,23 @@ else {
       ok(paths.every(([want, got, p]) => got.status === want && !lockOf(p)), `the lock is released on every path: ${paths.map(([want, got]) => `${want}→${got.status}`).join(', ')}`)
     } finally { if (existsSync(LOCK)) rmdirSync(LOCK); await s4.close() }
 
+    // an architecture change is acknowledged the same way, by its id, in the same request as a data one
+    const AREL = 'docs/specs/2026-11-07-search.delta.json'
+    const ARCH = { schema: 1, spec: 'docs/specs/2026-11-07-search-design.md', data: [{ id: 'col', op: 'add', target: 'api:db/books.isbn', after: { type: 'TEXT', nullable: true }, why: 'w', origin: 'planned' }],
+      architecture: [{ id: 'search', op: 'add', target: 'component:search', after: { label: `Search ${'"'}><img src=x>`, type: 'backend' }, why: 'find books', slice: 2, origin: 'planned' }, { id: 'line', op: 'add', target: 'connection:web->search', why: 'the page asks it', origin: 'planned' }] }
+    const ATEXT = JSON.stringify(ARCH, null, 2) + '\n'
+    w(`repos/api/${AREL}`, ATEXT)
+    r = await dput({ repo: 'api', path: AREL, base: docHash(ATEXT), ids: ['search', 'col'], ack: true })
+    const ad = JSON.parse(disk(`repos/api/${AREL}`))
+    ok(r.status === 200 && ad.architecture[0].ack.hash === changeHash(ARCH.architecture[0]) && ad.data[0].ack.hash === changeHash(ARCH.data[0]) && !ad.architecture[1].ack && r.j.changes.map((c) => c.id).join() === 'search,col' && disk(`repos/api/${AREL}`).split('\n').length === ATEXT.split('\n').length + 10,
+      'PUT /api/delta acknowledges an architecture change by its id, beside a data one in the same request: each ack edited in place in its own list, with its own hash')
+    const before2 = disk(`repos/api/${AREL}`)
+    eq2([(await dput({ repo: 'api', path: AREL, base: docHash(ATEXT), ids: ['line'], ack: true })).status, (await dput({ repo: 'api', path: AREL, base: docHash(before2), ids: ['line', 'nope'], ack: true })).status, disk(`repos/api/${AREL}`) === before2], [409, 400, true], 'the same refusals: a stale base (409), an id it does not hold (400), nothing written')
+    r = await dput({ repo: 'api', path: AREL, base: docHash(before2), ids: ['search'], ack: false })
+    ok(r.status === 200 && !JSON.parse(disk(`repos/api/${AREL}`)).architecture[0].ack && JSON.parse(disk(`repos/api/${AREL}`)).data[0].ack, 'unacknowledging an architecture change removes its ack, and only its')
     ok(readdirTmp(DH).length === 0, 'no temporary file is left behind')
     const pageD = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec((await fetch(`http://127.0.0.1:${s2.port}/?t=${s2.token}`).then((x) => x.text())))[1].replace(/\\u003c/g, '<')).data
-    ok(pageD.deltas.map((d) => `${d.repo}:${d.path}:${d.ackable}:${d.hash === docHash(disk(d.repo === 'api' ? `repos/api/${d.path}` : d.path))}`).sort().join(' ') === `api:${REL}:true:true api:docs/specs/broken.delta.json:true:true ${path.basename(DH)}:${REL}:true:true`,
+    ok(pageD.deltas.map((d) => `${d.repo}:${d.path}:${d.ackable}:${d.hash === docHash(disk(d.repo === 'api' ? `repos/api/${d.path}` : d.path))}`).sort().join(' ') === `api:${REL}:true:true api:${AREL}:true:true api:docs/specs/broken.delta.json:true:true ${path.basename(DH)}:${REL}:true:true`,
       'the served page carries every delta beside the specs, with the hash each was loaded with and where it may be written (symlinks out and links to other files are not listed)')
   } finally { await s2.close() }
 }
@@ -501,6 +522,315 @@ else {
   ok(/Backlinks \(1\)/.test(text()), "and the repository's note counts the backlink")
   go('#docs')
   ok(/notes/.test(text()) && /At the top/.test(text()), 'the Docs home: counts and the top-level notes')
+}
+
+// ── 6 · the architecture change view ──
+console.log('\n6 · the architecture change view: the delta\'s architecture targets, the diagram diff, the findings on two indexes, the states')
+{
+  const { parseDelta, parseArchTarget, archTargetOf, changeHash, setAcks, appendChanges } = await import('../lib/data/delta.mjs')
+  const AC = await import('../lib/arch-change.mjs')
+  const eq = (got, want, m) => { const g = JSON.stringify(got), w = JSON.stringify(want); ok(g === w, `${m}${g === w ? '' : `\n       want: ${w}\n       got:  ${g}`}`) }
+  // the target grammar
+  eq([parseArchTarget('component:search'), parseArchTarget('connection:web-app->api.v2'), parseArchTarget('connection:a-->b'), parseArchTarget('connection:web->api#HTTPS # json'), parseArchTarget('boundary:Backend / deploy')],
+    [{ kind: 'component', id: 'search' }, { kind: 'connection', from: 'web-app', to: 'api.v2', label: null }, { kind: 'connection', from: 'a-', to: 'b', label: null }, { kind: 'connection', from: 'web', to: 'api', label: 'HTTPS # json' }, { kind: 'boundary', label: 'Backend / deploy' }],
+    'targets: a component by its id, a line by its two ends (an id may hold - and end with it: the one > splits them), one of several lines by #<label>, a boundary by its label')
+  const bad = ['component:Search', 'component:', 'connection:web>api', 'connection:web->', 'connection:web->web', 'connection:web->api#', 'boundary:', 'module:x', 'api:db/books']
+  ok(bad.every((t) => parseArchTarget(t).error), `refused: an id in upper case, no id, a line without ->, an end missing, a loop, an empty #label, no label, another kind, a data target (${bad.filter((t) => !parseArchTarget(t).error)})`)
+  eq([archTargetOf('component', { id: 'x' }), archTargetOf('connection', { from: 'a', to: 'b' }), archTargetOf('connection', { from: 'a', to: 'b' }, 'SQL'), archTargetOf('boundary', { label: 'Edge' })], ['component:x', 'connection:a->b', 'connection:a->b#SQL', 'boundary:Edge'], 'the target of a drawn element, the inverse')
+  // validation: the architecture list is checked now, change by change
+  const ch = (id, op, target, extra = {}) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
+  const errs = (architecture, data = []) => parseDelta(JSON.stringify({ schema: 1, spec: 's', data, architecture })).errors
+  eq(errs([ch('c1', 'add', 'component:search', { after: { label: 'Search', type: 'backend', paths: ['src/search'] } }), ch('c2', 'add', 'connection:web->search'), ch('c3', 'change', 'connection:web->api', { after: { via: 'HTTP' } }),
+    ch('c4', 'add', 'boundary:Edge', { after: { kind: 'trust', wraps: ['web'] } }), ch('c5', 'rename', 'component:api', { after: { id: 'orders' } }), ch('c6', 'rename', 'boundary:Edge', { after: { label: 'Public edge' } }), ch('c7', 'remove', 'component:legacy')]), [],
+    'a component added with its label and type, a line added with no after, a line changed, a boundary added, a component renamed by id, a boundary by label, a removal: valid')
+  eq(errs([ch('a1', 'add', 'component:x', { after: { label: 'X' } }), ch('a2', 'add', 'component:y', { after: { label: 'Y', type: 'server', col: 1 } }), ch('a3', 'rename', 'connection:a->b', { after: { label: 'z' } }),
+    ch('a4', 'rename', 'component:x', { after: { id: 'Bad Id' } }), ch('a5', 'add', 'boundary:B', { after: { kind: 'zone', wraps: [] } }), ch('a6', 'change', 'connection:a->b', { after: {} }), ch('a7', 'remove', 'boundary:B', { after: { wraps: ['x'] } }), ch('a8', 'add', 'nope:x'), ch('a1', 'remove', 'component:z')], [ch('a7', 'remove', 'api:db/t')]),
+  ['architecture[0] (a1): after: a component needs its type', 'architecture[1] (a2): after: a component\'s type "server" is not valid', 'architecture[1] (a2): after: "col" is not an attribute of a component (label, sublabel, type, paths, imports, sources, note, tag, repo)',
+    'architecture[2] (a3): a connection has no name to rename: remove it and add the new one', 'architecture[3] (a4): after: { id }, the new id', 'architecture[4] (a5): after: a boundary\'s kind "zone" is not valid', 'architecture[4] (a5): after: a boundary\'s wraps [] is not valid',
+    'architecture[5] (a6): after: what changes (label, variant, via, note)', 'architecture[6] (a7): a removal has no after', 'architecture[6] (a7): the id "a7" is data[0]\'s too: ids are unique', 'architecture[7] (a8): target: "nope:x" is no architecture target: component:<id>, connection:<from>-><to> or boundary:<label>', 'architecture[8] (a1): the id "a1" is architecture[0]\'s too: ids are unique'],
+    'every problem named: a component without its type, an unknown type, a layout attribute, a line renamed, a bad id, a boundary kind and an empty wraps, a change that states nothing, a removal with after, another kind of target, an id used twice across both lists')
+  // acknowledgements and appended changes find their list
+  const FILE = JSON.stringify({ schema: 1, spec: 's', data: [ch('d1', 'remove', 'api:db/t')], architecture: [ch('a1', 'add', 'component:search', { after: { label: 'Search', type: 'backend' } })] }, null, 2) + '\n'
+  const ACK = { by: 'Ann', at: '2026-11-07T08:00:00.000Z', hash: changeHash(JSON.parse(FILE).architecture[0]) }
+  const acked = setAcks(FILE, new Map([[0, ACK]]), 'architecture')
+  eq([JSON.parse(acked).architecture[0].ack, JSON.parse(acked).data[0].ack, acked.replace(/,\n {6}"ack": \{\n[^}]*\}/, '') === FILE], [ACK, undefined, true], 'setAcks edits an architecture change\'s ack in place, and nothing else')
+  const unpl = (id, target, after) => ({ id, op: 'add', target, ...(after ? { after } : {}), why: 'the export needs it', slice: 1, origin: 'unplanned' })
+  const ap = appendChanges(FILE, [unpl('u1', 'connection:web->store'), unpl('u2', 'api:db/t.x', { type: 'TEXT', nullable: true }), unpl('u3', 'component:Bad'), unpl('a1', 'component:dup', { label: 'D', type: 'cli' })])
+  const after = JSON.parse(ap.text)
+  eq([after.architecture.map((c) => c.id), after.data.map((c) => c.id), ap.refused.map((r) => r.id), ap.already, parseDelta(ap.text).errors], [['a1', 'u1'], ['d1', 'u2'], ['u3'], ['a1'], []],
+    'appendChanges routes an architecture target to `architecture` and a data one to `data`; a bad target is refused; an id held in either list is already there')
+
+  // the diagram diff, base → branch
+  const base = { schema: 1, title: 'Shop', components: [{ id: 'web', label: 'Web', type: 'frontend', paths: ['src/web'] }, { id: 'api', label: 'API', type: 'backend', paths: ['src/api'] }, { id: 'store', label: 'Store', type: 'database', paths: ['src/store'] }, { id: 'old', label: 'Old', type: 'cli' }],
+    connections: [{ from: 'web', to: 'api', label: 'HTTP' }, { from: 'api', to: 'store', label: 'SQL' }, { from: 'api', to: 'store', label: 'cache' }], boundaries: [{ label: 'Backend', kind: 'deploy', wraps: ['api', 'store'] }] }
+  const branch = { ...base, components: [base.components[0], { ...base.components[1], label: 'Order API' }, base.components[2], { id: 'search', label: 'Search', type: 'backend', paths: ['src/search'] }],
+    connections: [base.connections[0], base.connections[1], { from: 'web', to: 'store', label: 'reads' }], boundaries: [{ label: 'Backend', kind: 'deploy', wraps: ['api', 'store', 'search'] }] }
+  const dd = AC.diffDiagrams([{ file: 'docs/architecture/shop.architecture.json', doc: base }, { file: 'docs/architecture/gone.architecture.json', doc: { schema: 1, title: 'Gone', components: [{ id: 'g', label: 'G', type: 'cli' }] } }, { file: 'docs/architecture/broken.architecture.json', error: 'does not parse: x' }],
+    [{ file: 'docs/architecture/shop.architecture.json', doc: branch }, { file: 'docs/architecture/broken.architecture.json', doc: base }])
+  eq(dd.files.map((f) => [f.file, f.change, f.changes.map((c) => `${c.change} ${c.target}${c.attrs.length ? ` ${c.attrs.map((a) => `${a.attr}: ${AC.shown(a.before)} → ${AC.shown(a.after)}`).join('; ')}` : ''}`)]), [
+    ['docs/architecture/gone.architecture.json', 'removed', ['removed component:g']],
+    ['docs/architecture/shop.architecture.json', 'modified', ['modified component:api label: API → Order API', 'removed component:old', 'added component:search', 'removed connection:api->store#cache', 'added connection:web->store', 'modified boundary:Backend wraps: api, store → api, search, store']],
+  ], 'the diff: a component relabelled, removed and added; one of two lines on a pair removed, named by its label; a new line; a boundary that wraps one more; a diagram gone lists what it held')
+  eq([dd.skipped, dd.counts], [[{ file: 'docs/architecture/broken.architecture.json', why: 'at the base, it does not parse: x' }], { files: 2, added: 2, removed: 3, modified: 2 }], 'a diagram that does not parse on a side is not compared, and said; the counts')
+
+  // the findings on two indexes: the same diagram, the base checkout's index and the branch's
+  const F = (files, edges, imports) => {
+    const fs = files.map(([p], i) => ({ id: i + 1, repo: 'shop', path: p, lang: 'javascript', is_test: 0, node_id: 100 + i + 1 }))
+    return { repos: ['shop'], files: fs, nodes: fs.map((f) => ({ id: 200 + f.id, file_id: f.id })), edges: edges.map(([a, b]) => ({ src: 200 + a, dst: 200 + b, kind: 'IMPORTS', confidence: 'import' })), imports: imports.map(([f, s]) => ({ file_id: f, source: s })) }
+  }
+  const shop = { schema: 1, title: 'Shop', components: [{ id: 'web', label: 'Web', type: 'frontend', paths: ['src/web'] }, { id: 'api', label: 'API', type: 'backend', paths: ['src/api'] }, { id: 'store', label: 'Store', type: 'database', paths: ['src/store'] }],
+    connections: [{ from: 'web', to: 'api', label: 'HTTP' }, { from: 'api', to: 'store', label: 'SQL' }] }
+  const BASE_FILES = [['src/web/page.js'], ['src/api/orders.js'], ['src/store/db.js'], ['src/api/cart.js']]
+  const baseIdx = F(BASE_FILES, [[1, 2], [2, 3], [4, 3]], [])
+  const brIdx = F([...BASE_FILES, ['src/jobs/mail.js']], [[1, 2], [1, 3], [4, 3]], [[3, 'redis'], [5, 'nodemailer']])
+  const nf = A.newFindings(shop, brIdx, baseIdx)
+  eq(nf.map((f) => `${f.kind} ${f.target} | ${f.text}`), [
+    'undrawn connection:web->store | web uses store (1 file pair in the graph), but no line is drawn between them',
+    'uncovered null | src/jobs (1 production file) is in no component',
+    'service component:redis | the code imports Redis (redis), and no component reaches it',
+  ], 'the findings new on the branch\'s index: a link no line draws, a module no component covers, an external service by import (a file in no component does not count)')
+  const gone = A.newFindings(shop, F(BASE_FILES, [[1, 2], [4, 3]], []), baseIdx)
+  eq(gone.map((f) => `${f.kind} ${f.target}`), [], 'api → store still seen through another file pair: nothing new')
+  eq(A.newFindings(shop, F(BASE_FILES, [[1, 2]], []), baseIdx).map((f) => `${f.kind} ${f.target} | ${f.text}`), ['unseen connection:api->store | api → store is drawn, and the code does not show it'], 'a drawn line the code no longer shows')
+  ok(A.analyze(shop, brIdx, null).warnings.includes('the code imports Redis (redis), and no component reaches it: draw it with "imports", or name the package in the "imports" of the component that stands for it'), 'the check warns of a service the code imports and no component reaches')
+
+  // the states of the delta's architecture changes, against the diagrams and the branch's impact
+  const cur = [{ file: 'docs/architecture/shop.architecture.json', doc: { ...shop, components: [...shop.components, { id: 'search', label: 'Search', type: 'worker', paths: ['src/search'] }], connections: [...shop.connections, { from: 'web', to: 'search' }] } }]
+  const was = [{ file: 'docs/architecture/shop.architecture.json', doc: shop }]
+  const impact = { diagrams: AC.diffDiagrams(was, cur), findings: nf.map((f) => ({ file: cur[0].file, ...f })), why: null, current: cur, before: was }
+  const ack = (c, edit = {}) => ({ ...c, ...edit, ack: { by: 'Ann', at: '2026-11-07T08:00:00.000Z', hash: changeHash(c) } })
+  const DELTA = [
+    ack(ch('search', 'add', 'component:search', { after: { label: 'Search', type: 'backend' }, slice: 2 })),
+    ch('to-search', 'add', 'connection:web->search'),
+    ack(ch('cache', 'add', 'component:cache', { after: { label: 'Cache', type: 'database', imports: ['redis'] } }), { why: 'edited after the acknowledgement' }),
+    ch('via', 'change', 'connection:web->api', { after: { via: 'HTTPS' } }),
+    ch('legacy', 'remove', 'component:legacy'),
+    ch('jobs', 'add', 'component:jobs', { after: { label: 'Jobs', type: 'worker', paths: ['src/jobs'] } }),
+  ]
+  const s = AC.archDeltaStates(DELTA, cur, { base: was, impact })
+  eq(s.changes.map((r) => `${r.id} ${r.state}${r.ack ? ` ${r.ack}` : ''}${r.diffs.length ? ` [${r.diffs.map((x) => x.text).join('; ')}]` : ''}${r.proposed.length ? ` (${r.proposed.map((x) => x.text).join('; ')})` : ''}${r.warn ? ` ⚠ ${r.warn}` : ''}`), [
+    'search built-differently acked [type: backend → worker]',
+    'to-search planned-built',
+    'cache pending stale',
+    'via pending (via: none → HTTPS)',
+    'legacy planned-built ⚠ not in the diagrams, nor at the base: check the target',
+    'jobs pending',
+  ], 'each state: drawn in another shape (planned → built), drawn as planned, not drawn yet (its acknowledgement stale once edited), a change with what it proposes, a removal gone (and never there: a warning)')
+  eq(s.unplanned.map((u) => `${u.source} ${u.target}`), ['code connection:web->store'], 'unplanned: what the branch did that no change covers (the diagram\'s new component and line are planned; the service is covered by the planned cache\'s imports, the uncovered module by the planned jobs\' paths)')
+  eq([s.counts.changes, s.counts['planned-built'], s.counts.pending, s.counts['built-differently'], s.counts.acked, s.counts.stale, s.counts.unplanned], [6, 2, 3, 1, 1, 1, 1], 'the counts')
+  const renamed = AC.archDeltaStates([ch('ren', 'rename', 'component:api', { after: { id: 'orders' } })], [{ file: 'f', doc: { ...shop, components: shop.components.map((c) => (c.id === 'api' ? { ...c, id: 'orders' } : c)), connections: [{ from: 'web', to: 'orders' }, { from: 'orders', to: 'store' }] } }], { base: [{ file: 'f', doc: shop }], impact: { diagrams: AC.diffDiagrams([{ file: 'f', doc: shop }], [{ file: 'f', doc: { ...shop, components: shop.components.map((c) => (c.id === 'api' ? { ...c, id: 'orders' } : c)), connections: [{ from: 'web', to: 'orders' }, { from: 'orders', to: 'store' }] } }]), findings: [] } })
+  eq([renamed.changes[0].state, renamed.unplanned.map((u) => u.target)], ['planned-built', []], 'a rename built covers the old and the new component and the lines that meet them')
+}
+
+// ── 7 · the Architecture tab draws the change view, on a worktree branch against its base checkout ──
+console.log('\n7 · the Architecture tab: a branch against its base checkout, and a delta, drawn and acknowledged')
+if (maj < 22 || (maj === 22 && min < 5)) console.log('   - skipped: needs node:sqlite (Node ≥ 22.5)')
+else {
+  const { openStore } = await import('../lib/store.mjs')
+  const { renderGraph } = await import('../lib/render.mjs')
+  const { changeHash, appendChanges } = await import('../lib/data/delta.mjs')
+  const eq = (got, want, m) => { const g = JSON.stringify(got), w = JSON.stringify(want); ok(g === w, `${m}${g === w ? '' : `\n       want: ${w}\n       got:  ${g}`}`) }
+  const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' })
+  const BAD = '"><img src=x onerror=alert(1)></title><script>x</script><!--'
+  const escd = (x) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const ROOT7 = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-arch-change-')))
+  const MAIN = path.join(ROOT7, 'main'), FEAT = path.join(ROOT7, 'feat')
+  const put = (dir, rel, text) => { mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); writeFileSync(path.join(dir, rel), text) }
+  const DIAGRAM = 'docs/architecture/shop.architecture.json'
+  const shop = { schema: 1, title: 'Shop', summary: 'A shop.', components: [{ id: 'web', label: 'Web', type: 'frontend', paths: ['src/web'] }, { id: 'api', label: 'API', type: 'backend', paths: ['src/api'] }, { id: 'store', label: 'Store', type: 'database', paths: ['src/store'] }],
+    connections: [{ from: 'web', to: 'api', label: 'HTTP' }, { from: 'api', to: 'store', label: 'SQL' }], boundaries: [{ label: 'Backend', kind: 'deploy', wraps: ['api', 'store'] }] }
+  // an index built by hand, as the code would give it: one function per file, the links between files
+  // (it records the checkout's HEAD, as an index run does: the base's is compared with the fork point)
+  const handIndex = async (dir, files, links) => {
+    rmSync(path.join(dir, '.grimoire'), { recursive: true, force: true })
+    const db = await openStore(path.join(dir, '.grimoire/graph/graph.db'))
+    db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES (?, ?, ?, ?)').run('shop', '.', git(dir, 'rev-parse', 'HEAD').stdout.trim(), '')
+    files.forEach((p, i) => {
+      db.prepare('INSERT INTO files(id, repo, path, lang, size, mtime, hash, is_test, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(i + 1, 'shop', p, 'javascript', 10, 0, '', 0, 100 + i + 1)
+      db.prepare("INSERT INTO nodes(id, file_id, kind, name, qualname, line, is_test) VALUES (?, ?, 'file', ?, ?, 1, 0)").run(100 + i + 1, i + 1, p, p)
+      db.prepare("INSERT INTO nodes(id, file_id, kind, name, qualname, line, is_test) VALUES (?, ?, 'function', ?, ?, 1, 0)").run(200 + i + 1, i + 1, `f${i}`, `f${i}`)
+    })
+    for (const [a, b] of links) db.prepare("INSERT INTO edges(src, dst, kind, confidence, line) VALUES (?, ?, 'CALLS', 'import', 1)").run(200 + files.indexOf(a) + 1, 200 + files.indexOf(b) + 1)
+    db.close()
+  }
+  const CODE = ['src/web/page.js', 'src/api/orders.js', 'src/store/db.js']
+  try {
+    put(MAIN, 'grimoire.config.json', JSON.stringify({ repos: [{ name: 'shop', path: '.' }] }))
+    put(MAIN, '.gitignore', '.grimoire/\n')
+    for (const p of CODE) put(MAIN, p, 'export const x = 1\n')
+    put(MAIN, DIAGRAM, JSON.stringify(shop, null, 2) + '\n')
+    git(MAIN, 'init', '-q', '-b', 'main'); git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base')
+    git(MAIN, 'worktree', 'add', '-q', '-b', 'feat', FEAT)
+    await handIndex(MAIN, CODE, [['src/web/page.js', 'src/api/orders.js'], ['src/api/orders.js', 'src/store/db.js']])
+    // the branch: the web page now imports the store directly (no line draws it), a search service is
+    // drawn in the diagram, and a design's delta proposes a cache
+    put(FEAT, 'src/search/index.js', 'export const y = 2\n')
+    const BR_CODE = [...CODE, 'src/search/index.js']
+    await handIndex(FEAT, BR_CODE, [['src/web/page.js', 'src/api/orders.js'], ['src/api/orders.js', 'src/store/db.js'], ['src/web/page.js', 'src/store/db.js']])
+    const drawn = (extra = {}) => ({ ...shop, components: [...shop.components, { id: 'search', label: 'Search', type: 'backend', paths: ['src/search'] }], boundaries: [{ label: 'Backend', kind: 'deploy', wraps: ['api', 'store', 'search'] }], ...extra })
+    put(FEAT, DIAGRAM, JSON.stringify(drawn(), null, 2) + '\n')
+    const ch = (id, op, target, extra = {}) => ({ id, op, target, why: `because ${id}`, origin: 'planned', ...extra })
+    const acked = (c, edit = {}) => ({ ...c, ...edit, ack: { by: 'Ann', at: '2026-11-07T08:00:00.000Z', hash: changeHash(c) } })
+    const DREL = 'docs/specs/2026-11-07-search.delta.json'
+    const DELTA = { schema: 1, spec: 'docs/specs/2026-11-07-search-design.md', data: [], architecture: [
+      acked(ch('search', 'add', 'component:search', { after: { label: 'Search', type: 'backend' }, slice: 1 })),
+      ch('cache', 'add', 'component:cache', { after: { label: `Cache${BAD}`, type: 'database' }, slice: 2 }),
+      ch('cache-line', 'add', 'connection:api->cache', { after: { label: 'reads' }, slice: 2 }),
+      acked(ch('relabel', 'change', 'component:api', { after: { label: 'Order API' } }), { why: `named for what it does, reworded${BAD}` }),
+    ] }
+    put(FEAT, DREL, JSON.stringify(DELTA, null, 2) + '\n')
+    const project = loadProject(FEAT)
+    const page = await renderGraph(project)
+    const D = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(page)[1].replace(/\\u003c/g, '<'))
+    eq([D.archCh.base.ref, D.archCh.codeWhy, D.arch[0].file, D.arch[0].ch.list.map((x) => `${x.change} ${x.target}`), D.arch[0].ch.findings.map((x) => `${x.kind} ${x.target}`), D.arch[0].ch.links.map((l) => l.slice(0, 2).join('>'))],
+      ['main', null, DIAGRAM, ['added component:search', 'modified boundary:Backend'], ['undrawn connection:web->store'], ['web>store']],
+      'the Changes overlay is packed in Node: the diagram against main (a component added, a boundary that wraps it), and the link the branch\'s code adds that the base checkout\'s index does not have')
+    const da = D.data.deltas[0].arch
+    eq([da.changes.map((c) => `${c.id} ${c.state}${c.ack ? ` ${c.ack}` : ''} on ${c.drawn.join(',')}`), da.unplanned.map((u) => `${u.source} ${u.target} ${u.built}`), da.outside],
+      [['search planned-built acked on 0', 'cache pending on 0', 'cache-line pending on 0', 'relabel pending stale on 0'], ['code connection:web->store false'], []],
+      'the delta\'s architecture changes, each in its state on the diagram it is drawn on; the undrawn link is not in the plan')
+    const ov = da.diagrams[0]
+    const comp = (id) => ov.comps.find((c) => c.id === id)
+    eq([comp('cache').dl.s, ov.conns.find((e) => e.from === 'api' && e.to === 'cache').dl.s, comp('search').dl.s, comp('api').dl.s, ov.links.map((l) => l.slice(0, 2).join('>')), ov.layout.boxes.length === ov.comps.length, ov.members.length === ov.comps.length, ov.evidence.length === ov.conns.length],
+      ['prop', 'prop', 'built', 'pend', ['web>store'], true, true, true],
+      'the delta overlay: the proposed cache as a ghost component placed by the layout with its proposed line, the search drawn as planned, the relabel proposed; members and evidence stay aligned')
+
+    // the page's own script, in a stub DOM
+    const stubPage = async (pg, hash, globals = {}) => {
+      const vm = await import('node:vm')
+      const blob = /<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(pg)[1], listeners = {}
+      class El {
+        constructor(tag) { this.tagName = tag.toUpperCase(); this.nodeType = 1; this.kids = []; this.attrs = {}; this.on = {}; this.dataset = {}; this.html = ''; this.value = ''; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} } }
+        setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-(.)/g, (_, c) => c.toUpperCase())] = String(v) }
+        getAttribute(k) { return this.attrs[k] ?? null }
+        append(...c) { this.kids.push(...c) }
+        addEventListener(t, f) { (this.on[t] = this.on[t] || []).push(f) }
+        set innerHTML(v) { this.html = v; this.firstChild = new El('svg') }
+        get innerHTML() { return this.html }
+        querySelectorAll() { return [] }
+        focus(o) { this.focusedWith = o || {} } setSelectionRange() {}
+        get offsetHeight() { return 0 }
+      }
+      const { ctlQuery } = await import('./stage-kit.mjs')
+      const doc = { createElement: (t) => new El(t), getElementById: (id) => (id === 'graph-data' ? { textContent: blob } : null), body: { replaceChildren(...c) { this.kids = c } }, documentElement: { style: { setProperty() {} } }, activeElement: null }
+      doc.querySelector = ctlQuery(() => ({ kids: doc.body.kids || [] }))
+      const loc = { hash, reload: () => { loc.reloads = (loc.reloads || 0) + 1 } }
+      vm.runInNewContext((/<script>([\s\S]*)<\/script>\s*<\/body>/.exec(pg) || [])[1], { document: doc, window: { addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (e) => { prev(e); f(e) } : f }, innerWidth: 1400, scrollTo() {} }, location: loc, history: { replaceState: (a, b, h) => { loc.hash = h } }, requestAnimationFrame: () => {}, getComputedStyle: () => ({ getPropertyValue: () => '' }), ...globals })
+      const find = (n, pred) => { if (!n || typeof n !== 'object') return null; if (pred(n)) return n; for (const k of n.kids || []) { const f = find(k, pred); if (f) return f } return null }
+      const all = (n, pred, out = []) => { if (n && typeof n === 'object') { if (pred(n)) out.push(n); for (const k of n.kids || []) all(k, pred, out) } return out }
+      const body = () => ({ kids: doc.body.kids || [] })
+      const flat = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : (n.kids || []).map(flat).join(''))
+      const dump = (n) => (n === null || n === undefined ? '' : typeof n !== 'object' ? String(n) : `${n.html || ''} ${Object.values(n.attrs || {}).join(' ')} ${(n.kids || []).map(dump).join(' ')}`)
+      const P = {
+        text: () => dump(body()), lines: (tag) => all(body(), (n) => n.tagName === tag).map(flat), reloads: () => loc.reloads || 0, textOf: flat, all: (pred) => all(body(), pred),
+        find: (pred) => find(body(), pred), ctl: (c) => find(body(), (n) => n.attrs && n.attrs['data-ctl'] === c),
+        press: (c) => (P.ctl(c).on.click || []).forEach((f) => f({})), pressed: (c) => Promise.all((P.ctl(c).on.click || []).map((f) => f({}))),
+        ctls: (re) => P.all((n) => n.attrs && re.test(n.attrs['data-ctl'] || '')).map((n) => n.attrs['data-ctl']),
+        svg: () => (find(body(), (n) => n.attrs && n.attrs.id === 'arch-box') || {}).html || '',
+        click: (id) => find(body(), (n) => n.attrs && n.attrs.id === 'arch-box').firstChild.on.click[0]({ target: { closest: (sel) => (/data-comp/.test(sel) ? { dataset: { comp: id } } : null) } }),
+      }
+      return P
+    }
+    const pg = await stubPage(page, '#arch-0')
+    ok(pg.ctl('arch-changes').attrs['aria-pressed'] === 'false' && pg.ctl('arch-delta').attrs['aria-pressed'] === 'false' && !/ (d|ch)-(prop|built|add|unpl)\b/.test(pg.svg()), 'two switches above the diagram, Changes vs main and Delta, both off by default: the diagram as saved')
+    pg.press('arch-changes')
+    let svg = pg.svg()
+    ok(/<g class="comp t-backend ch-add" data-comp="search"/.test(svg) && /<g class="bound k-deploy ch-mod">/.test(svg) && /<path class="newlink ch-add" d="M[^"]+"><title>web uses store \(1 file pair in the graph\), but no line is drawn between them\nnew since main: in the code, not drawn yet<\/title>/.test(svg),
+      'Changes: the component added green, the boundary that wraps it amber, the new code link dotted')
+    ok(['Changes since main:', 'added', 'modified: before → after', 'in the code, not drawn: a new link (dotted)'].every((w) => pg.text().includes(w)) && pg.lines('LI').some((l) => l.startsWith('component:searchadded since maincomponent search  "Search" (backend)')) && pg.lines('LI').some((l) => l.startsWith('connection:web->storenew in the code: in the code, not drawn')),
+      '… with its legend and its list: what the diagram changed, what the code did')
+    pg.press('arch-delta')
+    svg = pg.svg()
+    ok(pg.ctl('arch-changes').attrs['aria-pressed'] === 'false' && /<g class="comp t-database d-prop" data-comp="cache"/.test(svg) && /<path class="conn v-default d-prop" data-k="\d+" d="M[^"]+" marker-end="url\(#ar-arrow\)"><title>api → cache: reads/.test(svg) && /<g class="comp t-backend d-built" data-comp="search"/.test(svg) && /<g class="comp t-backend d-pend stale" data-comp="api"/.test(svg) && /<g class="stalemk">/.test(svg) && /<path class="newlink d-unpl"/.test(svg),
+      'Delta (one overlay at a time): the proposed cache a dashed ghost with its proposed line, the search planned and built, the api\'s proposed relabel badged stale, the undrawn link not in the plan')
+    ok(['Delta:', 'proposed (dashed)', 'proposed removal', 'proposed change: now → planned', 'planned and built', 'built differently: planned → built', 'not in the plan (dotted: a link in the code no line draws)', 'acknowledgement stale'].every((w) => pg.text().includes(w)), 'a legend for each state')
+    const ps = pg.lines('P'), lis = pg.lines('LI')
+    ok(ps.includes('For docs/specs/2026-11-07-search-design.md: 4 architecture changes · 1 planned and built · 3 pending · 0 built differently · 1 not in the plan · 1 acknowledged · 1 stale') && ps.includes('Read-only snapshot. To acknowledge changes, serve the page: graph.mjs serve')
+      && lis.some((l) => l.startsWith('add component:searchplanned and builtas: label Search, type backenddrawn in: docs/architecture/shop.architecture.jsonwhy: because searchslice 1 · acknowledged by Ann at 2026-11-07T08:00:00.000Z'))
+      && lis.some((l) => l.startsWith('change component:apipendingstale') && l.includes('proposed: label: API → Order API') && l.includes('stale: acknowledged by Ann at 2026-11-07T08:00:00.000Z, edited since'))
+      && lis.some((l) => l.startsWith('connection:web->storenot in the planin the code, not drawn')),
+      'the delta named with its design and counts, each change with its state, shape, where it is drawn, why, slice and acknowledgement; what is not in the plan; a static page says it is read-only')
+    eq(pg.ctls(/^arch-ack-/), [], 'the static page offers no acknowledgement')
+    pg.click('api')
+    ok(pg.lines('LI').some((l) => l.startsWith('change component:apipending')) && pg.text().includes('Delta: 2 changes'), "a component's passport lists the delta's changes that concern it (it, and the proposed line that meets it)")
+    ok(!/<img|<script|<!--/i.test(svg) && svg.includes(escd(`Cache${BAD}`).slice(0, 30)) && !pg.all((n) => n.tagName === 'IMG' || n.tagName === 'SCRIPT').length && pg.lines('LI').some((l) => l.includes(`named for what it does, reworded${BAD}`)), 'hostile strings in a label and a why are escaped in the drawing and carried as text in the lists')
+
+    // served: each change acknowledged through PUT /api/delta, the same as the Data tab's
+    const calls = []
+    let answer = (b) => ({ status: 200, j: { hash: 'h2', changes: b.ids.map((id) => ({ id, ack: { by: 'Cy', at: '2026-11-08T08:00:00.000Z', hash: 'x' } })) } })
+    const fetch = async (url, o) => { calls.push({ url, method: o.method, headers: o.headers, body: JSON.parse(o.body) }); const a = answer(JSON.parse(o.body)); return { ok: a.status < 300, status: a.status, json: async () => a.j } }
+    const served = await renderGraph(project, { serve: { token: 'page-token' } })
+    const sp = await stubPage(served, '#arch-0', { fetch })
+    sp.press('arch-delta')
+    ok(sp.ctls(/^arch-ack-l/).join(' ') === 'arch-ack-l0 arch-ack-l1 arch-ack-l2 arch-ack-l3' && sp.ctl('arch-ack-l3').kids[0] === 'Acknowledge again' && sp.ctl('arch-ack-l0').kids[0] === 'Unacknowledge' && sp.ctl('arch-ack-dall').kids[0] === 'Acknowledge all 3 changes not acknowledged on this diagram',
+      'served: each change has its control (Acknowledge, Acknowledge again when stale, Unacknowledge), and the diagram one for all not acknowledged')
+    await sp.pressed('arch-ack-l1')
+    eq(calls.map((c) => [c.url, c.method, c.headers['x-grimoire-token'], c.body]), [['/api/delta', 'PUT', 'page-token', { repo: 'shop', path: DREL, base: D.data.deltas[0].hash, ids: ['cache'], ack: true }]], 'the proposed component is acknowledged by its id, with the hash the delta was loaded with')
+    ok(sp.lines('LI').some((l) => l.startsWith('add component:cache') && l.includes('acknowledged by Cy at 2026-11-08T08:00:00.000Z')) && sp.text().includes('Acknowledged: 1 change, written to docs/specs/2026-11-07-search.delta.json'), '… and the page shows what the server wrote')
+    answer = () => ({ status: 409, j: { error: 'changed on disk since it was loaded', text: '{}', hash: 'h3' } })
+    const store = new Map(), session = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) }
+    const sr = await stubPage(served, '#arch-0', { fetch, sessionStorage: session })
+    sr.press('arch-delta')
+    await sr.pressed('arch-ack-l3')
+    const said = sr.find((n) => n.attrs && n.attrs['data-status-for'] === 'arch-ack-l3')
+    sr.press('arch-delta-reload')
+    ok(!!said && sr.textOf(said).startsWith('Not saved: the delta changed on disk since this page was loaded') && sr.reloads() === 1 && JSON.parse(store.get('grimoire-arch-delta')).archDelta === true, 'a refused write is said beside the control, with a Reload that keeps the overlay and the delta for the page it reloads')
+    const again = await stubPage(served, '#arch-0', { fetch, sessionStorage: session })
+    ok(again.ctl('arch-delta').attrs['aria-pressed'] === 'true' && !store.has('grimoire-arch-delta'), '… and the reloaded page opens with the Delta overlay on, once')
+    calls.length = 0; answer = () => ({ status: 503, j: { error: 'busy: another writer has the delta (the loop recording a change); try again in a moment' } })
+    await again.pressed('arch-ack-l2')
+    ok(again.textOf(again.find((n) => n.attrs && n.attrs['data-status-for'] === 'arch-ack-l2')).startsWith('Not saved: busy'), 'a busy delta (503) is said beside the control too')
+
+    // the Done-when: the undrawn link kept by the implementer reaches the delta (the ship appends it,
+    // origin unplanned): pending; the diagram updated in the branch draws it: planned and built
+    const kept = appendChanges(readFileSync(path.join(FEAT, DREL), 'utf8'), [{ id: 'unplanned-PROJ-1-web-store', op: 'add', target: 'connection:web->store', why: 'the page reads the stock directly', slice: 1, origin: 'unplanned' }])
+    writeFileSync(path.join(FEAT, DREL), kept.text)
+    const state = async () => { const x = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(await renderGraph(project))[1].replace(/\\u003c/g, '<')); const a = x.data.deltas[0].arch; return [a.changes.find((c) => c.id === 'unplanned-PROJ-1-web-store').state, a.unplanned.map((u) => u.target), x.arch[0].ch.findings.map((f) => f.target)] }
+    eq(await state(), ['pending', [], ['connection:web->store']], 'kept and appended to the delta, the undrawn link is planned now: pending until the diagram draws it')
+    put(FEAT, DIAGRAM, JSON.stringify(drawn({ connections: [...shop.connections, { from: 'web', to: 'store', label: 'stock' }] }), null, 2) + '\n')
+    eq(await state(), ['planned-built', [], []], 'the diagram updated in the branch draws it: planned and built, and the check finds nothing new in the code')
+    // a drawn line the code no longer shows is said as such, never "in the code, not drawn"
+    await handIndex(FEAT, BR_CODE, [['src/web/page.js', 'src/api/orders.js'], ['src/web/page.js', 'src/store/db.js']])
+    const unseenPage = await renderGraph(project)
+    const up = await stubPage(unseenPage, '#arch-0')
+    up.press('arch-delta')
+    const unseenLine = up.lines('LI').find((l) => l.startsWith('connection:api->storenot in the plan')) || ''
+    ok(unseenLine.startsWith('connection:api->storenot in the plandrawn, the code no longer shows itapi → store is drawn, and the code does not show it') && !unseenLine.includes('in the code, not drawn'), `an unseen line: "drawn, the code no longer shows it" (${unseenLine})`)
+    up.press('arch-changes')
+    ok(up.lines('LI').some((l) => l.startsWith('connection:api->storenew in the code: drawn, the code no longer shows it')), '… in the Changes list too')
+    const pageOf = (html) => JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(html)[1].replace(/\\u003c/g, '<'))
+    // the base checkout's index not at the fork point: main gains a commit (its index not refreshed),
+    // the branch merges main and changes nothing more: no code finding, the reason said, no path
+    const staleHead = git(MAIN, 'rev-parse', 'HEAD').stdout.trim()
+    put(MAIN, 'src/extra/z.js', 'export const z = 3\n')
+    git(MAIN, 'add', '-A'); git(MAIN, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'more on main')
+    const fork = git(MAIN, 'rev-parse', 'HEAD').stdout.trim()
+    const merged = git(FEAT, '-c', 'user.email=t@t', '-c', 'user.name=t', 'merge', '-q', '--ff-only', 'main')
+    await handIndex(FEAT, [...BR_CODE, 'src/extra/z.js'], [['src/web/page.js', 'src/api/orders.js'], ['src/web/page.js', 'src/store/db.js']])
+    const stale = await renderGraph(project), S = pageOf(stale)
+    const sp2 = await stubPage(stale, '#arch-0')
+    sp2.press('arch-changes')
+    const reason = `the base checkout's index is at ${staleHead.slice(0, 7)}, the branch forked from ${fork.slice(0, 7)}: refresh it (\`graph.mjs index\` in that checkout) to compare what the code did`
+    eq([merged.status, S.archCh.codeWhy, S.archCh.codePart, S.arch[0].ch.findings, S.data.deltas[0].arch.unplanned.filter((u) => u.source === 'code'), S.data.deltas[0].arch.codeWhy],
+      [0, reason, false, [], [], reason], 'a base index not at the fork point: no code finding at all (not the base\'s new module, not the unseen line), the reason said')
+    ok(sp2.text().includes(`Only the diagram files were compared: the code was not (${reason}).`) && !stale.includes(MAIN) && !stale.includes(ROOT7), 'the page says why, and names no path of the base checkout')
+    // an index built by another grimoire version: the reason, no path
+    await handIndex(MAIN, [...CODE, 'src/extra/z.js'], [['src/web/page.js', 'src/api/orders.js'], ['src/api/orders.js', 'src/store/db.js']])
+    const { driver } = await import('../lib/store.mjs')
+    const raw = new (await driver()).DatabaseSync(path.join(MAIN, '.grimoire/graph/graph.db'))
+    raw.prepare("UPDATE meta SET value = '0' WHERE key = 'schema'").run(); raw.close()
+    const old = await renderGraph(project), O = pageOf(old)
+    eq([O.archCh.codeWhy, O.arch[0].ch.findings], ['the base checkout\'s index was built by another grimoire version: index it there first', []], 'a base index from another grimoire version: no code finding, the reason said')
+    ok(!old.includes(MAIN) && !old.includes(ROOT7), '… and the page names no path of the base checkout')
+    // without a base index: only the diagram files are compared, and the view says so
+    rmSync(path.join(MAIN, '.grimoire'), { recursive: true, force: true })
+    const bare = await renderGraph(project)
+    const B = JSON.parse(/<script type="application\/json" id="graph-data">([\s\S]*?)<\/script>/.exec(bare)[1].replace(/\\u003c/g, '<'))
+    const bp = await stubPage(bare, '#arch-0')
+    bp.press('arch-changes')
+    ok(/has an index/.test(B.archCh.codeWhy) && B.arch[0].ch.findings.length === 0 && B.arch[0].ch.list.length === 3 && bp.text().includes('Only the diagram files were compared: the code was not (no other checkout of the repository has an index') && bp.text().includes('the code not compared'),
+      `with no index of the base checkout, only the diagram files are compared, and the view says so (${B.archCh.codeWhy})`)
+  } catch (e) { ok(false, `the architecture change view renders (${e.stack})`) } finally { rmSync(ROOT7, { recursive: true, force: true }) }
 }
 
 console.log(`\n${PASS} passed, ${FAIL} failed`)
