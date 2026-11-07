@@ -12,7 +12,11 @@
 // with its keys and projection, its attributes, billing and stream, the declarations that state it
 // (a template's logical id beside its file), its conflicts with every side, and, under an overlay,
 // the same marks as the ERD's (as classes on the card and its rows), before → after, and the delta
-// changes it carries. Search narrows the cards. Everything goes through h(): text, never markup.
+// changes it carries. A card bound to item types (data/binding.mjs) draws the item as a tree by dotted
+// path (each field as each bound type stores it, the keys marked), each binding with its confidence,
+// evidence and rivals (dashed below convention), and the logical table it is one declaration of with
+// the conflicts across its declarations; above the cards, the item types per repository, the unbound
+// badged. Search narrows the cards. Everything goes through h(): text, never markup.
 //
 // The change overlay (render.mjs dataData packs it against the base, in Node): a toggle "Changes vs
 // <base>", off by default and absent when no base resolved (the tab says why). On, a store that

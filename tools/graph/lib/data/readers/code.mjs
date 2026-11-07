@@ -13,7 +13,7 @@
 //            [{ ident, why }] (fields serde never stores: skip, skip_serializing) }
 //   Field  { name: as stored (after rename and rename_all), ident?: as the code writes it (when not
 //            the stored name), raw: the type as written (capped), t: T, nullable: Option, `?`, `| null`,
-//            skip_serializing_if, default: null | 'default' | the function serde calls, flatten?: true
+//            skip_serializing_if, default: null | 'Default::default()' | the function serde calls, flatten?: true
 //            (its type's fields inline), line }
 //   Variant { name: as stored, ident?, line, unit?: true, fields?: [Field], t?: T (a tuple variant of one) }
 //   T      { k: string | number | bool | any | ref | list | map | obj | enum, n?: a type's name (ref),

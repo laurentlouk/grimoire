@@ -11,7 +11,12 @@
 // (`partial`) is listed with its sources but compared with nothing, since it describes the store as
 // it was partway. Drizzle v1 snapshots form a DAG through prevIds: only its leaves declare a store.
 //
-//   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store] }   (model.mjs)
+// Then, over every store at once (items below, binding.mjs): the key-value tables declared in several
+// places grouped into logical tables (their disagreements across declarations its conflicts), and the
+// item types code converts bound to them, their fields on the tables.
+//
+//   reconcile([{ repo, extractor: 'id@version', facts }]) → { stores: [Store], logical, items,
+//     bindings, unresolved }   (model.mjs, binding.mjs)
 import { KINDS, keyOf, normType, normDefault, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
 import { logicalTables, bindItems, itemField, itemOf } from './binding.mjs'
 
