@@ -25,7 +25,10 @@ export function jsonLines(text) {
     if (c === '"') {
       let j = i + 1
       while (j < n && text[j] !== '"') j += text[j] === '\\' ? 2 : 1
-      if (top && !top.arr && expectKey) { top.slot = JSON.parse(text.slice(i, j + 1)); out.set(keyOf(top), line); expectKey = false }
+      if (top && !top.arr && expectKey) {
+        try { top.slot = JSON.parse(text.slice(i, j + 1)) } catch { throw new Error(`not valid JSON at line ${line}`) } // never the engine's message: it quotes the text
+        out.set(keyOf(top), line); expectKey = false
+      }
       else if (top && top.arr) out.set(keyOf(top), line)
       i = j
       continue
@@ -41,4 +44,84 @@ export function jsonLines(text) {
     while (i + 1 < n && !/[\s,\]}]/.test(text[i + 1])) i++ // a number, true, false or null
   }
   return out
+}
+
+// A JSON text read, or an error that says only where it breaks: "not valid JSON at line N". The
+// engine's own message quotes the characters around the error, and a file may hold a secret there,
+// so no text of the file is ever in the error (it is stored with the job, shown by graph_data and
+// graph_status). A text nested past MAX_DEPTH is refused first, as jsonLines refuses it.
+export function parseJson(text) {
+  const deep = deeperThan(text, MAX_DEPTH)
+  if (deep >= 0) throw new Error(`the JSON nests deeper than ${MAX_DEPTH} levels at line ${lineOfOffset(text, deep)}: not read`)
+  try { return JSON.parse(text) } catch {
+    const at = jsonErrorAt(text)
+    throw new Error(at < 0 ? 'not valid JSON' : `not valid JSON at line ${lineOfOffset(text, at)}`)
+  }
+}
+export const lineOfOffset = (text, at) => { let n = 1; for (let i = text.indexOf('\n'); i >= 0 && i < at; i = text.indexOf('\n', i + 1)) n++; return n }
+// where brackets outside strings first nest deeper than max, or -1 (one pass)
+export function deeperThan(t, max) {
+  let d = 0
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i]
+    if (c === '"') { i++; while (i < t.length && t[i] !== '"') i += t[i] === '\\' ? 2 : 1; continue }
+    if (c === '[' || c === '{') { if (++d > max) return i } else if (c === ']' || c === '}') d--
+  }
+  return -1
+}
+// Where a text stops being JSON (RFC 8259): its offset, or -1. One pass, no recursion.
+const NUM = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y
+const HEX4 = /[0-9a-fA-F]{4}/y
+export function jsonErrorAt(t) {
+  const n = t.length, stack = []
+  let i = 0, state = 'value'
+  const ws = () => { while (i < n && (t[i] === ' ' || t[i] === '\t' || t[i] === '\n' || t[i] === '\r')) i++ }
+  const str = () => { // at a quote: true when the string closes, i past it
+    i++
+    while (i < n) {
+      const c = t.charCodeAt(i)
+      if (c === 34) { i++; return true }
+      if (c < 32) return false
+      if (c === 92) {
+        const e = t[i + 1]
+        if (e && '"\\/bfnrt'.includes(e)) { i += 2; continue }
+        HEX4.lastIndex = i + 2
+        if (e === 'u' && HEX4.test(t)) { i += 6; continue }
+        return false
+      }
+      i++
+    }
+    return false
+  }
+  for (;;) {
+    ws()
+    if (state === 'value') {
+      if (i >= n) return i
+      const c = t[i]
+      if (c === '{' || c === '[') {
+        stack.push(c); i++; ws()
+        if (t[i] === (c === '{' ? '}' : ']')) { stack.pop(); i++; state = 'after' } else state = c === '{' ? 'key' : 'value'
+        continue
+      }
+      if (c === '"') { const s = i; if (!str()) return s; state = 'after'; continue }
+      if (t.startsWith('true', i) || t.startsWith('null', i)) { i += 4; state = 'after'; continue }
+      if (t.startsWith('false', i)) { i += 5; state = 'after'; continue }
+      NUM.lastIndex = i
+      if (NUM.test(t)) { i = NUM.lastIndex; state = 'after'; continue }
+      return i
+    }
+    if (state === 'key') {
+      const s = i
+      if (t[i] !== '"' || !str()) return s
+      ws()
+      if (t[i] !== ':') return i
+      i++; state = 'value'; continue
+    }
+    // after a value: a comma, its container's close, or the end of the text
+    if (!stack.length) return i < n ? i : -1
+    const top = stack[stack.length - 1], c = t[i]
+    if (c === ',') { i++; state = top === '{' ? 'key' : 'value'; continue }
+    if (c === (top === '{' ? '}' : ']')) { stack.pop(); i++; continue }
+    return i
+  }
 }

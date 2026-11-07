@@ -12,7 +12,7 @@
 // The store is the folder drizzle-kit writes into (`out`), the same one the SQL replay reads.
 // Check constraints are not part of the model yet.
 import path from 'node:path'
-import { jsonLines, pathKey } from '../readers/json-lines.mjs'
+import { jsonLines, pathKey, parseJson } from '../readers/json-lines.mjs'
 import { normDialect } from '../model.mjs'
 
 const LEGACY = /(^|\/)meta\/(\d+)_snapshot\.json$/
@@ -40,7 +40,7 @@ export default {
     return jobs
   },
   extract(text, file) {
-    const j = JSON.parse(text)
+    const j = parseJson(text)
     if (!j || (typeof j.tables !== 'object' && !Array.isArray(j.ddl))) throw new Error('not a Drizzle snapshot: neither tables{} nor ddl[]')
     const lines = jsonLines(text)
     const at = (...k) => ({ path: file, line: lines.get(pathKey(...k)) ?? 1 })

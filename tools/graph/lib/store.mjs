@@ -16,14 +16,16 @@
 //            ddl, what its content declares (registry.mjs inspect): for a .sql file its schema
 //            statements (2 creates or alters a table or an index, 1 other schema statements only,
 //            0 none); for a JSON or YAML file its tables (3 a template's table resource, 2 a key
-//            schema, a CreateTable input; 0 none)
+//            schema, a CreateTable input; 0 none); for a Terraform or Terragrunt file what it
+//            declares (4 a module with a table resource, 5 a terragrunt.hcl Terragrunt runs, 6 a
+//            module out of reach, 1 other)
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '6'
+export const SCHEMA_VERSION = '7'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.

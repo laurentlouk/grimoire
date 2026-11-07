@@ -42,6 +42,12 @@
 //  21. hostile JSON in bounded time (nesting past the cap refused, a wide file, a long "${" run), a
 //      byte order mark; a declaration that moves to another file or splits: its changes still seen,
 //      in the diff and the delta states
+//  22. Terraform and Terragrunt: the HCL reader (blocks, literals, heredocs, templates, comments,
+//      errors at their line; hostile text refused in bounded time), the evaluator (each construct,
+//      unknowns propagated and never guessed; the budget, depth and size caps), the extractor on
+//      fixtures/tf in memory (a table per for_each key, sources in the inputs and the module, an
+//      unknown input, a name template, a tfvars secret kept out, a var-file per environment, a
+//      module out of reach, files that do not parse), the levels and the candidates
 //
 //  Part 2 indexes a fixture project (fixtures/data) and asserts through the same `call()` the MCP
 //  server and the CLI use. It needs the parser runtime (the fixture has TypeScript files): skipped
@@ -66,6 +72,11 @@
 //      YAML parsed aside), a delta's states against every declaration, both overlays on the cards; a
 //      name holding a line break quoted in graph_data and graph_changes; a YAML template past the cap
 //      failing its job once, not read again until it changes
+//  23. Terraform and Terragrunt (fixtures/tf): a module run by a Terragrunt configuration that
+//      includes a root and an exposed file → graph_data (the tables, GSIs and TTL at their inputs
+//      lines, the module's beside; an input from dependency.*.outputs unknown; a table grouped with
+//      the CreateTable file of its exact name, and their conflicts), secrets in neither graph.db nor
+//      the page, the key cards (the unknown drawn), a name template, a branch against its base
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -1581,6 +1592,368 @@ console.log('\n21 · key-value declarations: hostile files read in bounded time,
   eq(ds.changes.map((r) => `${r.id} ${r.state}${r.diffs.length ? ` ${r.diffs.map((x) => x.text).join('; ')}` : ''}`), ['p built-differently projection: INCLUDE (x) → KEYS_ONLY', 'b planned-built'], '… and a delta against it: what the move changed counts as touched (built differently), what it built as planned is built')
 }
 
+// ── 22 · Terraform and Terragrunt: the HCL reader, the evaluator, the extractor ──
+console.log('\n22 · Terraform and Terragrunt: the HCL reader (readers/hcl.mjs), the evaluator (readers/hcl-eval.mjs), the extractor (extractors/terraform.mjs)')
+{
+  const { parseHcl, refText, HCL_MAX } = await import('../lib/data/readers/hcl.mjs')
+  const H = await import('../lib/data/readers/hcl-eval.mjs')
+  const { default: terraform, tfLevel, TF_LEVEL } = await import('../lib/data/extractors/terraform.mjs')
+  const { extractAll } = await import('../lib/data/registry.mjs')
+  const { elementsOf } = await import('../lib/data/reconcile.mjs')
+  const timed = (f) => { const t0 = Date.now(); let err = null, v; try { v = f() } catch (e) { err = String(e.message) } return { ms: Date.now() - t0, err, v } }
+  const SLOW = 4000
+  const attr = (text, name = 'x') => parseHcl(text).body.items.find((i) => i.t === 'attr' && i.name === name)
+  // an expression evaluated in a module whose variables and locals `decl` declares, `values` set from outside
+  const evalIn = (expr, decl = '', values = {}, opts = {}) => {
+    const mod = H.readModule([{ path: 'm/main.tf', body: parseHcl(decl).body }])
+    const vals = new Map(Object.entries(values).map(([k, v]) => [k, { v, at: { path: 'in.hcl', line: 1 } }]))
+    const { scope } = H.moduleScope(mod, vals)
+    const ev = new H.Evaluator(opts)
+    return { v: ev.value(attr(`x = ${expr}\n`).expr, H.child(scope, {}, {}, 'm/main.tf')), ev }
+  }
+  const val = (expr, decl, values) => JSON.parse(JSON.stringify(evalIn(expr, decl, values).v))
+  const tpl = (v) => (v instanceof H.Partial ? v.parts.map((p) => (typeof p === 'string' ? p : `{${p.label}}`)).join('') : v instanceof H.Unknown ? `{${v.label}}` : v)
+
+  // the reader: blocks, attributes, literals, comments, heredocs, templates
+  const doc = parseHcl(`# a comment
+// another
+/* a block
+   comment */
+resource "aws_dynamodb_table" "t" {
+  name = "a\\n\\"b\\" \\u00e9 $\${x} %%{y}"   # trailing
+  n    = 1.5e2
+  ok   = true
+  none = null
+  list = [1, "two", [3],]
+  obj  = { a = 1, "b" = 2
+    c : 3
+    (local.k) = 4 }
+  nested { inner = -1 }
+  doc = <<EOF
+  kept \${var.x}
+EOF
+  dedent = <<-EOT
+      one
+        two
+    EOT
+}
+`)
+  const res = doc.body.items[0]
+  eq([res.t, res.type, res.labels, res.line, res.end], ['block', 'resource', ['aws_dynamodb_table', 't'], 5, 22], 'a block: its type, labels, first and last line (comments of three kinds are blanks)')
+  const A = new Map(res.body.items.filter((i) => i.t === 'attr').map((i) => [i.name, i]))
+  eq(A.get('name').expr, { t: 'lit', line: 6, s: A.get('name').expr.s, e: A.get('name').expr.e, v: 'a\n"b" é ${x} %{y}' }, 'a quoted string: escapes (\\n \\" \\u), $${ and %%{ for a literal ${ and %{, a comment after it')
+  eq([A.get('n').expr.v, A.get('ok').expr.v, A.get('none').expr.v], [150, true, null], 'a number with an exponent, a bool, null')
+  eq(A.get('list').expr.items.map((x) => x.t), ['lit', 'lit', 'tuple'], 'a list, nested, with a trailing comma')
+  eq(A.get('obj').expr.items.map((x) => [x.key.t === 'lit' ? x.key.v : x.key.t, x.value.v]), [['a', 1], ['b', 2], ['c', 3], ['paren', 4]], 'an object: items separated by commas or new lines, = or :, a bare name, a string or a parenthesised key')
+  eq(res.body.items.find((i) => i.t === 'block').body.items[0].expr.t, 'neg', 'a one-line block, a negative number')
+  eq(A.get('doc').expr.parts[0], '  kept ', 'a heredoc keeps its text as written, an interpolation in it')
+  eq(A.get('dedent').expr.v, 'one\n  two\n', 'an indented heredoc (<<-) loses the common leading blanks of its lines')
+  const t1 = attr('x = "${var.env}-${var.app}-orders"\n').expr
+  eq([t1.t, t1.single, t1.parts.length, refText(t1.parts[0].x)], ['tpl', false, 4, 'var.env'], 'a template: its interpolations kept as expressions, its literal parts as strings')
+  eq(attr('x = "${each.value}"\n').expr.single, true, 'a template of one interpolation alone is its value, unconverted')
+  eq(attr('x = "%{ if a }yes%{ else }no%{ endif }"\n').expr.parts[0].t, 'if', 'a template directive: %{ if } … %{ else } … %{ endif }')
+  const fe = attr('x = { for k, v in m : k => v.name... if v != null }\n').expr
+  eq([fe.t, fe.kind, fe.k, fe.v, fe.group, fe.cond.t], ['for', 'object', 'k', 'v', true, 'bin'], 'a for expression: object form, two names, grouping, an if')
+  eq([attr('x = a ? b : c\n').expr.t, attr('x = 1 + 2 * 3\n').expr.r.op, attr('x = merge(a, b...)\n').expr.expand], ['cond', '*', true], 'a conditional, the operators\' precedence, a list expanded into arguments')
+  eq(refText(attr('x = get_env("TOKEN", "a-default")\n').expr), 'get_env(…)', 'refText names a function, never its arguments (a literal beside it may be a secret)')
+  eq(refText(attr('x = dependency.db.outputs["name"].id\n').expr), 'dependency.db.outputs["name"].id', '… and writes a path with its keys')
+  // errors carry their line; hostile text is refused in bounded time
+  const bad = (text) => { try { parseHcl(text); return null } catch (e) { return e.message } }
+  eq(bad('a = "open\nb = 1\n'), 'an unterminated string: a quoted string ends on its own line at line 1', 'an unterminated string, at its line')
+  eq(bad('x = 1\ndoc = <<EOF\nnever closed\n'), 'an unterminated heredoc: no line closes <<EOF at line 2', 'an unterminated heredoc, at the line that opens it')
+  eq(bad('a {\n  b = 1\n'), 'an unterminated block: no closing } at line 3', 'an unterminated block')
+  eq(bad('a = 1 b = 2\n'), 'expected a new line after an attribute or a block at line 1', 'two attributes on one line')
+  const deepList = timed(() => parseHcl(`x = ${'['.repeat(100000)}${']'.repeat(100000)}\n`))
+  ok(deepList.ms < SLOW && deepList.err === 'it nests deeper than 64 levels at line 1', `a list nested 100 000 deep is refused in bounded time (${deepList.ms} ms: ${deepList.err})`)
+  const deepBlock = timed(() => parseHcl(`${'a {\n'.repeat(5000)}${'}\n'.repeat(5000)}`))
+  ok(deepBlock.err === 'it nests deeper than 64 levels at line 65', `blocks nested 5 000 deep are refused (${deepBlock.err})`)
+  const deepTpl = timed(() => parseHcl(`x = ${'"${'.repeat(3000)}1${'}"'.repeat(3000)}\n`))
+  ok(deepTpl.err === 'it nests deeper than 64 levels at line 1', `interpolations nested 3 000 deep are refused (${deepTpl.err})`)
+  const deepNot = timed(() => parseHcl(`x = ${'!'.repeat(100000)}true\n`))
+  ok(deepNot.err === 'it nests deeper than 64 levels at line 1', `100 000 operators in a row are refused (${deepNot.err})`)
+  const huge = timed(() => parseHcl(`x = "${'y'.repeat(HCL_MAX)}"\n`))
+  ok(huge.err === 'the HCL is larger than 1024 KB: not read' && huge.ms < SLOW, `a text past the cap is refused before it is read (${huge.err})`)
+  const wide = timed(() => parseHcl(Array.from({ length: 40000 }, (_, i) => `a${i} = "v${i}" # c\n`).join('')))
+  ok(wide.err === null && wide.ms < SLOW, `40 000 attributes with comments read in linear time (${wide.ms} ms)`)
+  const blanks = timed(() => parseHcl(`x = 1${' '.repeat(500000)}\n${'\n'.repeat(400000)}y = 2\n`))
+  ok(blanks.err === null && blanks.ms < SLOW, `long runs of blanks and new lines read in linear time (${blanks.ms} ms)`)
+  const openHeredocs = timed(() => parseHcl(`${'d = <<EOF\n'.repeat(1)}${'line\n'.repeat(200000)}`))
+  ok(openHeredocs.err === 'an unterminated heredoc: no line closes <<EOF at line 1' && openHeredocs.ms < SLOW, `an unterminated heredoc over 200 000 lines fails once, in linear time (${openHeredocs.ms} ms)`)
+
+  // the evaluator: each construct
+  const VARS = `variable "env" { type = string }
+variable "app" {
+  type    = string
+  default = "shop"
+}
+variable "tables" {
+  type = map(object({
+    hash_key = string
+    sort     = optional(string)
+    ttl      = optional(bool, true)
+    tags     = optional(list(string), [])
+  }))
+  default = {}
+}
+locals {
+  prefix = "\${var.app}-\${var.env}"
+  names  = [for k, t in var.tables : "\${local.prefix}-\${k}" if t.ttl]
+  loop1  = local.loop2
+  loop2  = local.loop1
+}
+`
+  eq(val('var.app', VARS), 'shop', 'var.*: the default when nothing sets it')
+  eq(val('var.app', VARS, { app: 'books' }), 'books', '… the value set from outside (an input, a tfvars) over it')
+  eq(val('var.tables', VARS, { tables: { a: { hash_key: 'id', extra: 1 }, b: { hash_key: 'k', ttl: false, sort: 's' } } }), { a: { hash_key: 'id', sort: null, ttl: true, tags: [] }, b: { hash_key: 'k', sort: 's', ttl: false, tags: [] } },
+    'a value conformed to its type: optional attributes filled with their default or null, an attribute the type does not declare dropped')
+  eq(val('local.names', VARS, { env: 'prod', tables: { orders: { hash_key: 'id' }, carts: { hash_key: 'id', ttl: false } } }), ['shop-prod-orders'], 'locals reading locals and variables, a for expression with an if, string templates')
+  eq(val('[for s in ["b", "a", "b"] : upper(s)]'), ['B', 'A', 'B'], 'a for expression over a list')
+  eq(val('{ for k, v in { x = 1, y = 2 } : v => k }'), { 1: 'x', 2: 'y' }, 'a for expression building an object')
+  eq(val('{ for s in ["a1", "a2", "b1"] : (s == "b1" ? "b" : "a") => s... }'), { a: ['a1', 'a2'], b: ['b1'] }, 'a for expression grouping (...)')
+  eq(val('true && !false ? 1 + 2 * 3 : 0'), 7, 'a conditional and the operators, by precedence')
+  eq(val('"%{ for n in ["a", "b"] }${n}.%{ endfor }%{ if 1 == 1 }yes%{ else }no%{ endif }"'), 'a.b.yes', 'template directives: %{ for } and %{ if }')
+  eq([val('lookup({ a = 1 }, "a", 0)'), val('lookup({ a = 1 }, "z", 0)'), val('try(var.tables.nope.x, "fallback")', VARS), val('can(var.tables.nope)', VARS), val('can(var.app)', VARS)], [1, 0, 'fallback', false, true], 'lookup with its default, try() and can() catching an error')
+  eq(val('merge({ a = 1, b = 1 }, null, { b = 2 })'), { a: 1, b: 2 }, 'merge: later maps win, null skipped')
+  eq([val('coalesce(null, "", "x")'), val('compact(["a", "", null, "b"])'), val('flatten([["a"], [["b"]], "c"])'), val('toset(["b", "a", "b"])'), val('tolist(toset(["y", "x"]))')], ['x', ['a', 'b'], ['a', 'b', 'c'], ['a', 'b'], ['x', 'y']], 'coalesce, compact, flatten, toset (unique, in order), tolist')
+  eq([val('concat(["a"], ["b", "c"])'), val('contains(["a", "b"], "b")'), val('length({ a = 1, b = 2 })'), val('keys({ b = 1, a = 2 })'), val('format("%s-%d-%%", "a", 3)'), val('join("-", ["a", "b"])')], [['a', 'b', 'c'], true, 2, ['a', 'b'], 'a-3-%', 'a-b'], 'concat, contains, length, keys, format, join')
+  // unknowns: never guessed, propagated, kept in templates around the known parts
+  const u1 = evalIn('"${var.env}-${var.app}-orders"', VARS).v
+  eq([u1 instanceof H.Partial, tpl(u1)], [true, '{env}-shop-orders'], 'a variable with no value is unknown; a template keeps its known parts around it, the unknown labelled by its name')
+  const u2 = evalIn('aws_kms_key.main.arn').v
+  eq([u2 instanceof H.Unknown, u2.text, u2.label], [true, 'aws_kms_key.main.arn', 'arn'], 'another resource\'s attribute is unknown, with its text and its label')
+  eq([tpl(evalIn('upper(var.env)', VARS).v), evalIn('var.env == "prod"', VARS).v instanceof H.Unknown, evalIn('try(var.env, "x")', VARS).v instanceof H.Unknown], ['{env}', true, true], 'an operation on an unknown is unknown (a function, a comparison; try() returns it, it is no error)')
+  const u3 = evalIn('vault_secret("x")').v
+  eq([u3 instanceof H.Unknown, u3.text, u3.why], [true, 'vault_secret(…)', 'vault_secret(): a function the evaluator does not run'], 'a function the evaluator does not run is unknown, never guessed')
+  eq([evalIn('terraform.workspace').v.text, evalIn('data.aws_region.current.name').v.text, tpl(evalIn('"${path.module}/x"').v)], ['terraform.workspace', 'data.aws_region.current.name', '{module}/x'], 'terraform.workspace, data sources, path.*: unknown')
+  eq(val('lookup(merge({ a = { b = "c" } }), "a").b'), 'c', 'traversals on values: an attribute of a function result')
+  const cyc = H.attrOf(parseHcl('x = local.loop1\n').body, 'x', H.child(H.moduleScope(H.readModule([{ path: 'm/main.tf', body: parseHcl(VARS).body }]), new Map()).scope, {}, {}, 'm/main.tf'), new H.Evaluator())
+  eq([cyc.v instanceof H.Unknown, cyc.v.why], [true, 'x: not evaluated (loop1 refers to itself)'], 'a cycle of locals is an error, kept as an unknown value saying why')
+  // bounded: the budget of steps, the depth, the size of a string
+  const chain = Array.from({ length: 30 }, (_, i) => `  l${i} = [local.l${i + 1}, local.l${i + 1}]`).join('\n')
+  const blow = timed(() => evalIn('flatten(local.l0)', `locals {\n${chain}\n  l30 = ["x"]\n}\n`))
+  ok(blow.err === 'the evaluation ran past its budget of steps' && blow.ms < SLOW * 2, `locals doubling 30 times, flattened: stopped by the budget (${blow.ms} ms: ${blow.err})`)
+  const deepLocals = timed(() => evalIn('local.d0', `locals {\n${Array.from({ length: 400 }, (_, i) => `  d${i} = local.d${i + 1}`).join('\n')}\n  d400 = 1\n}\n`))
+  ok(/^the evaluation nests deeper than 128 levels/.test(deepLocals.err || ''), `a chain of 400 locals stops at the depth cap (${deepLocals.err})`)
+  const strs = timed(() => evalIn('local.s0', `locals {\n${Array.from({ length: 40 }, (_, i) => `  s${i} = "\${local.s${i + 1}}\${local.s${i + 1}}"`).join('\n')}\n  s40 = "ab"\n}\n`))
+  ok(strs.err === 'a string past 1024 KB' && strs.ms < SLOW, `a string doubling 40 times stops at the size cap (${strs.ms} ms: ${strs.err})`)
+  // resources: for_each over a map and a set, count; dynamic blocks with an iterator
+  const RES = parseHcl(`resource "aws_dynamodb_table" "m" {
+  for_each = { b = { k = "id" }, a = { k = "pk" } }
+  name     = each.key
+  dynamic "attribute" {
+    for_each = [each.value.k, "sk"]
+    iterator = at
+    content {
+      name = at.value
+      type = at.key == 0 ? "S" : "N"
+    }
+  }
+}
+resource "aws_dynamodb_table" "s" {
+  for_each = toset(["y", "x"])
+  name     = "\${each.key}-\${each.value}"
+}
+resource "aws_dynamodb_table" "c" {
+  count = 2
+  name  = "c\${count.index}"
+}
+`).body
+  const MOD = H.readModule([{ path: 'm/main.tf', body: RES }])
+  const msc = H.moduleScope(MOD, new Map()).scope
+  const ev = new H.Evaluator()
+  const inst = MOD.resources.map((r) => H.instancesOf(r, msc, ev).list.map((i) => [i.key, H.attrOf(r.block.body, 'name', i.scope, ev).v]))
+  eq(inst, [[['a', 'a'], ['b', 'b']], [['x', 'x-x'], ['y', 'y-y']], [[0, 'c0'], [1, 'c1']]], 'for_each over a map (keys in order) and over a set of strings (each.key is each.value), count.index')
+  const mi = H.instancesOf(MOD.resources[0], msc, ev).list[0]
+  eq(H.blocksOf(MOD.resources[0].block.body, 'attribute', mi.scope, ev).list.map((b) => [H.attrOf(b.body, 'name', b.scope, ev).v, H.attrOf(b.body, 'type', b.scope, ev).v]), [['pk', 'S'], ['sk', 'N']], 'a dynamic block: one block per element, its iterator renamed, key and value')
+
+  // the extractor, on the fixture project's files (fixtures/tf), in memory
+  const FIX = path.join(HERE, 'fixtures', 'tf', 'shop')
+  const listFiles = (dir, rel = '') => readdirSync(path.join(dir, rel), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? listFiles(dir, rel ? `${rel}/${e.name}` : e.name) : [rel ? `${rel}/${e.name}` : e.name]))
+  const tfRun = (edit = {}) => {
+    const files = new Map(listFiles(FIX).map((p) => [p, readFileSync(path.join(FIX, p), 'utf8')]))
+    for (const [p, t] of Object.entries(edit)) { if (t === null) files.delete(p); else files.set(p, t) }
+    return extractAll({ paths: [...files.keys()], size: (p) => files.get(p).length, read: (p) => files.get(p) }, { exclude: [] }, [], {})
+  }
+  const rows = tfRun()
+  eq(rows.map((r) => [r.extractor, r.key, r.error || null]), [['dynamodb-table@1', 'local/tables/orders.json', null], ['terraform@1', 'modules/kv-tables', null], ['terraform@1', 'live/prod/legacy/terragrunt.hcl', null]],
+    'found by content: the module folder declaring a table resource is a job, the configuration whose module is out of reach another; the configuration of a remote module that is no table module, and the root and stage files, are none')
+  const decl = rows[1].facts.declarations
+  eq(decl.map((d) => [d.source.path, d.label, d.status]), [['live/prod/tables/terragrunt.hcl', 'Terraform module modules/kv-tables through Terragrunt, 3 tables', 'read']], 'one declaration per configuration that runs the module, at that configuration')
+  const ent = Object.fromEntries(decl[0].entities.map((e) => [e.name, e]))
+  eq(Object.keys(ent), ['prod-shop-audit', 'prod-shop-carts', 'prod-shop-orders'], 'one table per for_each key, named from the inputs merged through the includes (stage from an exposed include, app from the root\'s inputs)')
+  const O = ent['prod-shop-orders']
+  const at = (x) => `${x.path}:${x.line} (${x.via.path}:${x.via.line})`
+  eq([at(O), O.as, O.billing, O.stream, O.whole], ['live/prod/tables/terragrunt.hcl:22 (modules/kv-tables/main.tf:2)', 'aws_dynamodb_table.table["orders"]', 'PAY_PER_REQUEST', 'NEW_AND_OLD_IMAGES', true], 'a table: at its entry in the inputs, the module\'s resource as its second source; billing, stream')
+  eq(O.keys.map((k) => `${k.role} ${k.parts.join(',')}${k.role === 'ttl' ? ` ${k.enabled}` : ''} @ ${at(k)}`), ['partition customer_id @ live/prod/tables/terragrunt.hcl:23 (modules/kv-tables/main.tf:7)', 'sort order_id @ live/prod/tables/terragrunt.hcl:24 (modules/kv-tables/main.tf:8)', 'ttl expires_at true @ live/prod/tables/terragrunt.hcl:22 (modules/kv-tables/main.tf:45)'],
+    'its keys at the input lines that state them; the TTL on by the type\'s default, at the table\'s entry (no line of the inputs says it)')
+  eq(O.fields.map((f) => `${f.name} ${f.type} ${f.nullable ? 'null' : 'key'} @ ${at(f)}`), ['customer_id S key @ live/prod/tables/terragrunt.hcl:23 (modules/kv-tables/main.tf:10)', 'order_id S key @ live/prod/tables/terragrunt.hcl:24 (modules/kv-tables/main.tf:15)', 'placed_at N null @ live/prod/tables/terragrunt.hcl:31 (modules/kv-tables/main.tf:23)', 'status S null @ live/prod/tables/terragrunt.hcl:30 (modules/kv-tables/main.tf:23)'],
+    'the attributes from three blocks, two of them dynamic (over a for expression flattened into a set, a type looked up): each at the input line that names it')
+  eq(O.indexes.map((i) => `${i.name} ${i.kind} ${i.partition}/${i.sort} ${i.projection} @ ${at(i)}`), ['ByStatus gsi status/placed_at KEYS_ONLY @ live/prod/tables/terragrunt.hcl:28 (modules/kv-tables/main.tf:34)'], 'a GSI from a dynamic block, at its object in the inputs')
+  const C = ent['prod-shop-carts']
+  eq([C.keys.find((k) => k.role === 'ttl'), C.stream, C.indexes], [{ role: 'ttl', parts: [], enabled: false, path: 'live/prod/tables/terragrunt.hcl', line: 38, via: { path: 'modules/kv-tables/main.tf', line: 45 } }, null, []], 'a TTL switched off in the inputs: off, its attribute empty as the module says, at the line that switches it')
+  const AU = ent['prod-shop-audit']
+  eq([AU.whole, AU.keys.find((k) => k.role === 'sort').parts, AU.keys.find((k) => k.role === 'sort').line], [false, ['${dependency.search.outputs.sort_attr}'], 44], 'an input from dependency.*.outputs: unknown, kept as its expression, at its line; the table not whole')
+  ok(decl[0].notes.includes('prod-shop-audit: range_key is unknown (dependency.search: another configuration\'s output, known only once it is applied)') && decl[0].notes.includes('prod-shop-audit: its attribute blocks are unknown (dependency.search: another configuration\'s output, known only once it is applied)'), `and noted, never guessed (${decl[0].notes.join(' | ')})`)
+  eq(rows[2].facts.declarations.map((d) => [d.status, d.label, d.notes]), [['not-read', 'a module out of reach (tfr:///terraform-aws-modules/dynamodb-table/aws)', ['live/prod/legacy/terragrunt.hcl:2: its module tfr:///terraform-aws-modules/dynamodb-table/aws is not in this repository (a remote source): the key-value tables it declares, if any, are unknown']]], 'a configuration whose module is out of reach (a registry address naming a table module): found, not read, said so, its query dropped')
+  // reconciled with the local CreateTable file stating one of the same tables by its exact name
+  const km = reconcile(rows.filter((r) => r.facts).map((r) => ({ repo: 'shop', extractor: r.extractor, facts: r.facts })))
+  const orders = km.stores[0].entities.find((e) => e.name === 'prod-shop-orders')
+  eq([km.stores.map((s) => s.id), orders.sources.map((s) => `${s.path}:${s.line}`), elementsOf(orders).flatMap(([l, x]) => x.conflicts.map((c) => `${l} ${c.attr}`))],
+    [['shop:dynamodb'], ['live/prod/tables/terragrunt.hcl:22', 'modules/kv-tables/main.tf:2', 'local/tables/orders.json:2'], ['prod-shop-orders.sku presence', 'prod-shop-orders index BySku presence']],
+    'one store with the CreateTable file: the table they both name is one entity citing the inputs, the module and the file; what only the file declares is a conflict')
+  // a name with an unknown part: its template
+  const noStage = tfRun({ 'live/prod/stage.hcl': null })[1].facts.declarations[0]
+  eq(noStage.entities.map((e) => [e.name, e.nameTemplate]), [['{stage}-shop-audit', '{stage}-shop-audit'], ['{stage}-shop-carts', '{stage}-shop-carts'], ['{stage}-shop-orders', '{stage}-shop-orders']], 'the include that sets the stage is missing: each name is its template, its literal parts kept')
+  eq(noStage.notes[0], '3 tables: a part of each name is unknown (find_in_parent_folders("stage.hcl"): no such file above live/prod/tables among the repository\'s HCL files): each named by its template ({stage}-shop-audit, {stage}-shop-carts, {stage}-shop-orders)', 'and noted once per reason, with why')
+  // secrets: a tfvars value no table uses never reaches the facts
+  const SECRET = ['sk', 'live', Array.from({ length: 24 }, (_, i) => 'abcdef0123456789'[(i * 7) % 16]).join('')].join('_')
+  const withSecret = tfRun({ 'modules/kv-tables/terraform.tfvars': `api_token = "${SECRET}"\napp = "store"\n` })
+  const sfacts = JSON.stringify(withSecret)
+  ok(!sfacts.includes(SECRET) && withSecret[1].facts.declarations[0].entities.map((e) => e.name).join() === 'prod-store-audit,prod-store-carts,prod-store-orders', 'a tfvars value: the module\'s terraform.tfvars over the Terragrunt inputs (app), and the secret beside it, used only in a tag, never in the facts')
+  // a standalone module: a var-file per environment, literal tables, multi-attribute keys, an LSI
+  const STANDALONE = {
+    'svc/db/tables.tf': `variable "env" { default = "dev" }
+resource "aws_dynamodb_table" "events" {
+  name           = "\${var.env}-events"
+  hash_key       = "tenant"
+  range_key      = "at"
+  read_capacity  = 5
+  write_capacity = 5
+  attribute {
+    name = "tenant"
+    type = "S"
+  }
+  attribute {
+    name = "at"
+    type = "N"
+  }
+  attribute {
+    name = "kind"
+    type = "S"
+  }
+  attribute {
+    name = "region"
+    type = "S"
+  }
+  global_secondary_index {
+    name            = "ByKindRegion"
+    projection_type = "INCLUDE"
+    non_key_attributes = ["payload"]
+    key_schema {
+      attribute_name = "kind"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "region"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "at"
+      key_type       = "RANGE"
+    }
+  }
+  local_secondary_index {
+    name            = "ByKind"
+    range_key       = "kind"
+    projection_type = "KEYS_ONLY"
+  }
+}
+`,
+    'svc/db/prod.tfvars': 'env = "prod"\n',
+    'svc/db/staging.tfvars.json': '{\n  "env": "staging"\n}\n',
+  }
+  const sa = extractAll({ paths: Object.keys(STANDALONE), size: (p) => STANDALONE[p].length, read: (p) => STANDALONE[p] }, { exclude: [] }, [], {})
+  const sd = sa[0].facts.declarations
+  eq(sd.map((d) => [d.source.path, d.label, d.entities.map((e) => e.name).join()]), [['svc/db/prod.tfvars', 'Terraform module svc/db with prod.tfvars, 1 table', 'prod-events'], ['svc/db/staging.tfvars.json', 'Terraform module svc/db with staging.tfvars.json, 1 table', 'staging-events']], 'a module no Terragrunt configuration runs: one declaration per var-file beside it (HCL or JSON), each over the defaults')
+  const ev1 = sd[0].entities[0]
+  eq([ev1.billing, ev1.indexes.map((i) => `${i.name} ${i.kind} ${i.partition.join('+')}/${i.sort.join('+')} ${i.projection}(${i.include})`), ev1.fields.map((f) => `${f.name}:${f.type}:${f.nullable}`)],
+    ['PROVISIONED', ['ByKindRegion gsi kind+region/at INCLUDE(payload)', 'ByKind lsi tenant/kind KEYS_ONLY()'], ['tenant:S:false', 'at:N:false', 'kind:S:true', 'region:S:true']],
+    'literal blocks: billing PROVISIONED when not said (the provider\'s default), a GSI keyed by key_schema blocks (a multi-attribute partition key), an LSI on the table\'s partition key')
+  eq([sd[0].entities[0].path, sd[0].entities[0].line], ['svc/db/tables.tf', 2], 'with no for_each, a table is at its resource\'s line')
+  const saModel = reconcile(sa.map((r) => ({ repo: 'svc', extractor: r.extractor, facts: r.facts })))
+  eq(saModel.stores[0].entities.find((e) => e.name === 'prod-events').sources.map((s) => `${s.path}:${s.line}`), ['svc/db/tables.tf:2'], '… cited once: its second source would be the same line')
+  // never throws past the extractor: a file that does not parse is noted, the others read
+  const broken = tfRun({ 'live/prod/other/terragrunt.hcl': 'terraform {\n  source = "../../../modules/kv-tables"\n', 'modules/kv-tables/extra.tf': 'resource "x" {\n' })
+  ok(!broken[1].error && broken[1].facts.declarations[0].entities.length === 3 && broken[1].facts.declarations[0].notes.includes('modules/kv-tables/extra.tf does not parse: an unterminated block: no closing } at line 2') && broken[1].facts.declarations[0].notes.some((n) => n.startsWith('live/prod/other/terragrunt.hcl does not parse (an unterminated block')),
+    `a module file and a configuration that do not parse: each noted, the tables still read (${broken[1].error || broken[1].facts.declarations[0].notes.slice(0, 3).join(' | ')})`)
+  // ── the review's fix round: no repository text in a parse error, deep merges, values out of notes, hostile values ──
+  // a secret-looking value next to a syntax error, built at run time (no token sits in the repository)
+  const NEAR = ['sk', 'live', Array.from({ length: 22 }, (_, i) => 'mnopqrstuvwxyz234567'[(i * 7) % 20]).join('')].join('_')
+  const { parseJson } = await import('../lib/data/readers/json-lines.mjs')
+  const pj = (() => { try { parseJson(`{\n  "password": ${NEAR},\n  "env": "prod"\n}\n`); return null } catch (e) { return e.message } })()
+  eq(pj, 'not valid JSON at line 2', 'a JSON text that does not parse: its line, and none of its text (the engine\'s message quotes the characters around the error)')
+  eq((() => { try { parseJson(`[${'['.repeat(300)}1${']'.repeat(300)}]`); return null } catch (e) { return e.message } })(), 'the JSON nests deeper than 200 levels at line 1: not read', '… and one nested past the cap is refused before it is parsed')
+  eq(parseJson('{ "a": [1, "two", { "b": null }] }'), { a: [1, 'two', { b: null }] }, '… a text that does parse is the value JSON.parse reads')
+  const ctBad = timed(() => dynamodbTable.extract(`{\n  "TableName": "t",\n  "KeySchema": [], "AttributeDefinitions": [],\n  "Token": ${NEAR}\n}`, 'local/t.json'))
+  ok(ctBad.err === 'not valid JSON at line 4' && !ctBad.err.includes(NEAR.slice(0, 8)), `a CreateTable file that does not parse: its job's error is its line alone (${ctBad.err})`)
+  const tvBad = tfRun({ 'modules/kv-tables/terraform.tfvars.json': `{\n  "api_token": ${NEAR},\n  "app": "store"\n}\n` })
+  ok(!JSON.stringify(tvBad).includes(NEAR.slice(0, 8)) && tvBad[1].facts.declarations[0].notes.includes('modules/kv-tables/terraform.tfvars.json does not parse: not valid JSON at line 2'), `a tfvars.json that does not parse: noted at its line, none of its text in the facts (${tvBad[1].facts.declarations[0].notes.find((n) => n.includes('tfvars.json')) || ''})`)
+  const { default: drizzleSnap } = await import('../lib/data/extractors/drizzle-snapshot.mjs')
+  const dzBad = timed(() => drizzleSnap.extract(`{ "version": "7", "secret": ${NEAR} }`, 'drizzle/meta/0001_snapshot.json'))
+  ok(dzBad.err === 'not valid JSON at line 1', `a snapshot that does not parse: its line only (${dzBad.err})`)
+  const sqlBad = replay([{ path: 'db/0001_x.sql', text: `CREATE TABLE t (id INTEGER);\nINSERT INTO t VALUES ('${NEAR});\n` }], DatabaseSync)
+  ok(sqlBad.stopped && !sqlBad.stopped.error.includes(NEAR.slice(0, 8)), `a statement SQLite rejects inside a string literal: its error quotes no literal (${sqlBad.stopped?.error})`)
+  const hclBad = (() => { try { parseHcl(`x = "value %{ ${NEAR} }"\n`); return null } catch (e) { return e.message } })()
+  ok(hclBad === 'an unknown template directive at line 1', `HCL that does not parse: no text of it in the error (${hclBad})`)
+  const hclChar = (() => { try { parseHcl('x = 1 + @\n'); return null } catch (e) { return e.message } })()
+  eq(hclChar, 'an unexpected character at line 1', '… not even the character it stopped at')
+  ok(!parseDelta(`{ "schema": 1, "secret": ${NEAR} }`).errors.some((e) => e.includes(NEAR.slice(0, 8))), 'a delta file that does not parse: no text of it in the error either')
+
+  // values never in a note: a key that is not there, an include that is not found
+  const SECRETVAL = NEAR.toUpperCase()
+  const atNote = (src, values) => {
+    const mod = H.readModule([{ path: 'm/main.tf', body: parseHcl('variable "m" {}\nvariable "k" {}\nvariable "f" {}\n').body }])
+    const vals = new Map(Object.entries(values).map(([k, v]) => [k, { v, at: { path: 'in.hcl', line: 1 } }]))
+    return H.attrOf(parseHcl(`x = ${src}\n`).body, 'x', H.child(H.moduleScope(mod, vals).scope, {}, {}, 'm/main.tf'), new H.Evaluator()).v
+  }
+  const missing = [atNote('lookup(var.m, var.k)', { m: { a: 1 }, k: SECRETVAL }), atNote('var.m[var.k]', { m: { a: 1 }, k: SECRETVAL })]
+  eq(missing.map((u) => [u instanceof H.Unknown, u.why.includes(SECRETVAL)]), [[true, false], [true, false]], `a key that is not there: unknown, saying why without the key's value (${missing.map((u) => u.why).join(' | ')})`)
+  eq(missing[1].why, 'x: not evaluated (no attribute [var.k])', '… naming the expression that holds it')
+
+  // Terragrunt merges an include's inputs as it does (pkg/config/include.go): bottom-up, the child winning;
+  // `deep` merges maps key by key and appends lists (mergo WithAppendSlice), `shallow` replaces top-level keys
+  const tg = (files, child = 'live/app/terragrunt.hcl') => {
+    const parsedTg = new Map(Object.entries(files).map(([p, t]) => [p, parseHcl(t).body]))
+    return JSON.parse(JSON.stringify(new H.Terragrunt(child, { has: (p) => parsedTg.has(p), body: (p) => parsedTg.get(p) }, new H.Evaluator()).inputs().v))
+  }
+  const ROOT = 'inputs = {\n  tables = { orders = { hash = "id" } }\n  tags   = ["a"]\n  stage  = "dev"\n  cfg    = { a = { x = 1, y = 2 }, b = 3 }\n}\n'
+  const CHILD = (strategy) => `include "root" {\n  path = find_in_parent_folders("root.hcl")\n${strategy ? `  merge_strategy = "${strategy}"\n` : ''}}\ninputs = {\n  tables = { audit = { hash = "k" } }\n  tags   = ["b"]\n  stage  = "prod"\n  cfg    = { a = { x = 9 } }\n}\n`
+  eq(tg({ 'live/root.hcl': ROOT, 'live/app/terragrunt.hcl': CHILD('deep') }), { tables: { orders: { hash: 'id' }, audit: { hash: 'k' } }, tags: ['a', 'b'], stage: 'prod', cfg: { a: { x: 9, y: 2 }, b: 3 } },
+    'merge_strategy = "deep": the child\'s map gains a key the include declares, a nested map merges key by key with the child winning, a list is the include\'s then the child\'s')
+  eq(tg({ 'live/root.hcl': ROOT, 'live/app/terragrunt.hcl': CHILD(null) }), { tables: { audit: { hash: 'k' } }, tags: ['b'], stage: 'prod', cfg: { a: { x: 9 } } }, 'the default, shallow: each top-level input of the child replaces the include\'s')
+  eq(tg({ 'live/root.hcl': ROOT, 'live/app/terragrunt.hcl': CHILD('no_merge') }), { tables: { audit: { hash: 'k' } }, tags: ['b'], stage: 'prod', cfg: { a: { x: 9 } } }, 'no_merge: the include\'s inputs are not merged at all')
+  eq(tg({ 'live/root.hcl': 'inputs = { a = "root", b = "root" }\n', 'live/app/env.hcl': 'inputs = { a = "env", c = "env" }\n', 'live/app/terragrunt.hcl': 'include "root" {\n  path = find_in_parent_folders("root.hcl")\n}\ninclude "env" {\n  path = "env.hcl"\n}\ninputs = { c = "child" }\n' }), { a: 'env', b: 'root', c: 'child' }, 'two includes: the later one over the earlier, the child over both')
+  const deepRows = tfRun({ 'live/root.hcl': readFileSync(path.join(FIX, 'live/root.hcl'), 'utf8').replace('  app = "shop"\n', '  app = "shop"\n  tables = {\n    legacy = { hash_key = "id", indexes = [] }\n  }\n'), 'live/prod/tables/terragrunt.hcl': readFileSync(path.join(FIX, 'live/prod/tables/terragrunt.hcl'), 'utf8').replace('include "root" {\n  path = find_in_parent_folders("root.hcl")\n}', 'include "root" {\n  path           = find_in_parent_folders("root.hcl")\n  merge_strategy = "deep"\n}') })
+  eq(deepRows[1].facts.declarations[0].entities.map((e) => `${e.name} ${e.path}:${e.line}`), ['prod-shop-audit live/prod/tables/terragrunt.hcl:43', 'prod-shop-carts live/prod/tables/terragrunt.hcl:37', 'prod-shop-legacy live/root.hcl:17', 'prod-shop-orders live/prod/tables/terragrunt.hcl:23'], 'through the extractor: a table the root\'s inputs declare joins the child\'s under a deep merge, cited in the root (the child\'s lines one lower: its include gained a line)')
+
+  // hostile values fail no job: a string that would explode, a value nested past any use
+  const big = timed(() => evalIn('replace(var.big, "a", var.big)', 'variable "big" {}\n', { big: 'a'.repeat(400000) }))
+  eq(big.err, 'a string past 1024 KB', 'replace() that would build a string past the cap stops on the cap, before the engine runs out of room')
+  const deepJson = H.attrOf(parseHcl('x = jsondecode(var.j)\n').body, 'x', H.child(H.moduleScope(H.readModule([{ path: 'm/main.tf', body: parseHcl('variable "j" {}\n').body }]), new Map([['j', { v: `${'['.repeat(450000)}${']'.repeat(450000)}`, at: null }]])).scope, {}, {}, 'm/main.tf'), new H.Evaluator()).v
+  eq([deepJson instanceof H.Unknown, deepJson.why], [true, 'x: not evaluated (jsondecode(): the JSON nests deeper than 200 levels)'], 'jsondecode() of a value nested 450 000 deep: refused (unknown), not a stack overflow')
+  const nest = (n) => { let v = ['x']; for (let i = 0; i < n; i++) v = [v]; return v }
+  eq([timed(() => evalIn('flatten(var.d)', 'variable "d" {}\n', { d: nest(20000) })).err, timed(() => evalIn('var.d == var.e', 'variable "d" {}\nvariable "e" {}\n', { d: nest(20000), e: nest(20000) })).err, timed(() => evalIn('compact(var.d)', 'variable "d" {}\n', { d: nest(20000) })).err],
+    ['a value nests deeper than 256 levels', 'a value nests deeper than 256 levels', 'a value nests deeper than 256 levels'], 'flatten, a comparison and compact over a value nested 20 000 deep: stopped at the depth cap')
+  const bigMod = tfRun({ 'modules/kv-tables/terraform.tfvars': `big = "${'a'.repeat(400000)}"\n`, 'modules/kv-tables/variables.tf': `${readFileSync(path.join(FIX, 'modules/kv-tables/variables.tf'), 'utf8')}\nvariable "big" {\n  default = ""\n}\n`, 'modules/kv-tables/main.tf': readFileSync(path.join(FIX, 'modules/kv-tables/main.tf'), 'utf8').replace('  name         = "${var.stage}-${var.app}-${each.key}"', '  name         = replace(var.big, "a", var.big)') })
+  ok(!bigMod[1].error && bigMod[1].facts.declarations[0].notes.some((n) => n.startsWith('the evaluation stopped: a string past 1024 KB')), `through the extractor: the job is not failed, its declaration says where the evaluation stopped (${bigMod[1].error || bigMod[1].facts.declarations[0].notes.slice(-1)})`)
+
+  // a remote address keeps no credentials: everything up to the last @ before the host's first /
+  const PW = ['p', 'TOKENVALUE'].join('@')
+  eq([H.safeAddress(`git::https://user:${PW}@example.com/org/m.git//kv?ref=v1`), H.safeAddress(`user:${['tok', 'en'].join('')}@example.com/org/m.git`), H.safeAddress('git@example.com:org/m.git'), H.safeAddress('tfr:///terraform-aws-modules/dynamodb-table/aws?version=4.0.0'), H.safeAddress(`https://example.com/m.zip#${['frag', 'value'].join('')}`)],
+    ['git::https://example.com/org/m.git//kv', 'example.com/org/m.git', 'example.com:org/m.git', 'tfr:///terraform-aws-modules/dynamodb-table/aws', 'https://example.com/m.zip'], 'a password holding @, an address with no scheme, an scp-like one, a registry one, a fragment: no user, no password, no query, no fragment')
+  // module addresses: a folder of the repository, or out of reach, shown without credentials or query
+  const CRED = ['user', 'pw'].join(':')
+  eq([H.moduleDir('../../modules//kv', 'live/prod/x'), H.moduleDir('/modules/kv', 'live/prod/x'), H.moduleDir('../../../../x', 'a/b'), H.moduleDir(`git::https://${CRED}@example.com/m.git//kv?ref=v1`, 'a'), H.repoPath('/.config/a.hcl')],
+    [{ dir: 'live/modules/kv' }, { dir: 'modules/kv' }, { outside: true }, { remote: 'git::https://example.com/m.git//kv' }, '.config/a.hcl'], 'a module source: a local path (its `//` subfolder joined), rooted at the repository, outside it, or remote (credentials and query dropped)')
+  // an HCL file past the reader's cap elsewhere in the repository is no input of the module's job
+  const bigInfo = new Map([['m/main.tf', { size: 10, ddl: TF_LEVEL.module }], ['live/a/terragrunt.hcl', { size: 10, ddl: TF_LEVEL.unit }], ['gen/huge.hcl', { size: HCL_MAX + 1, ddl: 1 }]])
+  eq(terraform.discover(bigInfo).map((j) => [j.key, j.inputs]), [['m', ['m/main.tf', 'live/a/terragrunt.hcl']]], 'an HCL file past the reader\'s cap is left out of a module\'s inputs, so it fails no job')
+  // found by content: the levels
+  eq([tfLevel('m/main.tf', 'resource "aws_dynamodb_table" "t" {}'), tfLevel('m/x.tf', '# resource "aws_dynamodb_table"\nvariable "a" {}'), tfLevel('a/terragrunt.hcl', 'include "root" {}'), tfLevel('a/root.hcl', 'inputs = {}'), tfLevel('a/terragrunt.hcl', 'terraform {\n  source = "git::https://example.com/m.git//dynamodb"\n}'), tfLevel('a/terragrunt.hcl', 'terraform {\n  source = "../modules/dynamodb"\n}'), tfLevel('m/c.tf', 'module "t" {\n  source = "terraform-aws-modules/dynamodb-table/aws"\n}')],
+    [TF_LEVEL.module, 1, TF_LEVEL.unit, 1, TF_LEVEL.remote, TF_LEVEL.unit, TF_LEVEL.remote], 'tfLevel: a module declares a table resource (not in a comment); a terragrunt.hcl is a configuration Terragrunt runs; a remote source naming a table module is out of reach; a local one is no such thing')
+  eq(candidates(['m/main.tf', 'm/terraform.tfvars', 'm/x.auto.tfvars.json', 'live/terragrunt.hcl', 'm/tests/plan.tftest.hcl', 'm/.terraform.lock.hcl', 'live/.terragrunt-cache/abc/main.tf', 'm/plan.tftest.hcl'], { exclude: [] }), ['m/main.tf', 'm/terraform.tfvars', 'm/x.auto.tfvars.json', 'live/terragrunt.hcl'], 'the candidates: .tf, .tfvars(.json), .hcl; never a test file, a lock file or Terragrunt\'s cache')
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()
@@ -2046,6 +2419,135 @@ async function indexed() {
     const fch = await kq('changes')
     ok(fch.includes('  + "forged\\n  + forged line"  table, 1 attribute, billing not said · no stream  — lending/local/tables/forged.json:1') && !fch.split('\n').includes('  + forged line"  table, 1 attribute') && fch.split('\n').filter((l) => l.startsWith('  + forged line')).length === 0, `graph_changes quotes it on its line (${fch.split('\n').find((l) => l.includes('forged')) || fch})`)
     rmSync(path.join(KV, 'lending/local/tables/forged.json'))
+
+    // ── 23 · Terraform and Terragrunt: a module run by a Terragrunt configuration ──
+    console.log('\n23 · Terraform and Terragrunt through call(): a module run by a configuration that includes its root and an exposed file (fixtures/tf), an input from another configuration, secrets beside, a CreateTable file naming one of the tables')
+    const TFP = path.join(SANDBOX, 'tf')
+    cpSync(path.join(HERE, 'fixtures', 'tf'), TFP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    // secret-looking values, built at run time (no token sits in the repository): one in the module's
+    // terraform.tfvars, one in the locals of the file the configuration includes
+    const fake = (tag) => [tag, Array.from({ length: 28 }, (_, i) => 'qrstuvwxyz0123456789ABCDEF'[(i * 11 + tag.length) % 26]).join('')].join('_')
+    const TFSECRET = fake('tfvar'), HCLSECRET = fake('local')
+    writeFileSync(path.join(TFP, 'shop/modules/kv-tables/terraform.tfvars'), `api_token = "${TFSECRET}"\n`)
+    const STAGE = path.join(TFP, 'shop/live/prod/stage.hcl')
+    writeFileSync(STAGE, readFileSync(STAGE, 'utf8').replace('  stage = "prod"\n', `  stage       = "prod"\n  db_password = "${HCLSECRET}"\n`))
+    const tq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: TFP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const tidx = await tq('index')
+    ok(/shop: /.test(tidx) && !tidx.includes('failure'), `index: the module, its configurations and the CreateTable file read, no extractor failure (${tidx.split('\n').find((l) => l.includes('shop')) || tidx})`)
+    eq(await tq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlive/prod/legacy/terragrunt.hcl\tterraform@1\nlocal/tables/orders.json\tdynamodb-table@1\nmodules/kv-tables\tterraform@1',
+      'found by content: the module folder (its job reads every HCL file), the configuration whose module is out of reach, the CreateTable file; the root, the stage file and the other configurations are inputs, no jobs')
+    const SH = 'shop/live/prod/tables/terragrunt.hcl', MT = 'shop/modules/kv-tables/main.tf', OJ = 'shop/local/tables/orders.json'
+    eq((await tq('data')).split('\n').slice(1), [
+      'shop:dynamodb  dynamodb  3 tables · 3 GSIs · 2 conflicts',
+      '  infra  terraform@1  not read: a module out of reach (tfr:///terraform-aws-modules/dynamodb-table/aws)  shop/live/prod/legacy/terragrunt.hcl',
+      '    note: live/prod/legacy/terragrunt.hcl:2: its module tfr:///terraform-aws-modules/dynamodb-table/aws is not in this repository (a remote source): the key-value tables it declares, if any, are unknown',
+      `  infra  terraform@1  Terraform module modules/kv-tables through Terragrunt, 3 tables  ${SH}`,
+      '    note: prod-shop-audit: range_key is unknown (dependency.search: another configuration\'s output, known only once it is applied)',
+      '    note: prod-shop-audit: its attribute blocks are unknown (dependency.search: another configuration\'s output, known only once it is applied)',
+      `  infra  dynamodb-table@1  CreateTable input  ${OJ}`,
+    ], 'graph_data: one key-value store for the repository, the Terraform module\'s instance beside the CreateTable file; the remote module found, not read; the unknown input noted')
+    eq(await tq('data', { store: 'shop:dynamodb' }), [
+      'shop:dynamodb  dynamodb  3 tables · 3 GSIs · 2 conflicts',
+      `  prod-shop-audit  table  2 attributes · partition (id) · sort (\${dependency.search.outputs.sort_attr}) · TTL (expires_at) on · 1 GSI · PAY_PER_REQUEST · no stream  ${SH}:42 · ${MT}:2`,
+      `  prod-shop-carts  table  1 attribute · partition (id) · TTL (no attribute) off · PAY_PER_REQUEST · no stream  ${SH}:36 · ${MT}:2`,
+      `  prod-shop-orders  table  5 attributes · partition (customer_id) · sort (order_id) · TTL (expires_at) on · 2 GSIs · PAY_PER_REQUEST · stream NEW_AND_OLD_IMAGES  ${SH}:22 · ${MT}:2 · ${OJ}:2  [2 conflicts]`,
+    ].join('\n'), 'graph_data store: a table per for_each key, named from the inputs merged through the includes, each citing its entry in the inputs and the module\'s resource')
+    eq(await tq('data', { entity: 'prod-shop-orders' }), [
+      'shop:dynamodb/prod-shop-orders  table  (dynamodb)',
+      `  declared at ${SH}:22 [infra terraform@1, aws_dynamodb_table.table["orders"]] · ${MT}:2 [infra terraform@1, the resource in modules/kv-tables] · ${OJ}:2 [infra dynamodb-table@1]`,
+      '  PAY_PER_REQUEST · stream NEW_AND_OLD_IMAGES',
+      'Attributes (5):',
+      `  customer_id  S  a key of the table  — ${SH}:23 · ${MT}:10 · ${OJ}:5`,
+      `  order_id  S  a key of the table  — ${SH}:24 · ${MT}:15 · ${OJ}:6`,
+      `  placed_at  N  — ${SH}:31 · ${MT}:23 · ${OJ}:8`,
+      `  status  S  — ${SH}:30 · ${MT}:23 · ${OJ}:7`,
+      `  sku  S  — ${OJ}:9`,
+      'Keys (3):',
+      `  partition (customer_id)  — ${SH}:23 · ${MT}:7 · ${OJ}:12`,
+      `  sort (order_id)  — ${SH}:24 · ${MT}:8 · ${OJ}:13`,
+      `  TTL (expires_at) on  — ${SH}:22 · ${MT}:45 · ${OJ}:28`,
+      'Indexes (2):',
+      `  ByStatus  global · partition (status) · sort (placed_at) · KEYS_ONLY  — ${SH}:28 · ${MT}:34 · ${OJ}:16`,
+      `  BySku  global · partition (sku) · ALL  — ${OJ}:21`,
+      'Conflicts (2): the declarations disagree; each side is kept',
+      `  prod-shop-orders.sku  presence: declared — ${OJ}:9 [infra] | absent — ${SH}:22 [infra]`,
+      `  prod-shop-orders index BySku  presence: declared — ${OJ}:21 [infra] | absent — ${SH}:22 [infra]`,
+    ].join('\n'), 'graph_data entity: the Terraform table and the CreateTable file name it alike, so it is one table: keys, GSI and TTL at the inputs lines that state them, the module\'s lines beside; what only the file declares is a conflict with both sides')
+    eq((await tq('data', { entity: 'prod-shop-audit' })).split('\n').filter((l) => /sort|Conflicts/.test(l)), [`  sort (\${dependency.search.outputs.sort_attr})  — ${SH}:44 · ${MT}:8`, 'Conflicts: none'], 'an input from dependency.*.outputs: unknown, shown as its expression at its line, never guessed')
+    // secrets: what the evaluator read and no table uses reaches neither graph.db nor the page
+    const GD = path.join(TFP, '.grimoire/graph')
+    const stored = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => [f, readFileSync(path.join(GD, f)).toString('latin1')])
+    ok(stored.some(([f]) => f === 'graph.db') && stored.every(([, t]) => !t.includes(TFSECRET) && !t.includes(HCLSECRET)), `neither the tfvars value nor the included file's local is in the index (${stored.map(([f]) => f).join(', ')})`)
+    const { renderGraph: renderTf } = await import('../lib/render.mjs')
+    const { loadProject: loadTf } = await import('../lib/project.mjs')
+    const tpage = await renderTf(loadTf(TFP))
+    ok(!tpage.includes(TFSECRET) && !tpage.includes(HCLSECRET), 'nor in the page')
+    // the page: a key card per table, the unknown drawn as such
+    const tpg = await stubPage(tpage, '#data-0')
+    const tcards = tpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
+    const tcard = (name) => tcards.find((c) => tpg.textOf(c.kids[0]).startsWith(name))
+    const under2 = (n, pred, out = []) => { if (n && typeof n === 'object') { if (pred(n)) out.push(n); for (const k of n.kids || []) under2(k, pred, out) } return out }
+    const audit = tcard('prod-shop-audit')
+    const sk = under2(audit, (n) => n.tagName === 'LI' && /\bkrow\b/.test(n.attrs.class || '')).find((r) => tpg.textOf(r).startsWith('SK'))
+    eq([tcards.length, tpg.textOf(sk), under2(sk, (n) => /\bunk\b/.test(n.attrs?.class || '')).length, sk.attrs.title], [3, 'SK${dependency.search.outputs.sort_attr} ?', 1, `${SH}:44 · ${MT}:8`], 'the card draws the unknown sort key as unknown (its expression, marked), citing the inputs line and the module\'s')
+    ok(tpg.textOf(tcard('prod-shop-orders')).includes(`${SH}:22 aws_dynamodb_table.table["orders"]`) && tpg.textOf(tcard('prod-shop-orders')).includes(`${MT}:2 the resource in modules/kv-tables`), 'the orders card cites the inputs entry and the module\'s resource, each named')
+    // a file that does not parse keeps its text out: a tfvars.json and a CreateTable file broken next to a
+    // secret; and a symbolic link to a file out of the repository is not followed (an outside file's
+    // values would land in the model as an in-repository auto.tfvars; the directory walk lists no link,
+    // git does: below, once the project is a repository)
+    const BROKEN = fake('broken'), OUTSECRET = fake('outside')
+    writeFileSync(path.join(TFP, 'shop/modules/kv-tables/terraform.tfvars.json'), `{\n  "api_token": ${BROKEN},\n  "app": "shop"\n}\n`)
+    writeFileSync(path.join(TFP, 'shop/local/tables/broken.json'), `{\n  "TableName": "x",\n  "KeySchema": [], "AttributeDefinitions": [],\n  "Token": ${BROKEN}\n}\n`)
+    const OUTSIDE = path.join(SANDBOX, 'outside.tfvars')
+    writeFileSync(OUTSIDE, `app = "leaked"\napi_token = "${OUTSECRET}"\n`)
+    symlinkSync(OUTSIDE, path.join(TFP, 'shop/modules/kv-tables/zz.auto.tfvars'))
+    const bidx = await tq('index')
+    const blist = await tq('data')
+    ok(blist.includes('    note: modules/kv-tables/terraform.tfvars.json does not parse: not valid JSON at line 2') && blist.includes('  dynamodb-table@1 on shop/local/tables/broken.json: not valid JSON at line 4'),
+      `graph_data: the broken files at their line, none of their text (${blist.split('\n').filter((l) => /broken|tfvars|link/.test(l)).join(' | ')}; index: ${bidx.split('\n').find((l) => l.includes('shop'))})`)
+    ok(!blist.includes('leaked') && (await tq('data', { store: 'shop:dynamodb' })).includes('  prod-shop-orders  table'), 'the link not followed: what the outside file says sets nothing')
+    const stored2 = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => readFileSync(path.join(GD, f)).toString('latin1'))
+    const bpage = await renderTf(loadTf(TFP))
+    ok(stored2.every((t) => !t.includes(BROKEN) && !t.includes(OUTSECRET)) && !bpage.includes(BROKEN) && !bpage.includes(OUTSECRET) && !blist.includes(BROKEN) && !(await tq('status')).includes(BROKEN), 'neither the broken files\' secret nor the outside file\'s is in graph.db, graph_data, graph_status or the page')
+    for (const f of ['shop/modules/kv-tables/terraform.tfvars.json', 'shop/local/tables/broken.json', 'shop/modules/kv-tables/zz.auto.tfvars']) rmSync(path.join(TFP, f))
+    await tq('index')
+    // a name with an unknown part: its template (the stage file gone)
+    rmSync(STAGE)
+    await tq('index')
+    eq((await tq('data', { store: 'shop:dynamodb' })).split('\n').slice(1).map((l) => l.trim().split('  ')[0]), ['prod-shop-orders', '{stage}-shop-audit', '{stage}-shop-carts', '{stage}-shop-orders'],
+      'the file that set the stage is gone: each Terraform table is named by its template, and no longer meets the CreateTable file\'s exact name')
+    const tmpl = await tq('data', { entity: '{stage}-shop-orders' })
+    ok(tmpl.includes('  name template {stage}-shop-orders: a part of the name is unknown (each {…}), never guessed'), `graph_data entity says it is a template (${tmpl.split('\n').slice(0, 4).join(' | ')})`)
+    const npg = await stubPage(await renderTf(loadTf(TFP)), '#data-0')
+    const ncard = npg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || '')).find((c) => npg.textOf(c.kids[0]).startsWith('{stage}-shop-orders'))
+    ok(!!ncard && npg.textOf(ncard.kids[0]).includes('name template'), 'its card says so, a pill beside the name')
+    // a branch against its base: the inputs gain a GSI and lose a stream (the base's HCL read through git)
+    writeFileSync(STAGE, 'locals {\n  stage = "prod"\n}\n')
+    rmSync(path.join(TFP, 'shop/modules/kv-tables/terraform.tfvars'))
+    git(TFP, 'init', '-q', '-b', 'main')
+    writeFileSync(path.join(TFP, '.gitignore'), '.grimoire/\n')
+    commit(TFP, 'the shop')
+    git(TFP, 'switch', '-q', '-c', 'feat')
+    const TG = path.join(TFP, SH)
+    writeFileSync(TG, readFileSync(TG, 'utf8').replace('      ttl      = false\n      indexes  = []', '      ttl      = false\n      indexes  = [{ name = "ByOwner", hash_key = "owner", projection = "ALL" }]').replace('      stream    = true\n', ''))
+    commit(TFP, 'carts by owner, no stream on orders')
+    await tq('index')
+    eq((await tq('changes')).split('\n').slice(1), [
+      'shop:dynamodb  dynamodb  modified',
+      `  + prod-shop-carts.owner  attribute S  — ${SH}:38 · ${MT}:23`,
+      `  + prod-shop-carts index ByOwner global · partition (owner) · ALL  — ${SH}:38 · ${MT}:34`,
+      `  ~ prod-shop-orders  table, 5 attributes, PAY_PER_REQUEST · no stream  stream in ${SH}: NEW_AND_OLD_IMAGES → none  — was ${SH}:22 · ${MT}:2 · ${OJ}:2; now ${SH}:22 · ${MT}:2 · ${OJ}:2`,
+    ], 'graph_changes: what the branch changed in the Terragrunt inputs, element by element, the change in one declaration named with its file (the CreateTable file still says the old value)')
+    // in a repository, git lists the link: found, not read, and nothing of the outside file in the model
+    const LINK = path.join(TFP, 'shop/modules/kv-tables/zz.auto.tfvars')
+    symlinkSync(OUTSIDE, LINK)
+    const lidx = await tq('index')
+    const llist = await tq('data')
+    ok(lidx.includes('modules/kv-tables/zz.auto.tfvars: a symbolic link to a file out of the repository: not read') && llist.includes('  data-inputs on shop/modules/kv-tables/zz.auto.tfvars: a symbolic link to a file out of the repository: not read') && (await tq('status')).includes('zz.auto.tfvars: a symbolic link to a file out of the repository: not read'),
+      `a symbolic link to a file out of the repository: found, not read, said by the index, graph_data and graph_status (${llist.split('\n').find((l) => l.includes('zz.auto')) || lidx})`)
+    const lstored = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => readFileSync(path.join(GD, f)).toString('latin1'))
+    ok(!llist.includes('leaked') && (await tq('data', { store: 'shop:dynamodb' })).includes('  prod-shop-orders  table') && lstored.every((t) => !t.includes(OUTSECRET)) && !(await renderTf(loadTf(TFP))).includes(OUTSECRET), 'not followed: the outside file sets no name, and its secret is in neither graph.db nor the page')
+    rmSync(LINK)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

@@ -25,7 +25,7 @@ const ATTRS = {
   relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate }),
 }
 const SHAPE = {
-  entity: (e) => ({ name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}) }),
+  entity: (e) => ({ name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nameTemplate: e.nameTemplate } : {}) }),
   field: (f) => ({ name: f.name, type: { raw: f.type, norm: normType(f.type) }, nullable: f.nullable, default: f.default ?? null, generated: f.generated ?? null }),
   key: (k) => ({ role: k.role, parts: k.parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}) }),
   index: (i) => (kvIndex(i) ? { name: i.name, kind: i.kind, partition: i.partition, sort: i.sort, projection: i.projection ?? null, include: i.include || [], columns: i.columns, unique: false, partial: false } : { name: i.name, unique: !!i.unique, columns: i.columns, partial: !!i.partial }),
@@ -52,7 +52,13 @@ function merge(id, ds) {
   const complete = ds.filter((d) => d.complete)
   const source = (d, el) => ({ repo: d.repo, path: el?.path ?? d.source.path, line: el?.line ?? d.source.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(el?.as ? { as: el.as } : {}) })
   const slot = (map, key, make) => { if (!map.has(key)) map.set(key, { ...make(), sources: [], by: new Map() }); return map.get(key) }
-  const note = (el, d, attrs, src) => { el.sources.push(src); el.by.set(d, { attrs, src }) }
+  // an element a declaration states in two places (a Terraform table: the inputs that set it, and
+  // the module's resource, its `via`) cites both, the line that states it first
+  const note = (el, d, attrs, src, x) => {
+    el.sources.push(src)
+    if (x?.via && !(x.via.path === src.path && x.via.line === src.line)) el.sources.push({ repo: d.repo, path: x.via.path, line: x.via.line, kind: d.source.kind, extractor: d.extractor, confidence: d.source.confidence, ...(x.via.as ? { as: x.via.as } : {}) })
+    el.by.set(d, { attrs, src })
+  }
 
   const store = ds.find((d) => d.dialect) || ds[0]
   const kv = KV_DIALECTS.has(store.dialect)
@@ -60,10 +66,10 @@ function merge(id, ds) {
   for (const d of ds) {
     for (const e of d.entities || []) {
       const E = slot(entities, e.name, () => ({ ...SHAPE.entity(e), fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map(), whole: new Set() }))
-      note(E, d, ATTRS.entity(e), source(d, e))
+      note(E, d, ATTRS.entity(e), source(d, e), e)
       E.at.set(d, source(d, e))
       if (e.whole) E.whole.add(d)
-      for (const [type, list] of PARTS) for (const x of e[list] || []) note(slot(E[list], keyOf[type](x), () => SHAPE[type](x)), d, ATTRS[type](x, kv), source(d, x))
+      for (const [type, list] of PARTS) for (const x of e[list] || []) note(slot(E[list], keyOf[type](x), () => SHAPE[type](x)), d, ATTRS[type](x, kv), source(d, x), x)
     }
   }
   // a key-value element keeps what each declaration says of it: [[declKey, attrs]] (model.mjs)

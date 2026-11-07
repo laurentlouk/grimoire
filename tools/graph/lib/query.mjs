@@ -38,7 +38,7 @@ export const changeVal = (attr, v, at = (p) => p) => (Array.isArray(v) ? v.map(a
 export const CHANGE_KIND = { field: 'column', key: 'key', index: 'index', relation: 'foreign key' }
 const typeOf = (x) => x.type?.raw ?? x.type
 // A key-value table's elements in words (graph_data, graph_changes): a key, an index, the table.
-export const kvKeyText = (k) => (k.role === 'ttl' ? `TTL (${k.parts.join(', ')})${k.enabled === true ? ' on' : k.enabled === false ? ' off' : ''}` : `${k.role} (${k.parts.join(', ')})`)
+export const kvKeyText = (k) => (k.role === 'ttl' ? `TTL (${k.parts.length ? k.parts.join(', ') : 'no attribute'})${k.enabled === true ? ' on' : k.enabled === false ? ' off' : typeof k.enabled === 'string' ? ` ${k.enabled}` : ''}` : `${k.role} (${k.parts.join(', ')})`)
 export const kvIndexText = (i) => [i.kind === 'lsi' ? 'local' : 'global', i.partition.length ? `partition (${i.partition.join(', ')})` : null, i.sort.length ? `sort (${i.sort.join(', ')})` : null, projectionText(i) || 'projection not said'].filter(Boolean).join(' · ')
 export const kvTableText = (e) => `${e.billing || 'billing not said'} · ${e.stream ? `stream ${e.stream}` : 'no stream'}`
 // One element of a change, as graph_changes lists it (`dialect`: its store's).
@@ -332,7 +332,7 @@ export class Graph {
     const failed = clean(this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra))
     if (entity) return this.dataEntity(model, String(entity))
     if (store) return this.dataStore(model, String(store))
-    if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot and no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource) in the indexed repositories.'
+    if (!model.stores.length && !failed.length) return 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot and no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table) in the indexed repositories.'
     const out = [`Data stores (${model.stores.length}), read from migrations, snapshots and table declarations:`]
     for (const st of model.stores) {
       out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`)
@@ -383,6 +383,7 @@ export class Graph {
     const kv = st.dialect === 'dynamodb'
     const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}${s.as ? `, ${s.as}` : ''}]`).join(' · ')}`]
     if (kv) out.push(`  ${kvTableText(e)}`)
+    if (e.nameTemplate) out.push(`  name template ${e.nameTemplate}: a part of the name is unknown (each {…}), never guessed`)
     const section = (title, list, line) => { if (list.length) out.push(`${title} (${list.length}):`, ...list.map((x) => `  ${line(x)}  — ${this.sources(st.repo, x.sources)}`)) }
     if (kv) section('Attributes', e.fields, (f) => `${f.name}  ${f.type.raw}${f.nullable ? '' : '  a key of the table'}`)
     else section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}`)

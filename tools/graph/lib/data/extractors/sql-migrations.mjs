@@ -22,6 +22,7 @@ import path from 'node:path'
 import { replay } from '../readers/sqlite-replay.mjs'
 import { sniffDialect } from '../readers/sql-dialect.mjs'
 import { normDialect, lineOf } from '../model.mjs'
+import { parseJson } from '../readers/json-lines.mjs'
 
 const P = path.posix
 const SQL = /\.sql$/i
@@ -106,7 +107,7 @@ function readJournal(folder, configs) {
   if (!configs.has(p)) return null
   const text = configs.get(p)
   try {
-    const j = JSON.parse(text)
+    const j = parseJson(text)
     return { path: p, tags: [...(j.entries || [])].sort((a, b) => a.idx - b.idx).map((e) => e.tag), dialect: j.dialect, line: lineOf(text, /"dialect"/) }
   } catch (e) { return { path: p, error: e.message } }
 }
