@@ -113,6 +113,10 @@ read what your commits did to stored data:
   acknowledge), with `after` = the element as built, in the delta's words; or revert it in a
   commit and say why. A change that would drop something another repository still reads, or lose
   data, is reverted or made safe, like any defect.
+- In a fix round, or a retry after a replan, the header names the task's own start as the base
+  (not this dispatch's start, which would show only the fix) and lists the task's earlier report.
+  Return the full current list for the whole task: every change still in it, kept with its
+  reason, and one you reverted since with `kept: false`. It replaces the earlier report.
 - Never edit the delta yourself: once your task lands the loop appends the changes you kept, and
   the PR lists every change, planned or not.
 

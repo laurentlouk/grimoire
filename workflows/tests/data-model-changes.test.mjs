@@ -19,8 +19,11 @@
 //    M4  no delta beside the design: the PR still gets the section (the branch's changes), no ship
 //        writes anything; a run that changes no stored data gets no section
 //    M5  a repo delivered at the end (no land ship): the seal after the gate records the kept changes
+//    M6  a replanned task keeps its planned changes; a split gives each part the ones its text names
+//    M7  a fix round reports the task's whole list against the task's start: a column reverted in the
+//        fix is reverted (nothing appended), a new reason replaces the old, the fix's states replace
 //  Same stubbed runtime as the other loop tests (support/script-harness.mjs).
-import { run, by, T, impl, QUIET, sandbox, scriptOf, realRepo, receipt, heredocs, PR_URL, tick, spawn, existsSync, readFileSync, writeFileSync, mkdirSync, join } from './support/script-harness.mjs'
+import { run, by, T, impl, BLOCKED, QUIET, sandbox, scriptOf, realRepo, receipt, heredocs, PR_URL, tick, spawn, existsSync, readFileSync, writeFileSync, mkdirSync, join } from './support/script-harness.mjs'
 
 let PASS = 0, FAIL = 0
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
@@ -152,7 +155,7 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
   const p1 = deltaPayload(prompt('ship:api#1')), p2 = deltaPayload(prompt('ship:api#2'))
   eq([p1.map((e) => e.target), p2.map((e) => e.target)], [['api:db/books.note'], ['api:db/books.note', 'api:db/books.color']], 'a kept change with no reason is never sent to the delta; one the first ship could not write rides the next one, with the new one')
   const body = heredocs(prompt('ship:api#2'))[0]
-  ok(body.includes('- unplanned ⚠ kept `api:db/books.tag` (add) — no reason given · PROJ-1 · not added to the delta (no reason given)') && body.includes('- unplanned ⚠ kept `api:db/books.note` (add) — notes are shown · PROJ-1') && !body.includes('no target here'),
+  ok(body.includes("- no planned change recorded in this session's tasks") && body.includes('- unplanned ⚠ kept `api:db/books.tag` (add) — no reason given · PROJ-1 · not added to the delta (no reason given)') && body.includes('- unplanned ⚠ kept `api:db/books.note` (add) — notes are shown · PROJ-1') && !body.includes('no target here'),
     'the PR lists the kept change with no reason as such; the entry with no target says nothing and is dropped')
   ok(logs.some((l) => l === '⚠ PROJ-1: the unplanned change api:db/books.tag was kept with no reason given — listed in the PR, not added to the delta') && logs.some((l) => l === '⚠ PROJ-1: 2 modelChanges entries named no target — dropped') && logs.some((l) => /^⚠ ship:api#1: the design's delta was not written \(DELTA bad: DELTA bad step=node\) — its 1 unplanned change\(s\) wait for the next ship$/.test(l)), 'each said in the run log')
   ok(!result.halt && result.done.length === 2 && !calls.some((c) => /^(replan|resolve)/.test(c.label)), 'nothing blocked')
@@ -184,6 +187,68 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
   }), { args: { ...ARGS, deliver: 'end' }, index: { deltaFound: true } })
   ok(!labels.some((l) => l.startsWith('ship:')) && deltaPayload(seal).map((e) => e.target).join() === 'api:db/books.note' && seal.includes('Then return what its SEAL and DELTA lines say'), 'no land ship ran; the seal carries the kept change')
   eq(result.dataModel.changes.map((m) => m.delta), ['added'], '… and the result says it reached the delta')
+}
+
+// ══════════════ M6 · a replanned task keeps its planned changes (the replanner never sees the delta) ══════════════
+{
+  let n = 0
+  const { calls, prompt } = await run('M6 · BLOCKED, then REVISE with a task that states no changes', [T('PROJ-1', { deltaChanges: PLANNED.slice(0, 1).map(asTask) })], by({
+    'impl:PROJ-1': () => (++n === 1 ? { ...BLOCKED } : { ...impl('aaaaaaa'), deltaStates: [{ id: 'isbn', state: 'planned-built' }] }),
+    'replan#1': { decision: 'REVISE', cause: 'code', reason: 'another approach', learnings: [], tasks: [T('PROJ-1', { taskText: 'Build PROJ-1 another way' })] },
+  }), { args: ARGS, index: { deltaFound: true } })
+  const again = calls.filter((c) => c.label === 'impl:PROJ-1')[1]
+  ok(!!again && again.prompt.includes('- `isbn` · add `api:db/books.isbn` — search by isbn') && !again.prompt.includes('This task plans no change to stored data'), 'the retried task\'s brief still carries its planned change')
+  ok((section(heredocs(prompt('ship:api#1'))[0]) || []).includes('- planned ✓ `api:db/books.isbn` — add `isbn`: search by isbn · PROJ-1'), '… and the PR still lists it, planned ✓')
+
+  // a split: the failed id retried for one part, a new task for another. Each gets the changes its
+  // text names; a change no task names goes to every one of them (which one builds it cannot be told)
+  let m = 0
+  const three = [...PLANNED.slice(0, 2), PLANNED[2]].map(asTask) // isbn, due, loans
+  const split = await run('M6b · BLOCKED, then a split into the retried id and a new task', [T('PROJ-1', { deltaChanges: three })], by({
+    'impl:PROJ-1': () => (++m === 1 ? { ...BLOCKED } : impl('aaaaaaa')),
+    'replan#1': { decision: 'REVISE', cause: 'code', reason: 'two smaller steps', learnings: [], tasks: [
+      T('PROJ-1', { taskText: 'Add the isbn column to books', files: ['src/books.ts — the column'] }),
+      T('PROJ-1b', { ticket: 'NO_TICKET', taskText: 'Create the loans table', files: ['src/loans.ts — the table'] }),
+    ] },
+  }), { args: ARGS, index: { deltaFound: true } })
+  const planned = (label) => [...((split.calls.filter((c) => c.label === label).pop() || {}).prompt || '').matchAll(/^- `([^`]+)` · /gm)].map((x) => x[1])
+  eq([planned('impl:PROJ-1'), planned('impl:PROJ-1b')], [['isbn', 'due'], ['due', 'loans']], 'each split task gets the changes its text names (isbn, loans), and the one neither names (due) goes to both')
+}
+
+// ══════════════ M7 · a fix round: the report is the task's whole list, against the task's start ══════════════
+{
+  const kept = { target: 'api:db/books.subtitle', op: 'add', kept: true, reason: 'the search page shows it', after: { type: 'TEXT', nullable: true } }
+  const FAIL_MAJOR = { verdict: 'FAIL', findings: [{ severity: 'major', file: 'src/PROJ1.ts', line: 3, issue: 'the subtitle leaks drafts' }], summary: 'FAIL' }
+  const first = { ...impl('aaaaaaa', '0000000'), modelChanges: [kept], deltaStates: [{ id: 'loans', state: 'built-differently', note: 'column id: INTEGER, not null → absent' }] }
+  const task = () => T('PROJ-1', { deltaChanges: [asTask(PLANNED[2])] })
+  let fixPrompt = ''
+  const reverted = await run('M7 · the implementer keeps a column, a fix round reverts it and reports none', [task()], by({
+    'impl:PROJ-1': first,
+    'break-it:PROJ-1': FAIL_MAJOR,
+    'fix:PROJ-1:quality#1': (p) => { fixPrompt = p; return { ...impl('bbbbbbb', 'aaaaaaa'), modelChanges: [], deltaStates: [{ id: 'loans', state: 'planned-built' }] } },
+  }), { args: ARGS, index: { deltaFound: true } })
+  ok(fixPrompt.includes('`base` = `0000000`') && fixPrompt.includes("this task's start, not this dispatch's") && fixPrompt.includes('- kept `api:db/books.subtitle` (add) — the search page shows it') && fixPrompt.includes('the FULL current list'),
+    'the fix brief names the task\'s start as the base, lists the earlier report, and asks for the whole current list')
+  eq(reverted.result.dataModel.changes.map((c) => [c.target, c.kept, c.delta]), [['api:db/books.subtitle', false, null]], 'after the fix the kept column is reverted: nothing waits for the delta')
+  ok(deltaPayload(reverted.prompt('ship:api#1')) === null, '… and no ship appends it')
+  const s = section(heredocs(reverted.prompt('ship:api#1'))[0]) || []
+  ok(s.includes('- planned ✓ `api:db/loans` — add `loans`: lend books · PROJ-1') && s.some((l) => l.startsWith('- unplanned ⚠ reverted `api:db/books.subtitle` (add) — ')), 'the PR says it was reverted, and the fix\'s state replaces the first round\'s (planned ✓, no longer built differently)')
+
+  const rekept = await run('M7b · a fix that keeps it with a new reason', [task()], by({
+    'impl:PROJ-1': first,
+    'break-it:PROJ-1': FAIL_MAJOR,
+    'fix:PROJ-1:quality#1': { ...impl('bbbbbbb', 'aaaaaaa'), modelChanges: [{ ...kept, reason: 'the export reads it too' }] },
+  }), { args: ARGS, index: { deltaFound: true } })
+  const payload = deltaPayload(rekept.prompt('ship:api#1'))
+  eq([rekept.result.dataModel.changes.map((c) => [c.target, c.kept, c.reason]), payload.map((e) => [e.target, e.why])], [[['api:db/books.subtitle', true, 'the export reads it too']], [['api:db/books.subtitle', 'the export reads it too']]], 'kept again with a new reason: one change, its reason updated, one entry for the delta')
+  ok((section(heredocs(rekept.prompt('ship:api#1'))[0]) || []).includes('- built differently `api:db/loans` — add `loans`: column id: INTEGER, not null → absent · PROJ-1'), 'a fix that reports no states leaves the earlier ones standing')
+
+  const silent = await run('M7c · a fix that does not report at all', [task()], by({
+    'impl:PROJ-1': first,
+    'break-it:PROJ-1': FAIL_MAJOR,
+    'fix:PROJ-1:quality#1': impl('bbbbbbb', 'aaaaaaa'),
+  }), { args: ARGS, index: { deltaFound: true } })
+  eq(silent.result.dataModel.changes.map((c) => [c.target, c.kept, c.reason]), [['api:db/books.subtitle', true, 'the search page shows it']], 'a fix with no modelChanges at all says nothing new: the earlier report stands')
 }
 
 // ══════════════ the briefs and the return contract say it ══════════════

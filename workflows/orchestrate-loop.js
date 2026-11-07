@@ -1287,19 +1287,70 @@ const deltaChangesOf = (task) =>
     .slice(0, 40)
     .map((c) => ({ id: trim(c.id, 80), op: MODEL_OPS.includes(c.op) ? c.op : 'change', target: trim(c.target, 200), why: str(c.why) ? trim(c.why, 300) : '' }))
 const noTick = (s) => String(s).replace(/`/g, "'")
+// A REVISE re-enters its tasks fully specified, and the replanner never sees the delta: a task that
+// states no planned changes of its own gets them from what it replaces, per repo. The pool: the
+// changes of the tasks it re-uses the id of, and, when it brings in a task of its own (a split, an
+// inserted step), those of this replan's failed tasks of that repo it does not re-emit. One task to
+// give them to: all of them. Several: each gets those its text or files name (a target's column,
+// index or table name, as a word), and the ones no task names go to every one of them (which builds
+// them cannot be told). A task that states its own keeps them.
+function carryDeltaChanges(tasks, failed) {
+  const priorOf = (t) => hydratedById.get(t.id) || (t.ticket && t.ticket !== 'NO_TICKET' ? hydratedById.get(t.ticket) : null) || null
+  const emitted = new Set(tasks.flatMap((t) => [t.id, t.ticket].filter(Boolean)))
+  for (const repo of new Set(tasks.map((t) => t.repo))) {
+    const need = tasks.filter((t) => t.repo === repo && !deltaChangesOf(t).length)
+    if (!need.length) continue
+    const pool = new Map()
+    for (const t of need) for (const c of deltaChangesOf(priorOf(t))) pool.set(c.id, c)
+    if (need.some((t) => !priorOf(t))) for (const f of failed) if (f.repo === repo && !emitted.has(f.id)) for (const c of deltaChangesOf(hydratedById.get(f.id))) pool.set(c.id, c)
+    const all = [...pool.values()]
+    if (!all.length) continue
+    if (need.length === 1) {
+      need[0].deltaChanges = all
+      continue
+    }
+    const text = (t) => [t.taskText, t.title, ...(Array.isArray(t.files) ? t.files : [])].filter((x) => typeof x === 'string').join(' ').toLowerCase()
+    const names = (c) => {
+      const rest = c.target.slice(c.target.indexOf(':') + 1)
+      const m = /\/(index|key|fk):/.exec(rest)
+      const head = m ? rest.slice(0, m.index) : rest
+      const own = m ? rest.slice(m.index + m[0].length).match(/[A-Za-z_][A-Za-z0-9_]*/g) || [] : head.slice(head.lastIndexOf('/') + 1).split('.').slice(-1)
+      return own.filter((w) => w.length >= 3 && !['primary', 'unique', 'partition', 'sort', 'ttl'].includes(w)).map((w) => w.toLowerCase())
+    }
+    const named = (t, c) => { const s = text(t); return names(c).some((w) => new RegExp(`(^|[^a-z0-9_])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9_])`).test(s)) }
+    const nobody = all.filter((c) => !need.some((t) => named(t, c)))
+    for (const t of need) t.deltaChanges = all.filter((c) => named(t, c) || nobody.includes(c))
+  }
+}
+// A dispatch after the task's first (a fix round, a retry after a replan) reports for the WHOLE task:
+// graph_changes from where the task started (its first dispatch's start, recorded by noteModel), not
+// from this dispatch's own start, which would show only the fix; and its return replaces the earlier
+// report (noteModel), which the block lists.
 function modelBlock(task) {
   if (/:final$/.test(String(task.id))) return '' // a terminal sweep's fix: its findings only, no task of its own to report on
+  const rec = modelById.get(task.id)
+  const again = !!(rec && rec.reported)
+  const base = !again ? '`base` = your `startSha`' : rec.origin ? `\`base\` = \`${rec.origin}\` (this task's start, not this dispatch's)` : "`base` = the commit this task started from, before its first commit (this task's start, not this dispatch's)"
+  const earlier = again ? earlierReport(rec) : ''
+  const whole = again ? ' Report the FULL current list for the whole task: every change still in it, kept with its reason, and one reverted since reported with `kept: false`; it replaces the earlier report.' : ''
   if (!hasDelta)
     return `
 ## Data model changes — this design has no delta (brief: "Data model changes")
-Before you return, run \`graph_changes\` with \`base\` = your \`startSha\`, and list in \`modelChanges\` every change to stored data your commits made: kept with the reason, or reverted. Nothing waits on it.
+${earlier}Before you return, run \`graph_changes\` with ${base}, and list in \`modelChanges\` every change to stored data ${again ? 'the task made' : 'your commits made'}: kept with the reason, or reverted.${whole} Nothing waits on it.
 `
   const planned = deltaChangesOf(task)
   return `
 ## Data model changes — the design's delta \`${deltaPath}\` (brief: "Data model changes")
 ${planned.length ? `Planned for this task (from the delta, verbatim):\n${planned.map((c) => `- \`${noTick(c.id)}\` · ${c.op} \`${noTick(c.target)}\`${c.why ? ` — ${c.why}` : ''}`).join('\n')}` : 'This task plans no change to stored data.'}
-Before you return, run \`graph_changes\` with \`delta: "${deltaPath}"\` and \`base\` = your \`startSha\`: return \`deltaStates\` for the ids above, and in \`modelChanges\` each change of its Unplanned list, kept with the reason or reverted. Nothing waits on it.
+${earlier}Before you return, run \`graph_changes\` with \`delta: "${deltaPath}"\` and ${base}: return \`deltaStates\` for the ids above, and in \`modelChanges\` each change of its Unplanned list, kept with the reason or reverted.${whole} Nothing waits on it.
 `
+}
+// The task's report so far, as the next dispatch's brief lists it (implementer text: data, trimmed).
+function earlierReport(rec) {
+  const ch = [...rec.changes.values()].map((m) => `- ${m.kept ? 'kept' : 'reverted'} \`${noTick(m.target)}\`${m.op ? ` (${m.op})` : ''} — ${m.reason ? trim(m.reason, 200) : 'no reason given'}`)
+  const st = [...rec.states].map(([id, x]) => `- \`${noTick(id)}\` ${x.state}${x.note ? `: ${trim(x.note, 160)}` : ''}`)
+  if (!ch.length && !st.length) return "This task's earlier report: no change to stored data.\n"
+  return `This task's earlier report:\n${[...ch, ...st].slice(0, 24).join('\n')}\n`
 }
 
 function implPrompt(task, fixFindings, resolved) {
@@ -5699,23 +5750,49 @@ const doneTasks = [] // {id, repo, status, summary, ticket, runBranch, headSha, 
 const modelById = new Map() // task id → { changes: Map(target → change), states: Map(planned id → {state, note}), malformed }
 const deltaPending = {} // repo → [delta entry]: kept unplanned changes of landed tasks, not yet confirmed in the delta
 const deltaOwner = new Map() // delta entry id → the change it records (its `delta` status is updated from the receipt)
+const REVERTED_ADDED = 'reverted after it was added to the delta' // a later report reverted a change a ship had already written
 // What an implementer's return says about the data model, merged across the dispatches of its task (a
-// fix round reports again): the latest entry per target, the latest state per planned change. An entry
-// with no target says nothing and is dropped; one with no reason is kept, said so, never recorded.
+// later dispatch reports again). Each report is the task's WHOLE list against where the task started
+// (modelBlock): a later one replaces the earlier, and a change it no longer lists is gone from the
+// branch, so reverted. A report that leaves modelChanges out says nothing new; states are replaced by
+// a report that gives any. An entry with no target says nothing and is dropped; one with no reason is
+// kept, said so, never recorded.
 function noteModel(task, out) {
   if (!task || !isPlain(out)) return
-  const rec = modelById.get(task.id) || { changes: new Map(), states: new Map(), malformed: 0 }
-  for (const m of Array.isArray(out.modelChanges) ? out.modelChanges.slice(0, 60) : []) {
-    if (!isPlain(m) || !str(m.target)) {
-      rec.malformed++
-      continue
-    }
-    const target = trim(m.target, 200)
-    const after = isPlain(m.after) && JSON.stringify(m.after).length <= 4000 ? m.after : null
-    rec.changes.set(target, { target, op: MODEL_OPS.includes(m.op) ? m.op : null, kept: m.kept !== false, reason: str(m.reason) ? trim(m.reason, 400) : '', ...(after ? { after } : {}), delta: null })
+  const rec = modelById.get(task.id) || { changes: new Map(), states: new Map(), malformed: 0, origin: null, reported: false }
+  // where the task started: the first dispatch's start (its first verified commit's parent when it
+  // found its work already on the branch), named to every later dispatch as graph_changes' base
+  if (!rec.origin) {
+    const commits = (Array.isArray(out.commits) ? out.commits : []).map(asSha).filter(Boolean)
+    const before = (Array.isArray(out.landedBefore) ? out.landedBefore : []).map(asSha).filter(Boolean)
+    rec.origin = !commits.length && before.length ? `${before[0]}^` : asSha(out.startSha) || (commits[0] ? `${commits[0]}^` : null)
   }
-  for (const s of Array.isArray(out.deltaStates) ? out.deltaStates.slice(0, 60) : [])
-    if (isPlain(s) && str(s.id) && MODEL_STATES.includes(s.state)) rec.states.set(trim(s.id, 80), { state: s.state, note: str(s.note) ? trim(s.note, 300) : '' })
+  rec.reported = true
+  if (Array.isArray(out.modelChanges)) {
+    const next = new Map()
+    for (const m of out.modelChanges.slice(0, 60)) {
+      if (!isPlain(m) || !str(m.target)) {
+        rec.malformed++
+        continue
+      }
+      const target = trim(m.target, 200)
+      const after = isPlain(m.after) && JSON.stringify(m.after).length <= 4000 ? m.after : null
+      next.set(target, { target, op: MODEL_OPS.includes(m.op) ? m.op : null, kept: m.kept !== false, reason: str(m.reason) ? trim(m.reason, 400) : '', ...(after ? { after } : {}), delta: null })
+    }
+    for (const [target, old] of rec.changes) {
+      const now = next.get(target)
+      if (old.delta === 'added' || old.delta === REVERTED_ADDED) {
+        // already in the delta: graph_changes no longer lists it as unplanned, so its absence says
+        // nothing; reported reverted now, it is said so (the delta is never edited from here)
+        if (!now) next.set(target, old)
+        else Object.assign(now, { id: old.id, delta: now.kept ? 'added' : REVERTED_ADDED })
+      } else if (!now) next.set(target, { ...old, kept: false, reason: old.kept ? `gone from the task's report after a later round${old.reason ? ` (kept before: ${old.reason})` : ''}` : old.reason })
+    }
+    for (const m of next.values()) if (m.id) deltaOwner.set(m.id, m)
+    rec.changes = next
+  }
+  const states = (Array.isArray(out.deltaStates) ? out.deltaStates.slice(0, 60) : []).filter((x) => isPlain(x) && str(x.id) && MODEL_STATES.includes(x.state))
+  if (states.length) rec.states = new Map(states.map((x) => [trim(x.id, 80), { state: x.state, note: str(x.note) ? trim(x.note, 300) : '' }]))
   modelById.set(task.id, rec)
 }
 // A task landed: its model record for doneTasks, its kept changes queued for the delta, each said in
@@ -5728,7 +5805,7 @@ function landModel(r, t) {
   const slice = t && Number.isInteger(t.slice) && t.slice > 0 ? t.slice : undefined
   const changes = [...rec.changes.values()]
   for (const m of changes) {
-    m.delta = !hasDelta || !m.kept ? null : !m.reason ? 'no reason given' : !m.op ? 'no op given' : 'pending'
+    if (m.delta !== 'added' && m.delta !== REVERTED_ADDED) m.delta = !hasDelta || !m.kept ? null : !m.reason ? 'no reason given' : !m.op ? 'no op given' : 'pending'
     if (m.delta === 'pending') {
       m.id = `unplanned-${r.id}-${fnv1a(m.target)}`.replace(/[^A-Za-z0-9._-]+/g, '-')
       const entry = { id: m.id, op: m.op, target: m.target, ...(m.after && m.op !== 'remove' ? { after: m.after } : {}), why: m.reason, ...(slice ? { slice } : {}), origin: 'unplanned' }
@@ -6163,9 +6240,13 @@ function modelLines(repo) {
   const planned = []
   for (const d of landedHere)
     for (const c of d.deltaChanges || []) {
-      if (seen.has(c.id)) continue
-      seen.add(c.id)
       const s = d.model && d.model.states[c.id]
+      const had = planned.find((x) => x.c.id === c.id)
+      if (had) {
+        if (s) Object.assign(had, { task: d.id, state: s.state, note: s.note }) // a later landing read it again: its report is the latest
+        continue
+      }
+      seen.add(c.id)
       planned.push({ c, task: d.id, state: s ? s.state : null, note: s ? s.note : '' })
     }
   for (const t of openHere)
@@ -6182,12 +6263,12 @@ function modelLines(repo) {
   const plannedLine = (p) =>
     `- ${p.state ? WORD[p.state] : 'planned, state not reported'} ${tk(p.c.target)} — ${p.c.op} ${tk(p.c.id)}${p.state === 'built-differently' && p.note ? `: ${why(p.note)}` : p.c.why ? `: ${why(p.c.why)}` : ''} · ${p.task}${p.open ? ' (not landed yet)' : ''}`
   const changeLine = ({ m, task }) =>
-    `- ${hasDelta ? 'unplanned ⚠ ' : ''}${m.kept ? 'kept' : 'reverted'} ${tk(m.target)}${m.op ? ` (${m.op})` : ''} — ${m.reason ? why(m.reason) : 'no reason given'} · ${task}${m.delta === 'added' ? ' · added to the delta' : m.delta && m.delta !== 'pending' ? ` · not added to the delta (${why(m.delta)})` : ''}`
+    `- ${hasDelta ? 'unplanned ⚠ ' : ''}${m.kept ? 'kept' : 'reverted'} ${tk(m.target)}${m.op ? ` (${m.op})` : ''} — ${m.reason ? why(m.reason) : 'no reason given'} · ${task}${m.delta === 'added' ? ' · added to the delta' : m.delta === REVERTED_ADDED ? ' · reverted after it was added to the delta: remove it in the Data tab' : m.delta && m.delta !== 'pending' ? ` · not added to the delta (${why(m.delta)})` : ''}`
   if (!hasDelta)
     return [`No delta beside the design (\`${noTick(deltaPath || 'none')}\`): the changes this branch makes to stored data, as its implementers reported them against their base.`, ...reported.map(changeLine)]
   return [
     `Against the design's delta \`${noTick(deltaPath)}\`, each state as its task's implementer read it with \`graph_changes\`:`,
-    ...(planned.length ? planned.map(plannedLine) : ['- no planned change in the tasks of this repository']),
+    ...(planned.length ? planned.map(plannedLine) : ["- no planned change recorded in this session's tasks"]),
     ...reported.map(changeLine),
     ...(reported.some(({ m }) => m.kept) ? ['', 'Each kept unplanned change is added to the delta (`origin: unplanned`, its reason as `why`) for you to acknowledge in the graph page\'s Data tab (`graph.mjs serve`). Nothing here blocks the run.'] : []),
   ]
@@ -7385,6 +7466,7 @@ while (true) {
       let requeued = 0
       let stillInFlight = 0 // revised tasks skipped because their writer is still running
       const replannedFailures = [...failures] // snapshot: the loop below retires the ones it retries
+      carryDeltaChanges(revised.filter((x) => !x.deferred), replannedFailures)
       for (const t of revised.filter((x) => !x.deferred)) {
         // a replanned task re-enters the DAG fully specified — no hydration round-trip.
         // A retry of an in-project issue must land under its tracker id, or its dependents

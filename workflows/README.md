@@ -839,15 +839,23 @@ told.
 
 - **The index** says whether the delta exists (`deltaFound`, at `deltaPath`). **The hydration**
   copies each task's planned changes from it (`deltaChanges`: those of its slice, or that its
-  issue names, verbatim).
+  issue names, verbatim). The replanner never sees the delta: a task a REVISE re-emits without
+  changes of its own keeps those of the task it replaces; tasks it splits one into each get the
+  changes their text or files name (a target's column, index or table name), and the changes none
+  names go to every one of them.
 - **The implementer** (and `migration-engineer`, `test-engineer`) gets them in its brief with the
   delta's path, builds them, and before it returns runs `graph_changes` against its `startSha`
   with the delta. It returns `deltaStates` (planned and built, pending, built differently, per
   planned change) and `modelChanges`: one `{target, op, kept, reason, after}` per change the delta
   does not plan, the parts built on a table the delta adds beyond what its `add` states included.
   It keeps each one with a reason or reverts it; neither is a question, a pause or a failure.
-  With no delta it reports every change its commits made to stored data. Fix rounds report again:
-  the latest entry per target wins.
+  With no delta it reports every change its commits made to stored data. A later dispatch of the
+  task (a fix round, a retry after a replan) is told the task's own start as the base (its first
+  dispatch's start) and the earlier report, and returns the whole current list, which replaces
+  it: a change it no longer lists is gone from the branch and reads as reverted; one already in
+  the delta and now reverted is said so in the PR ("remove it in the Data tab"), never removed
+  from the delta by the loop. A report without `modelChanges` says nothing new; states are
+  replaced by a report that gives any.
 - **The reviewers** never fail a change for being unplanned. A wrong change (it drops something
   another repository still reads, it loses data) is a finding on its merits.
 - **The ship step is the single writer.** Once a task lands, its kept changes (with a reason and
