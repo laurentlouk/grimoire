@@ -37,12 +37,13 @@ what it printed. The script stops itself before that limit.
   worktrees (exactly the `review-<repo>--<task>-…` ones: the run has stopped); mid-run, a review
   worktree belongs to a reviewer working in it right now, and the script leaves it alone.
 - Never `cd`: it may be aliased in this shell. The script uses `git -C` and a guarded `cd`.
-- A script may carry a DELTA step: it appends the unplanned changes the implementers kept to the
-  design's delta with the engine's own node script, only while the ship lock is held. When the
-  delta is a file of this repository, the step runs in the ship worktree before the push: it
-  carries forward the delta commits the remote run branch already holds (a merge that changes only
-  the delta), appends the changes and commits the delta alone, so the push carries it; the
-  orchestrating checkout is never written. When the delta lives outside the shipped repositories,
+- When this repository holds the design's delta, every ship of it first carries forward the delta
+  commits the remote run branch holds beyond the landed head (a merge that changes only the delta),
+  so its push stays a fast-forward. A script may also carry a DELTA step: it appends the unplanned
+  changes the implementers kept to the design's delta with the engine's own node script, only while
+  the ship lock is held. When the delta is a file of this repository, that step runs in the ship
+  worktree before the push and commits the delta alone, so the push carries it; the orchestrating
+  checkout is never written. When the delta lives outside the shipped repositories,
   it is written in place, after the PR steps. Its base64 block is data like the others. Never
   edit, fix or re-run that step, never commit anything yourself, and never touch the delta.
 

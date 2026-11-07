@@ -772,7 +772,9 @@ issues close only when the PR merges, so landed-but-unmerged work still looks op
   `timeout` or `gtimeout`, each fetch and `gh` call runs in the background and is killed at its
   time limit, with its process group or its process tree, so no fetch outlives the script. It
   prints a `BRANCH` line per repo (`local`, `remote`, `sync`: `same`, `ahead`, `created`,
-  `fast-forwarded`, `behind`, `diverged`, `local-only`, `remote-only` or `missing`;
+  `fast-forwarded`, `behind`, `delta-ahead` (diverged by the design's delta commits alone, in the
+  repository that holds it: not a refusal, the next ship carries them forward), `diverged`,
+  `local-only`, `remote-only` or `missing`;
   `fetch=ok|failed`; and `ahead=<n>`, the commits origin's run branch holds that the base does
   not), a `PR` line per PR of the branch from this same repository (a fork's PR is never read;
   open first, then newest, at most three, and only the first carrying a marker prints it, raw,
@@ -882,10 +884,12 @@ told.
 - **The delta is committed on the run branch** (from 0.33.0, spec D4 amended): when it is a file
   of one of the run's repositories (its path under that repository's `path`, compared once `root`
   makes both absolute), every kept change, whichever repository's task kept it, goes to that
-  repository's ships. The ship writes the delta in its ship worktree, before its push: it carries
-  forward the delta commits the remote run branch holds beyond the landed head (the checkout's run
-  branch never gets them, so a later landing diverges from the remote by exactly those: a merge
-  that changes only the delta), appends the changes, and commits the delta alone (`git add --
+  repository's ships. Every ship of that repository, with changes to record or not (a halt ship
+  too), first carries forward the delta commits the remote run branch holds beyond the landed head:
+  the checkout's run branch never gets them, so every later landing diverges from the remote by
+  exactly those, and a push of the landed head alone would be refused. It merges them (a merge
+  that changes only the delta) and pushes that, a fast-forward. A ship with changes of its own then
+  writes the delta in its ship worktree, before its push: it appends the changes, and commits the delta alone (`git add --
   <path>`), `chore(data): record unplanned changes in <path> (<tasks>)`, with the repository's own
   git identity, hooks and signing, and a `Grimoire-Run: <runId>` trailer. The push carries it:
   `PUSH ok=1 remote=<landed head>`, then `DELTA ok … commit=<sha>`. The design's delta absent at
@@ -903,9 +907,23 @@ told.
   and committed on the branch, or the design's delta added on both), keeps the branch's version
   and appends the remote's unplanned changes to it (`delta-append.mjs` takes the other version as
   its changes: their unplanned entries, an acknowledged one unacknowledged again); any other
-  conflict abandons the merge, and the push says the rest. A delta outside every
+  conflict abandons the merge, and the push says the rest (its message keeps no conflict list: the
+  run's trailer stays its last paragraph). A delta outside every
   repository the run ships (a hub folder that is not one) is written in place, as before, and the
-  PR section says so.
+  PR section says so. The home repository's PR section names the other repositories whose kept
+  changes its delta commits carry ("the delta on this branch also records what web kept: …").
+  **On a resume**, the reconcile fast-forwards a local run branch that is only behind (the delta
+  commits included). One that diverged from origin by the delta's own commits alone (a session
+  that ended after a landing, before its ship) is `sync=delta-ahead`, not a refusal: nothing is
+  reset, and the next ship carries them forward.
+  **Limits.** (a) While tasks run, `serve` on the orchestrating checkout does not show the
+  unplanned entries: they are on the remote run branch until the gate's SYNC brings them in. (b) A
+  repository whose pre-push hook requires the gate's stamp refuses the seal's delta push (`DELTA bad
+  step=push`): those entries are listed as unrecorded at the end of the run. (c) A delta whose
+  repository has no landed task in the run gets no ship and no seal: its entries are unrecorded,
+  and the end-of-run warning says so. (d) A home repository whose PR is already out of draft gets
+  no land ship: its entries wait for its next terminal slot's seal. (e) A conflict in the delta
+  other than the two-sided one above abandons the merge; the push is then refused as before.
 - **The PR body** gets a **Data model and architecture changes** section, rebuilt with every
   description (the delta's architecture changes and the architectural impact among them, under
   the same heading, to acknowledge in the Architecture tab): each planned change of the repo's tasks marked planned ✓, built differently (what
