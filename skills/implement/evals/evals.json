@@ -151,7 +151,7 @@
     "id": 8,
     "query": "Implement LOANS-3 (slice 2 of the loans plan; the design's delta is docs/specs/2026-11-06-loans.delta.json). The implementer reports it also added an index on loans.due that the delta does not plan, and that it reverted a column it had dropped by mistake.",
     "should_trigger": true,
-    "expected_output": "The implementer's brief carries the issue's planned changes and the delta's path; before returning it ran graph_changes with the delta and reported deltaStates and modelChanges. Neither unplanned change blocks or becomes a question for the user: the kept index has its reason, the reverted column says why. As the delta's single writer in a session, it appends the kept index to the delta as an unplanned change (origin unplanned, the reason as why, its slice, never acknowledged), adds a Data model and architecture changes section to the PR description (planned ✓ / pending / built differently, unplanned ⚠ kept or reverted with reasons), and tells the user in one message so they can acknowledge it in the Data tab, without waiting for an answer.",
+    "expected_output": "The implementer's brief carries the issue's planned changes and the delta's path; before returning it ran graph_changes with the delta and reported deltaStates and modelChanges. Neither unplanned change blocks or becomes a question for the user: the kept index has its reason, the reverted column says why. As the delta's single writer in a session, it appends the kept index to the delta as an unplanned change (origin unplanned, the reason as why, its slice, never acknowledged) on the issue's branch and commits the delta there before the PR, in its own commit with only the delta staged, so the PR carries it (never left uncommitted in the checkout), adds a Data model and architecture changes section to the PR description (planned ✓ / pending / built differently, unplanned ⚠ kept or reverted with reasons), and tells the user in one message so they can acknowledge it in the Data tab, without waiting for an answer.",
     "expectations": [
       {
         "text": "The implementer brief carries the issue's planned model changes and the delta's path, and asks for graph_changes before returning",
@@ -165,6 +165,11 @@
       },
       {
         "text": "Appends only the kept unplanned change to the delta, with origin unplanned, the implementer's reason as why, and no ack",
+        "passed": null,
+        "evidence": ""
+      },
+      {
+        "text": "Commits the delta on the issue's branch before the PR, in its own commit staging only the delta file (git add -- <delta>), so the PR carries it; it is never left as an uncommitted edit",
         "passed": null,
         "evidence": ""
       },
