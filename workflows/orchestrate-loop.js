@@ -303,7 +303,7 @@ const TASK_ITEM_SCHEMA = {
     policyReason: { type: 'string', description: 'one sentence: the risk behind a proposed policy (logged)' },
     deltaChanges: {
       type: 'array',
-      description: "ONLY when the header names the design's delta: its data changes this task builds (those whose `slice` is the task's slice, or that its issue names), each copied verbatim from the delta; [] when none",
+      description: "ONLY when the header names the design's delta: its data and architecture changes this task builds (those whose `slice` is the task's slice, or that its issue names), each copied verbatim from the delta; [] when none",
       items: { type: 'object', required: ['id', 'op', 'target'], properties: { id: { type: 'string' }, op: { type: 'string' }, target: { type: 'string' }, why: { type: 'string' } } },
     },
   },
@@ -502,16 +502,16 @@ const IMPL_SCHEMA = {
     // to stop or to ask: nothing waits on it; the loop records it, the PR says it, the user is told.
     modelChanges: {
       type: 'array',
-      description: 'one entry per UNPLANNED change to stored data your commits made (graph_changes with the delta: its Unplanned list; with no delta, every change of your commits), KEPT with the reason, or REVERTED and said so. [] when none',
+      description: 'one entry per UNPLANNED change to stored data or to the architecture your commits made (graph_changes with the delta: its Unplanned lists, the data model\'s and the architecture\'s; with no delta, every change of your commits, and every architectural impact it lists), KEPT with the reason, or REVERTED and said so. A kept architectural one has the diagram updated in your commits, as /grimoire:architecture does. [] when none',
       items: {
         type: 'object',
         required: ['target', 'kept', 'reason'],
         properties: {
-          target: { type: 'string', description: 'as graph_changes names it, e.g. api:db/books.isbn or api:db/books/index:books_isbn_idx' },
+          target: { type: 'string', description: 'as graph_changes names it, e.g. api:db/books.isbn or api:db/books/index:books_isbn_idx; an architecture target: component:<id>, connection:<from>-><to>, boundary:<label>' },
           op: { type: 'string', enum: ['add', 'change', 'remove', 'rename'], description: 'what it does to the element (+ add, - remove, ~ change in graph_changes)' },
           kept: { type: 'boolean', description: 'true: it stays in your commits; false: you reverted it' },
           reason: { type: 'string', description: 'why you kept it (it becomes its `why` in the delta) or why you reverted it' },
-          after: { type: 'object', description: 'kept add or change: the element as built, in the delta\'s words (a column {type, nullable}, an index {columns, unique?}, a table {fields: [{name, type, nullable}], keys?, indexes?, relations?}, a rename {name})' },
+          after: { type: 'object', description: 'kept add or change: the element as built, in the delta\'s words (a column {type, nullable}, an index {columns, unique?}, a table {fields: [{name, type, nullable}], keys?, indexes?, relations?}, a rename {name}; a component {label, type, paths?}, a connection {label?, via?}, a boundary {kind?, wraps})' },
         },
       },
     },
@@ -1261,7 +1261,7 @@ ${routingTable()}
 ${
     hasDelta
       ? `\n## The design's delta: \`${deltaPath}\` (brief: "The design's delta")
-For each task, set \`deltaChanges\` to the delta's \`data\` changes it builds: those whose \`slice\` is the task's slice, or that its issue names. Copy each \`{id, op, target, why}\` verbatim; [] when none.\n`
+For each task, set \`deltaChanges\` to the delta's \`data\` changes it builds, and its \`architecture\` changes: those whose \`slice\` is the task's slice, or that its issue names. Copy each \`{id, op, target, why}\` verbatim; [] when none.\n`
       : ''
   }${
     claim
@@ -1279,6 +1279,10 @@ For each issue above: assign it to \`${claim.identity}\` and move it to your tra
 // step records the kept ones in the delta, the PR lists every change, and the run report says it ──
 const MODEL_OPS = ['add', 'change', 'remove', 'rename']
 const MODEL_STATES = ['planned-built', 'pending', 'built-differently']
+// An architecture target (component:<id>, connection:<from>-><to>, boundary:<label>): the delta's
+// `architecture` list holds it (tools/graph/lib/data/delta.mjs isArchTarget: the ship's append routes
+// it there), and the PR says where to acknowledge it.
+const isArchTarget = (t) => /^(component|connection|boundary):/.test(String(t))
 const isPlain = (x) => !!x && typeof x === 'object' && !Array.isArray(x)
 // A task's planned changes as the hydration copied them from the delta: [{id, op, target, why}].
 const deltaChangesOf = (task) =>
@@ -1336,13 +1340,13 @@ function modelBlock(task) {
   if (!hasDelta)
     return `
 ## Data model changes — this design has no delta (brief: "Data model changes")
-${earlier}Before you return, run \`graph_changes\` with ${base}, and list in \`modelChanges\` every change to stored data ${again ? 'the task made' : 'your commits made'}: kept with the reason, or reverted.${whole} Nothing waits on it.
+${earlier}Before you return, run \`graph_changes\` with ${base}, and list in \`modelChanges\` every change to stored data ${again ? 'the task made' : 'your commits made'}, and every architectural impact its Architecture part lists: kept with the reason (an architectural one with the diagram updated in your commits), or reverted.${whole} Nothing waits on it.
 `
   const planned = deltaChangesOf(task)
   return `
 ## Data model changes — the design's delta \`${deltaPath}\` (brief: "Data model changes")
-${planned.length ? `Planned for this task (from the delta, verbatim):\n${planned.map((c) => `- \`${noTick(c.id)}\` · ${c.op} \`${noTick(c.target)}\`${c.why ? ` — ${c.why}` : ''}`).join('\n')}` : 'This task plans no change to stored data.'}
-${earlier}Before you return, run \`graph_changes\` with \`delta: "${deltaPath}"\` and ${base}: return \`deltaStates\` for the ids above, and in \`modelChanges\` each change of its Unplanned list, kept with the reason or reverted.${whole} Nothing waits on it.
+${planned.length ? `Planned for this task (from the delta, verbatim):\n${planned.map((c) => `- \`${noTick(c.id)}\` · ${c.op} \`${noTick(c.target)}\`${c.why ? ` — ${c.why}` : ''}`).join('\n')}` : 'This task plans no change to stored data or to the architecture.'}
+${earlier}Before you return, run \`graph_changes\` with \`delta: "${deltaPath}"\` and ${base}: return \`deltaStates\` for the ids above, and in \`modelChanges\` each change of its Unplanned lists (the data model's and the architecture's), kept with the reason (an architectural one with the diagram updated in your commits) or reverted.${whole} Nothing waits on it.
 `
 }
 // The task's report so far, as the next dispatch's brief lists it (implementer text: data, trimmed).
@@ -6264,13 +6268,14 @@ function modelLines(repo) {
     `- ${p.state ? WORD[p.state] : 'planned, state not reported'} ${tk(p.c.target)} — ${p.c.op} ${tk(p.c.id)}${p.state === 'built-differently' && p.note ? `: ${why(p.note)}` : p.c.why ? `: ${why(p.c.why)}` : ''} · ${p.task}${p.open ? ' (not landed yet)' : ''}`
   const changeLine = ({ m, task }) =>
     `- ${hasDelta ? 'unplanned ⚠ ' : ''}${m.kept ? 'kept' : 'reverted'} ${tk(m.target)}${m.op ? ` (${m.op})` : ''} — ${m.reason ? why(m.reason) : 'no reason given'} · ${task}${m.delta === 'added' ? ' · added to the delta' : m.delta === REVERTED_ADDED ? ' · reverted after it was added to the delta: remove it in the Data tab' : m.delta && m.delta !== 'pending' ? ` · not added to the delta (${why(m.delta)})` : ''}`
+  const archKept = reported.some(({ m }) => m.kept && isArchTarget(m.target)), dataKept = reported.some(({ m }) => m.kept && !isArchTarget(m.target))
   if (!hasDelta)
-    return [`No delta beside the design (\`${noTick(deltaPath || 'none')}\`): the changes this branch makes to stored data, as its implementers reported them against their base.`, ...reported.map(changeLine)]
+    return [`No delta beside the design (\`${noTick(deltaPath || 'none')}\`): the changes this branch makes to stored data${reported.some(({ m }) => isArchTarget(m.target)) ? ' and to the architecture' : ''}, as its implementers reported them against their base.`, ...reported.map(changeLine)]
   return [
     `Against the design's delta \`${noTick(deltaPath)}\`, each state as its task's implementer read it with \`graph_changes\`:`,
     ...(planned.length ? planned.map(plannedLine) : ["- no planned change recorded in this session's tasks"]),
     ...reported.map(changeLine),
-    ...(reported.some(({ m }) => m.kept) ? ['', 'Each kept unplanned change is added to the delta (`origin: unplanned`, its reason as `why`) for you to acknowledge in the graph page\'s Data tab (`graph.mjs serve`). Nothing here blocks the run.'] : []),
+    ...(dataKept || archKept ? ['', `Each kept unplanned change is added to the delta (\`origin: unplanned\`, its reason as \`why\`)${archKept ? ', a kept architectural one with the diagram updated in this branch,' : ''} for you to acknowledge in the graph page's ${dataKept && archKept ? 'Data and Architecture tabs' : archKept ? 'Architecture tab' : 'Data tab'} (\`graph.mjs serve\`). Nothing here blocks the run.`] : []),
   ]
 }
 const modelSection = (lines) => (lines.length ? ['', '### Data model and architecture changes', ...lines] : [])

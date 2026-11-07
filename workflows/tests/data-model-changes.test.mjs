@@ -22,6 +22,9 @@
 //    M6  a replanned task keeps its planned changes; a split gives each part the ones its text names
 //    M7  a fix round reports the task's whole list against the task's start: a column reverted in the
 //        fix is reverted (nothing appended), a new reason replaces the old, the fix's states replace
+//    M8  the architecture (slice 6, #80): a planned component and an unplanned line kept with the
+//        diagram updated: the brief carries both, the PR lists them under the same heading, and the
+//        ship appends the line to the delta's `architecture` list
 //  Same stubbed runtime as the other loop tests (support/script-harness.mjs).
 import { run, by, T, impl, BLOCKED, QUIET, sandbox, scriptOf, realRepo, receipt, heredocs, PR_URL, tick, spawn, existsSync, readFileSync, writeFileSync, mkdirSync, join } from './support/script-harness.mjs'
 
@@ -249,6 +252,39 @@ const section = (body) => { const i = body.indexOf('### Data model and architect
     'fix:PROJ-1:quality#1': impl('bbbbbbb', 'aaaaaaa'),
   }), { args: ARGS, index: { deltaFound: true } })
   eq(silent.result.dataModel.changes.map((c) => [c.target, c.kept, c.reason]), [['api:db/books.subtitle', true, 'the search page shows it']], 'a fix with no modelChanges at all says nothing new: the earlier report stands')
+}
+
+// ══════════════ M8 · the architecture: a planned component, an unplanned line kept ══════════════
+{
+  const X = sandbox()
+  const ARCH = [{ id: 'search', op: 'add', target: 'component:search', after: { label: 'Search', type: 'backend' }, why: 'find books by title', slice: 1, origin: 'planned' }]
+  mkdirSync(join(X.T0, 'docs/specs'), { recursive: true })
+  writeFileSync(join(X.T0, DELTA_PATH), JSON.stringify({ ...DELTA, architecture: ARCH }, null, 2) + '\n')
+  const c1 = X.commit('c1')
+  const line = { target: 'connection:web->store', op: 'add', kept: true, reason: 'the page shows the stock as it is', after: { label: 'reads stock' } }
+  const ships = []
+  const { result, prompt, calls } = await run('M8 · a planned component and an unplanned line, kept with the diagram updated', [T('PROJ-1', { deltaChanges: [asTask(PLANNED[0]), asTask(ARCH[0])] })], by({
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [line], deltaStates: [{ id: 'isbn', state: 'planned-built' }, { id: 'search', state: 'planned-built' }] },
+    'ship:api#1': shipFor(X, ships),
+  }), { args: { ...ARGS, repos: realRepo(X.W) }, index: { deltaFound: true } })
+  ok(hydrateOf(calls).includes('and its `architecture` changes'), 'the hydration copies the delta\'s architecture changes too')
+  const ip = prompt('impl:PROJ-1')
+  ok(ip.includes('- `search` · add `component:search` — find books by title') && ip.includes('Unplanned lists (the data model\'s and the architecture\'s)') && ip.includes('with the diagram updated in your commits'), 'the implementer brief carries the planned component and asks for the architectural impact, kept with the diagram updated')
+  eq(section(X.pr.body()), [
+    '### Data model and architecture changes',
+    `Against the design's delta \`${DELTA_PATH}\`, each state as its task's implementer read it with \`graph_changes\`:`,
+    '- planned ✓ `api:db/books.isbn` — add `isbn`: search by isbn · PROJ-1',
+    '- planned ✓ `component:search` — add `search`: find books by title · PROJ-1',
+    '- unplanned ⚠ kept `connection:web->store` (add) — the page shows the stock as it is · PROJ-1',
+    '',
+    "Each kept unplanned change is added to the delta (`origin: unplanned`, its reason as `why`), a kept architectural one with the diagram updated in this branch, for you to acknowledge in the graph page's Architecture tab (`graph.mjs serve`). Nothing here blocks the run.",
+  ], 'the PR section lists the architecture under the same heading: the planned component ✓, the unplanned line kept with its reason, acknowledged in the Architecture tab')
+  const after = readDelta(X)
+  eq([after.data.length, after.architecture.map(({ id, ...c }) => c), /^unplanned-PROJ-1-[0-9a-f]{8}$/.test(after.architecture[1] && after.architecture[1].id)],
+    [PLANNED.length, [(({ id, ...c }) => c)(ARCH[0]), { op: 'add', target: 'connection:web->store', after: { label: 'reads stock' }, why: 'the page shows the stock as it is', slice: 1, origin: 'unplanned' }], true],
+    'the ship appends the kept line to the delta\'s architecture list (origin unplanned, the reason as why), never to its data')
+  ok(/^DELTA ok added=1 already=0 refused=0$/m.test(ships.out[0]) && !result.halt && result.dataModel.changes.map((m) => `${m.target} ${m.delta}`).join() === 'connection:web->store added', 'written under the ship lock; nothing blocked; the run\'s result says it reached the delta')
+  X.done()
 }
 
 // ══════════════ the briefs and the return contract say it ══════════════

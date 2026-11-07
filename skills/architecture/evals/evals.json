@@ -51,5 +51,28 @@
       { "text": "Adds trust boundaries backed by code or config", "passed": null, "evidence": "" },
       { "text": "Checks the diagram with graph.mjs architecture check before showing it", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 6,
+    "query": "graph_changes on my branch ends with an Architecture part: 'web uses store (2 file pairs in the graph), but no line is drawn between them'. The PR is about to go out. Deal with it.",
+    "should_trigger": true,
+    "expected_output": "Treats it as an unplanned architectural impact of the branch, never a reason to block. Reads the code that makes the link (the import from the web module into the store), then updates the existing diagram in docs/architecture in the same branch: draws the line web → store with what flows on it (or says in via what carries it), edits in place rather than re-drafting, and runs graph.mjs architecture check until it passes. When the work has a design delta beside its spec, appends the kept change to it as { id, op: add, target: connection:web->store, after, why, slice, origin: unplanned } with tools/graph/delta-append.mjs, never acknowledged. Tells the user in one message what the branch changed in the architecture and what was done with it, pointing to the Architecture tab under graph.mjs serve to see it and acknowledge it.",
+    "expectations": [
+      { "text": "Updates the existing diagram in the same branch (the line drawn, or a via) rather than blocking or re-drafting", "passed": null, "evidence": "" },
+      { "text": "Reads the code behind the link before drawing it", "passed": null, "evidence": "" },
+      { "text": "Runs graph.mjs architecture check on the updated diagram", "passed": null, "evidence": "" },
+      { "text": "Tells the user what changed in the architecture; with a delta, appends the kept change as origin unplanned without acknowledging it", "passed": null, "evidence": "" }
+    ]
+  },
+  {
+    "id": 7,
+    "query": "The design's delta proposes a search component and a line from the web app to it. Are they built yet?",
+    "should_trigger": true,
+    "expected_output": "Reads the states rather than guessing: runs graph.mjs changes --delta docs/specs/<date>-<topic>.delta.json (graph_changes with delta) and reports each architecture change's state against the saved diagrams: planned and built, pending (not drawn yet) or built differently (planned → built), its acknowledgement (stale once edited), and any unplanned architectural impact of the branch. Settles a built-differently one by reading the diagram and the code, never by editing the delta or its acknowledgements, and points to the Architecture tab's Delta overlay under graph.mjs serve to see them drawn and acknowledge them.",
+    "expectations": [
+      { "text": "Runs graph_changes (graph.mjs changes) with the delta to read the states", "passed": null, "evidence": "" },
+      { "text": "Reports each change as planned and built, pending or built differently, and any unplanned impact", "passed": null, "evidence": "" },
+      { "text": "Does not edit the delta's changes or acknowledgements", "passed": null, "evidence": "" }
+    ]
   }
 ]
