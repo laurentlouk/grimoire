@@ -289,6 +289,8 @@ try {
     { type: 'model', task: '#5', repo: 'site', target: 'site:db/books.legacy', op: 'remove', kept: false, reason: 'still read by the export', delta: null },
     { type: 'delta', repo: 'site', label: 'ship:site#1', status: 'ok', added: 1, already: 0, refused: 0, detail: '' },
     { type: 'delta', repo: 'site', label: 'ship:site#2', status: 'bad', added: null, already: null, refused: null, detail: 'DELTA bad step=node' },
+    { type: 'delta', repo: 'site', label: 'ship:site#3', status: 'ok', added: 2, already: 0, refused: 0, detail: '', where: 'run-branch', commit: 'f00dfee' },
+    { type: 'delta', repo: 'hub', label: 'ship:hub#1', status: 'ok', added: 1, already: 0, refused: 0, detail: '', where: 'in-place', commit: null },
     { type: 'ship', repo: 'site', mode: 'land', pushed: true, head: 'bbbbbbb2222', prUrl: 'https://example.invalid/pr/7', draft: true },
     { type: 'ship', repo: 'site', mode: 'halt', pushed: null, head: 'bbbbbbb2222', failedStep: 'comment', detail: 'gh: rate limited', prUrl: 'https://example.invalid/pr/7', draft: true },
     { type: 'env', when: 'stall', why: 'a failed push of site', ok: null, failed: [] },
@@ -359,6 +361,8 @@ try {
   has(/kept site:db\/books\.subtitle \(add\) — the search page shows it · for the design's delta/, "model: a kept change, for the design's delta")
   has(/reverted site:db\/books\.legacy \(remove\) — still read by the export/, 'model: a reverted change, with its reason')
   has(/site → 1 unplanned change\(s\) added to the design's delta/, 'delta: what the ship wrote')
+  has(/site → 2 unplanned change\(s\) added to the design's delta, committed on the run branch \(f00dfee\)/, 'delta: recorded in its own commit on the run branch (#97)')
+  has(/hub → 1 unplanned change\(s\) added to the design's delta, in place \(outside the shipped repositories: not committed\)/, 'delta: written in place, outside the shipped repositories')
   has(/site → not written \(bad\): DELTA bad step=node — the next ship carries them again/, 'delta: a write that failed, retried')
   has(/#5\s+DONE\s+3 reviews \(\+1 discarded\) · 1 fixes/, "a task's review count leaves the discarded round out and shows it apart")
   has(/\[environment\] environment: commit:site timed out/, 'halt: its kind')

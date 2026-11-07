@@ -16,6 +16,12 @@ command, and the stamp file it writes.
    `git worktree remove --force` each `review-<repo>--…` path `git worktree list` shows (the
    reviewers name theirs after the repo and the task), then `git worktree prune`. Never remove
    any other worktree: a lane of another repo can also start with `review-`.
+   **When the header gives a SYNC script** (this repo holds the design's delta), run it once the
+   tree is clean and before the gate command: the loop's ships committed the kept unplanned
+   changes to the delta on the remote run branch, which this checkout's branch lacks, and a push
+   without them is refused. `SYNC ok` brings them in (a fast-forward, or a merge that changes only
+   the delta), so the gate certifies a tree that holds them; `SYNC none` has nothing to bring;
+   `SYNC bad …` goes on, said in your summary. Never merge, pull or rebase anything yourself.
 2. **If the gate command APPLIES**: run it ONCE, in the FOREGROUND, exactly as the header
    gives it, including any flags (a lock wait, a timeout, an environment variable) — those
    flags are not optional, they are what makes the command safe to run unattended. A gate

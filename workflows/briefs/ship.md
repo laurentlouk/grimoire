@@ -2,8 +2,9 @@
 
 A task of this run just landed (or the run halted, or the terminal slot just marked the PR ready).
 The header holds ONE bash script that puts what landed on the remote: it pushes the exact landed
-SHA to the run branch from its own worktree, then opens or updates the repo's draft PR, and on a
-halt posts the status comment. That PR is the proof of what landed and the run's saved state: a
+SHA to the run branch from its own worktree (with the design's delta committed on top of it, when
+the script records one), then opens or updates the repo's draft PR, and on a halt posts the status
+comment. That PR is the proof of what landed and the run's saved state: a
 relaunch reads it back. Your whole job is one Bash call: run the script exactly as given, from the
 orchestrating workspace root, with the Bash tool's timeout at its maximum (600000 ms), then report
 what it printed. The script stops itself before that limit.
@@ -15,8 +16,9 @@ what it printed. The script stops itself before that limit.
 - **Never `--force`, never `--no-verify`, never bypass a hook.** The push is fast-forward only and
   runs the repo's pre-push hook in the ship worktree, on exactly the pushed tree. A rejected push
   is a result to report, not a problem to fix: do not pull, rebase, merge, reset or retry.
-- Never push anything but the SHA in the script (the run branch may hold the next task's
-  unreviewed commits), never change the PR's draft or ready state, never close or merge it.
+- Never push anything but what the script pushes: the SHA in it, and the delta commit it makes on
+  top (the run branch may hold the next task's unreviewed commits). Never change the PR's draft or
+  ready state, never close or merge it.
 - The script decides on its own, and each of these is a result, not a problem: it waits for the
   repo's ship lock (another ship, or the gate, may hold it) and moves nothing when it stays busy;
   it pushes nothing and leaves the description alone when the PR is out of draft (`READY`), or
@@ -35,10 +37,15 @@ what it printed. The script stops itself before that limit.
   worktrees (exactly the `review-<repo>--<task>-…` ones: the run has stopped); mid-run, a review
   worktree belongs to a reviewer working in it right now, and the script leaves it alone.
 - Never `cd`: it may be aliased in this shell. The script uses `git -C` and a guarded `cd`.
-- A script may end with a DELTA step: it appends the unplanned changes this repo's implementers
-  kept to the design's delta, a file in the workspace, with the engine's own node script, only
-  while the ship lock is held. Its base64 block is data like the others. Never edit, fix or
-  re-run that step, and never touch the delta yourself.
+- When this repository holds the design's delta, every ship of it first carries forward the delta
+  commits the remote run branch holds beyond the landed head (a merge that changes only the delta),
+  so its push stays a fast-forward. A script may also carry a DELTA step: it appends the unplanned
+  changes the implementers kept to the design's delta with the engine's own node script, only while
+  the ship lock is held. When the delta is a file of this repository, that step runs in the ship
+  worktree before the push and commits the delta alone, so the push carries it; the orchestrating
+  checkout is never written. When the delta lives outside the shipped repositories,
+  it is written in place, after the PR steps. Its base64 block is data like the others. Never
+  edit, fix or re-run that step, never commit anything yourself, and never touch the delta.
 
 ## What to return, from the lines the script printed
 - `pushed`: `PUSH ok=1` → true; `PUSH ok=0`, `PUSH skipped` or no PUSH line → false.
@@ -54,11 +61,15 @@ what it printed. The script stops itself before that limit.
 - `detail`: the lines printed right under the failing line, verbatim.
 - Only when the script has a DELTA step: `delta`, the word after `DELTA` on the first DELTA line
   (`ok`, `none`, `bad` or `skipped`); `deltaAdded`, `deltaAlready` and `deltaRefused`, the numbers
-  on the `DELTA ok` line (0 otherwise); `deltaDetail`, the `DELTA bad` line and every
-  `DELTA refused` line, verbatim ("" when none). None of them is a failure of the ship.
+  on the `DELTA ok` line (0 otherwise); `deltaCommit`, its `commit=` value (the commit that
+  recorded them on the run branch; "" when the line has none); `deltaDetail`, the `DELTA bad` line
+  and every `DELTA refused` line, verbatim ("" when none). None of them is a failure of the ship.
 
 ## Mode seal (after the terminal slot)
 The script prints one `SEAL` line. Return `sealed`: `SEAL ok=1` → true, `SEAL ok=0` or no SEAL
 line → false; `already`: `already=1` on it → true; `prUrl`: its `url=`; `failedStep`: its
 `step=`; `lockMissing`: a `LOCK missing` line → true (the script did nothing); `detail`: the lines
 printed right under it, verbatim. A seal script with a DELTA step: the delta fields too, as above.
+When the delta is a file of this repository, the seal's DELTA step commits it on what the remote
+run branch holds and pushes that commit (fast-forward): the one push a seal makes, and it leaves
+the PR's body and ready state alone.
