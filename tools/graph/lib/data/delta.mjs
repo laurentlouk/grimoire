@@ -71,7 +71,7 @@
 // The loop's ship step appends the unplanned changes implementers kept (appendChanges), with
 // origin `unplanned` and the implementer's reason as `why`, never acknowledged: the user does that.
 import { createHash } from 'node:crypto'
-import { normType, normDefault } from './model.mjs'
+import { normType, normDefault, kvIndex, projectionText } from './model.mjs'
 import { KEY, NAME, foldOf } from './diff.mjs'
 import { TYPES, VARIANTS, BOUNDARY_KINDS, ID } from '../arch.mjs'
 
@@ -221,7 +221,7 @@ function changeErrors(c) {
   const t = parseTarget(c.target)
   if (t.error) out.push(`target: ${t.error}`)
   out.push(...tailErrors(c))
-  if (!t.error && OPS.includes(c.op)) out.push(...afterErrors(t.kind, c.op, c.after))
+  if (!t.error && OPS.includes(c.op)) out.push(...afterErrors(t, c.op, c.after))
   return out
 }
 export function archChangeErrors(c) {
@@ -253,7 +253,22 @@ function archAfterErrors(kind, op, after) {
   return attrs(what, after, allowed, op === 'add' ? need : [])
 }
 const FIELD = { type: (v) => str(v), nullable: (v) => typeof v === 'boolean', default: (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v), generated: (v) => v === null || v === 'virtual' || v === 'stored' }
-const INDEX = { columns: (v) => Array.isArray(v) && v.length > 0 && v.every(str), unique: (v) => typeof v === 'boolean', partial: (v) => typeof v === 'boolean' }
+const attrList = (v) => Array.isArray(v) && v.length > 0 && v.every(str)
+// an index: a SQL one's columns, or a key-value one's (a GSI's or an LSI's) keys and projection
+const INDEX = { columns: attrList, unique: (v) => typeof v === 'boolean', partial: (v) => typeof v === 'boolean',
+  kind: (v) => v === 'gsi' || v === 'lsi', partition: (v) => attrList(v) && v.length <= 4, sort: (v) => Array.isArray(v) && v.length <= 4 && v.every(str), projection: (v) => PROJECTIONS.includes(v), include: (v) => Array.isArray(v) && v.every(str) }
+export const PROJECTIONS = ['ALL', 'KEYS_ONLY', 'INCLUDE']
+export const BILLING = ['PAY_PER_REQUEST', 'PROVISIONED']
+export const STREAMS = ['NEW_IMAGE', 'OLD_IMAGE', 'NEW_AND_OLD_IMAGES', 'KEYS_ONLY']
+const KV_INDEX = ['kind', 'partition', 'sort', 'projection', 'include']
+const kvAfter = (a) => isObj(a) && KV_INDEX.some((k) => k in a)
+const indexWord = (a) => (a?.kind === 'gsi' ? 'a GSI' : a?.kind === 'lsi' ? 'an LSI' : 'an index')
+// what an index's addition must state: its columns, or a key-value index's kind and its key (a GSI's
+// partition, an LSI's sort: the table's partition is its own)
+const indexNeed = (a) => (kvAfter(a) ? ['kind', a.kind === 'lsi' ? 'sort' : 'partition'] : ['columns'])
+// a table's own attributes: its kind; a key-value table's billing and stream (null: none)
+const TABLE_OWN = { kind: (v) => v === 'table' || v === 'view', billing: (v) => BILLING.includes(v), stream: (v) => v === null || STREAMS.includes(v) }
+const TTL = { enabled: (v) => typeof v === 'boolean' }
 const ACTIONS = { onDelete: (v) => str(v), onUpdate: (v) => str(v) }
 // the attributes an object states, each checked: [errors]
 function attrs(what, o, allowed, need = []) {
@@ -264,26 +279,28 @@ function attrs(what, o, allowed, need = []) {
   for (const k of need) if (!(k in o)) out.push(`after: ${what} needs its ${k}`)
   return out
 }
-function afterErrors(kind, op, after) {
-  const word = KIND_WORD[kind]
+function afterErrors(t, op, after) {
+  const kind = t.kind, word = KIND_WORD[kind]
   if (op === 'remove') return after === undefined ? [] : ['a removal has no after']
   if (op === 'rename') {
     if (kind === 'key' || kind === 'relation') return [`a ${word} has no name to rename: remove it and add the new one`]
     return isObj(after) && str(after.name) && Object.keys(after).length === 1 ? [] : ['after: { name }, the new name']
   }
+  // a TTL is a key with one thing to say: whether it is enabled
+  if (kind === 'key' && t.el.role === 'ttl') return op === 'change' ? (isObj(after) && Object.keys(after).length ? attrs('a TTL', after, TTL) : ['after: a TTL changes whether it is enabled ({ enabled })']) : after === undefined ? [] : attrs('a TTL', after, TTL)
   if (kind === 'key') return op === 'change' ? ['a key has nothing to change: its columns are what it is (remove it and add the new one)'] : after === undefined || (isObj(after) && !Object.keys(after).length) ? [] : ['after: a key states nothing (its target is its shape)']
   if (kind === 'relation') return after === undefined && op === 'add' ? [] : op === 'change' && isObj(after) && !Object.keys(after).length ? ['after: what changes (onDelete, onUpdate)'] : attrs('a foreign key', after, ACTIONS)
   if (after === undefined) return [`${op === 'add' ? 'an addition' : 'a change'} needs after: the ${word} ${op === 'add' ? 'it adds' : 'as it becomes'}`]
   if (kind === 'field') return op === 'add' ? attrs('a column', after, FIELD, ['type', 'nullable']) : isObj(after) && !Object.keys(after).length ? ['after: what changes (type, nullable, default, generated)'] : attrs('a column', after, FIELD)
-  if (kind === 'index') return op === 'add' ? attrs('an index', after, INDEX, ['columns']) : isObj(after) && !Object.keys(after).length ? ['after: what changes (columns, unique, partial)'] : attrs('an index', after, INDEX)
+  if (kind === 'index') return op === 'add' ? attrs(indexWord(after), after, INDEX, indexNeed(after)) : isObj(after) && !Object.keys(after).length ? ['after: what changes (columns, unique, partial; a GSI\'s or an LSI\'s partition, sort, projection, include)'] : attrs(indexWord(after), after, INDEX)
   // a table
-  if (op === 'change') return isObj(after) && Object.keys(after).length === 1 && ['table', 'view'].includes(after.kind) ? [] : ['after: a table changes its kind ({ kind: table | view }) here; its columns, keys and indexes are changed through their own targets']
-  const TABLE = { kind: (v) => v === 'table' || v === 'view', fields: (v) => Array.isArray(v) && v.length > 0, keys: Array.isArray, indexes: Array.isArray, relations: Array.isArray }
+  if (op === 'change') return isObj(after) && Object.keys(after).length ? attrs('a table', after, TABLE_OWN).map((e) => (/is not an attribute/.test(e) ? `${e}: its columns, keys and indexes are changed through their own targets` : e)) : ['after: a table changes its kind ({ kind: table | view }), a key-value table its billing or stream, here; its columns, keys and indexes are changed through their own targets']
+  const TABLE = { ...TABLE_OWN, fields: (v) => Array.isArray(v) && v.length > 0, keys: Array.isArray, indexes: Array.isArray, relations: Array.isArray }
   const out = attrs('a table', after, TABLE, ['fields'])
   if (out.length) return out
   after.fields.forEach((f, i) => { const e = isObj(f) && str(f.name) ? attrs(`column ${f.name}`, (({ name, ...x }) => x)(f), FIELD, ['type', 'nullable']) : [`after: fields[${i}] needs its name`]; out.push(...e) })
-  ;(after.keys || []).forEach((k, i) => { if (!(isObj(k) && ROLES.includes(k.role) && Array.isArray(k.parts) && k.parts.length && k.parts.every(str))) out.push(`after: keys[${i}] is { role, parts }`) })
-  ;(after.indexes || []).forEach((x, i) => { out.push(...(isObj(x) && str(x.name) ? attrs(`index ${x.name}`, (({ name, ...y }) => y)(x), INDEX, ['columns']) : [`after: indexes[${i}] needs its name`])) })
+  ;(after.keys || []).forEach((k, i) => { if (!(isObj(k) && ROLES.includes(k.role) && Array.isArray(k.parts) && k.parts.length && k.parts.every(str) && Object.keys(k).every((x) => x === 'role' || x === 'parts' || (x === 'enabled' && k.role === 'ttl' && TTL.enabled(k.enabled))))) out.push(`after: keys[${i}] is { role, parts } (a TTL's enabled beside them)`) })
+  ;(after.indexes || []).forEach((x, i) => { out.push(...(isObj(x) && str(x.name) ? (({ name, ...y }) => attrs(`index ${x.name}`, y, INDEX, indexNeed(y)))(x) : [`after: indexes[${i}] needs its name`])) })
   ;(after.relations || []).forEach((r, i) => { if (!(isObj(r) && INDEX.columns(r.columns) && str(r.to) && INDEX.columns(r.toColumns))) out.push(`after: relations[${i}] is { columns, to, toColumns, onDelete?, onUpdate? }`) })
   return out
 }
@@ -302,7 +319,7 @@ export function findTarget(model, t) {
 }
 
 // How a value reads (as graph_changes and the page say it).
-export const say = (attr, v) => (attr.endsWith('nullable') ? (v ? 'nullable' : 'not null') : attr.endsWith('unique') ? (v ? 'unique' : 'not unique') : attr.endsWith('partial') ? (v ? 'partial' : 'whole') : v === null || v === undefined || v === '' ? 'none' : String(v))
+export const say = (attr, v) => (attr.endsWith('nullable') ? (v ? 'nullable' : 'not null') : attr.endsWith('unique') ? (v ? 'unique' : 'not unique') : attr.endsWith('partial') ? (v ? 'partial' : 'whole') : attr.endsWith('enabled') ? (v === true ? 'on' : v === false ? 'off' : 'not said') : v === null || v === undefined || v === '' ? 'none' : String(v))
 const d = (attr, planned, built) => ({ attr, planned, built, text: `${attr}: ${say(attr, planned)} → ${say(attr, built)}` })
 const typeOf = (x) => x.type?.raw ?? x.type
 const fieldText = (f) => `${typeOf(f)}, ${f.nullable ? 'nullable' : 'not null'}${f.default !== null && f.default !== undefined ? `, default ${f.default}` : ''}`
@@ -318,13 +335,25 @@ function shapeDiffs(kind, after, el, fold, whole, pre = '') {
     if ('nullable' in after && after.nullable !== el.nullable) out.push(d(`${pre}nullable`, after.nullable, el.nullable))
     if ('default' in after && normDefault(after.default === null ? null : String(after.default)) !== normDefault(el.default)) out.push(d(`${pre}default`, after.default, el.default ?? null))
     if ('generated' in after && (after.generated ?? null) !== (el.generated ?? null)) out.push(d(`${pre}generated`, after.generated, el.generated ?? null))
+  } else if (kind === 'index' && (kvIndex(el) || kvAfter(after))) {
+    // a GSI or an LSI: what it states of its kind, keys and projection (no sort key unless stated)
+    if ('kind' in after && after.kind !== el.kind) out.push(d(`${pre}kind`, after.kind, el.kind ?? null))
+    for (const a of ['partition', 'sort']) if ((a in after || (whole && a === 'sort')) && (after[a] || []).join(',') !== (el[a] || []).join(',')) out.push(d(`${pre}${a}`, (after[a] || []).join(', '), (el[a] || []).join(', ')))
+    if ('columns' in after && after.columns.join(',') !== el.columns.join(',')) out.push(d(`${pre}columns`, after.columns.join(', '), el.columns.join(', ')))
+    if ('projection' in after || 'include' in after) {
+      const planned = projectionText({ projection: after.projection ?? el.projection, include: after.include ?? el.include }), built = projectionText(el)
+      if (planned !== built) out.push(d(`${pre}projection`, planned, built))
+    }
   } else if (kind === 'index') {
     if ('columns' in after && after.columns.map(fold).join(',') !== el.columns.map(fold).join(',')) out.push(d(`${pre}columns`, after.columns.join(', '), el.columns.join(', ')))
     for (const a of ['unique', 'partial']) if ((a in after || whole) && !!after[a] !== !!el[a]) out.push(d(`${pre}${a}`, !!after[a], !!el[a]))
+  } else if (kind === 'key') {
+    if ('enabled' in after && (after.enabled ?? null) !== (el.enabled ?? null)) out.push(d(`${pre}enabled`, after.enabled, el.enabled ?? null))
   } else if (kind === 'relation') {
     for (const [a, w] of [['onDelete', 'on delete'], ['onUpdate', 'on update']]) if (a in after && lower(after[a]) !== lower(el[a])) out.push(d(`${pre}${w}`, after[a], el[a]))
   } else if (kind === 'entity') {
     if (('kind' in after || whole) && (after.kind || 'table') !== el.kind) out.push(d('kind', after.kind || 'table', el.kind))
+    for (const a of ['billing', 'stream']) if (a in after && (after[a] ?? null) !== (el[a] ?? null)) out.push(d(a, after[a], el[a] ?? null))
     for (const f of after.fields || []) {
       const b = el.fields.find((x) => fold(x.name) === fold(f.name))
       if (!b) out.push(d(`column ${f.name}`, fieldText(f), 'absent'))
@@ -335,7 +364,7 @@ function shapeDiffs(kind, after, el, fold, whole, pre = '') {
       for (const p of after[list] || []) {
         const b = built.get(id(p))
         if (!b) out.push(d(label(p), 'planned', 'absent'))
-        else out.push(...shapeDiffs(k, (({ name, columns, to, toColumns, role, parts, ...x }) => (k === 'index' ? { columns, ...x } : x))(p), b, fold, true, `${label(p)} `))
+        else out.push(...shapeDiffs(k, (({ name, columns, to, toColumns, role, parts, ...x }) => (k === 'index' && columns !== undefined ? { columns, ...x } : x))(p), b, fold, true, `${label(p)} `))
       }
     }
   }

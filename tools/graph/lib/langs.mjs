@@ -340,6 +340,9 @@ export const LANGS = {
   ruby: { wasm: 'ruby', family: 'ruby', exts: ['.rb', '.rake'], spec: ruby },
   php: { wasm: 'php', family: 'php', exts: ['.php'], spec: php },
   swift: { wasm: 'swift', family: 'swift', exts: ['.swift'], spec: swift },
+  // A data grammar, not a code language: no extension maps to it, so no file is indexed as YAML
+  // code; the data model's extractors read YAML through it (lib/data/readers/yaml.mjs).
+  yaml: { wasm: 'yaml', family: 'yaml', exts: [], spec: null },
 }
 // Indexed as file nodes only (searchable by path, reachable through imports), no symbols.
 export const FILE_ONLY_EXTS = ['.vue', '.svelte', '.scala', '.dart', '.lua', '.ex', '.exs', '.zig', '.sol', '.ml', '.m', '.mm', '.sh', '.bash', '.sql', '.proto', '.graphql', '.gql', '.tf', '.tfvars', '.hcl']

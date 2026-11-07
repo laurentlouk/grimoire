@@ -1168,6 +1168,218 @@ console.log('\n11 · the Data tab draws a delta over the model, against a git ba
   } catch (e) { ok(false, `the delta overlay renders (${e.stack})`) } finally { rmSync(DIR, { recursive: true, force: true }) }
 }
 
+// ── 18 · key-value tables declared (JSON) ──
+console.log('\n18 · key-value tables declared: CreateTable inputs and CloudFormation templates, JSON (readers/dynamodb.mjs)')
+const { default: dynamodbTable } = await import('../lib/data/extractors/dynamodb-table.mjs')
+const { default: cloudformation } = await import('../lib/data/extractors/cloudformation.mjs')
+const { inspect, plan } = await import('../lib/data/registry.mjs')
+const { storeSummary } = await import('../lib/data/reconcile.mjs')
+// a local-dev table file in CreateTable's shape (aws dynamodb create-table --cli-input-json)
+const KV_LOCAL = `{
+  "TableName": "loans",
+  "BillingMode": "PAY_PER_REQUEST",
+  "AttributeDefinitions": [
+    { "AttributeName": "memberId", "AttributeType": "S" },
+    { "AttributeName": "loanId", "AttributeType": "S" },
+    { "AttributeName": "bookId", "AttributeType": "S" },
+    { "AttributeName": "dueAt", "AttributeType": "N" },
+    { "AttributeName": "branchId", "AttributeType": "S" }
+  ],
+  "KeySchema": [
+    { "AttributeName": "memberId", "KeyType": "HASH" },
+    { "AttributeName": "loanId", "KeyType": "RANGE" }
+  ],
+  "GlobalSecondaryIndexes": [
+    {
+      "IndexName": "ByBook",
+      "KeySchema": [{ "AttributeName": "bookId", "KeyType": "HASH" }, { "AttributeName": "dueAt", "KeyType": "RANGE" }],
+      "Projection": { "ProjectionType": "ALL" }
+    },
+    {
+      "IndexName": "ByBranch",
+      "KeySchema": [{ "AttributeName": "branchId", "KeyType": "HASH" }],
+      "Projection": { "ProjectionType": "KEYS_ONLY" }
+    }
+  ],
+  "TimeToLiveSpecification": { "AttributeName": "expiresAt", "Enabled": false }
+}`
+// the same table in a CloudFormation template, beside a table named by a reference and a queue
+const KV_TEMPLATE = `{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": { "Stage": { "Type": "String" } },
+  "Resources": {
+    "LoanEvents": { "Type": "AWS::SQS::Queue", "Properties": { "QueueName": "loan-events" } },
+    "LoansTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "TableName": "loans",
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          { "AttributeName": "memberId", "AttributeType": "S" },
+          { "AttributeName": "loanId", "AttributeType": "S" },
+          { "AttributeName": "bookId", "AttributeType": "S" },
+          { "AttributeName": "dueAt", "AttributeType": "N" }
+        ],
+        "KeySchema": [
+          { "AttributeName": "memberId", "KeyType": "HASH" },
+          { "AttributeName": "loanId", "KeyType": "RANGE" }
+        ],
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "ByBook",
+            "KeySchema": [{ "AttributeName": "bookId", "KeyType": "HASH" }, { "AttributeName": "dueAt", "KeyType": "RANGE" }],
+            "Projection": { "ProjectionType": "INCLUDE", "NonKeyAttributes": ["title", "dueAt"] }
+          }
+        ],
+        "TimeToLiveSpecification": { "AttributeName": "expiresAt", "Enabled": true },
+        "StreamSpecification": { "StreamViewType": "NEW_AND_OLD_IMAGES" }
+      }
+    },
+    "HoldsTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "TableName": { "Fn::Sub": "\${Stage}-holds" },
+        "AttributeDefinitions": [{ "AttributeName": "bookId", "AttributeType": "S" }, { "AttributeName": "tenant", "AttributeType": "S" }, { "AttributeName": "region", "AttributeType": "S" }, { "AttributeName": "placedAt", "AttributeType": "N" }],
+        "KeySchema": [{ "AttributeName": "bookId", "KeyType": "HASH" }],
+        "ProvisionedThroughput": { "ReadCapacityUnits": 5, "WriteCapacityUnits": 5 },
+        "GlobalSecondaryIndexes": [{ "IndexName": "ByTenantRegion", "KeySchema": [{ "AttributeName": "tenant", "KeyType": "HASH" }, { "AttributeName": "region", "KeyType": "HASH" }, { "AttributeName": "placedAt", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "KEYS_ONLY" } }],
+        "LocalSecondaryIndexes": { "Fn::If": ["IsProd", [], { "Ref": "AWS::NoValue" }] }
+      }
+    }
+  }
+}`
+// a table as a line: its keys, attributes, indexes, billing, stream, each element at its line
+const kvTable = (e) => [`${e.name}@${e.line} ${e.billing} stream=${e.stream} whole=${e.whole}${e.as ? ` as ${e.as}` : ''}`,
+  ...e.keys.map((k) => `  ${k.role}(${k.parts.join(',')})${k.role === 'ttl' ? ` enabled=${k.enabled}` : ''} @${k.line}`),
+  ...e.fields.map((f) => `  ${f.name} ${f.type} ${f.nullable ? 'nullable' : 'not null'} @${f.line}`),
+  ...e.indexes.map((i) => `  ${i.kind} ${i.name} (${i.partition.join(',')})(${i.sort.join(',')}) ${i.projection}${i.include.length ? ` [${i.include.join(',')}]` : ''} @${i.line}`)]
+{
+  const local = dynamodbTable.extract(KV_LOCAL, 'seed/loans.json').declarations
+  eq(local.map((d) => [d.store, d.dialect, d.label, d.source.kind, d.source.path, d.complete, d.notes]), [['dynamodb', 'dynamodb', 'CreateTable input', 'infra', 'seed/loans.json', false, []]],
+    'a CreateTable input: one declaration of the repository\'s key-value store, describing that table and not the whole store')
+  eq(kvTable(local[0].entities[0]), [
+    'loans@2 PAY_PER_REQUEST stream=null whole=true',
+    '  partition(memberId) @12', '  sort(loanId) @13', '  ttl(expiresAt) enabled=false @27',
+    '  memberId S not null @5', '  loanId S not null @6', '  bookId S nullable @7', '  dueAt N nullable @8', '  branchId S nullable @9',
+    '  gsi ByBook (bookId)(dueAt) ALL @16', '  gsi ByBranch (branchId)() KEYS_ONLY @21',
+  ], 'its keys (HASH → partition, RANGE → sort), the TTL and whether it is on, the attributes typed S/N/B (not null when they key the table), each GSI with its keys and projection, billing and stream, each at its line')
+
+  const tpl = cloudformation.extract(KV_TEMPLATE, 'infra/template.json').declarations
+  eq(tpl.map((d) => [d.store, d.label, d.source.line]), [['dynamodb', 'CloudFormation template, 2 tables', 6]], 'a CloudFormation template: its table resources, every other resource (a queue) left alone')
+  eq(tpl[0].entities.map(kvTable), [[
+    'loans@6 PAY_PER_REQUEST stream=NEW_AND_OLD_IMAGES whole=true as LoansTable (AWS::DynamoDB::Table)',
+    '  partition(memberId) @18', '  sort(loanId) @19', '  ttl(expiresAt) enabled=true @28',
+    '  memberId S not null @12', '  loanId S not null @13', '  bookId S nullable @14', '  dueAt N nullable @15',
+    '  gsi ByBook (bookId)(dueAt) INCLUDE [title,dueAt] @22',
+  ], [
+    'HoldsTable@32 PROVISIONED stream=null whole=false as HoldsTable (AWS::DynamoDB::Table), TableName !Sub ${Stage}-holds',
+    '  partition(bookId) @37',
+    '  bookId S not null @36', '  tenant S nullable @36', '  region S nullable @36', '  placedAt N nullable @36',
+    '  gsi ByTenantRegion (tenant,region)(placedAt) KEYS_ONLY @39',
+  ]], 'a table named by its literal TableName; one whose TableName is a reference named by its logical id, its name expression kept as written; a multi-attribute GSI key; billing implied by ProvisionedThroughput')
+  eq(tpl[0].notes, [
+    'HoldsTable: its TableName is !Sub ${Stage}-holds, a reference, not resolved: named by its logical id',
+    'HoldsTable: LocalSecondaryIndexes is !If [IsProd, [], !Ref AWS::NoValue], a reference, not resolved',
+  ], 'intrinsic functions (long form) are kept as references in short form and never evaluated; a part stated by one is not read, and the table is not whole')
+
+  // found by content, not by name
+  eq([inspect('infra/template.json', KV_TEMPLATE), inspect('seed/loans.json', KV_LOCAL), inspect('config/settings.json', '{ "name": "loans", "keys": [] }'), inspect('ci/build.yml', 'on: push'), inspect('db/0001.sql', 'CREATE TABLE t (id int);')], [3, 2, 0, 0, 2],
+    'inspect: a JSON or YAML text naming a table resource type is a template (3), one with a KeySchema and AttributeDefinitions a CreateTable input (2), any other none (0); SQL keeps its schema level')
+  const jobs = plan(new Map([['seed/loans.json', { ddl: 2 }], ['infra/template.json', { ddl: 3 }], ['config/settings.json', { ddl: 0 }], ['dynamodb/tables/notes.json', { ddl: 0 }], ['svc/stack.yaml', { ddl: 3 }], ['local/tables.yml', { ddl: 2 }]]))
+  eq(jobs.map((j) => `${j.extractor.id} ${j.key}`), ['dynamodb-table seed/loans.json', 'dynamodb-table local/tables.yml', 'cloudformation infra/template.json', 'cloudformation svc/stack.yaml'],
+    'discovery goes by what inspect found, whatever the file is called (a `dynamodb/tables/` file declaring no table is no job)')
+  eq(candidates(['seed/loans.json', 'svc/template.yaml', 'svc/x.yml', 'cfn/stack.template', 'README.md', 'tests/fixtures/t.json', 'node_modules/p/t.json', 'package-lock.json'], { exclude: [] }), ['seed/loans.json', 'svc/template.yaml', 'svc/x.yml', 'cfn/stack.template'],
+    'every JSON, YAML and .template file is a candidate, but for test folders, dependencies and lock files')
+  eq(dynamodbTable.extract('[{ "TableName": "a", "KeySchema": [{ "AttributeName": "id", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "id", "AttributeType": "S" }] }, { "KeySchema": [], "AttributeDefinitions": [] }]', 'x.json').declarations.map((d) => [d.label, d.entities.map((e) => e.name), d.notes]),
+    [['CreateTable input', ['a'], ['a key schema with no TableName at line 1: not read']]], 'a list of CreateTable inputs: each table read; a key schema with no TableName noted, not read')
+  eq(dynamodbTable.extract('{ "Table": { "TableName": "b", "KeySchema": [{ "AttributeName": "k", "KeyType": "HASH" }], "AttributeDefinitions": [{ "AttributeName": "k", "AttributeType": "N" }], "BillingModeSummary": { "BillingMode": "PROVISIONED" }, "StreamSpecification": { "StreamEnabled": false, "StreamViewType": "KEYS_ONLY" } } }', 'y.json').declarations[0].entities.map((e) => [e.name, e.billing, e.stream]),
+    [['b', 'PROVISIONED', null]], 'describe-table\'s answer ({ Table }) reads the same; a stream not enabled is no stream')
+
+  // two declarations of one table: both kept, their differences conflicts
+  const rows = (...files) => files.map(([ex, text, file]) => ({ repo: 'app', extractor: `${ex.id}@1`, facts: ex.extract(text, file) }))
+  const kv = reconcile(rows([dynamodbTable, KV_LOCAL, 'seed/loans.json'], [cloudformation, KV_TEMPLATE, 'infra/template.json']))
+  const [kst] = kv.stores
+  eq([kv.stores.length, kst.id, kst.dialect, kst.entities.map((e) => e.name), storeSummary(kst)], [1, 'app:dynamodb', 'dynamodb', ['HoldsTable', 'loans'], '2 tables · 3 GSIs · 5 conflicts'],
+    'a CreateTable input and a template stating the same TableName are two declarations of one table, in one store per repository')
+  const loans = kst.entities[1]
+  eq(loans.sources.map((s) => `${s.path}:${s.line} ${s.kind} ${s.extractor}${s.as ? ` ${s.as}` : ''}`), ['infra/template.json:6 infra cloudformation@1 LoansTable (AWS::DynamoDB::Table)', 'seed/loans.json:2 infra dynamodb-table@1'],
+    'the table cites both declarations, each labelled with its kind and how it names the table')
+  eq(everyConflict(kst), [
+    'loans stream: NEW_AND_OLD_IMAGES @ infra/template.json:6 | null @ seed/loans.json:2',
+    'loans.branchId presence: declared @ seed/loans.json:9 | absent @ infra/template.json:6',
+    'loans ttl (expiresAt) enabled: true @ infra/template.json:28 | false @ seed/loans.json:27',
+    'loans index ByBook projection: INCLUDE (dueAt, title) @ infra/template.json:22 | ALL @ seed/loans.json:16',
+    'loans index ByBranch presence: declared @ seed/loans.json:21 | absent @ infra/template.json:6',
+  ], 'their differences are conflicts, every side kept with its source: a stream on one side only, a GSI in one and not the other, a different projection, TTL on and off')
+  const unsure = KV_TEMPLATE.replace(/"GlobalSecondaryIndexes": \[\n {10}\{[\s\S]*?\n {8}\],\n {8}"TimeToLive/, '"GlobalSecondaryIndexes": { "Fn::If": ["IsProd", [], []] },\n        "TimeToLive')
+  eq(everyConflict(reconcile(rows([dynamodbTable, KV_LOCAL, 'seed/loans.json'], [cloudformation, unsure, 'infra/template.json'])).stores[0]).filter((c) => /index/.test(c)), [],
+    'a table whose GSIs are stated by a reference is not whole: the GSIs it seems to lack are no disagreement')
+
+  // the diff: elements identified by name (a table, an index), a key by its role and attributes
+  const base = reconcile(rows([cloudformation, KV_TEMPLATE, 'infra/template.json']))
+  const BRANCH = KV_TEMPLATE.replace('"StreamViewType": "NEW_AND_OLD_IMAGES"', '"StreamViewType": "NEW_IMAGE"').replace(',\n        "TimeToLiveSpecification": { "AttributeName": "expiresAt", "Enabled": true }', '')
+    .replace('"Projection": { "ProjectionType": "INCLUDE", "NonKeyAttributes": ["title", "dueAt"] }\n          }', '"Projection": { "ProjectionType": "ALL" }\n          },\n          { "IndexName": "ByBranch", "KeySchema": [{ "AttributeName": "branchId", "KeyType": "HASH" }], "Projection": { "ProjectionType": "KEYS_ONLY" } }')
+    .replace('{ "AttributeName": "dueAt", "AttributeType": "N" }\n', '{ "AttributeName": "dueAt", "AttributeType": "N" },\n          { "AttributeName": "branchId", "AttributeType": "S" }\n')
+  const branch = reconcile(rows([cloudformation, BRANCH, 'infra/template.json']))
+  const kd = diffModels(base, branch)
+  eq(changeLines(kd), [
+    'app:dynamodb modified',
+    '  ~ entity loans  stream: NEW_AND_OLD_IMAGES → NEW_IMAGE',
+    '  + field loans branchId',
+    '  - key loans ttl (expiresAt)',
+    '  ~ index loans ByBook  projection: INCLUDE (dueAt, title) → ALL',
+    '  + index loans ByBranch',
+  ], 'graph_changes for a key-value table: its stream, an attribute, its TTL, a GSI\'s projection, a GSI added, each by its identity')
+
+  // the delta: targets address them the way the diff identifies them
+  eq(['app:dynamodb/loans/index:ByBook', 'app:dynamodb/HoldsTable/key:partition(bookId)', 'app:dynamodb/loans/key:ttl(expiresAt)', 'app:dynamodb/loans.branchId'].map((t) => { const p = parseTarget(t); return `${p.storeId} ${p.entity} ${p.kind} ${JSON.stringify(p.el)}` }),
+    ['app:dynamodb loans index {"name":"ByBook"}', 'app:dynamodb HoldsTable key {"role":"partition","parts":["bookId"]}', 'app:dynamodb loans key {"role":"ttl","parts":["expiresAt"]}', 'app:dynamodb loans field {"name":"branchId"}'],
+    'targets: a GSI or an LSI is index:<name>, a key key:partition(…), key:sort(…) or key:ttl(<attribute>), an attribute <table>.<attribute>')
+  const all = kst.entities.flatMap((e) => [['entity', e, e], ...e.fields.map((x) => ['field', e, x]), ...e.keys.map((x) => ['key', e, x]), ...e.indexes.map((x) => ['index', e, x])])
+  const round = all.map(([kind, e, x]) => { const t = targetOf(kst.id, e.name, kind, x); return findTarget(kv, parseTarget(t)).el === x ? 'ok' : `lost ${t}` })
+  ok(round.length === 18 && round.every((r) => r === 'ok'), `every element of a key-value store named by targetOf resolves back to itself (${round.filter((r) => r !== 'ok').join(', ') || `${round.length} elements`})`)
+  ok(!findTarget(kv, parseTarget('app:dynamodb/Loans')).el, 'a key-value table\'s name is case-sensitive')
+  const ch = (id, op, target, extra = {}) => ({ id, op, target, why: `why ${id}`, origin: 'planned', ...extra })
+  const errs = (data) => parseDelta(JSON.stringify({ schema: 1, spec: 'docs/specs/x-design.md', data, architecture: [] })).errors
+  eq(errs([
+    ch('gsi', 'add', 'app:dynamodb/loans/index:ByBranch', { after: { kind: 'gsi', partition: ['branchId'], projection: 'KEYS_ONLY' } }),
+    ch('lsi', 'add', 'app:dynamodb/loans/index:ByDue', { after: { kind: 'lsi', partition: ['memberId'], sort: ['dueAt'], projection: 'INCLUDE', include: ['title'] } }),
+    ch('proj', 'change', 'app:dynamodb/loans/index:ByBook', { after: { projection: 'ALL' } }),
+    ch('stream', 'change', 'app:dynamodb/loans', { after: { stream: 'NEW_IMAGE', billing: 'PROVISIONED' } }),
+    ch('ttl-on', 'change', 'app:dynamodb/loans/key:ttl(expiresAt)', { after: { enabled: true } }),
+    ch('ttl-add', 'add', 'app:dynamodb/HoldsTable/key:ttl(releasedAt)', { after: { enabled: true } }),
+    ch('table', 'add', 'app:dynamodb/fines', { after: { fields: [{ name: 'fineId', type: 'S', nullable: false }], keys: [{ role: 'partition', parts: ['fineId'] }], indexes: [{ name: 'ByMember', kind: 'gsi', partition: ['memberId'] }], billing: 'PAY_PER_REQUEST', stream: null } }),
+  ]), [], 'a delta addresses key-value elements in their own words: a GSI or LSI with its keys and projection, a table\'s billing and stream, a TTL on or off')
+  eq(errs([
+    ch('a', 'add', 'app:dynamodb/loans/index:X', { after: { kind: 'gsi', projection: 'ALL' } }),
+    ch('b', 'add', 'app:dynamodb/loans/index:Y', { after: { kind: 'lsi', partition: ['memberId'] } }),
+    ch('c', 'change', 'app:dynamodb/loans/index:ByBook', { after: { projection: 'SOME' } }),
+    ch('d', 'change', 'app:dynamodb/loans', { after: { billing: 'FREE' } }),
+    ch('e', 'change', 'app:dynamodb/loans/key:ttl(expiresAt)', { after: {} }),
+    ch('f', 'change', 'app:dynamodb/loans/key:partition(memberId)', { after: { enabled: true } }),
+  ]), [
+    'data[0] (a): after: a GSI needs its partition',
+    'data[1] (b): after: an LSI needs its sort',
+    'data[2] (c): after: an index\'s projection "SOME" is not valid',
+    'data[3] (d): after: a table\'s billing "FREE" is not valid',
+    'data[4] (e): after: a TTL changes whether it is enabled ({ enabled })',
+    'data[5] (f): a key has nothing to change: its columns are what it is (remove it and add the new one)',
+  ], 'and is refused when it says what the element has not, or leaves out what it needs')
+  const s = deltaStates({ data: [
+    ch('ttl-off', 'remove', 'app:dynamodb/loans/key:ttl(expiresAt)'),
+    ch('by-branch', 'add', 'app:dynamodb/loans/index:ByBranch', { after: { kind: 'gsi', partition: ['branchId'], projection: 'KEYS_ONLY' } }),
+    ch('by-book', 'change', 'app:dynamodb/loans/index:ByBook', { after: { projection: 'ALL' } }),
+    ch('stream', 'change', 'app:dynamodb/loans', { after: { stream: 'NEW_IMAGE' } }),
+    ch('holds-stream', 'change', 'app:dynamodb/HoldsTable', { after: { stream: 'KEYS_ONLY' } }),
+    ch('by-tenant', 'change', 'app:dynamodb/HoldsTable/index:ByTenantRegion', { after: { projection: 'ALL' }, before: { projection: 'KEYS_ONLY' } }),
+  ] }, branch, { base, diff: kd })
+  eq(s.changes.map((r) => `${r.id} ${r.state}${r.diffs.length ? ` ${r.diffs.map((x) => x.text).join('; ')}` : ''}${r.proposed.length ? ` proposed ${r.proposed.map((x) => x.text).join('; ')}` : ''}`), [
+    'ttl-off planned-built', 'by-branch planned-built', 'by-book planned-built', 'stream planned-built',
+    'holds-stream pending proposed stream: none → KEYS_ONLY', 'by-tenant pending proposed projection: KEYS_ONLY → ALL',
+  ], 'states against the branch: a TTL removed, a GSI added in its planned shape, a projection and a stream changed as planned; the others pending, with what they propose')
+  eq(s.unplanned.map((u) => u.target), ['app:dynamodb/loans.branchId'], '… and the attribute the branch added that no change states is unplanned')
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()

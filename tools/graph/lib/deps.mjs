@@ -42,6 +42,44 @@ export function installDeps(log = () => {}) {
   return nm
 }
 
+// A grammar whose external scanner was compiled as C++ imports the C++ runtime's allocation (operator
+// new and delete) and a vector's length error, which the pinned runtime does not export: the pinned
+// YAML grammar does, and fails on its first parse. Those imports are renamed, in the grammar's
+// bytes before it loads, to the C functions they stand for (malloc, free, abort), which it does
+// export with the same signatures. Any other grammar's bytes are loaded unchanged.
+const CXX = { _Znwm: 'malloc', _Znam: 'malloc', _ZdlPv: 'free', _ZdaPv: 'free', _ZNKSt3__220__vector_base_commonILb1EE20__throw_length_errorEv: 'abort' }
+export function cxxShim(u) {
+  let i = 8
+  const leb = () => { let r = 0, s = 0, b; do { b = u[i++]; r |= (b & 0x7f) << s; s += 7 } while (b & 0x80); return r >>> 0 }
+  const enc = (n) => { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b) } while (n); return o }
+  const dec = new TextDecoder(), te = new TextEncoder()
+  while (i < u.length) {
+    const at = i, id = u[i++], size = leb(), end = i + size
+    if (id !== 2) { i = end; continue } // the import section is 2
+    const n = leb(), body = [...enc(n)]
+    let changed = false
+    const name = () => { const l = leb(), s = dec.decode(u.subarray(i, i + l)); i += l; return s }
+    const put = (s) => { const b = te.encode(s); body.push(...enc(b.length), ...b) }
+    for (let k = 0; k < n; k++) {
+      const mod = name(), field = name(), kind = u[i++], from = i
+      if (kind === 0) leb() // a function: its type index
+      else if (kind === 1) { i++; if (u[i++] & 1) { leb(); leb() } else leb() } // a table
+      else if (kind === 2) { if (u[i++] & 1) { leb(); leb() } else leb() } // a memory
+      else if (kind === 3) i += 2 // a global
+      else if (kind === 4) { i++; leb() } // a tag
+      const to = kind === 0 && Object.hasOwn(CXX, field) ? CXX[field] : field
+      changed ||= to !== field
+      put(mod); put(to); body.push(kind, ...u.subarray(from, i))
+    }
+    if (!changed || i !== end) return u
+    const head = Uint8Array.from([2, ...enc(body.length), ...body])
+    const out = new Uint8Array(at + head.length + (u.length - end))
+    out.set(u.subarray(0, at), 0); out.set(head, at); out.set(u.subarray(end), at + head.length)
+    return out
+  }
+  return u
+}
+
 let runtime = null
 // { parserFor(lang) → Parser | null } — grammars load lazily, once each.
 export async function loadRuntime({ install = true, log } = {}) {
@@ -57,7 +95,7 @@ export async function loadRuntime({ install = true, log } = {}) {
       let p = null
       const wasm = LANGS[lang] && path.join(nm, 'tree-sitter-wasms', 'out', `tree-sitter-${LANGS[lang].wasm}.wasm`)
       if (wasm && existsSync(wasm)) {
-        try { p = new TS.Parser(); p.setLanguage(await TS.Language.load(wasm)) } catch { p = null }
+        try { p = new TS.Parser(); p.setLanguage(await TS.Language.load(cxxShim(new Uint8Array(readFileSync(wasm))))) } catch { p = null }
       }
       parsers.set(lang, p)
       return p
