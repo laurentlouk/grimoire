@@ -1,0 +1,72 @@
+// A lending desk: patrons borrow copies of books.
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["views"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Who may do what at the desk.
+enum Role {
+  MEMBER
+  STAFF @map("staff")
+}
+
+model Patron {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  role      Role     @default(MEMBER)
+  joinedAt  DateTime @default(now()) @map("joined_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  loans     Loan[]
+
+  @@map("patrons")
+}
+
+model Book {
+  id     Int    @id @default(autoincrement())
+  isbn   String
+  title  String
+  tags   Tag[]
+  copies Copy[]
+
+  @@index([title])
+}
+
+model Copy {
+  bookId Int
+  serial Int
+  shelf  String?
+  book   Book    @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  loans  Loan[]
+
+  @@id([bookId, serial])
+}
+
+model Loan {
+  id       Int      @id @default(autoincrement())
+  patronId String   @map("patron_id")
+  bookId   Int
+  serial   Int
+  dueOn    DateTime
+  patron   Patron   @relation(fields: [patronId], references: [id])
+  copy     Copy     @relation(fields: [bookId, serial], references: [bookId, serial])
+
+  @@unique([bookId, serial, dueOn])
+  @@index([patronId])
+}
+
+model Tag {
+  id    Int    @id @default(autoincrement())
+  label String @unique
+  books Book[]
+}
+
+/* Not in the schema language: skipped like a comment. */
+view OverdueLoan {
+  id    Int      @unique
+  dueOn DateTime
+}

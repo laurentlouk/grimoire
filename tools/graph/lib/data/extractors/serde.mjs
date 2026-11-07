@@ -450,6 +450,7 @@ export default {
   version: 1,
   kind: 'code',
   scope: 'file',
+  tree: true,
   lang: 'rust',
   wants: (p) => RS.test(p),
   level: (p, text) => rustLevel(text),

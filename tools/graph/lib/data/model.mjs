@@ -51,7 +51,10 @@ import { blank } from './readers/sql-split.mjs'
 // Trust, highest first: the order sources are listed in.
 export const KINDS = ['artifact', 'migration', 'infra', 'code', 'inferred']
 
-export const normType = (raw) => String(raw ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+// A type as compared: lower-cased, blanks collapsed, none before a parenthesis or around a comma
+// (`timestamp (3)` and `timestamp(3)`, `numeric(10, 2)` and `numeric(10,2)`: two versions of one tool
+// write them so).
+export const normType = (raw) => String(raw ?? '').trim().toLowerCase().replace(/\s+/g, ' ').replace(/ ?\( ?/g, '(').replace(/ ?, ?/g, ',')
 
 // A default as compared (shown as declared): SQLite reports `DEFAULT (unixepoch())` as
 // `unixepoch()`, while a snapshot keeps the text as written, so one balanced outer pair of

@@ -1,0 +1,35 @@
+{
+  "repos": [
+    {
+      "name": "lite1",
+      "path": "lite1"
+    },
+    {
+      "name": "lite2",
+      "path": "lite2"
+    },
+    {
+      "name": "pg1",
+      "path": "pg1"
+    },
+    {
+      "name": "pg2",
+      "path": "pg2"
+    },
+    {
+      "name": "my1",
+      "path": "my1"
+    },
+    {
+      "name": "my2",
+      "path": "my2"
+    },
+    {
+      "name": "prisma",
+      "path": "prisma"
+    }
+  ],
+  "graph": {
+    "dir": ".grimoire/graph"
+  }
+}

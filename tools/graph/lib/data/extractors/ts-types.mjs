@@ -335,6 +335,7 @@ export default {
   version: 1,
   kind: 'code',
   scope: 'file',
+  tree: true,
   wants: (p) => TS.test(p) && !DTS.test(p),
   level: (p, text) => tsLevel(text),
   discover: (info) => [...info].filter(([p, i]) => TS.test(p) && !DTS.test(p) && (i.ddl & 1)).map(([p]) => ({ key: p, inputs: [p] })),

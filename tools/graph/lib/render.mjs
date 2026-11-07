@@ -41,7 +41,7 @@ import { scanDocs, docRoots, scanDeltas, readDelta } from './docs.mjs'
 import { mdSlug, mdFront, mdToHtml } from './md.mjs'
 import { archClient } from './arch-view.mjs'
 import { docsClient } from './docs-view.mjs'
-import { reconcile, storeSummary } from './data/reconcile.mjs'
+import { reconcile, storeSummary, schemaDrift } from './data/reconcile.mjs'
 import { bindingHow, dashed } from './data/binding.mjs'
 import { kvIndex, kvTable, projectionText } from './data/model.mjs'
 import { layoutErd, erdBox } from './data/layout.mjs'
@@ -439,6 +439,7 @@ function packer(entities, src, cf, bsrc = null) {
     return {
       name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nt: e.nameTemplate } : {}), ...cite(e),
       fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, ...cite(f),
+        ...(f.computed ? { comp: f.computed } : {}), ...(f.enum ? { en: f.enum.values } : {}),
         ...(f.item ? { it: f.item.map((i) => ({ t: i.type, raw: i.raw, kind: i.kind, nul: i.nullable ? 1 : 0, def: i.default ?? null, vals: i.values ?? null })), ...(f.sources.every((s) => s.kind === 'code') ? { code: 1 } : {}) } : {}) })),
       keys: keys.map(({ k, parts }) => ({ role: k.role, parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}), ...cite(k) })),
       indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, ...(kvIndex(x) ? kvPack(x) : {}), ...cite(x) })),
@@ -499,7 +500,7 @@ function packStore(st, shown, fileId, sd = null, acc = null) {
   }
   // a source: [path index, line], and how the declaration names the element when it says (a template's logical id)
   const src = (list) => list.map((s) => (s.as ? [P(s.path, s.kind, s.repo ?? st.repo), s.line ?? null, s.as] : [P(s.path, s.kind, s.repo ?? st.repo), s.line ?? null]))
-  const cf = (list) => list.map((c) => ({ attr: c.attr, values: c.values.map((v) => ({ value: v.value, src: src(v.sources) })) }))
+  const cf = (list) => list.map((c) => ({ attr: c.attr, values: c.values.map((v) => ({ value: v.value, src: src(v.sources) })), ...(schemaDrift(c) ? { drift: 1 } : {}) }))
   const tables = st.entities.map(packer(st.entities, src, cf))
   // a key-value table's item types (data/binding.mjs): its bindings with their evidence and rivals,
   // the logical table it is one declaration of with the conflicts across it
@@ -509,6 +510,7 @@ function packStore(st, shown, fileId, sd = null, acc = null) {
     id: st.id, repo: st.repo, name: st.name, dialect: st.dialect, summary: storeSummary(st),
     how: f ? { how: f.how, marker: f.marker ?? null, at: f.path ? [P(f.path), f.line ?? null] : null } : null,
     decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: [P(d.path, d.kind), null], stopped: d.stopped ? [P(d.stopped.path, d.kind), d.stopped.line] : null, error: d.error, notes: d.notes })),
+    ...(st.enums ? { enums: st.enums.map((en) => ({ name: en.name, values: en.values, src: src(en.sources) })) } : {}),
     paths, tables, collapsed, ...(cards ? { cards: true, layout: null } : { layout: layoutErd(tables, { collapsed }) }),
     ...(sd ? { ch: packChanges(sd, tables, collapsed, shown, cards) } : {}),
   }

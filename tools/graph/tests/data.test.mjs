@@ -97,6 +97,23 @@
 //      a table named only in test code; then, with the parser
 //      runtime, the serde and TypeScript extractors (every serde attribute, TypeScript's optional,
 //      unions, extends and intersections, the uses per function) and the shapes as stored
+//  28. code-declared SQL models: the schema-language reader (blocks, fields, attributes, comments,
+//      errors at their line and never their text, hostile text bounded) and its extractor (Postgres
+//      and SQLite types, maps, native types, defaults in the migration's terms, computed defaults,
+//      relations and their default actions, an implicit many-to-many table, views, enums, a folder
+//      schema, a config's migrations path); the conflict rule on hand-built declarations (a schema
+//      agreeing with its migrations, one edited without a migration, a table stated in part); then,
+//      with the parser runtime, the TypeScript table builders (SQLite, Postgres and MySQL builders,
+//      the third argument, a pgSchema, a creator, helpers and spreads, casing, a customType, a config
+//      naming a barrel, discovery, a file that does not parse)
+//
+//  (Part 2, continued) 29. code-declared SQL models through call() (fixtures/sqlcode): a push-only
+//      TypeScript schema, a schema-language file beside its migrations, the Drizzle fixture's schema
+//      (fixtures/sqlcode/overlay) agreeing with its snapshot and replay, then a column added with no
+//      migration → the conflict with every source; a field added to the schema-language file → the
+//      same; the branch against its base (the schema parsed aside); the Data tab; then each golden
+//      project (fixtures/sqlcode/golden: synthetic schemas, and what their own tools generated from
+//      them, run once as a dev-time oracle) read against that output, agreeing but for a known gap
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -2541,6 +2558,321 @@ console.log('\n26 · access patterns: key-value SDK calls read per language (ext
   }
 }
 
+console.log('\n28 · code-declared SQL models: the schema-language reader (readers/prisma.mjs) and its extractor, the TypeScript table builders (extractors/drizzle-ts.mjs), the conflict "schema edited, migration not generated"')
+{
+  const { readPrisma, prismaLevel, MAX_TEXT } = await import('../lib/data/readers/prisma.mjs')
+  const { default: prismaX } = await import('../lib/data/extractors/prisma.mjs')
+  const { schemaDrift, elementsOf } = await import('../lib/data/reconcile.mjs')
+  const brief = (e) => ({ name: e.name, kind: e.kind, at: e.line, fields: e.fields.map((f) => `${f.name} ${f.type}${f.nullable ? '?' : ''}${f.default !== null ? ` =${f.default}` : ''}${f.computed ? ` [${f.computed}]` : ''}${f.unstated ? ` (${f.unstated})` : ''}`), keys: e.keys.map((k) => `${k.role}(${k.parts}):${k.line}`), indexes: e.indexes.map((i) => `${i.name}${i.unique ? '!' : ''}(${i.columns})${i.partial ? ' partial' : ''}:${i.line}`), rels: e.relations.map((r) => `(${r.columns})->${r.to}(${r.toColumns}) ${r.onDelete}/${r.onUpdate}:${r.line}`) })
+  // the unit as discovery makes it: the schema root is the folder of its first file
+  const px = (files, key = path.posix.dirname(Object.keys(files)[0])) => prismaX.extract({ key, files: Object.entries(files).map(([p, text]) => ({ path: p, text })) })
+
+  // the reader: blocks, fields, attributes and their arguments, comments skipped, newlines inside brackets
+  const PG = [
+    '// a doc comment, then a block comment the language does not have',
+    'datasource db {',
+    '  provider = "postgresql"',
+    '  url      = "postgresql://localhost/desk"',
+    '  schemas  = ["public", "auth"]',
+    '}',
+    '/* skipped */',
+    '/// Plans a member can be on.',
+    'enum Plan {',
+    '  FREE',
+    '  PRO   @map("pro")',
+    '  @@map("plan_kind")',
+    '}',
+    'model Account {',
+    '  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid',
+    '  handle    String   @db.VarChar(40)',
+    '  plan      Plan     @default(PRO)',
+    '  balance   Decimal  @db.Decimal(10, 2)',
+    '  tags      String[]',
+    '  token     String   @default(uuid())',
+    '  active    Boolean  @default(true)',
+    '  seenAt    DateTime @default(now()) @db.Timestamptz(6)',
+    '  touchedAt DateTime @updatedAt',
+    '  score     Float    @default(0.5)',
+    '  orgId     Int?',
+    '  org       Org?     @relation(fields: [orgId], references: [id], onDelete: SetNull)',
+    '  groups    Group[]',
+    '',
+    '  @@unique([handle, orgId], map: "account_handle_org")',
+    '  @@index(fields: [seenAt(sort: Desc)])',
+    '  @@index([',
+    '    plan,',
+    '    active',
+    '  ])',
+    '  @@map("accounts")',
+    '  @@schema("auth")',
+    '}',
+    'model Org {',
+    '  id       Int       @id @default(autoincrement())',
+    '  name     String    @unique',
+    '  accounts Account[]',
+    '  @@schema("public")',
+    '}',
+    'model Group {',
+    '  id       Int       @id @default(autoincrement())',
+    '  accounts Account[]',
+    '}',
+    'model Seat {',
+    '  orgId  Int',
+    '  number Int',
+    '  label  Unsupported("circle")?',
+    '  @@id([orgId, number])',
+    '}',
+    'view Busy {',
+    '  id Int @unique',
+    '}',
+  ].join('\n')
+  const r0 = readPrisma(PG)
+  eq([r0.errors, r0.blocks.map((b) => `${b.kind} ${b.name}:${b.line}-${b.end}`)], [[], ['datasource db:2-6', 'enum Plan:9-13', 'model Account:14-37', 'model Org:38-43', 'model Group:44-47', 'model Seat:48-53', 'view Busy:54-56']], 'the reader: every block with its lines; comments of both kinds skipped')
+  const acct = r0.blocks.find((b) => b.name === 'Account')
+  eq([acct.fields.find((f) => f.name === 'tags').list, acct.fields.find((f) => f.name === 'orgId').optional, acct.attrs.map((a) => a.name), acct.attrs[2].args[0].value.items.map((v) => v.v)], [true, true, ['unique', 'index', 'index', 'map', 'schema'], ['plan', 'active']], 'a list, an optional field, block attributes in order; a list over several lines read whole')
+
+  const d0 = px({ 'db/schema.prisma': PG }).declarations[0]
+  eq([d0.store, d0.dialect, d0.dialectFrom, d0.complete, d0.label, d0.enums], ['db/migrations', 'postgres', { how: 'stated', path: 'db/schema.prisma', line: 3 }, true, 'schema, read 1 file: 4 models, 1 enum, 1 view', [{ name: 'plan_kind', values: ['FREE', 'pro'], path: 'db/schema.prisma', line: 9 }]],
+    'the store beside the schema (where its migrations go), the dialect from the datasource provider, the enum by its mapped name and values')
+  ok(!JSON.stringify(d0).includes('localhost/desk'), 'nothing of the datasource but its provider is kept (its url may hold a secret)')
+  eq(d0.entities.map(brief), [
+    { name: 'auth.accounts', kind: 'table', at: 14, fields: [
+      'id UUID =gen_random_uuid()', 'handle VARCHAR(40)', 'plan plan_kind =\'pro\'', 'balance DECIMAL(10,2)', 'tags TEXT[]?', 'token TEXT [@default(uuid())]', 'active BOOLEAN =true',
+      'seenAt TIMESTAMPTZ(6) =CURRENT_TIMESTAMP', 'touchedAt TIMESTAMP(3) [@updatedAt]', 'score DOUBLE PRECISION =0.5', 'orgId INTEGER?'],
+    keys: ['primary(id):15'], indexes: ['account_handle_org!(handle,orgId):29', 'accounts_seenAt_idx(seenAt):30', 'accounts_plan_active_idx(plan,active):31'], rels: ['(orgId)->Org(id) set null/cascade:26'] },
+    { name: 'Org', kind: 'table', at: 38, fields: ['id SERIAL', 'name TEXT'], keys: ['primary(id):39'], indexes: ['Org_name_key!(name):40'], rels: [] },
+    { name: 'Group', kind: 'table', at: 44, fields: ['id SERIAL'], keys: ['primary(id):45'], indexes: [], rels: [] },
+    { name: 'Seat', kind: 'table', at: 48, fields: ['orgId INTEGER', 'number INTEGER', 'label circle? (type)'], keys: ['primary(orgId,number):52'], indexes: [], rels: [] },
+    { name: 'Busy', kind: 'view', at: 54, fields: [], keys: [], indexes: [], rels: [] },
+    { name: '_AccountToGroup', kind: 'table', at: 27, fields: ['A UUID', 'B INTEGER'], keys: [], indexes: [], rels: ['(A)->accounts(id) cascade/cascade:27', '(B)->Group(id) cascade/cascade:27'] },
+  ], 'Postgres: @db native types as written, scalars as the migration types them (autoincrement → SERIAL), @map and @@map physical names, @@schema outside public qualified; defaults in the migration\'s terms (an enum value by its mapped name, now() → CURRENT_TIMESTAMP, dbgenerated its text), uuid() and @updatedAt computed; an Unsupported type kept and not compared; unique and index named as Prisma names them (map: wins); an optional relation SetNull, Cascade on update; an implicit many-to-many join table')
+  eq([d0.entities.find((e) => e.name === '_AccountToGroup').part, d0.entities.find((e) => e.name === 'auth.accounts').fields.find((f) => f.name === 'plan').enum], [true, { name: 'plan_kind', values: ['FREE', 'pro'] }], 'the join table stated in part (its keys vary with the version); an enum column carries its enum')
+
+  // SQLite: types as its migrations write them; a required relation restricts; relationMode prisma has no foreign keys
+  const SQ = (extra = '') => `datasource db {\n  provider = "sqlite"\n  url = "file:dev.db"${extra}\n}\nenum Kind {\n  A\n  B\n}\nmodel P {\n  id Int @id @default(autoincrement())\n  k Kind @default(B)\n  big BigInt\n  f Float\n  raw Bytes\n  doc Json\n  q Q @relation(fields: [qId], references: [id])\n  qId String\n}\nmodel Q {\n  id String @id @default(cuid())\n  ps P[]\n}\n`
+  eq(px({ 'prisma/schema.prisma': SQ() }).declarations[0].entities.map(brief).map((e) => [e.name, e.fields, e.rels]), [
+    ['P', ['id INTEGER', 'k TEXT =\'B\'', 'big BIGINT', 'f REAL', 'raw BLOB', 'doc Json (type)', 'qId TEXT'], ['(qId)->Q(id) restrict/cascade:16']],
+    ['Q', ['id TEXT [@default(cuid())]'], []],
+  ], 'SQLite: an enum is TEXT, autoincrement no default, cuid() computed; Json not typed by any rule (kept, not compared); a required relation: Restrict on delete, Cascade on update')
+  const rm = px({ 'prisma/schema.prisma': SQ('\n  relationMode = "prisma"') }).declarations[0]
+  ok(rm.entities.every((e) => !e.relations.length) && rm.notes.some((n) => n.includes('relationMode = "prisma"')), `relationMode = "prisma": no foreign key in the database, none modeled, noted (${rm.notes.join(' | ')})`)
+  // the sides of a relation pair by its name: a one-to-many's list side beside a many-to-many of another
+  // name is no join table (the migration tool's own output, fixtures/sqlcode/golden/prisma, has only _likes and _admin)
+  const NAMED = 'datasource db {\n  provider = "sqlite"\n}\nmodel User {\n  id    Int    @id @default(autoincrement())\n  posts Post[]\n  liked Post[] @relation("likes")\n}\nmodel Post {\n  id       Int    @id @default(autoincrement())\n  authorId Int\n  author   User   @relation(fields: [authorId], references: [id])\n  likers   User[] @relation("likes")\n}\nmodel Org {\n  id      Int      @id @default(autoincrement())\n  members Member[] @relation("membership")\n  admins  Member[] @relation("admin")\n}\nmodel Member {\n  id      Int   @id @default(autoincrement())\n  orgId   Int\n  org     Org   @relation("membership", fields: [orgId], references: [id])\n  adminOf Org[] @relation(name: "admin")\n}\nmodel Node {\n  id   Int    @id\n  next Node[] @relation("chain")\n  prev Node[] @relation("chain")\n}\n'
+  eq(px({ 'prisma/schema.prisma': NAMED }).declarations[0].entities.map((e) => `${e.name}${e.relations.length ? ` ${e.relations.map((r) => `(${r.columns})->${r.to}`).join(' ')}` : ''}`), [
+    'User', 'Post (authorId)->User', 'Org', 'Member (orgId)->Org', 'Node', '_likes (A)->Post (B)->User', '_admin (A)->Member (B)->Org', '_chain (A)->Node (B)->Node',
+  ], 'the two sides of a relation pair by its name (positional or name:): an unnamed one-to-many beside a named many-to-many, a named one-to-many beside another named many-to-many, a self many-to-many; a join table only where both sides are lists and neither names its fields')
+
+  // a multi-file schema: files under the datasource's folder are one store; prisma.config.* says where migrations go
+  const info = (o) => new Map(Object.entries(o).map(([p, ddl]) => [p, { ddl }]))
+  eq(prismaX.discover(info({ 'db/schema/main.prisma': 48, 'db/schema/models/user.prisma': 16, 'db/schema/models/notes.txt.prisma': 0, 'other/thing.prisma': 16, 'prisma.config.ts': 0, 'db/prisma.config.ts': 0 })).map((j) => [j.key, j.inputs]),
+    [['db/schema', ['db/schema/main.prisma', 'db/schema/models/user.prisma', 'db/prisma.config.ts']], ['other', ['other/thing.prisma', 'prisma.config.ts']]], 'discovery by content: each file to the nearest folder holding a datasource (or its own), the nearest prisma.config.* at or above it')
+  const multi = px({ 'db/schema/main.prisma': 'datasource db {\n  provider = "postgresql"\n}\n', 'db/schema/models/user.prisma': 'model User {\n  id Int @id\n  posts Post[]\n}\n', 'db/schema/models/post.prisma': 'model Post {\n  id Int @id\n  by User @relation(fields: [byId], references: [id])\n  byId Int\n}\n', 'db/prisma.config.ts': 'export default defineConfig({ schema: "schema", migrations: { path: "migrations" } })\n' }).declarations[0]
+  eq([multi.store, multi.files, multi.entities.map((e) => `${e.name}@${e.path}:${e.line}`), multi.entities.flatMap((e) => e.relations.map((r) => `${e.name}->${r.to}`))], ['db/migrations', 3, ['User@db/schema/models/user.prisma:1', 'Post@db/schema/models/post.prisma:1'], ['Post->User']], 'a folder of schema files read as one model (a relation across files resolved); the migrations path a prisma.config.ts states is the store')
+
+  // errors: where, never what; the blocks around a broken one are read, and the schema is then not complete
+  const bad = px({ 'prisma/schema.prisma': 'datasource db {\n  provider = "sqlite"\n}\nmodel A {\n  id Int @id\n  secretish String @default("HIDDEN-MARKER\n}\nmodel B {\n  id Int @id ~~HIDDEN-MARKER~~\n}\nmodel C {\n  id Int @id\n}\n' }).declarations[0]
+  eq([bad.entities.map((e) => e.name), bad.complete, bad.notes.filter((n) => n.includes('prisma/schema.prisma:'))], [['C'], false, ['prisma/schema.prisma:6: a string left open; that block is skipped', 'prisma/schema.prisma:9: a character the schema language has no use for; that block is skipped']],
+    'a block that does not parse is skipped, its error at its line; the next blocks are read; the schema is no longer complete')
+  ok(!JSON.stringify(bad).includes('HIDDEN-MARKER'), 'no text of the file is ever in an error or a note')
+  // hostile text, in bounded time
+  let t0 = Date.now()
+  const deep = readPrisma(`model A {\n  id Int @default(${'['.repeat(200000)})\n}\nmodel B {\n  id Int @id\n}\n`)
+  const wide = readPrisma(Array.from({ length: 20000 }, (_, i) => `model M${i} {\n  id Int @id\n}`).join('\n'))
+  const junk = readPrisma('\u0001'.repeat(300000))
+  const huge = readPrisma(' '.repeat(MAX_TEXT + 1))
+  const took = Date.now() - t0
+  eq([deep.errors.map((e) => e.error), deep.blocks.map((b) => b.name), wide.blocks.length, junk.errors.length, huge.errors[0].error], [['nested deeper than 32 levels'], ['B'], 4000, 1, 'larger than 2 MB: not read'], 'nesting past the cap refused at its block, the next read; 20 000 models kept to 4 000; a run of bad characters one error; a text past 2 MB refused')
+  ok(took < 3000, `… all in bounded time (${took} ms)`)
+  eq([prismaLevel('datasource db {\n}'), prismaLevel('model X {\n}'), prismaLevel('// model X {\n'), prismaLevel('enum E {}')], [32, 16, 0, 16], 'the level, for discovery by content: a datasource, a model, view or enum block; a commented one is no block')
+
+  // the conflict rule: a code model and the migrations of one store, reconciled (spec D2)
+  const decl = (kind, extractor, path, entities, extra = {}) => ({ repo: 'app', extractor, facts: { declarations: [{ store: 'drizzle', dialect: 'sqlite', source: { path, line: 1, kind, confidence: 'exact' }, complete: true, partial: false, status: 'read', label: kind, notes: [], entities, ...extra }] } })
+  const col = (name, type, nullable, line, more = {}) => ({ name, type, nullable, default: null, generated: null, line, ...more })
+  const ent = (name, fields, more = {}) => ({ name, kind: 'table', line: 1, fields, keys: [{ role: 'primary', parts: ['id'], line: 2 }], indexes: [], relations: [], ...more })
+  const replay = decl('migration', 'sql-migrations@1', 'drizzle/0000_init.sql', [ent('books', [col('id', 'text', false, 2), col('title', 'text', false, 3, { default: "'untitled'" })])])
+  const same = decl('code', 'drizzle-ts@2', 'src/schema.ts', [ent('books', [col('id', 'text', false, 5), col('title', 'text', false, 6, { default: "'untitled'" })])])
+  const ahead = decl('code', 'drizzle-ts@2', 'src/schema.ts', [ent('books', [col('id', 'text', false, 5), col('title', 'text', false, 6, { default: 'someDefault()', unstated: ['default'], computed: '$onUpdate(() => x)' }), col('rating', 'integer', true, 7)]), ent('reviews', [col('id', 'text', false, 9)])], { enums: [{ name: 'mood', values: ['ok'], path: 'src/schema.ts', line: 12 }] })
+  const agree = reconcile([replay, same]).stores[0]
+  eq([agree.declarations.map((d) => d.kind), agree.entities.flatMap((e) => elementsOf(e).flatMap(([, x]) => x.conflicts)).length, agree.entities[0].fields[1].sources.map((s) => `${s.path}:${s.line} ${s.kind}`)], [['migration', 'code'], 0, ['drizzle/0000_init.sql:3 migration', 'src/schema.ts:6 code']],
+    'a schema agreeing with its migrations: one store, two declarations, every element citing both, no conflict')
+  const drifted = reconcile([replay, ahead]).stores[0]
+  const cf = drifted.entities.flatMap((e) => elementsOf(e).flatMap(([label, x]) => x.conflicts.map((c) => `${label} ${c.attr}: ${c.values.map((v) => `${v.value} — ${v.sources.map((s) => `${s.path}:${s.line} [${s.kind}]`).join(' · ')}`).join(' | ')}`)))
+  eq(cf, ['books.rating presence: declared — src/schema.ts:7 [code] | absent — drizzle/0000_init.sql:1 [migration]', 'reviews presence: declared — src/schema.ts:1 [code] | absent — drizzle/0000_init.sql:1 [migration]'],
+    'schema edited, migration not generated: a column and a table only the code model declares are conflicts carrying both sources; a default the code cannot state in the store\'s terms is compared with nothing')
+  ok(drifted.entities.every((e) => elementsOf(e).every(([, x]) => x.conflicts.every(schemaDrift))), '… each one named as the schema against its migrations')
+  eq([drifted.entities[0].fields[1].computed, drifted.enums], ['$onUpdate(() => x)', [{ name: 'mood', values: ['ok'], sources: [{ repo: 'app', path: 'src/schema.ts', line: 12, kind: 'code', extractor: 'drizzle-ts@2', confidence: 'exact' }] }]], 'a computed default and the enums a code model states are kept on the merged model')
+  const partly = reconcile([replay, decl('code', 'drizzle-ts@2', 'src/schema.ts', [ent('books', [col('id', 'text', false, 5), col('title', 'text', false, 6, { default: "'untitled'" })], { keys: [], part: true })])]).stores[0]
+  eq(partly.entities.flatMap((e) => elementsOf(e).flatMap(([, x]) => x.conflicts)).length, 0, 'a table a code model states in part (a column built by code the reader does not follow): what it lacks is not a conflict')
+
+  // the TypeScript table builders, through the pinned grammar
+  const deps = await import('../lib/deps.mjs')
+  if (!deps.findDeps()) {
+    if (process.env.CI) { FAIL++; console.log('   ✗ FAIL: parser runtime missing (run npm ci --prefix tools/graph)') } else console.log('   - TypeScript schemas skipped: parser runtime not installed (npm ci --prefix tools/graph)')
+  } else {
+    const rt = await deps.loadRuntime({ install: false })
+    const { default: dz, readConfig, drizzleLevel } = await import('../lib/data/extractors/drizzle-ts.mjs')
+    const ps = { typescript: await rt.parserFor('typescript'), tsx: await rt.parserFor('tsx') }
+    const ctx = { tree: (lang, t) => ps[lang].parse(t) }
+    const dzx = (files, key = 'drizzle.config.ts') => dz.extract({ key, files: Object.entries(files).map(([path, text]) => ({ path, text })) }, ctx).declarations
+    const cfg = (o) => `import { defineConfig } from 'drizzle-kit'\nexport default defineConfig(${o})\n`
+    const SQLITE = [
+      "import { sqliteTable, text, integer, real, blob, numeric, index, uniqueIndex, primaryKey, unique, foreignKey } from 'drizzle-orm/sqlite-core'",
+      "import { relations, sql } from 'drizzle-orm'",
+      "export const users = sqliteTable('users', {",
+      "  id: integer('id').primaryKey({ autoIncrement: true }),",
+      "  email: text('email', { length: 320 }).notNull().unique(),",
+      "  score: real('score').default(1.5),",
+      "  avatar: blob('avatar', { mode: 'buffer' }),",
+      "  balance: numeric('balance'),",
+      "  admin: integer('admin', { mode: 'boolean' }).notNull().default(false),",
+      "  nick: text('nick').default(\"it's\"),",
+      "  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().default(sql`(unixepoch())`),",
+      "  token: text('token').$defaultFn(() => makeToken()),",
+      "  touched: integer('touched').$onUpdate(() => Date.now()),",
+      "  slug: text('slug').generatedAlwaysAs(sql`lower(name)`, { mode: 'stored' }),",
+      "  odd: text('odd').default(someConstant),",
+      '})',
+      "export const posts = sqliteTable('posts', {",
+      "  authorId: integer('author_id').notNull().references(() => users.id, { onDelete: 'cascade', onUpdate: 'restrict' }),",
+      "  slug: text('slug').notNull(),",
+      "  editorId: integer('editor_id'),",
+      '}, (t) => [',
+      "  primaryKey({ columns: [t.authorId, t.slug] }),",
+      "  index('posts_slug_idx').on(t.slug).where(sql`slug <> ''`),",
+      "  uniqueIndex('posts_lower_slug').on(sql`lower(${t.slug})`),",
+      "  unique('posts_author_editor').on(t.authorId, t.editorId),",
+      "  foreignKey({ columns: [t.editorId], foreignColumns: [users.id] }).onDelete('set null'),",
+      '])',
+      'export const postsRelations = relations(posts, ({ one }) => ({ author: one(users) }))',
+    ].join('\n')
+    const [s0] = dzx({ 'drizzle.config.ts': cfg("{ schema: './src/db/schema.ts', dialect: 'sqlite' }"), 'src/db/schema.ts': SQLITE })
+    eq([s0.store, s0.dialect, s0.dialectFrom, s0.complete, s0.label, s0.source], ['drizzle', 'sqlite', { how: 'stated', path: 'src/db/schema.ts', line: 1 }, true, 'table builders, read 1 file: 2 tables', { path: 'src/db/schema.ts', line: 1, kind: 'code', confidence: 'declared' }],
+      'the store is the folder drizzle-kit writes into (out, default drizzle), the dialect from the builders\' core module')
+    eq(s0.entities.map(brief), [
+      { name: 'users', kind: 'table', at: 3, fields: ['id integer', 'email text(320)', 'score real? =1.5', 'avatar blob?', 'balance numeric?', 'admin integer =false', "nick text? ='it''s'", 'created_at integer =(unixepoch())', 'token text? [$defaultFn(() => makeToken())]', 'touched integer? [$onUpdate(() => Date.now())]', 'slug text?', 'odd text? =someConstant (default)'],
+        keys: ['primary(id):4'], indexes: ['users_email_unique!(email):5'], rels: [] },
+      { name: 'posts', kind: 'table', at: 17, fields: ['author_id integer', 'slug text', 'editor_id integer?'], keys: ['primary(author_id,slug):22'],
+        indexes: ['posts_slug_idx(slug) partial:23', 'posts_lower_slug!((expression)):24', 'posts_author_editor!(author_id,editor_id):25'], rels: ['(author_id)->users(id) cascade/restrict:18', '(editor_id)->users(id) set null/no action:26'] },
+    ], 'SQLite: each column builder\'s type, notNull, primaryKey (not null), unique() an index named as drizzle-kit names it, references() with its actions, defaults as the snapshot writes them (a literal quoted, sql`…` its text, another expression kept and not compared), $defaultFn and $onUpdate computed and never evaluated; the third argument: a composite key, a partial index, an expression index, a table-level unique() the unique index drizzle-kit creates, a foreign key with its action')
+    eq([s0.entities[0].fields.find((f) => f.name === 'slug').generated, s0.notes], ['stored', ['schema named by drizzle.config.ts', "relations() at src/db/schema.ts:28: the query API's, app-level only, not foreign keys"]], 'generatedAlwaysAs stored; relations() noted, never a foreign key')
+
+    const PGS = [
+      "import { pgTable, pgSchema, pgEnum, pgTableCreator, serial, varchar, timestamp, boolean, json, uuid, integer, text, doublePrecision, numeric, index } from 'drizzle-orm/pg-core'",
+      "export const mood = pgEnum('mood', ['calm', 'busy'])",
+      "export const auth = pgSchema('auth')",
+      "const createTable = pgTableCreator((name) => `app_${name}`)",
+      "export const people = auth.table('people', {",
+      '  id: uuid().defaultRandom().primaryKey(),',
+      "  name: varchar({ length: 80 }).notNull(),",
+      "  seen: timestamp('seen', { precision: 3, withTimezone: true }).defaultNow(),",
+      "  mood: mood('mood').default('calm'),",
+      "  ok: boolean('ok').default(true),",
+      "  meta: json('meta'),",
+      "  tags: text('tags').array(),",
+      "  ratio: doublePrecision('ratio'),",
+      "  cost: numeric('cost', { precision: 10, scale: 2 }),",
+      '}).enableRLS()',
+      "export const rooms = createTable('rooms', {",
+      "  id: serial('id').primaryKey(),",
+      "  ownerId: uuid('owner_id').references(() => people.id),",
+      "}, (t) => ({ byOwner: index().on(t.ownerId) }))",
+    ].join('\n')
+    const [p0] = dzx({ 'drizzle.config.ts': cfg("{ schema: ['./db/*.ts'], out: './migrations', dialect: 'postgresql' }"), 'db/schema.ts': PGS })
+    eq([p0.store, p0.dialect, p0.entities.map(brief), p0.enums], ['migrations', 'postgres', [
+      { name: 'auth.people', kind: 'table', at: 5, fields: ['id uuid =gen_random_uuid()', 'name varchar(80)', 'seen timestamp (3) with time zone? =now()', "mood mood? ='calm'", 'ok boolean? =true', 'meta json?', 'tags text[]?', 'ratio double precision?', 'cost numeric(10, 2)?'], keys: ['primary(id):6'], indexes: [], rels: [] },
+      { name: 'app_rooms', kind: 'table', at: 16, fields: ['id serial', 'owner_id uuid?'], keys: ['primary(id):17'], indexes: ['app_rooms_owner_id_index(owner_id):19'], rels: ['(owner_id)->auth.people(id) no action/no action:18'] },
+    ], [{ name: 'mood', values: ['calm', 'busy'], path: 'db/schema.ts', line: 2 }]],
+      'Postgres: a pgSchema\'s table qualified, a creator\'s literal prefix applied, a key named by casing-free property when the builder has no name, varchar length, timestamp precision and time zone, an enum column typed by its enum, .array(), defaultNow() and defaultRandom() as the snapshot writes them, serial not null, an index with no name named as drizzle-kit names it, .enableRLS() ignored; the enum with its line')
+
+    const MY = "import { mysqlTable, int, varchar, mysqlEnum, datetime, serial } from 'drizzle-orm/mysql-core'\nexport const jobs = mysqlTable('jobs', {\n  id: serial('id').primaryKey(),\n  tries: int('tries', { unsigned: true }).notNull(),\n  name: varchar('name', { length: 255 }),\n  state: mysqlEnum('state', ['queued', 'done']).notNull(),\n  at: datetime('at', { fsp: 3 }),\n})\n"
+    eq(dzx({ 'src/jobs.ts': MY }, 'src')[0].entities.map(brief).map((e) => e.fields), [['id serial', 'tries int unsigned', 'name varchar(255)?', "state enum('queued','done')", 'at datetime(3)?']], 'MySQL: int unsigned, varchar(255), an inline enum, datetime with its fractional seconds, serial not null')
+
+    // a helper, an object spread into tables, casing, a customType; what the reader does not follow
+    const HELP = [
+      "import { sqliteTable, text, integer, customType } from 'drizzle-orm/sqlite-core'",
+      "const id = () => integer().primaryKey({ autoIncrement: true })",
+      "const stamps = { createdAt: integer({ mode: 'timestamp' }).notNull(), updatedAt: integer({ mode: 'timestamp' }) }",
+      "const citext = customType<{ data: string }>({ dataType() { return 'citext' } })",
+      "export const tags = sqliteTable('tags', { id: id(), labelText: citext().notNull(), ...stamps })",
+      "export const odd = sqliteTable('odd', { id: id(), made: makeColumn(), ...elsewhere })",
+    ].join('\n')
+    const [h0] = dzx({ 'drizzle.config.ts': cfg("{ schema: './schema.ts', casing: 'snake_case', migrations: { schema: 'drizzle' } }"), 'schema.ts': HELP })
+    eq(h0.entities.map((e) => [e.name, brief(e).fields, brief(e).keys, !!e.part]), [
+      ['tags', ['id integer', 'label_text citext', 'created_at integer', 'updated_at integer?'], ['primary(id):5'], false],
+      ['odd', ['id integer', 'made makeColumn? (type,nullable,default)'], ['primary(id):6'], true],
+    ], 'a helper building a column, an object of columns spread where it stands, snake_case casing of the keys, a customType\'s dataType(); a column built by code no file of the schema declares, or a spread of something unknown, leaves the table stated in part')
+
+    // a config naming a barrel: the files it re-exports are the schema; a schema file it does not name is a store of its own
+    const people = "import { sqliteTable, integer } from 'drizzle-orm/sqlite-core'\nexport const people = sqliteTable('people', { id: integer('id').primaryKey() })\n"
+    const pets = "import { sqliteTable, integer } from 'drizzle-orm/sqlite-core'\nimport { people } from './people'\nexport const pets = sqliteTable('pets', { ownerId: integer('owner_id').references(() => people.id) })\n"
+    const stray = "import { sqliteTable, integer } from 'drizzle-orm/sqlite-core'\nexport const stray = sqliteTable('stray', { id: integer('id').references(() => nowhere.id) })\n"
+    const bar = dzx({ 'app/drizzle.config.ts': cfg("{ schema: './db/index.ts', out: './drizzle' }"), 'app/db/index.ts': "export * from './people'\nexport { pets } from './pets.js'\n", 'app/db/people.ts': people, 'app/db/pets.ts': pets, 'app/scratch/stray.ts': stray }, 'app/drizzle.config.ts')
+    eq(bar.map((d) => [d.store, d.entities.map((e) => e.name), d.entities.flatMap((e) => e.relations.map((r) => `${e.name}->${r.to}`)), d.notes.filter((n) => n.includes('reference'))]), [
+      ['app/drizzle', ['people', 'pets'], ['pets->people'], []],
+      ['app/scratch', ['stray'], [], ['app/scratch/stray.ts:2: a reference to nowhere.id that no table of the schema declares: not modeled']],
+    ], 'the config names a barrel: what it re-exports is the schema (a reference across its files resolved); a schema file it does not name is a store of its own folder; a reference to nothing declared noted, not modeled')
+    eq(dz.discover(new Map([['app/drizzle.config.ts', { ddl: 0 }], ['app/db/index.ts', { ddl: 8 }], ['app/db/people.ts', { ddl: 5 }], ['lib/x/schema.ts', { ddl: 4 }], ['lib/x/util.ts', { ddl: 8 }], ['lib/y/types.ts', { ddl: 1 }]])).map((j) => [j.key, j.inputs]),
+      [['app/drizzle.config.ts', ['app/drizzle.config.ts', 'app/db/index.ts', 'app/db/people.ts']], ['lib/x', ['lib/x/schema.ts']]], 'discovery by content: the schema files and barrels under a config are its job; schema files under none, by folder (a barrel there names nothing)')
+    eq([readConfig('{ "schema": ["./a.ts", "./b/*.ts"], "out": "./m", "dialect": "turso" }'), readConfig(cfg("{ dialect: 'postgresql', dbCredentials: { url: 'x', schema: 'nope' }, migrations: { schema: 'drizzle' } }")).schema],
+      [{ schema: ['./a.ts', './b/*.ts'], out: './m', dialect: 'turso', casing: null }, null], 'a config read as text: a JSON config, a list of schema specs; the migrations table\'s schema and the credentials\' are not the schema files')
+    eq([drizzleLevel(SQLITE), drizzleLevel("import { sqliteTable } from 'drizzle-orm/sqlite-core'\nexport type T = 1\n"), drizzleLevel("export * from './a'\n"), drizzleLevel("export * from 'pkg'\n")], [4, 0, 8, 0], 'the level: the core module imported and a table builder called; a barrel of relative modules')
+    const broken = dzx({ 's/schema.ts': "import { sqliteTable, text } from 'drizzle-orm/sqlite-core'\nexport const a = sqliteTable('a', { id: text('id').primaryKey() })\nexport const b = sqliteTable('b', { id: text('id' })\n" }, 's')[0]
+    eq([broken.complete, broken.entities.map((e) => e.name).includes('a'), broken.notes.some((n) => /^s\/schema\.ts:3: the file does not parse cleanly/.test(n))], [false, true, true], 'a file that does not parse cleanly: what parsed is kept, noted at its line, and the schema is no longer complete')
+    // hostile text, in bounded time: braces never closed, a chain of thousands of calls, a member path of thousands of names
+    const t1 = Date.now()
+    const lvl = drizzleLevel('export { a,\n'.repeat(60000))
+    const cfgHostile = readConfig('migrations: {\n'.repeat(30000))
+    const [hz] = dzx({ 'h/schema.ts': `import { sqliteTable, text } from 'drizzle-orm/sqlite-core'\nexport const t = sqliteTable('t', { a: text('a')${'.notNull()'.repeat(5000)}, b: x${'.y'.repeat(20000)}(), c: text('c') })\n` }, 'h')
+    const took1 = Date.now() - t1
+    eq([lvl, cfgHostile.schema, hz.entities[0].fields.map((f) => f.name), !!hz.entities[0].part], [0, null, ['c'], true], 'a barrel brace never closed is no barrel; a config of unclosed blocks names no schema; a column past the chain cap or built by an unknown path is not read, its table stated in part')
+    ok(took1 < 5000, `… all in bounded time (${took1} ms)`)
+
+    // what drizzle-kit 0.31 writes, as unit cases (its own snapshots and migrations: fixtures/sqlcode/golden)
+    const LITE = [
+      "import { sqliteTable, integer, text, real, unique } from 'drizzle-orm/sqlite-core'",
+      "export const users = sqliteTable('users', {",
+      '  id: integer().primaryKey(),',
+      '  displayName: text().notNull().unique(),',
+      '  email: text().notNull(),',
+      '  r1: real().default(1.0),',
+      '  r2: real().default(0.50),',
+      '  r3: real().default(1e3),',
+      '  r4: integer().default(1_000),',
+      '  r5: real().default(-2.50),',
+      "}, (t) => [unique().on(t.displayName, t.email), unique('named_u').on(t.displayName)])",
+    ].join('\n')
+    const [l0] = dzx({ 'drizzle.config.ts': cfg("{ schema: './s.ts', casing: 'snake_case' }"), 's.ts': LITE })
+    eq(brief(l0.entities[0]), { name: 'users', kind: 'table', at: 2, fields: ['id integer', 'display_name text', 'email text', 'r1 real? =1', 'r2 real? =0.5', 'r3 real? =1000', 'r4 integer? =1000', 'r5 real? =-2.5'], keys: ['primary(id):3'],
+      indexes: ['users_displayName_unique!(display_name):4', 'users_displayName_email_unique!(display_name,email):11', 'named_u!(display_name):11'], rels: [] },
+      'SQLite: a table-level unique() is the unique index drizzle-kit creates, named <table>_<keys>_unique when unnamed (the property keys, before casing), as a column\'s unique() is; a numeric default as the number it is (1.0 → 1, 0.50 → 0.5, 1e3 and 1_000 → 1000)')
+    const PGT = "import { pgTable, time, timestamp, integer, unique } from 'drizzle-orm/pg-core'\nexport const t = pgTable('t', {\n  tm: time('tm', { precision: 2, withTimezone: true }),\n  tm0: time('tm0'),\n  ts: timestamp('ts', { precision: 3 }),\n  a: integer('a'),\n}, (t) => [unique().on(t.a)])\n"
+    eq(dzx({ 'p/s.ts': PGT }, 'p')[0].entities.map((e) => [brief(e).fields, brief(e).keys, brief(e).indexes]), [[['tm time(2) with time zone?', 'tm0 time?', 'ts timestamp (3)?', 'a integer?'], ['unique(a):7'], []]],
+      'Postgres: time(p) with no space, as drizzle-kit writes it (timestamp keeps its space); a table-level unique() a unique key')
+    const MYT = "import { mysqlTable, serial, decimal, double, float, mysqlEnum } from 'drizzle-orm/mysql-core'\nexport const t = mysqlTable('t', {\n  sid: serial('sid'),\n  id: serial('id').primaryKey(),\n  up: decimal('up', { precision: 10, scale: 2, unsigned: true }),\n  d: double('d', { unsigned: true }),\n  d2: double('d2', { precision: 10, scale: 2, unsigned: true }),\n  f: float('f', { unsigned: true }),\n  st: mysqlEnum('st', ['a', 'b c', \"d'e\"]),\n})\n"
+    eq(brief(dzx({ 'm/s.ts': MYT }, 'm')[0].entities[0]).fields, ['sid serial?', 'id serial', 'up decimal(10,2) unsigned?', 'd double unsigned?', 'd2 double(10,2) unsigned?', 'f float unsigned?', "st enum('a','b c','d''e')?"],
+      'MySQL: serial nullable unless it is the primary key; unsigned on decimal, double and float; an enum value\'s quote doubled')
+    const { normType } = await import('../lib/data/model.mjs')
+    eq([normType('timestamp (3) with time zone'), normType('Numeric(10, 2)'), normType('numeric (10 ,2)'), normType('double  precision')], ['timestamp(3) with time zone', 'numeric(10,2)', 'numeric(10,2)', 'double precision'],
+      'types compare without the blanks before a parenthesis or around a comma (drizzle-kit 1.0 beta writes numeric(10,2) and timestamp(3))')
+
+    // spreads that would multiply, and globs that would backtrack: bounded
+    const t2 = Date.now()
+    const own = dzx({ 'w/s.ts': `import { pgTable, text } from 'drizzle-orm/pg-core'\nconst a = { x: text("x"), ${Array(300).fill('...a').join(', ')} }\nexport const t = pgTable("t", { ...a })\n` }, 'w')[0]
+    const wide = dzx({ 'w/s.ts': `import { pgTable, text } from 'drizzle-orm/pg-core'\nconst c = { z: text("z") }\nconst b = { ${Array(300).fill('...c').join(', ')} }\nconst a = { ${Array(300).fill('...b').join(', ')} }\nexport const t = pgTable("t", { y: text("y"), ...a })\n` }, 'w')[0]
+    const deep = `${Array.from({ length: 30 }, (_, i) => `d${i}`).join('/')}/schema.ts`
+    const table = (n) => `import { sqliteTable, integer } from 'drizzle-orm/sqlite-core'\nexport const ${n} = sqliteTable('${n}', { id: integer('id') })\n`
+    const globbed = dzx({ 'drizzle.config.ts': cfg(`{ schema: './${'**/'.repeat(12)}x.zz' }`), [deep]: table('deep') })
+    const took2 = Date.now() - t2
+    eq([own.entities[0].fields.map((f) => f.name), !!own.entities[0].part, wide.entities[0].fields.map((f) => f.name), !!wide.entities[0].part, wide.notes.some((n) => n.includes('cut')), globbed.map((d) => d.store)],
+      [['x'], true, ['y', 'z'], true, true, ['d0/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17/d18/d19/d20/d21/d22/d23/d24/d25/d26/d27/d28/d29']],
+      'an object spreading itself is read once; spreads of spreads stop at a budget, the table stated in part and the cut noted; a key spread twice is one column; twelve **/ match nothing in a path thirty folders deep')
+    ok(took2 < 5000, `… in bounded time (${took2} ms)`)
+    const named = dzx({ 'drizzle.config.ts': cfg("{ schema: ['./src/**/schema.ts', './lib/{a,b}/*.ts'] }"), 'src/schema.ts': table('s0'), 'src/x/y/schema.ts': table('s1'), 'lib/a/t.ts': table('la'), 'lib/c/t.ts': table('lc') })
+    eq(named.map((d) => [d.store, d.entities.map((e) => e.name)]), [['drizzle', ['s0', 's1', 'la']], ['lib/c', ['lc']]], 'globs: ** across folders (none included), a brace of alternatives, * within a folder')
+  }
+}
+
 // ════ Part 2 · through call(), on an indexed project ════
 const { findDeps } = await import('../lib/deps.mjs')
 if (findDeps()) await indexed()
@@ -2571,7 +2903,7 @@ async function indexed() {
       'web:supabase/migrations  postgres  found, not read (1 file)',
     ], 'graph_data: a store per migration folder, found by its DDL whatever its name; the Drizzle replay and snapshot agree')
     has(list, 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@1  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql', "Drizzle: the newest snapshot (0005) and the replay in the journal's order, its DROP-only migration included, are two declarations of one store")
-    has(list, '  migration  sql-migrations@1  replayed 3 files, 6 statements  api/prisma/migrations/20240105090000_init/migration.sql\n  dialect: stated at api/prisma/migrations/migration_lock.toml:3', 'Prisma: one migration per versioned subfolder, the dialect from its lock file')
+    has(list, '  migration  sql-migrations@1  replayed 3 files, 6 statements  api/prisma/migrations/20240105090000_init/migration.sql\n  code  prisma@2  schema, read 1 file: 3 models  api/prisma/schema.prisma\n  dialect: stated at api/prisma/migrations/migration_lock.toml:3', 'Prisma: one migration per versioned subfolder, the dialect from its lock file; schema.prisma beside them a second declaration of the store, agreeing with the replay')
     has(list, '  migration  sql-migrations@1  replayed 3 files, 5 statements  kiosk/storage/schema-changes/0001_visits.up.sql\n  dialect: sniffed: AUTOINCREMENT at kiosk/storage/schema-changes/0001_visits.up.sql:2', 'no tool named: the dialect sniffed; the down migrations and the seed left out, the migration holding only a DROP and a view kept')
     has(list, 'web:db/changes  dialect unknown  found, not read (2 files)\n  migration  sql-migrations@1  not read: dialect unknown (no config states it, and no dialect marker in the SQL)  web/db/changes/0001_events.sql', 'no dialect stated or seen: found, never replayed as SQLite by assumption')
     has(list, 'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes (+2 implicit, for keys) · no conflicts\n  migration  sql-migrations@1  replayed 2 files, 2 statements  web/db/legacy/0001_accounts.sql\n  dialect: set in grimoire.config.json (graph.data.migrations)', 'the same kind of SQL is read once grimoire.config.json states its dialect')
@@ -2647,6 +2979,7 @@ async function indexed() {
     edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` text,', '`published_at` integer,'))
     edit('mobile/drizzle/0002_book_isbn.sql', (t) => t.replace('ALTER TABLE `bookz`', 'ALTER TABLE `books`'))
     rmSync(path.join(PROJ, 'api/prisma/migrations/20240301080000_tags'), { recursive: true })
+    edit('api/prisma/schema.prisma', (t) => t.slice(0, t.indexOf('model Tag'))) // the schema drops it too (else its code model would still declare it)
     await q('index')
     has(await q('data'), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts', 'restored migrations replay in full again')
     has(await q('data', { store: 'api:prisma/migrations' }), 'api:prisma/migrations  sqlite  2 tables · 1 foreign key · 1 index · no conflicts', 'a deleted migration re-runs its folder')
@@ -2674,6 +3007,9 @@ async function indexed() {
     git(BR, 'switch', '-q', '-c', 'feat')
     mkdirSync(path.join(BR, 'api/prisma/migrations/20240401090000_branch_changes'))
     writeFileSync(path.join(BR, 'api/prisma/migrations/20240401090000_branch_changes/migration.sql'), '-- AlterTable\nALTER TABLE "Loan" ADD COLUMN "returnedOn" DATETIME;\n\n-- DropIndex\nDROP INDEX "Member_email_key";\n\n-- RenameTable\nALTER TABLE "Tag" RENAME TO "Label";\n')
+    // the schema says the same (the migration renames the table and keeps its index's name, so the schema maps it)
+    const prismaAt = path.join(BR, 'api/prisma/schema.prisma')
+    writeFileSync(prismaAt, readFileSync(prismaAt, 'utf8').replace('  dueOn    DateTime\n', '  dueOn    DateTime\n  returnedOn DateTime?\n').replace('String   @unique', 'String').replace(/model Tag \{[\s\S]*\}\s*$/, 'model Label {\n  id   Int    @id @default(autoincrement())\n  name String @unique(map: "Tag_name_key")\n}\n'))
     commit(BR, 'add a column, drop an index, rename a table')
     const br = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: BR })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     await br('index')
@@ -2683,10 +3019,10 @@ async function indexed() {
     ok(/^Data model against main \(the index's base branch\) at [0-9a-f]{10}: 1 store changed · 2 added · 2 removed · 0 modified · 1 possible rename$/.test(head), `graph_changes: one line to sum it up, against the branch the index is based on (${head})`)
     eq(changes.split('\n').slice(1), [
       'api:prisma/migrations  sqlite  modified',
-      '  + Label  table, 2 columns  — api/prisma/migrations/20240401090000_branch_changes/migration.sql:8',
-      '  + Loan.returnedOn  column DATETIME, nullable  — api/prisma/migrations/20240401090000_branch_changes/migration.sql:2',
-      '  - Member index Member_email_key unique (email)  — was api/prisma/migrations/20240105090000_init/migration.sql:19',
-      '  - Tag  table, 2 columns  — was api/prisma/migrations/20240301080000_tags/migration.sql:2',
+      '  + Label  table, 2 columns  — api/prisma/migrations/20240401090000_branch_changes/migration.sql:8 · api/prisma/schema.prisma:28',
+      '  + Loan.returnedOn  column DATETIME, nullable  — api/prisma/migrations/20240401090000_branch_changes/migration.sql:2 · api/prisma/schema.prisma:24',
+      '  - Member index Member_email_key unique (email)  — was api/prisma/migrations/20240105090000_init/migration.sql:19 · api/prisma/schema.prisma:12',
+      '  - Tag  table, 2 columns  — was api/prisma/migrations/20240301080000_tags/migration.sql:2 · api/prisma/schema.prisma:27',
       '  possible rename, not decided: table Tag → Label (same columns)',
     ], 'the column added, the index dropped, the table renamed (a candidate, never decided: Tag removed, Label added), each with path:line on its side')
     has(await call('graph_changes', {}, { root: BR }), '\n\nLeads, not facts: both sides are read from migrations and generated files', '… with the footer graph_data has')
@@ -2726,17 +3062,17 @@ async function indexed() {
     const migration = 'api/prisma/migrations/20240401090000_branch_changes/migration.sql'
     ok(/^Delta docs\/specs\/2026-11-06-loans\.delta\.json \(the design: docs\/specs\/2026-11-06-loans-design\.md\), against the model and the branch against main \(the index's base branch\) at [0-9a-f]{10}: 4 data changes$/.test(dl.split('\n')[0]), `graph_changes --delta: which delta, for which design, against what (${dl.split('\n')[0]})`)
     eq(dl.split('\n').slice(1), [
-      `  built differently  returned-on  add api:prisma/migrations/Loan.returnedOn  — ${migration}:2`,
+      `  built differently  returned-on  add api:prisma/migrations/Loan.returnedOn  — ${migration}:2 · api/prisma/schema.prisma:24`,
       '    planned → built: nullable: not null → nullable',
       '    why: because returned-on · slice 1 · not acknowledged',
-      `  planned and built  labels  rename api:prisma/migrations/Tag → Label  — ${migration}:8`,
+      `  planned and built  labels  rename api:prisma/migrations/Tag → Label  — ${migration}:8 · api/prisma/schema.prisma:28`,
       '    why: because labels · slice 1 · acknowledged by Ann at 2026-11-06T10:00:00.000Z',
       '  pending  returned-idx  add api:prisma/migrations/Loan/index:Loan_returnedOn_idx',
       '    why: list the loans still out, edited after the acknowledgement · stale: acknowledged by Ann at 2026-11-06T10:00:00.000Z, edited since',
       '  planned and built  bio  add mobile:drizzle/authors.bio  — mobile/drizzle/meta/0005_snapshot.json:24 · mobile/drizzle/0003_author_bio_required.sql:5',
       '    why: because bio · not acknowledged',
       'Unplanned (1): in the branch, in no change of the delta',
-      '  - api:prisma/migrations/Member/index:Member_email_key  Member index Member_email_key unique (email)  — was api/prisma/migrations/20240105090000_init/migration.sql:19',
+      '  - api:prisma/migrations/Member/index:Member_email_key  Member index Member_email_key unique (email)  — was api/prisma/migrations/20240105090000_init/migration.sql:19 · api/prisma/schema.prisma:12',
       'Summary: 2 planned and built · 1 pending · 1 built differently · 1 unplanned · 1 acknowledged · 1 stale · 2 not acknowledged',
     ], 'each change\'s state against the code: a column built in another shape (planned → built), a rename built, an index pending, a column that was there already; its why, slice and acknowledgement (stale once edited); then the branch\'s change no delta change covers, then the summary')
     has(await call('graph_changes', { delta: 'docs/specs/2026-11-06-loans.delta.json' }, { root: BR }), '\n\nLeads, not facts: the states are computed from migrations', '… with its own footer: states are computed, never written')
@@ -3148,7 +3484,7 @@ async function indexed() {
       'found by content: each Rust and TypeScript file with a serde derive, a type, a conversion or an environment read is a job of its own')
     const ORD = '{env}-{project}-orders', TFMAIN = 'infra/modules/shop-tables/main.tf'
     eq((await bq('data')).split('\n').filter((l) => !/^ {2}(infra|  note)/.test(l)), [
-      'Data stores (2), read from migrations, snapshots and table declarations:',
+      'Data stores (2), read from migrations, snapshots, schemas and table declarations:',
       'api:dynamodb  dynamodb  2 tables · 1 GSI · 2 item types bound · 2 conflicts',
       'infra:dynamodb  dynamodb  5 tables · 0 GSIs · 5 item types bound · 2 conflicts',
       'Logical tables (1), one table declared in several places (the same name template, or an exact name a template matches on its literal parts; never by a guess, never by a bare name across repositories):',
@@ -3364,6 +3700,143 @@ async function indexed() {
     const bigT = fpage.stores.flatMap((s) => s.tables).find((t) => t.name === 'local-big-orders')
     ok(accBytes < 30000 && fpage.access.how.length < 10 && bigT.acc.ix[0].q.length === 25 && bigT.acc.ix[0].more === 5 && bigT.acc.rw.length === 25 && bigT.acc.rwMore === 5 && fpage.stores.flatMap((s) => s.tables).filter((t) => /users/.test(t.name)).every((t) => t.acc.sp === 200 && !t.acc.rw.length),
       `the page: each list capped (25, and the rest counted), how a call reached its table once per page (${fpage.access.how.length} texts), the counted calls a number; ${accBytes} bytes of access patterns for 9 tables and 230 calls`)
+
+    // ── 29 · code-declared SQL models ──
+    console.log('\n29 · code-declared SQL models through call(): a push-only TypeScript schema and a schema-language file beside its migrations (fixtures/sqlcode); the Drizzle fixture\'s schema, then edited with no migration generated')
+    const SQ = path.join(SANDBOX, 'sqlcode')
+    cpSync(path.join(HERE, 'fixtures', 'sqlcode'), SQ, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const sq = async (tool, args = {}, root = SQ) => (await call(`graph_${tool}`, args, { root })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    const sidx = await sq('index')
+    ok(/notes: 4 files/.test(sidx) && /lending: 2 files/.test(sidx) && !sidx.includes('failure'), `index: both repositories, no extractor failure (${sidx.replace(/\n/g, ' | ')})`)
+    eq((await sq('data')).split('\n'), [
+      'Data stores (2), read from migrations, snapshots, schemas and table declarations:',
+      'lending:prisma/migrations  sqlite  6 tables · 1 view · 5 foreign keys · 7 indexes (+2 implicit, for keys) · no conflicts',
+      '  migration  sql-migrations@1  replayed 2 files, 14 statements  lending/prisma/migrations/20240501090000_init/migration.sql',
+      '  code  prisma@2  schema, read 1 file: 5 models, 1 enum, 1 view  lending/prisma/schema.prisma',
+      '  dialect: stated at lending/prisma/migrations/migration_lock.toml:3',
+      'notes:drizzle  sqlite  3 tables · 3 foreign keys · 2 indexes · no conflicts',
+      '  code  drizzle-ts@2  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
+      '    note: schema named by drizzle.config.ts (casing snake_case)',
+      "    note: relations() at src/db/tables/notes.ts:27: the query API's, app-level only, not foreign keys",
+      '  dialect: stated at notes/src/db/tables/notes.ts:1',
+    ], 'graph_data: a push-only schema is a store of its own, named by the folder drizzle-kit would write into (the barrel the config names, the files it re-exports); a schema-language file and its migrations are two declarations of one store, agreeing')
+    eq(await sq('data', { store: 'notes:drizzle' }), [
+      'notes:drizzle  sqlite  3 tables · 3 foreign keys · 2 indexes · no conflicts',
+      '  note_links  table  2 fields · primary (from_id, to_id) · foreign keys → notes  notes/src/db/tables/notes.ts:18',
+      '  notes  table  6 fields · primary (id) · 1 index · foreign keys → people  notes/src/db/tables/notes.ts:5',
+      '  people  table  5 fields · primary (id) · 1 index  notes/src/db/tables/people.ts:8',
+    ].join('\n'), 'its tables, each at the line that declares it')
+    eq(await sq('data', { entity: 'people' }), [
+      'notes:drizzle/people  table  (sqlite)',
+      '  declared at notes/src/db/tables/people.ts:8 [code drizzle-ts@2]',
+      'Fields (5):',
+      '  id  integer  not null  — notes/src/db/tables/people.ts:9',
+      '  handle  text  not null  — notes/src/db/tables/people.ts:10',
+      '  name  text  null  — notes/src/db/tables/people.ts:11',
+      '  created_at  integer  not null  computed $defaultFn(() => new Date())  — notes/src/db/tables/people.ts:4',
+      '  updated_at  integer  null  computed $onUpdate(() => new Date())  — notes/src/db/tables/people.ts:5',
+      'Keys (1):',
+      '  primary (id)  — notes/src/db/tables/people.ts:9',
+      'Indexes (1):',
+      '  people_handle_unique unique (handle)  — notes/src/db/tables/people.ts:10',
+      'Conflicts: none',
+    ].join('\n'), 'a table: keys named in snake_case (the config\'s casing), the builder\'s own name kept, the spread columns at their own lines, $defaultFn and $onUpdate computed, unique() an index')
+    has(await sq('data', { entity: 'notes' }), '  status  text  not null  default \'draft\'  enum (draft | shared)  — notes/src/db/tables/notes.ts:12\n  word_count  integer  null  default (0)  — notes/src/db/tables/notes.ts:13\nKeys (1):\n  primary (id)  — notes/src/db/tables/notes.ts:8\nIndexes (1):\n  notes_author_idx (author_id, pinned)  — notes/src/db/tables/notes.ts:15\nForeign keys (1):\n  (author_id) → people(id)  on delete cascade · on update no action  — notes/src/db/tables/notes.ts:9',
+      'a text enum, a sql default, an index of the third argument, a foreign key to a table of another file')
+    eq(await sq('data', { store: 'lending:prisma/migrations' }), [
+      'lending:prisma/migrations  sqlite  6 tables · 1 view · 5 foreign keys · 7 indexes (+2 implicit, for keys) · no conflicts',
+      '  Book  table  3 fields · primary (id) · 1 index  lending/prisma/migrations/20240501090000_init/migration.sql:11 · lending/prisma/schema.prisma:29',
+      '  Copy  table  3 fields · primary (bookId, serial) · foreign keys → Book  lending/prisma/migrations/20240501090000_init/migration.sql:18 · lending/prisma/schema.prisma:39',
+      '  Loan  table  5 fields · primary (id) · 2 indexes · foreign keys → Copy, patrons  lending/prisma/migrations/20240501090000_init/migration.sql:28 · lending/prisma/schema.prisma:49',
+      '  OverdueLoan  view  0 fields  lending/prisma/migrations/20240502090000_overdue_view/migration.sql:2 · lending/prisma/schema.prisma:69',
+      '  Tag  table  2 fields · primary (id) · 1 index  lending/prisma/migrations/20240501090000_init/migration.sql:39 · lending/prisma/schema.prisma:62',
+      '  _BookToTag  table  2 fields · no primary key · 2 indexes · foreign keys → Tag, Book  lending/prisma/migrations/20240501090000_init/migration.sql:45 · lending/prisma/schema.prisma:33',
+      '  patrons  table  5 fields · primary (id) · 1 index  lending/prisma/migrations/20240501090000_init/migration.sql:2 · lending/prisma/schema.prisma:18',
+      '  enum Role  MEMBER | staff  lending/prisma/schema.prisma:13',
+    ].join('\n'), 'the schema and the replay: every table at both its lines (the @@map\'ed one, the view, the implicit many-to-many join table), the enum at its line')
+    eq(await sq('data', { entity: 'patrons' }), [
+      'lending:prisma/migrations/patrons  table  (sqlite)',
+      '  declared at lending/prisma/migrations/20240501090000_init/migration.sql:2 [migration sql-migrations@1] · lending/prisma/schema.prisma:18 [code prisma@2]',
+      'Fields (5):',
+      '  id  TEXT  not null  computed @default(cuid())  — lending/prisma/migrations/20240501090000_init/migration.sql:3 · lending/prisma/schema.prisma:19',
+      '  email  TEXT  not null  — lending/prisma/migrations/20240501090000_init/migration.sql:4 · lending/prisma/schema.prisma:20',
+      "  role  TEXT  not null  default 'MEMBER'  enum Role (MEMBER | staff)  — lending/prisma/migrations/20240501090000_init/migration.sql:5 · lending/prisma/schema.prisma:21",
+      '  joined_at  DATETIME  not null  default CURRENT_TIMESTAMP  — lending/prisma/migrations/20240501090000_init/migration.sql:6 · lending/prisma/schema.prisma:22',
+      '  updated_at  DATETIME  not null  computed @updatedAt  — lending/prisma/migrations/20240501090000_init/migration.sql:7 · lending/prisma/schema.prisma:23',
+      'Keys (1):',
+      '  primary (id)  — lending/prisma/migrations/20240501090000_init/migration.sql:3 · lending/prisma/schema.prisma:19',
+      'Indexes (1):',
+      '  patrons_email_key unique (email)  — lending/prisma/migrations/20240501090000_init/migration.sql:53 · lending/prisma/schema.prisma:20',
+      'Conflicts: none',
+    ].join('\n'), 'a model: @map\'ed columns, its enum column, defaults in the migration\'s terms, cuid() and @updatedAt computed, @unique the index the migration creates, each element at both its lines')
+    has(await sq('data', { entity: 'Loan' }), 'Foreign keys (2):\n  (bookId, serial) → Copy(bookId, serial)  on delete restrict · on update cascade  — lending/prisma/migrations/20240501090000_init/migration.sql:35 · lending/prisma/schema.prisma:56\n  (patron_id) → patrons(id)  on delete restrict · on update cascade  — lending/prisma/migrations/20240501090000_init/migration.sql:34 · lending/prisma/schema.prisma:55\nConflicts: none',
+      'relations: a composite foreign key, one to a mapped table, Prisma\'s default actions agreeing with the migration')
+    // the schema edited, no migration generated: the conflict, both sides
+    const pz = path.join(SQ, 'lending/prisma/schema.prisma')
+    writeFileSync(pz, readFileSync(pz, 'utf8').replace('  title  String\n', '  title  String\n  pages  Int?\n'))
+    utimesSync(pz, new Date(Date.now() + 5000), new Date(Date.now() + 5000))
+    await sq('index')
+    has(await sq('data', { entity: 'Book' }), 'Conflicts (1): the declarations disagree; each side is kept\n  (the code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand)\n  Book.pages  presence: declared — lending/prisma/schema.prisma:33 [code] | absent — lending/prisma/migrations/20240501090000_init/migration.sql:11 [migration]',
+      'a field added to the schema and no migration generated: a conflict carrying both sources, named for what it is')
+
+    // the Drizzle fixture (slice 1), with the schema its config names: then a column added to it, and no migration
+    const MB = path.join(SANDBOX, 'mobile-schema')
+    cpSync(path.join(HERE, 'fixtures', 'data', 'mobile'), path.join(MB, 'mobile'), { recursive: true })
+    cpSync(path.join(HERE, 'fixtures', 'sqlcode', 'overlay', 'mobile'), path.join(MB, 'mobile'), { recursive: true })
+    writeFileSync(path.join(MB, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'mobile', path: 'mobile' }], graph: { dir: '.grimoire/graph' } }))
+    writeFileSync(path.join(MB, '.gitignore'), '.grimoire/\n')
+    git(MB, 'init', '-q', '-b', 'main')
+    commit(MB, 'the schema and its migrations')
+    await sq('index', {}, MB)
+    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@1  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@2  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
+      'the schema, the newest snapshot and the replay: three declarations of one store (the config\'s out), agreeing')
+    has(await sq('data', { entity: 'streaks' }, MB), "  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9 · mobile/src/db/schema.ts:42\nKeys (1):\n  primary (day)  — mobile/drizzle/meta/0005_snapshot.json:208 · mobile/drizzle/0004_streaks.sql:7 · mobile/src/db/schema.ts:40",
+      'a sql`(unixepoch())` default as the snapshot and the replay write it; every element at its three lines')
+    git(MB, 'switch', '-q', '-c', 'feat')
+    const ms = path.join(MB, 'mobile/src/db/schema.ts')
+    writeFileSync(ms, readFileSync(ms, 'utf8').replace("    isbn: text('isbn').unique(),\n", "    isbn: text('isbn').unique(),\n    rating: integer('rating').notNull().default(0),\n"))
+    utimesSync(ms, new Date(Date.now() + 5000), new Date(Date.now() + 5000))
+    commit(MB, 'a column in the schema, no migration generated')
+    await sq('index', {}, MB)
+    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · 1 conflict', 'the store counts the conflict')
+    has(await sq('data', { entity: 'books' }, MB), "  rating  integer  not null  default 0  — mobile/src/db/schema.ts:20\nKeys (1):", 'the column the schema declares, at its line')
+    has(await sq('data', { entity: 'books' }, MB), 'Conflicts (1): the declarations disagree; each side is kept\n  (the code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand)\n  books.rating  presence: declared — mobile/src/db/schema.ts:20 [code] | absent — mobile/drizzle/meta/0005_snapshot.json:39 [artifact] · mobile/drizzle/0002_book_isbn.sql:1 [migration]',
+      'schema edited, migration not generated: a conflict carrying the schema\'s line and the newest snapshot\'s and the replay\'s, never resolved')
+    // the branch against its base: the schema read at the base aside, the column added
+    has(await sq('changes', {}, MB), 'mobile:drizzle  sqlite  modified\n  + books.rating  column integer, not null, default 0  — mobile/src/db/schema.ts:20', 'graph_changes: the base\'s schema read through git and parsed aside, the column the branch added')
+    const mpage = await renderGraph(loadProject(MB))
+    const mdata = dataOf(mpage).data
+    const mbooks = mdata.stores[0].tables.find((t) => t.name === 'books')
+    const mrating = mbooks.fields.find((f) => f.name === 'rating')
+    ok(mrating.cf.length === 1 && mrating.cf[0].drift === 1 && mdata.stores[0].decls.some((d) => d.kind === 'code' && d.extractor === 'drizzle-ts@2'), 'the Data tab: the column carries its conflict, marked as the schema against its migrations; the schema among the declarations')
+    const mpg = await stubPage(mpage, '#data-0')
+    mpg.click(mdata.stores[0].tables.findIndex((t) => t.name === 'books'))
+    ok(mpg.text().includes('The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.'), '… and its passport says so under the conflicts')
+    const lpage = dataOf(await renderGraph(loadProject(SQ))).data
+    const lend = lpage.stores.find((s) => s.id === 'lending:prisma/migrations')
+    eq([lend.enums.map((e) => `${e.name} ${e.values.join('|')}`), lend.tables.find((t) => t.name === 'patrons').fields.filter((f) => f.comp || f.en).map((f) => `${f.name} ${f.comp || ''}${f.en ? f.en.join('|') : ''}`)], [['Role MEMBER|staff'], ['id @default(cuid())', 'role MEMBER|staff', 'updated_at @updatedAt']],
+      'the page carries the enums and each column\'s computed default and enum values')
+
+    // the tools' own output: synthetic schemas, and the snapshots, migrations and SQL drizzle-kit 0.31 and
+    // the schema language's migration tool generated from them (a dev-time oracle, fixtures/sqlcode/golden).
+    // A schema read against what its own tool made of it disagrees on nothing but an expression index's
+    // text, which the snapshot keeps and the replay and the code do not (a known gap, README)
+    const GOLD = path.join(SANDBOX, 'golden')
+    cpSync(path.join(HERE, 'fixtures', 'sqlcode', 'golden'), GOLD, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const gq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: GOLD })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    ok(!(await gq('index')).includes('failure'), 'the golden projects index with no extractor failure')
+    eq((await gq('data')).split('\n').filter((l) => /^\w+:/.test(l)), [
+      'lite1:drizzle  sqlite  4 tables · 3 foreign keys · 6 indexes (+1 implicit, for keys) · no conflicts',
+      'lite2:drizzle  sqlite  2 tables · 1 foreign key · 3 indexes (+1 implicit, for keys) · 1 conflict',
+      'my1:drizzle  mysql  3 tables · 2 foreign keys · 2 indexes · no conflicts',
+      'my2:drizzle  mysql  1 table · 0 foreign keys · 1 index · no conflicts',
+      'pg1:drizzle  postgres  4 tables · 3 foreign keys · 3 indexes · no conflicts',
+      'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · 1 conflict',
+      'prisma:prisma/migrations  sqlite  6 tables · 6 foreign keys · 4 indexes · no conflicts',
+    ], 'each schema against what its tool generated from it: SQLite, Postgres and MySQL table builders (numeric defaults, a table-level unique() in SQLite, time(p), unsigned decimals, a MySQL serial, an enum value with a quote), and a schema-language file with named relations (no phantom join table)')
+    has(await gq('data', { entity: 'lite2:drizzle/users' }), 'Conflicts (1): the declarations disagree; each side is kept\n  users index users_email_lower  columns: lower("email") — lite2/drizzle/meta/0000_snapshot.json:119 [artifact] | (expression) — lite2/drizzle/0000_thin_whistler.sql:19 [migration] · lite2/src/schema.ts:18 [code]',
+      '… the one left: an expression index\'s text, the snapshot\'s against the replay\'s and the code\'s')
+    has(await gq('data', { entity: 'pg2:drizzle/users' }), '  users index users_email_lower  columns: lower("email_addr") — pg2/drizzle/meta/0000_snapshot.json:216 [artifact] | (expression) — pg2/src/schema.ts:38 [code]', '… the same in Postgres, where no replay reads the migration (a known gap)')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 
