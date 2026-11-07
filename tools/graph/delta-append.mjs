@@ -3,7 +3,10 @@
 // implementers kept (spec D4: unplanned changes never block; the map is updated, the user is told).
 //   node tools/graph/delta-append.mjs <delta file> <changes file>
 // <changes file>: a JSON array of changes { id, op, target, before?, after?, why, slice?, origin:
-// 'unplanned' } (data/delta.mjs appendChanges). Prints one line, then one line per refused change:
+// 'unplanned' } (data/delta.mjs appendChanges), or another version of the delta, whose unplanned
+// changes are taken, each without its acknowledgement (the loop merging a run branch whose delta
+// changed on both sides keeps one version and appends the other's: an acknowledged change shows
+// unacknowledged again, never lost). Prints one line, then one line per refused change:
 //   DELTA ok added=<n> already=<n> refused=<n>   (already: ids the file holds: a ship sent again)
 //   DELTA none                                   the run has no delta there: nothing written
 //   DELTA bad <why>                              the delta does not validate, or cannot be read or
@@ -24,6 +27,8 @@ const say = (line) => console.log(line)
 if (!existsSync(file)) { say('DELTA none'); process.exit(0) }
 let entries
 try { entries = JSON.parse(readFileSync(changesFile, 'utf8')) } catch (e) { say(`DELTA bad the changes cannot be read: ${one(e.message)}`); process.exit(0) }
+const isDoc = (x) => !!x && typeof x === 'object' && !Array.isArray(x) && (Array.isArray(x.data) || Array.isArray(x.architecture))
+if (isDoc(entries)) entries = [...(Array.isArray(entries.data) ? entries.data : []), ...(Array.isArray(entries.architecture) ? entries.architecture : [])].filter((c) => c && typeof c === 'object' && c.origin === 'unplanned').map(({ ack, ...c }) => c)
 if (!Array.isArray(entries)) { say('DELTA bad the changes are not a JSON array'); process.exit(0) }
 
 // read, append, write, under the lock: the lines to print

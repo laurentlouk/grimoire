@@ -1029,6 +1029,17 @@ CREATE INDEX loans_shelf_idx ON loans (shelf);`
     eq([await waiting, untouched, Date.now() - t0 >= 400, JSON.parse(readFileSync(dfile, 'utf8')).data.some((c) => c.id === 'k6'), existsSync(`${dfile}.lock`)], ['DELTA ok added=1 already=0 refused=0\n', true, true, true, false], 'the lock an acknowledgement holds: the append waits for it, then writes, and leaves no lock')
     writeFileSync(dfile, '{"schema": 2}')
     ok(cli(dfile, cfile(5, [sub])).stdout.startsWith('DELTA bad the delta does not validate: '), 'a delta that does not validate: DELTA bad, the file left as it is')
+    // a delta document as the changes (the loop merging a run branch whose delta changed on both sides,
+    // #97): the other version's unplanned changes, appended without their acknowledgement; its planned
+    // ones and those already there left out
+    writeFileSync(dfile, FILE)
+    const acked = kept('o1', 'app:db/books.o1', { type: 'TEXT', nullable: true }, { ack: { by: 't', at: '2026-11-07', hash: 'h' } })
+    const theirs = path.join(DIR, 'theirs.delta.json')
+    writeFileSync(theirs, JSON.stringify({ ...JSON.parse(FILE), data: [...JSON.parse(FILE).data, sub, acked], architecture: [kept('a1', 'connection:web->api', { label: 'calls' })] }))
+    writeFileSync(dfile, appendChanges(FILE, [sub]).text)
+    const after = () => JSON.parse(readFileSync(dfile, 'utf8'))
+    eq([cli(dfile, theirs).stdout, after().data.slice(-1), after().architecture.map((c) => c.id)], ['DELTA ok added=2 already=1 refused=0\n', [{ id: 'o1', op: 'add', target: 'app:db/books.o1', after: { type: 'TEXT', nullable: true }, why: 'kept: o1', origin: 'unplanned', slice: 2 }], ['a1']],
+      "a delta document: its unplanned changes from both lists, the acknowledged one without its acknowledgement, one already there skipped, its planned ones never")
   } finally { rmSync(DIR, { recursive: true, force: true }) }
 }
 
