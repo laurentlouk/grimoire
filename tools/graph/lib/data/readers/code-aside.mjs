@@ -1,5 +1,5 @@
 // grimoire graph · data · source code read by the code extractors (extractors/serde.mjs,
-// extractors/ts-types.mjs) in a process of its own, for what reads code outside the indexer's process:
+// extractors/ts-types.mjs, and extractors/redis-commands.mjs's key templates) in a process of its own, for what reads code outside the indexer's process:
 // the model at a base ref (data/base.mjs) is built where graph_changes and the page run, the MCP
 // server's process, so its Rust and TypeScript are parsed here, with the indexer's flags (V8's
 // Liftoff-only WASM tier, lib/run.mjs), as readers/yaml-aside.mjs does for YAML: a grammar's crash
@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const HERE = fileURLToPath(import.meta.url)
-export const CODE_LANGS = ['rust', 'typescript', 'tsx']
+export const CODE_LANGS = ['rust', 'typescript', 'tsx', 'javascript', 'python', 'go']
 export const BATCH = 200, BATCH_BYTES = 8 << 20, BATCH_MS = 30_000, TOTAL_MS = 60_000
 
 export function extractAside(items, { batchMs = BATCH_MS, totalMs = TOTAL_MS } = {}) {

@@ -35,6 +35,7 @@ import { KINDS, keyOf, normType, normDefault, normColumn, kvIndex, kvTable, proj
 import { logicalTables, bindItems, itemField, itemOf, tableResolver, resolveSide } from './binding.mjs'
 import { resolveAccess } from './access.mjs'
 import { resolveQueries, inferredSummary, queryConflicts } from './queries.mjs'
+import { resolveRedis, redisSummary } from './redis.mjs'
 
 // What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
 // an LSI's kind, key attributes and projection, beside what a SQL element says. A key-value
@@ -77,7 +78,23 @@ export function reconcile(rows, opts = {}) {
   const model = { stores: [...stores].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, ds]) => merge(id, ds)) }
   items(model, rows, decls, opts.equivalences || [])
   inferred(model, rows)
+  keyspaces(model, rows)
   return model
+}
+
+// ── a key-value cache's key spaces (redis.mjs): the commands code sends, per instance the infra wires
+// to a repository, else per repository (`<repo>:redis`), inferred; an FT.CREATE literal a declaration
+// code makes. A failure leaves the model as it is, with `redisError` saying why.
+function keyspaces(model, rows) {
+  if (!rows.some((r) => r.facts?.redis?.sites?.length || r.facts?.redisInfra?.length)) return
+  try {
+    const instances = rows.flatMap((r) => (r.facts?.redisInfra || []).map((i) => ({ ...i, repo: r.repo, extractor: r.extractor })))
+    const r = resolveRedis(rows, model, instances)
+    model.stores = [...model.stores, ...r.stores].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    model.redis = r.redis
+  } catch (e) {
+    model.redisError = `the commands in code were not read into the model: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`
+  }
 }
 
 // ── the SQL code sends (queries.mjs): attached to the store that declares its tables, or deduced into
@@ -289,6 +306,7 @@ export const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name
 // (graph_data and the page's Data tab say the same).
 export function storeSummary(st) {
   const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+  if (st.dialect === 'redis') return redisSummary(st) // a key space read from the commands in code (redis.mjs)
   if (st.inferred) return inferredSummary(st) // deduced from the queries in code (queries.mjs)
   const tables = st.entities.filter((e) => e.kind === 'table' && !e.bookkeeping), views = st.entities.filter((e) => e.kind === 'view').length
   if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }

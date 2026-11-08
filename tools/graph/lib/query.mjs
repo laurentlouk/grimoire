@@ -11,10 +11,11 @@ import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
 import { refineModel, refineCheck } from './data/check.mjs'
 import { NOT_DECLARED, sqlFunctions, queryConflicts } from './data/queries.mjs'
+import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, NO_QUERY, ASSEMBLED } from './data/redis.mjs'
 import { docRoots } from './docs.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
-export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files (or deduced from the SQL the code sends, labelled inferred), never from a database. Open path:line before relying on any of it.'
+export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files (or deduced from the SQL or the cache commands the code sends, labelled inferred), never from a database. Open path:line before relying on any of it.'
 export const CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate. Open path:line before relying on any of it.'
 // with an architecture part (arch-change.mjs): what it reads, said too
 export const ARCH_CHANGES_FOOTER = 'Leads, not facts: both sides are read from migrations and generated files (the base through git at its commit, nothing checked out), never from a database, and a rename is only ever a candidate; the architecture from the saved diagrams and the check, by name. Open path:line before relying on any of it.'
@@ -214,8 +215,9 @@ export class Graph {
         const code = facts.filter((f) => f && f.code).length // source files read for item shapes (data/binding.mjs)
         const calls = facts.filter((f) => f && f.access?.sites?.length).length // and for access patterns (data/access.mjs)
         const sql = facts.filter((f) => f && f.queries?.sites?.length).length // and for the SQL they send (data/queries.mjs)
+        const kvc = facts.filter((f) => f && f.redis?.sites?.length).length // and for the commands they send a key-value cache (data/redis.mjs)
         const stopped = decls.filter((d) => d.partial).length, failed = data.filter((x) => x.error)
-        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${code ? `, ${code} source file(s) read for item shapes` : ''}${calls ? `, ${calls} for access patterns` : ''}${sql ? `, ${sql} source file(s) read for the SQL they send` : ''}${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
+        lines.push(`  data: ${new Set(decls.map((d) => d.store)).size} store(s) (graph_data)${code ? `, ${code} source file(s) read for item shapes` : ''}${calls ? `, ${calls} for access patterns` : ''}${sql ? `, ${sql} source file(s) read for the SQL they send` : ''}${kvc ? `, ${kvc} for the cache commands they send` : ''}${stopped ? `, ${stopped} replay(s) stopped early` : ''}${failed.length ? `; ${failed.length} extractor failure(s): ${failed.slice(0, 3).map((x) => `${x.extractor} on ${this.dloc({ repo: r.name, path: x.key })}: ${x.error}`).join('; ')}` : ''}`)
       }
     }
     const base = (() => { try { return JSON.parse(this.one("SELECT value FROM meta WHERE key = 'base'")?.value || 'null') } catch { return null } })()
@@ -373,9 +375,9 @@ export class Graph {
     const failed = clean(this.q(`SELECT repo, key, extractor, error FROM data_facts WHERE error IS NOT NULL${R} ORDER BY repo, key`, ...ra))
     if (entity) return this.dataEntity(model, String(entity), refine)
     if (store) return this.dataStore(model, String(store), refine)
-    const NONE = 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot, no Drizzle TypeScript schema, no Prisma schema, no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table) and no SQL sent from code in the indexed repositories.'
+    const NONE = 'No data store found: no folder of SQL migrations (.sql files that create or alter tables), no Drizzle snapshot, no Drizzle TypeScript schema, no Prisma schema, no table declaration (a CreateTable input, a CloudFormation, SAM or Serverless table resource, a Terraform aws_dynamodb_table), no SQL sent from code and no key-value cache command sent from code in the indexed repositories.'
     if (!model.stores.length && !failed.length && !refine) return NONE
-    const out = model.stores.length || failed.length ? [`Data stores (${model.stores.length}), read from migrations, snapshots, schemas and table declarations${model.stores.some((s) => s.inferred) ? ', or deduced from the SQL the code sends (inferred)' : ''}:`] : [NONE]
+    const out = model.stores.length || failed.length ? [`Data stores (${model.stores.length}), read from migrations, snapshots, schemas and table declarations${model.stores.some((s) => s.inferred) ? ', or deduced from the SQL the code sends (inferred)' : ''}${model.stores.some((s) => s.dialect === 'redis') ? ', or read from the commands the code sends a key-value cache (inferred)' : ''}:`] : [NONE]
     for (const st of model.stores) {
       out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`)
       for (const d of st.declarations) {
@@ -384,10 +386,11 @@ export class Graph {
         for (const n of d.notes) out.push(`    note: ${n}`)
       }
       if (st.inferred) out.push(`  reached through: ${st.inferred.clients.join(', ') || 'no client import read'}`, `  ${NOT_DECLARED}`)
+      if (st.dialect === 'redis') out.push(...this.redisStoreHead(st))
       if (st.queries) out.push(`  inferred  queries in code attached (${st.queries.why}): ${plural(st.queries.statements, 'statement')} in ${plural(st.queries.files, 'file')}${queryConflicts(st) ? `, ${plural(queryConflicts(st), '[inferred] conflict')} where they name what the declarations lack` : ', naming nothing the declarations lack'}`)
       if (st.dialectFrom) out.push(`  dialect: ${this.dialectFrom(st.repo, st.dialectFrom)}`)
     }
-    out.push(...this.dataItems(model), ...this.dataAccess(model), ...this.dataQueries(model))
+    out.push(...this.dataItems(model), ...this.dataAccess(model), ...this.dataQueries(model), ...this.dataRedis(model))
     if (failed.length) out.push(`Extractor failures (${failed.length}), their facts are missing:`, ...failed.map((f) => `  ${f.extractor} on ${this.dloc({ repo: f.repo, path: f.key })}: ${f.error}`))
     out.push(...this.dataRefine(refine))
     return out.join('\n')
@@ -551,6 +554,90 @@ export class Graph {
     out.push(...this.dataEntityQueries(model, e), `Unknown: ${NOT_DECLARED.replace(/^not declared: /, '')}`, 'Conflicts: none (a deduced store compares with nothing)')
     return out.join('\n')
   }
+  // ── a key-value cache's key space (data/redis.mjs) ──
+  // what the list says under a key space: its clients, its instance, its database index, what stays unknown
+  redisStoreHead(st) {
+    const ks = st.keyspace, out = []
+    if (ks.clients.length || ks.files) out.push(`  reached through: ${ks.clients.join(', ') || 'no client import read'}`)
+    if (ks.instance) out.push(...this.redisInstance(ks))
+    else if (ks.files) out.push(`  instance: none wired to it by the infrastructure or a Compose file: the key space of ${st.repo} alone (inferred)`)
+    if (ks.ambiguous) for (const a of ks.ambiguous) out.push(`  instance: ${a.repo} reads a variable several instances are wired through (${a.instances.join(', ')}): not grouped`)
+    const dbs = [...new Map(ks.dbs.filter((d) => d.db !== null).map((d) => [d.db, d])).values()]
+    if (dbs.length) out.push(`  database: ${dbs.map((d) => `${d.db} (${d.how === 'url' ? 'a connection URL' : d.how === 'select' ? 'SELECT' : 'a client option'} at ${this.dloc({ repo: d.repo, path: d.path, line: d.line })})`).join(', ')}`)
+    if (ks.files) out.push(`  not declared: ${ks.unknown.replace(/^deduced from the commands the code sends, not declared: /, '')}`)
+    return out
+  }
+  redisInstance(ks) {
+    const i = ks.instance
+    const val = (v) => (v === null || v === undefined ? 'not stated' : typeof v === 'object' && v.expr ? `${v.expr} (unknown)` : String(v))
+    const out = [`  instance: ${i.label || i.id}  ${i.kind}  engine ${val(i.engine)}${i.version ? ` ${val(i.version)}` : ''} · modules ${i.modules?.length ? i.modules.join(', ') : 'none stated'} · maxmemory-policy ${val(i.eviction)} · persistence ${val(i.persistence)} · keyspace notifications ${val(i.notifications)} · databases ${val(i.databases)}  — ${this.dloc({ repo: i.repo, path: i.path, line: i.line })} [infra ${i.extractor}]`]
+    for (const w of ks.wired || []) out.push(`    wired to ${w.repo} through ${w.env}${w.at ? ` (set at ${this.dloc({ repo: w.at.repo ?? i.repo, path: w.at.path, line: w.at.line })})` : ''}`)
+    if (i.evictionLead) out.push(`    ${i.evictionLead}`)
+    return out
+  }
+  // the key spaces in one line
+  dataRedis(model) {
+    if (model.redisError) return [`Key spaces in code: ${model.redisError}`]
+    const r = model.redis
+    if (!r) return []
+    const spaces = model.stores.filter((s) => s.dialect === 'redis').length
+    return [`Key spaces in code (inferred from the commands the code sends a key-value cache; leads, never verdicts): ${plural(r.commands, 'command')} in ${plural(r.files, 'file')}, ${plural(spaces, 'key space')}${r.dyn ? `; ${plural(r.dyn, 'key')} code builds wholly counted, never named` : ''}${r.tests ? `; ${plural(r.tests, 'call')} in test code not read` : ''}`]
+  }
+  redisFns(model, ids, entity) {
+    const list = ids.map((k) => model.redis?.sites?.[k]).filter(Boolean)
+    return redisFunctions(list, symbolAt(this.db), entity)
+  }
+  redisFnLines(fns, verb = null) {
+    return fns.slice(0, CAP).map((f) => `  ${f.name}  ${verb || [f.reads ? 'reads' : null, f.writes ? 'writes' : null].filter(Boolean).join(' · ') || 'names it'} (${f.kinds.join(', ')})  ${this.dloc({ repo: f.repo, path: f.path, line: f.line })}  (${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')})${f.callers !== null ? ` · ${plural(f.callers, 'caller')}` : ''}`).concat(fns.length > CAP ? [`  … and ${plural(fns.length - CAP, 'more function')} (the first ${CAP} listed)`] : [])
+  }
+  redisStore(model, st) {
+    const out = [`${st.id}  redis  ${storeSummary(st)}`, ...this.redisStoreHead(st)]
+    const cites = (x) => `${this.sources(st.repo, x.sources)}${x.more ? ` and ${plural(x.more, 'more')}` : ''}`
+    const ts = templatesOf(st)
+    out.push(ts.length ? `Key templates (${ts.length}), each part code fills in a placeholder:` : 'Key templates: none read')
+    for (const e of ts) {
+      const fns = this.redisFns(model, e.redis.sites, e.id)
+      const parts = [e.type || 'type unknown', e.fields.length ? `fields: ${e.fields.map((f) => f.name).join(', ')}` : null, e.ttl ? `lifetime ${ttlText(e.ttl)}` : e.lead ? 'no expiry found (lead)' : null, e.coveredBy.length ? `indexed by ${e.coveredBy.join(', ')}` : null, fns.length ? `${plural(fns.length, 'function')} (${fns.filter((f) => f.reads).length} reading, ${fns.filter((f) => f.writes).length} writing)` : null].filter(Boolean)
+      out.push(`  ${e.name}  ${parts.join(' · ')}  ${cites(e)}${e.conflicts.length ? `  [${plural(e.conflicts.length, 'conflict')}]` : ''}`)
+    }
+    const ix = indexesOf(st)
+    if (ix.length) out.push(`Search indexes (${ix.length}):`)
+    for (const x of ix) out.push(`  ${x.name}  ${x.declared ? `ON ${x.on}${x.prefixes.length ? ` PREFIX ${x.prefixes.join(' ')}` : ''} · ${plural(x.fields.length, 'field')}${x.assembled ? ' (assembled in code)' : ''} · covers ${x.covers.join(', ') || 'no template read'}` : 'its creation not read'} · ${x.lead ? 'no access found (lead)' : plural(x.queries.sites.length, 'query', 'queries')}  ${cites(x)}${x.conflicts.length ? `  [${plural(x.conflicts.length, 'conflict')}]` : ''}`)
+    const ch = st.keyspace.channels
+    if (ch.length) out.push(`Channels (${ch.length}):`)
+    for (const c of ch) out.push(`  ${c.name}${c.pattern ? ' (pattern)' : ''}  ${plural(c.pub.length, 'publisher')} · ${plural(c.sub.length, 'subscriber')}${c.psub ? ` · matched by ${c.psub.join(', ')}` : ''}${c.repos.length > 1 ? ` · across ${c.repos.join(', ')}` : ''}  ${cites(c)}`)
+    const sts = streamsOf(st)
+    if (sts.length) out.push(`Streams (${sts.length}):`)
+    for (const e of sts) out.push(`  ${e.name}  ${e.groups?.length ? `groups: ${e.groups.map((g) => `${g.name}${g.consumers.length ? ` (consumers ${g.consumers.join(', ')})` : ''}`).join('; ')}` : 'no consumer group read'}  ${cites(e)}`)
+    return out.join('\n')
+  }
+  redisEntity(model, st, e) {
+    const cites = (x) => `${this.sources(st.repo, x.sources)}${x.more ? ` and ${plural(x.more, 'more')}` : ''}`
+    const ex = st.declarations[0]?.extractor || 'redis-commands'
+    if (e.kind === 'index') {
+      const out = [`${e.id}  search index  (redis; ${e.declared ? `declared by code: a literal FT.CREATE at ${this.dloc({ repo: e.created.repo, path: e.created.path, line: e.created.line })}` : 'its creation not read: only queried'})`, `  seen at ${cites(e)} [${e.declared ? 'code' : 'inferred'} ${ex}]`]
+      if (e.declared) out.push(`  ON ${e.on} · ${e.prefixes.length ? `PREFIX ${e.prefixes.join(' ')}` : 'no PREFIX (every key of its type)'}${e.filter ? ' · a FILTER (its expression not kept)' : ''} · covers ${e.covers.join(', ') || 'no template read'}${e.aliases ? ` · aliases ${e.aliases.join(', ')}` : ''}`)
+      out.push(`Schema (${e.fields.length})${e.declared ? ':' : ': not read'}`, ...e.fields.map((f) => `  ${f.name}${f.as ? ` AS ${f.as}` : ''}  ${f.type.raw || 'type code builds'}${f.opts.length ? `  ${f.opts.join(' ')}` : ''}  — ${cites(f)}`))
+      if (e.assembled) out.push(`  … ${ASSEMBLED}`)
+      if (e.past) out.push(`  … and ${plural(e.past, 'more field')} (the first ${e.fields.length} kept)`)
+      const fns = this.redisFns(model, e.queries.sites, e.id)
+      out.push(fns.length ? `Queries (${plural(fns.length, 'function')}, from the commands the code sends: inferred):` : `Queries: ${NO_QUERY}`, ...this.redisFnLines(fns, 'queries'))
+      out.push(e.conflicts.length ? `Conflicts (${e.conflicts.length}): two FT.CREATE of this name disagree; each side is kept` : 'Conflicts: none', ...e.conflicts.flatMap((c) => c.values.map((v) => `  ${v.value} — ${cites(v)}`)))
+      return out.join('\n')
+    }
+    const out = [`${e.id}  key template  (redis; ${st.keyspace.instance ? `instance ${st.keyspace.instance.label || st.keyspace.instance.id}` : 'inferred'} from the commands in code, not declared)`, `  seen at ${cites(e)} [inferred ${ex}]`]
+    if (e.names.length > 1) out.push(`  also written as: ${e.names.filter((n) => n !== e.name).join(', ')}`)
+    out.push(`Type: ${e.types.length ? e.types.map((t) => `${t.type} — ${cites(t)}`).join(' | ') : 'unknown (only key commands: DEL, EXPIRE, EXISTS …)'}`)
+    if (e.fields.length) out.push(`Fields (${e.fields.length}), names the code writes literally:`, ...e.fields.map((f) => `  ${f.name}  ${f.how === 'path' ? 'JSON path' : f.how === 'stream' ? 'stream entry field' : 'hash field'}  — ${cites(f)}`))
+    out.push(e.ttl ? `Lifetime: ${ttlText(e.ttl)} — ${cites(e.ttl)}` : e.lead ? `Lifetime: ${e.lead}` : 'Lifetime: none set (only read in the indexed code)')
+    if (e.coveredBy.length) out.push(`Indexed by: ${e.coveredBy.join(', ')}`)
+    if (e.globs.length) out.push(`Read by globs: ${e.globs.join(', ')}`)
+    if (e.groups?.length) out.push(`Consumer groups (${e.groups.length}):`, ...e.groups.map((g) => `  ${g.name}${g.created ? ' (created in code)' : ''}${g.consumers.length ? `  consumers: ${g.consumers.join(', ')}` : ''}  — ${cites(g)}`))
+    const fns = this.redisFns(model, e.redis.sites, e.id)
+    out.push(fns.length ? `Reads and writes, from the commands the code sends (inferred; ${plural(fns.length, 'function')}: ${fns.filter((f) => f.reads).length} reading, ${fns.filter((f) => f.writes).length} writing):` : 'Reads and writes: none read', ...this.redisFnLines(fns))
+    out.push(e.conflicts.length ? `Conflicts (${e.conflicts.length}): the commands disagree on its type (WRONGTYPE at run time); each side is kept` : 'Conflicts: none', ...e.conflicts.map((c) => `  ${c.attr}: ${c.values.map((v) => `${v.value} — ${cites(v)}`).join(' | ')}`))
+    return out.join('\n')
+  }
   sources(repo, list) { return list.map((s) => this.dloc({ repo: s.repo ?? repo, path: s.path, line: s.line })).join(' · ') }
   findStore(model, spec) {
     const hits = model.stores.filter((s) => s.id === spec || s.name === spec)
@@ -563,6 +650,7 @@ export class Graph {
     if (!hits.length) return `No data store "${spec}". Stores: ${[...model.stores.map((s) => s.id), ...(refine ? refine.stores.map((s) => `${s.id} (refined)`) : [])].join(', ') || 'none'}.`
     if (hits.length > 1) return `"${spec}" names ${hits.length} stores; give one as repo:folder: ${hits.map((s) => s.id).join(', ')}`
     const [st] = hits
+    if (st.dialect === 'redis') return this.redisStore(model, st)
     const out = [`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`]
     const kv = st.dialect === 'dynamodb'
     if (st.inferred) {
@@ -594,6 +682,8 @@ export class Graph {
     const match = (fold) => all.filter(([, e]) => { const id = fold(e.id), s = fold(spec); return id === s || id.endsWith(`:${s}`) || id.endsWith(`/${s}`) })
     let hits = match((x) => x)
     if (!hits.length) hits = match((x) => x.toLowerCase())
+    // a key template by its form, whatever its placeholders are named (`user:{id}` finds `user:{user_id}`)
+    if (!hits.length) { const k = spec.replace(/\{[A-Za-z0-9_$]*\}/g, '{}'); hits = all.filter(([st, e]) => st.dialect === 'redis' && e.k && (e.k === k || `${st.id}/${e.k}` === k)) }
     if (!hits.length && refine) {
       // an entity of a store a refine file describes
       const ents = refine.stores.filter((s) => !s.reasons.length).flatMap((s) => s.entities.filter((e) => e.ok).map((e) => [s, e]))
@@ -610,6 +700,7 @@ export class Graph {
     if (hits.length > 1) return `"${spec}" names ${hits.length} entities; give store/entity or repo:store/entity: ${hits.map(([, e]) => e.id).join(', ')}`
     const [[st, e]] = hits
     if (st.inferred) return [this.dataInferredEntity(model, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
+    if (st.dialect === 'redis') return [this.redisEntity(model, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
     const kv = st.dialect === 'dynamodb'
     const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}${s.as ? `, ${s.as}` : ''}]`).join(' · ')}`]
     if (kv) out.push(`  ${kvTableText(e)}`)
