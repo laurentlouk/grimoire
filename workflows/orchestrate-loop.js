@@ -1464,19 +1464,18 @@ const trim = (s, n) => {
 // (incremental delivery) — or the PR an earlier terminal slot of this run already marked ready, which
 // work landed since does not hold yet —, the run's state marker, which the final body keeps so a
 // relaunch still finds the run, the repo's ship lock the gate takes before it pushes, and the lines of
-// the body's data model section (modelLines).
+// the body's data model section (modelLines). Or `{noPush}` alone (#99): why the gate's push is skipped
+// (the SYNC before it could not bring the remote's delta commits in, so the push would be refused). The
+// gate then runs its command and nothing else: no lock, no push, no PR step.
 function gatePrompt(task, gate, hits, landedHere = [], ship = {}) {
   const cond = gate && gate.when && Array.isArray(gate.when.pathsMatching) && gate.when.pathsMatching.length
   const applies = !!(gate && gate.run) && (!cond || hits.length > 0)
   const cmdLine = gate && gate.run ? `\`${gate.run}\`` : '(this repo has no gate command)'
+  const noPush = str(ship.noPush) || ''
   return `${memoryBlock(agentFor(task.repo))}${factsBlock(task.repo)}${brief('gate')}- Repo: ${repoPath(task.repo)} · branch ${task.branch || '(the feature branch)'} · ticket ${task.ticket || 'NO_TICKET'} (PR title tag ${ticketTag(task)})
 ${
-    ship.sync
-      ? `- Before the gate command, once the tree is clean (brief step 1): this repo holds the design's delta (\`${noTick(ship.syncRel)}\`), and the loop's ships committed the kept unplanned changes to it on the REMOTE run branch, which your checkout's branch does not have yet, so a push without them is refused. Bring them in: run this ONCE, verbatim, in one Bash call:
-  \`\`\`bash
-${ship.sync.split('\n').map((l) => `  ${l}`).join('\n')}
-  \`\`\`
-  \`SYNC ok\`: the branch holds them now (a fast-forward, or a merge that changes only the delta), and the gate certifies this tree. \`SYNC none\`: nothing to bring. \`SYNC bad …\`: go on, and say it in your summary. Never merge, pull or rebase anything yourself.
+    noPush
+      ? `- **No push and no PR this time** (brief: "When the push is skipped"): ${defang(scrubPaths(noPush))}. Do steps 1 and 2 only (the tree, then the gate command when it applies) and return: take no lock, push nothing, and leave the PR as it is (never edit it, mark it ready or open one). Return DONE when the gate command passed or does not apply, its result in \`summary\`; BLOCKED with failedStep \`gate\` when it failed. The loop reports the repo unshipped, with that reason, for a person to push.
 `
       : ''
   }- Gate command: **${applies ? 'APPLIES' : 'does NOT apply'}** — ${cmdLine}${
@@ -1490,7 +1489,7 @@ ${ship.sync.split('\n').map((l) => `  ${l}`).join('\n')}
         ? ` This branch touches NO path matching ${gate.when.pathsMatching.map((p) => `\`${p}\``).join(', ')}, so there is nothing for it to certify. Do **NOT** run it.`
         : ' There is no gate command for this repo — go straight to the PR.'
   }
-- ${rawOutputRule()}${
+- ${rawOutputRule()}${noPush ? '' : `${
     ship.lock
       ? `
 - Before you push, take this repo's SHIP LOCK, so no ship of this run that started late pushes to the branch or rewrites the PR while you do. Run this ONCE, verbatim, in one Bash call:
@@ -1536,7 +1535,7 @@ ${landedHere.length ? landedHere.map((d) => `  - ${d.id}${d.ticket && d.ticket !
   ### Data model and architecture changes
 ${defang(scrubPaths(ship.model.map((l) => `  ${l}`).join('\n')))}`
       : ''
-  }`
+  }`}`
 }
 
 // `who` names this dispatch's own worktree (see runBlock). `integrity`: the weakened-test fact
@@ -2196,19 +2195,23 @@ const deltaMsgOf = (delta) => {
     trailer: runTrailer(),
   }
 }
-// The run's trailer on every commit the loop makes itself (the delta's, its carry-forward merges, the gate's SYNC)
+// The run's trailer on every commit the loop makes itself (the delta's, its carry-forward merges, the SYNC's)
 const runTrailer = () => (runId ? ` -m ${shq(`Grimoire-Run: ${runId}`)}` : '')
 // A merge of the remote run branch that stopped on the delta alone, changed on both sides (an
 // acknowledgement made in `serve` and committed on the branch, or the design's delta added on both):
 // the branch's version is kept and the remote's unplanned changes appended to it by delta-append.mjs
 // (an id already there is skipped; an acknowledged one comes back unacknowledged, never lost), and the
 // merge is committed. Anything else that conflicts, or a step that fails: the merge is abandoned.
-// `dir` is the checkout the merge runs in; `to` the step cap (the gate's SYNC has none).
+// `dir` is the checkout the merge runs in; `to` the step cap (`to 60 `: the ships' carry and the SYNC).
+// The delta's path is the repository's to choose (the spec's name): every use of it is quoted (shq) and
+// every pathspec literal (pathspecOf), so no `$(…)`, quote or glob in it is ever read as anything else,
+// and the unmerged paths are compared by pathspec, never as text git may quote (a `"`, a non-ASCII name).
+const pathspecOf = (rel, exclude = false) => shq(`:(${exclude ? 'exclude,' : ''}literal)${rel}`)
 function deltaBothSides(dir, rel, to = '') {
   const f = `"${dir}"/${shq(rel)}`
   return [
     `    # the delta changed on both sides: this branch's version, the remote's unplanned changes appended to it`,
-    `    T=$(mktemp); if [ "$(git -C "${dir}" diff --name-only --diff-filter=U)" = ${shq(rel)} ] && git -C "${dir}" show "$R":${shq(rel)} >"$T" 2>/dev/null && git -C "${dir}" checkout -q --ours -- ${shq(rel)} >/dev/null 2>&1 && ${to}node ${shq(deltaCli())} ${f} "$T" 2>/dev/null | grep -q '^DELTA ok' && git -C "${dir}" add -- ${shq(rel)} >/dev/null 2>&1 && GIT_TERMINAL_PROMPT=0 ${to}git -C "${dir}" commit -q --no-edit --cleanup=strip >/dev/null 2>&1; then MG=1; else git -C "${dir}" merge --abort >/dev/null 2>&1; MG=0; fi; rm -f "$T"`,
+    `    T=$(mktemp); if [ -n "$(git -C "${dir}" diff --name-only --diff-filter=U -- ${pathspecOf(rel)})" ] && [ -z "$(git -C "${dir}" diff --name-only --diff-filter=U -- ${pathspecOf(rel, true)})" ] && git -C "${dir}" show "$R":${shq(rel)} >"$T" 2>/dev/null && git -C "${dir}" checkout -q --ours -- ${pathspecOf(rel)} >/dev/null 2>&1 && ${to}node ${shq(deltaCli())} ${f} "$T" 2>/dev/null | grep -q '^DELTA ok' && git -C "${dir}" add -- ${pathspecOf(rel)} >/dev/null 2>&1 && GIT_TERMINAL_PROMPT=0 ${to}git -C "${dir}" commit -q --no-edit --cleanup=strip >/dev/null 2>&1; then MG=1; else git -C "${dir}" merge --abort >/dev/null 2>&1; MG=0; fi; rm -f "$T"`,
   ]
 }
 // `rel`: the delta's path in this repository. Every ship of the repository that holds the delta runs
@@ -2255,28 +2258,103 @@ const deltaReport = (step = '') => [
   'else cat "$DO"; fi',
   'rm -f "$DO" "$E"',
 ]
-// The GATE's SYNC, before its gate command (#97): the remote run branch holds the delta commits the
-// ships made, which the checkout's run branch never got, so the gate's push of that branch would be
-// refused. With the tree clean, this brings them in (a fast-forward, or a merge that changes only
-// the delta): the gate then certifies, and pushes, a tree that holds them. A remote that holds
-// anything else is left alone (SYNC bad), and the push says the rest.
-function gateSyncScript(repo) {
+// The SYNC, between the repo's last ship and its gate (#99; in 0.33.0 the gate's agent was told to run
+// it): the remote run branch holds the delta commits the ships made there, which the orchestrating
+// checkout's run branch never got, so the gate's push of that branch would be refused. One fixed script
+// brings them in: a fast-forward, or a merge that changes only the delta (deltaBothSides when it stopped
+// on the delta alone, changed on both sides). The checkout's own uncommitted copy of the delta (the
+// design's, never committed; an acknowledgement made in `serve`), which would stop the merge, is
+// committed first, alone, as the gate's step 1 would have done; it is put back as it was when the merge
+// fails. A remote that holds anything else, a merge in progress, another branch checked out: left alone.
+// No lock: the terminal slot runs it once the repo's ships are done (ship.chain) and before its gate,
+// when no task of the repo is pending or in flight, so nothing else writes this checkout (the ships push
+// from their own worktree). Every step that can wait on the remote or a hook (ls-remote, fetch, commit,
+// merge, the delta's own step) is capped at 60 s (`to 60`), the whole script by the ship deadline. It
+// prints one SYNC line, the receipt the engine parses (parseSync): `SYNC ok mode=ff|merge head=<sha>`,
+// `SYNC none` (` remote=0`: no run branch there yet), or `SYNC bad step=fetch|merge|branch|other: <why>`
+// with the last lines of git's output under it.
+// The delta's path is the repository's to choose: it reaches the shell only quoted (shq: the commit
+// messages, `git show`) or as a literal pathspec (pathspecOf), and no line the script prints names it.
+function syncScript(repo) {
   const rel = deltaHome.rel
+  const q = pathspecOf(rel) // the delta, and nothing else, whatever its name holds
+  const others = pathspecOf(rel, true) // every path but the delta
   return [
     ...(ROOT ? [rootCd()] : []),
-    `P=${shq(repoPath(repo))}; B=${shq(runBranchFor(repo))}; GIT_TERMINAL_PROMPT=0; export GIT_TERMINAL_PROMPT; R=`,
-    'H=$(git -C "$P" rev-parse -q --verify "refs/heads/$B")',
-    '[ -n "$H" ] && git -C "$P" fetch -q origin "refs/heads/$B" >/dev/null 2>&1 && R=$(git -C "$P" rev-parse -q --verify FETCH_HEAD)',
-    'if [ -z "$R" ]; then echo "SYNC none remote=0"',
-    'elif git -C "$P" merge-base --is-ancestor "$R" "$H"; then echo "SYNC none"',
+    'set -u',
+    `DL=\${GRIMOIRE_SHIP_DEADLINE:-${SHIP_DEADLINE_SEC}}; case "$DL" in ''|*[!0-9]*) DL=${SHIP_DEADLINE_SEC} ;; esac`,
+    'GIT_TERMINAL_PROMPT=0; export GIT_TERMINAL_PROMPT',
+    LOCK_NOW_FN,
+    SHIP_HELPERS,
+    `T0=$(now); P=${shq(repoPath(repo))}; B=${shq(runBranchFor(repo))}; O=$(mktemp); E=$(mktemp); R=; MB=; H=; MG=0; MODE=; DC=0`,
+    'H0=$(git -C "$P" rev-parse -q --verify "refs/heads/$B")',
+    `# 1 · what the remote run branch holds beyond this branch: brought in only when it is the delta alone`,
+    'if [ -z "$H0" ]; then echo "SYNC bad step=branch: $B is not a branch of this checkout"',
+    'elif ! to 60 git -C "$P" ls-remote origin "refs/heads/$B" >"$O" 2>"$E"; then echo "SYNC bad step=fetch: origin could not be read"; tail -n 5 "$E"',
+    'elif R=$(cut -f1 "$O" | head -n 1); [ -z "$R" ]; then echo "SYNC none remote=0"',
+    'elif ! git -C "$P" cat-file -e "$R^{commit}" 2>/dev/null && ! to 60 git -C "$P" fetch -q origin "refs/heads/$B" >"$O" 2>&1; then echo "SYNC bad step=fetch: origin/$B could not be fetched"; tail -n 5 "$O"',
+    'elif ! git -C "$P" cat-file -e "$R^{commit}" 2>/dev/null; then echo "SYNC bad step=fetch: origin/$B moved while it was fetched"',
+    'elif git -C "$P" merge-base --is-ancestor "$R" "$H0"; then echo "SYNC none"',
     'elif [ "$(git -C "$P" symbolic-ref -q --short HEAD)" != "$B" ]; then echo "SYNC bad step=branch: $B is not the checked-out branch"',
-    `elif [ -n "$(git -C "$P" diff --name-only "$(git -C "$P" merge-base "$H" "$R")" "$R" -- | grep -vxF ${shq(rel)})" ]; then echo "SYNC bad step=other: the remote run branch holds more than the delta"`,
-    `elif git -C "$P" merge -q -m ${shq(`chore(data): bring the unplanned changes recorded in ${rel} into the run branch`)}${runTrailer()} "$R" >/dev/null 2>&1; then echo "SYNC ok head=$(git -C "$P" rev-parse HEAD)"`,
+    'elif git -C "$P" rev-parse -q --verify MERGE_HEAD >/dev/null; then echo "SYNC bad step=other: a merge is already in progress in the checkout"',
+    'elif ! MB=$(git -C "$P" merge-base "$H0" "$R"); then echo "SYNC bad step=other: origin/$B shares no history with $B"',
+    `elif [ -n "$(git -C "$P" diff --no-renames --name-only "$MB" "$R" -- ${others})" ]; then echo "SYNC bad step=other: origin/$B holds more than the delta"; git -C "$P" diff --no-renames --name-only "$MB" "$R" -- ${others} | head -n 5`,
     'else',
-    ...deltaBothSides('$P', rel),
-    '  if [ "$MG" = 1 ]; then echo "SYNC ok head=$(git -C "$P" rev-parse HEAD)"; else echo "SYNC bad step=merge"; fi',
+    `  # 2 · the checkout's own uncommitted copy of the delta would stop the merge: committed first, alone`,
+    `  if [ -n "$(git -C "$P" status --porcelain --untracked-files=all -- ${q})" ]; then`,
+    `    if git -C "$P" add -- ${q} >"$O" 2>&1 && to 60 git -C "$P" commit -q -m ${shq(`chore(data): commit ${rel} as the orchestrating checkout holds it`)}${runTrailer()} -- ${q} >>"$O" 2>&1; then DC=1; else git -C "$P" reset -q -- ${q} >/dev/null 2>&1; DC=2; fi`,
+    '  fi',
+    '  H=$(git -C "$P" rev-parse HEAD)',
+    `  if [ "$DC" = 2 ]; then echo "SYNC bad step=merge: the checkout's uncommitted copy of the delta could not be committed"; tail -n 5 "$O"`,
+    '  else',
+    `    # 3 · a fast-forward, or a merge that changes only the delta`,
+    '    if git -C "$P" merge-base --is-ancestor "$H" "$R"; then MODE=ff; to 60 git -C "$P" merge -q --ff-only "$R" >"$O" 2>&1 && MG=1',
+    `    else MODE=merge; if to 60 git -C "$P" merge -q --no-ff -m ${shq(`chore(data): bring the unplanned changes recorded in ${rel} into the run branch`)}${runTrailer()} "$R" >"$O" 2>&1; then MG=1; else`,
+    ...deltaBothSides('$P', rel, 'to 60 ').map((l) => `  ${l}`),
+    '    fi; fi',
+    '    if [ "$MG" = 1 ]; then echo "SYNC ok mode=$MODE head=$(git -C "$P" rev-parse HEAD)"',
+    '    else',
+    // the checkout as it was: exactly the commit of its own delta undone (only while HEAD is still that
+    // commit), the edit uncommitted again
+    `      [ "$DC" = 1 ] && [ "$(git -C "$P" rev-parse HEAD)" = "$H" ] && git -C "$P" reset -q --soft "$H^" && git -C "$P" reset -q -- ${q} >/dev/null 2>&1`,
+    '      echo "SYNC bad step=merge: origin/$B could not be merged into $B: abandoned, the checkout as it was"; tail -n 5 "$O"',
+    '      git -C "$P" rev-parse -q --verify MERGE_HEAD >/dev/null && echo "the merge could not be abandoned: the checkout is mid-merge (git merge --abort)"',
+    '    fi',
+    '  fi',
     'fi',
+    'rm -f "$O" "$E"',
   ].join('\n')
+}
+// The SYNC's receipt: its one SYNC line, verbatim, which the engine parses (parseSync). The model copies
+// one line and reads nothing into it.
+const SYNC_SCHEMA = {
+  type: 'object',
+  required: ['line'],
+  properties: {
+    line: { type: 'string', description: 'the SYNC line the script printed, verbatim, character for character ("" when it printed none)' },
+    detail: { type: 'string', description: 'the lines printed right under the SYNC line, verbatim ("" when none)' },
+  },
+}
+// {status: 'ok', mode, head} · {status: 'none'} · {status: 'bad', step, reason}; null: no SYNC line the
+// engine can read (none, or a garbled one): as far as the engine knows, the SYNC did not run
+function parseSync(r) {
+  const line = r && typeof r.line === 'string' ? r.line.trim() : ''
+  let m = /^SYNC ok mode=(ff|merge) head=([0-9a-f]{7,40})$/.exec(line)
+  if (m) return { status: 'ok', mode: m[1], head: m[2] }
+  if (/^SYNC none(?: remote=0)?$/.test(line)) return { status: 'none' }
+  m = /^SYNC bad step=(fetch|merge|branch|other)(?::\s*(.*))?$/.exec(line)
+  if (m) return { status: 'bad', step: m[1], reason: trim(scrubPaths(m[2] || ''), 200) }
+  return null
+}
+function syncPrompt(repo) {
+  return `${brief('ship')}- Repo \`${repo}\` · checkout \`${repoPath(repo)}\` · run branch \`${runBranchFor(repo)}\` · the design's delta \`${noTick(deltaHome.rel)}\`
+- Mode: **sync** — before the gate. The loop's ships committed the kept unplanned changes to the design's delta on the REMOTE run branch, which this checkout's branch does not have yet. This brings them in (a fast-forward, or a merge that changes only the delta), so the gate certifies and pushes a tree that holds them. It takes no lock and pushes nothing: nothing else writes this repository now.
+
+The script — run it ONCE, VERBATIM, in one Bash call ${fromRoot()}, with the Bash tool's timeout at its maximum (600000 ms): it stops itself within ${Math.round(SHIP_DEADLINE_SEC / 60)} minutes, each git step within 60 s. Then return its SYNC line, as the brief maps it.
+
+\`\`\`bash
+${syncScript(repo)}
+\`\`\``
 }
 function shipPrompt(repo, plan) {
   const path = repoPath(repo)
@@ -7188,6 +7266,47 @@ async function sealMarker(repo, marker) {
   return false
 }
 
+// The SYNC before the gate (#99; syncScript): tried twice when the first returned no receipt or could not
+// reach the remote (a network that may answer again), once otherwise (a conflict, another branch checked
+// out, a remote that holds more than the delta: none goes away by itself). Every receipt is journaled
+// (`sync`) with what follows it: `gate` (the gate runs as before), `retry`, or `push-skipped` (the gate
+// runs without its push, lock or PR step). Returns the last receipt (parseSync), null when none came.
+async function syncDelta(repo) {
+  let s = null
+  for (let n = 0; n < 2; n++) {
+    const label = `sync:${repo}${n ? `~r${n}` : ''}`
+    const r = await agentT(syncPrompt(repo), {
+      label,
+      phase: 'Implement',
+      model: 'haiku',
+      effort: 'low', // runs one fixed script
+      schema: SYNC_SCHEMA,
+      kind: 'ship', // 5/12 min; the script stops itself by SHIP_DEADLINE_SEC, each git step by 60 s
+      repo,
+    })
+    s = parseSync(r)
+    const again = n === 0 && !bodyReturned && (!s || (s.status === 'bad' && s.step === 'fetch'))
+    const then = s && s.status !== 'bad' ? 'gate' : again ? 'retry' : 'push-skipped'
+    const detail = r && str(r.detail) ? trim(scrubPaths(r.detail), 300) : ''
+    emit('sync', { repo, label, status: s ? s.status : null, mode: (s && s.mode) || null, step: (s && s.step) || null, head: s && s.head ? shortSha(s.head) : null, reason: (s && s.reason) || null, detail, round: n + 1, then })
+    if (s && s.status === 'ok') log(`◎ ${label}: SYNC ok mode=${s.mode} — ${runBranchFor(repo)} holds the remote's delta commits now (${s.mode === 'ff' ? 'a fast-forward' : 'a merge that changes only the delta'}, at ${shortSha(s.head)}): the gate certifies and pushes that tree`)
+    else if (s && s.status === 'none') log(`◎ ${label}: SYNC none — nothing to bring`)
+    else log(`⚠ ${label}: ${s ? `SYNC bad step=${s.step}${s.reason ? ` (${s.reason})` : ''}` : 'no SYNC receipt'}${detail ? `: ${detail}` : ''} — ${again ? 'trying once more' : "the gate's push is skipped (one without the remote's delta commits would be refused)"}`)
+    if (!again) break
+  }
+  return s
+}
+// Why the gate's push is skipped: `why` for the gate's prompt (what the SYNC said, no instruction in
+// it), `reason` for the person who will push (ungatedReasons): that, and what is left to do by hand.
+function syncSkip(repo, s) {
+  const branch = runBranchFor(repo)
+  const what = s ? `SYNC bad step=${s.step}${s.reason ? ` (${s.reason})` : ''}` : 'the SYNC before it returned no receipt'
+  return {
+    why: `the SYNC before you could not bring the remote's delta commits into this branch (${what}), so a push would be refused`,
+    reason: `the gate's push was skipped: ${what} — ${branch} here lacks what origin/${branch} holds (the design's delta commits, ${deltaHome.rel}), so its push would be refused. Merge origin/${branch} into ${branch} by hand${s && s.step === 'other' ? ' once you have checked what else it holds' : ''}, then push it and mark the PR ready`,
+  }
+}
+
 // ── the repo's TERMINAL slot: quality sweep first, then (where configured) the gate, then push + PR ──
 // The sweep runs BEFORE the gate so any sweep-fix commit lands before a gate stamp is
 // paid — a commit after the stamp would staleness its tree hash.
@@ -7220,10 +7339,25 @@ async function terminalSlot(repo) {
   // and rewrites the description over every task (no ship touched it meanwhile).
   const ship = shipState[repo]
   if (ship) await ship.chain
+  // The SYNC (#99): in the repository that holds the design's delta, the remote run branch has the delta
+  // commits the ships made there, which this checkout's branch lacks. It runs here, as its own scripted
+  // step: the repo's ships are done, none of its tasks is pending or in flight (the final wave's
+  // condition) and ships push from their own worktree, so nothing else writes this checkout: no lock.
+  // On SYNC bad, or no receipt, the gate runs without its push, lock or PR step (a push would be
+  // refused as a non-fast-forward), and the slot ends SHIP_FAILED with the receipt's reason.
+  const syncHere = hasDelta && !!deltaHome && deltaHome.repo === repo && !dispatchClosed
+  const sync = syncHere ? await syncDelta(repo) : null
+  const skip = syncHere && (!sync || sync.status === 'bad') ? syncSkip(repo, sync) : null
+  const noPush = skip ? skip.reason : ''
   const marker = stateMarker(repo, ++shipGen)
   const lockId = `g${fnv1a(`${journal.session}:${repo}:${shipGen}`)}`
+  if (noPush && !applies) {
+    // no gate command to run and no push to make: there is nothing left for a gate dispatch to do
+    emit('terminal', { repo, verdict: 'PASS' })
+    return { id: pseudo.id, repo, gateStep: true, status: 'SHIP_FAILED', gate: null, gateApplies: applies, reason: noPush, advisory: terminal.advisory }
+  }
   const dispatchGate = (label) =>
-    agentT(gatePrompt(pseudo, gateCfg, hits, landedHere, { draftPrUrl: ship && ship.prUrl && ship.draft !== false ? ship.prUrl : '', readyPrUrl: ship && ship.prUrl && ship.draft === false ? ship.prUrl : '', marker, lock: gateLockScripts(repo, lockId), model: modelLines(repo), ...(hasDelta && deltaHome && deltaHome.repo === repo ? { sync: gateSyncScript(repo), syncRel: deltaHome.rel } : {}) }), {
+    agentT(gatePrompt(pseudo, gateCfg, hits, landedHere, skip ? { noPush: skip.why } : { draftPrUrl: ship && ship.prUrl && ship.draft !== false ? ship.prUrl : '', readyPrUrl: ship && ship.prUrl && ship.draft === false ? ship.prUrl : '', marker, lock: gateLockScripts(repo, lockId), model: modelLines(repo) }), {
       label,
       phase: 'Implement',
       model: 'sonnet', // run one command, push, write the PR body: no design judgement left to buy with opus
@@ -7241,7 +7375,7 @@ async function terminalSlot(repo) {
   // only where the engine copy lost its file before any ship of the run found it (deliver: 'end'). A gate
   // that returns after the run stopped dispatching is not sent again: it could not ship (SHIP_FAILED). A
   // gate built with the file is sent again even when another repo's gate switched the run meanwhile.
-  if (gate && gate.failedStep === 'lock' && viaFile && !dispatchClosed && !bodyReturned) {
+  if (gate && gate.failedStep === 'lock' && viaFile && !noPush && !dispatchClosed && !bodyReturned) {
     shipLockMissing(`gate:${repo}`)
     gate = await dispatchGate(`gate:${repo}.inline`)
   }
@@ -7252,9 +7386,11 @@ async function terminalSlot(repo) {
   // the reason, for a human to push.
   if (failed && gate && (gate.failedStep === 'push' || gate.failedStep === 'pr' || gate.failedStep === 'lock')) {
     emit('terminal', { repo, verdict: 'PASS' })
-    return { id: pseudo.id, repo, gateStep: true, status: 'SHIP_FAILED', gate, gateApplies: applies, reason: `the ${gate.failedStep} step failed: ${gate.summary || gate.concerns || '(no detail)'}`, advisory: terminal.advisory }
+    return { id: pseudo.id, repo, gateStep: true, status: 'SHIP_FAILED', gate, gateApplies: applies, reason: noPush || `the ${gate.failedStep} step failed: ${gate.summary || gate.concerns || '(no detail)'}`, advisory: terminal.advisory }
   }
   emit('terminal', { repo, verdict: 'PASS' })
+  // certified (or nothing to certify), not shipped: the push was skipped on the SYNC's receipt
+  if (!failed && noPush) return { id: pseudo.id, repo, gateStep: true, status: 'SHIP_FAILED', gate, gateApplies: applies, reason: noPush, advisory: terminal.advisory }
   if (!failed) {
     const st = shipStateOf(repo)
     st.draft = false

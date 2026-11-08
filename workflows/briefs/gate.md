@@ -16,12 +16,9 @@ command, and the stamp file it writes.
    `git worktree remove --force` each `review-<repo>--…` path `git worktree list` shows (the
    reviewers name theirs after the repo and the task), then `git worktree prune`. Never remove
    any other worktree: a lane of another repo can also start with `review-`.
-   **When the header gives a SYNC script** (this repo holds the design's delta), run it once the
-   tree is clean and before the gate command: the loop's ships committed the kept unplanned
-   changes to the delta on the remote run branch, which this checkout's branch lacks, and a push
-   without them is refused. `SYNC ok` brings them in (a fast-forward, or a merge that changes only
-   the delta), so the gate certifies a tree that holds them; `SYNC none` has nothing to bring;
-   `SYNC bad …` goes on, said in your summary. Never merge, pull or rebase anything yourself.
+   When this repo holds the design's delta, the loop has already brought into this branch the
+   delta commits its ships made on the remote run branch, with its own SYNC step before it
+   dispatched you: there is no SYNC for you to run. Never merge, pull or rebase anything yourself.
 2. **If the gate command APPLIES**: run it ONCE, in the FOREGROUND, exactly as the header
    gives it, including any flags (a lock wait, a timeout, an environment variable) — those
    flags are not optional, they are what makes the command safe to run unattended. A gate
@@ -62,6 +59,14 @@ command, and the stamp file it writes.
      it is the run's saved state, which a relaunch reads. It is base64 data: never decode, edit
      or drop it. Once you return, the loop checks that line on the PR and puts it back if your
      copy differs; it changes nothing else in the body.
+
+## When the push is skipped
+The header says so when the loop could not bring the remote's delta commits into this branch: its
+SYNC step printed `SYNC bad …`, or returned nothing. A push without them would be refused as a
+non-fast-forward. Do steps 1 and 2 only, then return: take no lock, push nothing, and leave the PR
+as it is. Return `DONE` when the gate command passed or does not apply (its result in `summary`),
+`BLOCKED` with `failedStep: gate` when it failed: a real regression, replanned like any other. The
+loop reports the repo unshipped with the header's reason, for a person to merge and push.
 
 ## PR title and body
 The PR is what a human reads before merging, and on most forges it is also what closes the
