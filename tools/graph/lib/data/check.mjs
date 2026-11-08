@@ -15,8 +15,10 @@
 // lines exist and name what the claim states (one of its names, letter case aside, not inside a longer
 // identifier; a template by its longest literal part), and the claim agrees with the extracted model
 // (its entities, fields, indexes and item types exist; an equivalence's declarations exist under the
-// names or templates it states; no foreign key contradicts a relation, and no binding the code states
-// at convention or above contradicts a binding; a described store is no store an extractor reads). A
+// names or templates it states; no foreign key contradicts a relation, nor a join a deduced store's
+// queries show whose referenced side is known (an id, or a column named after the other table: one
+// taken as written is a note), and no binding the code states at convention or above contradicts a
+// binding; a described store is no store an extractor reads). A
 // claim that fails is drift: reported with why, never drawn as fact. Refined facts are labelled
 // refined, never extracted.
 // Gaps: the datastores the code reaches through client imports (arch.mjs KNOWN's databases, and
@@ -276,6 +278,9 @@ function readCited(real, size, ctx) {
   return { text, starts: Uint32Array.from(starts), n }
 }
 
+// a repository's file as the check says it: from the project root
+const shownPath = (root, p) => `${root.rel && root.rel !== '.' ? `${root.rel}/` : ''}${p}`
+
 // A citation checked: { cite, ok, repo?, path?, start?, end?, why? }. Confined to its repository (a link
 // or a path leading out of it is no file of it).
 function cite(s, names, ctx) {
@@ -284,7 +289,7 @@ function cite(s, names, ctx) {
   const root = p && (p.repo ? ctx.roots.find((r) => r.name === p.repo) : single)
   if (!p || p.start === undefined) return { cite: s, ok: false, why: `${s}: cite repo:path:line` }
   if (!root) return { cite: s, ok: false, why: `${s}: name its repository (repo:path:line)` }
-  const shown = `${root.rel && root.rel !== '.' ? `${root.rel}/` : ''}${p.path}`
+  const shown = shownPath(root, p.path)
   const out = { cite: s, repo: root.name, path: p.path, start: p.start, end: p.end }
   // the real path of a spelling, once; the file of a real path, once
   const k = `${root.name}\0${p.path}`
@@ -358,6 +363,22 @@ function fieldIn(ent, name) {
   return ent.fields.find((f) => f.toLowerCase() === lower) ?? null
 }
 
+// An extracted relation a refined one is compared with, as a reason or a note says it: a foreign key,
+// or a join a deduced store's queries show (queries.mjs: `inferred`, never a foreign key), at the first
+// line it was read, the others counted. SAID: the relations on a claim's columns said one by one.
+const SAID = 3
+function relationAt(r, ctx) {
+  if (r.kind !== 'join') return 'a foreign key'
+  const s = (r.sources || [])[0]
+  if (!s) return 'a join inferred from the queries'
+  const root = ctx.roots.find((x) => x.name === s.repo)
+  const more = r.sources.length - 1 + (r.more || 0)
+  return `a join inferred from the queries at ${root ? shownPath(root, s.path) : `${s.repo}:${s.path}`}:${s.line}${more ? ` and ${more} other line${more === 1 ? '' : 's'}` : ''}`
+}
+const relationText = (r, ctx) => (r.kind === 'join'
+  ? `${relationAt(r, ctx)} reads (${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})`
+  : `a foreign key on (${r.columns.join(', ')}) references ${r.to}(${r.toColumns.join(', ')})`)
+
 // One file's claims, checked. A claim: { kind, file, at, line, text, ok, why: [reasons], notes,
 // sources: [citation], …what it names, resolved }.
 function checkFile(r, ctx) {
@@ -387,12 +408,18 @@ function checkFile(r, ctx) {
     if (!B) why.push(missing(x.to))
     const cols = x.columns.map((c) => { const f = A ? fieldIn(A, c) : null; if (A && !f) why.push(`the column ${c} is not in ${A.id}`); return f ?? c })
     const toCols = x.toColumns.map((c) => { const f = B ? fieldIn(B, c) : null; if (B && !f) why.push(`the column ${c} is not in ${B.id}`); return f ?? c })
-    // a foreign key on the same columns: the same relation (said), or another one (drift)
-    const fk = A && A.e ? A.e.relations.find((r) => r.columns.join('\0').toLowerCase() === cols.join('\0').toLowerCase()) : null
-    if (fk && B) {
-      // the foreign key's target is a table of A's own store: the same relation only when B is that table
-      if (`${A.store}/${fk.to}`.toLowerCase() === B.id.toLowerCase() && fk.toColumns.join('\0').toLowerCase() === toCols.join('\0').toLowerCase()) notes.push('a foreign key now states it')
-      else why.push(`a foreign key on (${fk.columns.join(', ')}) references ${fk.to}(${fk.toColumns.join(', ')}): the claim disagrees with it`)
+    // the extracted relations on the same columns (foreign keys, or a deduced store's joins), each
+    // target a table of A's own store: the same relation only when B is that table. One stating the
+    // claim is said; else each one contradicts it (drift), but for a join whose direction was taken as
+    // written (equal columns: which one references the other is unknown), a note
+    const same = A && A.e && B ? A.e.relations.filter((r) => r.columns.join('\0').toLowerCase() === cols.join('\0').toLowerCase()) : []
+    const states = same.find((r) => `${A.store}/${r.to}`.toLowerCase() === B.id.toLowerCase() && r.toColumns.join('\0').toLowerCase() === toCols.join('\0').toLowerCase())
+    if (states) notes.push(states.kind === 'join' ? `${relationAt(states, ctx)} states it` : 'a foreign key now states it')
+    else {
+      const asWritten = (r) => r.kind === 'join' && r.direction === 'as written'
+      const listed = (rs, text) => [...rs.slice(0, SAID).map(text), ...(rs.length > SAID ? [`and ${rs.length - SAID} more ${rs[0].kind === 'join' ? 'join' : 'foreign key'}${rs.length - SAID === 1 ? '' : 's'} on (${cols.join(', ')})`] : [])]
+      why.push(...listed(same.filter((r) => !asWritten(r)), (r) => `${relationText(r, ctx)}: the claim disagrees with it`))
+      notes.push(...listed(same.filter(asWritten), (r) => `${relationText(r, ctx)}, its direction only as written (neither side is id or names the other table): too weak to contradict the claim`))
     }
     const names = [...citeNames(A ? A.name : x.from), ...citeNames(B ? B.name : x.to), ...cols, ...toCols]
     add('relation', ['relations', i], { text: `${x.from}(${cols.join(', ')}) → ${x.to}(${toCols.join(', ')})`, from: x.from, to: x.to, columns: cols, toColumns: toCols, store: A?.store ?? null, why: x.why, reasons: why, notes, sources: sources(x.sources, names) })

@@ -138,7 +138,9 @@
 //      ambiguous, an equivalence, a store described by citation), each way one drifts (a line past the
 //      end, a line naming something else, a field, entity, index, item or table the model lacks, a
 //      foreign key contradicting a relation, an equivalence's missing side, a link or a path out of
-//      its repository); the equivalence grouping a local table with its production template, their
+//      its repository); a deduced store's joins against relations (worded as joins at their
+//      path:line, never as a foreign key: one whose referenced side is known contradicts, one taken
+//      as written only notes, every join on the columns compared); the equivalence grouping a local table with its production template, their
 //      differences conflicts; the note on a table no code uses; the gaps; the files read beside the
 //      diagrams
 //
@@ -3424,6 +3426,54 @@ console.log('\n32 · the refine file (data/check.mjs): its format, each claim re
   eq(run({ schema: 1, relations: [{ from: 'app:db/tags', columns: ['event_id'], to: 'app:db/events', toColumns: ['id'], why: W, sources: ['app:src/participants.ts:1'] }] }).r.claims[0].notes, ['a foreign key now states it'], 'a relation a foreign key now states: it holds, and says so')
   eq(drifted({ schema: 1, relations: [{ from: 'app:db/tags', columns: ['event_id'], to: 'api:dynamodb/events', toColumns: ['id'], why: W, sources: ['app:src/participants.ts:1'] }] }), [['relations[0]', ['a foreign key on (event_id) references events(id): the claim disagrees with it']]],
     'a relation across stores to a table of the same name as the foreign key\'s: compared by entity, never by the bare name (the foreign key reaches app:db/events, not api:dynamodb/events)')
+  // a deduced store's joins (data/queries.mjs, the least trusted kind, inferred): worded as joins read in
+  // the queries, never as a foreign key; one whose referenced side is known (an id, or a column named
+  // after the other table) contradicts a claim, one taken as written (equal columns, which one references
+  // the other unknown) is a note
+  {
+    const { readQueries } = await import('../lib/data/readers/sql-query.mjs')
+    const QL = [
+      "import { Pool } from 'pg'",
+      'const pool = new Pool()',
+      "export const owner = (id) => pool.query('SELECT a.name FROM orders o JOIN accounts a ON o.owner_id = a.id WHERE o.id = $1', [id])",
+      "export const review = (code) => pool.query('SELECT r.body FROM orders o JOIN reviews r ON o.code = r.ref WHERE o.code = $1', [code])",
+      "export const user = (id) => pool.query('SELECT id, email FROM users WHERE id = $1', [id])",
+      "export const coupon = (code) => pool.query('SELECT code, percent FROM coupons WHERE code = $1', [code])",
+      '// orders.owner_id: who placed it; orders.code: its coupon',
+      "export const owners = () => pool.query('SELECT 1 FROM orders o JOIN accounts a ON o.owner_id = a.id JOIN teams t ON o.owner_id = t.id JOIN orgs g ON o.owner_id = g.id JOIN squads s ON o.owner_id = s.id')",
+    ]
+    put('api/src/orders.ts', `${QL.join('\n')}\n`)
+    const qrow = (lines) => ({ repo: 'api', extractor: 'sql-queries@1', facts: { declarations: [], queries: { lang: 'ts', path: 'src/orders.ts', clients: [{ source: 'pg', dialect: 'postgres', line: 1 }], hints: [], markers: [], notes: [], tests: 0, fns: [{ name: 'owner', line: 3, end: 8 }],
+      sites: lines.map((line) => ({ line, fn: 0, call: 'query', statements: readQueries(QL[line - 1].match(/'(SELECT[^']*)'/)[1], { dialect: 'postgres', line }).statements })) } } })
+    const Q = 'api:sql (inferred, postgres)'
+    const rel = (from, columns, to, toColumns) => ({ from: `${Q}/${from}`, columns, to: `${Q}/${to}`, toColumns, why: W, sources: ['api:src/orders.ts:7'] })
+    const runQ = (relations, lines = [3, 4, 5, 6]) => refineCheck([sqlRow(SQL), qrow(lines)], refine({ schema: 1, relations }), { roots }).refine
+    const qorders = reconcile([sqlRow(SQL), qrow([3, 4, 5, 6])]).stores.find((s) => s.id === Q).entities.find((e) => e.name === 'orders')
+    eq(qorders.relations.map((x) => [x.kind, x.columns, x.to, x.toColumns, x.direction, x.sources.map((s) => `${s.path}:${s.line}`)]), [['join', ['owner_id'], 'accounts', ['id'], 'id', ['src/orders.ts:3']], ['join', ['code'], 'reviews', ['ref'], 'as written', ['src/orders.ts:4']]],
+      'the model the claims meet: a deduced orders joined to accounts by its id, and to reviews as written (neither side an id)')
+    const q1 = runQ([rel('orders', ['owner_id'], 'users', ['id']), rel('orders', ['owner_id'], 'accounts', ['id']), rel('orders', ['code'], 'coupons', ['code']), rel('orders', ['code'], 'reviews', ['ref'])])
+    eq(q1.drift.map((d) => [d.at, d.why]), [['relations[0]', ['a join inferred from the queries at api/src/orders.ts:3 reads (owner_id) → accounts(id): the claim disagrees with it']]],
+      'a relation a join contradicts (the join\'s referenced side its id): drift, worded as the join inferred from the queries at its path:line, never as a foreign key')
+    eq(q1.claims.map((c) => [c.at, c.ok, c.notes]), [
+      ['relations[0]', false, []],
+      ['relations[1]', true, ['a join inferred from the queries at api/src/orders.ts:3 states it']],
+      ['relations[2]', true, ['a join inferred from the queries at api/src/orders.ts:4 reads (code) → reviews(ref), its direction only as written (neither side is id or names the other table): too weak to contradict the claim']],
+      ['relations[3]', true, ['a join inferred from the queries at api/src/orders.ts:4 states it']],
+    ], '… a relation a join states holds, and says so; one a join taken as written disagrees with holds, with a note (equal columns say nothing of which one references the other): never drift')
+    eq(runQ([{ from: 'app:db/tags', columns: ['event_id'], to: 'app:db/event_participants', toColumns: ['event_id'], why: W, sources: ['app:src/participants.ts:1'] }, { from: 'app:db/tags', columns: ['event_id'], to: 'app:db/events', toColumns: ['id'], why: W, sources: ['app:src/participants.ts:1'] }]).claims.map((c) => [c.ok, c.reasons, c.notes]),
+      [[false, ['a foreign key on (event_id) references events(id): the claim disagrees with it'], []], [true, [], ['a foreign key now states it']]], 'a foreign key beside the deduced store keeps its wording: drift on another target, noted on the same')
+    // the code joining one column to several tables: a claim one of them states holds; the others, said
+    // one by one up to three, then counted
+    const q2 = runQ([rel('orders', ['owner_id'], 'squads', ['id']), rel('orders', ['owner_id'], 'users', ['id'])], [5, 8])
+    eq([q2.claims[0].ok, q2.claims[0].notes, q2.drift.map((d) => [d.at, d.why])], [true, ['a join inferred from the queries at api/src/orders.ts:8 states it'], [['relations[1]', [
+      'a join inferred from the queries at api/src/orders.ts:8 reads (owner_id) → accounts(id): the claim disagrees with it',
+      'a join inferred from the queries at api/src/orders.ts:8 reads (owner_id) → teams(id): the claim disagrees with it',
+      'a join inferred from the queries at api/src/orders.ts:8 reads (owner_id) → orgs(id): the claim disagrees with it',
+      'and 1 more join on (owner_id)',
+    ]]]], 'one column the code joins to four tables: a claim the fourth states holds (every join on its columns compared, not the first); another target disagrees with each, three said, the rest counted')
+    const q3 = runQ([rel('orders', ['owner_id'], 'accounts', ['id'])], [3, 5, 8])
+    eq(q3.claims[0].notes, ['a join inferred from the queries at api/src/orders.ts:3 and 1 other line states it'], 'a join read in two statements: its first line, the others counted')
+  }
   eq(run({ schema: 1, indexes: [{ entity: 'app:db/tags', index: 'TAGS_EVENT_IDX', purpose: 'the tags of an event', sources: ['api:src/events.rs:6'] }] }).r.drift, [], 'an index of a SQL store found in any letter case, as its fields are')
   eq(drifted({ schema: 1, stores: [{ repo: 'api', id: 'k', kind: 'redis', entities: [{ name: '{tenant}:{id}', source: 'api:src/note.ts:3', fields: [] }] }] }), [['stores[0].entities[0]', ['api/src/note.ts line 3: the template has no literal part to look for']]],
     'a template with no literal part: said so, not "names none of"')
