@@ -26,6 +26,7 @@
 import { spawnSync } from 'node:child_process'
 import { EXTRACTORS, asideOf, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
 import { COMPOSE } from './extractors/redis-infra.mjs'
+import { docRoots } from '../docs.mjs'
 import { reconcile } from './reconcile.mjs'
 import { parseAside } from './readers/yaml-aside.mjs'
 import { extractAside } from './readers/code-aside.mjs'
@@ -85,7 +86,7 @@ export async function modelAt(project, base, opts = {}) {
       else failed.push({ repo: r.name, extractor: x.extractor, key: x.key, error: x.error })
     }
   }
-  return { model: reconcile(rows, opts), failed }
+  return { model: reconcile(rows, { ...opts, roots: opts.roots || (project.root ? docRoots(project) : []) }), failed }
 }
 
 function extractAt(abs, commit, project, overrides, ctx) {

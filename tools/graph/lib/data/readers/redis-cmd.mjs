@@ -91,7 +91,8 @@ export function template(a) {
   if (!a.s) return null
   let t = '', k = '', letters = false, holes = 0, last = null
   for (const p of a.s) {
-    if (typeof p === 'string') { if (!p) continue; t += p; k += p; if (/[A-Za-z]/.test(p)) letters = true; last = 'lit'; continue }
+    // a literal brace (a cluster hash tag, `{cart}:…`) is written `\{`, so a placeholder is never one
+    if (typeof p === 'string') { if (!p) continue; const e = escapeLit(p); t += e; k += e; if (/[A-Za-z]/.test(p)) letters = true; last = 'lit'; continue }
     if (last === 'hole') continue // two parts filled in side by side are one
     holes++
     t += `{${holeName(p.h)}}`; k += '{}'; last = 'hole'
@@ -99,6 +100,13 @@ export function template(a) {
   if (!letters || t.length > MAX_TEXT || holes > MAX_HOLES) return null
   return holes ? { t, k } : { t, k, lit: true }
 }
+
+// a literal part of a template: its braces and backslashes escaped (`{cart}` → `\{cart\}`)
+export const escapeLit = (s) => String(s).replace(/[\\{}]/g, '\\$&')
+// a placeholder in a template (never an escaped brace): `{name}` or `{}`
+export const HOLE_RE = /(?<!\\)\{[A-Za-z0-9_$]*\}/g
+// a template as compared: each placeholder `{}`, whatever it is named
+export const formOf = (t) => String(t).replace(HOLE_RE, '{}')
 
 // ── reading one command ──
 export function readCommand(c) {
@@ -121,7 +129,8 @@ export function readCommand(c) {
     case '1': key(args[0]); break
     // a …STORE command's destination comes first, the keys it reads after
     case 'all': args.forEach((a, i) => key(a, /STORE$/.test(name) ? (i ? 'r' : 'w') : f.rw)); break
-    case 'pairs': for (let i = 0; i < args.length; i += 2) key(args[i]); break
+    // pairs: a spread's width is unknown, so the pairs after it are not read (never shifted)
+    case 'pairs': for (let i = 0; i < args.length; i += 2) { if (spreadAt(args, i)) { f.dyn++; f.spread = true; break } key(args[i]) } break
     case 'last1': for (const a of args.slice(0, -1)) key(a); if (name === 'JSON.MGET') f.paths = pathsOf([args[args.length - 1]]); break
     case 'two': {
       const store = /STORE$/.test(name)
@@ -129,12 +138,16 @@ export function readCommand(c) {
       key(args[1], store || name === 'LCS' ? 'r' : 'w')
       break
     }
-    case 'num': { const n = num(args[name.startsWith('EVAL') || name.startsWith('FCALL') ? 1 : 0]); const from = name.startsWith('EVAL') || name.startsWith('FCALL') ? 2 : 1; if (n === null) { f.dyn++; f.keysUnknown = true } else for (const a of args.slice(from, from + Math.min(n, 64))) key(a); break }
+    // the key count: after the script (EVAL, FCALL), after the timeout (BZMPOP, BLMPOP), else first
+    case 'num': { const at = name.startsWith('EVAL') || name.startsWith('FCALL') || name === 'BZMPOP' || name === 'BLMPOP' ? 1 : 0; const n = num(args[at]); if (n === null) { f.dyn++; f.keysUnknown = true } else for (const a of args.slice(at + 1, at + 1 + Math.min(n, 64))) { if (a && a.spread !== undefined) { f.dyn++; break } key(a) } break }
     case 'store1num': { key(args[0], 'w'); const n = num(args[1]); if (n === null) f.dyn++; else for (const a of args.slice(2, 2 + Math.min(n, 64))) key(a, 'r'); break }
     case 'streams': { const at = args.findIndex((a) => word(a) === 'STREAMS'); if (at < 0) { f.dyn++; break } const rest = args.slice(at + 1); for (const a of rest.slice(0, Math.floor(rest.length / 2))) key(a, 'r'); if (rest.some((a) => a.spread !== undefined)) f.dyn++; break }
     case 'sub': if (sub === 'HELP') break; key(args[1]); break
     default: break
   }
+  // BITOP op dest key…: the operation is no key; SORT key … STORE dest writes dest
+  if (name === 'BITOP') { f.keys = []; f.dyn = 0; key(args[1], 'w'); for (const a of args.slice(2)) key(a, 'r') }
+  if (name === 'SORT' || name === 'SORT_RO') { const st = args.findIndex((a) => word(a) === 'STORE'); if (st > 0) { f.keys = f.keys.map((x) => ({ ...x, role: 'r' })); key(args[st + 1], 'w'); f.rw = 'w' } else f.rw = 'r' }
   // what each family names
   if (def.family === 'hash') hashFields(f, name, args)
   else if (def.family === 'json') { if (name !== 'JSON.MGET' && name !== 'JSON.DEBUG') f.paths = pathsOf(args.slice(1, name === 'JSON.GET' ? undefined : 2)) }
@@ -151,11 +164,25 @@ export function readCommand(c) {
 
 // hash fields: HSET key f v f v · HMSET · HSETNX key f v · HGET key f · HMGET key f… · HDEL key f… ·
 // HINCRBY key f n · HEXISTS key f · HSTRLEN key f · HEXPIRE key s FIELDS n f… — each literal name
+// whether an argument at `i` (or one before it) has a width the reader cannot know: a spread
+const spreadAt = (args, i) => args.slice(0, i + 1).some((a) => a && a.spread !== undefined)
+// field value pairs from `from`: the field names, until a spread or a field code names (whose width,
+// an object or an array the client expands, is unknown: the pairs after it are never read shifted)
+function pairNames(args, from) {
+  const out = []
+  let stopped = false
+  for (let i = from; i < args.length; i += 2) {
+    const a = args[i]
+    if (args.slice(from, i + 2).some((x) => x && x.spread !== undefined) || lit(a) === null) { stopped = true; break }
+    out.push(a)
+  }
+  return { list: out, stopped }
+}
 function hashFields(f, name, args) {
   let list = []
-  if (name === 'HSET' || name === 'HMSET' || name === 'HSETNX') list = args.slice(1).filter((_, i) => i % 2 === 0)
+  if (name === 'HSET' || name === 'HMSET' || name === 'HSETNX') { const p = pairNames(args, 1); list = p.list; if (p.stopped) f.fieldsCode = true }
   else if (name === 'HGET' || name === 'HINCRBY' || name === 'HINCRBYFLOAT' || name === 'HEXISTS' || name === 'HSTRLEN') list = [args[1]]
-  else if (name === 'HMGET' || name === 'HDEL' || name === 'HGETDEL') list = args.slice(name === 'HGETDEL' ? 3 : 1)
+  else if (name === 'HMGET' || name === 'HDEL' || name === 'HGETDEL') list = args.slice(name === 'HGETDEL' ? 3 : 1).filter((a) => !a || a.spread === undefined)
   else if (name === 'HEXPIRE' || name === 'HPEXPIRE' || name === 'HPERSIST' || name === 'HTTL' || name === 'HGETEX' || name === 'HSETEX') { const at = args.findIndex((a) => word(a) === 'FIELDS'); if (at >= 0) list = args.slice(at + 2).filter((_, i) => name !== 'HSETEX' || i % 2 === 0) }
   const names = []
   for (const a of list) { const t = lit(a); if (t !== null && fieldName(t) && !names.includes(t) && names.length < MAX_FIELDS) names.push(t); else if (a && t === null) f.fieldsCode = true }
@@ -183,7 +210,7 @@ function streamOf(f, name, args, sub) {
       break
     }
     const names = []
-    for (const a of args.slice(i + 1).filter((_, j) => j % 2 === 0)) { const t = lit(a); if (t !== null && fieldName(t) && !names.includes(t) && names.length < MAX_FIELDS) names.push(t) }
+    for (const a of pairNames(args, i + 1).list) { const t = lit(a); if (t !== null && fieldName(t) && !names.includes(t) && names.length < MAX_FIELDS) names.push(t) }
     if (names.length) f.fields = names
     f.stream = { role: 'add' }
   } else if (name === 'XREADGROUP') {
@@ -380,6 +407,7 @@ function globTokens(s) {
 function tmplTokens(s) {
   const out = []
   for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\' && i + 1 < s.length) { out.push({ c: s[++i] }); continue } // an escaped literal
     if (s[i] === '{') { const j = s.indexOf('}', i + 1); if (j > i && /^[A-Za-z0-9_$]*$/.test(s.slice(i + 1, j))) { out.push({ hole: true }); i = j; continue } }
     out.push({ c: s[i] })
   }
@@ -387,7 +415,7 @@ function tmplTokens(s) {
 }
 
 // A template's literal start, before its first part code fills in (what an index's PREFIX matches)
-export const literalPrefix = (t) => { const i = String(t).search(/\{[A-Za-z0-9_$]*\}/); return i < 0 ? String(t) : String(t).slice(0, i) }
+export const literalPrefix = (t) => { const i = String(t).search(/(?<!\\)\{[A-Za-z0-9_$]*\}/); return i < 0 ? String(t) : String(t).slice(0, i) }
 // The prefix tree's path of a template: its parts at each `:` (`user:{user_id}:sessions` → user:,
 // {user_id}:, sessions)
 export function segments(t) {

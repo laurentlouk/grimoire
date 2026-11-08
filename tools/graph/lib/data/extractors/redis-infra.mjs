@@ -137,13 +137,12 @@ function compose(file, ctx) {
     for (const [sname, s] of Object.entries(services)) {
       if (!s || typeof s !== 'object' || redis.some(([n]) => n === sname)) continue
       const build = typeof s.build === 'string' ? s.build : s.build && typeof s.build.context === 'string' ? s.build.context : null
-      const repo = build === null ? null : build === '.' || build === './' ? '.' : build.replace(/\/+$/, '').split('/').pop() || null
       for (const [k, v] of envOf(s.environment)) {
         if (typeof v !== 'string') continue
         const hit = redis.find(([n]) => v === n || new RegExp(`^(?:[a-z]+://)?(?:[^@/\\s]*@)?${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?::\\d+)?(?:/\\d*)?$`).test(v.trim()))
         if (!hit) continue
         const inst = out.find((i) => i.label === hit[0] && i.path === file.path)
-        if (inst && inst.env.length < 32) inst.env.push({ env: k, path: file.path, line: at(sname, 'environment', k) || at(sname, 'environment'), build: repo, service: sname })
+        if (inst && inst.env.length < 32) inst.env.push({ env: k, path: file.path, line: at(sname, 'environment', k) || at(sname, 'environment'), build: build && build.length <= 200 ? build : null, service: sname })
       }
     }
   }

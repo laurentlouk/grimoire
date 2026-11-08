@@ -557,7 +557,7 @@ export function gapsOf(model, stores, imports) {
 export function refineCheck(rows, refines, { roots = [], imports = [], limits = {} } = {}) {
   const cc = citeContext(roots, limits)
   const held = heldEquivalences(refines, cc)
-  const model = reconcile(rows, { equivalences: held.equivalences })
+  const model = reconcile(rows, { equivalences: held.equivalences, roots })
   const refine = checkRefines(refines, model, { roots, imports, cite: cc, cited: held.cited })
   return { model, refine, equivalences: held.equivalences }
 }

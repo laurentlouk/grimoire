@@ -574,8 +574,20 @@ export function dataClient(ctx) {
       h('p', { class: 'note' }, 'Read from the files that declare each table (CreateTable inputs, CloudFormation, SAM and Serverless templates, Terraform modules evaluated with the Terragrunt inputs or tfvars that set them), never from a database. A table two files declare is one card citing both; where they disagree, both values are kept. A reference (!Ref, !Sub, ${…}) is shown as written, never evaluated; a Terraform value no file states (another configuration\'s output, the environment) is shown as ${its expression}, and a name with such a part as its template ({…} for each unknown part), never guessed. Hover a row for the path:line that declares it. A map, not the database: read the code at the path:line.'))
   }
 
+  // the selected delta's changes on a key space, with their states (no overlay is drawn on its card)
+  const KS_STATE = { 'planned-built': 'planned and built', pending: 'pending', 'built-differently': 'built differently' }
+  function ksDelta(n) {
+    const d = DL[st.deltaSel]
+    if (!d || (d.errors && d.errors.length)) return null
+    const rs = (d.changes || []).filter((c) => c.store === n), us = (d.unplanned || []).filter((u) => u.store === n)
+    if (!rs.length && !us.length) return null
+    return [h('div', { class: 'ksub' }, `Delta ${d.shown}: ${plural(rs.length, 'change')}${us.length ? `, ${us.length} not in the plan` : ''}`),
+      h('ul', { class: 'links dlist', 'data-ctl': 'data-ks-delta' }, rs.map((c) => h('li', null, h('span', { class: `pill d-${(STATE[c.state] || ['pend'])[0]}` }, KS_STATE[c.state] || c.state), ' ', h('b', { class: 'mono' }, c.id), ' ', h('span', { class: 'mono' }, c.text), c.diffs && c.diffs.length ? h('div', { class: 'srcline muted' }, c.diffs.join(' · ')) : null, c.warn ? h('div', { class: 'srcline warn' }, c.warn) : null)),
+        us.map((u) => h('li', null, h('span', { class: 'pill warn' }, 'not in the plan'), ' ', h('span', { class: 'mono' }, u.text))))]
+  }
+
   // ── a key-value cache's key space: a card, its templates as a prefix tree ──
-  function keyspaceView(s) {
+  function keyspaceView(s, n) {
     const K = s.ks
     const q = lower(st.q.trim())
     const fnEl = (f) => h('span', { class: 'kfn', title: `${f.k.join(', ')}${f.lines.length ? `\n${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')}` : ''}${f.c !== null && f.c !== undefined ? `\n${plural(f.c, 'caller')} in the index` : ''}` }, h('span', { class: `mkl k-${f.wr ? 'w' : 'r'}` }, f.wr && f.r ? 'RW' : f.wr ? 'W' : 'R'), ' ', h('b', { class: 'mono' }, f.n), h('span', { class: 'muted' }, ` ${f.k.join(', ')} `), srcEl(s, f.at), f.c !== null && f.c !== undefined ? h('span', { class: 'muted' }, ` · ${plural(f.c, 'caller')}`) : null)
@@ -635,6 +647,7 @@ export function dataClient(ctx) {
         rows.length ? h('ul', { class: 'krows ktree', id: 'data-cards', role: 'list', 'aria-label': `${s.id}: key templates` }, rows) : h('p', { class: 'muted' }, K.tpl.length ? 'no template matches the search' : 'no template read'),
         K.ix.length ? [h('div', { class: 'ksub' }, `Search indexes (${K.ix.length})`), h('div', { class: 'kcards' }, K.ix.map(ixCard))] : null,
         K.ch.length ? [h('div', { class: 'ksub' }, `Channels (${K.ch.length})`), h('ul', { class: 'krows' }, K.ch.map(chRow))] : null,
+        ksDelta(n),
         K.st.length ? [h('div', { class: 'ksub' }, `Streams (${K.st.length})`), h('ul', { class: 'krows' }, K.st.map((ti) => { const t = K.tpl[ti]; return h('li', { class: 'krow' }, h('span', { class: 'mkl k-stream' }, 'XS'), h('span', { class: 'mono' }, t.n), h('span', { class: 'muted' }, t.gr.length ? ` groups ${t.gr.map(([n, cons]) => `${n}${cons.length ? ` (${cons.join(', ')})` : ''}`).join(' · ')}` : ' no consumer group read'), ' ', srcs(s, t.src.slice(0, 3))) }))] : null),
       h('p', { class: 'note' }, 'Read from the commands the code sends (key templates, types, fields, lifetimes, channels, streams) and from a literal FT.CREATE (a declaration code makes), never from a server; no value is kept. A type two commands disagree on is a conflict; a template written with no lifetime is a lead, never a verdict.'))
   }

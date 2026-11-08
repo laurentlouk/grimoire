@@ -71,7 +71,9 @@ export const CLIENTS = {
 export const ALL_CLIENTS = [...new Set(Object.values(CLIENTS).flat())]
 const clientOf = (fam, source) => CLIENTS[fam].find((c) => importMatches(source, c)) || null
 // a receiver named after the store; a module path naming it
-const STORE_NAME = /redis|valkey|upstash|keydb|dragonfly|^rdb$/i
+// (`redis`, `rdb`, `redisClient`, `redis_pool`, `cacheRedis`, `this.redis`; never `redis_config`)
+const STORE_WORD = '(?:redis|valkey|upstash|keydb|dragonfly)'
+const STORE_NAME = new RegExp(`^(?:rdb|${STORE_WORD}|${STORE_WORD}_?(?:client|conn|connection|pool|cluster|pipeline|pipe|tx|multi|sub|pub|subscriber|publisher|manager|mgr|cli|db)s?|[a-z][a-z0-9]*_?${STORE_WORD})$`, 'i')
 const STORE_PATH = /(?:^|[/._-])(?:redis|valkey|upstash|keydb|dragonfly|kv)(?:$|[/._-])|redis|valkey/i
 // a type naming a client
 const CLIENT_TYPE = {
@@ -220,9 +222,14 @@ function keyCall(call, F, depth) {
   const args = argNodes(call, F.fam).filter((a) => a.type !== 'keyword_argument')
   const bind = new Map()
   k.params.forEach((p, i) => { if (args[i]) { const a = argOf(args[i], F, depth + 1); bind.set(p, a.s || a.n !== undefined ? a : { x: holeName(args[i], F.fam) || p }) } else bind.set(p, { x: p }) })
+  const mk = `${k.params.join(',')}\0${k.body.id}\0${JSON.stringify([...bind.values()].map((a) => a.s || a.n || a.x || ''))}`
+  if (F.keyMemo.has(mk)) return F.keyMemo.get(mk)
   const saved = F.bind
   F.bind = bind; F.keyDepth = (F.keyDepth || 0) + 1
-  try { const a = argOf(k.body, F, depth + 1); return a.s ? a : null } finally { F.bind = saved; F.keyDepth-- }
+  let r = null
+  try { const a = argOf(k.body, F, depth + 1); r = a.s ? a : null } finally { F.bind = saved; F.keyDepth-- }
+  if (F.keyMemo.size < 4000) F.keyMemo.set(mk, r)
+  return r
 }
 // a function's parameter names, in order (never Rust's self, Python's self or cls)
 function paramsOf(n, fam) {
@@ -318,13 +325,29 @@ function ttItems(tt) {
 }
 const GO_UNITS = { Nanosecond: 1e-9, Microsecond: 1e-6, Millisecond: 1e-3, Second: 1, Minute: 60, Hour: 3600 }
 
+// Reading an argument is memoized per node (outside a key function's call, whose parameters change
+// what its body reads), bounded in work (ARG_WORK reads a file), in the parts a text keeps (MAX_PARTS:
+// past them the text is code's) and in time (the file's deadline, checked here too): a chain of
+// locals each holding several of the one before stays linear.
+export const ARG_WORK = 50_000, MAX_PARTS = 64
 export function argOf(n, F, depth = 0) {
-  const fam = F.fam
   if (!n || depth > 24) return { x: '' }
+  if (F.over) return { x: '' }
+  F.work = (F.work || 0) + 1
+  if (F.work > ARG_WORK || ((F.work & 255) === 0 && F.deadline && Date.now() > F.deadline)) { F.over = true; F.note?.(F.work > ARG_WORK ? `the arguments took more than ${ARG_WORK} reads: the rest read as code's` : 'the arguments took past the file\'s deadline: the rest read as code\'s'); return { x: '' } }
+  const memo = !F.bind && F.memo
+  if (memo && F.memo.has(n.id)) return F.memo.get(n.id)
+  const r = argOf0(n, F, depth)
+  const kept = r && r.s && r.s.length > MAX_PARTS ? withNode({ x: '' }, r.node) : r
+  if (memo) F.memo.set(n.id, kept)
+  return kept
+}
+function argOf0(n, F, depth) {
+  const fam = F.fam
   n = unwrap(n, fam)
   if (!n) return { x: '' }
   const t = n.type
-  const out = (a) => withNode(a, n)
+  const out = (a) => withNode(a.s && a.s.length > MAX_PARTS ? { x: '' } : a, n)
   if (fam === 'ts') {
     switch (t) {
       case 'string': return out({ s: [n.namedChildren.map((c) => (c.type === 'escape_sequence' ? unescape(c.text) : c.text)).join('')] })
@@ -483,6 +506,22 @@ function ident(n, F, depth, out) {
   return out({ x: n.text })
 }
 
+// The names bound to a client, per function: one bound in a function holds there; one bound at the top
+// of the file (or a struct's or a class's field) holds wherever no local or parameter rebinds it; a
+// member (`this.redis`, `self.conn`) is looked up in any.
+function scopedNames(F) {
+  const m = new Map(), TOP = '\0top'
+  const rebound = (name) => !!F.cur && ((F.locals.get(name)?.fn === F.cur) || (F.cur.params || []).includes(name))
+  return {
+    set(name, how) { const k = F.cur || TOP; if (!m.has(name)) m.set(name, new Map()); m.get(name).set(k, how) },
+    get(name) { const s = m.get(name); if (!s) return undefined; if (F.cur && s.has(F.cur)) return s.get(F.cur); return s.has(TOP) && !rebound(name) ? s.get(TOP) : undefined },
+    has(name) { return this.get(name) !== undefined },
+    any(name) { const s = m.get(name); return s ? s.values().next().value : undefined },
+    rebound,
+    get size() { return m.size },
+  }
+}
+
 // an object's key: a name, a string, a computed key
 function keyArg(k, F) {
   if (!k) return { x: '' }
@@ -510,29 +549,69 @@ const isFn = (a) => a && a.fn
 const kwOf = (args, k) => args.find((a) => a.kw === k)?.v
 // expand: arrays to their elements (an array of pairs too), objects and maps to key value pairs (a
 // false, null or nil value drops its pair, a true one keeps its key alone), Python keywords likewise
+// expand: arrays to their elements (an array of pairs too), objects and maps to key value pairs, always
+// two by two (a pair whose value is false, null or nil dropped whole); an object's spread contributes
+// nothing (its own pairs stay pairs); a keyword argument is never an argument here (pyArgs maps the
+// ones a client method takes; the rest are dropped, never read as a name or a value)
 function expand(args, depth = 0) {
   const out = []
   for (const a of args) {
-    if (!a || isFn(a)) continue
-    if (a.kw !== undefined) {
-      if (a.kw === 'mapping' || a.kw === 'items' || a.kw === 'fields') { out.push(...expand([a.v], depth + 1)); continue }
-      if (a.v && a.v.b === false) continue
-      out.push(S(a.kw))
-      if (!(a.v && a.v.s && a.v.s.length === 1 && (a.v.s[0] === 'True' || a.v.s[0] === 'true'))) out.push(a.v)
-      continue
-    }
+    if (!a || isFn(a) || a.kw !== undefined) continue
     if (a.a && depth < 2) { out.push(...expand(a.a, depth + 1)); continue }
     if (a.o && depth < 2) {
       for (const [k, v] of a.o) {
-        if (!k) continue
-        if (k.spread !== undefined) { out.push(k); continue }
+        if (!k || k.spread !== undefined) continue
         if (v && v.b === false) continue
-        out.push(k)
-        if (!(v && v.s && v.s.length === 1 && v.s[0] === 'true')) out.push(v)
+        out.push(k, v || { x: '' })
       }
       continue
     }
     out.push(a)
+  }
+  return out
+}
+// A redis-py call's keyword arguments, mapped to the method's own parameters (its positions, then its
+// options as the protocol writes them): null when a parameter is given twice or a leading one is
+// missing (the call is not read); a method this does not map keeps them for its adapter, unread here
+const PY = (params, opts = {}, defaults = {}) => ({ params, opts, defaults })
+const SET_OPTS = { ex: 'EX', px: 'PX', exat: 'EXAT', pxat: 'PXAT', nx: 'flag', xx: 'flag', keepttl: 'flag', get: 'flag' }
+const PY_SIG = {
+  set: PY(['name', 'value'], SET_OPTS), get: PY(['name']), getex: PY(['name'], { ex: 'EX', px: 'PX', exat: 'EXAT', pxat: 'PXAT', persist: 'flag' }), getdel: PY(['name']),
+  setex: PY(['name', 'time', 'value']), psetex: PY(['name', 'time_ms', 'value']), setnx: PY(['name', 'value']), mset: PY(['mapping']), mget: PY(['keys']),
+  incr: PY(['name', 'amount']), incrby: PY(['name', 'amount']), decr: PY(['name', 'amount']), decrby: PY(['name', 'amount']), append: PY(['key', 'value']),
+  expire: PY(['name', 'time']), pexpire: PY(['name', 'time']), expireat: PY(['name', 'when']), pexpireat: PY(['name', 'when']), persist: PY(['name']), ttl: PY(['name']), pttl: PY(['name']), type: PY(['name']),
+  hset: PY(['name', 'key', 'value'], { mapping: 'pairs', items: 'pairs' }), hsetnx: PY(['name', 'key', 'value']), hmset: PY(['name', 'mapping']), hget: PY(['name', 'key']), hgetall: PY(['name']), hmget: PY(['name', 'keys']),
+  hincrby: PY(['name', 'key', 'amount']), hincrbyfloat: PY(['name', 'key', 'amount']), hexists: PY(['name', 'key']), hdel: PY(['name']), hkeys: PY(['name']), hvals: PY(['name']), hlen: PY(['name']),
+  sadd: PY(['name']), srem: PY(['name']), smembers: PY(['name']), sismember: PY(['name', 'value']), scard: PY(['name']),
+  zadd: PY(['name', 'mapping']), zincrby: PY(['name', 'amount', 'value']), zscore: PY(['name', 'value']), zrem: PY(['name']), zrange: PY(['name', 'start', 'end']), zcard: PY(['name']), zrangebyscore: PY(['name', 'min', 'max']),
+  lpush: PY(['name']), rpush: PY(['name']), lpop: PY(['name']), rpop: PY(['name']), lrange: PY(['name', 'start', 'end']), ltrim: PY(['name', 'start', 'end']), llen: PY(['name']),
+  xadd: PY(['name', 'fields', 'id']), xack: PY(['name', 'groupname']), xlen: PY(['name']), xreadgroup: PY(['groupname', 'consumername', 'streams']), xread: PY(['streams']),
+  xgroupcreate: PY(['name', 'groupname', 'id'], { mkstream: 'flag' }, { 2: S('$') }),
+  publish: PY(['channel', 'message']), spublish: PY(['channel', 'message']), delete: PY([]), exists: PY([]), unlink: PY([]),
+  scaniter: PY([], { match: 'MATCH', count: 'COUNT' }), scan: PY(['cursor'], { match: 'MATCH', count: 'COUNT' }), hscaniter: PY(['name'], { match: 'MATCH' }), sscaniter: PY(['name'], { match: 'MATCH' }), zscaniter: PY(['name'], { match: 'MATCH' }),
+  eval: PY(['script', 'numkeys']), evalsha: PY(['sha', 'numkeys']),
+  'json.set': PY(['name', 'path', 'obj']), 'json.get': PY(['name']), 'json.delete': PY(['key', 'path']),
+}
+function pyArgs(norm, ns, args) {
+  const kw = args.filter((a) => a && a.kw !== undefined)
+  if (!kw.length) return args
+  const sig = PY_SIG[ns ? `${ns}.${norm}` : norm]
+  if (!sig) return args
+  const pos = args.filter((a) => !a || a.kw === undefined)
+  const out = [...pos]
+  for (const a of kw) {
+    const i = sig.params.indexOf(a.kw)
+    if (i < 0) continue
+    if (i < pos.length) return null // given twice
+    out[i] = a.v
+  }
+  for (let i = 0; i < out.length; i++) if (out[i] === undefined) { if (sig.defaults[i]) out[i] = sig.defaults[i]; else return null }
+  for (const a of kw) {
+    const o = sig.opts[a.kw]
+    if (!o || !a.v || a.v.b === false) continue
+    if (o === 'pairs') out.push(...expand([a.v]))
+    else if (o === 'flag') { if (lit(a.v) === 'True') out.push(S(a.kw.toUpperCase())) }
+    else out.push(S(o), a.v)
   }
   return out
 }
@@ -579,8 +658,8 @@ function protocol(cmd, norm, args0, fam, ftIndex, F) {
     case 'XGROUP': {
       const sub = { xgroupcreate: 'CREATE', xgroupcreatemkstream: 'CREATE', xgroupcreateconsumer: 'CREATECONSUMER', xgroupdestroy: 'DESTROY', xgroupdelconsumer: 'DELCONSUMER', xgroupsetid: 'SETID' }[norm]
       if (!sub) break
-      const mk = norm === 'xgroupcreatemkstream' || kw.some((a) => a.kw === 'mkstream' && lit(a.v) === 'True') || pos.slice(3).some((a) => a.o && a.o.some(([k, v]) => lit(k)?.toUpperCase() === 'MKSTREAM' && v?.b !== false))
-      const p3 = pos.filter((a) => !a.o)
+      const mk = norm === 'xgroupcreatemkstream' || pos.some((a) => lit(a)?.toUpperCase() === 'MKSTREAM') || pos.slice(3).some((a) => a.o && a.o.some(([k, v]) => lit(k)?.toUpperCase() === 'MKSTREAM' && v?.b !== false))
+      const p3 = pos.filter((a) => !a.o && lit(a)?.toUpperCase() !== 'MKSTREAM')
       if (sub === 'CREATE') return [S(sub), p3[0] || { x: '' }, p3[1] || { x: '' }, p3[2] || kwOf(kw, 'id') || S('$'), ...(mk ? [S('MKSTREAM')] : [])]
       return [S(sub), ...p3.slice(0, 3)]
     }
@@ -730,7 +809,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
   const root = tree.rootNode
   const out = { lang: fam, path: file, clients: [], env: [], dbs: [], sites: [], fns: [], notes: [], tests: 0 }
   const note = (s) => { if (out.notes.length < 8 && !out.notes.includes(s)) out.notes.push(s) }
-  const F = { fam, consts: new Map(), twice: new Set(), vals: new Map(), locals: new Map(), keyFns: new Map(), fnNames: new Set(), calls: new Map(), bind: null, cur: null, skip: new Set(), arrays: new Map(), known: new Map(), ctors: new Set(), mods: new Set(), scripts: new Map(), defined: new Map(), builders: new Map(), returns: new Map() }
+  const F = { fam, consts: new Map(), twice: new Set(), vals: new Map(), locals: new Map(), keyFns: new Map(), fnNames: new Set(), calls: new Map(), bind: null, cur: null, skip: new Set(), arrays: new Map(), memo: new Map(), keyMemo: new Map(), work: 0, over: false, deadline: Date.now() + ms, note: null, known: new Map(), ctors: new Set(), mods: new Set(), scripts: new Map(), defined: new Map(), builders: new Map(), returns: new Map() }
   const fileTest = TEST_PATH.test(file) || TEST_FILE[fam].test(file)
   const deadline = Date.now() + ms
   let steps = 0, stopped = false
@@ -755,6 +834,8 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     }
     return false
   })
+  F.note = note
+  F.known = scopedNames(F)
   topDecls(root, F)
   keyFns(root, F)
   const evidence = () => out.clients.length > 0 || F.known.size > 0 || F.mods.size > 0
@@ -768,7 +849,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     pending.push({ c, line, ctx, how, seq: pending.length, ...extra })
   }
   // whether a root or a link names a client: how it is known, or null
-  const clientName = (nm) => (F.known.has(nm) ? F.known.get(nm) : nm && STORE_NAME.test(nm) && nm.length <= 40 ? 'name' : F.mods.has(nm) ? 'bound' : null)
+  const clientName = (nm, prop = false) => (prop ? F.known.any(nm) : F.known.get(nm)) ?? (nm && STORE_NAME.test(nm) && nm.length <= 40 ? 'name' : F.mods.has(nm) && !F.known.rebound(nm) ? 'bound' : null)
   const isMaker = (n) => { const t = n.text.slice(0, 300); return MAKER[fam].test(t) || (fam === 'ts' && [...F.ctors].some((c) => new RegExp(`^(?:await\\s+)?(?:new\\s+)?${c.replace(/[$]/g, '\\$')}(?:\\.\\w+)?\\s*\\(`).test(t))) || (fam === 'python' && [...F.ctors].some((c) => new RegExp(`^(?:await\\s+)?${c.replace(/[$]/g, '\\$')}(?:\\.\\w+)*\\s*\\(`).test(t))) }
   // what a declaration's value makes: a client, a script, a command assembled in steps, an array
   const bindValue = (name, val, ctx, line) => {
@@ -799,7 +880,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
       const scriptMaker = r.call && /(?:^|::)(?:Script::new|NewScript)$/.test(r.name) && !ch.links.length ? r.args[0] : lastLink?.call && /^(?:register_script|createScript|NewScript)$/.test(lastLink.name) ? lastLink.args?.[0] : null
       if (scriptMaker) { F.scripts.set(name, { body: scriptBody(scriptMaker, F), line }); skip(); return }
       // a client, a connection, a pipeline taken from a known client; a call of a handle the file imports
-      const rootHow = (r.call ? (F.mods.has(r.name) || F.known.has(r.name) || STORE_NAME.test(lastName(r.name)) ? 'bound' : null) : clientName(lastName(r.name))) || (ch.links.some((l) => !l.call && clientName(l.name)) ? 'bound' : null)
+      const rootHow = (r.call ? (F.mods.has(r.name) || F.known.has(r.name) || STORE_NAME.test(lastName(r.name)) ? 'bound' : null) : clientName(lastName(r.name), r.node && r.node.type !== 'identifier')) || (ch.links.some((l) => !l.call && clientName(l.name, true)) ? 'bound' : null)
       const last = ch.links[ch.links.length - 1]
       if (rootHow && (!last || MAKES.has(last.name) || last.name === 'await' || /^(?:unwrap|expect)$/.test(last.name))) F.known.set(name, 'bound')
       else if (rootHow && ch.links.some((l) => PIPES.has(l.name))) F.known.set(name, 'bound')
@@ -882,7 +963,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
       if (!l.call) {
         // a property: a client's (`this.redis`), a namespace (`redis.json`, `client.ft`)
         if (state === 'client' && NAMESPACES.has(l.name)) { ns = l.name; continue }
-        if (state === null) { const k = clientName(l.name); if (k) { state = 'client'; how = k } }
+        if (state === null) { const k = clientName(l.name, true); if (k) { state = 'client'; how = k } }
         continue
       }
       const args = (l.args || []).map((a) => argOf(a, F))
@@ -927,9 +1008,11 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
         const tc = typedCommand(l.name, ns)
         if (!tc) { if (state === null) { const k = clientName(l.name); if (k && MAKES.has(l.name)) { state = 'client'; how = k } } continue }
         if (state === null && (GENERIC.has(tc.cmd) || !evidence())) continue
-        const p = protocol(tc.cmd, tc.norm, args, fam, ns === 'ft' && ftIndex ? ftIndex : null, F)
+        const pyMapped = fam === 'python' ? pyArgs(tc.norm, ns, args) : args
+        if (pyMapped === null) { emit({ name: tc.cmd, args: [] }, lineOf(l.call), ctx, state === 'client' ? how : 'command', batch ? { batch } : {}); if (state === null) { state = 'client'; how = 'command' } ns = null; continue } // keywords it cannot place: no key read
+        const p = protocol(tc.cmd, tc.norm, pyMapped, fam, ns === 'ft' && ftIndex ? ftIndex : null, F)
         const name = p && !Array.isArray(p) ? p.cmd : tc.cmd
-        const pargs = p === undefined || p === null ? expand(fam === 'go' && !(ns === 'ft' && ftIndex) ? args.filter((a) => !isFn(a)).slice(1) : ns === 'ft' && ftIndex ? [ftIndex, ...args] : args) : Array.isArray(p) ? p : p.args
+        const pargs = p === undefined || p === null ? expand(fam === 'go' && !(ns === 'ft' && ftIndex) ? pyMapped.filter((a) => !isFn(a)).slice(1) : ns === 'ft' && ftIndex ? [ftIndex, ...pyMapped] : pyMapped) : Array.isArray(p) ? p : p.args
         emit({ name, args: pargs }, lineOf(l.call), ctx, state === 'client' ? how : 'command', batch ? { batch } : {})
         if (name === 'EVAL' || name === 'EVAL_RO') luaFromEval(pargs, lineOf(l.call), ctx)
         if (state === null) { state = 'client'; how = 'command' }

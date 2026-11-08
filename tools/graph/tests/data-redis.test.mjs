@@ -104,6 +104,15 @@ console.log('\n1 · the command reader (readers/redis-cmd.mjs): families, templa
   // a connection URL: only its database index
   eq([urlDb(`redis://:${PW}@cache:6379/2`), urlDb(`rediss://user:${PW}@h:1/0`), urlDb('redis://h'), urlDb('unix:///tmp/r.sock?db=3'), urlDb('http://h/2'), urlDb('redis://h:6379/2?x=1')], [{ db: 2 }, { db: 0 }, { db: null }, { db: 3 }, null, { db: 2 }], 'a connection URL: its database index, nothing else (user, password, host dropped)')
   eq([cmd('SELECT', 3).db, cmd('SELECT', X('n')).db], [{ n: 3 }, { code: true }], 'SELECT n: a literal database index kept')
+  // the review's false facts, at the reader
+  eq([keys(cmd('BITOP', 'AND', 'dst:b', 'a:b', 'c:b')), keys(cmd('BZMPOP', 5, 1, 'z:a', 'MIN')), keys(cmd('BLMPOP', 5, 2, 'l:a', 'l:b', 'LEFT')), keys(cmd('SORT', 'l:src', 'BY', 'w:*', 'STORE', 'l:dst')), cmd('SORT', 'l:src').rw],
+    [['dst:b:w', 'a:b:r', 'c:b:r'], ['z:a:w'], ['l:a:w', 'l:b:w'], ['l:src:r', 'l:dst:w'], 'r'], 'BITOP\'s operation is no key; BZMPOP and BLMPOP count their keys after the timeout; SORT … STORE writes its destination')
+  const spread = { spread: 'base' }
+  eq([cmd('HSET', 'h:1', spread, 'name', 'SPREAD-VALUE').fields, cmd('HSET', 'h:1', 'a', 'v', X('f'), 'w', 'b', 'SPREAD-VALUE').fields, keys(cmd('MSET', 'k:a', 'v', spread, 'k:b', 'SPREAD-VALUE')), cmd('XADD', 's:1', '*', spread, 'f', 'SPREAD-VALUE').fields],
+    [undefined, ['a'], ['k:a:w'], undefined], 'pairs are never read shifted: after a spread or a field code names (its width unknown), none read; a value never becomes a field or a key')
+  const tagged = template(s('{cart}:', h('id')))
+  eq([tagged, R.formOf(tagged.t), literalPrefix(tagged.t), globMatches('\\{cart\\}:*', tagged.t), globMatches('cart:*', tagged.t), R.formOf('cart:{id}') === R.formOf(tagged.t)],
+    [{ t: '\\{cart\\}:{id}', k: '\\{cart\\}:{}' }, '\\{cart\\}:{}', '\\{cart\\}:', true, false, false], 'a cluster hash tag\'s braces are literal (escaped), never a placeholder: `{cart}:{id}` is not `cart:{id}`')
 }
 
 console.log('\n1 · Lua scripts: the commands a literal body sends, KEYS mapped, never a literal kept')
@@ -471,6 +480,60 @@ if (!RT) {
   const covered = reconcile([{ repo: 'api', extractor: 'redis-commands@1', facts: { declarations: [], redis: kf } }])
   eq(covered.stores[0].entities.filter((e) => e.kind === 'index').map((e) => [e.label, e.declared, e.queries.sites.length, e.lead ?? null]), [['{stage}:idx:docs', true, 1, null]], '… the index declared and queried under one templated name: no lead')
 
+  console.log('\n2 · no value read as a name: Python keywords, an object\'s spread; a client named or bound only where it is one')
+  const V = ['KW', 'VAL', String(process.pid % 13)].join('')
+  const kw = readFile('w/kw.py', [
+    'import redis',
+    'r = redis.Redis()',
+    'def f(base):',
+    `    r.hset(name="kwh:1", key="fld", value="${V}")`,
+    `    r.hset("kwh:2", mapping={"g": "${V}", "h": "${V}"})`,
+    `    r.hset(name="kwh:3", mapping={"m": "${V}"})`,
+    `    r.set(name="kwh:4", value="${V}", ex=10, nx=True)`,
+    `    r.publish(channel="ch:kw", message="${V}")`,
+    `    r.hmset("kwh:5", {"n": "${V}"})`,
+    `    r.xadd(name="kws:1", fields={"o": "${V}"})`,
+    `    r.xgroup_create(name="kws:1", groupname="g1", mkstream=True)`,
+    `    r.hset(key="fld", value="${V}")`,
+    `    r.lindex(name="kwh:6", index=0)`,
+  ])
+  eq(kw.sites.map((x) => `${x.cmd} ${x.keys.map((k) => k.t).join(',') || '-'} ${(x.fields || []).join(',')}${x.ttl ? ` ttl ${x.ttl.s}` : ''}${x.channel ? ` ch ${x.channel.map((c) => c.t)}` : ''}${x.stream?.mkstream ? ' mkstream' : ''}`),
+    ['HSET kwh:1 fld', 'HSET kwh:2 g,h', 'HSET kwh:3 m', 'SET kwh:4  ttl 10', 'PUBLISH -  ch ch:kw', 'HMSET kwh:5 n', 'XADD kws:1 o', 'XGROUP kws:1  mkstream', 'HSET - ', 'LINDEX - '],
+    'redis-py\'s keywords mapped to the method\'s parameters (name, key, value, mapping, channel, fields, ex, nx, mkstream); a leading one missing: no key read')
+  ok(!JSON.stringify(kw).includes(V) && !kw.sites.some((x) => x.keys.some((k) => /^(?:name|key|value|channel)$/.test(k.t))), '… never a value as a field, never a keyword\'s name as a key or a channel')
+  const sp = readFile('web/src/spread.ts', [
+    "import Redis from 'ioredis'",
+    'const r = new Redis()',
+    'export async function f(id: string, base: Record<string, string>) {',
+    `  await r.hset(\`h:\${id}\`, { ...base, name: '${V}', active: true })`,
+    `  await r.mset({ ...base, 'k:1': '${V}', 'k:2': '${V}' })`,
+    `  await r.hmset('h:2', { ...base, g: '${V}' })`,
+    `  await r.hset('h:3', ...[base], 'x', '${V}')`,
+    '}',
+  ])
+  eq(sp.sites.map((x) => `${x.cmd} ${x.keys.map((k) => k.t).join(',')} ${(x.fields || []).join(',')}`), ['HSET h:{id} name,active', 'MSET k:1,k:2 ', 'HMSET h:2 g', 'HSET h:3 '], 'an object\'s spread contributes nothing: its own pairs stay pairs (a key, a field, never a value); after a spread among the arguments, no pair read')
+  ok(!JSON.stringify(sp).includes(V), '… no value anywhere')
+  // m1, m2: a receiver named after the store is the whole name or the store's word with a client's; a
+  // client bound in one function is no client in another
+  const scope = {
+    'w/scope.py': ['import redis', 'import requests', 'def a():', '    client = redis.Redis()', '    client.hset("p:1", "f", 1)', 'def b():', '    client = requests.Session()', '    client.get("http://x/users")', 'def c(redis_config):', '    redis_config.get("host")'],
+    'web/src/scope.ts': ["import Redis from 'ioredis'", 'export async function a() { const client = new Redis(); await client.hset("p:1", "f", 1) }', 'export async function b() { const client = new Map<string, string>(); client.get("http://x/users") }', 'export function c(redisConfig: Map<string, string>) { redisConfig.get("host") }'],
+    'svc/scope.go': ['package svc', 'import ("net/http"; "github.com/redis/go-redis/v9")', 'func a(ctx any) { client := redis.NewClient(nil); client.HSet(ctx, "p:1", "f", 1) }', 'func b() { client := http.Client{}; client.Get("http://x/users") }'],
+    'api/src/scope.rs': ['use redis::AsyncCommands;', 'async fn a(c: &redis::Client) { let mut client = c.get_multiplexed_async_connection().await.unwrap(); let _: () = client.hset("p:1", "f", 1).await.unwrap(); }', 'fn b() { let client = reqwest::Client::new(); client.get("http://x/users"); }'],
+  }
+  eq(Object.entries(scope).map(([f, lines]) => brief(readFile(f, lines))), [['5 a HSET p:1:w bound'], ['2 a HSET p:1:w bound'], ['3 a HSET p:1:w bound'], ['2 a HSET p:1:w bound']], 'a client bound in one function is no client in another (an HTTP client\'s get is no GET); `redis_config` is not named after the store')
+  // M1: a chain of locals each holding several of the one before: linear, bounded
+  const chainOf8 = (fam) => {
+    const n = 12, parts = (i) => Array.from({ length: 8 }, () => i)
+    if (fam === 'ts') return readFile('big/amp.ts', ["import Redis from 'ioredis'", 'const r = new Redis()', 'export async function f(k0: string) {', ...Array.from({ length: n }, (_, i) => `  const k${i + 1} = \`${parts(i).map((j) => `\${k${j}}`).join('')}\``), `  await r.set(\`a:\${k${n}}\`, 1)`, '}'])
+    if (fam === 'py') return readFile('big/amp.py', ['import redis', 'r = redis.Redis()', 'def f(k0):', ...Array.from({ length: n }, (_, i) => `    k${i + 1} = f"${parts(i).map((j) => `{k${j}}`).join('')}"`), `    r.set(f"a:{k${n}}", 1)`])
+    if (fam === 'go') return readFile('big/amp.go', ['package big', 'import ("fmt"; "github.com/redis/go-redis/v9")', 'func f(ctx any, r *redis.Client, k0 string) {', ...Array.from({ length: n }, (_, i) => `  k${i + 1} := fmt.Sprintf("${parts(i).map(() => '%s').join('')}", ${parts(i).map((j) => `k${j}`).join(', ')})`), `  r.Set(ctx, "a:"+k${n}, 1, 0)`, '}'])
+    return readFile('big/amp.rs', ['use redis::AsyncCommands;', 'async fn f(c: &mut redis::aio::MultiplexedConnection, k0: &str) {', ...Array.from({ length: n }, (_, i) => `    let k${i + 1} = format!("${parts(i).map(() => '{}').join('')}", ${parts(i).map((j) => `k${j}`).join(', ')});`), `    let _: () = c.set(format!("a:{}", k${n}), 1).await.unwrap();`, '}'])
+  }
+  for (const fam of ['ts', 'py', 'go', 'rs']) { const [r, ms] = timed(() => chainOf8(fam)); ok(r.sites.length === 1 && r.sites[0].keys[0]?.t.startsWith('a:') && ms < 5000, `${fam}: 12 locals each holding 8 of the one before (8^12 parts unexpanded): read once each, its key ${r.sites[0]?.keys[0]?.t} (${ms} ms)`) }
+  const [kfn, tk] = timed(() => readFile('big/amp-fn.ts', ["import Redis from 'ioredis'", 'const r = new Redis()', 'const k0 = (a: string) => `x:${a}`', ...Array.from({ length: 6 }, (_, i) => `const k${i + 1} = (a: string) => \`${Array.from({ length: 30 }, () => `\${k${i}(a)}`).join('')}\``), 'export const f = (id: string) => r.set(k6(id), 1)']))
+  ok(kfn.sites.length === 1 && tk < 5000, `key functions each calling the one before 30 times, 6 deep: each read once per binding (${tk} ms)`)
+
   console.log('\n2 · the call sites: hostile and dynamic input, bounded and inert; errors by position only')
   const head = ["import Redis from 'ioredis'", 'const r = new Redis()']
   const [many, tMany] = timed(() => readFile('big/many.ts', [...head, 'export function f(id: string) {', ...Array.from({ length: 100000 }, (_, i) => `  r.hset(\`k${i % 7}:\${id}\`, 'f', 1)`), '}']))
@@ -553,6 +616,23 @@ console.log('\n3 · the key space (data/redis.mjs): templates, types and their c
   eq(m.redis.clients, [{ repo: 'api', source: 'ioredis' }, { repo: 'web', source: 'ioredis' }], '… the clients read, per repository')
   // no value anywhere
   ok(!JSON.stringify(m).includes('@name:x') && !JSON.stringify(m).includes('"v"'), 'no value and no query text in the model')
+  // the review's false facts, in the model
+  const envFile = (repo, path, env) => ({ repo, extractor: 'redis-commands@1', facts: file(path, ['f'], [[11, 0, 'SET', s(`${repo}:`, h('id')), 'v']], { env: env.map((name) => ({ name, line: 1 })) }) })
+  const inst = (env, build = null) => ({ repo: 'ops', extractor: 'redis-infra@1', facts: { declarations: [], redisInfra: [{ name: 'redis:cache', label: 'cache', kind: 'Compose service', engine: 'Redis', version: null, modules: [], eviction: null, persistence: null, notifications: null, databases: null, path: 'compose.yaml', line: 2, env: [{ env, path: 'compose.yaml', line: 9, build }], notes: [] }] } })
+  const ids = (rows2, opts) => reconcile(rows2, opts).stores.map((x) => `${x.id}${x.keyspace.wired?.length ? ` <${x.keyspace.wired.map((w) => w.repo)}>` : ''}${x.keyspace.shared ? ' shared' : ''}`)
+  eq([ids([envFile('a', 'a.ts', ['REDIS_URL']), envFile('b', 'b.ts', ['REDIS_URL']), envFile('c', 'c.ts', ['REDIS_URL']), inst('REDIS_URL')]), ids([envFile('a', 'a.ts', ['REDIS_URL']), envFile('b', 'b.ts', ['OTHER']), inst('REDIS_URL')])],
+    [['a:redis shared', 'b:redis shared', 'c:redis shared', 'ops:redis:cache'], ['b:redis', 'ops:redis:cache <a>']], 'a variable the infrastructure sets naming no repository: three repositories reading it are never grouped (said); one alone reading it is wired')
+  const roots = [{ name: 'ops', rel: 'deploy/ops' }, { name: 'a', rel: 'services/a' }, { name: 'b', rel: 'services/b' }]
+  eq([ids([envFile('a', 'a.ts', ['REDIS_URL']), envFile('b', 'b.ts', ['REDIS_URL']), inst('REDIS_URL', '../../services/a')], { roots }), ids([envFile('a', 'a.ts', ['REDIS_URL']), envFile('b', 'b.ts', ['REDIS_URL']), inst('REDIS_URL', '../../elsewhere/a')], { roots })],
+    [['b:redis', 'ops:redis:cache <a>'], ['a:redis shared', 'b:redis shared', 'ops:redis:cache']], 'a Compose build context resolved against the repositories\' paths: the repository it builds, never a folder that merely shares its name')
+  const typed = reconcile([{ repo: 'k', extractor: 'redis-commands@1', facts: file('k.ts', ['f'], [[1, 0, 'HSET', s('doc:', h('id')), 'f', 'v'], [2, 0, 'JSON.SET', s('doc:j:', h('id')), '$.a', '1'], [3, 0, 'FT.CREATE', 'idx:json', 'ON', 'JSON', 'PREFIX', 1, 'doc:', 'SCHEMA', '$.a', 'TEXT'], [4, 0, 'FT.CREATE', 'idx:hash', 'ON', 'HASH', 'PREFIX', 1, 'doc:', 'SCHEMA', 'f', 'TEXT']]) }]).stores[0]
+  eq(typed.entities.filter((e) => e.kind === 'index').map((e) => `${e.label}: ${e.covers}`), ['idx:hash: doc:{id}', 'idx:json: doc:j:{id}'], 'an index covers the templates of its kind only: ON HASH a hash, ON JSON a JSON document')
+  const only = reconcile([inst('REDIS_URL')]).stores[0]
+  eq([only.declarations.map((d) => `${d.kind} ${d.path}`), RM.redisSummary(only)], [['infra compose.yaml'], '0 key templates · 0 search indexes · 0 channels · 0 streams · no command in code reaches it · no conflicts'], 'an instance no code reaches: its own declaration only, never one of commands with no file')
+  const { diffModels } = await import('../lib/data/diff.mjs')
+  const tag = (t) => reconcile([{ repo: 'k', extractor: 'redis-commands@1', facts: file('k.ts', ['f'], [[1, 0, 'SET', t, 'v']]) }])
+  eq(diffModels(tag(s('cart:', h('id'))), tag(s('{cart}:', h('id')))).stores[0].changes.map((c) => `${c.change} ${c.name}`), ['added \\{cart\\}:{id}', 'removed cart:{id}'], 'graph_changes: a hash tag `{cart}:{id}` is another template than `cart:{id}`, never folded into it')
+
   // a refine file's claims, checked against what was read (data/check.mjs): a lineage across two key
   // spaces holds on the fields read; one naming a field the index's schema lacks drifts; a store the
   // file describes under a key space's id stays drift
@@ -601,8 +681,8 @@ if (RT) {
     '    build: ./site',
     `    environment: ["CACHE=redis://:${PW}@cache:6379", "OTHER=x"]`,
   ].join('\n') }] }, ictx).redisInfra
-  eq(brief(cmp), ['cache Compose service: Redis 7.2 | - | allkeys-lfu | null | KEA | null | REDIS_URL@11>api,CACHE@16>site', 'queue Compose service: Valkey 8 | - | null | AOF | null | null | QUEUE_HOST@12>api'],
-    'Compose: each Redis-family service, its flags; the variables other services set to it (a URL or a host naming it), each with the repository its build context names')
+  eq(brief(cmp), ['cache Compose service: Redis 7.2 | - | allkeys-lfu | null | KEA | null | REDIS_URL@11>../api,CACHE@16>./site', 'queue Compose service: Valkey 8 | - | null | AOF | null | null | QUEUE_HOST@12>../api'],
+    'Compose: each Redis-family service, its flags; the variables other services set to it (a URL or a host naming it), each with its build context as written (resolved against the repositories\' paths when the model is built)')
   ok(!JSON.stringify(cmp).includes('postgres') && !JSON.stringify(cmp).includes(`:${PW}@`) && !JSON.stringify(cmp).includes('redis://'), '… never a value: only the variables\' names')
   const tf = (files, key = 'mod') => infra.extract({ key, override: 'tf', files: files.map(([path, text]) => ({ path, text })) }, ictx).redisInfra
   const planted = ['tf', 'S3cret', String(process.pid % 7)].join('')
@@ -811,11 +891,25 @@ if (RT) {
       { id: 'chan', op: 'add', target: 'infra:redis:cache/channel:cart:events', why: 'cart events', origin: 'planned' },
       { id: 'stream', op: 'change', target: 'infra:redis:cache/stream:stream:orders', after: { type: 'stream' }, why: 'kept', origin: 'planned' },
       { id: 'later', op: 'add', target: 'infra:redis:cache/index:idx:carts', why: 'not built yet', origin: 'planned' },
+      { id: 'gone', op: 'remove', target: 'infra:redis:cache/rate:{ip}', why: 'no rate limit', origin: 'planned' },
+      { id: 'kept', op: 'add', target: 'infra:redis:cache/user:{id}:session', after: { type: 'hash' }, why: 'sessions', origin: 'planned' },
     ] }, null, 2))
     const dl2 = await q2('changes', { delta: 'docs/specs/2026-11-08-cart.delta.json', base: 'main' })
     for (const id of ['audit', 'items', 'nick', 'chan', 'stream']) has(dl2, `planned and built  ${id}  `, `the delta: ${id} planned and built (its target found: a template by its form and its type, a field, an index's field, a channel, a stream by its template)`)
     has(dl2, 'pending  later  add infra:redis:cache/index:idx:carts', '… an index not built yet: pending')
     has(dl2, 'Unplanned (1): in the branch, in no change of the delta\n  ~ infra:redis:cache/cart:{cart_id}  type: hash / string → hash', '… the type the branch changed, in no change of the delta: unplanned')
+    // the page with that delta: never a crash; the key-space card lists its changes with their states
+    let page3 = null
+    try { page3 = await renderGraph(loadProject(P2)) } catch (e) { ok(false, `the page renders with a delta over a key space (${e.message})`) }
+    if (page3) {
+      const D3 = dataOf(page3).data
+      const n3 = D3.stores.findIndex((x) => x.id === 'infra:redis:cache')
+      eq([D3.deltas[0].errors, D3.deltas[0].stores[n3], D3.deltas[0].changes.filter((c) => c.store === n3).map((c) => `${c.id} ${c.state}`)], [[], null, ['audit planned-built', 'items planned-built', 'nick planned-built', 'chan planned-built', 'stream planned-built', 'later pending', 'gone pending', 'kept planned-built']],
+        'the page renders a delta over a key space (an existing target, a pending add, a removal): no table overlay, each change with its state')
+      const pg3 = await stubPage(page3, `#data-${n3}`)
+      const list3 = pg3.ctl('data-ks-delta')
+      ok(!!list3 && pg3.textOf(list3).includes('planned and built') && pg3.textOf(list3).includes('pending') && pg3.textOf(list3).includes('gone'), '… the key-space card lists them')
+    }
     const { parseTarget } = await import('../lib/data/delta.mjs')
     eq([parseTarget('api:redis/index:idx:docs.$.title'), parseTarget('api:redis/user:{id}:session.token').entity, parseTarget('infra:redis:cache/channel:a:b').storeId], [{ repo: 'api', store: 'redis', storeId: 'api:redis', entity: 'index:idx:docs', kind: 'field', el: { name: '$.title' } }, 'user:{id}:session', 'infra:redis:cache'], 'the targets: a key space\'s index (a JSON path its field), a template\'s field, a channel, under an instance\'s store id')
 
@@ -829,11 +923,29 @@ if (RT) {
       `  await r.hset(\`cfg:\${id}:h\`, 'field', '${SECRET}')`,
       `  await r.publish('cfg:chan', '${SECRET}')`,
       `  await r.eval("local x = '${SECRET}' redis.call('SET', KEYS[1], '${SECRET}') return x", 1, \`cfg:\${id}:lua\`)`,
+      `  await r.hset(\`cfg:\${id}:spread\`, { ...base, name: '${SECRET}' })`,
+      `  await r.mset({ ...base, 'cfg:m1': '${SECRET}' })`,
+      `  await r.hmset('cfg:hm', { ...base, g: '${SECRET}' })`,
       '}',
+      'const base: Record<string, string> = {}',
+    ].join('\n'))
+    mkdirSync(path.join(P1, 'web/jobs'), { recursive: true })
+    writeFileSync(path.join(P1, 'web/jobs/planted.py'), [
+      'import redis',
+      'r = redis.Redis()',
+      'def plant(base):',
+      `    r.hset(name="cfg:py", key="fld", value="${SECRET}")`,
+      `    r.hset("cfg:py2", mapping={"g": "${SECRET}"})`,
+      `    r.publish(channel="cfg:pych", message="${SECRET}")`,
+      `    r.hmset("cfg:py3", {"h": "${SECRET}"})`,
+      `    r.xadd(name="cfg:pys", fields={"o": "${SECRET}"})`,
+      `    r.mset({"cfg:py4": "${SECRET}"})`,
     ].join('\n'))
     await q1('index')
     const outs = [await q1('data'), await q1('data', { store: 'web:redis' }), await q1('data', { entity: 'web:redis/cfg:{id}' }), await q1('data', { entity: 'web:redis/cfg:{id}:lua' }), await q1('status'), await renderGraph(loadProject(P1))]
     has(outs[1], 'cfg:{id}:lua', 'the planted file is read (its keys are there)')
+    for (const k of ['cfg:{id}:spread  hash · fields: name', 'cfg:hm  hash · fields: g', 'cfg:m1  string', 'cfg:py  hash · fields: fld', 'cfg:py2  hash · fields: g', 'cfg:py3  hash · fields: h', 'cfg:pys  stream · fields: o', 'cfg:py4  string']) has(outs[1], k, `… ${k.split('  ')[0]}: its key and fields read, the planted value none of them`)
+    has(outs[1], 'cfg:pych', '… a channel by its keyword')
     has(outs[0], '  database: 2 (a connection URL at web/src/planted.ts:2)', '… the URL\'s database index kept')
     ok(outs.every((o) => !o.includes(SECRET)), 'the secret is in no graph_data answer, no graph_status, not in the page')
     ok(!allBytes(path.join(P1, '.grimoire')).includes(SECRET), '… nor in any file under .grimoire/ (graph.db and its pages included)')

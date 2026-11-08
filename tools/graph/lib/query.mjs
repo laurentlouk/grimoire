@@ -12,6 +12,7 @@ import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT 
 import { refineModel, refineCheck } from './data/check.mjs'
 import { NOT_DECLARED, sqlFunctions, queryConflicts } from './data/queries.mjs'
 import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, shownName, NO_QUERY, ASSEMBLED } from './data/redis.mjs'
+import { formOf } from './data/readers/redis-cmd.mjs'
 import { docRoots } from './docs.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
@@ -565,6 +566,7 @@ export class Graph {
     if (ks.instance) out.push(...this.redisInstance(ks))
     else if (ks.files) out.push(`  instance: none wired to it by the infrastructure or a Compose file: the key space of ${st.repo} alone (inferred)`)
     if (ks.ambiguous) for (const a of ks.ambiguous) out.push(`  instance: ${a.repo} reads a variable several instances are wired through (${a.instances.join(', ')}): not grouped`)
+    if (ks.shared) for (const a of ks.shared) out.push(`  instance: ${a.instances.join(', ')} sets ${a.env}, which ${a.readers.join(', ')} all read, and names no repository: not grouped (no evidence ties one of them to it)`)
     const dbs = [...new Map(ks.dbs.filter((d) => d.db !== null).map((d) => [d.db, d])).values()]
     if (dbs.length) out.push(`  database: ${dbs.map((d) => `${d.db} (${d.how === 'url' ? 'a connection URL' : d.how === 'select' ? 'SELECT' : 'a client option'} at ${this.dloc({ repo: d.repo, path: d.path, line: d.line })})`).join(', ')}`)
     if (ks.files) out.push(`  not declared: ${ks.unknown.replace(/^deduced from the commands the code sends, not declared: /, '')}`)
@@ -691,7 +693,7 @@ export class Graph {
     let hits = match((x) => x)
     if (!hits.length) hits = match((x) => x.toLowerCase())
     // a key template by its form, whatever its placeholders are named (`user:{id}` finds `user:{user_id}`)
-    if (!hits.length) { const k = spec.replace(/\{[A-Za-z0-9_$]*\}/g, '{}'); hits = all.filter(([st, e]) => st.dialect === 'redis' && e.k && (e.k === k || `${st.id}/${e.k}` === k)) }
+    if (!hits.length) { const k = formOf(spec); hits = all.filter(([st, e]) => st.dialect === 'redis' && e.k && (e.k === k || `${st.id}/${e.k}` === k)) }
     if (!hits.length && refine) {
       // an entity of a store a refine file describes
       const ents = refine.stores.filter((s) => !s.reasons.length).flatMap((s) => s.entities.filter((e) => e.ok).map((e) => [s, e]))
@@ -777,7 +779,7 @@ export class Graph {
   // compares the code and never what a refine file groups
   currentModel(repos, opts = {}) {
     const list = [...repos]
-    return reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL AND repo IN (${list.map(() => '?').join(',')}) ORDER BY repo, key, extractor`, ...list).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })), opts)
+    return reconcile(this.q(`SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL AND repo IN (${list.map(() => '?').join(',')}) ORDER BY repo, key, extractor`, ...list).map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })), { roots: [...this.roots].map(([name, root]) => ({ name, rel: root || '.' })), ...opts })
   }
   changes(base, at, opts = {}) {
     const d = clean(diffModels(at.model, this.currentModel(base.repos.map((r) => r.name), opts)))

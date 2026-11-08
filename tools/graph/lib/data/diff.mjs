@@ -49,13 +49,14 @@
 //                from: [index into changes], to: [index into changes], ambiguous }
 import { normType, normDefault, normColumn, kvIndex, kvTable, projectionText, declPath } from './model.mjs'
 import { instanceAttrs } from './redis.mjs'
+import { formOf } from './readers/redis-cmd.mjs'
 
 // Dialects whose identifiers compare in any letter case.
 const CASELESS = new Set(['sqlite'])
 // How a dialect's names compare: lower-cased where they are caseless, as written elsewhere.
 // a key space's names: a key template's placeholders compared without their names (`user:{id}` is
 // `user:{user_id}`), as data/redis.mjs compares templates
-export const foldOf = (dialect) => (CASELESS.has(dialect) ? (x) => String(x).toLowerCase() : dialect === 'redis' ? (x) => String(x).replace(/\{[A-Za-z0-9_$]*\}/g, '{}') : (x) => String(x))
+export const foldOf = (dialect) => (CASELESS.has(dialect) ? (x) => String(x).toLowerCase() : dialect === 'redis' ? formOf : (x) => String(x))
 const LISTS = [['field', 'fields'], ['key', 'keys'], ['index', 'indexes'], ['relation', 'relations']]
 
 // An element's identity within its entity (an entity's within its store), names folded by `f`:

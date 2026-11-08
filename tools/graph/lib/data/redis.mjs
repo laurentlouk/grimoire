@@ -31,7 +31,7 @@
 // model.redis { files, commands, sites: [Site], clients: [{ repo, source }] (no longer a gap), tests, dyn }
 //   Site { repo, path, line, extractor, fn, fnLine, cmd, store, reads: [entity id], writes: [entity id],
 //          batch?, via?, how }
-import { globMatches, literalPrefix, TYPE_OF, segments } from './readers/redis-cmd.mjs'
+import { globMatches, literalPrefix, TYPE_OF, segments, formOf } from './readers/redis-cmd.mjs'
 
 export const MAX_SOURCES = 8, CAP = 25
 export const NO_EXPIRY = 'no expiry found (lead): written, and no EXPIRE, SET … EX, SETEX or GETEX sets a lifetime on it anywhere in the indexed code; it may be set by code the extractor does not read, a script, or a server-wide policy'
@@ -56,11 +56,16 @@ export function resolveRedis(rows, model, instances = []) {
   // its commands or its client reads), else its own
   const spaceOf = new Map() // repo → { id, instance, why }
   const repos = [...new Set(files.map((f) => f.repo))].sort()
+  const envOf = new Map(repos.map((repo) => [repo, new Set(files.filter((f) => f.repo === repo && (f.r.sites.length || f.r.clients.length)).flatMap((f) => f.r.env.map((e) => e.name)))]))
+  // a variable the infrastructure sets naming no repository (an image-only service, a function's
+  // environment) ties only the one repository that reads it: two that read it are never grouped by it
+  const readers = (env) => repos.filter((r) => envOf.get(r).has(env))
+  const applies = (w, repo) => envOf.get(repo).has(w.env) && (w.repos ? w.repos.includes(repo) : readers(w.env).length === 1)
   for (const repo of repos) {
-    const env = new Set(files.filter((f) => f.repo === repo && (f.r.sites.length || f.r.clients.length)).flatMap((f) => f.r.env.map((e) => e.name)))
-    const hits = instances.filter((i) => i.wires.some((w) => env.has(w.env) && (!w.repos || w.repos.includes(repo))))
-    if (hits.length === 1) { const w = hits[0].wires.find((x) => env.has(x.env) && (!x.repos || x.repos.includes(repo))); spaceOf.set(repo, { id: hits[0].id, instance: hits[0], why: { env: w.env, at: w.at, repos: w.repos } }) }
-    else spaceOf.set(repo, { id: redisId(repo), instance: null, why: hits.length > 1 ? { ambiguous: hits.map((i) => i.id) } : null })
+    const hits = instances.filter((i) => i.wires.some((w) => applies(w, repo)))
+    const unsure = instances.filter((i) => !hits.includes(i) && i.wires.some((w) => !w.repos && envOf.get(repo).has(w.env) && readers(w.env).length > 1))
+    if (hits.length === 1) { const w = hits[0].wires.find((x) => applies(x, repo)); spaceOf.set(repo, { id: hits[0].id, instance: hits[0], why: { env: w.env, at: w.at, repos: w.repos } }) }
+    else spaceOf.set(repo, { id: redisId(repo), instance: null, why: hits.length > 1 ? { ambiguous: hits.map((i) => i.id) } : unsure.length ? { shared: unsure.map((i) => i.id), env: unsure[0].wires.find((w) => !w.repos && envOf.get(repo).has(w.env)).env, readers: readers(unsure[0].wires.find((w) => !w.repos && envOf.get(repo).has(w.env)).env) } : null })
   }
   const spaces = new Map() // id → { files, instance, repos, why }
   for (const f of files) {
@@ -211,7 +216,9 @@ function keySpace(g, out) {
     const schema = [...(d?.schema || []).map((f) => ({ ...f, source: x.defs[0].source })), ...x.alterFields]
     const fields = schema.map((f) => ({ name: f.name, type: { raw: f.type, norm: f.type ? f.type.toLowerCase() : null }, as: f.as ?? null, opts: f.opts || [], nullable: null, default: null, generated: null, sources: [f.source].filter(Boolean), conflicts: [] }))
     const prefixes = d?.prefixes || []
-    const covers = templates.filter((e) => prefixes.length ? prefixes.some((p) => covered(p, e.name)) : !!d)
+    // what it indexes: the templates its PREFIX covers, of its kind (ON HASH a hash, ON JSON a JSON document)
+    const kind = !d ? null : d.on === 'JSON' ? 'ReJSON-RL' : d.on === 'HASH' || !d.on ? 'hash' : null
+    const covers = templates.filter((e) => (kind === null || e.base === kind) && (prefixes.length ? prefixes.some((p) => covered(p, e.name)) : !!d))
     for (const e of covers) e.coveredBy.push(x.name)
     return {
       id: x.id, name: `index:${x.name}`, label: x.name, kind: 'index', on: d ? d.on || 'HASH' : null, prefixes, ...(d?.filter ? { filter: true } : {}),
@@ -238,8 +245,9 @@ function keySpace(g, out) {
       channels: channels.map((c) => ({ name: c.name, k: c.k, pattern: c.pattern, pub: c.pub, sub: c.sub, ...(c.psub ? { psub: c.psub } : {}), repos: [...c.repos].sort(), sources: c.sources })),
       dbs, deduced: !inst, ...(inst ? { instance: inst, wired: [...g.why].map(([repo, w]) => ({ repo, ...w })), ...(evictionLead ? { evictionLead } : {}) } : {}),
       ...([...g.why.values()].some((w) => w.ambiguous) ? { ambiguous: [...g.why].filter(([, w]) => w.ambiguous).map(([repo, w]) => ({ repo, instances: w.ambiguous })) } : {}),
+      ...([...g.why.values()].some((w) => w.shared) ? { shared: [...g.why].filter(([, w]) => w.shared).map(([repo, w]) => ({ repo, instances: w.shared, env: w.env, readers: w.readers })) } : {}),
     },
-    declarations: [decl, ...(inst ? inst.declarations || [] : [])],
+    declarations: [...(n ? [decl] : []), ...(inst ? inst.declarations || [] : [])],
     // a channel is an entity too (graph_changes and a delta address it: channel:<name>)
     entities: [...templates, ...indexes, ...channels.map((c) => ({ id: `${id}/channel:${c.name}`, name: `channel:${c.name}`, label: c.name, kind: 'channel', pattern: c.pattern, sources: c.sources, conflicts: [], fields: [], keys: [], indexes: [], relations: [] }))],
   }
@@ -251,8 +259,7 @@ function covered(prefix, t) {
   const lp = literalPrefix(t)
   if (lp.startsWith(prefix)) return true
   // a prefix code builds part of (`{stage}:doc:`): compared as templates are, without the names
-  const form = (x) => String(x).replace(/\{[A-Za-z0-9_$]*\}/g, '{}')
-  if (prefix.includes('{') && form(t).startsWith(form(prefix))) return true
+  if (/(?<!\\)\{/.test(prefix) && formOf(t).startsWith(formOf(prefix))) return true
   return lp.length > 0 && prefix.startsWith(lp) && globMatches(prefix.replace(/[*?[\\]/g, '\\$&') + '*', t)
 }
 export function describeDef(d) {

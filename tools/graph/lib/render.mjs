@@ -316,7 +316,8 @@ function packDelta(file, { model, base, diff, why, stores, packedAt, shown }) {
   const slot = (n) => { if (!byStore.has(n)) byStore.set(n, { rs: [], us: [] }); return byStore.get(n) }
   s.changes.forEach((r, k) => { if (changes[k].store >= 0) slot(changes[k].store).rs.push([r, k]) })
   s.unplanned.forEach((u, j) => { if (unplanned[j].store >= 0) slot(unplanned[j].store).us.push([u, j]) })
-  const overlay = stores.map((ps, n) => (byStore.has(n) ? packDeltaStore(ps, model.stores.find((x) => x.id === ps.id), byStore.get(n), { base, diff, changes, unplanned, shown }) : null))
+  // (a key space draws no table overlay: its card lists the delta's changes with their states, data-view.mjs)
+  const overlay = stores.map((ps, n) => (byStore.has(n) && !ps.ks ? packDeltaStore(ps, model.stores.find((x) => x.id === ps.id), byStore.get(n), { base, diff, changes, unplanned, shown }) : null))
   return { ...head, errors: [], spec: delta.spec, changes, unplanned, stores: overlay, unplWhy: diff ? null : why || 'no base was resolved' }
 }
 const describeChange = (c, dialect = null) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${dialect === 'dynamodb' && c.kind === 'field' ? 'attribute' : CHANGE_KIND[c.kind]} ${c.entity} · ${c.name} ${c.change}`)
