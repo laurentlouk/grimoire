@@ -101,7 +101,7 @@ export function runBill(runId, opts = {}) {
 }
 
 // The engine's own dispatch kinds; any other label prefix is a review persona (a lens).
-export const ENGINE_KINDS = new Set(['impl', 'fix', 'precheck', 'verify', 'guard', 'integrate', 'resolve', 'hydrate', 'env', 'ship', 'seal', 'gate',
+export const ENGINE_KINDS = new Set(['impl', 'fix', 'precheck', 'verify', 'guard', 'integrate', 'resolve', 'hydrate', 'env', 'ship', 'seal', 'sync', 'gate',
   'journal', 'status', 'claim', 'replan', 'preflight', 'parse-index', 'harness-context', 'ledger', 'crystallize', 'contract-check', 'release-claims', 'agent', 'stuck-judge'])
 // Run-level kinds: whatever their label's rest holds (an agent name, a cycle), it is no task or repo.
 const RUN_KINDS = new Set(['preflight', 'journal', 'status', 'claim', 'replan', 'hydrate', 'stuck-judge'])

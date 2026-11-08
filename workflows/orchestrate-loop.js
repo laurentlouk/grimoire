@@ -2203,11 +2203,15 @@ const runTrailer = () => (runId ? ` -m ${shq(`Grimoire-Run: ${runId}`)}` : '')
 // (an id already there is skipped; an acknowledged one comes back unacknowledged, never lost), and the
 // merge is committed. Anything else that conflicts, or a step that fails: the merge is abandoned.
 // `dir` is the checkout the merge runs in; `to` the step cap (`to 60 `: the ships' carry and the SYNC).
+// The delta's path is the repository's to choose (the spec's name): every use of it is quoted (shq) and
+// every pathspec literal (pathspecOf), so no `$(…)`, quote or glob in it is ever read as anything else,
+// and the unmerged paths are compared by pathspec, never as text git may quote (a `"`, a non-ASCII name).
+const pathspecOf = (rel, exclude = false) => shq(`:(${exclude ? 'exclude,' : ''}literal)${rel}`)
 function deltaBothSides(dir, rel, to = '') {
   const f = `"${dir}"/${shq(rel)}`
   return [
     `    # the delta changed on both sides: this branch's version, the remote's unplanned changes appended to it`,
-    `    T=$(mktemp); if [ "$(git -C "${dir}" diff --name-only --diff-filter=U)" = ${shq(rel)} ] && git -C "${dir}" show "$R":${shq(rel)} >"$T" 2>/dev/null && git -C "${dir}" checkout -q --ours -- ${shq(rel)} >/dev/null 2>&1 && ${to}node ${shq(deltaCli())} ${f} "$T" 2>/dev/null | grep -q '^DELTA ok' && git -C "${dir}" add -- ${shq(rel)} >/dev/null 2>&1 && GIT_TERMINAL_PROMPT=0 ${to}git -C "${dir}" commit -q --no-edit --cleanup=strip >/dev/null 2>&1; then MG=1; else git -C "${dir}" merge --abort >/dev/null 2>&1; MG=0; fi; rm -f "$T"`,
+    `    T=$(mktemp); if [ -n "$(git -C "${dir}" diff --name-only --diff-filter=U -- ${pathspecOf(rel)})" ] && [ -z "$(git -C "${dir}" diff --name-only --diff-filter=U -- ${pathspecOf(rel, true)})" ] && git -C "${dir}" show "$R":${shq(rel)} >"$T" 2>/dev/null && git -C "${dir}" checkout -q --ours -- ${pathspecOf(rel)} >/dev/null 2>&1 && ${to}node ${shq(deltaCli())} ${f} "$T" 2>/dev/null | grep -q '^DELTA ok' && git -C "${dir}" add -- ${pathspecOf(rel)} >/dev/null 2>&1 && GIT_TERMINAL_PROMPT=0 ${to}git -C "${dir}" commit -q --no-edit --cleanup=strip >/dev/null 2>&1; then MG=1; else git -C "${dir}" merge --abort >/dev/null 2>&1; MG=0; fi; rm -f "$T"`,
   ]
 }
 // `rel`: the delta's path in this repository. Every ship of the repository that holds the delta runs
@@ -2269,9 +2273,12 @@ const deltaReport = (step = '') => [
 // prints one SYNC line, the receipt the engine parses (parseSync): `SYNC ok mode=ff|merge head=<sha>`,
 // `SYNC none` (` remote=0`: no run branch there yet), or `SYNC bad step=fetch|merge|branch|other: <why>`
 // with the last lines of git's output under it.
+// The delta's path is the repository's to choose: it reaches the shell only quoted (shq: the commit
+// messages, `git show`) or as a literal pathspec (pathspecOf), and no line the script prints names it.
 function syncScript(repo) {
   const rel = deltaHome.rel
-  const q = shq(rel)
+  const q = pathspecOf(rel) // the delta, and nothing else, whatever its name holds
+  const others = pathspecOf(rel, true) // every path but the delta
   return [
     ...(ROOT ? [rootCd()] : []),
     'set -u',
@@ -2291,14 +2298,14 @@ function syncScript(repo) {
     'elif [ "$(git -C "$P" symbolic-ref -q --short HEAD)" != "$B" ]; then echo "SYNC bad step=branch: $B is not the checked-out branch"',
     'elif git -C "$P" rev-parse -q --verify MERGE_HEAD >/dev/null; then echo "SYNC bad step=other: a merge is already in progress in the checkout"',
     'elif ! MB=$(git -C "$P" merge-base "$H0" "$R"); then echo "SYNC bad step=other: origin/$B shares no history with $B"',
-    `elif [ -n "$(git -C "$P" diff --no-renames --name-only "$MB" "$R" -- | grep -vxF ${q})" ]; then echo "SYNC bad step=other: origin/$B holds more than the delta"; git -C "$P" diff --no-renames --name-only "$MB" "$R" -- | grep -vxF ${q} | head -n 5`,
+    `elif [ -n "$(git -C "$P" diff --no-renames --name-only "$MB" "$R" -- ${others})" ]; then echo "SYNC bad step=other: origin/$B holds more than the delta"; git -C "$P" diff --no-renames --name-only "$MB" "$R" -- ${others} | head -n 5`,
     'else',
     `  # 2 · the checkout's own uncommitted copy of the delta would stop the merge: committed first, alone`,
     `  if [ -n "$(git -C "$P" status --porcelain --untracked-files=all -- ${q})" ]; then`,
     `    if git -C "$P" add -- ${q} >"$O" 2>&1 && to 60 git -C "$P" commit -q -m ${shq(`chore(data): commit ${rel} as the orchestrating checkout holds it`)}${runTrailer()} -- ${q} >>"$O" 2>&1; then DC=1; else git -C "$P" reset -q -- ${q} >/dev/null 2>&1; DC=2; fi`,
     '  fi',
     '  H=$(git -C "$P" rev-parse HEAD)',
-    `  if [ "$DC" = 2 ]; then echo "SYNC bad step=merge: the checkout's uncommitted ${rel} could not be committed"; tail -n 5 "$O"`,
+    `  if [ "$DC" = 2 ]; then echo "SYNC bad step=merge: the checkout's uncommitted copy of the delta could not be committed"; tail -n 5 "$O"`,
     '  else',
     `    # 3 · a fast-forward, or a merge that changes only the delta`,
     '    if git -C "$P" merge-base --is-ancestor "$H" "$R"; then MODE=ff; to 60 git -C "$P" merge -q --ff-only "$R" >"$O" 2>&1 && MG=1',
@@ -2307,8 +2314,9 @@ function syncScript(repo) {
     '    fi; fi',
     '    if [ "$MG" = 1 ]; then echo "SYNC ok mode=$MODE head=$(git -C "$P" rev-parse HEAD)"',
     '    else',
-    // the checkout as it was: the commit of its own delta undone, the edit uncommitted again
-    `      [ "$DC" = 1 ] && [ "$(git -C "$P" rev-parse HEAD)" = "$H" ] && git -C "$P" reset -q --soft "$H0" && git -C "$P" reset -q -- ${q} >/dev/null 2>&1`,
+    // the checkout as it was: exactly the commit of its own delta undone (only while HEAD is still that
+    // commit), the edit uncommitted again
+    `      [ "$DC" = 1 ] && [ "$(git -C "$P" rev-parse HEAD)" = "$H" ] && git -C "$P" reset -q --soft "$H^" && git -C "$P" reset -q -- ${q} >/dev/null 2>&1`,
     '      echo "SYNC bad step=merge: origin/$B could not be merged into $B: abandoned, the checkout as it was"; tail -n 5 "$O"',
     '      git -C "$P" rev-parse -q --verify MERGE_HEAD >/dev/null && echo "the merge could not be abandoned: the checkout is mid-merge (git merge --abort)"',
     '    fi',
@@ -7283,7 +7291,7 @@ async function syncDelta(repo) {
     emit('sync', { repo, label, status: s ? s.status : null, mode: (s && s.mode) || null, step: (s && s.step) || null, head: s && s.head ? shortSha(s.head) : null, reason: (s && s.reason) || null, detail, round: n + 1, then })
     if (s && s.status === 'ok') log(`◎ ${label}: SYNC ok mode=${s.mode} — ${runBranchFor(repo)} holds the remote's delta commits now (${s.mode === 'ff' ? 'a fast-forward' : 'a merge that changes only the delta'}, at ${shortSha(s.head)}): the gate certifies and pushes that tree`)
     else if (s && s.status === 'none') log(`◎ ${label}: SYNC none — nothing to bring`)
-    else log(`⚠ ${label}: ${s ? `SYNC bad step=${s.step}${s.reason ? ` (${s.reason})` : ''}` : 'no SYNC receipt'}${detail ? `: ${detail}` : ''} — ${again ? 'trying once more' : "the gate runs without its push (one without the remote's delta commits would be refused)"}`)
+    else log(`⚠ ${label}: ${s ? `SYNC bad step=${s.step}${s.reason ? ` (${s.reason})` : ''}` : 'no SYNC receipt'}${detail ? `: ${detail}` : ''} — ${again ? 'trying once more' : "the gate's push is skipped (one without the remote's delta commits would be refused)"}`)
     if (!again) break
   }
   return s

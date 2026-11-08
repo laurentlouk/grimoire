@@ -311,8 +311,9 @@ committed first, alone, as the gate's step 1 would have done, and put back as it
 fails. The script takes no lock: by then the repo's ships are done, none of its tasks is pending or
 in flight, and ships push from their own worktree, so nothing else writes that checkout. Every step
 that can wait on the remote or a hook (ls-remote, fetch, commit, merge, the delta's own step) is
-capped at 60 s, and the whole script by the ship deadline. Its one `SYNC` line is the receipt: the
-engine parses it, journals it (`sync`) and logs it. The gate prompt carries no SYNC step.
+capped at 60 s, and the whole script by the ship deadline. The delta's path, which the repository
+names, reaches git only quoted and as a literal pathspec, and no line the script prints holds it.
+Its one `SYNC` line is the receipt: the engine parses it, journals it (`sync`) and logs it. The gate prompt carries no SYNC step.
 `SYNC bad step=fetch|merge|branch|other` (a remote it cannot read; a conflict it does not resolve,
 abandoned with the worktree as it was; another branch checked out; a remote that holds more than
 the delta), or no receipt the engine can read, means the gate's push would be refused as a

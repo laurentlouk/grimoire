@@ -21,8 +21,12 @@
 //    S5  bad step=fetch: the remote cannot be read; tried twice, then the gate runs without its push
 //    S6  a skipped SYNC (no receipt, a garbled one): no gate push; with no gate command, no gate at all
 //    S7  the script: every git step that can wait (the remote, a hook) is capped with `to 60`
+//    S8  a delta path the repository chose ($(…), a quote, a backtick): never run as shell, on every
+//        path the script takes (the delta that cannot be committed, the merge, none, ff, other)
+//    S9  the other receipts: bad step=branch (another branch checked out), bad step=other (a merge
+//        already in progress, left alone; a remote that holds more than the delta)
 //  Every script runs for real against a git sandbox (support/script-harness.mjs).
-import { run, by, T, impl, QUIET, sandbox, scriptOf, realRepo, receipt, PR_URL, RUN_BRANCH, readFileSync, writeFileSync, mkdirSync, join } from './support/script-harness.mjs'
+import { run, by, T, impl, QUIET, sandbox, scriptOf, realRepo, receipt, PR_URL, RUN_BRANCH, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync, existsSync, join } from './support/script-harness.mjs'
 
 let PASS = 0, FAIL = 0
 const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL++; console.log(`   ✗ FAIL: ${m}`) } }
@@ -213,7 +217,7 @@ const before = (labels, a, b) => labels.indexOf(a) >= 0 && labels.indexOf(a) < l
   ok(shipFailed(logs) && result.ungatedRepos.includes('api') && /SYNC bad step=merge/.test(result.ungatedReasons.api || '') && /push/.test(result.ungatedReasons.api || ''), `the slot ends SHIP_FAILED, the reason the receipt's (${result.ungatedReasons.api})`)
   ok(!labels.includes('seal:api') && !labels.some((l) => l.startsWith('replan')), 'no seal, no replan')
   eq(syncEvents(events).map((e) => [e.status, e.step, e.then]), [['bad', 'merge', 'push-skipped']], "the journal keeps the receipt, and that the gate's push is skipped")
-  ok(logs.some((l) => /^⚠ sync:api: SYNC bad step=merge.* — the gate runs without its push/.test(l)), 'the run log says it')
+  ok(logs.some((l) => /^⚠ sync:api: SYNC bad step=merge.* — the gate's push is skipped/.test(l)), 'the run log says it')
   X.done()
 }
 // ══════════════ S4b · the checkout's uncommitted delta: committed first, put back when the merge fails ══════════════
@@ -275,7 +279,7 @@ const before = (labels, a, b) => labels.indexOf(a) >= 0 && labels.indexOf(a) < l
   ok(!labels.includes('gate:api') && X.origin() === d1 && local(X) === c1, 'no gate command and no push to make: the gate is not dispatched; nothing moved')
   ok(/no receipt/.test(result.ungatedReasons.api || '') && shipFailed(logs), `SHIP_FAILED: the SYNC returned no receipt (${result.ungatedReasons.api})`)
   eq(syncEvents(events).map((e) => [e.status, e.round, e.then]), [[null, 1, 'retry'], [null, 2, 'push-skipped']], 'both journaled, with no status')
-  ok(logs.some((l) => /^⚠ sync:api~r1: no SYNC receipt — the gate runs without its push/.test(l)), 'the run log says it')
+  ok(logs.some((l) => /^⚠ sync:api~r1: no SYNC receipt — the gate's push is skipped/.test(l)) && !logs.some((l) => /the gate runs/.test(l)), 'the run log says the push is skipped, not that a gate runs: none is dispatched')
 
   // with a gate command: the gate runs, with no push, lock or PR step
   const Y = sandbox()
@@ -304,6 +308,97 @@ const before = (labels, a, b) => labels.indexOf(a) >= 0 && labels.indexOf(a) < l
   }), { args: inRepo(Z, { repos: realRepo(Z.W, { gate: { run: 'false' } }), telemetry: { enabled: false } }), index: { deltaFound: true } })
   ok(r3.logs.some((l) => /^⛔ api: gate failed/.test(l)) && r3.labels.includes('replan#1') && !r3.result.ungatedReasons.api, 'GATE_FAILED and a replan, as any failed gate')
   X.done(); Y.done(); Z.done()
+}
+
+// ══════════════ S8 · a delta path the repository chose: never run as shell ══════════════
+// The delta's path comes from the spec's name (or deltaPath), which the repository controls. Through the
+// SYNC that cannot commit the checkout's delta (a pre-commit hook refuses it: DC=2), then the merge
+// (DC=1), none, a fast-forward and a remote that holds more: no `$(…)` or backtick runs, a quote breaks
+// nothing, and every receipt still parses.
+const pwned = (X) => ['PWN', 'PWN2'].filter((f) => existsSync(join(X.T0, f)) || existsSync(join(X.W, f)) || existsSync(join(REPO, f)) || existsSync(f))
+for (const name of ['plain', 'a$(touch PWN)b', 'q"uote', "s'q`touch PWN2`"]) {
+  const X = sandbox()
+  const rel = `docs/specs/${name}.delta.json`
+  mkdirSync(join(X.W, 'docs/specs'), { recursive: true })
+  writeFileSync(join(X.W, rel), JSON.stringify(DELTA, null, 2) + '\n')
+  X.sh(`git add -A docs && git commit -q -m 'docs: the design delta'`, X.W)
+  const c1 = X.commit('c1')
+  const hook = join(X.W, '.git', 'hooks', 'pre-commit')
+  const EDIT = JSON.stringify({ ...DELTA, spec: 'docs/specs/y.md' }, null, 2) + '\n' // the checkout's own edit, at the top: no conflict with an append
+  const dirty = () => { writeFileSync(join(X.W, rel), EDIT); mkdirSync(join(X.W, '.git', 'hooks'), { recursive: true }); writeFileSync(hook, '#!/bin/sh\necho "lint: refused" >&2\nexit 1\n'); chmodSync(hook, 0o755) }
+  const events = [], sync = {}
+  const { result } = await run(`S8 · the delta at ${rel}: the checkout's edit of it cannot be committed (DC=2)`, [T('PROJ-1')], withJournal(events, {
+    'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
+    'ship:api#1': shipFor(X),
+    'sync:api': syncFor(X, sync, dirty),
+  }), { args: inRepo(X, { deltaPath: `work/${rel}` }), index: { deltaFound: true } })
+  const d1 = X.origin()
+  ok(X.sh(`git --git-dir=origin.git diff --name-only -z ${c1} ${d1}`).replace(/\0/g, '') === rel, `(the ship committed the kept change at ${rel} on the remote)`) // -z: the name as it is, never quoted
+  const first = (sync.out[0] || '').split('\n')[0]
+  ok(/^SYNC bad step=merge: /.test(first) && !first.includes(name), `DC=2: SYNC bad step=merge, no path in the line (${first})`)
+  eq(syncEvents(events).map((e) => [e.status, e.step, e.then]), [['bad', 'merge', 'push-skipped']], '… and the engine parsed it: the gate\'s push is skipped')
+  ok(/SYNC bad step=merge/.test(result.ungatedReasons.api || ''), '… with the receipt as the reason')
+  eq([local(X), X.sh(`git status --porcelain -- docs | sed 's/^ /_/'`, X.W).startsWith('_M '), readFileSync(join(X.W, rel), 'utf8') === EDIT, X.sh('git diff --cached --name-only', X.W)], [c1, true, true, ''], 'the checkout as it was: its branch, its edit uncommitted, nothing staged')
+  // the hook gone: the edit is committed, then merged with the remote's delta commit
+  rmSync(hook)
+  const sc = scriptOf(sync.prompts[0])
+  const merged = X.exec('bash', sc).out.split('\n')[0]
+  const head = local(X)
+  const atHead = JSON.parse(X.sh(`git show HEAD:'${rel.replace(/'/g, `'\\''`)}'`, X.W))
+  eq([merged, atHead.spec, unplannedIn(JSON.stringify(atHead)), X.sh(`git log -1 --format=%s ${head}^1`, X.W).startsWith('chore(data): commit docs/specs/')], [`SYNC ok mode=merge head=${head}`, 'docs/specs/y.md', ['api:db/books.k1'], true], 'DC=1: the edit committed alone, then merged: SYNC ok mode=merge')
+  ok(X.exec('bash', sc).out.trim() === 'SYNC none', 'none')
+  // the remote ahead again, by the delta alone: a fast-forward; then by another file: other
+  X.sh(`git push -q origin ${RUN_BRANCH}`, X.W)
+  X.sh(`rm -rf other && git clone -q origin.git other && cd other && git checkout -q ${RUN_BRANCH}`)
+  writeFileSync(join(X.T0, 'other', rel), EDIT.replace('y.md', 'z.md'))
+  X.sh(`cd other && git commit -q -am more && git push -q origin ${RUN_BRANCH}`)
+  ok(X.exec('bash', sc).out.split('\n')[0] === `SYNC ok mode=ff head=${X.origin()}`, 'ff')
+  // the delta changed on both sides (the checkout acknowledges its last entry, the remote appends one
+  // right after it): the merge stops on the delta alone, found by a literal pathspec, and is resolved
+  const { setAcks, changeHash } = await import('../../tools/graph/lib/data/delta.mjs')
+  const here = JSON.parse(readFileSync(join(X.W, rel), 'utf8')).data
+  writeFileSync(join(X.W, rel), setAcks(readFileSync(join(X.W, rel), 'utf8'), [[here.length - 1, { by: 'owner', at: '2026-11-08T10:00:00Z', hash: changeHash(here.at(-1)) }]]))
+  X.sh(`git commit -q -am ack`, X.W)
+  const there = JSON.parse(readFileSync(join(X.T0, 'other', rel), 'utf8'))
+  there.data.push({ id: 'unplanned-PROJ-9-0123abcd', op: 'add', target: 'api:db/books.k9', after: { type: 'TEXT', nullable: true }, why: 'task 9 needs it', slice: 1, origin: 'unplanned' })
+  writeFileSync(join(X.T0, 'other', rel), JSON.stringify(there, null, 2) + '\n')
+  X.sh(`cd other && git commit -q -am k9 && git push -q origin ${RUN_BRANCH}`)
+  ok(X.sh(`git fetch -q origin ${RUN_BRANCH} && { git merge-tree --write-tree HEAD FETCH_HEAD >/dev/null 2>&1; echo $?; }`, X.W) === '1', '(the two versions conflict: the merge stops on the delta)')
+  const both = X.exec('bash', sc).out.split('\n')[0]
+  const joined = JSON.parse(readFileSync(join(X.W, rel), 'utf8')).data
+  eq([both, joined.filter((c) => c.origin === 'unplanned').map((c) => c.target), !!(joined.find((c) => c.target === here.at(-1).target) || {}).ack, status(X)], [`SYNC ok mode=merge head=${local(X)}`, [...here.filter((c) => c.origin === 'unplanned').map((c) => c.target), 'api:db/books.k9'], true, ''],
+    "both sides: this branch's version kept (the acknowledgement), the remote's entry appended")
+  X.sh(`cd other && echo x > other.txt && git add other.txt && git commit -q -m more && git push -q origin ${RUN_BRANCH}`)
+  const other = X.exec('bash', sc).out
+  ok(/^SYNC bad step=other: /.test(other) && /^other\.txt$/m.test(other) && !/^docs\/specs\//m.test(other), 'other: the remote holds more than the delta, the delta itself not listed')
+  eq(pwned(X), [], 'nothing in the path ran as shell')
+  X.done()
+}
+
+// ══════════════ S9 · the other receipts: another branch checked out, a merge in progress, more than the delta ══════════════
+{
+  const cases = [
+    ['bad step=branch: another branch is checked out', (X) => X.sh('git checkout -q -b elsewhere', X.W), /^SYNC bad step=branch: /, 'branch', (X, c1) => X.sh('git symbolic-ref --short HEAD', X.W) === 'elsewhere' && local(X) === c1],
+    ['bad step=other: a merge is already in progress in the checkout', (X) => X.sh(`git checkout -q -b side && echo a > a.txt && git add a.txt && git commit -q -m a && git checkout -q ${RUN_BRANCH} && echo b > a.txt && git add a.txt && git commit -q -m b && { git merge side >/dev/null 2>&1; true; }`, X.W), /^SYNC bad step=other: a merge is already in progress/, 'other',
+      (X) => X.sh('git rev-parse -q --verify MERGE_HEAD >/dev/null && echo kept', X.W) === 'kept' && /^AA a\.txt$/m.test(X.sh('git status --porcelain', X.W))],
+    ['bad step=other: the remote holds more than the delta', (X) => X.sh(`rm -rf other && git clone -q origin.git other && cd other && git checkout -q ${RUN_BRANCH} && echo x > more.txt && git add more.txt && git commit -q -m more && git push -q origin ${RUN_BRANCH}`), /^SYNC bad step=other: .* holds more than the delta/, 'other', (X, c1) => local(X) === c1 && status(X) === ''],
+  ]
+  for (const [what, setup, line, step, intact] of cases) {
+    const X = sandbox()
+    deltaInRepo(X)
+    const c1 = X.commit('c1')
+    const events = [], sync = {}
+    const { result, labels } = await run(`S9 · ${what}`, [T('PROJ-1')], withJournal(events, {
+      'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
+      'ship:api#1': shipFor(X),
+      'sync:api': syncFor(X, sync, () => setup(X)),
+    }), { args: inRepo(X), index: { deltaFound: true } })
+    ok(line.test(sync.out[0]), `the receipt (${sync.out[0].split('\n')[0]})`)
+    eq(syncEvents(events).map((e) => [e.status, e.step, e.then]), [['bad', step, 'push-skipped']], 'parsed and journaled: not tried again, the push skipped')
+    ok(labels.filter((l) => l.startsWith('sync:')).length === 1 && !labels.includes('gate:api') && new RegExp(`SYNC bad step=${step}`).test(result.ungatedReasons.api || ''), 'SHIP_FAILED with the receipt; no gate command, so no gate dispatched')
+    ok(intact(X, c1), 'left alone: nothing in the checkout moved (a merge in progress is not abandoned)')
+    X.done()
+  }
 }
 
 // ══════════════ S7 · the script: every step that can wait is capped ══════════════
