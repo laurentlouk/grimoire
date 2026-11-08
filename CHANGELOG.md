@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.41.2 — a refined relation is compared with a deduced store's joins as joins, never as a foreign key that does not exist (#114)
+
+Since 0.41.0 a table deduced from the queries in code carries relations *inferred from a join*. The refine check compared a relation claim with them as it does with foreign keys, so its drift and its note named a foreign key no file declares, sending an agent to look for it.
+
+- **Worded for what was compared.** A claim a join contradicts now says *a join inferred from the queries at `path:line` reads (owner_id) → accounts(id): the claim disagrees with it*, and one a join states *a join inferred from the queries at `path:line` states it*, the first line it was read at, the others counted. Foreign keys keep their wording.
+- **Trust, by what the join knows.** A join whose referenced side is known (one side's column is `id`, or is named after the other table) contradicts a claim on the same columns to another target: drift, as spec D8 asks a claim to agree with any extracted fact, and how the check catches a claim the queries moved away from. A join whose direction was taken as written says only that two columns are equal, not which one references the other: a disagreement with it is a note, never drift (spec D2: `inferred` is the least trusted kind; a refined binding drifts only on a binding the code states at convention or above).
+- **Every relation on the claim's columns is compared**, not the first: code that joins one column to several tables (a polymorphic owner) holds a claim one of them states; the disagreeing ones are said one by one, the first three, the rest counted.
+- Docs: `tools/graph/README.md` (*The check*), the `data-model` skill (what a relation claim is checked against). Tests: a deduced store with a join and a claim to another target (the exact drift), to the same target (the note), a join taken as written (a note), one column joined to four tables, a join read in two statements, and the foreign key beside it unchanged.
+
 ## 0.41.1 — the code graph's signatures and calls keep no string literal's text: a signature stops at the body, and a literal in it or in a call's receiver shows as `…`
 
 A definition's signature was its first source line, cut to 160 characters, so a one-line function put its whole body in the index: a password in an `ALTER ROLE`, a key in a `WHERE` clause or a URL. `graph_search`, `graph_symbol` and `graph_sql` then showed it. A call's receiver text did the same in the refs table (`fetch('…').then`, `"…".to_string()`), on any line, not only one-liners, and so did a C macro's value and the key of a call by a string key (`handlers['…'](x)`). The data model map already keeps only identifiers (#106); the code graph now follows the same rule.
