@@ -1014,7 +1014,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     if ((fam === 'ts' && t === 'return_statement') || (fam === 'python' && t === 'return_statement') || (fam === 'go' && t === 'return_statement')) { const v = unwrap(n.namedChildren[0], fam); if (ctx.fn && v) { const a = v.type === 'identifier' && F.arrays.has(v.text) ? { ref: v.text } : argOf(v, F); if (a.a || a.ref) F.returns.set(ctx.fn.name.split(/[.:]/).pop(), a) } }
     if (fam === 'rust' && t === 'block' && parent && parent.type === 'function_item' && ctx.fn) { const last = n.namedChildren[n.namedChildren.length - 1]; const v = last && (last.type === 'expression_statement' ? null : unwrap(last, fam)); if (v) { const a = v.type === 'identifier' && F.arrays.has(v.text) ? { ref: v.text } : argOf(v, F); if (a.a || a.ref) F.returns.set(ctx.fn.name.split(/[.:]/).pop(), a) } }
     // reads
-    if ((evidence() || out.clients.length) && !handled.has(n.id)) envAt(n)
+    if (evidence() || out.clients.length) envAt(n) // (a call read with its chain too: `env::var(…).expect(…)`)
     if (STRINGS[fam].test(t)) urlAt(n)
     dbOption(n)
     if (t === CALL[fam] && F.fnNames.size) recordCall(n)

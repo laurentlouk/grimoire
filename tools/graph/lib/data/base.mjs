@@ -25,6 +25,7 @@
 //     view (arch-change.mjs), which reads the saved diagrams at the base the same way.
 import { spawnSync } from 'node:child_process'
 import { EXTRACTORS, asideOf, MAX_BYTES, candidates, extractAll, idOf, keeps } from './registry.mjs'
+import { COMPOSE } from './extractors/redis-infra.mjs'
 import { reconcile } from './reconcile.mjs'
 import { parseAside } from './readers/yaml-aside.mjs'
 import { extractAside } from './readers/code-aside.mjs'
@@ -102,7 +103,8 @@ function extractAt(abs, commit, project, overrides, ctx) {
   }
   const read = (p) => { if (!text.has(p)) throw new Error(`${p} could not be read at ${commit.slice(0, 10)}`); return text.get(p) }
   // the YAML a table extractor will read, parsed in a process of its own (readers/yaml-aside.mjs)
-  const yaml = parseAside([...new Set(want.filter((p) => YAML.test(p) && text.has(p)).map((p) => stripBom(read(p))).filter((t) => tableLevel(t)))])
+  // (and a Compose file, which redis-infra.mjs reads whatever its level)
+  const yaml = parseAside([...new Set(want.filter((p) => YAML.test(p) && text.has(p)).filter((p) => COMPOSE.test(p) || tableLevel(stripBom(read(p)))).map((p) => stripBom(read(p))))])
   const yamlOf = (t) => { const v = yaml.get(t); if (v instanceof Error) throw v; if (!v) throw new Error('no YAML reader: the text was not parsed'); return v }
   // the source files a code extractor parses, read in a process of its own too (readers/code-aside.mjs),
   // once per extractor reading them (a TypeScript schema is item shapes and tables both); the access

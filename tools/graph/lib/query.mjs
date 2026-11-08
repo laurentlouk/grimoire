@@ -382,7 +382,7 @@ export class Graph {
       out.push(`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`)
       for (const d of st.declarations) {
         const how = d.stopped ? `replayed to ${this.dloc({ repo: st.repo, ...d.stopped })}: ${d.error}` : d.status === 'not-read' ? `not read: ${d.label}` : d.label
-        out.push(`  ${d.kind}  ${d.extractor}  ${how}  ${this.dloc({ repo: st.repo, path: d.path })}`)
+        out.push(`  ${d.kind}  ${d.extractor}  ${how}  ${this.dloc({ repo: d.repo ?? st.repo, path: d.path })}`)
         for (const n of d.notes) out.push(`    note: ${n}`)
       }
       if (st.inferred) out.push(`  reached through: ${st.inferred.clients.join(', ') || 'no client import read'}`, `  ${NOT_DECLARED}`)
@@ -570,9 +570,9 @@ export class Graph {
   redisInstance(ks) {
     const i = ks.instance
     const val = (v) => (v === null || v === undefined ? 'not stated' : typeof v === 'object' && v.expr ? `${v.expr} (unknown)` : String(v))
-    const out = [`  instance: ${i.label || i.id}  ${i.kind}  engine ${val(i.engine)}${i.version ? ` ${val(i.version)}` : ''} · modules ${i.modules?.length ? i.modules.join(', ') : 'none stated'} · maxmemory-policy ${val(i.eviction)} · persistence ${val(i.persistence)} · keyspace notifications ${val(i.notifications)} · databases ${val(i.databases)}  — ${this.dloc({ repo: i.repo, path: i.path, line: i.line })} [infra ${i.extractor}]`]
+    const out = [`  instance: ${i.label || i.id}  ${i.kind}  engine ${val(i.engine)}${i.version ? ` ${val(i.version)}` : ''} · modules ${i.modules?.length ? `${i.modules.join(', ')}${i.modulesFrom ? ` (${i.modulesFrom})` : ''}` : 'none stated'} · maxmemory-policy ${val(i.eviction)} · persistence ${val(i.persistence)} · keyspace notifications ${val(i.notifications)} · databases ${val(i.databases)}  — ${this.dloc({ repo: i.repo, path: i.path, line: i.line })} [infra ${i.extractor}]`]
     for (const w of ks.wired || []) out.push(`    wired to ${w.repo} through ${w.env}${w.at ? ` (set at ${this.dloc({ repo: w.at.repo ?? i.repo, path: w.at.path, line: w.at.line })})` : ''}`)
-    if (i.evictionLead) out.push(`    ${i.evictionLead}`)
+    if (ks.evictionLead) out.push(`    ${ks.evictionLead}`)
     return out
   }
   // the key spaces in one line

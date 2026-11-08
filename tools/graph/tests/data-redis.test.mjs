@@ -573,6 +573,129 @@ console.log('\n3 · the key space (data/redis.mjs): templates, types and their c
   } finally { rmSync(RD, { recursive: true, force: true }) }
 }
 
+// ════ 4 · the infrastructure: Compose, Terraform (resources, a Helm release), CloudFormation ════
+if (RT) {
+  console.log('\n4 · the infrastructure (extractors/redis-infra.mjs): engine, modules, eviction, persistence, notifications, databases, the variables it wires')
+  const { default: infra, confOf, imageOf } = await import('../lib/data/extractors/redis-infra.mjs')
+  const { readYaml } = await import('../lib/data/readers/yaml.mjs')
+  const yp = await RT.parserFor('yaml')
+  const ictx = { yaml: (t) => readYaml(yp, t) }
+  const brief = (list) => list.map((i) => `${i.label} ${i.kind}: ${[i.engine, i.version].filter(Boolean).map((v) => (typeof v === 'object' ? v.expr : v)).join(' ')} | ${i.modules.join(',') || '-'} | ${typeof i.eviction === 'object' && i.eviction ? i.eviction.expr : i.eviction} | ${i.persistence} | ${i.notifications} | ${i.databases} | ${i.env.map((e) => `${e.env}@${e.line}${e.build ? `>${e.build}` : ''}`).join(',')}`)
+  eq([imageOf('redis:7.2-alpine'), imageOf('redis:8.0.2').modules, imageOf('valkey/valkey:8').engine, imageOf('docker.dragonflydb.io/dragonflydb/dragonfly').engine, imageOf('postgres:16')], [{ engine: 'Redis', version: '7.2-alpine', modules: [], from: 'Redis 8 and later' }, ['search', 'JSON', 'time series', 'bloom'], 'Valkey', 'Dragonfly', null], 'an image: its engine and version; the modules a stack image or Redis 8 carries')
+  eq(confOf('--maxmemory-policy volatile-ttl --appendonly no --save "" --loadmodule /opt/lib/redisearch.so --databases 2'), { eviction: 'volatile-ttl', aof: 'no', save: 'off', modules: ['search'], databases: 2 }, 'a server\'s flags as redis.conf directives')
+  const cmp = infra.extract({ key: 'stack/compose.yaml', override: 'compose', files: [{ path: 'stack/compose.yaml', text: [
+    'services:',
+    '  cache:',
+    '    image: redis:7.2',
+    '    command: ["redis-server", "--maxmemory-policy", "allkeys-lfu", "--notify-keyspace-events", "KEA"]',
+    '  queue:',
+    '    image: valkey/valkey:8',
+    '    command: valkey-server --appendonly yes',
+    '  api:',
+    '    build: { context: ../api }',
+    '    environment:',
+    '      REDIS_URL: redis://cache:6379/1',
+    '      QUEUE_HOST: queue',
+    '      DB_URL: postgres://db/x',
+    '  site:',
+    '    build: ./site',
+    `    environment: ["CACHE=redis://:${PW}@cache:6379", "OTHER=x"]`,
+  ].join('\n') }] }, ictx).redisInfra
+  eq(brief(cmp), ['cache Compose service: Redis 7.2 | - | allkeys-lfu | null | KEA | null | REDIS_URL@11>api,CACHE@16>site', 'queue Compose service: Valkey 8 | - | null | AOF | null | null | QUEUE_HOST@12>api'],
+    'Compose: each Redis-family service, its flags; the variables other services set to it (a URL or a host naming it), each with the repository its build context names')
+  ok(!JSON.stringify(cmp).includes('postgres') && !JSON.stringify(cmp).includes(`:${PW}@`) && !JSON.stringify(cmp).includes('redis://'), '… never a value: only the variables\' names')
+  const tf = (files, key = 'mod') => infra.extract({ key, override: 'tf', files: files.map(([path, text]) => ({ path, text })) }, ictx).redisInfra
+  const planted = ['tf', 'S3cret', String(process.pid % 7)].join('')
+  const ec = tf([['mod/main.tf', [
+    'variable "policy" { default = "allkeys-lru" }',
+    'variable "auth" {}',
+    'resource "aws_elasticache_parameter_group" "pg" {',
+    '  family = "redis7"',
+    '  parameter {',
+    '    name  = "maxmemory-policy"',
+    '    value = var.policy',
+    '  }',
+    '  parameter {',
+    '    name  = "notify-keyspace-events"',
+    '    value = "Ex"',
+    '  }',
+    '}',
+    'resource "aws_elasticache_replication_group" "cache" {',
+    '  engine               = "redis"',
+    '  engine_version       = module.versions.redis',
+    '  parameter_group_name = aws_elasticache_parameter_group.pg.name',
+    '  auth_token           = var.auth',
+    '  snapshot_retention_limit = 3',
+    '}',
+    'resource "aws_lambda_function" "api" {',
+    '  environment {',
+    '    variables = {',
+    '      REDIS_HOST = aws_elasticache_replication_group.cache.primary_endpoint_address',
+    '      OTHER      = "x"',
+    '    }',
+    '  }',
+    '}',
+  ].join('\n')], ['mod/terraform.tfvars', `auth = "${planted}"\npolicy = "volatile-lru"\n`]])
+  eq(brief(ec), ['aws_elasticache_replication_group.cache ElastiCache replication group: Redis ${module.versions.redis} | - | volatile-lru | RDB snapshots | Ex | null | REDIS_HOST@24'],
+    'Terraform: an ElastiCache replication group, its parameter group\'s directives (a tfvars value over the default), a version from a module output kept as its expression, the variable a function sets to it')
+  ok(!JSON.stringify(ec).includes(planted), '… an auth token beside it never read')
+  const helm = tf([['k8s/redis.tf', [
+    'locals { mods = ["redisearch", "rejson"] }',
+    'resource "helm_release" "cache" {',
+    '  chart  = "redis-ha"',
+    '  values = [file("${path.module}/values.yaml")]',
+    '  set {',
+    '    name  = "image.repository"',
+    '    value = "redis/redis-stack-server"',
+    '  }',
+    '  set {',
+    '    name  = "redis.config.maxmemory-policy"',
+    '    value = var.eviction',
+    '  }',
+    '  set_sensitive {',
+    '    name  = "auth.password"',
+    `    value = "${planted}"`,
+    '  }',
+    '  set {',
+    '    name  = "redis.customConfig"',
+    '    value = join("\\n", [for m in local.mods : "loadmodule /opt/lib/${m}.so"])',
+    '  }',
+    '}',
+    'variable "eviction" {}',
+  ].join('\n')], ['k8s/values.yaml', 'image:\n  tag: "7.4.0-v8"\nredis:\n  config:\n    appendonly: "yes"\n    notify-keyspace-events: "Ex"\n'], ['live/k8s/terragrunt.hcl', 'terraform { source = "../../k8s" }\ninputs = { eviction = "allkeys-lru" }\n']], 'k8s')
+  eq(brief(helm), ['helm_release.cache Helm release: Redis Stack 7.4.0-v8 | search,JSON | allkeys-lru | AOF | Ex | null | '], 'a Helm release of a Redis-family chart: its set blocks (an input from Terragrunt), a values file at a literal path, the modules its config loads (a for evaluated)')
+  ok(!JSON.stringify(helm).includes(planted) && helm[0].path === 'live/k8s/terragrunt.hcl', '… a set_sensitive never read; cited at the configuration that runs it')
+  const unk = tf([['u/main.tf', 'resource "upstash_redis_database" "db" {\n  database_name = "x"\n  eviction = true\n}\nresource "helm_release" "other" {\n  chart = "postgresql"\n}\n']], 'u')
+  eq(brief(unk), ['upstash_redis_database.db Upstash database: Upstash Redis | - | eviction on (the provider\'s policy) | null | null | null | '], 'an Upstash database; a Helm release of another chart is none')
+  const cfn = infra.extract({ key: 'cfn/template.yaml', override: 'cfn', files: [{ path: 'cfn/template.yaml', text: [
+    'Resources:',
+    '  Params:',
+    '    Type: AWS::ElastiCache::ParameterGroup',
+    '    Properties:',
+    '      CacheParameterGroupFamily: redis7',
+    '      Properties:',
+    '        maxmemory-policy: noeviction',
+    '  Cache:',
+    '    Type: AWS::ElastiCache::ReplicationGroup',
+    '    Properties:',
+    '      Engine: valkey',
+    '      EngineVersion: "8.0"',
+    '      CacheParameterGroupName: !Ref Params',
+    '  Fn:',
+    '    Type: AWS::Serverless::Function',
+    '    Properties:',
+    '      Environment:',
+    '        Variables:',
+    '          CACHE_HOST: !GetAtt Cache.PrimaryEndPoint.Address',
+  ].join('\n') }] }, ictx).redisInfra
+  eq(brief(cfn), ['Cache ElastiCache replication group: Valkey 8.0 | - | noeviction | null | null | null | CACHE_HOST@19'], 'CloudFormation: a replication group, its parameter group by Ref, the variable a function sets to it by GetAtt')
+  const { tfLevel } = await import('../lib/data/extractors/terraform.mjs')
+  const { tableLevel } = await import('../lib/data/readers/dynamodb.mjs')
+  eq([tfLevel('m/a.tf', 'resource "aws_elasticache_cluster" "c" {}'), tfLevel('m/a.tf', 'resource "aws_dynamodb_table" "t" {}\nresource "helm_release" "r" {\n  chart = "redis"\n}'), tableLevel('Resources:\n  C:\n    Type: AWS::MemoryDB::Cluster\n')], [9, 12, 8], 'found by content: a module\'s level and a template\'s carry bit 8, the table readers\' levels kept beside it')
+  const [lv, tl] = timed(() => tfLevel('m/a.tf', ' '.repeat(300000) + 'chart' + ' '.repeat(300000) + '= "x'))
+  ok(lv === 1 && tl < 1000, `the content filter on 600 KB of blanks: linear (${tl} ms)`)
+}
+
 // ════ Part 2 · through call(), on an indexed project (fixtures/redis) ════
 const { dataOf, stubPage } = await import('./data-kit.mjs')
 const strip = (t) => t.replace(/\n\nLeads, not facts:[^\n]*$/, '')
@@ -629,6 +752,36 @@ if (RT) {
     eq(tplRows().length, 4, '… a row per template')
     pg1.search('saveCart'); eq(tplRows(), ['cart:{cartId}'], 'search narrows the templates by a function writing them')
     pg1.search('session'); eq(tplRows(), ['user:{userId}:session'], '… or by a name')
+    console.log('\n7 · one instance wired to both repositories by Compose through REDIS_URL (fixtures/redis): one key space, the issue\'s "done when"')
+    const P2 = path.join(SANDBOX, 'wired')
+    cpSync(path.join(HERE, 'fixtures', 'redis'), P2, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const q2 = async (tool, args = {}) => strip(await call(`graph_${tool}`, args, { root: P2 }))
+    const idx2 = await q2('index')
+    ok(!idx2.includes('failure'), `index: three repositories, no extractor failure (${idx2.replace(/\n/g, ' | ')})`)
+    const list2 = (await q2('data')).split('\n')
+    eq(list2.filter((l) => /^\S+:redis/.test(l)), ['infra:redis:cache  redis  6 key templates · 2 search indexes · 1 channel · 1 stream · inferred from the commands in code, not declared (19 commands) · 1 conflict · 4 leads'], 'one key space: the Compose service wired to both repositories (never one per repository once an instance ties them)')
+    has(list2.join('\n'), '  instance: cache  Compose service  engine Redis Stack 7.4.0-v8 · modules search, JSON, time series, bloom (the redis-stack image) · maxmemory-policy allkeys-lru · persistence AOF · keyspace notifications Ex · databases 4  — infra/compose.yaml:2 [infra redis-infra@1]\n    wired to api through REDIS_URL (set at infra/compose.yaml:11)\n    wired to web through REDIS_URL (set at infra/compose.yaml:15)', 'the instance: engine, version, modules, eviction policy, persistence, notifications, databases; wired to each repository at the line that sets the variable')
+    has(list2.join('\n'), '    eviction lead: allkeys-lru may evict any key; 2 templates written with no lifetime (product:{id}, user:{user_id}:profile) lose their data when evicted unless another store holds a copy: a lead, never a verdict', '… the eviction lead')
+    const ks2 = await q2('data', { store: 'infra:redis:cache' })
+    for (const [line, m] of [
+      ['  cart:{cart_id}  hash / string · lifetime 1 h · 2 functions (0 reading, 2 writing)  api/src/sessions.rs:23 · web/src/cart.ts:6  [1 conflict]', 'a type conflict across the two repositories (HINCRBY in Rust, SET in TypeScript)'],
+      ['  user:{user_id}:session  hash · fields: token, device · lifetime 30 min · indexed by idx:users · 2 functions (1 reading, 1 writing)  api/src/sessions.rs:12 · api/src/sessions.rs:13 · web/src/cart.ts:10', 'a template both repositories reach: its fields, lifetime, index, the reader in one and the writer in the other'],
+      ['  user:{user_id}:profile  hash · fields: name · no expiry found (lead) · indexed by idx:users', 'the no-expiry lead'],
+      ['  rate:{ip}  string · lifetime 1 min', 'a Lua script\'s keys mapped'],
+      ['Search indexes (2):\n  idx:products  ON JSON PREFIX product: · 2 fields · covers product:{id} · no access found (lead)  web/src/search.ts:8\n  idx:users  ON HASH PREFIX user: · 2 fields · covers user:{user_id}:profile, user:{user_id}:session · 1 query  api/src/sessions.rs:33', 'an index created in Rust, queried in TypeScript, covering its PREFIX\'s templates; an unqueried index a lead'],
+      ['Channels (1):\n  orders:events  1 publisher · 1 subscriber · across api, web  api/src/orders.rs:7 · web/src/events.ts:5', 'a channel published in one repository and subscribed in the other'],
+      ['Streams (1):\n  stream:orders  groups: billing (consumers {worker})', 'a stream with its consumer group'],
+    ]) has(ks2, line, m)
+    const cart2 = await q2('data', { entity: 'cart:{id}' })
+    has(cart2, 'Conflicts (1): the commands disagree on its type (WRONGTYPE at run time); each side is kept\n  type: hash — api/src/sessions.rs:23 | string — web/src/cart.ts:6', 'graph_data entity: the conflict with both sides, never resolved')
+    has(cart2, '  add_to_cart  writes (HINCRBY)  api/src/sessions.rs:22  (the call at line 23) · 0 callers\n  saveCart  writes (SET)  web/src/cart.ts:5  (the call at line 6) · 0 callers', '… its writers in both repositories')
+    has(await q2('data', { entity: 'infra:redis:cache/index:idx:users' }), 'Queries (1 function, from the commands the code sends: inferred):\n  searchUsers  queries (FT.SEARCH)  web/src/search.ts:3  (the call at line 4) · 0 callers', 'the index\'s query, in the other repository')
+    const page2 = await renderGraph(loadProject(P2))
+    const K2 = dataOf(page2).data.stores.find((x) => x.id === 'infra:redis:cache').ks
+    eq([K2.inst.engine, K2.inst.modules, K2.inst.eviction, K2.wired.map((w) => `${w.repo} ${w.env}`), K2.tpl.find((t) => t.n === 'cart:{cart_id}').cf.map((c) => c.values.map((v) => v.value))], ['Redis Stack', ['search', 'JSON', 'time series', 'bloom'], 'allkeys-lru', ['api REDIS_URL', 'web REDIS_URL'], [['hash', 'string']]], 'the page: the key-space card\'s header from the instance, its wiring, the conflict badged')
+    const pg2 = await stubPage(page2, `#data-${dataOf(page2).data.stores.findIndex((x) => x.id === 'infra:redis:cache')}`)
+    ok(pg2.text().includes('maxmemory-policy') && pg2.text().includes('allkeys-lru') && pg2.text().includes('≠ hash ≠ string') && !pg2.ctl('data-keyspace'), '… drawn: the instance\'s header, the conflict, no "inferred" banner on an instance\'s key space')
+
     console.log('\n6 · a secret planted at runtime in a SET value, an HSET value, a PUBLISH payload, a Lua literal and a connection URL: found in no output')
     const SECRET = ['Pl4nt', 'ed', String(process.pid % 89), 'Zq'].join('')
     writeFileSync(path.join(P1, 'web/src/planted.ts'), [

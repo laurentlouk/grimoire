@@ -31,11 +31,12 @@ import drizzleTs from './extractors/drizzle-ts.mjs'
 import prisma from './extractors/prisma.mjs'
 import sqlQueries from './extractors/sql-queries.mjs'
 import redisCommands from './extractors/redis-commands.mjs'
+import redisInfra from './extractors/redis-infra.mjs'
 import { DOC } from './readers/documents.mjs'
 import { tableLevel } from './readers/dynamodb.mjs'
 import { skipped } from '../project.mjs'
 
-export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma, sqlQueries, redisCommands]
+export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma, sqlQueries, redisCommands, redisInfra]
 // the code and inferred extractors: their files are source (code, or a schema language), inspected by level
 export const SOURCE = EXTRACTORS.filter((ex) => ex.kind === 'code' || ex.kind === 'inferred')
 // those parsing source through the pinned grammars (ctx.tree), and the ones of them a base reads
@@ -82,7 +83,7 @@ export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text
 // so the index and a base keep no copy of it; nor is a source file with nothing for the binding or
 // the access patterns or a schema. A configuration an extractor reads is always kept (a base reads
 // it too: a drizzle.config.ts holds no level of its own).
-const TABLE_EXTRACTORS = new Set([dynamodbTable, cloudformation])
+const TABLE_EXTRACTORS = new Set([dynamodbTable, cloudformation, redisInfra]) // (a Compose file redis-infra.mjs keeps as configuration)
 const isConfig = (p) => EXTRACTORS.some((ex) => ex.config?.(p))
 export const keeps = (p, text) => isConfig(p) || (isSource(p) ? sourceLevel(p, text) > 0 : !DOC.test(p) || tableLevel(text) > 0 || EXTRACTORS.some((ex) => !TABLE_EXTRACTORS.has(ex) && ex.wants(p)))
 // A job reads YAML (its context needs ctx.yaml): one of its inputs is a YAML file, or a .template

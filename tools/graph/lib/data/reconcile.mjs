@@ -88,7 +88,14 @@ export function reconcile(rows, opts = {}) {
 function keyspaces(model, rows) {
   if (!rows.some((r) => r.facts?.redis?.sites?.length || r.facts?.redisInfra?.length)) return
   try {
-    const instances = rows.flatMap((r) => (r.facts?.redisInfra || []).map((i) => ({ ...i, repo: r.repo, extractor: r.extractor })))
+    const repos = new Set(rows.map((r) => r.repo))
+    // an instance the infra declares: its store id, the variables it wires (to the repository a Compose
+    // service builds, when its build context is one by name, else to any that reads the variable)
+    const instances = rows.flatMap((r) => (r.facts?.redisInfra || []).map((i) => ({
+      ...i, repo: r.repo, extractor: r.extractor, id: `${r.repo}:${i.name}`,
+      wires: (i.env || []).map((e) => ({ env: e.env, at: { repo: r.repo, path: e.path, line: e.line }, repos: e.build === '.' ? [r.repo] : e.build && repos.has(e.build) ? [e.build] : null, ...(e.service ? { service: e.service } : {}) })),
+      declarations: [{ extractor: r.extractor, kind: 'infra', path: i.path, line: i.line, status: 'read', label: `${i.kind} ${i.label}`, stopped: null, error: null, notes: i.notes || [], files: 1, implicitIndexes: 0, dialect: 'redis', dialectFrom: null }],
+    })))
     const r = resolveRedis(rows, model, instances)
     model.stores = [...model.stores, ...r.stores].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     model.redis = r.redis

@@ -577,11 +577,11 @@ function packKeySpace(st, shown, fileId, kacc, sd = null) {
   const i = ks.instance
   return {
     id: st.id, repo: st.repo, name: st.name, dialect: 'redis', summary: storeSummary(st),
-    decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: d.path ? [P(d.path, d.kind), d.line ?? null] : null, stopped: null, error: d.error ?? null, notes: d.notes || [] })),
+    decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: d.path ? [P(d.path, d.kind, d.repo ?? st.repo), d.line ?? null] : null, stopped: null, error: d.error ?? null, notes: d.notes || [] })),
     paths, tables: [], collapsed: false, layout: null,
     ks: {
       clients: ks.clients, files: ks.files, commands: ks.commands, dyn: ks.dyn, repos: ks.repos, deduced: !!ks.deduced, unknown: KS_UNKNOWN,
-      inst: i ? { label: i.label || i.id, kind: i.kind, engine: i.engine ?? null, version: i.version ?? null, modules: i.modules || [], eviction: i.eviction ?? null, persistence: i.persistence ?? null, notifications: i.notifications ?? null, databases: i.databases ?? null, at: src([{ repo: i.repo, path: i.path, line: i.line, kind: 'infra' }])[0], lead: i.evictionLead || null } : null,
+      inst: i ? { label: i.label || i.id, kind: i.kind, engine: i.engine ?? null, version: i.version ?? null, modules: i.modules || [], eviction: i.eviction ?? null, persistence: i.persistence ?? null, notifications: i.notifications ?? null, databases: i.databases ?? null, at: src([{ repo: i.repo, path: i.path, line: i.line, kind: 'infra' }])[0], lead: ks.evictionLead || null, from: i.modulesFrom || null } : null,
       wired: (ks.wired || []).map((w) => ({ repo: w.repo, env: w.env, at: w.at ? src([{ repo: w.at.repo ?? (i ? i.repo : st.repo), path: w.at.path, line: w.at.line, kind: 'infra' }])[0] : null })),
       dbs: [...new Map(ks.dbs.filter((d) => d.db !== null).map((d) => [d.db, d])).values()].map((d) => ({ db: d.db, how: d.how, at: src([d])[0] })),
       tree: prefixTree(ts).map((r) => [r.seg, r.depth, r.entity ? pos.get(r.entity) : -1]),

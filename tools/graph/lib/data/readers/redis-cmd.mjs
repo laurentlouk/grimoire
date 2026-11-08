@@ -165,7 +165,8 @@ function hashFields(f, name, args) {
 const fieldName = (t) => t.length > 0 && t.length <= 120 && !/[\u0000-\u001f]/.test(t)
 function pathsOf(list) {
   const out = []
-  for (const a of list) { const t = lit(a); if (t !== null && fieldName(t) && (t === '$' || t === '.' || /^[$.]/.test(t)) && !out.includes(t)) out.push(t) }
+  // a path below the root: the root itself (`$`, `.`) names no field
+  for (const a of list) { const t = lit(a); if (t !== null && fieldName(t) && t !== '$' && t !== '.' && /^[$.]/.test(t) && !out.includes(t)) out.push(t) }
   return out.length ? out : undefined
 }
 

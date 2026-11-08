@@ -226,14 +226,17 @@ function keySpace(g, out) {
   for (const p of channels.filter((c) => c.pattern)) for (const c of channels) if (!c.pattern && globMatches(p.name, c.name)) { c.psub = [...(c.psub || []), p.name] }
   const repos = [...g.repos].sort()
   const n = g.files.length
-  const decl = { extractor: g.files[0]?.extractor || 'redis-commands@1', kind: 'inferred', path: g.files[0]?.r.path || null, line: null, status: 'read', label: n ? `deduced from ${plural(commands, 'command')} in ${plural(n, 'file')}, not declared` : 'declared by the infrastructure; no command in the indexed code reaches it', stopped: null, error: null, notes, files: n, implicitIndexes: 0, dialect: 'redis', dialectFrom: null }
+  const decl = { extractor: g.files[0]?.extractor || 'redis-commands@1', kind: 'inferred', repo: g.files[0]?.repo, path: g.files[0]?.r.path || null, line: null, status: 'read', label: n ? `deduced from ${plural(commands, 'command')} in ${plural(n, 'file')}, not declared` : 'declared by the infrastructure; no command in the indexed code reaches it', stopped: null, error: null, notes, files: n, implicitIndexes: 0, dialect: 'redis', dialectFrom: null }
   const inst = g.instance
+  // an allkeys-* eviction policy: what is written with no lifetime may be evicted (a lead)
+  const noTtl = templates.filter((e) => e.written && !e.ttl && e.base && e.base !== 'stream')
+  const evictionLead = inst && typeof inst.eviction === 'string' && /^allkeys-/.test(inst.eviction) && noTtl.length ? `eviction lead: ${inst.eviction} may evict any key; ${plural(noTtl.length, 'template')} written with no lifetime (${noTtl.slice(0, 5).map((e) => e.name).join(', ')}${noTtl.length > 5 ? ', …' : ''}) lose${noTtl.length === 1 ? 's its' : ' their'} data when evicted unless another store holds a copy: a lead, never a verdict` : null
   return {
     id, repo: inst ? inst.repo : repos[0], name: inst ? inst.name : 'redis', dialect: 'redis', dialectFrom: null,
     keyspace: {
       clients: [...clients].sort(), files: n, commands, dyn, notes, repos, unknown: UNKNOWN,
       channels: channels.map((c) => ({ name: c.name, k: c.k, pattern: c.pattern, pub: c.pub, sub: c.sub, ...(c.psub ? { psub: c.psub } : {}), repos: [...c.repos].sort(), sources: c.sources })),
-      dbs, deduced: !inst, ...(inst ? { instance: inst, wired: [...g.why].map(([repo, w]) => ({ repo, ...w })) } : {}),
+      dbs, deduced: !inst, ...(inst ? { instance: inst, wired: [...g.why].map(([repo, w]) => ({ repo, ...w })), ...(evictionLead ? { evictionLead } : {}) } : {}),
       ...([...g.why.values()].some((w) => w.ambiguous) ? { ambiguous: [...g.why].filter(([, w]) => w.ambiguous).map(([repo, w]) => ({ repo, instances: w.ambiguous })) } : {}),
     },
     declarations: [decl, ...(inst ? inst.declarations || [] : [])],
