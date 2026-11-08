@@ -48,7 +48,7 @@ Never invent: a claim you could not tie to a line is left out. Read enough to be
 | List | Each claim | Checked |
 | --- | --- | --- |
 | `lineage` | `from`, `to` (two entities, across stores), `fields` `[{ from, to }]`, `why`, `sources` | both entities exist, each field on its side, the citations name an entity or a field |
-| `relations` | `from`, `columns`, `to`, `toColumns`, `why`, `sources` | the entities and columns exist; a foreign key on those columns to another table is drift, one stating the same is noted |
+| `relations` | `from`, `columns`, `to`, `toColumns`, `why`, `sources` | the entities and columns exist; a foreign key on those columns to another table is drift, one stating the same is noted; on a store deduced from queries, so is a join the queries show (said as *a join inferred from the queries at `path:line`*), but one whose direction is only as written is a note, never drift |
 | `indexes` | `entity`, `index`, `purpose`, `sources` | the index exists on the entity; the citations name it |
 | `bindings` | `item` (`repo:Type`), `table` (its name, template or entity id), `why`, `sources` | the item type and the table exist; a binding the code states at convention or above to another table is drift |
 | `equivalences` | `tables`: two or more `{ repo, name \| template, store?, path? }` (`name` an exact name, `template` one with `{…}` parts, `path` the file that declares it; `store` defaults to `dynamodb`), `why`, `sources?` | each declaration exists under the name or template stated (in that file); they are then one logical table, their differences conflicts |
@@ -62,7 +62,7 @@ Bounds: 1 MB, 2000 claims, 20 citations per claim, 500 entities, fields or pairs
 node <root>/tools/graph/graph.mjs data check            # every refine file; or: data check docs/architecture/<slug>.data.json
 ```
 
-Exit 1 on drift or a file that does not validate. Each drift line says where (`lineage[0] (line 6)`) and why: a line past the file's end, a line that names none of the claim's names (cite the line that does), an entity, field, index or item the model lacks (read the code again: renamed, moved, or gone), a contradicting foreign key or binding (the claim is wrong, or the code changed). Fix the claim or remove it; never cite a line only to make the check pass. A **gap** is never an error: describe that store under `stores`, or leave it and say why.
+Exit 1 on drift or a file that does not validate. Each drift line says where (`lineage[0] (line 6)`) and why: a line past the file's end, a line that names none of the claim's names (cite the line that does), an entity, field, index or item the model lacks (read the code again: renamed, moved, or gone), a contradicting foreign key, join or binding (the claim is wrong, or the code changed). Fix the claim or remove it; never cite a line only to make the check pass. A **gap** is never an error: describe that store under `stores`, or leave it and say why.
 
 ## 5 · Show it
 

@@ -45,11 +45,47 @@ export function lastSegment(n) {
   return leaves.length ? lastSegment(leaves[leaves.length - 1]) : n.text
 }
 
+// A literal may hold a secret (a token, a password in SQL), a comment anything: the graph keeps
+// neither. `bare(node, to)` is the node's source up to `to`, each string, template, character or
+// regex literal in it shown as `…` between its delimiters (`'…'`, `r#"…"#`, `f"…"`, `"""…"""`,
+// `/…/`; a heredoc, `%q(…)` or `?c` as `…` alone) and each comment dropped. A literal that runs past
+// `to` ends the text.
+const LITERAL = new Set([
+  'string', 'template_string', 'template_literal_type', 'regex', // JavaScript, TypeScript, Python, Ruby, PHP
+  'string_literal', 'raw_string_literal', 'char_literal', 'character_literal', // Rust, Java, Kotlin, C, C++, C#
+  'interpreted_string_literal', 'rune_literal', // Go
+  'verbatim_string_literal', 'interpolated_string_expression', // C#
+  'character', 'string_array', 'delimited_symbol', 'subshell', 'heredoc_body', // Ruby
+  'encapsed_string', 'heredoc', 'nowdoc', // PHP
+  'line_string_literal', 'multi_line_string_literal', 'regex_literal', // Swift
+])
+const hide = (n) => {
+  const m = /heredoc|nowdoc/.test(n.type) ? null : /^(\w{0,3}|[@$]{0,2})(#*)(['"`/])(\3\3)?/.exec(n.text)
+  return m ? `${m[0]}…${m[3]}${m[4] || ''}${m[2]}` : '…'
+}
+export function bare(n, to = n.endIndex) {
+  if (LITERAL.has(n.type)) return hide(n)
+  const src = n.text, from = n.startIndex, out = []
+  let at = from
+  const visit = (p) => {
+    for (let i = 0; i < p.namedChildCount; i++) {
+      const c = p.namedChild(i)
+      if (c.startIndex >= to) return false
+      if (LITERAL.has(c.type)) { out.push(src.slice(at - from, c.startIndex - from), hide(c)); at = c.endIndex }
+      else if (/comment$/.test(c.type)) { out.push(src.slice(at - from, c.startIndex - from)); at = c.endIndex; while (at < to && /[ \t]/.test(src[at - from])) at++ }
+      else if (visit(c) === false) return false
+    }
+  }
+  visit(n)
+  if (at < to) out.push(src.slice(at - from, to - from))
+  return out.join('')
+}
+
 // What a call site calls: { name, qual } where qual is the receiver / scope text ('' for a bare call).
 const NAME_FIELDS = ['name', 'field', 'property', 'attribute', 'method', 'suffix']
 const RECV_FIELDS = ['object', 'value', 'operand', 'receiver', 'scope', 'argument', 'path', 'expression', 'target']
 export function calleeOf(n) {
-  if (!n) return null
+  if (!n || LITERAL.has(n.type)) return null // `handlers['…'](x)` calls by a value, never by a name
   if (n.namedChildCount === 0) return { name: n.text.split(/::|\.|\\|->/).pop(), qual: '' }
   if (/generic|template/.test(n.type)) return calleeOf(field(n, 'function') || field(n, 'name') || n.namedChild(0))
   for (const f of NAME_FIELDS) {
@@ -58,13 +94,13 @@ export function calleeOf(n) {
     const inner = calleeOf(c)
     if (!inner) return null
     const r = RECV_FIELDS.map((rf) => field(n, rf)).find(Boolean)
-    return { name: inner.name, qual: r ? r.text : inner.qual }
+    return { name: inner.name, qual: r ? bare(r) : inner.qual }
   }
   const ch = named(n)
   if (ch.length === 0) return null
   const last = calleeOf(ch[ch.length - 1])
   if (!last) return null
-  return { name: last.name, qual: ch.length > 1 ? ch.slice(0, -1).map(text).join('.') : last.qual }
+  return { name: last.name, qual: ch.length > 1 ? ch.slice(0, -1).map((c) => bare(c)).join('.') : last.qual }
 }
 
 // ───────────────────────── JavaScript / TypeScript / TSX ─────────────────────────
@@ -165,7 +201,7 @@ const rust = {
         const between = n.text.slice(ch[i].endIndex - n.startIndex, ch[i + 1].startIndex - n.startIndex)
         if (between.trim()) continue
         const before = i > 0 ? n.text.slice(ch[i - 1].endIndex - n.startIndex, ch[i].startIndex - n.startIndex).trim() : ''
-        out.push({ name: ch[i].text, qual: before === '::' || before === '.' ? ch[i - 1].text : '' })
+        out.push({ name: ch[i].text, qual: before === '::' || before === '.' ? bare(ch[i - 1]) : '' })
       }
       return out
     },
