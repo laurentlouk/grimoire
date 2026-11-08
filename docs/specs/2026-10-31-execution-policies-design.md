@@ -67,18 +67,18 @@ Fetched from the official docs on 2026-10-31.
 
 ## 3 · Where the time and tokens go today (measured)
 
-**Corpus:** 15 recorded runs with journals on this machine (odyyy-orchestrator ×13, lab ×1, iDeaLex ×1), read with `render-logs.mjs summary --json` and a journal counter (session scratchpad `baseline.mjs`).
+**Corpus:** 15 recorded runs with journals on this machine (acme-orchestrator ×13, lab ×1, globex ×1), read with `render-logs.mjs summary --json` and a journal counter (session scratchpad `baseline.mjs`).
 
 | Measure | Value |
 |---|---|
 | Tasks dispatched / landed | 113 / 123 settles landed (absorbed included), 16 failed settles |
-| Per-task review stages; gating on round 0 | 240; **19 (7.9 %)**. odyyy `firstRoundRate` 0.94 |
+| Per-task review stages; gating on round 0 | 240; **19 (7.9 %)**. acme `firstRoundRate` 0.94 |
 | Tasks needing any fix / two or more | 25 (22 %) / **4 (3.5 %)** |
 | Review dispatches per task | ≈ 3.4 (386 / 113); prechecks ≈ 1.3; guards 13 and verifies 21 in total |
 | Replans; opus escalations | 17; 0 |
-| Cost split (odyyy, 727 M effective tokens, 1,550 dispatches) | implement 58 % + fix 5 %; all review lenses ≈ 16 % (break-it 6, spec-hawk 4, data-integrity 2, SRE 2, …); precheck 1 %; guard + verify < 1 %; mechanical (journal 5, hydrate 4, ship 2, gate 2, preflight, env, index, ledger, integrate, seal, harness-context) ≈ 20 % |
+| Cost split (acme, 727 M effective tokens, 1,550 dispatches) | implement 58 % + fix 5 %; all review lenses ≈ 16 % (break-it 6, spec-hawk 4, data-integrity 2, SRE 2, …); precheck 1 %; guard + verify < 1 %; mechanical (journal 5, hydrate 4, ship 2, gate 2, preflight, env, index, ledger, integrate, seal, harness-context) ≈ 20 % |
 | Tier share of cost | opus 59 %, sonnet 29 %, haiku 12 % (lab: 48 / 41 / 11) |
-| Late dispatches | 18 % (odyyy `lateShare`); median active run 149 min |
+| Late dispatches | 18 % (acme `lateShare`); median active run 149 min |
 
 **What this means for the brief:**
 - "Unnecessary verification loops" are not a material cost on these runs. The guard already stops most panel re-runs.
@@ -368,5 +368,5 @@ Settled while building, inside the approved design:
   - `workflows/briefs/{hydrate,review,guard,precheck}.md`, `workflows/personas/*`, `agents/reviewer.md`;
   - `skills/{implement,review,manager,orchestrate}/SKILL.md`, `scripts/manager.mjs`, `scripts/economy/*`;
   - `docs/specs/2026-10-30-token-economy-design.md`, `CHANGELOG.md` 0.8.0 → 0.15.1.
-- **Measurements:** `render-logs.mjs summary --json` over the 15 recorded runs under `~/Awesome/{odyyy-orchestrator,lab,iDeaLex}/.grimoire/runs`, plus a journal counter (`baseline.mjs`, session scratchpad).
+- **Measurements:** `render-logs.mjs summary --json` over the 15 recorded runs under `~/Awesome/{acme-orchestrator,lab,globex}/.grimoire/runs`, plus a journal counter (`baseline.mjs`, session scratchpad).
 - **Claude Code docs** (via the `claude-code-guide` agent, 2026-10-31): [workflows](https://code.claude.com/docs/en/workflows.md), [sub-agents](https://code.claude.com/docs/en/sub-agents.md), [worktrees](https://code.claude.com/docs/en/worktrees.md), [agent-teams](https://code.claude.com/docs/en/agent-teams.md), [agent-view](https://code.claude.com/docs/en/agent-view.md), [headless](https://code.claude.com/docs/en/headless.md), [sessions](https://code.claude.com/docs/en/sessions.md), [cross-session-messaging](https://code.claude.com/docs/en/cross-session-messaging.md), [hooks](https://code.claude.com/docs/en/hooks.md), [monitoring-usage](https://code.claude.com/docs/en/monitoring-usage.md), [costs](https://code.claude.com/docs/en/costs.md).

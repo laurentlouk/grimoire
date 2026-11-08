@@ -491,15 +491,15 @@ for (const SHELL of SHELLS) {
   for (const [text, key, token] of cases) eq([projectKey(text), keyToken(text)], [key, token], JSON.stringify(text))
 }
 {
-  const IDX = [{ name: 'idealex', path: '.', agent: 'idealex-engineer', tags: ['web'], gate: null }]
-  const W = (t) => ({ ...t, repo: 'idealex', agent: 'idealex-engineer' })
+  const IDX = [{ name: 'globex', path: '.', agent: 'globex-engineer', tags: ['web'], gate: null }]
+  const W = (t) => ({ ...t, repo: 'globex', agent: 'globex-engineer' })
   const two = [W(T('PROJ-1')), W(T('PROJ-2', { dependsOn: ['PROJ-1'] }))]
   const A = 'Migrate to UTF-8 and ISO-8601 dates'
   const s1 = await run('K2 · session 1, "Migrate to UTF-8 and ISO-8601 dates": PROJ-1 lands, PROJ-2 blocks, halt', two,
     by({ 'impl:PROJ-1': impl('aaaaaaa'), 'impl:PROJ-2': BLOCKED, 'replan#1': { decision: 'HALT', reason: 'x', learnings: [] } }), { args: { ...QUIET, repos: IDX, project: A, builtinEnvChecks: false } })
-  const marker = (heredocs(s1.prompt('ship:idealex#halt'))[0] || '').split('\n').find((l) => l.startsWith('<!-- grimoire:state ')) || ''
-  ok(s1.prompt('ship:idealex#halt').includes('feat/migrate-to-utf-8-and-iso-8601-dates-idealex'), 'its run branch is the slugged text, not `utf-8`')
-  const index = { prState: [{ repo: 'idealex', url: PR_URL, state: 'OPEN', isDraft: true, ...copied(marker) }], reconcile: [{ id: 'PROJ-1', repo: 'idealex', sha: 'aaaaaaa', onBranch: true, inBase: 'no' }], runBranches: [{ repo: 'idealex', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'same', fetch: 'ok' }] }
+  const marker = (heredocs(s1.prompt('ship:globex#halt'))[0] || '').split('\n').find((l) => l.startsWith('<!-- grimoire:state ')) || ''
+  ok(s1.prompt('ship:globex#halt').includes('feat/migrate-to-utf-8-and-iso-8601-dates-globex'), 'its run branch is the slugged text, not `utf-8`')
+  const index = { prState: [{ repo: 'globex', url: PR_URL, state: 'OPEN', isDraft: true, ...copied(marker) }], reconcile: [{ id: 'PROJ-1', repo: 'globex', sha: 'aaaaaaa', onBranch: true, inBase: 'no' }], runBranches: [{ repo: 'globex', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'same', fetch: 'ok' }] }
   const other = await run('K2 · another project that mentions UTF-8 ("Add UTF-8 to the CSV export") does not take that state', two, happy, { args: { ...QUIET, repos: IDX, project: 'Add UTF-8 to the CSV export', builtinEnvChecks: false }, index })
   ok(other.labels.includes('impl:PROJ-1') && other.logs.some((l) => /for another project, repo or run branch — ignored/.test(l)), 'ignored: PROJ-1 is built again')
 }

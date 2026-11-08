@@ -667,8 +667,8 @@ function aiContext(config, repos) {
 const repoPath = (r) => (typeof r.path === 'string' && r.path ? r.path : `repositories/${r.name}`)
 
 // The repos[] entry an issue maps to (spec D8, D13): through manager.repoLabels first, so a label
-// that names a repo outright wins over a reading (Odyyy's `frontend` is the mobile app, not the
-// web app), then through the item's `repo` (the scout's match against the repos[] names, as the
+// that names a repo outright wins over a reading (a `frontend` label can name the mobile app, not
+// the web app), then through the item's `repo` (the scout's match against the repos[] names, as the
 // loop's index does), and with neither, to the only repos[] entry when there is one. → { name,
 // path, via } or { problem }. A problem names config text only,
 // never the ticket's: a label is printed as the config's key it matched.

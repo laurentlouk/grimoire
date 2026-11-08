@@ -32,7 +32,7 @@ const ok = (c, m) => { if (c) { PASS++; console.log(`   ✓ ${m}`) } else { FAIL
 const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.stringify(a) === JSON.stringify(b) ? '' : ` (got ${JSON.stringify(a)})`}`)
 const HANG = () => new Promise(() => {})
 const after = (ms, v) => new Promise((r) => setTimeout(() => r(v), ms))
-const ROOT = '/ws/odyyy-orchestrator'
+const ROOT = '/ws/acme-orchestrator'
 const FAST = { agentTimeoutMin: 0.001, agentHardTimeoutMin: 0.005 } // soft 60 ms · writer hard 300 ms
 const NO_SHIP = { deliver: 'end', builtinEnvChecks: false }
 
