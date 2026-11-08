@@ -239,7 +239,7 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
       failed: changes.at.failed.map((f) => ({ extractor: f.extractor, at: shown(f.repo, f.key), error: f.error })) }
   }
   for (const st of model.stores) {
-    if (st.dialect === 'redis') { out.stores.push(packKeySpace(st, shown, fileId, kacc, diff?.get(st.id) || null)); continue }
+    if (st.dialect === 'redis') { out.stores.push(packKeySpace(st, shown, fileId, kacc)); continue }
     const n = st.entities.length ? out.stores.length : -1
     if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc, rrel.get(st.id) || [], qacc))
     for (const d of st.declarations) {
@@ -562,7 +562,7 @@ const CARDS = new Set(['dynamodb'])
 //   ix     each search index { n, on, pre, f: [[name, as, type, opts, src]], asm, lead, q, covers, src, decl, cf }
 //   ch     each channel { n, pat, pub, sub, psub, repos, src }; st: the streams' template indexes
 // Every function is { n, at, r, wr, k: commands, lines, c: callers }. Names only: no value.
-function packKeySpace(st, shown, fileId, kacc, sd = null) {
+function packKeySpace(st, shown, fileId, kacc) {
   const paths = [], at = new Map()
   const P = (p, kind = null, repo = st.repo) => {
     const k = `${repo}\0${p}`
@@ -586,12 +586,11 @@ function packKeySpace(st, shown, fileId, kacc, sd = null) {
       dbs: [...new Map(ks.dbs.filter((d) => d.db !== null).map((d) => [d.db, d])).values()].map((d) => ({ db: d.db, how: d.how, at: src([d])[0] })),
       tree: prefixTree(ts).map((r) => [r.seg, r.depth, r.entity ? pos.get(r.entity) : -1]),
       tpl: ts.map((e) => ({ n: e.name, type: e.type, types: e.types.map((t) => [t.type, src(t.sources)]), cf: cf(e.conflicts), f: e.fields.map((f) => [f.name, f.how, src(f.sources)]), ttl: e.ttl ? [ttlText(e.ttl), src(e.ttl.sources)] : null, lead: e.lead ? 1 : 0, ix: e.coveredBy, globs: e.globs, gr: (e.groups || []).map((g) => [g.name, g.consumers, g.created ? 1 : 0, src(g.sources)]), src: src(e.sources), more: e.more || 0, rw: fns(e.redis.sites, e.id), names: e.names })),
-      ix: ixs.map((x) => ({ n: x.name, on: x.on, pre: x.prefixes, f: x.fields.map((f) => [f.name, f.as, f.type.raw, f.opts, src(f.sources)]), asm: x.assembled ? 1 : 0, past: x.past || 0, lead: x.lead ? 1 : 0, q: fns(x.queries.sites, x.id), covers: x.covers, src: src(x.sources), decl: x.declared ? 1 : 0, filter: x.filter ? 1 : 0, cf: cf(x.conflicts), aliases: x.aliases || [] })),
+      ix: ixs.map((x) => ({ n: x.label ?? x.name, on: x.on, pre: x.prefixes, f: x.fields.map((f) => [f.name, f.as, f.type.raw, f.opts, src(f.sources)]), asm: x.assembled ? 1 : 0, past: x.past || 0, lead: x.lead ? 1 : 0, q: fns(x.queries.sites, x.id), covers: x.covers, src: src(x.sources), decl: x.declared ? 1 : 0, filter: x.filter ? 1 : 0, cf: cf(x.conflicts), aliases: x.aliases || [] })),
       ch: ks.channels.map((c) => ({ n: c.name, pat: c.pattern ? 1 : 0, pub: fns(c.pub), sub: fns(c.sub), psub: c.psub || [], repos: c.repos, src: src(c.sources) })),
       st: streamsOf(st).map((e) => pos.get(e)),
       say: { noExpiry: NO_EXPIRY, noQuery: NO_QUERY, assembled: ASSEMBLED },
     },
-    ...(sd ? { ksch: sd } : {}),
   }
 }
 // rr: the refined relations between two of its tables (dataData), drawn as lines no foreign key states

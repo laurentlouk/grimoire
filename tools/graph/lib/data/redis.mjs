@@ -214,7 +214,7 @@ function keySpace(g, out) {
     const covers = templates.filter((e) => prefixes.length ? prefixes.some((p) => covered(p, e.name)) : !!d)
     for (const e of covers) e.coveredBy.push(x.name)
     return {
-      id: x.id, name: x.name, kind: 'index', on: d ? d.on || 'HASH' : null, prefixes, ...(d?.filter ? { filter: true } : {}),
+      id: x.id, name: `index:${x.name}`, label: x.name, kind: 'index', on: d ? d.on || 'HASH' : null, prefixes, ...(d?.filter ? { filter: true } : {}),
       created: x.created, declared: !!x.created, ...(d?.assembled ? { assembled: d.assembled } : {}), ...(d?.past ? { past: d.past } : {}),
       fields, keys: [], indexes: [], relations: [], covers: covers.map((e) => e.name), ...(x.aliases ? { aliases: x.aliases } : {}),
       queries: { sites: [...x.queries] }, ...(x.queries.size ? {} : { lead: NO_QUERY }),
@@ -240,7 +240,8 @@ function keySpace(g, out) {
       ...([...g.why.values()].some((w) => w.ambiguous) ? { ambiguous: [...g.why].filter(([, w]) => w.ambiguous).map(([repo, w]) => ({ repo, instances: w.ambiguous })) } : {}),
     },
     declarations: [decl, ...(inst ? inst.declarations || [] : [])],
-    entities: [...templates, ...indexes],
+    // a channel is an entity too (graph_changes and a delta address it: channel:<name>)
+    entities: [...templates, ...indexes, ...channels.map((c) => ({ id: `${id}/channel:${c.name}`, name: `channel:${c.name}`, label: c.name, kind: 'channel', pattern: c.pattern, sources: c.sources, conflicts: [], fields: [], keys: [], indexes: [], relations: [] }))],
   }
 }
 
@@ -264,6 +265,8 @@ export const templatesOf = (st) => st.entities.filter((e) => e.kind === 'keyPatt
 export const indexesOf = (st) => st.entities.filter((e) => e.kind === 'index')
 export const streamsOf = (st) => templatesOf(st).filter((e) => e.base === 'stream' || (e.types || []).some((t) => t.base === 'stream'))
 export const redisConflicts = (st) => st.entities.reduce((a, e) => a + e.conflicts.length, 0)
+// what an entity is called where it is shown: an index or a channel by its own name
+export const shownName = (e) => e.label ?? e.name
 // A key space in one line (graph_data and the Data tab say the same)
 export function redisSummary(st) {
   const t = templatesOf(st), ix = indexesOf(st), ks = st.keyspace
@@ -275,6 +278,13 @@ export function ttlText(ttl) {
   if (!ttl) return 'no lifetime set'
   const secs = (s) => (s % 86400 === 0 ? `${s / 86400} d` : s % 3600 === 0 ? `${s / 3600} h` : s % 60 === 0 && s >= 60 ? `${s / 60} min` : `${s} s`)
   return [...ttl.seconds.map(secs), ttl.code ? 'set in code' : null, ttl.keep ? 'kept (KEEPTTL)' : null].filter(Boolean).join(', ')
+}
+// A key space's settings as graph_changes compares them: its instance's (engine, version, modules,
+// eviction, persistence, notifications, databases), each as written (an unknown as its expression)
+export function instanceAttrs(st) {
+  const i = st?.keyspace?.instance
+  const v = (x) => (x === null || x === undefined ? null : typeof x === 'object' ? x.expr ?? JSON.stringify(x) : String(x))
+  return i ? { engine: v(i.engine), version: v(i.version), modules: (i.modules || []).join(', ') || null, 'maxmemory-policy': v(i.eviction), persistence: v(i.persistence), 'keyspace notifications': v(i.notifications), databases: v(i.databases) } : {}
 }
 // The functions holding a list of commands, one entry per function (as queries.mjs sqlFunctions):
 // `sym(site)` → the code graph's symbol around it; with `entity`, whether each reads or writes it.

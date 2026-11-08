@@ -48,11 +48,14 @@
 //   Rename     { kind, entity: null for entities, shape: 'same columns' | 'same type and position',
 //                from: [index into changes], to: [index into changes], ambiguous }
 import { normType, normDefault, normColumn, kvIndex, kvTable, projectionText, declPath } from './model.mjs'
+import { instanceAttrs } from './redis.mjs'
 
 // Dialects whose identifiers compare in any letter case.
 const CASELESS = new Set(['sqlite'])
 // How a dialect's names compare: lower-cased where they are caseless, as written elsewhere.
-export const foldOf = (dialect) => (CASELESS.has(dialect) ? (x) => String(x).toLowerCase() : (x) => String(x))
+// a key space's names: a key template's placeholders compared without their names (`user:{id}` is
+// `user:{user_id}`), as data/redis.mjs compares templates
+export const foldOf = (dialect) => (CASELESS.has(dialect) ? (x) => String(x).toLowerCase() : dialect === 'redis' ? (x) => String(x).replace(/\{[A-Za-z0-9_$]*\}/g, '{}') : (x) => String(x))
 const LISTS = [['field', 'fields'], ['key', 'keys'], ['index', 'indexes'], ['relation', 'relations']]
 
 // An element's identity within its entity (an entity's within its store), names folded by `f`:
@@ -77,7 +80,7 @@ const typeOf = (x) => x.type?.raw ?? x.type
 // and projection, as reconcile.mjs compares them)
 const same = (v) => [v ?? null, v ?? null]
 const ATTRS = {
-  entity: (e) => ({ kind: [e.kind, e.kind], ...(kvTable(e) ? { billing: same(e.billing), stream: same(e.stream) } : {}) }),
+  entity: (e) => ({ kind: [e.kind, e.kind], ...(kvTable(e) ? { billing: same(e.billing), stream: same(e.stream) } : {}), ...(e.kind === 'keyPattern' ? { type: [e.base ?? null, e.type ?? null] } : {}), ...(e.kind === 'index' && 'prefixes' in e ? { on: same(e.on), prefixes: [(e.prefixes || []).join('\u0000'), (e.prefixes || []).join(' ')] } : {}) }),
   field: (x, f) => ({ type: [normType(typeOf(x), f?.dialect), typeOf(x)], nullable: [x.nullable, x.nullable], default: [normDefault(x.default, f?.dialect), x.default ?? null], generated: [x.generated ?? null, x.generated ?? null] }),
   key: (k) => (k.role === 'ttl' ? { enabled: same(k.enabled) } : {}),
   index: (i, f) => (kvIndex(i) ? { kind: same(i.kind), partition: [i.partition.join(','), i.partition.join(', ')], sort: [i.sort.join(','), i.sort.join(', ')], projection: same(projectionText(i)) }
@@ -108,6 +111,8 @@ function diffStore(b, a) {
   const fold = Object.assign(foldOf(dialect), { dialect }) // names folded; types and defaults compared in the dialect's terms
   const out = { id: s.id, repo: s.repo, name: s.name, dialect, change: !b ? 'added' : !a ? 'removed' : null, attrs: [], before: b, after: a, changes: [], renames: [] }
   if (b && a && (b.dialect ?? null) !== (a.dialect ?? null)) out.attrs.push({ attr: 'dialect', before: b.dialect ?? null, after: a.dialect ?? null })
+  // a key space's instance: what the infrastructure states of it (data/redis.mjs instanceAttrs)
+  if (b && a && dialect === 'redis') { const x = instanceAttrs(b), y = instanceAttrs(a); for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) if ((x[k] ?? null) !== (y[k] ?? null)) out.attrs.push({ attr: k, before: x[k] ?? null, after: y[k] ?? null }) }
   const push = (kind, change, entity, x, y, pos, attrs = [], owner = null) => out.changes.push({ kind, change, entity, name: NAME[kind](y || x), key: KEY[kind](y || x, fold), pos, owner, before: x, after: y, attrs, rename: null })
   const byName = (p, q) => { const m = KEY.entity(p[0] || p[1], fold), n = KEY.entity(q[0] || q[1], fold); return m < n ? -1 : m > n ? 1 : 0 }
   for (const [x, y, px, py] of pairs(b?.entities || [], a?.entities || [], (e) => KEY.entity(e, fold)).sort(byName)) {

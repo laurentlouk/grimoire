@@ -469,7 +469,7 @@ if (!RT) {
   eq([brief(kpy), brief(kgo)], [['6 run HSET job:{jid}:w bound'], ['4 run SET lock:{id}:w typed']], 'Python and Go: a key function read through')
   const { reconcile } = await import('../lib/data/reconcile.mjs')
   const covered = reconcile([{ repo: 'api', extractor: 'redis-commands@1', facts: { declarations: [], redis: kf } }])
-  eq(covered.stores[0].entities.filter((e) => e.kind === 'index').map((e) => [e.name, e.declared, e.queries.sites.length, e.lead ?? null]), [['{stage}:idx:docs', true, 1, null]], '… the index declared and queried under one templated name: no lead')
+  eq(covered.stores[0].entities.filter((e) => e.kind === 'index').map((e) => [e.label, e.declared, e.queries.sites.length, e.lead ?? null]), [['{stage}:idx:docs', true, 1, null]], '… the index declared and queried under one templated name: no lead')
 
   console.log('\n2 · the call sites: hostile and dynamic input, bounded and inert; errors by position only')
   const head = ["import Redis from 'ioredis'", 'const r = new Redis()']
@@ -531,7 +531,7 @@ console.log('\n3 · the key space (data/redis.mjs): templates, types and their c
   ], 'templates compared without their placeholders\' names (user:{user_id} and user:{id} one), each with its type, fields, lifetime and every path:line; a written template with no lifetime anywhere a lead; a read-only one none')
   eq([T('user:{user_id}:session').names, T('user:{user_id}:session').path, T('user:{user_id}:session').coveredBy, T('user:{user_id}:session').globs, T('events:orders').groups.map((g) => [g.name, g.created, g.consumers])], [['user:{user_id}:session', 'user:{id}:session'], ['user:', '{user_id}:', 'session'], ['idx:users'], ['user:*:session'], [['billing', true, ['w1']]]],
     '… the names code gives its placeholders, its prefix-tree path, the index whose PREFIX covers it, the SCAN glob reading it, a stream\'s consumer group and consumer')
-  const IX = (name, st = api) => st.entities.find((e) => e.kind === 'index' && e.name === name)
+  const IX = (name, st = api) => st.entities.find((e) => e.kind === 'index' && e.label === name)
   eq([IX('idx:users').fields.map((f) => `${f.name}:${f.type.raw}${f.opts.length ? `(${f.opts})` : ''}`), IX('idx:users').on, IX('idx:users').prefixes, IX('idx:users').covers, IX('idx:users').declared, IX('idx:users').lead, IX('idx:orphan').lead === RM.NO_QUERY, IX('idx:orphan').covers],
     [['name:TEXT(SORTABLE)', 'email:TAG'], 'HASH', ['user:'], ['user:{user_id}:session'], true, RM.NO_QUERY, true, []],
     'a literal FT.CREATE: a declaration (its schema, ON, PREFIX and the templates it covers); queried only from another key space, it is unqueried in its own')
@@ -781,6 +781,43 @@ if (RT) {
     eq([K2.inst.engine, K2.inst.modules, K2.inst.eviction, K2.wired.map((w) => `${w.repo} ${w.env}`), K2.tpl.find((t) => t.n === 'cart:{cart_id}').cf.map((c) => c.values.map((v) => v.value))], ['Redis Stack', ['search', 'JSON', 'time series', 'bloom'], 'allkeys-lru', ['api REDIS_URL', 'web REDIS_URL'], [['hash', 'string']]], 'the page: the key-space card\'s header from the instance, its wiring, the conflict badged')
     const pg2 = await stubPage(page2, `#data-${dataOf(page2).data.stores.findIndex((x) => x.id === 'infra:redis:cache')}`)
     ok(pg2.text().includes('maxmemory-policy') && pg2.text().includes('allkeys-lru') && pg2.text().includes('≠ hash ≠ string') && !pg2.ctl('data-keyspace'), '… drawn: the instance\'s header, the conflict, no "inferred" banner on an instance\'s key space')
+
+    console.log('\n8 · a branch against its base (graph_changes: templates, fields, indexes, channels and the instance; never access), and a delta\'s targets')
+    const git = (...a) => spawnSync('git', ['-C', P2, ...a], { encoding: 'utf8' })
+    const commit = (m) => { git('add', '-A'); git('-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m) }
+    git('init', '-q', '-b', 'main'); commit('the key space')
+    git('switch', '-q', '-c', 'feat')
+    const edit2 = (rel, fn) => { const f = path.join(P2, rel); writeFileSync(f, fn(readFileSync(f, 'utf8'))) }
+    edit2('web/src/cart.ts', (t) => t.replace("await redis.set(`cart:${cartId}`, JSON.stringify(items), 'EX', CART_TTL)", "await redis.hset(`cart:${cartId}`, 'items', JSON.stringify(items))\n  await redis.lpush(`audit:${cartId}`, 'saved')\n  await redis.publish('cart:events', cartId)").replace("return redis.hgetall(`user:${userId}:session`)", "return redis.hgetall(`user:${userId}:session`) // read only"))
+    edit2('api/src/sessions.rs', (t) => t.replace('.arg("email").arg("TAG")', '.arg("email").arg("TAG").arg("nick").arg("TAG")'))
+    edit2('infra/compose.yaml', (t) => t.replace('--maxmemory-policy allkeys-lru', '--maxmemory-policy volatile-lru'))
+    commit('a template, a field, an index field, a channel; the eviction policy')
+    const ch = await q2('changes', { base: 'main' })
+    for (const [line, m] of [
+      ['infra:redis:cache  redis  modified', 'the key space changed'],
+      ['maxmemory-policy: allkeys-lru → volatile-lru', 'the instance\'s eviction policy, as the infrastructure states it'],
+      ['+ audit:{cartId}  key template, list', 'a template added'],
+      ['+ channel:cart:events  channel', 'a channel added'],
+      ['cart:{cart_id}', 'a template whose type changed (it was a conflict, now a hash on both sides)'],
+      ['+ cart:{cart_id}.items  hash field', 'a field added'],
+      ['+ index:idx:users.nick  TAG', 'an index\'s schema field added (FT.CREATE, a declaration)'],
+    ]) has(ch, line, `graph_changes: ${m}`)
+    ok(!/readSession|HGETALL|lifetime|function/.test(ch), '… never access: readers, writers and lifetimes are not compared')
+    mkdirSync(path.join(P2, 'docs/specs'), { recursive: true })
+    writeFileSync(path.join(P2, 'docs/specs/2026-11-08-cart.delta.json'), JSON.stringify({ schema: 1, spec: 'docs/specs/2026-11-08-cart.md', architecture: [], data: [
+      { id: 'audit', op: 'add', target: 'infra:redis:cache/audit:{id}', after: { type: 'list' }, why: 'an audit trail', origin: 'planned' },
+      { id: 'items', op: 'add', target: 'infra:redis:cache/cart:{id}.items', why: 'a cart as a hash', origin: 'planned' },
+      { id: 'nick', op: 'add', target: 'infra:redis:cache/index:idx:users.nick', after: { type: 'TAG' }, why: 'search by nickname', origin: 'planned' },
+      { id: 'chan', op: 'add', target: 'infra:redis:cache/channel:cart:events', why: 'cart events', origin: 'planned' },
+      { id: 'stream', op: 'change', target: 'infra:redis:cache/stream:stream:orders', after: { type: 'stream' }, why: 'kept', origin: 'planned' },
+      { id: 'later', op: 'add', target: 'infra:redis:cache/index:idx:carts', why: 'not built yet', origin: 'planned' },
+    ] }, null, 2))
+    const dl2 = await q2('changes', { delta: 'docs/specs/2026-11-08-cart.delta.json', base: 'main' })
+    for (const id of ['audit', 'items', 'nick', 'chan', 'stream']) has(dl2, `planned and built  ${id}  `, `the delta: ${id} planned and built (its target found: a template by its form and its type, a field, an index's field, a channel, a stream by its template)`)
+    has(dl2, 'pending  later  add infra:redis:cache/index:idx:carts', '… an index not built yet: pending')
+    has(dl2, 'Unplanned (1): in the branch, in no change of the delta\n  ~ infra:redis:cache/cart:{cart_id}  type: hash / string → hash', '… the type the branch changed, in no change of the delta: unplanned')
+    const { parseTarget } = await import('../lib/data/delta.mjs')
+    eq([parseTarget('api:redis/index:idx:docs.$.title'), parseTarget('api:redis/user:{id}:session.token').entity, parseTarget('infra:redis:cache/channel:a:b').storeId], [{ repo: 'api', store: 'redis', storeId: 'api:redis', entity: 'index:idx:docs', kind: 'field', el: { name: '$.title' } }, 'user:{id}:session', 'infra:redis:cache'], 'the targets: a key space\'s index (a JSON path its field), a template\'s field, a channel, under an instance\'s store id')
 
     console.log('\n6 · a secret planted at runtime in a SET value, an HSET value, a PUBLISH payload, a Lua literal and a connection URL: found in no output')
     const SECRET = ['Pl4nt', 'ed', String(process.pid % 89), 'Zq'].join('')

@@ -11,7 +11,7 @@ import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
 import { refineModel, refineCheck } from './data/check.mjs'
 import { NOT_DECLARED, sqlFunctions, queryConflicts } from './data/queries.mjs'
-import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, NO_QUERY, ASSEMBLED } from './data/redis.mjs'
+import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, shownName, NO_QUERY, ASSEMBLED } from './data/redis.mjs'
 import { docRoots } from './docs.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
@@ -50,6 +50,9 @@ export const kvTableText = (e) => `${e.billing || 'billing not said'} · ${e.str
 // One element of a change, as graph_changes lists it (`dialect`: its store's).
 export function describe(c, el, dialect = null) {
   const kv = dialect === 'dynamodb'
+  // a key space's template, index, channel and their fields (data/redis.mjs)
+  if (dialect === 'redis' && c.kind === 'entity') return el.kind === 'index' ? `${el.name}  search index ON ${el.on ?? '?'}${el.prefixes?.length ? ` PREFIX ${el.prefixes.join(' ')}` : ''}, ${plural(el.fields.length, 'field')}` : el.kind === 'channel' ? `${el.name}  channel${el.pattern ? ' pattern' : ''}` : `${el.name}  key template, ${el.type || 'type unknown'}${el.fields.length ? `, ${plural(el.fields.length, 'field')}` : ''}`
+  if (dialect === 'redis' && c.kind === 'field') return `${c.entity}.${el.name}  ${el.type?.raw ? `${el.type.raw}${el.as ? ` AS ${el.as}` : ''}` : el.how === 'path' ? 'JSON path' : el.how === 'stream' ? 'stream entry field' : 'hash field'}`
   if (c.kind === 'entity') return `${el.name}  ${el.kind}${el.kind === 'table' || el.fields.length ? `, ${plural(el.fields.length, kv ? 'attribute' : 'column')}` : ''}${kv ? `, ${kvTableText(el)}` : ''}`
   if (c.kind === 'field' && kv && el.item && el.sources.every((s) => s.kind === 'code')) return `${c.entity}.${el.name}  item field, ${itemText(el)}`
   if (c.kind === 'field' && kv) return `${c.entity}.${el.name}  attribute ${typeOf(el)}${el.nullable ? '' : ', a key of the table'}${el.item ? `; item: ${itemText(el)}` : ''}`
@@ -602,7 +605,7 @@ export class Graph {
     }
     const ix = indexesOf(st)
     if (ix.length) out.push(`Search indexes (${ix.length}):`)
-    for (const x of ix) out.push(`  ${x.name}  ${x.declared ? `ON ${x.on}${x.prefixes.length ? ` PREFIX ${x.prefixes.join(' ')}` : ''} · ${plural(x.fields.length, 'field')}${x.assembled ? ' (assembled in code)' : ''} · covers ${x.covers.join(', ') || 'no template read'}` : 'its creation not read'} · ${x.lead ? 'no access found (lead)' : plural(x.queries.sites.length, 'query', 'queries')}  ${cites(x)}${x.conflicts.length ? `  [${plural(x.conflicts.length, 'conflict')}]` : ''}`)
+    for (const x of ix) out.push(`  ${shownName(x)}  ${x.declared ? `ON ${x.on}${x.prefixes.length ? ` PREFIX ${x.prefixes.join(' ')}` : ''} · ${plural(x.fields.length, 'field')}${x.assembled ? ' (assembled in code)' : ''} · covers ${x.covers.join(', ') || 'no template read'}` : 'its creation not read'} · ${x.lead ? 'no access found (lead)' : plural(x.queries.sites.length, 'query', 'queries')}  ${cites(x)}${x.conflicts.length ? `  [${plural(x.conflicts.length, 'conflict')}]` : ''}`)
     const ch = st.keyspace.channels
     if (ch.length) out.push(`Channels (${ch.length}):`)
     for (const c of ch) out.push(`  ${c.name}${c.pattern ? ' (pattern)' : ''}  ${plural(c.pub.length, 'publisher')} · ${plural(c.sub.length, 'subscriber')}${c.psub ? ` · matched by ${c.psub.join(', ')}` : ''}${c.repos.length > 1 ? ` · across ${c.repos.join(', ')}` : ''}  ${cites(c)}`)
@@ -614,6 +617,11 @@ export class Graph {
   redisEntity(model, st, e) {
     const cites = (x) => `${this.sources(st.repo, x.sources)}${x.more ? ` and ${plural(x.more, 'more')}` : ''}`
     const ex = st.declarations[0]?.extractor || 'redis-commands'
+    if (e.kind === 'channel') {
+      const c = st.keyspace.channels.find((x) => x.name === e.label) || { pub: [], sub: [] }
+      const pub = this.redisFns(model, c.pub, null), sub = this.redisFns(model, c.sub, null)
+      return [`${e.id}  ${e.pattern ? 'channel pattern' : 'channel'}  (redis; from the commands in code, not declared)`, `  seen at ${cites(e)} [inferred ${ex}]`, `Publishers (${pub.length}):`, ...this.redisFnLines(pub, 'publishes'), `Subscribers (${sub.length}):`, ...this.redisFnLines(sub, 'subscribes')].join('\n')
+    }
     if (e.kind === 'index') {
       const out = [`${e.id}  search index  (redis; ${e.declared ? `declared by code: a literal FT.CREATE at ${this.dloc({ repo: e.created.repo, path: e.created.path, line: e.created.line })}` : 'its creation not read: only queried'})`, `  seen at ${cites(e)} [${e.declared ? 'code' : 'inferred'} ${ex}]`]
       if (e.declared) out.push(`  ON ${e.on} · ${e.prefixes.length ? `PREFIX ${e.prefixes.join(' ')}` : 'no PREFIX (every key of its type)'}${e.filter ? ' · a FILTER (its expression not kept)' : ''} · covers ${e.covers.join(', ') || 'no template read'}${e.aliases ? ` · aliases ${e.aliases.join(', ')}` : ''}`)
