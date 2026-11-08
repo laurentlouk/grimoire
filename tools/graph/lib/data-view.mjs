@@ -21,6 +21,15 @@
 // bound item does not state joins the card's conflicts. Search narrows the cards (a function's name
 // too). Everything goes through h(): text, never markup.
 //
+// A key-value cache's key space (render.mjs packs it `ks`, data/redis.mjs) is drawn as a key-space
+// card: its header the instance the infra declares (engine, version, modules, eviction policy,
+// persistence, keyspace notifications, databases, the eviction lead) or "inferred: no instance wired";
+// its body the key templates as a prefix tree (each with its type badge, its fields, its lifetime or
+// the no-expiry lead, the indexes covering it, a type conflict with both sides, its readers and
+// writers), then the search indexes (schema, PREFIX coverage, queries or the lead), the channels (their
+// publishers and subscribers) and the streams (their consumer groups). Search narrows the templates by
+// name, field or function.
+//
 // The change overlay (render.mjs dataData packs it against the base, in Node): a toggle "Changes vs
 // <base>", off by default and absent when no base resolved (the tab says why). On, a store that
 // changed is drawn from its overlay tables and layout: added elements green, removed ones struck in
@@ -565,8 +574,87 @@ export function dataClient(ctx) {
       h('p', { class: 'note' }, 'Read from the files that declare each table (CreateTable inputs, CloudFormation, SAM and Serverless templates, Terraform modules evaluated with the Terragrunt inputs or tfvars that set them), never from a database. A table two files declare is one card citing both; where they disagree, both values are kept. A reference (!Ref, !Sub, ${…}) is shown as written, never evaluated; a Terraform value no file states (another configuration\'s output, the environment) is shown as ${its expression}, and a name with such a part as its template ({…} for each unknown part), never guessed. Hover a row for the path:line that declares it. A map, not the database: read the code at the path:line.'))
   }
 
+  // the selected delta's changes on a key space, with their states (no overlay is drawn on its card)
+  const KS_STATE = { 'planned-built': 'planned and built', pending: 'pending', 'built-differently': 'built differently' }
+  function ksDelta(n) {
+    const d = DL[st.deltaSel]
+    if (!d || (d.errors && d.errors.length)) return null
+    const rs = (d.changes || []).filter((c) => c.store === n), us = (d.unplanned || []).filter((u) => u.store === n)
+    if (!rs.length && !us.length) return null
+    return [h('div', { class: 'ksub' }, `Delta ${d.shown}: ${plural(rs.length, 'change')}${us.length ? `, ${us.length} not in the plan` : ''}`),
+      h('ul', { class: 'links dlist', 'data-ctl': 'data-ks-delta' }, rs.map((c) => h('li', null, h('span', { class: `pill d-${(STATE[c.state] || ['pend'])[0]}` }, KS_STATE[c.state] || c.state), ' ', h('b', { class: 'mono' }, c.id), ' ', h('span', { class: 'mono' }, c.text), c.diffs && c.diffs.length ? h('div', { class: 'srcline muted' }, c.diffs.join(' · ')) : null, c.warn ? h('div', { class: 'srcline warn' }, c.warn) : null)),
+        us.map((u) => h('li', null, h('span', { class: 'pill warn' }, 'not in the plan'), ' ', h('span', { class: 'mono' }, u.text))))]
+  }
+
+  // ── a key-value cache's key space: a card, its templates as a prefix tree ──
+  function keyspaceView(s, n) {
+    const K = s.ks
+    const q = lower(st.q.trim())
+    const fnEl = (f) => h('span', { class: 'kfn', title: `${f.k.join(', ')}${f.lines.length ? `\n${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')}` : ''}${f.c !== null && f.c !== undefined ? `\n${plural(f.c, 'caller')} in the index` : ''}` }, h('span', { class: `mkl k-${f.wr ? 'w' : 'r'}` }, f.wr && f.r ? 'RW' : f.wr ? 'W' : 'R'), ' ', h('b', { class: 'mono' }, f.n), h('span', { class: 'muted' }, ` ${f.k.join(', ')} `), srcEl(s, f.at), f.c !== null && f.c !== undefined ? h('span', { class: 'muted' }, ` · ${plural(f.c, 'caller')}`) : null)
+    const hit = (t) => !q || lower(t.n).includes(q) || t.f.some(([n]) => lower(n).includes(q)) || t.rw.some((f) => lower(f.n).includes(q)) || (t.type && lower(t.type).includes(q))
+    const shown = new Set(K.tpl.map((t, i) => [t, i]).filter(([t]) => hit(t)).map(([, i]) => i))
+    const I = K.inst
+    const val = (v) => (v === null || v === undefined ? 'not stated' : typeof v === 'object' && v.expr ? v.expr : String(v))
+    const unk = (v) => (v && typeof v === 'object' && v.expr ? h('span', { class: 'unk', title: UNK }, v.expr) : val(v))
+    const head = I
+      ? h('header', { class: 'khead kshead' }, h('span', { class: 'tdot t-database' }), h('b', { class: 'kname mono' }, I.label), h('span', { class: 'pill' }, I.kind),
+        h('span', { class: 'pill' }, 'engine ', unk(I.engine), I.version ? [' ', unk(I.version)] : null), h('span', { class: 'pill' }, `modules ${I.modules.length ? I.modules.join(', ') : 'none stated'}`),
+        h('span', { class: `pill${I.lead ? ' warn' : ''}`, title: I.lead || null }, 'maxmemory-policy ', unk(I.eviction)), h('span', { class: 'pill' }, 'persistence ', unk(I.persistence)),
+        I.notifications !== null ? h('span', { class: 'pill' }, 'keyspace notifications ', unk(I.notifications)) : null, I.databases !== null ? h('span', { class: 'pill' }, 'databases ', unk(I.databases)) : null)
+      : h('header', { class: 'khead kshead' }, h('span', { class: 'tdot t-database' }), h('b', { class: 'kname mono' }, s.id), h('span', { class: 'pill inferred', title: 'no infrastructure or Compose file wires an instance to this repository: its own key space, inferred' }, 'inferred: no instance wired'))
+    // a template's row: its prefix-tree segment, type badge, fields, lifetime or lead, indexes, conflict
+    const tplRow = (seg, depth, ti) => {
+      const t = ti >= 0 ? K.tpl[ti] : null
+      if (!t) return h('li', { class: `krow kseg d${Math.min(depth, 6)}` }, h('span', { class: 'mono muted' }, seg))
+      const cfTitle = t.cf.map((c) => `${c.attr}: ${c.values.map((v) => `${v.value} (${v.src.map((p) => srcText(s, p)).join(', ')})`).join(' ≠ ')}`).join('\n')
+      return h('li', { class: `krow ktpl d${Math.min(depth, 6)}${t.cf.length ? ' cf' : ''}`, 'data-tpl': String(ti), title: `${t.n}\n${t.src.map((p) => srcText(s, p)).join(' · ')}` },
+        h('span', { class: `mkl k-${(t.type || 'u').split(' ')[0].toLowerCase()}` }, t.type || '?'), h('span', { class: 'mono' }, seg), h('span', { class: 'mono muted' }, `  ${t.n}`),
+        t.cf.length ? h('span', { class: 'pill warn', title: `the commands disagree on its type (WRONGTYPE at run time): ${cfTitle}` }, `≠ ${t.cf.map((c) => c.values.map((v) => v.value).join(' ≠ ')).join('; ')}`) : null,
+        t.ttl ? h('span', { class: 'pill', title: t.ttl[1].map((p) => srcText(s, p)).join(' · ') }, `TTL ${t.ttl[0]}`) : t.lead ? h('span', { class: 'pill warn', title: K.say.noExpiry }, 'no expiry found (lead)') : null,
+        t.ix.length ? h('span', { class: 'pill', title: 'search indexes whose PREFIX covers it' }, `indexed: ${t.ix.join(', ')}`) : null,
+        t.f.length ? h('div', { class: 'srcline kfields' }, h('span', { class: 'muted' }, 'fields '), t.f.flatMap(([n, how, src], k) => [k ? ' · ' : null, h('span', { class: 'mono', title: `${how === 'path' ? 'JSON path' : how === 'stream' ? 'stream entry field' : 'hash field'}: ${src.map((p) => srcText(s, p)).join(' · ')}` }, n)])) : null,
+        t.gr.length ? h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'consumer groups '), t.gr.flatMap(([n, cons, made, src], k) => [k ? ' · ' : null, h('span', { class: 'mono', title: src.map((p) => srcText(s, p)).join(' · ') }, n), cons.length ? h('span', { class: 'muted' }, ` (${cons.join(', ')})`) : null])) : null,
+        t.globs.length ? h('div', { class: 'srcline muted' }, `read by globs ${t.globs.join(', ')}`) : null,
+        t.rw.length ? h('ul', { class: 'links kaccess', 'aria-label': `${t.n}: the functions reading and writing it` }, t.rw.map((f) => h('li', null, fnEl(f)))) : null,
+        t.cf.length ? h('ul', { class: 'links dlist' }, t.cf.map((c) => h('li', null, h('b', null, c.attr), c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, v.value), ' ', srcs(s, v.src)))))) : null)
+    }
+    const rows = K.tree.filter(([, , ti]) => ti < 0 ? K.tree.some(([, , tj]) => tj >= 0 && shown.has(tj)) : shown.has(ti)).map(([seg, depth, ti]) => tplRow(seg, depth, ti))
+    const ixCard = (x) => h('article', { class: `kcard kix${x.lead ? ' lead' : ''}`, 'aria-label': `index ${x.n}` },
+      h('header', { class: 'khead' }, h('span', { class: 'mkl k-idx' }, 'FT'), h('b', { class: 'kname mono' }, x.n), x.decl ? h('span', { class: 'pill' }, `ON ${x.on}`) : h('span', { class: 'pill inferred' }, 'its creation not read'),
+        x.pre.length ? h('span', { class: 'pill' }, `PREFIX ${x.pre.join(' ')}`) : null, x.filter ? h('span', { class: 'pill', title: 'its expression is not kept' }, 'FILTER') : null,
+        x.lead ? h('span', { class: 'pill warn', title: K.say.noQuery }, 'no access found (lead)') : h('span', { class: 'pill' }, plural(x.q.length, 'function querying it', 'functions querying it')), x.cf.length ? h('span', { class: 'pill warn' }, `≠${x.cf.length}`) : null),
+      x.f.length ? h('ul', { class: 'krows' }, x.f.map(([n, as, type, opts, src]) => h('li', { class: 'krow', title: src.map((p) => srcText(s, p)).join(' · ') }, h('span', { class: 'mkl k-a' }, type || '?'), h('span', { class: 'mono' }, n), as ? h('span', { class: 'muted' }, ` AS ${as}`) : null, opts.length ? h('span', { class: 'muted' }, ` ${opts.join(' ')}`) : null))) : h('p', { class: 'muted' }, 'schema not read'),
+      x.asm ? h('p', { class: 'note' }, K.say.assembled) : null, x.past ? h('p', { class: 'muted' }, `… and ${plural(x.past, 'more field')}`) : null,
+      h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'covers '), x.covers.length ? h('span', { class: 'mono' }, x.covers.join(' · ')) : h('span', { class: 'muted' }, 'no template read')),
+      x.q.length ? h('ul', { class: 'links kaccess' }, x.q.map((f) => h('li', null, fnEl(f)))) : null,
+      x.cf.length ? h('ul', { class: 'links dlist' }, x.cf.map((c) => h('li', null, h('b', null, c.attr), c.values.map((v) => h('div', { class: 'srcline' }, h('span', { class: 'pill warn' }, v.value), ' ', srcs(s, v.src)))))) : null,
+      h('div', { class: 'srcline' }, h('span', { class: 'muted' }, x.decl ? 'declared by code ' : 'seen '), srcs(s, x.src)))
+    const chRow = (c) => h('li', { class: 'krow kch' }, h('span', { class: 'mkl k-ch' }, c.pat ? 'PSUB' : 'CH'), h('span', { class: 'mono' }, c.n), c.repos.length > 1 ? h('span', { class: 'pill', title: 'one end in each repository' }, `across ${c.repos.join(', ')}`) : null,
+      c.psub.length ? h('span', { class: 'muted' }, ` matched by ${c.psub.join(', ')}`) : null,
+      h('div', { class: 'srcline' }, h('span', { class: 'muted' }, `${plural(c.pub.length, 'publisher')}: `), c.pub.length ? c.pub.map((f) => fnEl(f)) : h('span', { class: 'muted' }, 'none read')),
+      h('div', { class: 'srcline' }, h('span', { class: 'muted' }, `${plural(c.sub.length, 'subscriber')}: `), c.sub.length ? c.sub.map((f) => fnEl(f)) : h('span', { class: 'muted' }, 'none read')))
+    return h('section', null,
+      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect), h('span', { class: 'muted' }, s.summary), q ? h('span', { class: 'muted' }, `${plural(shown.size, 'template')} of ${K.tpl.length} match “${st.q.trim()}”`) : null),
+      K.deduced && K.files ? h('div', { class: 'callout callout-warning banner', 'data-ctl': 'data-keyspace' }, h('div', { class: 'callout-title' }, 'Read from the commands in code, not declared'),
+        h('p', null, `Read from ${plural(K.commands, 'command')} the code sends, in ${plural(K.files, 'file')}${K.clients.length ? `, reached through ${K.clients.join(', ')}` : ''}${K.dyn ? `; ${plural(K.dyn, 'key')} code builds wholly counted, never named` : ''}. ${K.unknown}`)) : null,
+      h('article', { class: 'kcard kspace', 'aria-label': `${s.id}: key space` },
+        head,
+        I && I.lead ? h('p', { class: 'note unused' }, I.lead) : null,
+        K.wired.length ? h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'wired to '), K.wired.flatMap((w, k) => [k ? ' · ' : null, h('b', { class: 'mono' }, w.repo), h('span', { class: 'muted' }, ` through ${w.env} `), w.at ? srcEl(s, w.at) : null])) : null,
+        I ? h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'declared '), srcEl(s, I.at)) : null,
+        K.dbs.length ? h('div', { class: 'srcline' }, h('span', { class: 'muted' }, 'database '), K.dbs.flatMap((d, k) => [k ? ' · ' : null, h('b', { class: 'mono' }, String(d.db)), ' ', srcEl(s, d.at)])) : null,
+        h('div', { class: 'ksub' }, `Key templates (${K.tpl.length}), as a prefix tree`),
+        rows.length ? h('ul', { class: 'krows ktree', id: 'data-cards', role: 'list', 'aria-label': `${s.id}: key templates` }, rows) : h('p', { class: 'muted' }, K.tpl.length ? 'no template matches the search' : 'no template read'),
+        K.ix.length ? [h('div', { class: 'ksub' }, `Search indexes (${K.ix.length})`), h('div', { class: 'kcards' }, K.ix.map(ixCard))] : null,
+        K.ch.length ? [h('div', { class: 'ksub' }, `Channels (${K.ch.length})`), h('ul', { class: 'krows' }, K.ch.map(chRow))] : null,
+        ksDelta(n),
+        K.st.length ? [h('div', { class: 'ksub' }, `Streams (${K.st.length})`), h('ul', { class: 'krows' }, K.st.map((ti) => { const t = K.tpl[ti]; return h('li', { class: 'krow' }, h('span', { class: 'mkl k-stream' }, 'XS'), h('span', { class: 'mono' }, t.n), h('span', { class: 'muted' }, t.gr.length ? ` groups ${t.gr.map(([n, cons]) => `${n}${cons.length ? ` (${cons.join(', ')})` : ''}`).join(' · ')}` : ' no consumer group read'), ' ', srcs(s, t.src.slice(0, 3))) }))] : null),
+      h('p', { class: 'note' }, 'Read from the commands the code sends (key templates, types, fields, lifetimes, channels, streams) and from a literal FT.CREATE (a declaration code makes), never from a server; no value is kept. A type two commands disagree on is a conflict; a template written with no lifetime is a lead, never a verdict.'))
+  }
+
   // ── the tab ──
   function storeView(s, n) {
+    if (s.ks) return keyspaceView(s, n)
     if (s.cards) return cardsView(s, n)
     const sc = scene(s, n)
     const cur = st.dataZoom === 'fit' ? 'fit' : st.dataZoom || 1

@@ -70,14 +70,17 @@ const NEVER = /\.tftest\.hcl$|(?:^|\/)\.terraform\.lock\.hcl$/i
 // module; a terragrunt.hcl with a terraform, include or inputs is a configuration Terragrunt runs; a
 // remote module source whose address names a key-value table module, out of reach. Each scan is per
 // line and linear.
-export const TF_LEVEL = { module: 4, unit: 5, remote: 6 }
+// a .tf's level: one of these, plus `redis` (8) when it declares a key-value cache's instance
+// (extractors/redis-infra.mjs); compared modulo 8 here
+export const TF_LEVEL = { module: 4, unit: 5, remote: 6, redis: 8 }
+export const REDIS_TF = /^[ \t]*resource[ \t]+"(?:aws_elasticache_(?:replication_group|cluster|serverless_cache)|aws_memorydb_cluster|upstash_redis_database)"|^[ \t]*chart[ \t]*=[ \t]*"[^"\n]{0,200}(?:redis|valkey|keydb|dragonfly)/im
 const TABLE_RESOURCE = /^[ \t]*resource[ \t]+"aws_dynamodb_table"/m
 const UNIT = /^[ \t]*(?:terraform|include)\b|^[ \t]*inputs[ \t]*=/m
 const REMOTE = /^[ \t]*source[ \t]*=[ \t]*"(?![./$])[^"\n]*dynamodb/im
 const MODULE_BLOCK = /^[ \t]*module[ \t]+"/m
 export const wantsTf = (p) => (TF.test(p) || TFVARS.test(p) || HCL.test(p)) && !NEVER.test(p)
 export function tfLevel(p, text) {
-  if (TF.test(p)) return TABLE_RESOURCE.test(text) ? TF_LEVEL.module : MODULE_BLOCK.test(text) && REMOTE.test(text) ? TF_LEVEL.remote : 1
+  if (TF.test(p)) return (TABLE_RESOURCE.test(text) ? TF_LEVEL.module : MODULE_BLOCK.test(text) && REMOTE.test(text) ? TF_LEVEL.remote : 1) + (REDIS_TF.test(text) ? TF_LEVEL.redis : 0)
   if (UNIT_FILE.test(p)) return REMOTE.test(text) ? TF_LEVEL.remote : UNIT.test(text) ? TF_LEVEL.unit : 1
   return 1
 }
@@ -94,12 +97,12 @@ export default {
   discover(info) {
     const all = [...info.keys()].filter(wantsTf)
     const hcl = all.filter((p) => HCL.test(p) && !(info.get(p).size > HCL_MAX)).sort()
-    const dirs = [...new Set(all.filter((p) => TF.test(p) && info.get(p).ddl === TF_LEVEL.module).map((p) => P.dirname(p)))].sort()
+    const dirs = [...new Set(all.filter((p) => TF.test(p) && info.get(p).ddl % 8 === TF_LEVEL.module).map((p) => P.dirname(p)))].sort()
     const jobs = dirs.map((dir) => {
       const own = all.filter((p) => P.dirname(p) === dir && (TF.test(p) || TFVARS.test(p))).sort()
       return { key: dir, inputs: [...own, ...hcl.filter((p) => P.dirname(p) !== dir || !own.includes(p))] }
     })
-    for (const p of all.filter((x) => info.get(x).ddl === TF_LEVEL.remote).sort()) jobs.push({ key: p, inputs: [p], override: 'remote' })
+    for (const p of all.filter((x) => info.get(x).ddl % 8 === TF_LEVEL.remote).sort()) jobs.push({ key: p, inputs: [p], override: 'remote' })
     return jobs
   },
   extract({ key, files, override }) {
@@ -252,7 +255,7 @@ function wiring(mod, entities, ev, scope) {
 const forEachOf =(res) => res.block.body.items.find((x) => x.t === 'attr' && (x.name === 'for_each' || x.name === 'count'))?.expr ?? null
 
 // a tfvars file's values (HCL, or JSON with the line of each member)
-function varsOf(p, body, texts, ev) {
+export function varsOf(p, body, texts, ev) {
   if (/\.json$/i.test(p)) {
     const text = texts.get(p).replace(/^\ufeff/, '')
     const lines = jsonLines(text)

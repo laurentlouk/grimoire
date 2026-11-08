@@ -24,14 +24,15 @@
 //            environment read, a string constant), 2 a key-value SDK call shape (the access
 //            patterns), 4 a table-builder schema, 8 a barrel re-exporting relative modules, 16 a
 //            schema-language file's models, 32 its datasource, 64 a query call beside SQL text or a
-//            SQL client import (the queries the code sends); 0 none
+//            SQL client import (the queries the code sends), 128 a key-value cache's client or command
+//            (its key space); 0 none
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '13'
+export const SCHEMA_VERSION = '14'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.

@@ -48,7 +48,7 @@ export default {
   kind: 'infra',
   scope: 'file',
   wants: (p) => DOC.test(p),
-  discover: (info) => [...info].filter(([p, i]) => DOC.test(p) && i.ddl === LEVEL.template).map(([p]) => ({ key: p, inputs: [p] })),
+  discover: (info) => [...info].filter(([p, i]) => DOC.test(p) && i.ddl % 8 === LEVEL.template).map(([p]) => ({ key: p, inputs: [p] })),
   extract(text, file, ctx) {
     const notes = [], entities = [], kinds = [], env = []
     for (const doc of documents(text, file, ctx)) {
