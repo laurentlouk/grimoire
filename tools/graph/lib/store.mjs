@@ -4,12 +4,13 @@
 //   files    one row per indexed file; node_id = its `file` node
 //   nodes    kind: file | function | method | constructor | class | struct | interface | trait |
 //            protocol | enum | type | module | namespace | macro; qualname = Container.name;
-//            parent_id = the enclosing type or module (NULL at top level); is_test
+//            parent_id = the enclosing type or module (NULL at top level); is_test; signature = the
+//            first line up to the body, each literal's text shown as `…` (extract.mjs)
 //   edges    src → dst, kind: CALLS | IMPORTS | EXTENDS | IMPLEMENTS; confidence: how the name
 //            was resolved (same-class, qualified, import, same-file, same-package, unique-name,
 //            ambiguous, path)
-//   refs     unresolved names as extracted (call sites with the receiver's stated type when the
-//            syntax gives it, supertypes); imports: import statements
+//   refs     unresolved names as extracted (call sites with the receiver's text, literals as `…`,
+//            and its stated type when the syntax gives it, supertypes); imports: import statements
 //   cochange files that changed in the same commits (from git log), n = commits shared
 //   churn    per file, n = recent commits that touched it (same window as cochange)
 //   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
@@ -27,10 +28,10 @@
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '12'
+export const SCHEMA_VERSION = '13'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
@@ -71,12 +72,16 @@ CREATE TABLE IF NOT EXISTS data_facts(repo TEXT, scope TEXT, key TEXT, extractor
 export async function openStore(dbPath, { readOnly = false } = {}) {
   const { DatabaseSync } = await driver()
   if (!readOnly) mkdirSync(path.dirname(dbPath), { recursive: true })
-  const db = new DatabaseSync(dbPath, readOnly ? { readOnly: true } : {})
-  if (readOnly) return db
-  db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;')
+  if (readOnly) return new DatabaseSync(dbPath, { readOnly: true })
+  const open = () => { const d = new DatabaseSync(dbPath); d.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;'); return d }
+  let db = open()
   const v = (() => { try { return db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value } catch { return null } })()
+  // An index from another version is deleted, not emptied: dropped tables leave their text in free
+  // pages, and an older index may hold literals this one never stores.
   if (v && v !== SCHEMA_VERSION) {
-    for (const t of TABLES) db.exec(`DROP TABLE IF EXISTS ${t}`)
+    db.close()
+    for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) rmSync(f, { force: true })
+    db = open()
   }
   db.exec(DDL)
   db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('schema', ?)").run(SCHEMA_VERSION)

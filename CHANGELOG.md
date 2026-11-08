@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.41.1 — the loop-durability tests hold on a loaded machine (#112)
+## 0.41.3 — the loop-durability tests hold on a loaded machine (#112)
 
 `run-durability-hardening`, `-followups` and `-statewrite` passed alone and failed under a full `npm test`, which runs one file per CPU. They bounded lock breaks and waits by the wall clock, and their concurrency trials let a slow machine reach the writers' own give-up, or the harness's guard before it. Each property is now checked where load cannot move it. Test-only: nothing changes for a project.
 
@@ -8,6 +8,25 @@
 - **Waits with no clock, counted.** Where `date +%s` fails (U-6c, U-6d), the break is checked in naps, each written down with whose lock stood then: it stands through the first second's 20 naps and falls before the give-up's 40. The ship lock's wait (U-10) ends after two counted 1-s sleeps. The hanging lane setup (U-2) is checked by the limit `to` hands perl: on a clock that jumps to the deadline's last 2 s once the ship worktree exists, it must be those 2 s, never the setup's own 180.
 - **The trials that count writers inside at once** (H-6a, U-6a, the W-2 and W-3 races) give their writers a stale age no load reaches. A starved waiter no longer gives up and writes beside the holder (a race of 13 flushes rolled `run.json` back that way). The guard against a hung writer now comes after the writers' own give-up: the old 40 s killed waiters, holders among them, that the mutex was still letting in.
 - **The big reconcile** (H-2d) runs on a 600-s deadline. Its output budget is under test, and the 90-s default cut the big repo's job short under load.
+
+## 0.41.2 — a refined relation is compared with a deduced store's joins as joins, never as a foreign key that does not exist (#114)
+
+Since 0.41.0 a table deduced from the queries in code carries relations *inferred from a join*. The refine check compared a relation claim with them as it does with foreign keys, so its drift and its note named a foreign key no file declares, sending an agent to look for it.
+
+- **Worded for what was compared.** A claim a join contradicts now says *a join inferred from the queries at `path:line` reads (owner_id) → accounts(id): the claim disagrees with it*, and one a join states *a join inferred from the queries at `path:line` states it*, the first line it was read at, the others counted. Foreign keys keep their wording.
+- **Trust, by what the join knows.** A join whose referenced side is known (one side's column is `id`, or is named after the other table) contradicts a claim on the same columns to another target: drift, as spec D8 asks a claim to agree with any extracted fact, and how the check catches a claim the queries moved away from. A join whose direction was taken as written says only that two columns are equal, not which one references the other: a disagreement with it is a note, never drift (spec D2: `inferred` is the least trusted kind; a refined binding drifts only on a binding the code states at convention or above).
+- **Every relation on the claim's columns is compared**, not the first: code that joins one column to several tables (a polymorphic owner) holds a claim one of them states; the disagreeing ones are said one by one, the first three, the rest counted.
+- Docs: `tools/graph/README.md` (*The check*), the `data-model` skill (what a relation claim is checked against). Tests: a deduced store with a join and a claim to another target (the exact drift), to the same target (the note), a join taken as written (a note), one column joined to four tables, a join read in two statements, and the foreign key beside it unchanged.
+
+## 0.41.1 — the code graph's signatures and calls keep no string literal's text: a signature stops at the body, and a literal in it or in a call's receiver shows as `…`
+
+A definition's signature was its first source line, cut to 160 characters, so a one-line function put its whole body in the index: a password in an `ALTER ROLE`, a key in a `WHERE` clause or a URL. `graph_search`, `graph_symbol` and `graph_sql` then showed it. A call's receiver text did the same in the refs table (`fetch('…').then`, `"…".to_string()`), on any line, not only one-liners, and so did a C macro's value and the key of a call by a string key (`handlers['…'](x)`). The data model map already keeps only identifiers (#106); the code graph now follows the same rule.
+
+- **A signature stops where the body starts**: the name, parameters and return type (`pub fn token() -> String`, `def token(scope="…")`, `func Token() string`), in every language with definitions, Kotlin's unnamed bodies included; a C or C++ macro stops before its value (`#define TOKEN(x)`).
+- **No string literal's text in a signature or a call**: a string, template, character or regex literal in a signature (a parameter's default, an annotation's argument) or in a call's receiver is kept as `…` between its delimiters (`'…'`, `r#"…"#`, `f"…"`, `"""…"""`, `/…/`); a heredoc or a delimiter-less literal is kept as `…` alone. A comment is dropped. A call by a string key is no call to a name. Numbers are kept, and so are module paths (`import`, `require`, `#include`), which resolution reads.
+- **Calls resolve as before** where a receiver holds no literal or comment: it is unchanged. One that held them is shorter, so the 80-character cut keeps more of it, and two calls whose receivers differ only by a literal are one ref (they resolved alike). Extraction takes about 13% longer.
+- **The index's schema moves to 13**: an older index is deleted and rebuilt once (emptying its tables would leave their text in the file's free pages), so the literals it held go with it.
+- Docs: `tools/graph/README.md` (*What it holds*). Tests: a one-line definition in TypeScript, Python, Go, Rust, Java, Kotlin, C, C++, C#, Ruby, PHP and Swift, with literals in its parameters, body, annotations, receivers, a macro's value and a call's string key. Then TypeScript, Python, Go and Rust one-liners go through `graph_index`, every graph tool that shows a definition, the page and the index's bytes, and an older index full of literals is upgraded with none of them left in a byte.
 
 ## 0.41.0 — the data model map deduces a SQL schema from the queries the code sends, for a database nothing in the repositories declares (data model map slice 14, #106)
 
