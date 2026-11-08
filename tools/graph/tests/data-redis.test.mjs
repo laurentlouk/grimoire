@@ -24,7 +24,7 @@
 //  graph_data, the Data tab's key-space card (escaped), graph_changes; a secret planted at runtime in a
 //  SET value, an HSET value, a PUBLISH payload, a Lua literal and a connection URL, found in no output.
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync, realpathSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, cpSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -418,6 +418,59 @@ if (!RT) {
   const rg = readFile('svc/old.go', ['package svc', 'import "github.com/gomodule/redigo/redis"', 'func f(c redis.Conn, id string) { c.Do("HSET", "legacy:"+id, "a", 1); redis.String(c.Do("GET", "legacy:"+id)) }'])
   eq(brief(rg), ['3 f HSET legacy:{id}:w typed', '3 f GET legacy:{id}:r typed'], 'redigo: conn.Do("CMD", …) with no context')
 
+  console.log('\n2 · keys and index names built by the file\'s own functions: a key function read through at its call, a parameter every call of its function binds alike')
+  const kf = readFile('api/src/search.rs', [
+    'use redis::aio::ConnectionManager;',
+    'const INDEX: &str = "idx:docs";',
+    'const SUFFIX: &str = "meta";',
+    'pub struct Search { stage: String, conn: ConnectionManager }',
+    'fn doc_key(id: &str) -> String { format!("doc:{}", id) }',
+    'fn user_key(user_id: &str, suffix: &str) -> String { format!("user:{user_id}:{suffix}") }',
+    'impl Search {',
+    '    fn index_name(&self) -> String { format!("{}:{}", self.stage, INDEX) }',
+    '    fn prefix(&self) -> String { format!("{}:doc:", self.stage) }',
+    '    pub async fn ensure(&mut self) -> redis::RedisResult<()> {',
+    '        let name = self.index_name();',
+    '        self.create_once(&name).await',
+    '    }',
+    '    async fn create_once(&mut self, index_name: &str) -> redis::RedisResult<()> {',
+    '        let index_name = index_name.to_string();',
+    '        let prefix = self.prefix();',
+    '        redis::cmd("FT.CREATE").arg(&index_name).arg("ON").arg("HASH").arg("PREFIX").arg(1).arg(&prefix).arg("SCHEMA").arg("title").arg("TEXT").query_async::<()>(&mut self.conn).await',
+    '    }',
+    '    pub async fn find(&mut self, q: &str) -> redis::RedisResult<()> {',
+    '        let index_name = self.index_name();',
+    '        redis::cmd("FT.SEARCH").arg(&index_name).arg(q).query_async::<()>(&mut self.conn).await',
+    '    }',
+    '    pub async fn save(&mut self, id: &str) -> redis::RedisResult<()> {',
+    '        let key = doc_key(id);',
+    '        redis::cmd("HSET").arg(&key).arg("title").arg("t").query_async::<()>(&mut self.conn).await?;',
+    '        redis::cmd("HSET").arg(user_key(id, SUFFIX)).arg("seen").arg(1).query_async::<()>(&mut self.conn).await',
+    '    }',
+    '    pub async fn drop_one(&mut self, which: &str) -> redis::RedisResult<()> { redis::cmd("DEL").arg(which).query_async::<()>(&mut self.conn).await }',
+    '    pub async fn a(&mut self) -> redis::RedisResult<()> { self.drop_one("tmp:a").await }',
+    '    pub async fn b(&mut self) -> redis::RedisResult<()> { self.drop_one("tmp:b").await }',
+    '}',
+  ])
+  eq(brief(kf), ['17 Search::create_once FT.CREATE  command', '21 Search::find FT.SEARCH  command', '25 Search::save HSET doc:{id}:w command', '26 Search::save HSET user:{id}:meta:w command', '28 Search::drop_one DEL dyn1 command'],
+    'a key function read through (its parameters bound to the call\'s arguments, a constant inlined); a local bound to one; a parameter its two calls bind apart: dynamic')
+  eq([kf.sites[0].index.name, kf.sites[0].index.def.prefixes, kf.sites[1].index.name], ['{stage}:idx:docs', ['{stage}:doc:'], '{stage}:idx:docs'],
+    'an index name built by a method, passed as a parameter its one call binds, rebound to itself (`let x = x.to_string()`): one template at FT.CREATE and FT.SEARCH, its PREFIX too')
+  const kts = readFile('web/src/keys.ts', [
+    "import Redis from 'ioredis'",
+    'const redis = new Redis()',
+    'const sessionKey = (id: string) => `session:${id}`',
+    'function cartKey(id: string) { return `cart:${id}:items` }',
+    'export async function f(userId: string) { await redis.hset(sessionKey(userId), "ip", 1); await redis.sadd(cartKey(userId), "x"); const k = sessionKey(userId); await redis.expire(k, 60) }',
+  ])
+  eq(brief(kts), ['5 f HSET session:{userId}:w bound', '5 f SADD cart:{userId}:items:w bound', '5 f EXPIRE session:{userId}:w bound'], 'TypeScript: an arrow and a function returning a template literal, read through at their calls')
+  const kpy = readFile('w/keys.py', ['import redis', 'r = redis.Redis()', 'def job_key(job_id):', '    return f"job:{job_id}"', 'def run(jid):', '    r.hset(job_key(jid), "state", "x")'])
+  const kgo = readFile('w/keys.go', ['package w', 'import ("fmt"; "github.com/redis/go-redis/v9")', 'func lockKey(id string) string { return fmt.Sprintf("lock:%s", id) }', 'func run(rdb *redis.Client, ctx any, id string) { rdb.SetNX(ctx, lockKey(id), "1", 0) }'])
+  eq([brief(kpy), brief(kgo)], [['6 run HSET job:{jid}:w bound'], ['4 run SET lock:{id}:w typed']], 'Python and Go: a key function read through')
+  const { reconcile } = await import('../lib/data/reconcile.mjs')
+  const covered = reconcile([{ repo: 'api', extractor: 'redis-commands@1', facts: { declarations: [], redis: kf } }])
+  eq(covered.stores[0].entities.filter((e) => e.kind === 'index').map((e) => [e.name, e.declared, e.queries.sites.length, e.lead ?? null]), [['{stage}:idx:docs', true, 1, null]], '… the index declared and queried under one templated name: no lead')
+
   console.log('\n2 · the call sites: hostile and dynamic input, bounded and inert; errors by position only')
   const head = ["import Redis from 'ioredis'", 'const r = new Redis()']
   const [many, tMany] = timed(() => readFile('big/many.ts', [...head, 'export function f(id: string) {', ...Array.from({ length: 100000 }, (_, i) => `  r.hset(\`k${i % 7}:\${id}\`, 'f', 1)`), '}']))
@@ -500,6 +553,24 @@ console.log('\n3 · the key space (data/redis.mjs): templates, types and their c
   eq(m.redis.clients, [{ repo: 'api', source: 'ioredis' }, { repo: 'web', source: 'ioredis' }], '… the clients read, per repository')
   // no value anywhere
   ok(!JSON.stringify(m).includes('@name:x') && !JSON.stringify(m).includes('"v"'), 'no value and no query text in the model')
+  // a refine file's claims, checked against what was read (data/check.mjs): a lineage across two key
+  // spaces holds on the fields read; one naming a field the index's schema lacks drifts; a store the
+  // file describes under a key space's id stays drift
+  const { parseRefine, refineCheck } = await import('../lib/data/check.mjs')
+  const RD = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-redis-refine-')))
+  try {
+    for (const [p, text] of [['api/src/sessions.rs', '// mirror\nlet token = 1;\n'], ['web/src/cache.ts', '// mirror\nconst items = 1\n']]) { const f = path.join(RD, p); mkdirSync(path.dirname(f), { recursive: true }); writeFileSync(f, text) }
+    const roots = [{ name: 'api', rel: 'api', abs: path.join(RD, 'api') }, { name: 'web', rel: 'web', abs: path.join(RD, 'web') }]
+    const W = 'why it holds'
+    const doc = (x) => [{ file: 'docs/architecture/kv.data.json', ...parseRefine(JSON.stringify({ schema: 1, ...x }, null, 2)) }]
+    const run = (x) => refineCheck(rows, doc(x), { roots }).refine
+    const held = run({ lineage: [{ from: 'api:redis/user:{user_id}:session', to: 'web:redis/cart:{cartId}', fields: [{ from: 'token', to: 'items' }], why: W, sources: ['api:src/sessions.rs:2', 'web:src/cache.ts:2'] }] })
+    eq([held.claims.map((c) => [c.kind, c.ok]), held.drift], [[['lineage', true]], []], 'a lineage between two key spaces\' templates, on fields the commands name: it holds')
+    const bad = run({ lineage: [{ from: 'api:redis/index:idx:users', to: 'web:redis/cart:{cartId}', fields: [{ from: 'nickname', to: 'items' }], why: W, sources: ['api:src/sessions.rs:2'] }] })
+    ok(bad.drift.length === 1 && bad.drift[0].why.some((w) => /nickname/.test(w)), `a lineage naming a field the index's schema lacks: drift (${bad.drift.map((d) => d.why.join('; ')).join(' | ')})`)
+    const dup = run({ stores: [{ repo: 'api', id: 'redis', kind: 'redis', imports: ['redis'], entities: [{ name: 'user', source: 'api:src/sessions.rs:2', fields: [{ name: 'token', source: 'api:src/sessions.rs:2' }] }] }] })
+    ok(dup.drift.length >= 1 && dup.drift.some((d) => d.kind === 'store'), `a store described under a key space's id (api:redis) stays drift (${dup.drift.map((d) => d.why.join('; ')).join(' | ')})`)
+  } finally { rmSync(RD, { recursive: true, force: true }) }
 }
 
 // ════ Part 2 · through call(), on an indexed project (fixtures/redis) ════

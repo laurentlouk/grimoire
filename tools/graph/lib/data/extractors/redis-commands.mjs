@@ -51,7 +51,7 @@
 //          creates, keys, dyn, fields, paths, ttl, glob, channel, stream, index, script, db, tx) }
 // A base's file is read too, aside (readers/code-aside.mjs): graph_changes compares key templates and
 // FT.CREATE declarations, never the access.
-import { readCommand, readLua, mapKeys, urlDb, COMMANDS, lit, MAX_ARGS } from '../readers/redis-cmd.mjs'
+import { readCommand, readLua, mapKeys, urlDb, COMMANDS, lit, template, MAX_ARGS } from '../readers/redis-cmd.mjs'
 import { named, field, lineOf, endOf, each } from '../readers/code.mjs'
 import { SRC, treeLang } from './dynamo-access.mjs'
 import { familyOf, FN, CLASS, TEST_ATTR, TEST_FILE, isTestName, fnName, unescape, FILE_MS } from './sql-queries.mjs'
@@ -195,10 +195,94 @@ const S = (t) => ({ s: [t] })
 // a part code fills in: a same-file constant's text (or a literal), else a placeholder named after it
 function sub(n, F, depth) {
   const u = unwrap(n, F.fam)
-  if (u && (u.type === 'identifier' ? F.consts.has(u.text) : /^(?:string|string_literal|raw_string_literal|interpreted_string_literal)$/.test(u.type))) { const a = argOf(u, F, depth + 1); if (a.s) return a.s }
+  if (u && u.type === 'identifier' && F.bind && F.bind.has(u.text)) { const a = F.bind.get(u.text); return a.s ? a.s : a.n !== undefined ? [String(a.n)] : [{ h: a.x || u.text }] }
+  if (u && (u.type === 'identifier' ? F.consts.has(u.text) || !!local(u.text, F) : /^(?:string|string_literal|raw_string_literal|interpreted_string_literal)$/.test(u.type) || (u.type === CALL[F.fam] && !!keyFnOf(u, F)))) { const a = argOf(u, F, depth + 1); if (a.s) return a.s }
   return [H(n, F.fam)]
 }
-const withNode = (a, n) => { if (a && n) Object.defineProperty(a, 'node', { value: n, enumerable: false }); return a }
+
+// ── key functions: a same-file function or method whose body is one key form (`fn session_key(id:
+// &str) -> String { format!("user:{}:session", id) }`, `const key = (id) => \`user:${id}\``), read
+// through at its call with each parameter bound to the call's argument (a literal or a constant
+// inlined, else a placeholder named after the caller's variable). Never across files; bounded depth.
+const RECV_SELF = /^(?:self|this|Self|cls)$/
+function keyFnOf(call, F) {
+  if (!F.keyFns.size) return null
+  const c = callee(call, F.fam)
+  if (!c || !c.name) return null
+  const name = c.recv ? (RECV_SELF.test(unwrap(c.recv, F.fam)?.text || '') ? c.name : null) : c.name.split(/::|\./).pop()
+  if (!name) return null
+  if (!c.recv && /::|\./.test(c.name) && !/^(?:Self|self|crate::.*)::/.test(c.name) && c.name.split(/::|\./).length > 2) return null
+  return F.keyFns.get(name) || null
+}
+function keyCall(call, F, depth) {
+  const k = keyFnOf(call, F)
+  if (!k || depth > 12 || (F.keyDepth || 0) >= 4) return null
+  const args = argNodes(call, F.fam).filter((a) => a.type !== 'keyword_argument')
+  const bind = new Map()
+  k.params.forEach((p, i) => { if (args[i]) { const a = argOf(args[i], F, depth + 1); bind.set(p, a.s || a.n !== undefined ? a : { x: holeName(args[i], F.fam) || p }) } else bind.set(p, { x: p }) })
+  const saved = F.bind
+  F.bind = bind; F.keyDepth = (F.keyDepth || 0) + 1
+  try { const a = argOf(k.body, F, depth + 1); return a.s ? a : null } finally { F.bind = saved; F.keyDepth-- }
+}
+// a function's parameter names, in order (never Rust's self, Python's self or cls)
+function paramsOf(n, fam) {
+  const ps = field(n, 'parameters') || field(n, 'parameter')
+  if (!ps) return []
+  if (ps.type === 'identifier') return [ps.text]
+  const out = []
+  for (const p of ps.namedChildren) {
+    if (fam === 'rust') { if (p.type === 'parameter') out.push(lastName(field(p, 'pattern')?.text || '')); continue }
+    if (fam === 'go') { for (const x of p.namedChildren) if (x.type === 'identifier') out.push(x.text); continue }
+    if (fam === 'python') { const nm = p.type === 'identifier' ? p.text : lastName((p.namedChildren[0] || p).text); if (nm !== 'self' && nm !== 'cls') out.push(nm); continue }
+    out.push(lastName((field(p, 'pattern') || p).text))
+  }
+  return out.slice(0, 32)
+}
+
+// the key functions of a file: its top-level functions, an impl's or a class's methods (a module's too)
+const KEY_BODY = /^(?:string|template_string|binary_expression|string_literal|raw_string_literal|macro_invocation|interpreted_string_literal|call_expression|call|concatenated_string|binary_operator)$/
+function keyFns(root, F) {
+  const fam = F.fam
+  const stack = [root]
+  for (let k = 0; stack.length && k < 20000 && F.keyFns.size < 2000; k++) {
+    const n = stack.pop()
+    const t = n.type
+    let body = null, params = null, name = null
+    if (fam === 'rust' && t === 'function_item') {
+      const b = field(n, 'body'), kids = b ? b.namedChildren.filter((c) => c.type !== 'line_comment' && c.type !== 'block_comment') : []
+      if (kids.length === 1 && !/statement|declaration/.test(kids[0].type)) body = kids[0]
+      params = (field(n, 'parameters')?.namedChildren || []).filter((p) => p.type === 'parameter').map((p) => lastName(field(p, 'pattern')?.text || ''))
+      name = field(n, 'name')?.text
+    } else if (fam === 'ts' && (t === 'function_declaration' || t === 'method_definition' || (t === 'variable_declarator' && /^(?:arrow_function|function_expression)$/.test(field(n, 'value')?.type || '')))) {
+      const fn = t === 'variable_declarator' ? field(n, 'value') : n
+      const b = field(fn, 'body')
+      if (b && b.type !== 'statement_block') body = b
+      else if (b) { const kids = b.namedChildren.filter((c) => c.type !== 'comment'); if (kids.length === 1 && kids[0].type === 'return_statement') body = kids[0].namedChildren[0] || null }
+      const ps = field(fn, 'parameters') || field(fn, 'parameter')
+      params = ps ? (ps.type === 'identifier' ? [ps.text] : ps.namedChildren.map((p) => lastName((field(p, 'pattern') || p).text))) : []
+      name = field(n, 'name')?.text
+    } else if (fam === 'python' && t === 'function_definition') {
+      const kids = (field(n, 'body')?.namedChildren || []).filter((c) => c.type !== 'comment' && !(c.type === 'expression_statement' && c.namedChildren[0]?.type === 'string'))
+      if (kids.length === 1 && kids[0].type === 'return_statement') body = kids[0].namedChildren[0] || null
+      params = (field(n, 'parameters')?.namedChildren || []).map((p) => (p.type === 'identifier' ? p.text : lastName((p.namedChildren[0] || p).text))).filter((p) => p !== 'self' && p !== 'cls')
+      name = field(n, 'name')?.text
+    } else if (fam === 'go' && (t === 'function_declaration' || t === 'method_declaration')) {
+      const kids = (field(n, 'body')?.namedChildren || []).filter((c) => c.type !== 'comment')
+      if (kids.length === 1 && kids[0].type === 'return_statement') { const l = kids[0].namedChildren[0]; body = l?.type === 'expression_list' ? l.namedChildren[0] : l }
+      params = []
+      for (const p of field(n, 'parameters')?.namedChildren || []) for (const x of p.namedChildren) if (x.type === 'identifier') params.push(x.text)
+      name = field(n, 'name')?.text
+    }
+    if (name && F.fnNames.size < 4000) F.fnNames.add(name)
+    if (name && body && KEY_BODY.test(body.type) && !F.keyFns.has(name)) F.keyFns.set(name, { params, body })
+    else if (name && F.keyFns.has(name) && body) F.keyFns.get(name).twice = true
+    // into the containers of functions, never into a function's body
+    if (/^(?:program|source_file|module|export_statement|lexical_declaration|class_declaration|class_body|class|class_definition|block|impl_item|declaration_list|mod_item|decorated_definition)$/.test(t) && !(t === 'block' && fam !== 'python')) for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i))
+    if (fam === 'python' && t === 'class_definition') { const b = field(n, 'body'); if (b) stack.push(b) }
+  }
+  for (const [k, v] of F.keyFns) if (v.twice) F.keyFns.delete(k)
+}
+const withNode = (a, n) => { if (a && n && !Object.prototype.hasOwnProperty.call(a, 'node')) Object.defineProperty(a, 'node', { value: n, enumerable: false }); return a }
 // a format string's text with each field a part code fills in, named after its argument
 function formatted(text, argNodesList, F, re) {
   const fam = F.fam
@@ -210,7 +294,7 @@ function formatted(text, argNodesList, F, re) {
     if (m[0] === '{{' || m[0] === '%%') { parts.push(m[0][0]); continue }
     if (m[0] === '}}') { parts.push('}'); continue }
     const inner = m[1]
-    if (inner && /^[A-Za-z_][A-Za-z0-9_]*$/.test(inner)) { parts.push(...(F.consts.has(inner) ? sub(F.consts.get(inner), F, 0) : [{ h: inner }])); continue }
+    if (inner && /^[A-Za-z_][A-Za-z0-9_]*$/.test(inner)) { const b = F.bind?.get(inner); parts.push(...(b ? (b.s ? b.s : b.n !== undefined ? [String(b.n)] : [{ h: b.x || inner }]) : F.consts.has(inner) ? sub(F.consts.get(inner), F, 0) : [{ h: inner }])); continue }
     const at = inner && /^\d+$/.test(inner) ? Number(inner) : k++
     parts.push(...(argNodesList[at] ? sub(argNodesList[at], F, 0) : [{ h: '' }]))
   }
@@ -249,7 +333,8 @@ export function argOf(n, F, depth = 0) {
       case 'true': return out(S('true'))
       case 'false': case 'null': case 'undefined': return out({ b: false })
       case 'binary_expression': return field(n, 'operator')?.type === '+' ? out(concat(argOf(field(n, 'left'), F, depth + 1), argOf(field(n, 'right'), F, depth + 1), field(n, 'left'), field(n, 'right'), fam)) : out({ x: '' })
-      case 'identifier': { if (F.consts.has(n.text)) return argOf(F.consts.get(n.text), F, depth + 1); const l = local(n.text, F); if (l) return argOf(l, F, depth + 1); return out({ x: n.text }) }
+      case 'identifier': return ident(n, F, depth, out)
+      case 'call_expression': { const k = keyCall(n, F, depth); return out(k || { x: holeName(n, fam) }) }
       case 'object': return out({ o: n.namedChildren.map((p) => p.type === 'pair' ? [keyArg(field(p, 'key'), F), argOf(field(p, 'value'), F, depth + 1)] : p.type === 'shorthand_property_identifier' ? [S(p.text), { x: p.text }] : p.type === 'spread_element' ? [{ spread: holeName(p.namedChildren[0], fam) }, null] : null).filter(Boolean) })
       case 'array': return out({ a: n.namedChildren.map((c) => (c.type === 'spread_element' ? spreadOf(c.namedChildren[0], F) : argOf(c, F, depth + 1))) })
       case 'arrow_function': case 'function_expression': case 'function': return out({ x: '', fn: true })
@@ -263,7 +348,7 @@ export function argOf(n, F, depth = 0) {
       case 'raw_string_literal': { const m = /^r(#*)"([\s\S]*)"\1$/.exec(n.text); return out(m ? { s: [m[2]] } : { x: '' }) }
       case 'integer_literal': { const v = Number(n.text.replace(/_/g, '').replace(/[iu](?:8|16|32|64|128|size)$/, '')); return out(Number.isFinite(v) ? { n: v } : { x: '' }) }
       case 'boolean_literal': return out(n.text === 'true' ? S('true') : { b: false })
-      case 'identifier': { if (F.consts.has(n.text)) return argOf(F.consts.get(n.text), F, depth + 1); const l = local(n.text, F); if (l) return argOf(l, F, depth + 1); return out({ x: n.text }) }
+      case 'identifier': return ident(n, F, depth, out)
       case 'array_expression': case 'tuple_expression': return out({ a: n.namedChildren.filter((c) => c.type !== 'attribute_item').map((c) => argOf(c, F, depth + 1)) })
       case 'closure_expression': return out({ x: '', fn: true })
       case 'macro_invocation': {
@@ -287,7 +372,11 @@ export function argOf(n, F, depth = 0) {
         const a0 = argNodes(n, fam)[0]
         const unit = /Duration::from_(secs|millis|mins|hours)$/.exec(fnText)
         if (unit && a0?.type === 'integer_literal') { const v = Number(a0.text.replace(/_/g, '').replace(/[iu]\d+$/, '')); return out({ n: unit[1] === 'millis' ? v / 1000 : unit[1] === 'mins' ? v * 60 : unit[1] === 'hours' ? v * 3600 : v, dur: true }) }
-        return out({ x: holeName(n, fam) })
+        // x.to_string(), x.clone(), x.as_str(): x itself (a key form or a key function's call)
+        const fe = field(n, 'function')
+        if (fe?.type === 'field_expression' && /^(?:to_string|to_owned|clone|as_str|as_ref|into)$/.test(field(fe, 'field')?.text || '') && !argNodes(n, fam).length) { const inner = argOf(field(fe, 'value'), F, depth + 1); if (inner.s) return out(inner) }
+        const k = keyCall(n, F, depth)
+        return out(k || { x: holeName(n, fam) })
       }
       default: return out({ x: holeName(n, fam) })
     }
@@ -299,7 +388,7 @@ export function argOf(n, F, depth = 0) {
       case 'int_literal': { const v = Number(n.text.replace(/_/g, '')); return out(Number.isFinite(v) ? { n: v } : { x: '' }) }
       case 'true': return out(S('true'))
       case 'false': case 'nil': return out({ b: false })
-      case 'identifier': { if (F.consts.has(n.text)) return argOf(F.consts.get(n.text), F, depth + 1); const l = local(n.text, F); if (l) return argOf(l, F, depth + 1); return out({ x: n.text }) }
+      case 'identifier': return ident(n, F, depth, out)
       case 'selector_expression': { const u = GO_UNITS[field(n, 'field')?.text]; if (u !== undefined && field(n, 'operand')?.text === 'time') return out({ n: u, dur: true }); return out({ x: field(n, 'field')?.text || '' }) }
       case 'binary_expression': {
         const op = field(n, 'operator')?.type
@@ -313,7 +402,8 @@ export function argOf(n, F, depth = 0) {
         const args = argNodes(n, fam)
         if (/^fmt\.Sprintf$/.test(fn)) { const f = args[0] ? argOf(args[0], F, depth + 1) : null; const text = f ? lit(f) : null; return out(text === null ? { x: '' } : formatted(text, args.slice(1), F, GO_FMT)) }
         if (/^(?:strconv\.Itoa|fmt\.Sprint|string)$/.test(fn) && args[0]) return out({ s: [{ h: holeName(args[0], fam) }] })
-        return out({ x: holeName(n, fam) })
+        const k = keyCall(n, F, depth)
+        return out(k || { x: holeName(n, fam) })
       }
       case 'composite_literal': {
         const body = field(n, 'body')
@@ -345,7 +435,7 @@ export function argOf(n, F, depth = 0) {
     case 'integer': { const v = Number(n.text.replace(/_/g, '')); return out(Number.isFinite(v) ? { n: v } : { x: '' }) }
     case 'true': return out(S('True'))
     case 'false': case 'none': return out({ b: false })
-    case 'identifier': { if (F.consts.has(n.text)) return argOf(F.consts.get(n.text), F, depth + 1); const l = local(n.text, F); if (l) return argOf(l, F, depth + 1); return out({ x: n.text }) }
+    case 'identifier': return ident(n, F, depth, out)
     case 'binary_operator': {
       const op = field(n, 'operator')?.type
       if (op === '%') { const l = argOf(field(n, 'left'), F, depth + 1); const text = lit(l); if (text === null) return out({ x: '' }); const r = unwrap(field(n, 'right'), fam); return out(formatted(text, r?.type === 'tuple' ? r.namedChildren : [r], F, PY_PCT)) }
@@ -356,7 +446,8 @@ export function argOf(n, F, depth = 0) {
       const fn = field(n, 'function')
       if (fn?.type === 'attribute' && field(fn, 'attribute')?.text === 'format') { const text = lit(argOf(field(fn, 'object'), F, depth + 1)); if (text !== null) return out(formatted(text, argNodes(n, fam).filter((a) => a.type !== 'keyword_argument'), F, PY_FMT)) }
       if (fn?.text === 'str' && argNodes(n, fam)[0]) return out({ s: [H(argNodes(n, fam)[0], fam)] })
-      return out({ x: holeName(n, fam) })
+      const k = keyCall(n, F, depth)
+      return out(k || { x: holeName(n, fam) })
     }
     case 'dictionary': return out({ o: n.namedChildren.filter((c) => c.type === 'pair').map((p) => [argOf(field(p, 'key'), F, depth + 1), argOf(field(p, 'value'), F, depth + 1)]) })
     case 'list': case 'tuple': return out({ a: n.namedChildren.map((c) => (c.type === 'list_splat' ? spreadOf(c.namedChildren[0], F) : argOf(c, F, depth + 1))) })
@@ -373,9 +464,23 @@ function local(name, F) {
   const l = F.locals?.get(name)
   if (!l || l.fn !== F.cur || l.twice || !KEY_FORMS.test(l.node.type)) return null
   if (l.node.type === 'macro_invocation' && !/^(?:format|formatdoc|concat)$/.test((field(l.node, 'macro')?.text || '').split('::').pop())) return null
-  if ((l.node.type === 'call_expression' && F.fam !== 'go') || (l.node.type === 'call' && !/\.format$|^str$/.test(field(l.node, 'function')?.text || ''))) return null
-  if (F.fam === 'go' && l.node.type === 'call_expression' && !/^fmt\.Sprintf$/.test(field(l.node, 'function')?.text || '')) return null
+  const isCall = l.node.type === 'call_expression' || l.node.type === 'call'
+  if (isCall && !keyFnOf(l.node, F) && !(F.fam === 'go' && /^fmt\.Sprintf$/.test(field(l.node, 'function')?.text || '')) && !(F.fam === 'python' && /\.format$|^str$/.test(field(l.node, 'function')?.text || '')) && !(F.fam === 'rust' && /\.(?:to_string|to_owned|clone)$/.test(field(l.node, 'function')?.text || ''))) return null
   return l.node
+}
+
+// A name: a key function's bound parameter, a same-file constant, a local bound to a key form, else
+// unknown; a parameter of the function around it says which (resolved once the file is read, when
+// every call of that function in the file passes it one same template)
+function ident(n, F, depth, out) {
+  if (F.bind?.has(n.text)) return F.bind.get(n.text)
+  if (F.consts.has(n.text)) return argOf(F.consts.get(n.text), F, depth + 1)
+  const l = local(n.text, F)
+  if (l) return argOf(l, F, depth + 1)
+  const ps = F.cur?.params
+  const lb = F.locals.get(n.text)
+  if (ps && ps.includes(n.text) && !(lb && lb.fn === F.cur)) return out({ x: n.text, param: { fn: F.cur.short, i: ps.indexOf(n.text) } })
+  return out({ x: n.text })
 }
 
 // an object's key: a name, a string, a computed key
@@ -447,7 +552,7 @@ function protocol(cmd, norm, args0, fam, ftIndex, F) {
       if (fam === 'go' && norm === 'setargs') { const o = pos[2]?.o || []; const ttl = o.find(([k]) => lit(k) === 'TTL'); return [pos[0], pos[1], ...ttlArg(ttl?.[1])] }
       if (fam === 'rust' && norm === 'setoptions') { const o = textOf(follow(pos[2])); const m = /\b(EX|PX)\s*\(\s*(\d+)/.exec(o); return [pos[0], pos[1], ...(m ? [S(m[1]), { n: Number(m[2]) }] : /\bKEEPTTL\b|keep_ttl/i.test(o) ? [S('KEEPTTL')] : [])] }
       break
-    case 'SETNX': if (fam === 'go') return [pos[0], pos[1]]; break
+    case 'SETNX': if (fam === 'go') return { cmd: 'SET', args: [pos[0], pos[1], S('NX'), ...ttlArg(pos[2])] }; break
     case 'SETEX': case 'PSETEX': if (fam === 'rust' || fam === 'go') return [pos[0], pos[2], pos[1]]; break
     case 'GETEX': {
       if (fam === 'go') return [pos[0], ...ttlArg(pos[1])]
@@ -465,7 +570,7 @@ function protocol(cmd, norm, args0, fam, ftIndex, F) {
       const group = norm === 'xreadoptions' ? /\.group\s*\(/.exec(textOf(follow(pos[2]))) : null
       if (fam === 'rust') {
         const keys = expand([pos[0] || { x: '' }]), ids = expand([pos[1] || { x: '' }])
-        if (group) { const g = groupArgs(follow(pos[2])); return { cmd: 'XREADGROUP', args: [S('GROUP'), g[0] || { x: '' }, g[1] || { x: '' }, S('STREAMS'), ...keys, ...ids] } }
+        if (group) { const g = groupArgs(follow(pos[2]), F); return { cmd: 'XREADGROUP', args: [S('GROUP'), g[0] || { x: '' }, g[1] || { x: '' }, S('STREAMS'), ...keys, ...ids] } }
         return [S('STREAMS'), ...keys, ...ids]
       }
       return streamsForm(cmd, pos, kw, fam) || undefined
@@ -493,7 +598,7 @@ function protocol(cmd, norm, args0, fam, ftIndex, F) {
       if (norm !== cmd.toLowerCase()) return keyed ? [pos[0], { n: 0 }, ...expand([...pos.slice(1), ...kw])] : [{ n: 0 }, ...expand([...pos, ...kw])]
       break
     }
-    case 'FT.CREATE': return ftCreate(pos, kw, fam) || undefined
+    case 'FT.CREATE': return ftCreate(pos, kw, fam, F) || undefined
     default: break
   }
   return undefined
@@ -517,16 +622,16 @@ function streamsForm(cmd, pos, kw, fam) {
   return [...head, S('STREAMS'), { spread: '' }]
 }
 // the group and consumer a Rust StreamReadOptions names (`.group("g", "c")`)
-function groupArgs(opts) {
+function groupArgs(opts, F) {
   const n = opts?.node
   if (!n) return []
   let found = null
   each(n, (x) => { if (found) return false; if (x.type === 'call_expression') { const fnn = field(x, 'function'); if (fnn?.type === 'field_expression' && field(fnn, 'field')?.text === 'group') { found = x; return false } } return true })
-  return found ? argNodes(found, 'rust').map((a) => argOf(a, { fam: 'rust', consts: new Map(), arrays: new Map() })) : []
+  return found ? argNodes(found, 'rust').map((a) => argOf(a, F)) : []
 }
 // FT.CREATE in each client's typed form → the protocol's arguments
 const PY_FIELDS = { TextField: 'TEXT', TagField: 'TAG', NumericField: 'NUMERIC', GeoField: 'GEO', VectorField: 'VECTOR', GeoShapeField: 'GEOSHAPE' }
-function ftCreate(pos, kw, fam) {
+function ftCreate(pos, kw, fam, F) {
   const [name, schema, opts] = pos
   if (fam === 'ts' && schema?.o) {
     // node-redis: (name, { field: SchemaFieldTypes.TEXT | 'TEXT' | { type, AS, SORTABLE, SEPARATOR, WEIGHT } }, { ON, PREFIX })
@@ -562,7 +667,7 @@ function ftCreate(pos, kw, fam) {
       const fnode = f?.node
       if (!fnode || fnode.type !== 'call') { out.push({ spread: '' }); continue }
       const cls = lastName(field(fnode, 'function')?.text || '')
-      const fa = argNodes(fnode, 'python').map((a) => argOf(a, { fam: 'python', consts: new Map(), arrays: new Map() }))
+      const fa = argNodes(fnode, 'python').map((a) => argOf(a, F))
       const fname = fa.find((a) => a.kw === undefined)
       const type = PY_FIELDS[cls]
       if (!type || !fname) { out.push({ spread: '' }); continue }
@@ -625,7 +730,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
   const root = tree.rootNode
   const out = { lang: fam, path: file, clients: [], env: [], dbs: [], sites: [], fns: [], notes: [], tests: 0 }
   const note = (s) => { if (out.notes.length < 8 && !out.notes.includes(s)) out.notes.push(s) }
-  const F = { fam, consts: new Map(), twice: new Set(), vals: new Map(), locals: new Map(), cur: null, skip: new Set(), arrays: new Map(), known: new Map(), ctors: new Set(), mods: new Set(), scripts: new Map(), defined: new Map(), builders: new Map(), returns: new Map() }
+  const F = { fam, consts: new Map(), twice: new Set(), vals: new Map(), locals: new Map(), keyFns: new Map(), fnNames: new Set(), calls: new Map(), bind: null, cur: null, skip: new Set(), arrays: new Map(), known: new Map(), ctors: new Set(), mods: new Set(), scripts: new Map(), defined: new Map(), builders: new Map(), returns: new Map() }
   const fileTest = TEST_PATH.test(file) || TEST_FILE[fam].test(file)
   const deadline = Date.now() + ms
   let steps = 0, stopped = false
@@ -651,6 +756,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     return false
   })
   topDecls(root, F)
+  keyFns(root, F)
   const evidence = () => out.clients.length > 0 || F.known.size > 0 || F.mods.size > 0
   let dyn = 0
   const pending = [] // commands read once the file is walked: [{ c: { name, args }, line, ctx, how, batch, via }]
@@ -670,7 +776,9 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     const v = unwrap(val, fam)
     if (!v) return
     if (F.vals.size < 2000) F.vals.set(name, v)
-    if (ctx.fn && F.locals.size < 4000) { const was = F.locals.get(name); F.locals.set(name, { node: v, fn: ctx.fn, twice: !!(was && was.fn === ctx.fn) }) }
+    const itself = new RegExp(`^&?\\s*${name.replace(/[$]/g, '\\$')}(?:\\s*\\.\\s*(?:to_string|clone|to_owned|as_str|as_ref|into)\\s*\\(\\s*\\))?$`).test(v.text.slice(0, 200))
+    if (ctx.fn && F.locals.size < 4000 && !itself) { const was = F.locals.get(name); F.locals.set(name, { node: v, fn: ctx.fn, twice: !!(was && was.fn === ctx.fn) }) }
+    if (itself) return
     const skip = () => { let cur = v; for (let g = 0; g < 64 && cur; g++) { cur = unwrap(cur, fam); if (!cur || cur.type !== CALL[fam]) break; F.skip.add(cur.id); const c = callee(cur, fam); cur = c?.recv || null } }
     if (isMaker(v)) { F.known.set(name, 'bound'); return }
     // an array: a command's arguments when it starts with a command's name, else elements a spread inlines
@@ -871,6 +979,18 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     const a = argOf(v, F)
     if (a.n !== undefined && out.dbs.length < MAX_DBS && (out.clients.length || F.known.size)) out.dbs.push({ db: a.n, line: lineOf(n), how: 'option' })
   }
+  // the calls of the file's own functions, their arguments as the caller has them (a parameter's value)
+  const recordCall = (n) => {
+    const c = callee(n, fam)
+    if (!c || !c.name) return
+    const name = c.recv ? (RECV_SELF.test(unwrap(c.recv, fam)?.text || '') ? c.name : null) : c.name.split(/::|\./).pop()
+    if (!name || !F.fnNames.has(name)) return
+    const list = F.calls.get(name) || []
+    if (list.length >= 16 || F.callCount >= 4000) { list.over = true; F.calls.set(name, list); return }
+    F.callCount = (F.callCount || 0) + 1
+    try { list.push(argNodes(n, fam).filter((a) => a.type !== 'keyword_argument').map((a) => argOf(a, F))) } catch { list.over = true }
+    F.calls.set(name, list)
+  }
   // ── the walk ──
   const handled = new Set()
   const top = { fn: null, cls: null, pyCls: null, impl: null, test: false }
@@ -897,6 +1017,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     if ((evidence() || out.clients.length) && !handled.has(n.id)) envAt(n)
     if (STRINGS[fam].test(t)) urlAt(n)
     dbOption(n)
+    if (t === CALL[fam] && F.fnNames.size) recordCall(n)
     if (t === CALL[fam] && !handled.has(n.id) && !F.skip.has(n.id)) {
       // every call of the chain is read with its outermost
       let cur = n
@@ -907,7 +1028,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     let c = ctx
     if (FN[fam].test(t)) {
       const name = fnName(n, parent, fam, ctx)
-      c = name !== null ? { ...ctx, fn: { name: name.slice(0, 120), line: lineOf(n), end: endOf(n), idx: -1 }, test: ctx.test || isTestName(fam, name), pyCls: null } : { ...ctx, pyCls: fam === 'python' ? null : ctx.pyCls }
+      c = name !== null ? { ...ctx, fn: { name: name.slice(0, 120), short: name.split(/::|\./).pop(), params: paramsOf(n, fam), line: lineOf(n), end: endOf(n), idx: -1 }, test: ctx.test || isTestName(fam, name), pyCls: null } : { ...ctx, pyCls: fam === 'python' ? null : ctx.pyCls }
     } else if (CLASS[fam]?.test(t)) {
       const name = field(n, 'name')?.text || '(class)'
       c = fam === 'python' ? { ...ctx, pyCls: name, test: ctx.test || /^Test/.test(name) } : { ...ctx, cls: name }
@@ -927,9 +1048,25 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
   for (const b of F.builders.values()) if (!b.used) emit({ name: b.name, args: b.args }, b.line, b.ctx, 'builder')
   pending.sort((a, b) => a.line - b.line || a.seq - b.seq)
   // ── each command read, its spreads resolved ──
+  // a parameter's value: what every call of its function in the file passes it, when they agree
+  const paramValue = (p, depth) => {
+    const list = F.calls.get(p.fn)
+    if (!list || !list.length || list.over || depth > 3) return null
+    let got = null
+    for (const args of list) {
+      let a = args[p.i]
+      if (a && a.param) a = paramValue(a.param, depth + 1)
+      const t = a && a.s ? template(a) : null
+      if (!t) return null
+      if (got && got.k !== t.k) return null
+      got = got || { a, k: t.k }
+    }
+    return got ? got.a : null
+  }
   const resolve = (args, depth = 0) => {
     const outA = []
     for (const a of args) {
+      if (a && a.param) { const v = paramValue(a.param, 0); outA.push(v || a); continue }
       if (a && a.ref && depth < 4) { const arr = F.arrays.get(a.ref); if (arr) { outA.push(...resolve(arr.args, depth + 1)); continue } }
       if (a && a.call && depth < 4) { const r = F.returns.get(a.call); if (r) { outA.push(...resolve(r.ref ? [r] : r.a, depth + 1)); continue } outA.push({ spread: a.call }); continue }
       outA.push(a)

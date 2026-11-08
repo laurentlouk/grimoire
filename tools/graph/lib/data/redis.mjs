@@ -246,6 +246,9 @@ function keySpace(g, out) {
 function covered(prefix, t) {
   const lp = literalPrefix(t)
   if (lp.startsWith(prefix)) return true
+  // a prefix code builds part of (`{stage}:doc:`): compared as templates are, without the names
+  const form = (x) => String(x).replace(/\{[A-Za-z0-9_$]*\}/g, '{}')
+  if (prefix.includes('{') && form(t).startsWith(form(prefix))) return true
   return lp.length > 0 && prefix.startsWith(lp) && globMatches(prefix.replace(/[*?[\\]/g, '\\$&') + '*', t)
 }
 export function describeDef(d) {
