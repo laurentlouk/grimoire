@@ -34,15 +34,15 @@
 //    M10 one kept change: exactly one new commit on the run branch, on the landed head, touching only
 //        the delta, pushed with it; the checkout's delta byte-identical, its run branch untouched
 //    M11 a later landing: the earlier ship's delta commit is carried forward (a merge that changes
-//        only the delta), the new entry committed on top; the gate's SYNC brings them into the
-//        checkout before its gate command, so its push is a fast-forward
+//        only the delta), the new entry committed on top; the SYNC before the gate (its own step,
+//        #99) brings them into the checkout, so the gate's push is a fast-forward
 //    M12 two lanes landing together: one delta commit; with the lock held, nothing moves
 //    M13 a commit hook that fails: the ship and its push stay green, the entry pending; the next
 //        ship commits it
 //    M14 deliver: 'end': the seal commits the delta on what the gate pushed, and pushes it
 //    M15 the design's delta absent on the run branch: added from the checkout's copy, committed
-//        with the first entry; at the gate, added on both sides, SYNC keeps the checkout's version
-//        with the remote's unplanned change appended
+//        with the first entry; the SYNC commits the checkout's uncommitted copy first, so it is added
+//        on both sides, and keeps that version with the remote's unplanned change appended
 //    M16 two repositories: the delta lives in one; the other's kept change goes to its ships
 //    M17 the delta changed on both sides (an acknowledgement swept into a task's commit): the
 //        carry-forward merge keeps the branch's version, appends the remote's entries, and pushes
@@ -374,7 +374,7 @@ const CLOSING_COMMIT = "Each kept unplanned change is added to the delta (`origi
   const before = readFileSync(join(X.W, REL), 'utf8')
   const ships = [], tips = []
   const ship = (p) => { const r = shipFor(X, ships)(p); tips.push(X.origin()); return r }
-  const { result, prompt } = await run('M11 · two landings, each keeping a change: the second ship carries the first commit forward', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })], by({
+  const { result, prompt, labels } = await run('M11 · two landings, each keeping a change: the second ship carries the first commit forward', [T('PROJ-1'), T('PROJ-2', { dependsOn: ['PROJ-1'] })], by({
     'impl:PROJ-1': { ...impl(c1.slice(0, 7)), modelChanges: [keptAs(1)] },
     'impl:PROJ-2': { ...impl(c2.slice(0, 7), c1.slice(0, 7)), modelChanges: [keptAs(2)] },
     'ship:api#1': ship, 'ship:api#2': ship,
@@ -388,19 +388,19 @@ const CLOSING_COMMIT = "Each kept unplanned change is added to the delta (`origi
   ok(ships.out.every((o) => /^PUSH ok=1 /m.test(o) && /^DELTA ok added=1 already=0 refused=0 commit=/m.test(o)) && !result.halt && result.dataModel.changes.every((c) => c.delta === 'added'), 'both ships pushed and recorded; nothing failed or halted')
   ok(readFileSync(join(X.W, REL), 'utf8') === before && X.sh(`git rev-parse refs/heads/${RUN_BRANCH}`, X.W) === c2, 'the checkout still has neither: its delta untouched, its run branch at the landed head')
 
-  // the terminal slot: a sweep commit on the checkout's run branch, then the gate's SYNC brings the
-  // recorded delta in before the gate command runs, and its push is a fast-forward of the remote
-  const gp = prompt('gate:api')
-  ok(gp.includes(`this repo holds the design's delta (\`${REL}\`)`) && /^- Before the gate command/m.test(gp) && gp.indexOf('SYNC ok') < gp.indexOf('Gate command:'), 'the gate prompt carries the SYNC script, before the gate command')
+  // the terminal slot: a sweep commit on the checkout's run branch, then the SYNC (its own step before
+  // the gate, #99) brings the recorded delta in, and the gate's push is a fast-forward of the remote
+  const gp = prompt('gate:api'), sp = scriptOf(prompt('sync:api'))
+  ok(!/SYNC/.test(gp) && sp.includes('SYNC ok mode=') && labels.indexOf('sync:api') >= 0 && labels.indexOf('sync:api') < labels.indexOf('gate:api'), 'the SYNC is its own step, before the gate; the gate prompt carries none')
   const B = blocksOf(gp), pick = (s) => B.find((b) => b.includes(s)) || ''
   const s = X.commit('sweep')
-  const so = X.exec('bash', pick('SYNC ok')).out
+  const so = X.exec('bash', sp).out
   const head = X.sh('git rev-parse HEAD', X.W)
-  eq([so.trim(), X.sh(`git rev-list --parents -n 1 ${head}`, X.W).split(' ').slice(1), X.sh(`git diff --name-only ${s} ${head}`, X.W)], [`SYNC ok head=${head}`, [s, d2], REL], "SYNC merges the remote's delta commits into the checkout's run branch: a merge that changes only the delta")
+  eq([so.trim(), X.sh(`git rev-list --parents -n 1 ${head}`, X.W).split(' ').slice(1), X.sh(`git diff --name-only ${s} ${head}`, X.W)], [`SYNC ok mode=merge head=${head}`, [s, d2], REL], "SYNC merges the remote's delta commits into the checkout's run branch: a merge that changes only the delta")
   const take = X.exec('bash', pick('shiplock gate')).out, push = X.exec('bash', pick('push -u origin')).out
   X.exec('bash', pick('lkrel'))
   ok(/^LOCK ok/m.test(take) && /^PUSH exit=0$/m.test(push) && X.origin() === head, "the gate's push is a fast-forward: the remote holds the swept head with both entries")
-  ok(X.exec('bash', pick('SYNC ok')).out.trim() === 'SYNC none', 'run again: SYNC none, nothing to bring')
+  ok(X.exec('bash', sp).out.trim() === 'SYNC none', 'run again: SYNC none, nothing to bring')
   X.done()
 }
 
@@ -558,16 +558,17 @@ const CLOSING_COMMIT = "Each kept unplanned change is added to the delta (`origi
   ok(og(X, `log -1 --format=%b ${tip}`).includes("The design's delta was not on this branch yet: added as the orchestrating checkout holds it.") && /^DELTA ok added=1 /m.test(ships.out[0]), 'its message says so')
   ok(readFileSync(join(X.W, REL), 'utf8') === before && X.sh(`git status --porcelain -- ${REL}`, X.W) === `?? ${REL}`, "the checkout's copy byte-identical, still uncommitted there")
 
-  // the gate: its step 1 commits what is uncommitted, the design's delta with it, so the delta was
-  // added on both sides; SYNC keeps the checkout's version and appends the remote's unplanned change
-  X.sh(`git add -- ${REL} && git commit -q -m 'docs: the design delta'`, X.W)
-  const g = X.sh('git rev-parse HEAD', X.W)
-  const B = blocksOf(prompt('gate:api')), pick = (s) => B.find((b) => b.includes(s)) || ''
-  const so = X.exec('bash', pick('SYNC ok')).out.trim()
+  // the SYNC, before the gate (#99): the design's delta is still uncommitted in the checkout, and the
+  // remote's seed commit added it. The SYNC commits the checkout's copy first, alone (as the gate's
+  // step 1 would have), so the delta is added on both sides; the merge keeps the checkout's version
+  // and appends the remote's unplanned change
+  const so = X.exec('bash', scriptOf(prompt('sync:api'))).out.trim()
   const head = X.sh('git rev-parse HEAD', X.W)
+  const g = X.sh(`git rev-parse ${head}^1`, X.W)
   const local = JSON.parse(readFileSync(join(X.W, REL), 'utf8'))
-  eq([so, X.sh(`git rev-list --parents -n 1 ${head}`, X.W).split(' ').slice(1), local.data.map((c) => c.id).slice(0, 3), local.data.filter((c) => c.origin === 'unplanned').map((c) => c.target), X.sh('git status --porcelain -- docs', X.W)],
-    [`SYNC ok head=${head}`, [g, tip], ['isbn', 'due', 'loans'], ['api:db/books.k1'], ''], "the delta added on both sides: SYNC merges, keeping the checkout's version with the remote's unplanned change appended")
+  eq([so, X.sh(`git rev-list --parents -n 1 ${head}`, X.W).split(' ').slice(1), X.sh(`git rev-list --parents -n 1 ${g}`, X.W).split(' ').slice(1), X.sh(`git diff --name-status ${c1} ${g}`, X.W), X.sh(`git log -1 --format=%s ${g}`, X.W), local.data.map((c) => c.id).slice(0, 3), local.data.filter((c) => c.origin === 'unplanned').map((c) => c.target), X.sh('git status --porcelain -- docs', X.W)],
+    [`SYNC ok mode=merge head=${head}`, [g, tip], [c1], `A\t${REL}`, `chore(data): commit ${REL} as the orchestrating checkout holds it`, ['isbn', 'due', 'loans'], ['api:db/books.k1'], ''], "the checkout's copy committed alone first, then the delta added on both sides: SYNC merges, keeping the checkout's version with the remote's unplanned change appended")
+  const B = blocksOf(prompt('gate:api')), pick = (s) => B.find((b) => b.includes(s)) || ''
   X.exec('bash', pick('shiplock gate'))
   ok(/^PUSH exit=0$/m.test(X.exec('bash', pick('push -u origin')).out) && X.origin() === head, "the gate's push is a fast-forward")
   X.done()
@@ -638,7 +639,7 @@ const CLOSING_COMMIT = "Each kept unplanned change is added to the delta (`origi
   ok(/## The design's delta/.test(read('workflows/briefs/hydrate.md')), 'hydrate.md: copy each task\'s planned changes')
   ok(/never a finding by itself/.test(read('workflows/briefs/review.md')) && /on its merits/.test(read('workflows/briefs/review.md')), 'review.md: an unplanned change is never a finding by itself; a wrong one is, on its merits')
   ok(/DELTA/.test(read('workflows/briefs/ship.md')) && /deltaAdded/.test(read('workflows/briefs/ship.md')) && /deltaCommit/.test(read('workflows/briefs/ship.md')), 'ship.md maps the DELTA lines, the commit included')
-  ok(/SYNC/.test(read('workflows/briefs/gate.md')), 'gate.md says when to run the SYNC script and what its lines mean')
+  ok(/## Mode sync/.test(read('workflows/briefs/ship.md')) && /there is no SYNC for you to run/.test(read('workflows/briefs/gate.md')), 'ship.md maps the SYNC line (its own step before the gate); gate.md: the gate runs none itself')
   ok(['templates/team-agent.md', 'agents/migration-engineer.md', 'agents/test-engineer.md', 'AGENTS.md'].every((f) => /modelChanges/.test(read(f))), 'the team-agent template, both specialists and the roster\'s return contract name modelChanges')
 }
 

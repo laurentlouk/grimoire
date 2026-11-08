@@ -32,6 +32,7 @@ export const happy = (label, p) => {
   if (label.startsWith('gate:')) return { status: 'DONE', summary: 'green', prUrl: PR_URL }
   if (label.startsWith('ship:')) return { pushed: true, remoteHead: headOf(p), prUrl: PR_URL, draft: true }
   if (label.startsWith('seal:')) return { sealed: true, already: true, prUrl: PR_URL }
+  if (label.startsWith('sync:')) return { line: 'SYNC none' } // the SYNC before the gate: nothing to bring
   if (label.startsWith('env:')) return envReport(p)
   if (label.startsWith('integrate:')) return { status: 'MERGED', headSha: 'eeeeeee' }
   return V('PASS')

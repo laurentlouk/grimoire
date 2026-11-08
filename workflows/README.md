@@ -138,8 +138,8 @@ ignored, with a warning.)
 | `agentHardTimeoutMin` | `180` | where waiting ends. A reader (reviewer, verifier, guard, replanner, …) is given up on at twice its soft limit, capped by this value (`telemetry.timedOut`). A writer (implementer, fix, integrate, gate) is never settled while it may still be running: it is marked wedged, its repo is fenced (nothing else is dispatched into that checkout, no replan requeues into it) and its result is still taken when it arrives. When only wedged work is left, the run waits out each wedged writer's grace window (`wedgeGraceMin`) and then halts with `kind: 'wedged'`. `0`: writers never wedge |
 | `wedgeGraceMin` | the hard limit, at most `60` | how long a wedged writer is still waited for once it is the only work left. Halting ends the run's agents, the wedged writer with them: one was minutes from done when its run halted, and the resume rebuilt its task for three hours. Other repos keep running meanwhile; a result that arrives inside the window is used as usual. `0`: halt as soon as only wedged work is left |
 | `deltaPath` | beside the spec | the design's delta, what it changes in stored data (`docs/specs/<date>-<topic>.delta.json` beside `<date>-<topic>-design.md`; any other spec `<stem>.md` has `<stem>.delta.json`). The index agent says whether it exists (`deltaFound`); none is normal: a design that changes no stored data has none. Inside one of `repos`, the kept unplanned changes are committed on that repository's run branch; outside them all, written in place. See "The data model: unplanned changes, resolved and reported" |
-| `root` | — | the workspace root, an absolute path (`/grimoire:orchestrate` passes it). Every brief names it and reads its file by absolute path, and every verbatim script (journal, ship, seal, environment check, reconcile) changes to it first, so an agent dispatched while the launching session sits in another folder still finds the run dir, the repos and the engine's scripts. Without it, prompts keep their relative paths |
-| `timeouts` | — | per dispatch kind, `{<kind>: {soft, hard, hedgeAfter}}` in minutes. Defaults: `writer` (soft `agentTimeoutMin`, hard `agentHardTimeoutMin`), `reader` (hard 2 × soft, capped by the hard limit), `hydrate` (hard 90), `preflight` 2/6 (hedge at 2), `precheck` 6/15 (hedge at 6), `journal` 4/8, `ship` 5/12 (the seal too; the ship script stops itself by 540 s), `env` 2/4, `status` 4/8, `crystallize` 90/180. `hedgeAfter` starts one duplicate of a side-effect-free dispatch and takes the first non-empty reply: it applies to `preflight`, `precheck`, and `hydrate` when `claim` is off (no default for hydrate), and is ignored with a warning for any other kind. Unknown kinds are ignored with a warning |
+| `root` | — | the workspace root, an absolute path (`/grimoire:orchestrate` passes it). Every brief names it and reads its file by absolute path, and every verbatim script (journal, ship, seal, SYNC, environment check, reconcile) changes to it first, so an agent dispatched while the launching session sits in another folder still finds the run dir, the repos and the engine's scripts. Without it, prompts keep their relative paths |
+| `timeouts` | — | per dispatch kind, `{<kind>: {soft, hard, hedgeAfter}}` in minutes. Defaults: `writer` (soft `agentTimeoutMin`, hard `agentHardTimeoutMin`), `reader` (hard 2 × soft, capped by the hard limit), `hydrate` (hard 90), `preflight` 2/6 (hedge at 2), `precheck` 6/15 (hedge at 6), `journal` 4/8, `ship` 5/12 (the seal and the SYNC too; the ship script stops itself by 540 s), `env` 2/4, `status` 4/8, `crystallize` 90/180. `hedgeAfter` starts one duplicate of a side-effect-free dispatch and takes the first non-empty reply: it applies to `preflight`, `precheck`, and `hydrate` when `claim` is off (no default for hydrate), and is ignored with a warning for any other kind. Unknown kinds are ignored with a warning |
 | `deliver` | `'incremental'` | `'incremental'`: after each landing, push the landed SHA to the repo's run branch (fast-forward only, from a ship worktree, hooks never bypassed) and open or update its draft PR. `'end'`: nothing reaches the remote before the terminal slot. Per repo: `repos[].deliver` |
 | `shipOnHalt` | `true` | on a halt, push what landed, open the draft PR if it is missing, and post a status comment on it (the reason, what landed, what is open, what to fix, how to resume), even under `deliver: 'end'` |
 | `draftPr` | `true` | open the repo's PR as a draft after its first landing; `false` pushes without opening a PR before the terminal slot |
@@ -227,7 +227,7 @@ flowchart TB
     replan -- "HALT (reason) · cause: environment" --> halt["HALT — kind: environment · wedged · harness · budget · or none\npush what landed · open the draft PR if missing (shipOnHalt)\nSTATUS COMMENT: reason · landed / open · what to fix · how to resume\na PR out of draft: the status comment only"]
     disp -- "QUIESCENT: only WEDGED writers left" --> halt
     halt --> ledger
-    disp -- "QUIESCENT: project DRAINED" --> final["ONE FINAL WAVE — environment check, then terminal slots,\nrepos in PARALLEL: sweep → gate → the draft PR marked READY → seal\ndiagram below"]
+    disp -- "QUIESCENT: project DRAINED" --> final["ONE FINAL WAVE — environment check, then terminal slots,\nrepos in PARALLEL: sweep → (SYNC) → gate → the draft PR marked READY → seal\ndiagram below"]
     final -- "slot failed → held, retries at next full drain" --> disp
     final -- "all green" --> check["FINAL PASS — optional cross-repo check"]
     check --> ledger["LEDGER — cheap, own worktree\nruns/&lt;date&gt;-&lt;project&gt;.json · every execute run"]
@@ -284,7 +284,10 @@ flowchart TB
     drained["PROJECT DRAINED\n(nothing pending anywhere, nothing in flight —\nevery task landed &amp; integrated on its repo's ONE run branch)"]
     drained --> sweep["TERMINAL QUALITY SWEEP — per repo, all repos in PARALLEL\nSRE · human interface · a11y · privacy · store review (by TAG)\nsubject: the ENTIRE integrated run branch — cross-task consistency,\nthe assembled user flow, release-readiness\nfix ⇄ guard ⇄ re-review loop as above (fixes commit to the run branch)"]
     sweep -- "FAIL → TERMINAL_REVIEW_FAILED\nheld · replanner · gate NOT paid" --> replan["scheduler blocks → replanner\n(slot retries at the next full drain)"]
-    sweep -- "PASS" --> gate["GATE + PR dispatch — after the repo's pending pushes\nrun the repo's gate command ONCE on the final tree\n(none configured, or gate.when does not match → skipped)\ntakes the ship lock · pushes the final head (fast-forward)\nbrings the draft PR's title and body up to the PR rules\nand marks it READY (opens it under deliver: 'end';\na PR already READY stays ready, its description rewritten over every task)"]
+    sweep -- "PASS" --> sync["SYNC — only in the repo that holds the design's delta\nafter the repo's pending pushes · haiku, one fixed script, no lock\nbrings the remote's delta commits into the run branch\n(a fast-forward, or a merge that changes only the delta)\nevery git step capped at 60 s · its receipt journaled"]
+    sync -- "SYNC ok · SYNC none · or no delta here" --> gate
+    sync -- "SYNC bad · no receipt\nthe gate runs its command, no push, no PR" --> shipfail["SHIP_FAILED — never a refused push\nungatedReasons: the receipt, for a person to merge and push"]
+    gate["GATE + PR dispatch — after the repo's pending pushes\nrun the repo's gate command ONCE on the final tree\n(none configured, or gate.when does not match → skipped)\ntakes the ship lock · pushes the final head (fast-forward)\nbrings the draft PR's title and body up to the PR rules\nand marks it READY (opens it under deliver: 'end';\na PR already READY stays ready, its description rewritten over every task)"]
     gate -- "green" --> seal["SEAL — haiku, one fixed script, under the ship lock\nthe body's last line is exactly the state marker, else it is put back\nnothing else edited · the PR stays ready"]
 ```
 
@@ -294,6 +297,29 @@ the slot retries at the next full drain. A gate that cannot push or open the PR 
 step failed, or the ship lock stayed busy) certified the tree but could not ship it: no code
 change fixes that, so it is never replanned, and the repo is listed in `ungatedRepos` with the
 reason in `ungatedReasons`, for a person to push.
+
+**The SYNC** (from 0.42.0, #99). In the repository that holds the design's delta, the ships commit
+the kept unplanned changes on the remote run branch, which the orchestrating checkout's run branch
+never gets. So between that repo's last ship and its gate, `sync:<repo>` runs one fixed script
+(haiku, the ship brief's mode sync). It reads the remote run branch and brings in what it holds
+beyond the checkout's branch, when that is the delta alone: a fast-forward (`SYNC ok mode=ff
+head=<sha>`), or a merge that changes only the delta (`SYNC ok mode=merge`; the delta changed on
+both sides is resolved as a ship's carry-forward resolves it). `SYNC none` has nothing to bring
+(`remote=0`: no run branch there yet). The checkout's own uncommitted copy of the delta (the
+design's, never committed; an acknowledgement made in `serve`) would stop the merge: it is
+committed first, alone, as the gate's step 1 would have done, and put back as it was if the merge
+fails. The script takes no lock: by then the repo's ships are done, none of its tasks is pending or
+in flight, and ships push from their own worktree, so nothing else writes that checkout. Every step
+that can wait on the remote or a hook (ls-remote, fetch, commit, merge, the delta's own step) is
+capped at 60 s, and the whole script by the ship deadline. Its one `SYNC` line is the receipt: the
+engine parses it, journals it (`sync`) and logs it. The gate prompt carries no SYNC step.
+`SYNC bad step=fetch|merge|branch|other` (a remote it cannot read; a conflict it does not resolve,
+abandoned with the worktree as it was; another branch checked out; a remote that holds more than
+the delta), or no receipt the engine can read, means the gate's push would be refused as a
+non-fast-forward. A failed fetch and a missing receipt are tried once more. Then the gate runs its
+command without its push, lock or PR step (it is not dispatched at all when the repo has no gate
+command), and the slot ends `SHIP_FAILED` with the receipt as its reason in `ungatedReasons`, for a
+person to merge and push: never a refused push. A gate command that fails is still `GATE_FAILED`.
 
 The gate retypes the state marker (up to 8,000 characters of base64) into the final body with
 no checksum, and a mangled copy would surface only at the next relaunch, as an unreadable
@@ -900,15 +926,17 @@ told.
   refuses (`DELTA bad step=commit`), a push that fails (`DELTA bad step=push`) or a step that did
   not run (`DELTA skipped …`) never fails the ship or its push: the changes wait for the next
   one. With `deliver: 'end'`, the seal commits them on what the gate pushed and pushes that commit.
-  The gate, before its gate command, runs a `SYNC` script that brings the remote's delta commits
-  into the checkout's run branch (a fast-forward, or a merge that changes only the delta), so it
-  certifies a tree that holds them and its push stays a fast-forward. A merge (the ship's or the
+  Before the gate, the terminal slot's SYNC step (from 0.42.0; "The final wave") brings the remote's
+  delta commits into the checkout's run branch (a fast-forward, or a merge that changes only the
+  delta), so the gate certifies a tree that holds them and its push stays a fast-forward; when it
+  cannot, the gate's push is skipped with its receipt as the reason. A merge (the ship's or the
   SYNC's) that stops on the delta alone, changed on both sides (an acknowledgement made in `serve`
   and committed on the branch, or the design's delta added on both), keeps the branch's version
   and appends the remote's unplanned changes to it (`delta-append.mjs` takes the other version as
   its changes: their unplanned entries, an acknowledged one unacknowledged again); any other
-  conflict abandons the merge, and the push says the rest (its message keeps no conflict list: the
-  run's trailer stays its last paragraph). A delta outside every
+  conflict abandons the merge: a ship's push is then refused, and the SYNC says `SYNC bad
+  step=merge` and the gate's push is skipped (the resolved merge's message keeps no conflict list:
+  the run's trailer stays its last paragraph). A delta outside every
   repository the run ships (a hub folder that is not one) is written in place, as before, and the
   PR section says so. The home repository's PR section names the other repositories whose kept
   changes its delta commits carry ("the delta on this branch also records what web kept: …").
@@ -917,13 +945,18 @@ told.
   that ended after a landing, before its ship) is `sync=delta-ahead`, not a refusal: nothing is
   reset, and the next ship carries them forward.
   **Limits.** (a) While tasks run, `serve` on the orchestrating checkout does not show the
-  unplanned entries: they are on the remote run branch until the gate's SYNC brings them in. (b) A
+  unplanned entries: they are on the remote run branch until the SYNC before the gate brings them
+  in. (b) A
   repository whose pre-push hook requires the gate's stamp refuses the seal's delta push (`DELTA bad
   step=push`): those entries are listed as unrecorded at the end of the run. (c) A delta whose
   repository has no landed task in the run gets no ship and no seal: its entries are unrecorded,
   and the end-of-run warning says so. (d) A home repository whose PR is already out of draft gets
   no land ship: its entries wait for its next terminal slot's seal. (e) A conflict in the delta
-  other than the two-sided one above abandons the merge; the push is then refused as before.
+  other than the two-sided one above abandons the merge: a ship's push is refused as before, and at
+  the terminal slot the gate's push is skipped, the repo left for a person to merge and push. (f) A
+  ship that starts after the SYNC (a kept change of another repository's task landing during the
+  slot, from a writer that was wedged) can push a newer delta commit before the gate does: the
+  gate's push is then refused, as before 0.42.0.
 - **The PR body** gets a **Data model and architecture changes** section, rebuilt with every
   description (the delta's architecture changes and the architectural impact among them, under
   the same heading, to acknowledge in the Architecture tab): each planned change of the repo's tasks marked planned ✓, built differently (what
@@ -953,7 +986,10 @@ prUrl, draft, failedStep, detail, disabled, skipped?}`; `pushed: null` = nothing
 and `skipped: 'lock'` = the ship lock stayed busy, each moving nothing and none a failed push),
 `landed.flush` (`{left}`, after `run.end`: landed details still to write), `seal` (`{repo, ok, already, step, round}`: the
 ready PR's state marker was exact (`already`), put back, or not checked, with the failing
-`step`), `env` (`{when, why, ok, failed, recheck?, cleared?}`; `ok: null` = no usable report;
+`step`), `sync` (from 0.42.0, `{repo, label, status, mode, step, head, reason, detail, round,
+then}`: one per receipt of the SYNC before the gate; `status` `ok` (with `mode` `ff` or `merge` and
+the `head`), `none`, `bad` (with its `step` and `reason`) or `null` for no receipt; `then` is what
+followed: `gate`, `retry` or `push-skipped`), `env` (`{when, why, ok, failed, recheck?, cleared?}`; `ok: null` = no usable report;
 `recheck: true` on the one re-check of a failed stall check; `cleared` names the checks a later
 green check found answering, which lifted the environment halt) and `absorb` (`{task, repo,
 source, head}`;
@@ -1328,7 +1364,7 @@ changed, so the mix it reports leans balanced.
 
 - What a run really costs is in `/grimoire:logs`, read after the fact from Claude Code's transcripts (cache reads and writes included). `maxOutputTokens` and the journal's `tok` count output tokens only, which were 4–7 % of the real cost on recorded runs; quote the cost lines, not `tok`, when judging spend. `maxCost` caps that real cost while the run goes (see "Cost fuse").
 - The terminal sweep reads **by lens**: each persona takes the branch `--stat` and reads only the files its Scope section names, never the whole branch.
-- Mechanical dispatches (index, harness-context, agent preflight, integrate, precheck, journal, ship, seal, environment checks, claim release, ledger) run with `effort: 'low'`; ship, seal and environment checks run on haiku, index and hydration on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
+- Mechanical dispatches (index, harness-context, agent preflight, integrate, precheck, journal, ship, seal, SYNC, environment checks, claim release, ledger) run with `effort: 'low'`; ship, seal, SYNC and environment checks run on haiku, index and hydration on sonnet, the replanner stays on opus, and implementers run on the tier the selector picked (opus when unset).
 - A precheck stops an unreviewable diff before the panel; a verifier stops a false-positive finding before it buys a fix.
 - The first review of a stage is the full panel; after a fix a sonnet guard decides whether the panel re-runs.
 - Briefs and memory are pasted as a stable prefix so prompt caching hits across dispatches; volatile values (task, SHAs) come last.
