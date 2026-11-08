@@ -22,7 +22,8 @@
 //    • 0.9.0 run durability: the page summarizes late, hedge, wedged, late-result,
 //      fence, ship (a ship skipped on a ready PR or a held lock never reads as a
 //      failed push), env (a re-check, transient or failing again, and a halt a later
-//      check lifted), seal, absorb (each source), harness-routed, and the data model's
+//      check lifted), seal, sync (each receipt of the SYNC before the gate, and what followed it),
+//      absorb (each source), harness-routed, and the data model's
 //      model (a change kept or reverted, with its reason) and delta (what a ship wrote) events in words,
 //      shows a halt's kind and draft
 //      PRs, and the checkpoint card shows a v2 checkpoint's landedTasks with their
@@ -299,6 +300,13 @@ try {
     { type: 'seal', repo: 'app', ok: false, already: false, step: 'view', round: 1 },
     { type: 'seal', repo: 'app', ok: true, already: false, step: null, round: 2 },
     { type: 'seal', repo: 'web', ok: true, already: true, step: null, round: 1 },
+    // the SYNC before the gate (#99): each receipt, and what followed it
+    { type: 'sync', repo: 'site', label: 'sync:site', status: 'ok', mode: 'ff', step: null, head: 'c0ffee1', reason: null, detail: '', round: 1, then: 'gate' },
+    { type: 'sync', repo: 'app', label: 'sync:app', status: 'ok', mode: 'merge', step: null, head: 'c0ffee2', reason: null, detail: '', round: 1, then: 'gate' },
+    { type: 'sync', repo: 'web', label: 'sync:web', status: 'none', mode: null, step: null, head: null, reason: null, detail: '', round: 1, then: 'gate' },
+    { type: 'sync', repo: 'hub', label: 'sync:hub', status: 'bad', mode: null, step: 'fetch', head: null, reason: 'origin could not be read', detail: 'fatal: unable to access', round: 1, then: 'retry' },
+    { type: 'sync', repo: 'hub', label: 'sync:hub~r1', status: 'bad', mode: null, step: 'merge', head: null, reason: 'a conflict the loop does not resolve: abandoned', detail: '', round: 2, then: 'push-skipped' },
+    { type: 'sync', repo: 'kit', label: 'sync:kit~r1', status: null, mode: null, step: null, head: null, reason: null, detail: '', round: 2, then: 'push-skipped' },
     { type: 'ship', repo: 'app', mode: 'land', pushed: null, head: 'eeeeeee5555', failedStep: null, skipped: 'ready', prUrl: 'https://example.invalid/pr/8', draft: false },
     // a stall check that fails, re-checked: transient once; then latched, lifted by a later green check
     { type: 'env', when: 'stall', why: '#6 → BLOCKED', ok: false, failed: ['remote:site'] },
@@ -354,6 +362,12 @@ try {
   has(/app → the state marker could not be checked \(step view\), try 1/, 'seal: a failed try, with its step')
   has(/app → the state marker was put back as the last line of the PR body \(the gate's copy differed\)/, 'seal: the marker put back')
   has(/web → the state marker the gate kept is exact: nothing edited/, 'seal: an exact copy, nothing edited')
+  has(/site → the remote's delta commits brought in \(a fast-forward\) @ c0ffee1/, 'sync: ok, a fast-forward, with the head')
+  has(/app → the remote's delta commits brought in \(a merge that changes only the delta\) @ c0ffee2/, 'sync: ok, a merge')
+  has(/web → nothing to bring: the run branch holds what the remote holds/, 'sync: none')
+  has(/hub → SYNC bad at fetch: origin could not be read · fatal: unable to access — tried once more/, "sync: bad, with git's lines, tried again")
+  has(/hub → SYNC bad at merge: a conflict the loop does not resolve: abandoned — the gate's push is skipped \(it would be refused\)/, "sync: bad, the gate's push skipped")
+  has(/kit → no SYNC receipt — the gate's push is skipped/, 'sync: no receipt, the push skipped')
   has(/landed in an earlier attempt, verified on the run branch \(from the checkpoint\) @ aaaaaaa1111/, 'absorb from the checkpoint: verified on the run branch, with the head')
   has(/already on the branch, not reviewed for this task: sent to the panel as it stands @ ccccccc3333/, 'absorb verify-only: reviewed as it stands, never "landed earlier"')
   has(/already on the branch and reviewed for this task: landed with no new review @ ddddddd4444/, 'absorb reviewed-earlier: landed with no new review')

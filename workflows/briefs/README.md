@@ -23,7 +23,7 @@ skills in all but name and evolve the same way. Personas (review lenses) live in
 | `guard.md` | post-fix guard | sonnet |
 | `integrate.md` | lane → run-branch merge | cheap |
 | `gate.md` | the repo's gate command + PR (title and body) | sonnet |
-| `ship.md` | after a landing: push the landed SHA (fast-forward, own worktree), open or update the draft PR; on a halt, the status comment | haiku |
+| `ship.md` | after a landing: push the landed SHA (fast-forward, own worktree), open or update the draft PR; on a halt, the status comment; after a green gate, the seal; before the gate, the SYNC of the design's delta into the run branch | haiku |
 | `env.md` | environment checks: run the fixed script, report each `CHECK` line, run nothing else | haiku |
 | `replan.md` | adaptive re-planner | opus |
 | `journal.md` | one chunk of the decision log (runs a fixed script) | haiku |

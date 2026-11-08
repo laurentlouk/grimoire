@@ -830,6 +830,10 @@ function client(score) {
           : `FAILED${e.recheck ? ' again on the re-check' : ''}: ${list(e.failed)}`}`,
     // after a green gate: the state marker is the ready PR body's last line, exactly, or it is put back
     seal: (e) => `${s(e.repo)} → ${e.ok ? (e.already ? 'the state marker the gate kept is exact: nothing edited' : "the state marker was put back as the last line of the PR body (the gate's copy differed)") : `the state marker could not be checked${e.step ? ` (step ${s(e.step)})` : ''}${e.round != null ? `, try ${s(e.round)}` : ''}`}`,
+    // before the gate (from 0.42.0), in the repo that holds the design's delta: the remote's delta commits
+    // brought into the checkout's run branch, or why not; `then` says what followed (the gate as before,
+    // the SYNC once more, or the gate without its push)
+    sync: (e) => `${s(e.repo)} → ${e.status === 'ok' ? `the remote's delta commits brought in (${e.mode === 'ff' ? 'a fast-forward' : 'a merge that changes only the delta'})${e.head ? ` @ ${s(e.head)}` : ''}` : e.status === 'none' ? 'nothing to bring: the run branch holds what the remote holds' : `${e.status === 'bad' ? `SYNC bad at ${s(e.step)}${e.reason ? `: ${s(e.reason)}` : ''}` : 'no SYNC receipt'}${e.detail ? ` · ${s(e.detail)}` : ''}${e.then === 'retry' ? ' — tried once more' : e.then === 'push-skipped' ? " — the gate's push is skipped (it would be refused)" : ''}`}`,
     // checkpoint · pr: absorbed at start, verified on the run branch; reviewed-earlier · verify-only:
     // an implementer found the work already on the branch, reviewed for this task or not yet
     absorb: (e) => `${e.source === 'reviewed-earlier' ? 'already on the branch and reviewed for this task: landed with no new review'

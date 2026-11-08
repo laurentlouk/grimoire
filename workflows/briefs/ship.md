@@ -1,6 +1,7 @@
 # Brief · ship — push the landed head and keep the draft PR, mechanically
 
-A task of this run just landed (or the run halted, or the terminal slot just marked the PR ready).
+A task of this run just landed (or the run halted, or the terminal slot just marked the PR ready, or
+is about to run the gate).
 The header holds ONE bash script that puts what landed on the remote: it pushes the exact landed
 SHA to the run branch from its own worktree (with the design's delta committed on top of it, when
 the script records one), then opens or updates the repo's draft PR, and on a halt posts the status
@@ -73,3 +74,14 @@ printed right under it, verbatim. A seal script with a DELTA step: the delta fie
 When the delta is a file of this repository, the seal's DELTA step commits it on what the remote
 run branch holds and pushes that commit (fast-forward): the one push a seal makes, and it leaves
 the PR's body and ready state alone.
+
+## Mode sync (before the gate)
+In the repository that holds the design's delta, the terminal slot runs this script before its
+gate. It reads the remote run branch and brings the delta commits the ships made there into the
+checkout's run branch: a fast-forward, or a merge that changes only the delta. It takes no lock,
+pushes nothing and touches no PR, and each git step stops itself within 60 s. It prints one `SYNC`
+line: `SYNC ok mode=ff head=<sha>` or `SYNC ok mode=merge head=<sha>`, `SYNC none` (or
+`SYNC none remote=0`), or `SYNC bad step=<fetch|merge|branch|other>: <why>` with git's last lines
+under it. Return `line`: that SYNC line, verbatim, character for character ("" when there is
+none); `detail`: the lines printed right under it, verbatim. Never fetch, merge, retry or fix
+anything yourself: the loop reads the line and decides what the gate does.

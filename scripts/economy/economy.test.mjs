@@ -118,6 +118,7 @@ try {
   eq(at('reliability-sre:api:final'), { kind: 'reliability-sre', task: 'api:final', repo: 'api', lens: 'reliability-sre' }, 'a terminal persona: the <repo>:final slot and its repo')
   eq(at('ship:api#3'), { kind: 'ship', task: null, repo: 'api', lens: null }, 'ship: the repo')
   eq(at('gate:api'), { kind: 'gate', task: null, repo: 'api', lens: null }, 'gate: the repo')
+  eq([at('sync:api'), at('sync:api~r1'), at('seal:api~r1')], [{ kind: 'sync', task: null, repo: 'api', lens: null }, { kind: 'sync', task: null, repo: 'api', lens: null }, { kind: 'seal', task: null, repo: 'api', lens: null }], 'the SYNC before the gate (#99) is an engine kind, its retry too, booked to the repo like the seal: never a review lens')
   eq(at('journal#4'), { kind: 'journal', task: null, repo: null, lens: null }, 'journal')
   // #56 (a): the #, ~ and + suffixes go before a : segment, so a task id holding ':' keeps its task
   const colon = { tasks: new Set(['org/r:12', 'api:final']), repos: new Set(['api', 'org/r', 'grimoire']) }
