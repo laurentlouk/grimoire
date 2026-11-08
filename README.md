@@ -189,7 +189,7 @@ Installed as a plugin, skills are called as `/grimoire:roast` (or just `/roast` 
 npm test               # every test file, in parallel (the graph's need `npm ci --prefix tools/graph`); --jobs N or GRIMOIRE_TEST_JOBS to cap
 npm run test:fast      # the same without the six slow loop-durability files: about 25 s, for iterating
 node scripts/run-tests.mjs scripts/manager.test.mjs   # only the files you name
-npm run check          # drift: roster ↔ agents, briefs ↔ engine, evals present, config documented
+npm run check          # drift: roster ↔ agents, briefs ↔ engine, evals present, config documented, no private name on the deny list
 npm run evals:check    # evals/ is up to date with skills/*/evals/evals.json
 claude plugin eval .   # run the skill evals (paid; see evals/README.md)
 npm run hooks          # once per clone: the pre-push check below

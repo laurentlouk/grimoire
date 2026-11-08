@@ -37,6 +37,9 @@
 //  10 policies   workflows/policies.md names every policy, FAST's per-task panel, and each router
 //                default of orchestrate-loop.js (DEFAULT_POLICY_RULES, as `key` | `JSON value`), read
 //                from the engine's own policy block (scripts/policy-counterfactual.mjs loadRouter).
+//  11 names      no tracked text file (docs, tests and evals included) holds a private name on the
+//                deny list of scripts/private-names.mjs, compared by hash, so the list spells no
+//                name; a hit is reported by file and line, never by the word.
 // Plain Node, no dependencies.
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import path from 'node:path'
@@ -45,6 +48,7 @@ import { writerText, WRITER_FILE } from './build-journal-writer.mjs'
 import { lockText, LOCK_FILE } from './build-ship-lock.mjs'
 import { versionVerdict, againstBase } from './version-check.mjs'
 import { loadRouter } from './policy-counterfactual.mjs'
+import { scanTree, report as namesReport } from './private-names.mjs'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const rel = (...p) => path.join(ROOT, ...p)
@@ -289,6 +293,13 @@ group('policies · workflows/policies.md and the engine\'s router', (bad) => {
     const want = '| `' + k + '` | `' + JSON.stringify(v) + '` |'
     if (!doc.includes(want)) bad(`workflows/policies.md: the defaults table must read ${want} (the engine's DEFAULT_POLICY_RULES)`)
   }
+})
+
+// ─────────────────────────── 11 · names ───────────────────────────
+group('names · no private name on the deny list in a tracked file', (bad) => {
+  const hits = scanTree(ROOT)
+  if (hits === null) { bad('git ls-files failed: the tracked files cannot be listed to check them'); return }
+  for (const line of namesReport(hits)) bad(line)
 })
 
 // ─────────────────────────── report ───────────────────────────

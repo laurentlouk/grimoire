@@ -5,7 +5,7 @@ focus: trace
 
 You are grading one run of the "setup" skill of a plugin, from its transcript.
 
-The user's request was: "Grimoire and its manager block are set up in this project (Linear, team ODY, through the claude.ai connector). Re-run the setup and add a daily schedule for the manager briefing. I work in the Claude desktop app, which has scheduled tasks; weekdays at 08:30 is fine."
+The user's request was: "Grimoire and its manager block are set up in this project (Linear, team ACME, through the claude.ai connector). Re-run the setup and add a daily schedule for the manager briefing. I work in the Claude desktop app, which has scheduled tasks; weekdays at 08:30 is fine."
 
 Expectation to check: Proposes the task with a local-time cron expression for weekdays at 08:30 (30 8 * * 1-5) and a self-contained prompt that runs /grimoire:manager for this project, named by its absolute path, as a scheduled headless run
 
