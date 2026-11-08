@@ -157,5 +157,16 @@
         "evidence": ""
       }
     ]
+  },
+  {
+    "id": 9,
+    "query": "Review the PR for INDEX-12. It resolved to fast. The diff adds a reader that replays the migration SQL found in any indexed repository into an in-memory SQLite database, after a text filter drops statements that start with ATTACH or VACUUM, and stores the schema it reads back in the index.",
+    "should_trigger": true,
+    "expected_output": "Treats the repository's SQL as input the code does not control, so even under fast the review runs a security review beside adversarial QA, and the reliability lens. A text filter that reads statements differently from the engine it guards is a check on a different reading of the input than its use, so it is a finding: the engine itself must refuse what can write a file (ATTACH, VACUUM INTO, extension loading). The reviewer times hostile shapes (deep nesting, long runs of blanks, very many statements) at a size where quadratic work takes seconds, and follows a planted secret from a migration literal and a malformed file to the index, tool answers and error notes.",
+    "expectations": [
+      { "text": "Runs a security review beside adversarial QA, and the reliability lens, although the profile is fast, because the reader takes repository input", "passed": null, "evidence": "" },
+      { "text": "Flags the text filter as a check on a different reading of the input than the engine it guards, and asks that the engine itself refuse file writes", "passed": null, "evidence": "" },
+      { "text": "Times hostile inputs at a size where quadratic work would show, and follows a planted secret to every output", "passed": null, "evidence": "" }
+    ]
   }
 ]

@@ -1,6 +1,6 @@
 # Data model map: design
 
-**Status:** approved 2026-11-06 · **Plan:** [2026-11-06-data-model-map-plan.md](../plans/2026-11-06-data-model-map-plan.md) · **Date:** 2026-11-06 · **Input:** [the data model map research](../research/2026-11-06-data-model-map.md)
+**Status:** approved 2026-11-06; shipped in 0.27.0–0.43.0 (the plan's 13 slices, then a 14th the owner added, #106; slice 15, a cache's key space read from the commands in code, #118, added by the owner) · **Plan:** [2026-11-06-data-model-map-plan.md](../plans/2026-11-06-data-model-map-plan.md) · **Date:** 2026-11-06 · **Input:** [the data model map research](../research/2026-11-06-data-model-map.md)
 
 ## Problem
 
@@ -161,8 +161,9 @@ Each slice is demoed on the probed project and on a fixture from a second ecosys
 10. **Code-declared SQL models.** Drizzle TS (`sqliteTable` / `pgTable` / `mysqlTable`, for push-only projects) and `schema.prisma`, plus the conflict "schema edited, migration not generated". *Demo:* `backoffice`'s seven tables, plus a Prisma fixture.
 11. **Postgres and MySQL DDL.** The splitter and interpreter for migration folders (Flyway, golang-migrate, goose, dbmate, sqlx, Supabase) and for `structure.sql` and `db/schema.sql` dumps. *Demo:* a Supabase fixture.
 12. **The refine skill.** `/grimoire:data-model` and the checked `*.data.json`: bindings, lineage, FK-less relations, agent-described stores with citations re-verified, and the gaps list. *Demo:* the probed project's device `events` ↔ backend `event` lineage, and its RediSearch index described by citation.
+13. **SQL inferred from the queries in code** (added by the owner on 2026-11-07, #106; the plan's slice 14). The owner: "In some cases we are not able to connect to the db, especially if it's only in prod and we don't have a local db. So we need to deduce the schema." A database nothing in the repositories declares is deduced from the statements the code sends, as `inferred` facts, the lowest trust (D2): tables, the columns seen, relations from joins (never foreign keys), unique keys from `ON CONFLICT`, lookups. Types, nullability and defaults stay unknown. Queries attach to a declared store only on evidence, and only add `[inferred]` conflicts there. *Demo:* a fixture; no project in reach sends raw SQL without migrations.
 
-**After v1, extractor-only slices on the same model**, in an order the owner can change: Mongoose and Typegoose; ElectroDB, OneTable and Dynamoose; Firestore indexes and rules; Redis key templates and RediSearch `FT.CREATE` literals; CDK and SST literals; Rails `schema.rb`; EF Core model snapshots; Django and Alembic operations; JPA; GORM; Elasticsearch mappings; Cassandra CQL; Convex; Supabase types.
+**After v1, extractor-only slices on the same model**, in an order the owner can change: Mongoose and Typegoose; ElectroDB, OneTable and Dynamoose; Firestore indexes and rules; CDK and SST literals; Rails `schema.rb`; EF Core model snapshots; Django and Alembic operations; JPA; GORM; Elasticsearch mappings; Cassandra CQL; Convex; Supabase types.
 
 ## Edge cases and failure modes
 

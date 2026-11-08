@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "title": "grimoire architecture",
-  "summary": "A Claude Code plugin: skills and agents the host loads, hooks it runs around tool calls and subagents, an unattended build loop that ships PRs and journals its decisions, and a local code graph served to agents over MCP and to people as a page. Knowledge flows back through crystallize into skills, memory and docs.",
+  "summary": "A Claude Code plugin: skills and agents the host loads, hooks it runs around tool calls and subagents, an unattended build loop that ships PRs and journals its decisions, and a local code graph, with the architecture diagrams and data model maps it checks, served to agents over MCP and to people as a page. Knowledge flows back through crystallize into skills, memory and docs.",
   "components": [
     { "id": "developer", "label": "Developer", "sublabel": "slash commands, reviews", "type": "external" },
     { "id": "claude-code", "label": "Claude Code", "sublabel": "the host: loads the plugin", "type": "external", "sources": [".claude-plugin/plugin.json:1-22"], "note": "Loads skills and agents, runs the hooks in hooks.json and starts the MCP servers in .mcp.json." },
@@ -20,12 +20,13 @@
     { "id": "queries", "label": "Graph queries", "sublabel": "commands · query · freshness", "type": "library", "paths": ["tools/graph/lib/commands.mjs", "tools/graph/lib/query.mjs", "tools/graph/lib/project.mjs", "tools/graph/lib/freshness.mjs"], "sources": ["tools/graph/lib/commands.mjs:24-30", "tools/graph/lib/commands.mjs:118-152"] },
     { "id": "indexer", "label": "Indexer", "sublabel": "tree-sitter, in a child process", "type": "worker", "paths": ["tools/graph/lib/run.mjs", "tools/graph/lib/worker.mjs", "tools/graph/lib/indexer.mjs", "tools/graph/lib/extract.mjs", "tools/graph/lib/langs.mjs", "tools/graph/lib/bindings.mjs", "tools/graph/lib/resolve.mjs", "tools/graph/lib/cochange.mjs", "tools/graph/lib/deps.mjs"], "sources": ["tools/graph/lib/run.mjs:1-14"], "tag": "liftoff-only", "note": "Never in the server's process: some grammars crash V8's optimizing wasm tier." },
     { "id": "index", "label": "Graph index", "sublabel": "SQLite · .grimoire/graph", "type": "database", "paths": ["tools/graph/lib/store.mjs"], "imports": ["node:sqlite"], "sources": ["tools/graph/lib/store.mjs:28-49"] },
-    { "id": "page", "label": "Graph page", "sublabel": "map · architecture · docs", "type": "frontend", "paths": ["tools/graph/lib/render.mjs", "tools/graph/lib/layout.mjs", "tools/graph/lib/modules.mjs", "tools/graph/lib/arch.mjs", "tools/graph/lib/arch-view.mjs", "tools/graph/lib/md.mjs", "tools/graph/lib/docs.mjs", "tools/graph/lib/docs-view.mjs"], "sources": ["tools/graph/lib/render.mjs:39-60"], "note": "One self-contained HTML file, no network; its CSP admits only its own script." },
-    { "id": "serve", "label": "Page server", "sublabel": "127.0.0.1 · token", "type": "backend", "paths": ["tools/graph/lib/serve.mjs"], "sources": ["tools/graph/lib/serve.mjs:43-91"], "tag": "loopback", "note": "The only writer: Markdown notes inside the project's repositories, refused when they changed on disk." }
+    { "id": "page", "label": "Graph page", "sublabel": "map · architecture · data · docs", "type": "frontend", "paths": ["tools/graph/lib/render.mjs", "tools/graph/lib/layout.mjs", "tools/graph/lib/modules.mjs", "tools/graph/lib/arch.mjs", "tools/graph/lib/arch-view.mjs", "tools/graph/lib/arch-change.mjs", "tools/graph/lib/arch-pack.mjs", "tools/graph/lib/data-view.mjs", "tools/graph/lib/stage-view.mjs", "tools/graph/lib/md.mjs", "tools/graph/lib/docs.mjs", "tools/graph/lib/docs-view.mjs"], "sources": ["tools/graph/lib/render.mjs:39-60"], "note": "One self-contained HTML file, no network; its CSP admits only its own script." },
+    { "id": "serve", "label": "Page server", "sublabel": "127.0.0.1 · token", "type": "backend", "paths": ["tools/graph/lib/serve.mjs"], "sources": ["tools/graph/lib/serve.mjs:43-91"], "tag": "loopback", "note": "The only writer: Markdown notes inside the project's repositories, and the acknowledgements in a design's delta (docs/specs/*.delta.json, its ack members only, under the delta's lock); each refused when the file changed on disk." },
+    { "id": "data-model", "label": "Data model map", "sublabel": "extractors · readers · reconcile · check", "type": "library", "paths": ["tools/graph/lib/data", "tools/graph/delta-append.mjs"], "sources": ["tools/graph/lib/data/registry.mjs:1-16"], "note": "Every datastore's model from migrations, schemas, infra, code types and what the code sends (SQL, a cache's commands), never running the code or connecting to a database; conflicts kept, never resolved; refine files re-checked on every read." }
   ],
   "boundaries": [
     { "label": "Plugin, run by Claude Code", "kind": "deploy", "wraps": ["skills", "guard", "hooks", "loop"] },
-    { "label": "Code graph (Node, local)", "kind": "deploy", "wraps": ["graph-mcp", "graph-cli", "queries", "indexer", "index", "page", "serve"] }
+    { "label": "Code graph (Node, local)", "kind": "deploy", "wraps": ["graph-mcp", "graph-cli", "queries", "indexer", "index", "page", "serve", "data-model"] }
   ],
   "connections": [
     { "from": "developer", "to": "claude-code", "label": "slash commands", "variant": "emphasis" },
@@ -54,10 +55,16 @@
     { "from": "serve", "to": "page", "label": "renders per load" },
     { "from": "serve", "to": "indexer", "label": "refresh per load" },
     { "from": "page", "to": "queries", "label": "project, repos" },
-    { "from": "serve", "to": "knowledge", "label": "saves notes", "variant": "security", "via": "fs, .md only" }
+    { "from": "serve", "to": "knowledge", "label": "saves notes, delta acks", "variant": "security", "via": "fs, .md and .delta.json only" },
+    { "from": "indexer", "to": "data-model", "label": "extractors per file" },
+    { "from": "queries", "to": "data-model", "label": "graph_data · graph_changes" },
+    { "from": "page", "to": "data-model", "label": "Data tab · change views" },
+    { "from": "serve", "to": "data-model", "label": "acks under the delta lock" },
+    { "from": "graph-cli", "to": "data-model", "label": "data · changes" },
+    { "from": "data-model", "to": "index", "label": "node:sqlite driver (a base's replay)" }
   ],
   "cards": [
-    { "title": "Who writes what", "color": "rose", "items": ["The graph never writes code: indexing is a script, queries are read-only SQL.", "The page server writes only Markdown notes, atomically, and refuses a stale save.", "Memory is written by crystallize only, never mid-task."] },
+    { "title": "Who writes what", "color": "rose", "items": ["The graph never writes code: indexing is a script, queries are read-only SQL.", "The page server writes only Markdown notes and a delta's acknowledgements, atomically, and refuses a stale save.", "Memory is written by crystallize only, never mid-task."] },
     { "title": "How it learns", "color": "emerald", "items": ["Each run ends with crystallize: PR review threads become skill patches, memory facts and doc fixes.", "The next run reads the previous runs' ledgers and the journal's scorecard."] },
     { "title": "Left out", "color": "slate", "items": ["The loop's briefs and review personas (Markdown the loop renders into prompts).", "Evals, templates and tests.", "Scouts and implementers: agents the host runs from agents/*.md."] }
   ]
