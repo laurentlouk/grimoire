@@ -19,8 +19,7 @@ already settled there.
 - TDD: write the failing test FIRST, watch it fail, then the minimal code to pass, then
   refactor — never bolt tests on after.
 - Code that reads what someone else wrote (a repository's files, an upload, a payload) gets,
-  before DONE, the tests the `tdd` skill lists under *Input you do not control*
-  (`skills/tdd/SKILL.md` in the grimoire plugin): its hostile
+  before DONE, the tests the `tdd` skill lists under *Input you do not control*: its hostile
   shapes timed with wide headroom, a planted secret followed to every output. Code that models
   what another tool writes is tested against that tool's real output, kept as a golden fixture.
 - Keep the red→green loop TIGHT: iterate on the FOCUSED test(s) for the behaviour you are

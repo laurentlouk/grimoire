@@ -5,7 +5,7 @@ description: Refine the project's data model map with what no file declares, in 
 
 # Data model: what the code cannot say, checked
 
-The map of a project's data is extracted by the code graph's index (`graph_data`): SQL migrations, schema snapshots and code-declared schemas, key-value table declarations (CreateTable files, templates, Terraform), item shapes bound to tables, access patterns, and, for a database nothing declares, the SQL the code sends (a store deduced from queries, labelled inferred). Some facts no file declares. They go in one typed JSON file per map, `docs/architecture/<name>.data.json` (beside the architecture diagrams; `graph.architectureDir` in `grimoire.config.json` moves the folder), and the graph page (`/grimoire:graph`) draws them in its **Data** tab, labelled *refined*.
+The map of a project's data is extracted by the code graph's index (`graph_data`): SQL migrations, schema snapshots and code-declared schemas, key-value table declarations (CreateTable files, templates, Terraform), item shapes bound to tables, access patterns, a cache's key space from its commands, and, for a database nothing declares, the SQL the code sends (a store deduced from queries, labelled inferred). Some facts no file declares. They go in one typed JSON file per map, `docs/architecture/<name>.data.json` (beside the architecture diagrams; `graph.architectureDir` in `grimoire.config.json` moves the folder), and the graph page (`/grimoire:graph`) draws them in its **Data** tab, labelled *refined*.
 
 Three hands, as for the architecture diagrams:
 

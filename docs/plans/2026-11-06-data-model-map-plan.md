@@ -1,6 +1,6 @@
 # Data model map: plan
 
-**Spec:** [2026-11-06-data-model-map-design.md](../specs/2026-11-06-data-model-map-design.md) (approved 2026-11-06) · **Status:** shipped in 0.27.0–0.41.0, slices 1–13 as planned and slice 14 added by the owner (#106) · **Research:** [2026-11-06-data-model-map.md](../research/2026-11-06-data-model-map.md)
+**Spec:** [2026-11-06-data-model-map-design.md](../specs/2026-11-06-data-model-map-design.md) (approved 2026-11-06) · **Status:** shipped in 0.27.0–0.43.0, slices 1–13 as planned, slice 14 added by the owner (#106), and slice 15 (#118) added by the owner: a cache's key space read from the commands in code · **Research:** [2026-11-06-data-model-map.md](../research/2026-11-06-data-model-map.md)
 
 ## The problem, in the user's words
 
@@ -195,7 +195,6 @@ Extractor-only slices on the same model, each with its fixture:
 - Mongoose and Typegoose;
 - ElectroDB, OneTable and Dynamoose;
 - Firestore indexes and rules;
-- Redis key templates and RediSearch `FT.CREATE` literals;
 - CDK and SST literals;
 - Rails `schema.rb`; EF Core model snapshots; Django and Alembic operations; JPA; GORM;
 - Elasticsearch mappings; Cassandra CQL; Convex; Supabase types.

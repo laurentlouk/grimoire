@@ -8,13 +8,12 @@ The crystallize pass on the data model map's 20 merged PRs (#73 to #110). Report
   - its hostile shapes timed with wide headroom (overlapping quantifiers, deep nesting, a list scanned per item, expansion, a cache keyed by a path's spelling, fan-out);
   - a planted secret followed to every output, with errors that give a position, never the text.
 
-  Code that models another tool's output takes its expected values from that tool's real output, kept as golden fixtures. Eight of the fourteen slices had a reliability blocker or major that only the reviewer's timing found, and two had false conflicts that only running the tools exposed. New eval case `tdd-5`.
-- **`review`: input the code does not control** always gets adversarial QA with a security review, and the reliability lens, whatever the profile. Adversarial QA also flags a check that runs after what it guards. New eval case `review-9`. The loop's `break-it` persona and `implement` brief carry the same rules.
+  Code that models another tool's output takes its expected values from that tool's real output, kept as golden fixtures. Eight of the fourteen slices had a reliability blocker or major that only the reviewer's hostile-input probes found, and two had false conflicts that only running the tools exposed. New eval case `tdd-5`.
+- **`review`: input the code does not control** always gets adversarial QA with a security review, and the reliability lens, whatever the profile: a property of the change, not a promotion by file. Adversarial QA also flags a check that runs after what it guards, or on a different reading of the input than its use. New eval case `review-9`. The loop's `break-it` persona and `implement` brief carry the same rules.
 - **`data-model`** names the stores deduced from queries (slice 14): already read, never described again, and a lineage may name their tables. New eval case `data-model-6`.
 - **Docs synced to the code:**
   - grimoire's architecture diagram gains the data model map, and the page server's second write (a delta's acknowledgements);
-  - the data model map's spec and plan say what shipped, slice 14 included.
-- **Upstream:** [#112](https://github.com/laurentlouk/grimoire/issues/112): the loop-durability files' wall-clock assertions fail under a loaded `npm test`, and pass alone.
+  - the data model map's spec and plan say what shipped, slices 14 and 15 included.
 
 ## 0.43.1 — a private project's names are replaced by neutral ones in the docs, the tests and the examples, and the drift check keeps them out
 

@@ -104,7 +104,7 @@ The floors, raises and promotions are the router's, read the same way:
   an error code, a field or an endpoint that another repo's open issue adds). Changing a contract
   another repo consumes, with no such issue, is hydration's case: propose `strict`.
 - **Promotion.** Under `strict`, add the lenses `promote` names for the files the change touches,
-  plus `data-integrity` and `contract` for a cross-repo dependency. Nothing else promotes a lens.
+  plus `data-integrity` and `contract` for a cross-repo dependency. Nothing else promotes a lens by file.
 
 **The panel in a session.** A session has no terminal sweep, so `balanced` and `strict` add the
 terminal lenses that fit the repo (by its tags: `reliability-sre`, `privacy`, and `hig`,

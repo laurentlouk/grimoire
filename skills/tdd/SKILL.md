@@ -13,7 +13,7 @@ It checks behavior through the public interface, the same entry point a real cal
 
 Assert the whole value, not its shape. Compare against the full result, `toEqual(['a', 'b'])` or the complete object, not a loose `typeof x === 'object'` or "the list isn't empty". The expected value has to come from somewhere independent: a literal you know is correct, a worked example, the spec. If you build it the same way the code does, the test passes by construction and proves nothing.
 
-When the code models what another tool writes or an engine stores (a generated migration or snapshot, a schema dump, a catalog, a serializer's output), that tool's own output is the independent value. Run the tool at development time, in a throwaway container when it needs a server, and commit what it wrote as a golden fixture the tests read, so CI stays hermetic. Reading the tool's source is not running it: readers built from the source reported false conflicts on schemas the tools themselves had generated in sync.
+When the code models what another tool writes or an engine stores (a generated migration or snapshot, a schema dump, a catalog, a serializer's output), that tool's own output is the independent value. Run the tool at development time, in a throwaway container when it needs a server, and commit what it wrote as a golden fixture the tests read, so CI stays hermetic. Throw the container away after (`--rm`), and remove only the images you pulled. Reading about the tool is not running it: readers written from the tool's documented behaviour reported false conflicts on schemas the tools themselves had generated in sync.
 
 ## What to avoid
 
@@ -27,7 +27,7 @@ Mock only at the edges: outside APIs, the clock, randomness, and, sparingly, hea
 
 Code that reads what someone else wrote (a repository's files, an upload, a network payload) gets two more kinds of test, written as you build it, not left to the review.
 
-**Time the hostile shapes.** Build each shape the code can meet at a size where quadratic work takes seconds, and assert a bound with wide headroom (100× the linear time), so a loaded machine never fails it:
+**Time the hostile shapes.** Build each shape the code can meet at a size where quadratic work takes seconds, and assert a bound with wide headroom (100× what the linear code takes, measured once, and far under what quadratic work takes), so a loaded machine never fails it. Better still, assert no wall-clock bound at all: count the work (steps, comparisons, nodes visited), or run n and 2n and assert the ratio stays near 2, never near 4. The shapes:
 - two quantifiers that can match the same text (`\s*` runs side by side over a long run of blanks): one pattern per span, or a hand scan;
 - deep nesting (JSON, YAML, code 20,000 levels deep): a depth cap, and one walk down the tree carrying context, never up a node's parents for each node;
 - a lookup in a growing list for each item (an interpreter finding a column per statement): a map by name;

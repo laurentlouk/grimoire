@@ -1,13 +1,13 @@
 [
   {
     "id": 1,
-    "query": "Our mobile app keeps events in SQLite and the backend stores them in a DynamoDB table. Map how the data flows between the stores, and document the Redis search index too: nothing reads it yet.",
+    "query": "Our mobile app keeps events in SQLite and the backend stores them in a DynamoDB table. Map how the data flows between the stores, and document our search index too: the code assembles its schema at run time.",
     "should_trigger": true,
-    "expected_output": "Checks grimoire.config.json and the index, reads the extracted map with graph_data (stores, logical tables, item types, access leads, and the Gaps part listing the Redis client), then reads the code at each lead before claiming anything: the sync code that copies the device's events into the backend table (which field goes where), the code that creates the search index and its fields. Writes docs/architecture/<slug>.data.json with a lineage claim from the SQLite events entity to the DynamoDB table, field pairs and a citation to the sync line, and a stores entry describing the search index entity by entity with a repo:path:line per field and the client package in imports. Runs node <root>/tools/graph/graph.mjs data check until no claim drifts, renders the page and points to the Data tab (lineage drawn, the store as a card, each fact labelled refined), and reports the file, what it adds, and the gaps left.",
+    "expected_output": "Checks grimoire.config.json and the index, reads the extracted map with graph_data (stores, logical tables, item types, access leads, and the cache's key space, whose search index says its schema is assembled in code, not read), then reads the code at each lead before claiming anything: the sync code that copies the device's events into the backend table (which field goes where), the functions that assemble the index's schema, field by field. Writes docs/architecture/<slug>.data.json with a lineage claim from the SQLite events entity to the DynamoDB table, field pairs and a citation to the sync line, and a stores entry (kind redisearch, an id no extractor gives) describing only the assembled fields, each at the line that pushes it, never a template, type or field the map already reads. Runs node <root>/tools/graph/graph.mjs data check until no claim drifts, renders the page and points to the Data tab (lineage drawn, the store as a card, each fact labelled refined), and reports the file, what it adds, and the gaps left.",
     "expectations": [
       { "text": "Reads the extracted map (graph_data or graph.mjs data) before writing claims", "passed": null, "evidence": "" },
-      { "text": "Reads the sync code and the index-creation code before writing the lineage and the store", "passed": null, "evidence": "" },
-      { "text": "Writes the claims in docs/architecture/<slug>.data.json: a lineage with field pairs and a stores entry with a path:line citation per field", "passed": null, "evidence": "" },
+      { "text": "Reads the sync code and the code that assembles the index's schema before writing the lineage and the store", "passed": null, "evidence": "" },
+      { "text": "Writes the claims in docs/architecture/<slug>.data.json: a lineage with field pairs, and a stores entry for the assembled fields only, under an id no extractor gives, with a path:line citation per field", "passed": null, "evidence": "" },
       { "text": "Runs graph.mjs data check and fixes any drift before showing it", "passed": null, "evidence": "" },
       { "text": "Points the user at the Data tab of the rendered page", "passed": null, "evidence": "" }
     ]
@@ -56,11 +56,11 @@
     "id": 6,
     "query": "Our backend reaches a production-only Postgres with raw SQL and no migrations; graph_data lists backend:sql (inferred, postgres). The app keeps orders in SQLite and uploads them there. Map that in the data model.",
     "should_trigger": true,
-    "expected_output": "Reads graph_data and recognises the inferred store as deduced from the queries the code sends: tables and columns seen, relations from joins, unique keys from ON CONFLICT, types and nullability unknown. It is read, so it is no gap and is not described again under stores. Reads the app's upload code and the backend's INSERT for orders, then writes a lineage from the app's SQLite orders entity to backend:sql (inferred, postgres)/orders with field pairs and citations to those lines, claims no type or nullability for the deduced columns, runs graph.mjs data check until no claim drifts, and points to the Data tab.",
+    "expected_output": "Reads graph_data and recognises the inferred store as deduced from the queries the code sends: tables and columns seen, relations from joins, unique keys from ON CONFLICT, types and nullability unknown. It is read, so it is no gap and is not described again under stores. Reads the app's upload code and the backend's INSERT for orders, then writes a lineage from the app's SQLite orders entity to backend:sql (inferred, postgres)/orders with field pairs and citations to those lines, adds no stores entry for the deduced store and no type on a described entity for it, runs graph.mjs data check until no claim drifts, and points to the Data tab.",
     "expectations": [
-      { "text": "Treats the inferred store as already read: no stores entry describing it and no gap claimed for it", "passed": null, "evidence": "" },
+      { "text": "Treats the inferred store as already read and claims no gap for it", "passed": null, "evidence": "" },
       { "text": "Writes a lineage naming the deduced table by its id, backend:sql (inferred, postgres)/orders, with field pairs cited at the upload code and the INSERT", "passed": null, "evidence": "" },
-      { "text": "Claims no type, nullability or default for the deduced columns", "passed": null, "evidence": "" }
+      { "text": "Does not add a stores entry or a type to a described entity for the inferred store", "passed": null, "evidence": "" }
     ]
   }
 ]
