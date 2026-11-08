@@ -1,13 +1,27 @@
 // grimoire graph · extraction. One parsed file → its symbols, call/inheritance refs and imports,
 // still unresolved: resolve.mjs turns names into edges once every file of the repo is known.
-import { LANGS, nameOf, calleeOf } from './langs.mjs'
+import { LANGS, nameOf, calleeOf, bare } from './langs.mjs'
 import { bindingsOf, varName } from './bindings.mjs'
 
 const CALLABLE = new Set(['function', 'method', 'constructor', 'macro'])
 // A function declared directly in one of these is a method (modules and namespaces do not count).
 const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'enum', 'protocol', 'object'])
 const IDENT = /^[\p{L}_$][\p{L}\p{N}_$]*[!?]?$/u
-const signature = (n) => n.text.split('\n', 1)[0].replace(/\s*[{:=]\s*$/, '').trim().slice(0, 160)
+// A definition's signature: its first line up to its body (name, parameters, return type), with
+// no literal's value and no comment in it (langs.mjs bare), at most 160 characters. The body is
+// the `body` field, a C macro's `value` (unparsed text), or the last child in Kotlin, whose
+// grammar names no field.
+const KOTLIN_BODY = /^(function_body|class_body|enum_class_body)$/
+const bodyOf = (n) => {
+  const last = n.lastNamedChild
+  return n.childForFieldName('body') || (n.type.startsWith('preproc_') && n.childForFieldName('value')) || (last && KOTLIN_BODY.test(last.type) ? last : null)
+}
+const signature = (n) => {
+  const nl = n.text.indexOf('\n'), body = bodyOf(n)
+  let to = nl < 0 ? n.endIndex : n.startIndex + nl
+  if (body && body.startIndex > n.startIndex) to = Math.min(to, body.startIndex)
+  return bare(n, to).replace(/\s+/g, ' ').replace(/\s*[{:=]\s*$/, '').trim().slice(0, 160)
+}
 
 export function extract(tree, lang, isTestFile) {
   const spec = LANGS[lang].spec
