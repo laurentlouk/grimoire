@@ -55,6 +55,7 @@ import { parseDelta, deltaStates, findTarget, changeText, diffText } from './dat
 import { changeVal, renameText, baseText, refName, CHANGE_KIND, symbolAt } from './query.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, CAP, LABELS } from './data/access.mjs'
 import { sqlFunctions, NOT_DECLARED } from './data/queries.mjs'
+import { redisFunctions, templatesOf, indexesOf, streamsOf, prefixTree, ttlText, NO_EXPIRY, NO_QUERY, ASSEMBLED, UNKNOWN as KS_UNKNOWN } from './data/redis.mjs'
 import { dataClient } from './data-view.mjs'
 import { stageClient } from './stage-view.mjs'
 
@@ -224,6 +225,10 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
   const qacc = model.queries ? { sites: model.queries.sites, sym: acc?.sym || symbolAt(db) } : null
   out.queries = model.queries ? { files: model.queries.files, statements: model.queries.statements, deduced: model.stores.filter((s) => s.inferred).length, attached: model.queries.attached.length, tests: model.queries.tests } : null
   out.queriesError = model.queriesError || null
+  // a key-value cache's commands (data/redis.mjs), their calls placed in the code graph's functions
+  const kacc = model.redis ? { sites: model.redis.sites, sym: acc?.sym || qacc?.sym || symbolAt(db) } : null
+  out.redis = model.redis ? { files: model.redis.files, commands: model.redis.commands, spaces: model.stores.filter((s) => s.dialect === 'redis').length, dyn: model.redis.dyn, tests: model.redis.tests } : null
+  out.redisError = model.redisError || null
   let diff = null, whole = null
   if (changes?.base) {
     const compared = new Set(changes.base.repos.map((r) => r.name))
@@ -234,6 +239,7 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
       failed: changes.at.failed.map((f) => ({ extractor: f.extractor, at: shown(f.repo, f.key), error: f.error })) }
   }
   for (const st of model.stores) {
+    if (st.dialect === 'redis') { out.stores.push(packKeySpace(st, shown, fileId, kacc)); continue }
     const n = st.entities.length ? out.stores.length : -1
     if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc, rrel.get(st.id) || [], qacc))
     for (const d of st.declarations) {
@@ -310,7 +316,8 @@ function packDelta(file, { model, base, diff, why, stores, packedAt, shown }) {
   const slot = (n) => { if (!byStore.has(n)) byStore.set(n, { rs: [], us: [] }); return byStore.get(n) }
   s.changes.forEach((r, k) => { if (changes[k].store >= 0) slot(changes[k].store).rs.push([r, k]) })
   s.unplanned.forEach((u, j) => { if (unplanned[j].store >= 0) slot(unplanned[j].store).us.push([u, j]) })
-  const overlay = stores.map((ps, n) => (byStore.has(n) ? packDeltaStore(ps, model.stores.find((x) => x.id === ps.id), byStore.get(n), { base, diff, changes, unplanned, shown }) : null))
+  // (a key space draws no table overlay: its card lists the delta's changes with their states, data-view.mjs)
+  const overlay = stores.map((ps, n) => (byStore.has(n) && !ps.ks ? packDeltaStore(ps, model.stores.find((x) => x.id === ps.id), byStore.get(n), { base, diff, changes, unplanned, shown }) : null))
   return { ...head, errors: [], spec: delta.spec, changes, unplanned, stores: overlay, unplWhy: diff ? null : why || 'no base was resolved' }
 }
 const describeChange = (c, dialect = null) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${dialect === 'dynamodb' && c.kind === 'field' ? 'attribute' : CHANGE_KIND[c.kind]} ${c.entity} · ${c.name} ${c.change}`)
@@ -547,6 +554,46 @@ function packAccess(e, src, cf, acc) {
 // A store drawn as key cards rather than an ERD: a key-value one (its tables have no foreign key to
 // draw, and keys, indexes, TTL and stream to show).
 const CARDS = new Set(['dynamodb'])
+
+// A key-value cache's key space (data/redis.mjs), packed `ks` for the Data tab's key-space card:
+//   inst   the instance the infra declares (engine, version, modules, eviction, persistence,
+//          notifications, databases, its source, the eviction lead) and how it is wired (`wired`)
+//   tree   the templates' prefix tree, rows [seg, depth, template index or -1]
+//   tpl    each template { n, type, types, cf, f: [[name, how, src]], ttl, lead, ix, globs, gr, src, rw, more }
+//   ix     each search index { n, on, pre, f: [[name, as, type, opts, src]], asm, lead, q, covers, src, decl, cf }
+//   ch     each channel { n, pat, pub, sub, psub, repos, src }; st: the streams' template indexes
+// Every function is { n, at, r, wr, k: commands, lines, c: callers }. Names only: no value.
+function packKeySpace(st, shown, fileId, kacc) {
+  const paths = [], at = new Map()
+  const P = (p, kind = null, repo = st.repo) => {
+    const k = `${repo}\0${p}`
+    if (!at.has(k)) { at.set(k, paths.length); paths.push([shown(repo, p), fileId.get(k) ?? -1, kind]) }
+    return at.get(k)
+  }
+  const src = (list) => (list || []).map((s) => [P(s.path, s.kind, s.repo ?? st.repo), s.line ?? null])
+  const cf = (list) => list.map((c) => ({ attr: c.attr, values: c.values.map((v) => ({ value: v.value, src: src(v.sources) })) }))
+  const fns = (ids, entity) => (kacc ? redisFunctions(ids.map((k) => kacc.sites[k]).filter(Boolean), kacc.sym, entity) : []).map((x) => ({ n: x.name, at: src([{ repo: x.repo, path: x.path, line: x.line, kind: 'code' }])[0], r: x.reads ? 1 : 0, wr: x.writes ? 1 : 0, k: x.kinds, lines: x.lines, c: x.callers }))
+  const ts = templatesOf(st), ixs = indexesOf(st), ks = st.keyspace
+  const pos = new Map(ts.map((e, i) => [e, i]))
+  const i = ks.instance
+  return {
+    id: st.id, repo: st.repo, name: st.name, dialect: 'redis', summary: storeSummary(st),
+    decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: d.path ? [P(d.path, d.kind, d.repo ?? st.repo), d.line ?? null] : null, stopped: null, error: d.error ?? null, notes: d.notes || [] })),
+    paths, tables: [], collapsed: false, layout: null,
+    ks: {
+      clients: ks.clients, files: ks.files, commands: ks.commands, dyn: ks.dyn, repos: ks.repos, deduced: !!ks.deduced, unknown: KS_UNKNOWN,
+      inst: i ? { label: i.label || i.id, kind: i.kind, engine: i.engine ?? null, version: i.version ?? null, modules: i.modules || [], eviction: i.eviction ?? null, persistence: i.persistence ?? null, notifications: i.notifications ?? null, databases: i.databases ?? null, at: src([{ repo: i.repo, path: i.path, line: i.line, kind: 'infra' }])[0], lead: ks.evictionLead || null, from: i.modulesFrom || null } : null,
+      wired: (ks.wired || []).map((w) => ({ repo: w.repo, env: w.env, at: w.at ? src([{ repo: w.at.repo ?? (i ? i.repo : st.repo), path: w.at.path, line: w.at.line, kind: 'infra' }])[0] : null })),
+      dbs: [...new Map(ks.dbs.filter((d) => d.db !== null).map((d) => [d.db, d])).values()].map((d) => ({ db: d.db, how: d.how, at: src([d])[0] })),
+      tree: prefixTree(ts).map((r) => [r.seg, r.depth, r.entity ? pos.get(r.entity) : -1]),
+      tpl: ts.map((e) => ({ n: e.name, type: e.type, types: e.types.map((t) => [t.type, src(t.sources)]), cf: cf(e.conflicts), f: e.fields.map((f) => [f.name, f.how, src(f.sources)]), ttl: e.ttl ? [ttlText(e.ttl), src(e.ttl.sources)] : null, lead: e.lead ? 1 : 0, ix: e.coveredBy, globs: e.globs, gr: (e.groups || []).map((g) => [g.name, g.consumers, g.created ? 1 : 0, src(g.sources)]), src: src(e.sources), more: e.more || 0, rw: fns(e.redis.sites, e.id), names: e.names })),
+      ix: ixs.map((x) => ({ n: x.label ?? x.name, on: x.on, pre: x.prefixes, f: x.fields.map((f) => [f.name, f.as, f.type.raw, f.opts, src(f.sources)]), asm: x.assembled ? 1 : 0, past: x.past || 0, lead: x.lead ? 1 : 0, q: fns(x.queries.sites, x.id), covers: x.covers, src: src(x.sources), decl: x.declared ? 1 : 0, filter: x.filter ? 1 : 0, cf: cf(x.conflicts), aliases: x.aliases || [] })),
+      ch: ks.channels.map((c) => ({ n: c.name, pat: c.pattern ? 1 : 0, pub: fns(c.pub), sub: fns(c.sub), psub: c.psub || [], repos: c.repos, src: src(c.sources) })),
+      st: streamsOf(st).map((e) => pos.get(e)),
+      say: { noExpiry: NO_EXPIRY, noQuery: NO_QUERY, assembled: ASSEMBLED },
+    },
+  }
+}
 // rr: the refined relations between two of its tables (dataData), drawn as lines no foreign key states
 // (`rf`: dashed, labelled refined, its why and citations), after the store's own, so the overlays'
 // positions hold.
@@ -884,6 +931,7 @@ ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4
 .pill.refined{color:var(--t-worker);border-color:currentColor;border-style:dashed}.rent{font-size:12.5px;margin:10px 0 3px;overflow-wrap:anywhere}.rent .mono{font-weight:600}.krow .kpur{margin:1px 0 2px 30px}.note.unused{color:var(--warn)}svg.erd .fk.rf{stroke:var(--t-worker);stroke-dasharray:4 4}
 svg.erd .tbl.inf .tframe{stroke-dasharray:6 4;stroke-width:1.5}svg.erd .tbl.inf .thead{fill:color-mix(in srgb,var(--t-database) 5%,var(--panel))}svg.erd .fk.jn{stroke-dasharray:6 4}svg.erd .unk{fill:var(--panel);stroke:var(--muted);stroke-width:1;stroke-dasharray:2 1.6}svg.erd .row.inf .ctype{font-style:italic}
 .pill.inferred{color:var(--muted);border-color:currentColor;border-style:dashed}.dia.unk{border-style:dashed;background:transparent}.dlegend .jnline{display:inline-block;width:22px;border-top:1.6px dashed var(--link);margin:0 3px}.dlegend .infbox{display:inline-block;width:16px;height:10px;border:1.4px dashed var(--muted);border-radius:3px;margin:0 3px}
+.kcard.kspace{max-width:none}.kshead{flex-wrap:wrap;gap:4px 6px}ul.ktree .krow.d1{padding-left:18px}ul.ktree .krow.d2{padding-left:34px}ul.ktree .krow.d3{padding-left:50px}ul.ktree .krow.d4,ul.ktree .krow.d5,ul.ktree .krow.d6{padding-left:66px}ul.ktree .krow.cf{background:color-mix(in srgb,var(--warn) 7%,transparent)}ul.ktree .kfields,ul.ktree .kaccess{margin-left:30px;font-size:12px}.kcard.kix.lead{border-style:dashed}.mkl.k-hash,.mkl.k-string,.mkl.k-set,.mkl.k-sorted,.mkl.k-list,.mkl.k-json,.mkl.k-geo,.mkl.k-hyperloglog,.mkl.k-bitmap,.mkl.k-time{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 10%,var(--panel))}.mkl.k-stream,.mkl.k-ch{color:var(--link);background:color-mix(in srgb,var(--link) 10%,var(--panel))}
 details.refine{margin:0 0 14px}details.refine h2{font-size:14px;margin:14px 0 6px}.lineagebox{margin:6px 0}.lineagebox svg{min-width:640px;max-width:900px}svg.lineage .lbox rect{fill:var(--panel);stroke:color-mix(in srgb,var(--t-database) 55%,var(--line));stroke-width:1.3}svg.lineage .lbox.rf rect{stroke:var(--t-worker);stroke-dasharray:5 4}svg.lineage .lbox.go{cursor:pointer}
 svg.lineage .ln{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink)}svg.lineage .ls,svg.lineage .lt{font-size:11px;fill:var(--muted)}svg.lineage .lf{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink)}svg.lineage .lin{fill:none;stroke:var(--t-worker);stroke-width:1.8;stroke-dasharray:7 4}svg.lineage .linm{fill:var(--t-worker)}
 .kbind{border:1px solid var(--border);border-radius:8px;padding:6px 8px;margin:4px 0}.kbind.dash{border-style:dashed}.kbind .srcline{margin:2px 0 0}.pill.c-declared,.pill.c-convention{color:var(--ok);border-color:currentColor}.pill.c-name-match,.pill.c-ambiguous{color:var(--warn);border-color:currentColor;border-style:dashed}

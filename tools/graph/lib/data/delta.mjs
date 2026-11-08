@@ -122,6 +122,14 @@ export function parseTarget(t) {
   const repo = t.slice(0, colon), rest = t.slice(colon + 1)
   const m = /\/(index|key|fk):/.exec(rest)
   const head = m ? rest.slice(0, m.index) : rest, spec = m ? rest.slice(m.index + m[0].length) : null
+  // a key space's search index, of the store itself: <repo>:<store>/index:<name>[.<field>]
+  if (m && m[1] === 'index' && !head.includes('/') && head) {
+    const dot = spec.indexOf('.')
+    const ix = dot < 0 ? spec : spec.slice(0, dot), field = dot < 0 ? null : spec.slice(dot + 1)
+    if (!ix.trim() || field === '') return { error: `${q(t)}: index:<name>[.<field>]` }
+    const b0 = { repo, store: head, storeId: `${repo}:${head}`, entity: `index:${ix}` }
+    return field ? { ...b0, kind: 'field', el: { name: field } } : { ...b0, kind: 'entity', el: { name: `index:${ix}` } }
+  }
   const slash = head.lastIndexOf('/')
   if (slash <= 0 || slash === head.length - 1) return { error: `${q(t)} names no store and entity: <repo>:<store>/<entity>` }
   const store = head.slice(0, slash), tail = head.slice(slash + 1)
@@ -292,7 +300,22 @@ function attrs(what, o, allowed, need = []) {
   for (const k of need) if (!(k in o)) out.push(`after: ${what} needs its ${k}`)
   return out
 }
+// A key space's target (its store `redis`, or `redis:<instance>`: the names data/redis.mjs gives): a
+// key template, a search index (index:<name>) or a channel (channel:<name>), and their fields. An
+// addition may state nothing more (its target is its shape) or what it is: a template's type, an
+// index's ON and PREFIX, a field's type (an index's TEXT, TAG …) and alias.
+export const isKeySpaceTarget = (t) => t.store === 'redis' || /^redis:/.test(t.store || '')
+const KS_ENTITY = { kind: (v) => v === 'keyPattern' || v === 'index' || v === 'channel', type: (v) => str(v), on: (v) => v === 'HASH' || v === 'JSON', prefixes: (v) => Array.isArray(v) && v.every(str), fields: Array.isArray }
+const KS_FIELD = { type: (v) => str(v), as: (v) => str(v) }
+function keySpaceAfterErrors(t, op, after) {
+  if (op === 'remove') return after === undefined ? [] : ['a removal has no after']
+  if (op === 'rename') return isObj(after) && str(after.name) && Object.keys(after).length === 1 ? [] : ['after: { name }, the new name']
+  if (op === 'add' && (after === undefined || (isObj(after) && !Object.keys(after).length))) return []
+  if (op === 'change' && !(isObj(after) && Object.keys(after).length)) return [`after: what changes (${t.kind === 'field' ? 'type, as' : 'a template\'s type; an index\'s on, prefixes'})`]
+  return t.kind === 'field' ? attrs('a key space\'s field', after, KS_FIELD) : t.kind === 'entity' ? attrs('a key space\'s template, index or channel', after, KS_ENTITY) : [`a key space has no ${KIND_WORD[t.kind]}: address its template, index:<name> or channel:<name>`]
+}
 function afterErrors(t, op, after) {
+  if (isKeySpaceTarget(t)) return keySpaceAfterErrors(t, op, after)
   const kind = t.kind, word = KIND_WORD[kind]
   if (op === 'remove') return after === undefined ? [] : ['a removal has no after']
   if (op === 'rename') {
@@ -325,7 +348,8 @@ export function findTarget(model, t) {
   const st = stores.find((s) => s.id === t.storeId) || stores.find((s) => s.id.toLowerCase() === t.storeId.toLowerCase()) || null
   if (!st) return { st: null, e: null, el: null, fold: foldOf(null) }
   const fold = Object.assign(foldOf(st.dialect), { dialect: st.dialect }) // names folded; types, defaults and expressions compared in the dialect's terms
-  const e = st.entities.find((x) => fold(x.name) === fold(t.entity)) || null
+  // (a key space's stream:<name> is its template)
+  const e = st.entities.find((x) => fold(x.name) === fold(t.entity)) || (st.dialect === 'redis' && /^stream:/.test(t.entity) ? st.entities.find((x) => x.kind === 'keyPattern' && fold(x.name) === fold(t.entity.slice(7))) : null) || null
   if (!e || t.kind === 'entity') return { st, e, el: e, fold }
   const k = KEY[t.kind](t.el, fold)
   return { st, e, el: e[LIST[t.kind]].find((x) => KEY[t.kind](x, fold) === k) || null, fold }
@@ -343,6 +367,17 @@ const lower = (v) => (v === null || v === undefined ? v : String(v).trim().toLow
 // built and not stated are not differences: they are unplanned (extrasOf).
 function shapeDiffs(kind, after, el, fold, whole, pre = '') {
   const out = []
+  // a key space's element: only what the change states (a template's type, an index's ON and PREFIX,
+  // a field's type and alias), never a table's defaults
+  if (fold.dialect === 'redis') {
+    const low = (v) => (v === null || v === undefined ? null : String(v).toLowerCase())
+    if ('kind' in after && after.kind !== el.kind) out.push(d(`${pre}kind`, after.kind, el.kind ?? null))
+    if ('type' in after) { const built = kind === 'field' ? typeOf(el) : el.type; if (low(after.type) !== low(built) && !(kind === 'entity' && (el.types || []).some((t) => low(t.type) === low(after.type)) && (el.types || []).length === 1)) out.push(d(`${pre}type`, after.type, built ?? null)) }
+    if ('as' in after && (after.as ?? null) !== (el.as ?? null)) out.push(d(`${pre}as`, after.as, el.as ?? null))
+    if ('on' in after && after.on !== el.on) out.push(d(`${pre}on`, after.on, el.on ?? null))
+    if ('prefixes' in after && (after.prefixes || []).join(' ') !== (el.prefixes || []).join(' ')) out.push(d(`${pre}prefixes`, (after.prefixes || []).join(' '), (el.prefixes || []).join(' ')))
+    return out
+  }
   if (kind === 'field') {
     if ('type' in after && normType(after.type, fold.dialect) !== normType(typeOf(el), fold.dialect)) out.push(d(`${pre}type`, after.type, typeOf(el)))
     if ('nullable' in after && after.nullable !== el.nullable) out.push(d(`${pre}nullable`, after.nullable, el.nullable))

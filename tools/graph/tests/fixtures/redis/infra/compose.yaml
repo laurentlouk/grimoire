@@ -1,0 +1,17 @@
+services:
+  cache:
+    image: redis/redis-stack-server:7.4.0-v8
+    environment:
+      REDIS_ARGS: "--maxmemory-policy allkeys-lru --appendonly yes --notify-keyspace-events Ex --databases 4"
+    ports:
+      - "127.0.0.1:6379:6379"
+  api:
+    build: ../api
+    environment:
+      REDIS_URL: redis://cache:6379/0
+    depends_on: [cache]
+  web:
+    build: ../web
+    environment:
+      - REDIS_URL=redis://cache:6379/0
+    depends_on: [cache]

@@ -31,7 +31,10 @@ import { tagOf } from './yaml.mjs'
 export const TABLE_TYPES = ['AWS::DynamoDB::Table', 'AWS::DynamoDB::GlobalTable', 'AWS::Serverless::SimpleTable']
 export const LEVEL = { schema: 2, template: 3 }
 const TEMPLATE = /AWS::(?:DynamoDB::(?:Global)?Table|Serverless::SimpleTable)\b/
-export const tableLevel = (text) => (TEMPLATE.test(text) ? LEVEL.template : /\bKeySchema\b/.test(text) && /\bAttributeDefinitions\b/.test(text) ? LEVEL.schema : 0)
+// (plus 8 when a template names a key-value cache's resource: extractors/redis-infra.mjs; the table
+// extractors compare it modulo 8)
+export const CACHE_TEMPLATE = /AWS::(?:ElastiCache::(?:ReplicationGroup|CacheCluster|ServerlessCache)|MemoryDB::Cluster)\b/
+export const tableLevel = (text) => (TEMPLATE.test(text) ? LEVEL.template : /\bKeySchema\b/.test(text) && /\bAttributeDefinitions\b/.test(text) ? LEVEL.schema : 0) + (CACHE_TEMPLATE.test(text) ? 8 : 0)
 
 export const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 // an intrinsic function's name (Ref, Sub, GetAtt, If…), or null

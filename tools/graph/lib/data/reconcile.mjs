@@ -31,10 +31,12 @@
 //   reconcile([{ repo, extractor: 'id@version', facts }], { equivalences? }) → { stores: [Store],
 //     logical, items, bindings, unresolved, equivalences, access?, accessError?, queries?,
 //     queriesError? }   (model.mjs, binding.mjs, access.mjs, queries.mjs)
+import path from 'node:path'
 import { KINDS, keyOf, normType, normDefault, normColumn, kvIndex, kvTable, projectionText, KV_DIALECTS, declKey } from './model.mjs'
 import { logicalTables, bindItems, itemField, itemOf, tableResolver, resolveSide } from './binding.mjs'
 import { resolveAccess } from './access.mjs'
 import { resolveQueries, inferredSummary, queryConflicts } from './queries.mjs'
+import { resolveRedis, redisSummary } from './redis.mjs'
 
 // What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
 // an LSI's kind, key attributes and projection, beside what a SQL element says. A key-value
@@ -77,7 +79,32 @@ export function reconcile(rows, opts = {}) {
   const model = { stores: [...stores].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, ds]) => merge(id, ds)) }
   items(model, rows, decls, opts.equivalences || [])
   inferred(model, rows)
+  keyspaces(model, rows, opts.roots || [])
   return model
+}
+
+// ── a key-value cache's key spaces (redis.mjs): the commands code sends, per instance the infra wires
+// to a repository, else per repository (`<repo>:redis`), inferred; an FT.CREATE literal a declaration
+// code makes. A failure leaves the model as it is, with `redisError` saying why.
+// roots: the repositories' paths in the project ([{ name, rel }]), where a Compose service's build
+// context is resolved to the repository it builds
+function keyspaces(model, rows, roots = []) {
+  if (!rows.some((r) => r.facts?.redis?.sites?.length || r.facts?.redisInfra?.length)) return
+  try {
+    const repos = new Set(rows.map((r) => r.repo))
+    // an instance the infra declares: its store id, the variables it wires (to the repository a Compose
+    // service builds, when its build context is one by name, else to any that reads the variable)
+    const instances = rows.flatMap((r) => (r.facts?.redisInfra || []).map((i) => ({
+      ...i, repo: r.repo, extractor: r.extractor, id: `${r.repo}:${i.name}`,
+      wires: (i.env || []).map((e) => { const built = buildRepo(roots, r.repo, e); return { env: e.env, at: { repo: r.repo, path: e.path, line: e.line }, repos: built ? [built] : null, ...(e.service ? { service: e.service } : {}) } }),
+      declarations: [{ extractor: r.extractor, kind: 'infra', path: i.path, line: i.line, status: 'read', label: `${i.kind} ${i.label}`, stopped: null, error: null, notes: i.notes || [], files: 1, implicitIndexes: 0, dialect: 'redis', dialectFrom: null }],
+    })))
+    const r = resolveRedis(rows, model, instances)
+    model.stores = [...model.stores, ...r.stores].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    model.redis = r.redis
+  } catch (e) {
+    model.redisError = `the commands in code were not read into the model: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`
+  }
 }
 
 // ── the SQL code sends (queries.mjs): attached to the store that declares its tables, or deduced into
@@ -93,6 +120,19 @@ function inferred(model, rows) {
     for (const s of model.stores) { delete s.queries; for (const x of s.entities) delete x.queries }
     model.queriesError = `the queries in code were not read into the model: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`
   }
+}
+
+// The repository a Compose service builds: its build context (relative to the Compose file) resolved
+// against the configured repositories' paths, the deepest that holds it; else none
+function buildRepo(roots, repo, e) {
+  if (typeof e.build !== 'string' || !e.build) return null
+  const at = roots.find((x) => x.name === repo)
+  if (!at) return null
+  const norm = (p) => path.posix.normalize(p).replace(/\/+$/, '').replace(/^\.\//, '') || '.'
+  const target = norm(path.posix.join(at.rel || '.', path.posix.dirname(e.path), e.build))
+  if (target.startsWith('..')) return null
+  const holds = roots.map((x) => ({ name: x.name, rel: norm(x.rel || '.') })).filter((x) => x.rel === '.' || target === x.rel || target.startsWith(`${x.rel}/`)).sort((a, b) => (b.rel === '.' ? 0 : b.rel.length) - (a.rel === '.' ? 0 : a.rel.length))
+  return holds[0]?.name ?? null
 }
 
 // what the note on a key-value table no code reaches says
@@ -289,6 +329,7 @@ export const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name
 // (graph_data and the page's Data tab say the same).
 export function storeSummary(st) {
   const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+  if (st.dialect === 'redis') return redisSummary(st) // a key space read from the commands in code (redis.mjs)
   if (st.inferred) return inferredSummary(st) // deduced from the queries in code (queries.mjs)
   const tables = st.entities.filter((e) => e.kind === 'table' && !e.bookkeeping), views = st.entities.filter((e) => e.kind === 'view').length
   if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }

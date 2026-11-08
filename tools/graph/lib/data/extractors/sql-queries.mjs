@@ -51,7 +51,7 @@ import { LANGS, TEST_PATH } from '../../langs.mjs'
 const DTS = /\.d\.[cm]?ts$/i
 // calls, statements and names (tables, columns, joins, lookups, casts) a file keeps: its facts stay small in graph.db
 export const MAX_SITES = 400, MAX_STATEMENTS = 2000, MAX_FACTS = 20000
-const familyOf = (lang) => (lang === 'tsx' || lang === 'typescript' || lang === 'javascript' ? 'ts' : lang)
+export const familyOf = (lang) => (lang === 'tsx' || lang === 'typescript' || lang === 'javascript' ? 'ts' : lang)
 
 // ── the clients: a module, the dialect it speaks (null: any) ──
 const KNOWN_DIALECT = { postgres: 'postgres', mysql: 'mysql', sqlite: 'sqlite', 'sql-db': null }
@@ -93,7 +93,7 @@ export const queryLevel = (p, text) => {
 // ── SQL text, as written: segments { text, row } assembled so each statement keeps its file line ──
 // An escape as the SQL sees it, never adding a line (a line break escaped is a blank)
 const ESCAPED = { n: ' ', t: ' ', r: ' ', 0: ' ', b: ' ', f: ' ', v: ' ' }
-const unescape = (s) => s.replace(/\\(?:u\{[0-9a-fA-F]{1,6}\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|([\s\S]))/g, (m, c) => (c === undefined ? ' ' : c === '\n' ? '\n' : ESCAPED[c] ?? c))
+export const unescape = (s) => s.replace(/\\(?:u\{[0-9a-fA-F]{1,6}\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|([\s\S]))/g, (m, c) => (c === undefined ? ' ' : c === '\n' ? '\n' : ESCAPED[c] ?? c))
 const rowOf = (n) => n.startPosition.row
 function assemble(segs) {
   if (!segs || !segs.length || segs.every((s) => s.text === PARAM)) return null
@@ -222,15 +222,15 @@ const RS_METHODS = new Set(['execute', 'query', 'query_row', 'query_map', 'query
 // parameters and locals bind). Nothing ever walks up from a node (a parent costs the tree's depth
 // each time): a call's function, class and test status come down with the walk.
 export const FILE_MS = 10_000 // a file's read stops past this (said), as a replay does
-const FN = { ts: /^(?:function_declaration|generator_function_declaration|method_definition|arrow_function|function_expression|function|generator_function)$/, go: /^(?:function_declaration|method_declaration|func_literal)$/, python: /^(?:function_definition|lambda)$/, rust: /^(?:function_item|closure_expression)$/ }
-const CLASS = { ts: /^(?:class_declaration|abstract_class_declaration|class)$/, python: /^class_definition$/ }
-const TEST_ATTR = /\b(?:test|cfg\s*\(\s*test\s*\))/
-const TEST_FILE = { ts: /\.(?:test|spec)\.[cm]?[jt]sx?$/i, go: /_test\.go$/i, python: /(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$/i, rust: /(?:^|\/)tests\// }
-const isTestName = (fam, name) => (fam === 'go' ? /^(?:Test|Benchmark|Example|Fuzz)/.test(name.split('.').pop()) : fam === 'python' ? /^test/.test(name.split('.').pop()) || /(?:^|\.)Test/.test(name) : false)
+export const FN = { ts: /^(?:function_declaration|generator_function_declaration|method_definition|arrow_function|function_expression|function|generator_function)$/, go: /^(?:function_declaration|method_declaration|func_literal)$/, python: /^(?:function_definition|lambda)$/, rust: /^(?:function_item|closure_expression)$/ }
+export const CLASS = { ts: /^(?:class_declaration|abstract_class_declaration|class)$/, python: /^class_definition$/ }
+export const TEST_ATTR = /\b(?:test|cfg\s*\(\s*test\s*\))/
+export const TEST_FILE = { ts: /\.(?:test|spec)\.[cm]?[jt]sx?$/i, go: /_test\.go$/i, python: /(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$/i, rust: /(?:^|\/)tests\// }
+export const isTestName = (fam, name) => (fam === 'go' ? /^(?:Test|Benchmark|Example|Fuzz)/.test(name.split('.').pop()) : fam === 'python' ? /^test/.test(name.split('.').pop()) || /(?:^|\.)Test/.test(name) : false)
 
 // The function a function-like node is, as its language names it (`parent`: what holds it, known
 // from the walk) → its name, or null for a callback, which belongs to the function around it
-function fnName(n, parent, fam, ctx) {
+export function fnName(n, parent, fam, ctx) {
   if (fam === 'ts') {
     if (n.type === 'function_declaration' || n.type === 'generator_function_declaration') return field(n, 'name')?.text || '(function)'
     if (n.type === 'method_definition') return `${ctx.cls || '(class)'}.${field(n, 'name')?.text || '(method)'}`

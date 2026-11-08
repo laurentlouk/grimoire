@@ -37,7 +37,8 @@ Use the graph to find *where* (`graph_search`, `graph_file`, `graph_callers`, a 
 | An index with no purpose said | every index; `no access found (lead)` in `graph_data` | the queries that name it (`IndexName`, `index_name`, a `WHERE` the index serves) |
 | A binding left ambiguous | `graph_data`'s item types: `ambiguous: A \| B` | the call site: which table the conversion writes |
 | Declarations of one table no evidence ties | a local-dev `Orders` beside a production `{env}-{project}-order`; `declared, no code uses this name` | where the local name is set (a compose file, an `.env.example`, a test setup, a seed script). No such line: the local declaration may be stale; say so, never pair by a guess |
-| A store no extractor reads | **Gaps** (a Redis, MongoDB, search or other client imported, nothing covering it) | the code that defines its shape: a schema, the index creation (`FT.CREATE`), the key templates, the documents written |
+| A store no extractor reads | **Gaps** (a MongoDB, search or other client imported, nothing covering it; a Redis-protocol client is no gap once its commands are read) | the code that defines its shape: a schema, the index creation, the documents written |
+| A key space read only in part | A key-value cache's key space (`graph_data`: its templates, indexes and leads): a search index whose schema is *assembled in code, not read*, a key built across files (counted as built wholly) | describe by hand only what is not read: an assembled schema's fields as a store of its own (`stores`, kind `redisearch`, an id no extractor gives: `<repo>:redis` and `<repo>:redis:<instance>` are read, so a store under them is drift), each field at the line that pushes it; a lineage from a template or an index to the table it mirrors; never a template, type or field the map already reads |
 
 Never invent: a claim you could not tie to a line is left out. Read enough to be sure, not everything.
 

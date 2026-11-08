@@ -30,24 +30,28 @@ import dynamoAccess from './extractors/dynamo-access.mjs'
 import drizzleTs from './extractors/drizzle-ts.mjs'
 import prisma from './extractors/prisma.mjs'
 import sqlQueries from './extractors/sql-queries.mjs'
+import redisCommands from './extractors/redis-commands.mjs'
+import redisInfra from './extractors/redis-infra.mjs'
 import { DOC } from './readers/documents.mjs'
 import { tableLevel } from './readers/dynamodb.mjs'
 import { skipped } from '../project.mjs'
 
-export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma, sqlQueries]
+export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma, sqlQueries, redisCommands, redisInfra]
 // the code and inferred extractors: their files are source (code, or a schema language), inspected by level
 export const SOURCE = EXTRACTORS.filter((ex) => ex.kind === 'code' || ex.kind === 'inferred')
 // those parsing source through the pinned grammars (ctx.tree), and the ones of them a base reads
-// aside (readers/code-aside.mjs; a base does not compare access patterns)
+// aside (readers/code-aside.mjs; a base does not compare access patterns or the SQL code sends, but
+// does compare a key-value cache's key templates: extractors/redis-commands.mjs says `aside`)
 export const TREE = EXTRACTORS.filter((ex) => ex.tree)
-export const ASIDE = TREE.filter((ex) => ex.kind === 'code')
+export const ASIDE = TREE.filter((ex) => ex.kind === 'code' || ex.aside)
 // the extractors a base parses this text with, aside
 export const asideOf = (p, text) => ASIDE.filter((ex) => ex.wants(p) && (ex.parses ? ex.parses(p, text) : ex.level(p, text) > 0))
 // A source file's level, bits: 1 what the item binding reads (its code extractor's level), 2 a
 // key-value SDK call shape (extractors/dynamo-access.mjs), 4 a table-builder schema and 8 a barrel
 // re-exporting relative modules (extractors/drizzle-ts.mjs), 16 a model, view or enum block and 32 a
 // datasource block of a schema-language file (extractors/prisma.mjs), 64 a query call beside SQL text,
-// or a SQL client import (extractors/sql-queries.mjs).
+// or a SQL client import (extractors/sql-queries.mjs), 128 a key-value cache's client or command
+// (extractors/redis-commands.mjs).
 export const sourceLevel = (p, text) => { let l = 0; for (const ex of SOURCE) if (ex.wants(p)) l |= ex.level(p, text); return l }
 const isSource = (p) => SOURCE.some((ex) => ex.wants(p))
 export const MAX_BYTES = 8 << 20 // an input past this is not read (its job reports it)
@@ -69,7 +73,8 @@ export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some(
 // source file (.rs, .ts, .js, .py, .go, .prisma), sourceLevel's bits (1: what the item binding reads:
 // a serde derive, a type declaration, a conversion, an environment read, a string constant; 2: a
 // key-value SDK call shape; 4, 8: a table-builder schema, a barrel; 16, 32: a schema-language file's
-// models, its datasource; 64: a query call beside SQL text, a SQL client import; 0: none). A change to
+// models, its datasource; 64: a query call beside SQL text, a SQL client import; 128: a key-value cache's
+// client or command; 0: none). A change to
 // what this computes moves the store's SCHEMA_VERSION, so no
 // stale level survives in an index.
 export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : wantsTf(p) ? tfLevel(p, text) : DOC.test(p) ? tableLevel(text) : isSource(p) ? sourceLevel(p, text) : null)
@@ -78,7 +83,7 @@ export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text
 // so the index and a base keep no copy of it; nor is a source file with nothing for the binding or
 // the access patterns or a schema. A configuration an extractor reads is always kept (a base reads
 // it too: a drizzle.config.ts holds no level of its own).
-const TABLE_EXTRACTORS = new Set([dynamodbTable, cloudformation])
+const TABLE_EXTRACTORS = new Set([dynamodbTable, cloudformation, redisInfra]) // (a Compose file redis-infra.mjs keeps as configuration)
 const isConfig = (p) => EXTRACTORS.some((ex) => ex.config?.(p))
 export const keeps = (p, text) => isConfig(p) || (isSource(p) ? sourceLevel(p, text) > 0 : !DOC.test(p) || tableLevel(text) > 0 || EXTRACTORS.some((ex) => !TABLE_EXTRACTORS.has(ex) && ex.wants(p)))
 // A job reads YAML (its context needs ctx.yaml): one of its inputs is a YAML file, or a .template
