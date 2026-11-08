@@ -61,6 +61,21 @@ const ZW = '​'
 const NODATE = fresh('nodate')
 writeFileSync(join(NODATE, 'date'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = +%s ] && exit 1; done\nexec ${which('date')} "$@"\n`)
 chmodSync(join(NODATE, 'date'), 0o755)
+// a command that writes down each call (`line`, in the shell: its arguments by default) before the real
+// one runs. A wait with no clock to read is counted in such calls, and checked by that count, never by
+// the wall clock: a loaded machine slows the calls and cannot change how many there are
+const logged = (cmd, line = '$*') => {
+  const d = fresh(`log-${cmd}`), LOG = join(d, 'calls')
+  writeFileSync(LOG, '')
+  writeFileSync(join(d, cmd), `#!/bin/sh\necho "${line}" >> '${LOG}'\nexec ${which(cmd)} "$@"\n`)
+  chmodSync(join(d, cmd), 0o755)
+  return { dir: d, calls: () => readFileSync(LOG, 'utf8').split('\n').filter(Boolean) }
+}
+// a `sleep` that writes down, with each nap, whose lock stands in D: [nap, 'held:<pid>' | 'gone'] each
+const napsIn = (D) => {
+  const s = logged('sleep', `$* $(if [ -d '${D}/.lock' ]; then echo "held:$(cat '${D}/.lock/pid' 2>/dev/null)"; else echo gone; fi)`)
+  return { dir: s.dir, naps: () => s.calls().map((l) => l.split(' ')).filter(([arg]) => arg !== '0.01') } // 0.01: the writer's probe of fractional sleeps, no nap
+}
 
 // ══════════════ U-1 · an unreadable PR is UNKNOWN: nothing pushed, rewritten or claimed ══════════════
 await perShell(async (SHELL, { ok, section }) => {
@@ -118,9 +133,18 @@ await perShell(async (SHELL, { ok, section }) => {
     const c1 = X.commit('c1')
     const land = scriptOf((await getScripts(X, c1, { repos: realRepo(X.W, { laneSetup: `sleep ${n}; touch <lane>/never` }) })).land)
     if (!k) ok(land.includes(`to 180 sh -c 'sleep ${n}; touch ${X.W}/.worktrees/ship-api/never'`), 'the setup runs under `to`, at most 180 s, with <lane> substituted')
-    const r = await execA(X, SHELL, land, { GRIMOIRE_SHIP_DEADLINE: '2' }, { timeout: 30000, killSignal: 'SIGKILL' })
+    // The script's clock is the test's: it reads T until the ship worktree exists (the step right before
+    // the setup), then T+58, so of a 60-s deadline the steps before the setup have it all, however slowly a
+    // loaded machine runs them, and the setup gets what is left: 2 s. That limit is read off the call `to`
+    // makes (perl's first argument after its program, `$3`), never off the wall clock
+    const clock = fresh('clock'), EPOCH = Math.floor(Date.now() / 1000)
+    writeFileSync(join(clock, 'date'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = +%s ] || continue; if [ -d '${X.W}/.worktrees/ship-api' ]; then echo ${EPOCH + 58}; else echo ${EPOCH}; fi; exit 0; done\nexec ${which('date')} "$@"\n`)
+    chmodSync(join(clock, 'date'), 0o755)
+    const perl = which('perl') ? logged('perl', '$3 $6') : null
+    const r = await execA(X, SHELL, land, { GRIMOIRE_SHIP_DEADLINE: '60', PATH: `${perl ? `${perl.dir}:` : ''}${clock}:${X.BIN}:${process.env.PATH}` }, { timeout: 120000, killSignal: 'SIGKILL' })
     const left = spawnSync('sh', ['-c', `pgrep -f "sleep ${n.slice(0, -1)}[${n.slice(-1)}]" || true`], { encoding: 'utf8' }).stdout.trim() // the last digit in brackets: never this shell's own command line
-    ok(r.signal === null && r.ms < 10000 && left === '' && !existsSync(join(X.W, '.worktrees', 'ship-api', 'never')), `${SHELL}: returned in ${r.ms} ms with a 2-s deadline; the setup was killed, nothing of it left running`)
+    const limit = perl ? (perl.calls().find((l) => l.includes(` sleep ${n};`)) || 'no').split(' ')[0] : '2' // no perl here: `to` uses timeout, unseen
+    ok(r.signal === null && limit === '2' && left === '' && !existsSync(join(X.W, '.worktrees', 'ship-api', 'never')), `${SHELL}: the setup ran under a ${limit}-s limit, what the deadline had left (its own is 180 s), and was killed with its group: the script returned, nothing of it left running`)
     X.done()
   })
   spawnSync('pkill', ['-f', 'sleep 307[1-3]'])
@@ -231,14 +255,20 @@ await run('', Array.from({ length: 3 }, (_, k) => T(`PROJ-${k + 1}`)), landedWri
 const DIR0 = `${tel}/run-u`
 const retarget = (p, to) => scriptOf(p).replaceAll(`DIR='${DIR0}'`, `DIR='${to.replace(/'/g, `'\\''`)}'`)
 const script = journals.find((p) => scriptOf(p).includes(`DIR='${DIR0}'`)) || ''
-const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
-  const t0 = Date.now()
+// `hang`: a guard against a writer that never returns, never a bound on one that is slow (nothing is timed)
+const runAsync = (shell, s, extraEnv = {}, hang = 120000) => new Promise((res) => {
   const c = spawn(shell, ['-c', s], { env: { ...process.env, ...extraEnv } })
   let out = ''
-  const kill = setTimeout(() => c.kill('SIGKILL'), 40000)
+  const kill = setTimeout(() => c.kill('SIGKILL'), hang)
   c.stdout.on('data', (d) => (out += d))
-  c.on('close', () => { clearTimeout(kill); res({ out, s: (Date.now() - t0) / 1000 }) })
+  c.on('close', () => { clearTimeout(kill); res({ out }) })
 })
+// The lock's stale age for the trials that count writers inside at once: one no load reaches. Their
+// writers' give-up comes at twice it, and the guard after that: on the default 30 s, a waiter starved
+// for 60 s on a loaded machine wrote beside the holder, and the old 40-s guard killed waiters (and the
+// holders among them, leaving their lock) that the mutex was still letting in, one by one
+const UNHURRIED = { GRIMOIRE_LOCK_STALE: '120' }
+const PAST_GIVE_UP = 300000
 {
   ok(!!script, 'U-6 · captured a journal script')
   // the lock lives in the writer's file: inline it (the file's own text) so the critical section can be marked
@@ -247,8 +277,8 @@ const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
   const depth = (LOG) => { let d = 0, max = 0; for (const l of (existsSync(LOG) ? readFileSync(LOG, 'utf8') : '').trim().split('\n').filter(Boolean)) { d += l.startsWith('in') ? 1 : -1; max = Math.max(max, d) } return max }
   // U-6b and U-6e have no time bound to keep (U-6b waits out 7 s and then looks, U-6e counts lines),
   // and directories and holders of their own: they start here and run while U-6a's trials load the CPU,
-  // each printing its lines in its own section below. U-6c and U-6d, timed against an upper bound, run
-  // after U-6a, side by side.
+  // each printing its lines in its own section below. U-6c and U-6d, counted in naps, run after U-6a,
+  // side by side.
   const u6b = (async () => {
     const D = fresh('mx')
     const holder = spawn('sleep', ['30'])
@@ -275,7 +305,7 @@ const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
     for (let i = 0; i < trials; i++) {
       const D = fresh('mx'), LOG = join(D, 'cs.log')
       mkdirSync(join(D, '.lock.brk')); if (plant) writeFileSync(join(D, '.lock.brk', 'pid'), plant)
-      await Promise.all(Array.from({ length: 16 }, (_, k) => runAsync(SH[SHELLS[(i + k) % SHELLS.length]], instr(D, LOG))))
+      await Promise.all(Array.from({ length: 16 }, (_, k) => runAsync(SH[SHELLS[(i + k) % SHELLS.length]], instr(D, LOG), UNHURRIED, PAST_GIVE_UP)))
       if (depth(LOG) > 1) overlaps++
       if (existsSync(join(D, '.lock')) || existsSync(join(D, '.lock.brk'))) litter++
       entered += (existsSync(LOG) ? readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l.startsWith('in')).length
@@ -292,26 +322,26 @@ const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
   const { held, out } = await u6b
   ok(held, 'after 7 s (past the old 5-s timer) the live holder still has it')
   ok(/^RUNJSON ok$/m.test(out), 'its holder gone, the writer breaks it at once and writes')
-  const u6c = Promise.all(SHELLS.map(async (shell) => {
+  // Without `date +%s` the writer's seconds are its naps, 20 to the second: each nap is written down
+  // with whose lock stands then (napsIn), and the break is checked in naps, not in wall time. The
+  // holder's lock must stand through the first second's 20 naps, and fall before the give-up's 40
+  const counted = (stale, life) => Promise.all(SHELLS.map(async (shell) => {
     const D = fresh('lk')
-    const holder = spawn('sleep', ['30'])
+    const holder = spawn('sleep', [life])
     mkdirSync(join(D, '.lock')); writeFileSync(join(D, '.lock', 'pid'), `${holder.pid}\n`)
-    const r = await runAsync(SH[shell], retarget(script, D), { GRIMOIRE_LOCK_STALE: '0', PATH: `${NODATE}:${process.env.PATH}` })
+    const sleeps = napsIn(D)
+    const r = await runAsync(SH[shell], retarget(script, D), { GRIMOIRE_LOCK_STALE: stale, PATH: `${sleeps.dir}:${NODATE}:${process.env.PATH}` })
     holder.kill()
-    return [shell, r]
+    const naps = sleeps.naps()
+    const stood = naps.every(([, lock]) => lock === `held:${holder.pid}`)
+    return [shell, { ...r, n: naps.length, ok: /^RUNJSON ok$/m.test(r.out) && stood && naps.length >= 20 && naps.length < 40 && !existsSync(join(D, '.lock')) && !existsSync(join(D, '.lock.brk')) }]
   }))
-  const u6d = Promise.all(SHELLS.map(async (shell) => {
-    const D = fresh('lk')
-    const holder = spawn('sleep', ['60'])
-    mkdirSync(join(D, '.lock')); writeFileSync(join(D, '.lock', 'pid'), `${holder.pid}\n`)
-    const r = await runAsync(SH[shell], retarget(script, D), { GRIMOIRE_LOCK_STALE: '1', PATH: `${NODATE}:${process.env.PATH}` })
-    holder.kill()
-    return [shell, r]
-  }))
+  const u6c = counted('0', '30')
+  const u6d = counted('1', '60')
   section('U-6c · GRIMOIRE_LOCK_STALE=0 is 1: a lock held by a live pid is not broken at once (timed in counted naps: whole-second clocks blur 0 and 1)')
-  for (const [shell, { out, s }] of await u6c) ok(/^RUNJSON ok$/m.test(out) && s >= 0.9 && s < 5, `${shell}: broken after ${s.toFixed(1)} s (20 naps: the 1-s floor), written`)
+  for (const [shell, { ok: good, n }] of await u6c) ok(good, `${shell}: the holder's lock stood through ${n} naps, then broken (20 naps: the 1-s floor, under the 40 of the give-up), written, nothing left`)
   section('U-6d · without `date +%s` the wait still ends: the naps are counted')
-  for (const [shell, { out, s }] of await u6d) ok(/^RUNJSON ok$/m.test(out) && s < 15, `${shell}: the live holder's lock broken by counted naps, written in ${s.toFixed(1)} s (it waited forever)`)
+  for (const [shell, { ok: good, n }] of await u6d) ok(good, `${shell}: the live holder's lock broken after ${n} counted naps (it waited forever), written, nothing left`)
   section('U-6e · a run directory with a backslash in its path: landed.jsonl still holds each task once')
   for (const [shell, ids] of await u6e) ok(ids.length === 3 && new Set(ids).size === 3, `${shell}: ${ids.length} lines for 3 tasks, each once (awk reads the path from ENVIRON, not -v)`)
 }
@@ -375,9 +405,11 @@ const runAsync = (shell, s, extraEnv = {}) => new Promise((res) => {
     const holder = spawn('sleep', ['60'])
     const LK = join(X.W, '.git', 'grimoire-ship-api.lock')
     rmSync(LK, { recursive: true, force: true }); mkdirSync(LK, { recursive: true }); writeFileSync(join(LK, 'owner'), `${holder.pid} ${Math.floor(Date.now() / 1000)} ship\n`)
-    const r = await execA(X, SHELL, `${prefix}\nif shiplock ship; then echo GOT; shipunlock; fi${close}`, { GRIMOIRE_SHIP_LOCK_WAIT: '2', PATH: `${NODATE}:${X.BIN}:${process.env.PATH}` }, { timeout: 20000, killSignal: 'SIGKILL' })
+    const sleeps = logged('sleep') // the wait, counted in its sleeps: LOCK busy once they add up to the 2 s it may wait
+    const r = await execA(X, SHELL, `${prefix}\nif shiplock ship; then echo GOT; shipunlock; fi${close}`, { GRIMOIRE_SHIP_LOCK_WAIT: '2', PATH: `${sleeps.dir}:${NODATE}:${X.BIN}:${process.env.PATH}` }, { timeout: 120000, killSignal: 'SIGKILL' })
     holder.kill()
-    ok(r.signal === null && /^LOCK busy: held by ship /m.test(r.out) && r.ms < 8000, `${SHELL}: LOCK busy in ${r.ms} ms (it waited forever)`)
+    const slept = sleeps.calls()
+    ok(r.signal === null && /^LOCK busy: held by ship /m.test(r.out) && slept.join() === '1,1', `${SHELL}: LOCK busy after ${slept.length} counted sleep(s) of ${[...new Set(slept)].join(', ') || 'none'} s, the 2 s it may wait (it waited forever)`)
     X.done()
   })
 }

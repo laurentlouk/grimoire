@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.41.3 — crystallize: what the data model map (#74) taught
+## 0.41.4 — crystallize: what the data model map (#74) taught
 
 The crystallize pass on the data model map's 20 merged PRs (#73 to #110). Report: `docs/crystallize/2026-11-07-grimoire-data-model-map.md`.
 
@@ -15,6 +15,15 @@ The crystallize pass on the data model map's 20 merged PRs (#73 to #110). Report
   - grimoire's architecture diagram gains the data model map, and the page server's second write (a delta's acknowledgements);
   - the data model map's spec and plan say what shipped, slice 14 included.
 - **Upstream:** [#112](https://github.com/laurentlouk/grimoire/issues/112): the loop-durability files' wall-clock assertions fail under a loaded `npm test`, and pass alone.
+
+## 0.41.3 — the loop-durability tests hold on a loaded machine (#112)
+
+`run-durability-hardening`, `-followups` and `-statewrite` passed alone and failed under a full `npm test`, which runs one file per CPU. They bounded lock breaks and waits by the wall clock, and their concurrency trials let a slow machine reach the writers' own give-up, or the harness's guard before it. Each property is now checked where load cannot move it. Test-only: nothing changes for a project.
+
+- **A clock of the test's own.** The stale-lock break (H-6b) runs against a `date` whose seconds come from a schedule of its reads, and which writes down, at each read, whose lock stands. The holder's lock must stand at every read through +1 s and fall once the clock reads +2 s. The old 1–3 s window also passed a writer that counted its naps instead of reading the clock; this one does not.
+- **Waits with no clock, counted.** Where `date +%s` fails (U-6c, U-6d), the break is checked in naps, each written down with whose lock stood then: it stands through the first second's 20 naps and falls before the give-up's 40. The ship lock's wait (U-10) ends after two counted 1-s sleeps. The hanging lane setup (U-2) is checked by the limit `to` hands perl: on a clock that jumps to the deadline's last 2 s once the ship worktree exists, it must be those 2 s, never the setup's own 180.
+- **The trials that count writers inside at once** (H-6a, U-6a, the W-2 and W-3 races) give their writers a stale age no load reaches. A starved waiter no longer gives up and writes beside the holder (a race of 13 flushes rolled `run.json` back that way). The guard against a hung writer now comes after the writers' own give-up: the old 40 s killed waiters, holders among them, that the mutex was still letting in.
+- **The big reconcile** (H-2d) runs on a 600-s deadline. Its output budget is under test, and the 90-s default cut the big repo's job short under load.
 
 ## 0.41.2 — a refined relation is compared with a deduced store's joins as joins, never as a foreign key that does not exist (#114)
 
