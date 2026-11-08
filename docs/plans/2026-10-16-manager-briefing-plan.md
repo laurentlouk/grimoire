@@ -1,6 +1,6 @@
 # Manager briefing: plan
 
-**Spec:** [docs/specs/2026-10-16-manager-briefing-design.md](../specs/2026-10-16-manager-briefing-design.md) (approved 2026-10-16) · **Research:** [docs/research/2026-10-16-manager-po-landscape.md](../research/2026-10-16-manager-po-landscape.md) · **Issues:** Linear project [grimoire · manager briefing](https://linear.app/odyyy/project/grimoire-manager-briefing-1da8f07b905f) (P-ODY-46), ODY-869 to ODY-878, plus ODY-879 (page) and ODY-880 (panel)
+**Spec:** [docs/specs/2026-10-16-manager-briefing-design.md](../specs/2026-10-16-manager-briefing-design.md) (approved 2026-10-16) · **Research:** [docs/research/2026-10-16-manager-po-landscape.md](../research/2026-10-16-manager-po-landscape.md) · **Issues:** a Linear project (private), grimoire · manager briefing (P-ACME-46), ACME-869 to ACME-878, plus ACME-879 (page) and ACME-880 (panel)
 
 ## Problem, in the user's words
 

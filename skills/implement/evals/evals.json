@@ -126,7 +126,7 @@
   },
   {
     "id": 6,
-    "query": "The webapp implementer for ODY-948 has been resumed six times this afternoon with Laurent's feedback, and it was compacted an hour ago. Send it the next round of feedback.",
+    "query": "The webapp implementer for ACME-948 has been resumed six times this afternoon with Laurent's feedback, and it was compacted an hour ago. Send it the next round of feedback.",
     "should_trigger": true,
     "expected_output": "Does not resume the same implementer a seventh time: writes a short handoff (branch, head, what is done, the open feedback) and starts a fresh implementer from it, which still waits on long commands in chunks of at most 4 minutes.",
     "expectations": [
@@ -137,7 +137,7 @@
   },
   {
     "id": 7,
-    "query": "Implement ODY-792: per-user rate limits on SMS OTP and chat send, backend half. The issue declares no files and there is no policy in grimoire.config.json.",
+    "query": "Implement ACME-792: per-user rate limits on SMS OTP and chat send, backend half. The issue declares no files and there is no policy in grimoire.config.json.",
     "should_trigger": true,
     "expected_output": "Resolves the profile from workflows/policies.md before building: no declared files, so it lists the files the change will touch and classifies those (the repo's strictPaths included); the auth service and the deploy workflow are floors, so the profile is strict and the build runs on opus. After the build it classifies what actually changed (a floor file, or an auth check added, removed or changed) and never lowers the profile. The PR description names the profile and the signal that set it.",
     "expectations": [

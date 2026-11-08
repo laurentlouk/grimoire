@@ -5,7 +5,7 @@ focus: trace
 
 You are grading one run of the "setup" skill of a plugin, from its transcript.
 
-The user's request was: "Grimoire and its manager block are set up in this project (Linear, team ODY, through the claude.ai connector). Re-run the setup and add a daily schedule for the manager briefing. I work in the Claude desktop app, which has scheduled tasks; weekdays at 08:30 is fine."
+The user's request was: "Grimoire and its manager block are set up in this project (Linear, team ACME, through the claude.ai connector). Re-run the setup and add a daily schedule for the manager briefing. I work in the Claude desktop app, which has scheduled tasks; weekdays at 08:30 is fine."
 
 Expectation to check: Probes through the desktop app on the user's yes: a manual-only task (no cronExpression) with the probe as its prompt, run once with run_scheduled_task and read with list_task_runs; never runs claude -p and never asks for a CLI login (claude auth login)
 

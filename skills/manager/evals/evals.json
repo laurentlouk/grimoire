@@ -61,9 +61,9 @@
   },
   {
     "id": 6,
-    "query": "From the briefing, launch the ready ones: I tick ODY-12 and ODY-14 (project Billing) and ODY-31 (project Onboarding). (Claude desktop app: ToolSearch finds a start_session tool; every repo is checked out; Billing and Onboarding touch different repos.)",
+    "query": "From the briefing, launch the ready ones: I tick ACME-12 and ACME-14 (project Billing) and ACME-31 (project Onboarding). (Claude desktop app: ToolSearch finds a start_session tool; every repo is checked out; Billing and Onboarding touch different repos.)",
     "should_trigger": true,
-    "expected_output": "Runs scripts/manager.mjs repos (every repo available), then scripts/manager.mjs launch-plan --ids ODY-12,ODY-14,ODY-31 with the items file, --config and --root. The plan has two groups, one per tracker project, neither waiting for the other. It finds the session-starting tool with ToolSearch and starts exactly two new conversations, one per project, each with that group's prompt as its first message, verbatim: tracker ids, routes and repo paths only, no ticket title or description. It then says what it started.",
+    "expected_output": "Runs scripts/manager.mjs repos (every repo available), then scripts/manager.mjs launch-plan --ids ACME-12,ACME-14,ACME-31 with the items file, --config and --root. The plan has two groups, one per tracker project, neither waiting for the other. It finds the session-starting tool with ToolSearch and starts exactly two new conversations, one per project, each with that group's prompt as its first message, verbatim: tracker ids, routes and repo paths only, no ticket title or description. It then says what it started.",
     "expectations": [
       { "text": "Runs manager.mjs repos and then manager.mjs launch-plan with the three ticked ids", "passed": null, "evidence": "" },
       { "text": "Starts exactly two new conversations, one per tracker project, through the host's session-starting tool", "passed": null, "evidence": "" },
@@ -74,7 +74,7 @@
   },
   {
     "id": 7,
-    "query": "Launch ODY-40 and ODY-41 from the briefing. (ODY-40 maps to the mobile repo, a submodule that has not been initialised; ODY-41 maps to webapp, whose nested clone under repositories/ is missing and has a remote in repos[].)",
+    "query": "Launch ACME-40 and ACME-41 from the briefing. (ACME-40 maps to the mobile repo, a submodule that has not been initialised; ACME-41 maps to webapp, whose nested clone under repositories/ is missing and has a remote in repos[].)",
     "should_trigger": true,
     "expected_output": "Runs scripts/manager.mjs repos and reports mobile as 'submodule not initialised' with the fix git submodule update --init -- <its path>, and webapp as 'not checked out' with the fix git clone -- <remote> repositories/webapp. It offers each fix command and runs one only after the user says yes, from the project root; it never runs a fix on its own nor edits repos[]. Without a yes, launch-plan refuses both ids with the repo reason and its fix, and nothing is launched for them.",
     "expectations": [
@@ -98,9 +98,9 @@
   },
   {
     "id": 9,
-    "query": "/grimoire:manager launch ODY-12 ODY-31 (Sent by the Launch button of the briefing panel in the Claude desktop app. The latest briefing is 2 hours old and lists both under Hand to AI, ODY-12 in project Billing and ODY-31 in project Onboarding, on different repos; every repo is checked out; ToolSearch finds a start_session tool.)",
+    "query": "/grimoire:manager launch ACME-12 ACME-31 (Sent by the Launch button of the briefing panel in the Claude desktop app. The latest briefing is 2 hours old and lists both under Hand to AI, ACME-12 in project Billing and ACME-31 in project Onboarding, on different repos; every repo is checked out; ToolSearch finds a start_session tool.)",
     "should_trigger": true,
-    "expected_output": "Does not run a new briefing or dispatch any scout. Runs scripts/manager.mjs launch-check 'ODY-12' 'ODY-31' with --root and --config, which checks both ids against the latest briefing (latest.json) and a fresh repos check and prints the plan: two groups, one per tracker project, neither waiting, nothing refused. It finds the session-starting tool with ToolSearch and starts exactly two new conversations, each with that group's prompt as its first message, verbatim: ids, routes and repo paths only. Then it says what it started.",
+    "expected_output": "Does not run a new briefing or dispatch any scout. Runs scripts/manager.mjs launch-check 'ACME-12' 'ACME-31' with --root and --config, which checks both ids against the latest briefing (latest.json) and a fresh repos check and prints the plan: two groups, one per tracker project, neither waiting, nothing refused. It finds the session-starting tool with ToolSearch and starts exactly two new conversations, each with that group's prompt as its first message, verbatim: ids, routes and repo paths only. Then it says what it started.",
     "expectations": [
       { "text": "Runs manager.mjs launch-check with the two ids from the message, before starting anything", "passed": null, "evidence": "" },
       { "text": "Does not dispatch tracker-scout or run manager.mjs brief again", "passed": null, "evidence": "" },
@@ -111,13 +111,13 @@
   },
   {
     "id": 10,
-    "query": "/grimoire:manager launch ODY-99 (Sent from the briefing panel. ODY-99 is not in the latest briefing: it was opened after it.)",
+    "query": "/grimoire:manager launch ACME-99 (Sent from the briefing panel. ACME-99 is not in the latest briefing: it was opened after it.)",
     "should_trigger": true,
-    "expected_output": "Runs scripts/manager.mjs launch-check 'ODY-99' with --root and --config. It refuses ODY-99 with the reason 'not in the latest briefing' and plans no group. The skill says so, quoting the reason, starts no conversation and prints no launch prompt, and offers a fresh briefing (/grimoire:manager) so the issue can be checked. It does not fall back to launch-plan or launch the issue another way.",
+    "expected_output": "Runs scripts/manager.mjs launch-check 'ACME-99' with --root and --config. It refuses ACME-99 with the reason 'not in the latest briefing' and plans no group. The skill says so, quoting the reason, starts no conversation and prints no launch prompt, and offers a fresh briefing (/grimoire:manager) so the issue can be checked. It does not fall back to launch-plan or launch the issue another way.",
     "expectations": [
-      { "text": "Runs manager.mjs launch-check with ODY-99", "passed": null, "evidence": "" },
-      { "text": "Reports that ODY-99 is refused because it is not in the latest briefing", "passed": null, "evidence": "" },
-      { "text": "Starts no conversation and prints no launch prompt for ODY-99", "passed": null, "evidence": "" },
+      { "text": "Runs manager.mjs launch-check with ACME-99", "passed": null, "evidence": "" },
+      { "text": "Reports that ACME-99 is refused because it is not in the latest briefing", "passed": null, "evidence": "" },
+      { "text": "Starts no conversation and prints no launch prompt for ACME-99", "passed": null, "evidence": "" },
       { "text": "Does not route around the refusal with launch-plan or by launching it directly", "passed": null, "evidence": "" }
     ]
   },

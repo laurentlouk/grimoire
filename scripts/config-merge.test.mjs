@@ -709,10 +709,10 @@ try {
   // ══════ 21 · manager.sources[] matched by id ══════
   section('21 · manager.sources[] matched by id: a hand-edited scope and threshold are kept, a new source is appended, a duplicate id makes the array a value')
   {
-    const LINEAR = { id: 'linear', category: 'tracker', kind: 'linear', hint: 'mcp__abc__* (Linear, the claude.ai connector)', readOnly: 'guard', scope: { teams: ['ODY'] }, verifiedAt: '2026-10-01T08:00:00Z' }
+    const LINEAR = { id: 'linear', category: 'tracker', kind: 'linear', hint: 'mcp__abc__* (Linear, the claude.ai connector)', readOnly: 'guard', scope: { teams: ['ACME'] }, verifiedAt: '2026-10-01T08:00:00Z' }
     const RUNS = { id: 'runs', category: 'runs', kind: 'grimoire' }
     const PRS = { id: 'prs', category: 'prs', kind: 'github', hint: 'gh CLI, authenticated', readOnly: 'permission-rule', scope: { repos: ['acme/app'] }, verifiedAt: '2026-10-16T09:00:00Z' }
-    const current = { manager: { sources: [{ ...LINEAR, scope: { teams: ['ODY', 'OPS'] }, note: 'ours' }, RUNS], urgent: { priorityAtMost: 2, dueWithinDays: 2, blocksAtLeast: 2, stalledDays: 7 }, maxItemsPerSource: 200 } }
+    const current = { manager: { sources: [{ ...LINEAR, scope: { teams: ['ACME', 'OPS'] }, note: 'ours' }, RUNS], urgent: { priorityAtMost: 2, dueWithinDays: 2, blocksAtLeast: 2, stalledDays: 7 }, maxItemsPerSource: 200 } }
     const proposed = { manager: { sources: [LINEAR, PRS, RUNS], urgent: { priorityAtMost: 2, dueWithinDays: 2, blocksAtLeast: 2, stalledDays: 5 }, repoLabels: { frontend: 'app' }, maxItemsPerSource: 200 } }
     const d = project()
     writeFileSync(join(d, 'grimoire.config.json'), pretty(current))
@@ -721,7 +721,7 @@ try {
     same(j && { added: j.added, changed: j.changed, kept: j.kept }, {
       added: [{ path: 'manager.sources[prs]', value: PRS }, { path: 'manager.repoLabels', value: { frontend: 'app' } }],
       changed: [
-        { path: 'manager.sources[linear].scope.teams', current: ['ODY', 'OPS'], proposed: ['ODY'], approved: false },
+        { path: 'manager.sources[linear].scope.teams', current: ['ACME', 'OPS'], proposed: ['ACME'], approved: false },
         { path: 'manager.urgent.stalledDays', current: 7, proposed: 5, approved: false },
       ],
       kept: [{ path: 'manager.sources[linear].note', value: 'ours' }],
@@ -732,7 +732,7 @@ try {
     const got = JSON.parse(readFileSync(join(d, 'grimoire.config.json'), 'utf8'))
     ok(w.status === 0, '--write exits 0')
     same(got.manager.sources.map((s) => s.id), ['linear', 'runs', 'prs'], 'the current sources keep their order; prs is appended')
-    same(got.manager.sources[0].scope, { teams: ['ODY', 'OPS'] }, 'without --approve the hand-edited scope stays')
+    same(got.manager.sources[0].scope, { teams: ['ACME', 'OPS'] }, 'without --approve the hand-edited scope stays')
     same(got.manager.urgent.stalledDays, 7, 'without --approve the hand-set stalledDays stays')
     const again = json(cli(d, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
     same(again && { added: again.added, changed: again.changed.map((c) => c.path) }, { added: [], changed: ['manager.sources[linear].scope.teams', 'manager.urgent.stalledDays'] },
@@ -744,10 +744,10 @@ try {
     const v = json(cli(a, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
     same(v && v.changed.map((c) => c.path), ['manager.sources'], 'two sources with one id are not keyable: the array is one value, CHANGED whole')
 
-    // manager.share (ODY-877): kind, target and hint only make sense together
+    // manager.share (ACME-877): kind, target and hint only make sense together
     const s = project()
     writeFileSync(join(s, 'grimoire.config.json'), pretty({ manager: { share: { kind: 'github-issue', target: 'acme/app', hint: 'gh CLI, authenticated' } } }))
-    writeFileSync(join(s, 'proposal.json'), pretty({ manager: { share: { kind: 'linear-document', target: 'ODY', hint: 'mcp__abc__* (Linear)' } } }))
+    writeFileSync(join(s, 'proposal.json'), pretty({ manager: { share: { kind: 'linear-document', target: 'ACME', hint: 'mcp__abc__* (Linear)' } } }))
     const sh = json(cli(s, '--current', 'grimoire.config.json', '--proposed', 'proposal.json', '--json'))
     same(sh && sh.changed.map((c) => c.path), ['manager.share'], 'manager.share is one CHANGED key, never its kind without its target')
   }

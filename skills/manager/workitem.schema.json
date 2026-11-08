@@ -22,8 +22,8 @@
       "required": ["sourceId", "id", "title", "kind", "stateType"],
       "properties": {
         "sourceId": { "description": "The manager.sources[].id this item was read from (\"tracker\" when the config has no manager block).", "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
-        "id": { "description": "The tracker's stable id: Linear's identifier (ODY-871), Jira's key, GitHub's owner/repo#n. Unique per source.", "type": "string", "minLength": 1 },
-        "key": { "description": "The short id a person reads (ODY-871, #12). null or absent: the id.", "type": ["string", "null"], "minLength": 1 },
+        "id": { "description": "The tracker's stable id: Linear's identifier (ACME-871), Jira's key, GitHub's owner/repo#n. Unique per source.", "type": "string", "minLength": 1 },
+        "key": { "description": "The short id a person reads (ACME-871, #12). null or absent: the id.", "type": ["string", "null"], "minLength": 1 },
         "title": { "type": "string", "minLength": 1 },
         "url": { "description": "The item's web link. Only http(s) links are rendered as links.", "type": ["string", "null"] },
         "kind": { "enum": ["issue", "pr", "run"] },

@@ -32,7 +32,7 @@ Two replies are not that array:
 - **You could not read the source at all** (no tool reaches it, auth expired, a permission error, a timeout): reply in prose, not JSON. Name every route you tried (the hint, the connectors ToolSearch found, the CLI) and why each failed, and the fix when you know it ("authorize the Linear connector", "`gh auth login`"). **Never return `[]` for it**: `[]` says you read the source and nothing open is in scope, and the briefing would show it as clear.
 
 Map the native fields onto the schema:
-- `sourceId`: the source's `id` from the brief. `id`: the tracker's stable id (Linear's identifier `ODY-871`, Jira's key, GitHub's `owner/repo#12`). `key`: the short id a person reads. `title`, `url`, `kind: "issue"`.
+- `sourceId`: the source's `id` from the brief. `id`: the tracker's stable id (Linear's identifier `ACME-871`, Jira's key, GitHub's `owner/repo#12`). `key`: the short id a person reads. `title`, `url`, `kind: "issue"`.
 - `stateType`, one of six, with `nativeState` the tracker's own status name:
   - Linear: its status type as is (`triage`, `backlog`, `unstarted`, `started`, `completed`, `canceled`).
   - Jira: status category To Do → `unstarted` (a status named Backlog → `backlog`, a triage or untriaged status → `triage`), In Progress → `started`, Done → `completed`, or `canceled` when the resolution says Won't Do, Duplicate, Cancelled or similar.

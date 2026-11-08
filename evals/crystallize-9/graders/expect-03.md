@@ -5,7 +5,7 @@ focus: trace
 
 You are grading one run of the "crystallize" skill of a plugin, from its transcript.
 
-The user's request was: "Crystallize the last loop runs. render-logs summary --json shows toolEvidence for odyyy-backend/backend-engineer: candidates mcp__fal-ai__* (never used over 120 dispatches in 9 runs) and mcp__ccd_turn__* (the desktop app's own tools, called here though they act on the launching session); the role used mcp__Claude_Code_iOS_Simulator__*."
+The user's request was: "Crystallize the last loop runs. render-logs summary --json shows toolEvidence for acme-backend/backend-engineer: candidates mcp__fal-ai__* (never used over 120 dispatches in 9 runs) and mcp__ccd_turn__* (the desktop app's own tools, called here though they act on the launching session); the role used mcp__Claude_Code_iOS_Simulator__*."
 
 Expectation to check: Says the denial fails open and is restored by deleting the entry
 
