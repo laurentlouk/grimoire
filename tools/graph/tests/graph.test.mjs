@@ -5,9 +5,11 @@
 //  Run:  node tools/graph/tests/graph.test.mjs
 //
 //  1. extraction: one sample per language (fixtures/langs) → the definitions, calls, supertypes
-//     and imports the syntax states, and the variable types bindings.mjs reads off it
+//     and imports the syntax states, and the variable types bindings.mjs reads off it; one-line
+//     definitions holding literals → signatures and receivers with no literal's value
 //  2. a polyglot project (fixtures/poly: TypeScript, Rust, Python, Go repos in one config) →
-//     the resolved edges and their confidence, through the same `call()` the MCP server uses
+//     the resolved edges and their confidence, through the same `call()` the MCP server uses;
+//     2b: no literal's value in any answer, the page or the index's bytes
 //  3. incremental refresh: an edit, a new file and a deletion show up in the next query
 //  4. the MCP server over stdio: initialize, tools/list, tools/call, read-only SQL
 //  5. worktrees, the lock, the hook's refresh, churn, and the page (data, CSP, its script run in a stub DOM)
@@ -92,6 +94,41 @@ for (const [f, want] of Object.entries(expect)) {
 }
 ok(!facts['a.js'].calls.includes('require'), 'a require() is an import, not a call')
 ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every((d) => !d.startsWith('method run')), 'Rust: free functions stay functions; impl members become methods of their type')
+{ // A literal may hold a secret: a signature keeps the name, parameters and return type, up to the
+  // body; each string, template, character or regex literal in it shows as `…` between its
+  // delimiters, a comment is dropped, and a call's receiver text hides literals the same way.
+  const one = {
+    typescript: ["export function token(/* canary3 */ scope: string = 'canary1'): string { return db.query(`ALTER ROLE app PASSWORD 'canary2'`).then((r) => r.text()) }\ntype Verb = 'canary4' | 'b'\nclass K { m(x = /canary5/g) { return 'canary6'.length } }\nfunction pick(x: number) { return handlers['canary7'](x) }\n",
+      { token: "function token(scope: string = '…'): string", Verb: "type Verb = '…' | '…'", K: 'class K', 'K.m': 'm(x = /…/)' }],
+    python: ['def token(scope="canary1"): return requests.get(f"https://api.test/?key=canary2{scope}").json()  # canary3\nclass K:  # canary4\n  pass\n',
+      { token: 'def token(scope="…")', K: 'class K' }],
+    go: ['package p\n\nfunc Token() string { return fmt.Sprintf(`canary2`, "canary1", \'c\') } // canary3\n',
+      { Token: 'func Token() string' }],
+    rust: ['pub fn token() -> String { "canary1".to_string() + &format!("{}", r#"canary2"#.len()) } // canary3\n',
+      { token: 'pub fn token() -> String' }],
+    java: ['class A { @Query("SELECT u FROM User u WHERE u.key = \'canary1\'") public String token() { return "canary2".trim(); } }\n',
+      { A: 'class A', 'A.token': '@Query("…") public String token()' }],
+    kotlin: ['fun token(scope: String = "canary1"): String = "canary2".uppercase()\nclass K(val a: Int) { fun m() = "canary3" }\n',
+      { token: 'fun token(scope: String = "…"): String', K: 'class K(val a: Int)', 'K.m': 'fun m()' }],
+    c: ['const char *token(void) { return "canary1"; } /* canary2 */\n#define TOKEN(x) "canary3" x\nint pick(int x) { return m["canary4"](x); }\n', { token: 'const char *token(void)', TOKEN: '#define TOKEN(x)' }],
+    cpp: ['std::string token() { return std::string(R"(canary1)").substr(1); }\n#define TOKEN(x) printf("canary2 %s", x)\n', { token: 'std::string token()', TOKEN: '#define TOKEN(x)' }],
+    csharp: ['class A { public string Token(string s = @"canary1") => $"canary2".Trim(); }\n', { A: 'class A' }],
+    ruby: ["def token(scope = 'canary1') = \"canary2\".upcase\nclass K; def m; %q(canary3).strip; end; end\n", {}],
+    php: ["<?php function token($s = 'canary1') { return strtoupper(\"canary2\"); }\nfunction pick($x) { return $m[\"canary3\"]($x) . (new Foo)->{\"canary4\"}(); }\n", { token: "function token($s = '…')" }],
+    swift: ['func token(scope: String = "canary1") -> String { return "canary2".uppercased() }\n', { token: 'func token(scope: String = "…") -> String' }],
+  }
+  for (const [lang, [src, want]] of Object.entries(one)) {
+    const tree = (await rt.parserFor(lang)).parse(src)
+    const r = extract(tree, lang, false)
+    tree.delete()
+    const sig = Object.fromEntries(r.symbols.map((s) => [s.qualname, s.signature]))
+    const leaks = [...r.symbols.map((s) => s.signature), ...r.refs.map((x) => `${x.qual || ''} ${x.name}`)].filter((t) => /canary/.test(t))
+    const wrong = Object.entries(want).filter(([q, s]) => sig[q] !== s).map(([q, s]) => `${q}: ${JSON.stringify(sig[q])}, not ${JSON.stringify(s)}`)
+    ok(r.symbols.length && !leaks.length && !wrong.length, `${lang}: no literal's value in a one-line definition's signature, a macro's, a receiver or a name called by a string key${leaks.length ? `; leaks ${JSON.stringify(leaks)}` : ''}${wrong.length ? `; ${wrong.join(' · ')}` : ''}`)
+  }
+  const rs = extract((await rt.parserFor('rust')).parse(one.rust[0]), 'rust', false).refs.filter((x) => x.qual).map((x) => `${x.qual}.${x.name}`)
+  ok(rs.includes('"…".to_string') && rs.includes('r#"…"#.len'), `a literal receiver keeps its delimiters, so a call on it still reads as one (${rs.join(', ')})`)
+}
 
 // ── 1b · which files count, and as what ──
 {
@@ -481,6 +518,41 @@ has(await q('sql', { sql: 'DELETE FROM nodes' }), 'Only a single SELECT', 'sql: 
   rmSync(path.join(PROJ, 'docs'), { recursive: true, force: true })
   const sv = cli('serve', '--port', 'abc')
   ok(sv.status === 1 && /--port takes a number/.test(sv.stderr), 'serve refuses a port that is not a number')
+}
+
+// ── 2b · no literal's value in the index ──
+console.log('\n2b · no literal value in the index')
+{ // One-line functions holding SQL and keys: no answer, no page and no byte of the index holds them.
+  const H = path.join(SANDBOX, 'hush')
+  const put = (rel, s) => { mkdirSync(path.dirname(path.join(H, rel)), { recursive: true }); writeFileSync(path.join(H, rel), s) }
+  put('grimoire.config.json', '{ "graph": {} }\n')
+  put('web/token.ts', "export function token(role: string = 'canary-ts-1'): Promise<string> { return db.query(`ALTER ROLE app PASSWORD 'canary-ts-2'`).then((r) => r.text()) }\n")
+  put('svc/token.py', 'def token(scope="canary-py-1"): return db.execute("SELECT * FROM users WHERE api_key = \'canary-py-2\'").fetchone()  # canary-py-3\n')
+  put('shop/token.go', 'package shop\n\nfunc Token() string { return db.QueryRow(`SELECT id FROM keys WHERE secret = \'canary-go-1\'`).Scan() } // canary-go-2\n')
+  put('core/token.rs', 'pub fn token() -> String { "canary-rs-1".to_string() + &format!("{}", r#"canary-rs-2"#) } // canary-rs-3\n')
+  const hq = (tool, args = {}) => call(`graph_${tool}`, args, { root: H })
+  const answers = [await hq('index'), await hq('search', { query: 'token' }), await hq('search', { query: 'Token' }), await hq('symbol', { symbol: 'token' }), await hq('symbol', { symbol: 'Token' }),
+    ...await Promise.all(['web/token.ts', 'svc/token.py', 'shop/token.go', 'core/token.rs'].map((p) => hq('file', { path: p }))),
+    await hq('callees', { symbol: 'token' }), await hq('sql', { sql: 'SELECT * FROM nodes' }), await hq('sql', { sql: 'SELECT * FROM refs' }), await hq('sql', { sql: 'SELECT * FROM imports' })]
+  const { renderGraph } = await import('../lib/render.mjs')
+  answers.push(await renderGraph({ dbPath: path.join(H, '.grimoire/graph/graph.db') }))
+  const leaked = answers.flatMap((a) => a.match(/canary-[a-z]+-\d/g) || [])
+  ok(!leaked.length, `no graph_* answer and no page shows a literal's value (${leaked.length ? [...new Set(leaked)].join(', ') : 'none'})`)
+  const dir = path.join(H, '.grimoire/graph')
+  const bytes = readdirSync(dir, { withFileTypes: true }).filter((f) => f.isFile()).map((f) => f.name).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-[a-z]+-\d/g) || []).map((m) => `${f}: ${m}`))
+  ok(!bytes.length, `no byte of the index holds a literal's value (${bytes.length ? [...new Set(bytes)].join(', ') : readdirSync(dir).join(', ')})`)
+  const found = answers[1] + answers[2]
+  const sigs = ["function token(role: string = '…'): Promise<string>", 'def token(scope="…")', 'func Token() string', 'pub fn token() -> String']
+  ok(sigs.every((s) => found.includes(s)), `a signature still names the function, its parameters and its return type (${sigs.filter((s) => !found.includes(s)).join(' · ') || 'all four'})`)
+  // An index from an older version, its pages full of literals: rebuilt, not one of them left in a byte.
+  const { openStore } = await import('../lib/store.mjs')
+  const old = await openStore(path.join(dir, 'graph.db'))
+  const add = old.prepare("INSERT INTO nodes(kind, name, signature) VALUES('function', 'old', ?)")
+  for (let i = 0; i < 3000; i++) add.run(`function old() { return 'canary-old-${i}' }`)
+  old.prepare("UPDATE meta SET value = '2' WHERE key = 'schema'").run(); old.close()
+  await hq('search', { query: 'token' })
+  const kept = readdirSync(dir, { withFileTypes: true }).filter((f) => f.isFile()).flatMap((f) => (readFileSync(path.join(dir, f.name), 'latin1').match(/canary-old-\d+/g) || []).map(() => f.name))
+  ok(!kept.length, `an older index is deleted, not emptied: no byte of the one it holds stays (${kept.length ? `${kept.length} in ${[...new Set(kept)].join(', ')}` : 'none'})`)
 }
 
 // ── 3 · incremental refresh ──
