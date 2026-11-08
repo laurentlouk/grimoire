@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.43.1 — a private project's names are replaced by neutral ones in the docs, the tests and the examples, and the drift check keeps them out
+
+A private project's names had reached this public repository: the project's own name, its repositories' names, its tracker's team key, ticket keys and a link into its tracker, plus another private repository's name in two tests. They are now neutral placeholders. A ticket key keeps its number, so the changelog, the specs and the tests still point at each other. Nothing changes in what a project gets but the wording of a few examples. Only the current tree changes: git history is unchanged.
+
+- **Where.** `agents/tracker-scout.md`, `skills/manager/SKILL.md` and its WorkItem schema, `skills/setup/SKILL.md`, a comment in `scripts/manager.mjs`, the eval cases of `crystallize`, `implement`, `manager`, `review` and `setup` (with the generated `evals/`), the manager briefing's spec and plan, the execution-policies spec, and the tests of the manager, the config merge, the guard and the loop. The tracker link is gone; its text stays as plain text.
+- **The drift check keeps them out** (group 11, `scripts/private-names.mjs`). Every tracked text file, docs, tests and evals included, is lowercased and split into tokens, and each token is compared by SHA-256 against a frozen deny list, so the list spells no name. A name of 5 letters or more also hits inside a longer token (`<name>app`, camelCase `<name>Engineer`); the 3-letter team key hits only as a whole token, so a word that contains it never does. A hit is reported by file and line, never by the word. Binaries and files over 2 MB are skipped. The list is a tripwire against putting a name back by accident, not secrecy: a short word's unsalted hash can be brute-forced.
+- **The check that the loop's prose names no product** (`workflows/tests/workflow-gates.test.mjs`) no longer lists the project's name, since listing it would publish it; the drift check covers it now, everywhere. Its vendor and stack names stay.
+- Tests: `scripts/private-names.test.mjs`, on a synthetic deny list (made-up words, whole and joined, planted in a temp repository beside a binary, an oversized file and an untracked one), then the real list against the real tree.
+
 ## 0.43.0 — a key-value cache's key space, read from the commands in code, with the search indexes created from code and the infrastructure that runs it (#118)
 
 A key-value cache was only a gap in the data model map ("imported, no extractor reads it"), or a store an agent described by hand. Its server keeps no schema, but the code that talks to it states the model: which keys exist, what each holds, which fields, how long it lives, which channels and streams carry messages, which search indexes cover which keys, and who reads and writes each. The map now reads it, as the least trusted kind of fact (`inferred`), never connecting to a server and never running the code.
@@ -1035,7 +1044,7 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   is a "Share: failed (<reason>)" line in the local briefing, never filed anywhere. It is the
   manager's only write. `config-merge.mjs` compares `manager.share` whole. Checks:
   `scripts/manager.test.mjs` (401 in all, with launching), `scripts/config-merge.test.mjs`.
-- **What ODY-872's review found.** A `--sources` file holding `null` is refused, no longer read as
+- **What ACME-872's review found.** A `--sources` file holding `null` is refused, no longer read as
   absent. A `manager.sources` entry missing from `--sources` is listed under Not checked, "not
   reported by the skill", and makes the briefing partial; without `--sources`, a configured source
   with no items reads the same way, since nothing said it was read. An `ok` source whose count is not its
@@ -1103,7 +1112,7 @@ no-overwrite rule named only the Markdown instructions, the roster and agent def
   still goes out (the user's standing ask); its write needs its own allow rule, else the share is
   recorded as failed. `--headless` checks the
   repos, as `launch-plan` does; without it there is no such section.
-- **"Stale" reads the schedule better** (ODY-873's review): a cron restricted to some days of the
+- **"Stale" reads the schedule better** (ACME-873's review): a cron restricted to some days of the
   week other than `1-5`, or to a day of the month, reads as a week, not 24 h; "weekdays" and a
   `1-5` cron skip the weekend, so Friday's briefing is fresh until Monday's run (cron's day names
   read as its numbers, `mon-fri` as `1-5`, and a day of the month of `1-31` is every day); and a 15 minute

@@ -5,7 +5,7 @@ focus: trace
 
 You are grading one run of the "crystallize" skill of a plugin, from its transcript.
 
-The user's request was: "Crystallize the last loop runs. render-logs summary --json lists learnedFacts: odyyy-backend, active 14 folds, fired 11/12: `cargo test` fails here with a linker error; `cargo test --target-dir /tmp/t` works."
+The user's request was: "Crystallize the last loop runs. render-logs summary --json lists learnedFacts: acme-backend, active 14 folds, fired 11/12: `cargo test` fails here with a linker error; `cargo test --target-dir /tmp/t` works."
 
 Expectation to check: Proposes the fact as a memory entry in the owning role's store, citing its folds and fired counts
 

@@ -5,7 +5,7 @@ focus: trace
 
 You are grading one run of the "implement" skill of a plugin, from its transcript.
 
-The user's request was: "The webapp implementer for ODY-948 has been resumed six times this afternoon with Laurent's feedback, and it was compacted an hour ago. Send it the next round of feedback."
+The user's request was: "The webapp implementer for ACME-948 has been resumed six times this afternoon with Laurent's feedback, and it was compacted an hour ago. Send it the next round of feedback."
 
 Expectation to check: The handoff names the branch, the head, what is done and the open feedback
 

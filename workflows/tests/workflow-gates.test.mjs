@@ -932,7 +932,7 @@ const laneTask = (id, files) => appTask({ id, ticket: id, files })
     'personas/privacy.md', 'personas/app-store.md', 'personas/contract.md', 'briefs/precheck.md', 'briefs/verify.md', 'briefs/journal.md', 'briefs/claim.md',
     'tests/loop-integrity-v08.test.mjs', 'tests/run-efficiency-v081.test.mjs', '../CHANGELOG.md']
   // Product, vendor and stack names that must not reappear when someone edits the prose.
-  const BANNED = /\b(odyyy|linear mcp|claude\.md|redpanda|dynamodb|redisearch|drizzle|expo|nativewind|terragrunt|sentry|codex|laurent|e2e-green|smoke:android|smoke:ios)\b/i
+  const BANNED = /\b(linear mcp|claude\.md|redpanda|dynamodb|redisearch|drizzle|expo|nativewind|terragrunt|sentry|codex|laurent|e2e-green|smoke:android|smoke:ios)\b/i
   const offenders = files.filter((f) => BANNED.test(readFileSync(`${DIR}/${f}`, 'utf8')))
   ok(offenders.length === 0, `no product/vendor names in the shipped prose${offenders.length ? ' — found in: ' + offenders.join(', ') : ''}`)
   const engine = readFileSync(`${DIR}/orchestrate-loop.js`, 'utf8')

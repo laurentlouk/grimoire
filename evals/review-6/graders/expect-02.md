@@ -5,7 +5,7 @@ focus: trace
 
 You are grading one run of the "review" skill of a plugin, from its transcript.
 
-The user's request was: "We're on ODY-945's PR in a session. It already went through the reviewer, a re-review, Codex and a Claude PR review, each followed by a fix round. A privacy re-review now reports one major and six minors. Laurent said to fix things the review found. Next step?"
+The user's request was: "We're on ACME-945's PR in a session. It already went through the reviewer, a re-review, Codex and a Claude PR review, each followed by a fix round. A privacy re-review now reports one major and six minors. Laurent said to fix things the review found. Next step?"
 
 Expectation to check: Never makes the minors a rework round of their own
 

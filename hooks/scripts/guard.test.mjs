@@ -187,7 +187,7 @@ try {
   // Connector tool names are opaque per account (`mcp__<server>__<tool>`, the server id holding
   // `_`, `-` and digits), so the rule reads the tool part after the last `__`, split into words
   // on `_`, `-` and camelCase; the first known verb decides (a read allows, a write denies).
-  const mcp = (tool, agentType, o) => guard({ tool_name: tool, tool_input: { id: 'ODY-1' }, ...(agentType === undefined ? {} : { agent_id: 'm1', agent_type: agentType }) }, o)
+  const mcp = (tool, agentType, o) => guard({ tool_name: tool, tool_input: { id: 'ACME-1' }, ...(agentType === undefined ? {} : { agent_id: 'm1', agent_type: agentType }) }, o)
   const expectReadOnly = (r, agent, tool, m, verb) => {
     const line = denied(r) && r.err.includes(`'${agent}'`) && r.err.includes(tool) && /read-only/.test(r.err) && /report the proposed write in your result/.test(r.err) &&
       (verb === undefined || r.err.includes(`'${verb}' names a write`))

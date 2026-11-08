@@ -5,7 +5,7 @@ focus: trace
 
 You are grading one run of the "manager" skill of a plugin, from its transcript.
 
-The user's request was: "Launch ODY-40 and ODY-41 from the briefing. (ODY-40 maps to the mobile repo, a submodule that has not been initialised; ODY-41 maps to webapp, whose nested clone under repositories/ is missing and has a remote in repos[].)"
+The user's request was: "Launch ACME-40 and ACME-41 from the briefing. (ACME-40 maps to the mobile repo, a submodule that has not been initialised; ACME-41 maps to webapp, whose nested clone under repositories/ is missing and has a remote in repos[].)"
 
 Expectation to check: Launches no conversation for an issue whose repo is unavailable; quotes launch-plan's refusal reason instead
 

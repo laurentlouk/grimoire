@@ -325,34 +325,34 @@ const BATT = (pct) => `Now drawing from 'Battery Power'\n -InternalBattery-0 (id
 
 // ══════════════ B · a stable run branch: named after the project's KEY ══════════════
 {
-  const IDX = [{ name: 'idealex', path: '.', agent: 'idealex-engineer', tags: ['web'], gate: null }]
-  const W = { ...A, repo: 'idealex', agent: 'idealex-engineer' }
+  const IDX = [{ name: 'globex', path: '.', agent: 'globex-engineer', tags: ['web'], gate: null }]
+  const W = { ...A, repo: 'globex', agent: 'globex-engineer' }
   const branchOf = async (project, extra = {}) => (await run(`B1 · project ${JSON.stringify(project)}`, [W], happy, { args: { ...QUIET, repos: IDX, project, ...extra } })).result.done[0].runBranch
-  const sentence = await branchOf('awesome-lab/idealex#3 — GitHub parent issue #3; its slices are S1 to S9, one per page')
-  const bare = await branchOf('awesome-lab/iDealex#3')
-  const url = await branchOf('https://github.com/awesome-lab/idealex/issues/3')
-  eq([sentence, bare, url], Array(3).fill('feat/awesome-lab-idealex-3-idealex'), 'a sentence, the bare reference and its URL give ONE branch')
-  eq([await branchOf('PROJ-700 Points: earn and show points'), await branchOf('see #12 for the plan'), await branchOf('Q3 roadmap')], ['feat/proj-700-idealex', 'feat/issue-12-idealex', 'feat/q3-roadmap-idealex'], 'a Jira/Linear key, a bare #N, and no reference at all (the slugged text, as before)')
+  const sentence = await branchOf('awesome-lab/globex#3 — GitHub parent issue #3; its slices are S1 to S9, one per page')
+  const bare = await branchOf('awesome-lab/GloBex#3')
+  const url = await branchOf('https://github.com/awesome-lab/globex/issues/3')
+  eq([sentence, bare, url], Array(3).fill('feat/awesome-lab-globex-3-globex'), 'a sentence, the bare reference and its URL give ONE branch')
+  eq([await branchOf('PROJ-700 Points: earn and show points'), await branchOf('see #12 for the plan'), await branchOf('Q3 roadmap')], ['feat/proj-700-globex', 'feat/issue-12-globex', 'feat/q3-roadmap-globex'], 'a Jira/Linear key, a bare #N, and no reference at all (the slugged text, as before)')
   eq(await branchOf('PROJ-700', { runBranch: 'feat/my-run' }), 'feat/my-run', '{runBranch} names it outright')
   eq(await branchOf('PROJ-700', { runBranch: 'feat/my-run', repos: [{ ...IDX[0], runBranch: 'release/site' }] }), 'release/site', 'repos[].runBranch wins over the run-level one')
   const bad = await run('B1b · an unusable runBranch is ignored, with a warning', [W], happy, { args: { ...QUIET, repos: IDX, project: 'PROJ-700', runBranch: 'my branch..' } })
-  ok(bad.result.done[0].runBranch === 'feat/proj-700-idealex' && bad.logs.some((l) => /runBranch "my branch\.\." is not a usable branch name — ignored/.test(l)), 'derived branch, warned')
+  ok(bad.result.done[0].runBranch === 'feat/proj-700-globex' && bad.logs.some((l) => /runBranch "my branch\.\." is not a usable branch name — ignored/.test(l)), 'derived branch, warned')
 }
 {
-  const IDX = [{ name: 'idealex', path: '.', agent: 'idealex-engineer', tags: ['web'], gate: null }]
-  const W = (t) => ({ ...t, repo: 'idealex', agent: 'idealex-engineer' })
+  const IDX = [{ name: 'globex', path: '.', agent: 'globex-engineer', tags: ['web'], gate: null }]
+  const W = (t) => ({ ...t, repo: 'globex', agent: 'globex-engineer' })
   const four = [W(A), W(B), W(C), W(D)]
-  const SENTENCE = 'awesome-lab/idealex#3 — GitHub parent issue #3; its slices are S1 to S9'
+  const SENTENCE = 'awesome-lab/globex#3 — GitHub parent issue #3; its slices are S1 to S9'
   const s1 = await run('B2 · session 1, project worded as a sentence: PROJ-1 lands, PROJ-2 blocks, halt', four,
     by({ 'impl:PROJ-1': impl('aaaaaaa'), 'impl:PROJ-2': BLOCKED, 'replan#1': { decision: 'HALT', reason: 'x', learnings: [] } }), { args: { ...QUIET, repos: IDX, project: SENTENCE } })
-  const marker = markerLine(heredocs(s1.prompt('ship:idealex#halt'))[0])
-  ok(s1.prompt('ship:idealex#halt').includes('feat/awesome-lab-idealex-3-idealex') && !!marker, 'its halt ship carries the marker for feat/awesome-lab-idealex-3-idealex')
-  const index = { prState: [{ repo: 'idealex', url: PR_URL, state: 'OPEN', isDraft: true, ...copied(marker) }], reconcile: [{ id: 'PROJ-1', repo: 'idealex', sha: 'aaaaaaa', onBranch: true, inBase: 'no' }], runBranches: [{ repo: 'idealex', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'same', fetch: 'ok' }] }
-  const same = await run('B2 · session 2, the bare key "awesome-lab/iDealex#3": the same branch, the PR state resumes it', four, by({ 'impl:PROJ-2': impl('bbbbbbb', 'aaaaaaa') }),
-    { args: { ...QUIET, repos: IDX, project: 'awesome-lab/iDealex#3' }, index })
-  eq(same.result.resumedLanded, [{ id: 'PROJ-1', repo: 'idealex', headSha: 'aaaaaaa', source: 'pr' }], 'PROJ-1 absorbed from the PR')
+  const marker = markerLine(heredocs(s1.prompt('ship:globex#halt'))[0])
+  ok(s1.prompt('ship:globex#halt').includes('feat/awesome-lab-globex-3-globex') && !!marker, 'its halt ship carries the marker for feat/awesome-lab-globex-3-globex')
+  const index = { prState: [{ repo: 'globex', url: PR_URL, state: 'OPEN', isDraft: true, ...copied(marker) }], reconcile: [{ id: 'PROJ-1', repo: 'globex', sha: 'aaaaaaa', onBranch: true, inBase: 'no' }], runBranches: [{ repo: 'globex', local: 'aaaaaaa', remote: 'aaaaaaa', sync: 'same', fetch: 'ok' }] }
+  const same = await run('B2 · session 2, the bare key "awesome-lab/GloBex#3": the same branch, the PR state resumes it', four, by({ 'impl:PROJ-2': impl('bbbbbbb', 'aaaaaaa') }),
+    { args: { ...QUIET, repos: IDX, project: 'awesome-lab/GloBex#3' }, index })
+  eq(same.result.resumedLanded, [{ id: 'PROJ-1', repo: 'globex', headSha: 'aaaaaaa', source: 'pr' }], 'PROJ-1 absorbed from the PR')
   ok(!same.labels.includes('impl:PROJ-1') && same.labels.includes('impl:PROJ-2'), 'only the rest is built')
-  const other = await run('B2b · a relaunch for another key (#4) does not take that state', four, happy, { args: { ...QUIET, repos: IDX, project: 'awesome-lab/idealex#4' }, index })
+  const other = await run('B2b · a relaunch for another key (#4) does not take that state', four, happy, { args: { ...QUIET, repos: IDX, project: 'awesome-lab/globex#4' }, index })
   ok(other.labels.includes('impl:PROJ-1') && other.logs.some((l) => /for another project, repo or run branch — ignored/.test(l)), 'ignored, PROJ-1 runs')
 }
 

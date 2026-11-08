@@ -5,7 +5,7 @@ focus: trace
 
 You are grading one run of the "review" skill of a plugin, from its transcript.
 
-The user's request was: "Review the PR for ODY-794 (the app's force-update gate). It resolved to balanced; this is a session, not the loop. The repo's AGENTS.md says not to add hydrate* helpers to stores."
+The user's request was: "Review the PR for ACME-794 (the app's force-update gate). It resolved to balanced; this is a session, not the loop. The repo's AGENTS.md says not to add hydrate* helpers to stores."
 
 Expectation to check: The spec gate checks the repo's AGENTS.md and CLAUDE.md golden rules and gates a breach as a major
 
