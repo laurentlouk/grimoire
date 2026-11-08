@@ -115,6 +115,10 @@ const confirming = (p) => {
   return { runDir: (/^DIR='([^']+)'$/m.exec(p) || [])[1], lines: has.chunk ? lines.trim().split('\n').length : 0, bytes: Buffer.byteLength(lines), runJson: has.rj ? 'ok' : 'kept', runJsonBytes: Buffer.byteLength(rj), landed: landed ? landed.trim().split('\n').length : 0 }
 }
 const flushOnly = (x) => /^journal#\d+$/.test(x.label) // the flushes, not the resends of a chunk or of the final run.json
+// The races (W-2, W-3) run their writers on a lock stale age no load reaches: a writer gives up at twice
+// it and writes without the lock, so on the default 30 s, a flush of 13 starved for 60 s on a loaded
+// machine wrote beside another and rolled run.json back. The lock is under test there, not its give-up
+const RACING = { ...process.env, GRIMOIRE_LOCK_STALE: '120' }
 const sh = (shell, script, env) => spawnSync(shell.path, ['-c', script], { encoding: 'utf8', env: env || process.env })
 const shAsync = (shell, script, env) => new Promise((res) => { const c = spawn(shell.path, ['-c', script], { env: env || process.env }); let out = ''; c.stdout.on('data', (d) => (out += d)); c.on('close', (code) => res({ code, out })) })
 const retarget = (p, from, to) => bashOf(p).replaceAll(`DIR='${from}'`, `DIR='${to}'`)
@@ -224,9 +228,9 @@ const afterFirst = (shell) => { const D = join(fresh(shell.name), 'run-w1'); cpS
     let good = 0, rolled = 0, corrupt = 0, litter = 0
     for (let i = 0; i < 20; i++) {
       const D = afterFirst(shell) // after ps[0], the first flush
-      const a = shAsync(shell, retarget(older, S1.dir, D))
+      const a = shAsync(shell, retarget(older, S1.dir, D), RACING)
       await new Promise((r) => setTimeout(r, i % 4))
-      const b = shAsync(shell, retarget(newer, S1.dir, D))
+      const b = shAsync(shell, retarget(newer, S1.dir, D), RACING)
       await Promise.all([a, b])
       const o = readRun(D)
       if (!o) corrupt++
@@ -237,7 +241,7 @@ const afterFirst = (shell) => { const D = join(fresh(shell.name), 'run-w1'); cpS
     eq({ good, rolled, corrupt, litter }, { good: 20, rolled: 0, corrupt: 0, litter: 0 }, 'every race ends on the newer checkpoint, parseable, with no temp or lock left')
     // every flush of the session at once
     const D = join(fresh(shell.name), 'run-w1')
-    const outs = await Promise.all(ps.map((p) => shAsync(shell, retarget(p, S1.dir, D))))
+    const outs = await Promise.all(ps.map((p) => shAsync(shell, retarget(p, S1.dir, D), RACING)))
     const o = readRun(D)
     ok(o && o.checkpoint.lastSeq === Math.max(...ps.map(seqOf)) && o.attempt === 1 && outs.every((x) => x.code === 0) && leftovers(D).length === 0, `all ${ps.length} flushes at once: run.json holds the newest (seq ${o && o.checkpoint.lastSeq}), attempt 1, nothing left behind`)
     ok(readdirSync(join(D, 'events')).length === ps.length && readOr(join(D, 'sessions')).trim().split('\n').filter(Boolean).length === 1, 'every chunk written once, one session registered')
@@ -275,7 +279,7 @@ const LEGACY = '{"runId":"run-s","attempt":1,"project":"PROJ-700","status":"halt
     for (let i = 0; i < 10; i++) {
       const R = join(fresh(shell.name), 'run-s')
       cpSync(atTwo, R, { recursive: true }) // LEGACY, then #2
-      await Promise.all([shAsync(shell, retarget(zombie, S2.dir, R)), shAsync(shell, retarget(last, S2.dir, R))])
+      await Promise.all([shAsync(shell, retarget(zombie, S2.dir, R), RACING), shAsync(shell, retarget(last, S2.dir, R), RACING)])
       const x = readRun(R)
       if (!x || x.checkpoint.lastSeq !== seqOf(last) || x.attempt !== 2) rolled++
     }

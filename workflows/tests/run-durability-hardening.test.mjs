@@ -146,10 +146,10 @@ async function reconcileScript(repos, landedTasks, extra = {}) {
   return (/## Also RECONCILE[\s\S]*?```bash\n([\s\S]*?)\n```/.exec(prompt('parse-index')) || [])[1] || ''
 }
 // its stdout; asynchronous, so a guard waiting on one leaves the event loop to the guards beside it
-const execRc = (shell, script, extra = {}, cwd = TMP) => new Promise((res) => {
+const execRc = (shell, script, extra = {}, cwd = TMP, hang = 120000) => new Promise((res) => {
   const c = spawn(shell, ['-c', script], { cwd, stdio: ['ignore', 'pipe', 'ignore'], env: { ...env, PATH: `${BIN}:${process.env.PATH}`, GH_FAKE_JSON: '[]', ...extra } })
   let out = ''
-  const limit = setTimeout(() => c.kill('SIGTERM'), 120000)
+  const limit = setTimeout(() => c.kill('SIGTERM'), hang)
   c.stdout.setEncoding('utf8').on('data', (d) => (out += d))
   c.on('close', () => { clearTimeout(limit); res(out) })
 })
@@ -219,7 +219,12 @@ guard('H-2', async () => {
   const count = { api: 250, web: 5, ios: 5 }
   const known = names.flatMap((name) => Array.from({ length: count[name] }, (_, k) => ({ ...CK(`${name.toUpperCase()}-${k + 1}`, c2, { firstSha: c1 }), repo: name, runBranch: RUN_BRANCH })))
   const script = await reconcileScript(repos, known)
-  const out = await execRc('bash', script, { GH_FAKE_JSON: prJson('a PR without a marker') })
+  // the output budget is under test, not the deadline (H-8 times that): 260 tasks are ~1,500 git calls,
+  // ~20 s on an idle machine and minutes on a loaded one, where the 90-s default cut the big repo's job
+  // short and its unchecked tasks never reached the budget. A deadline no load reaches here
+  const UNHURRIED = { GH_FAKE_JSON: prJson('a PR without a marker'), GRIMOIRE_RECONCILE_DEADLINE: '600' }
+  const out = await execRc('bash', script, UNHURRIED, TMP, 660000)
+  ok(!/did not finish within/.test(out), 'every repo\'s job finished inside its deadline (600 s here: what is shown is the budget\'s choice alone)')
   ok(out.length <= 28000, `the whole output is ${out.length} characters (budget 28,000; 260 TASK lines would take ~27,000 plus the rest)`)
   const shown = {}
   for (const name of names) {
@@ -233,7 +238,7 @@ guard('H-2', async () => {
   ok(new RegExp(`^WARN repo=api: ${250 - shown.api} landed task\\(s\\) not checked: the reconcile output budget is spent`, 'm').test(out) && !/^WARN repo=(web|ios):/m.test(out), `api: a WARN line counts the ${250 - shown.api} left unchecked; none for web or ios`)
   ok(linesOf(out, 'TASK').filter((l) => l.includes(' repo=api ')).every((l, k) => l.startsWith(`TASK id=API-${250 - k} `)), 'api: its newest tasks first')
   if (original) {
-    const oa = await execRc('bash', script.replace('| awk -v B=', `| ${original} -v B=`), { GH_FAKE_JSON: prJson('a PR without a marker') })
+    const oa = await execRc('bash', script.replace('| awk -v B=', `| ${original} -v B=`), UNHURRIED, TMP, 660000)
     eq(oa, out, `the allotment reads the same under ${original} (the one-true-awk macOS ships)`)
   }
 
@@ -379,11 +384,13 @@ await guard('H-6', async () => {
     let overlaps = 0, litter = 0
     // the trials run side by side, each on its own dead lock in its own directory: a trial of 8 takes
     // ~15 s either way (its waiters queue on the mutex), and the pre-mutex lock still overlaps as often
-    // (in 24 trials of 2 and 12 of 8: 16 and 12 one trial at a time, 21 and 12 side by side)
+    // (in 24 trials of 2 and 12 of 8: 16 and 12 one trial at a time, 21 and 12 side by side). The dead
+    // holder is broken by its pid, whatever the stale age; the waiters get one no load reaches (their
+    // give-up, at twice it, would let a starved waiter in beside the holder: a slow machine, not the race)
     await Promise.all(Array.from({ length: trials }, async (_, i) => {
       const D = fresh('lk'), LOG = join(D, 'cs.log')
       mkdirSync(join(D, '.lock')); writeFileSync(join(D, '.lock', 'pid'), '99999\n')
-      await Promise.all(Array.from({ length: waiters }, (_, k) => runAsync(which(SHELLS[(i + k) % SHELLS.length]), instr(D, LOG), { PATH: `${SLOW}:${process.env.PATH}` })))
+      await Promise.all(Array.from({ length: waiters }, (_, k) => runAsync(which(SHELLS[(i + k) % SHELLS.length]), instr(D, LOG), { PATH: `${SLOW}:${process.env.PATH}`, GRIMOIRE_LOCK_STALE: '120' })))
       if (depth(LOG) > 1) overlaps++
       if (existsSync(join(D, '.lock')) || existsSync(join(D, '.lock.brk'))) litter++
     }))
@@ -393,23 +400,55 @@ await guard('H-6', async () => {
   const INT = fresh('intsleep')
   writeFileSync(join(INT, 'sleep'), `#!/bin/sh\ncase "$1" in *.*) echo "sleep: invalid time interval: $1" >&2; exit 1 ;; esac\nexec ${which('sleep')} "$@"\n`)
   chmodSync(join(INT, 'sleep'), 0o755)
+  // The clock is the test's: a `date` whose +%s answers from its reads so far (the first 6 at T, the next
+  // 4 at T+1, then T+2; any other format is the real date's), and writes down, with each answer, whose
+  // lock stands at that read. The writer's stale age passes in clock reads, never in wall time, so a
+  // loaded machine slows the steps and cannot move the break. A writer counting its naps instead of
+  // reading the clock would break the lock at T+1 where sleep takes whole seconds (two have passed by
+  // then), and the reads would show it.
+  const EPOCH = Math.floor(Date.now() / 1000)
+  const clockFor = (D) => {
+    const C = fresh('clock'), READS = join(C, 'reads')
+    writeFileSync(READS, '')
+    writeFileSync(join(C, 'date'), [
+      '#!/bin/sh',
+      'for a in "$@"; do [ "$a" = +%s ] || continue',
+      `  n=$(( $(wc -l < '${READS}') + 1 )); if [ "$n" -le 6 ]; then t=${EPOCH}; elif [ "$n" -le 10 ]; then t=${EPOCH + 1}; else t=${EPOCH + 2}; fi`,
+      `  if [ -d '${D}/.lock' ]; then s="held:$(cat '${D}/.lock/pid' 2>/dev/null)"; else s=gone; fi`,
+      `  echo "$t $s" >> '${READS}'; echo "$t"; exit 0`,
+      'done',
+      `exec ${which('date')} "$@"`,
+    ].join('\n') + '\n')
+    chmodSync(join(C, 'date'), 0o755)
+    const reads = () => readFileSync(READS, 'utf8').split('\n').filter(Boolean).map((l) => ({ at: Number(l.slice(0, l.indexOf(' '))) - EPOCH, lock: l.slice(l.indexOf(' ') + 1) }))
+    return { C, reads }
+  }
   const holder = spawn('sleep', ['300'])
-  const cases = SHELLS.flatMap((shell) => [['a live pid', String(holder.pid), process.env.PATH], ['no pid', '', process.env.PATH], ['a live pid, integer-only sleep', String(holder.pid), `${INT}:${process.env.PATH}`]].map(([what, pid, path]) => ({ shell, what, pid, path, D: fresh('lk') })))
-  const results = await Promise.all(cases.map(({ shell, pid, path, D }) => {
+  const cases = SHELLS.flatMap((shell) => [['a live pid', String(holder.pid), ''], ['no pid', '', ''], ['a live pid, integer-only sleep', String(holder.pid), INT]].map(([what, pid, sleeps]) => ({ shell, what, pid, sleeps, D: fresh('lk') })))
+  const results = await Promise.all(cases.map(({ shell, pid, sleeps, D }) => {
     mkdirSync(join(D, '.lock')); writeFileSync(join(D, '.lock', 'pid'), pid ? `${pid}\n` : '')
-    const t0 = Date.now()
+    const clock = clockFor(D)
     return new Promise((res) => {
-      const c = spawn(which(shell), ['-c', retarget(script, dir, D)], { env: { ...process.env, PATH: path, GRIMOIRE_LOCK_STALE: '2' } })
+      const c = spawn(which(shell), ['-c', retarget(script, dir, D)], { env: { ...process.env, PATH: [clock.C, sleeps, process.env.PATH].filter(Boolean).join(':'), GRIMOIRE_LOCK_STALE: '2' } })
       let out = ''
-      const kill = setTimeout(() => c.kill('SIGKILL'), 20000)
+      const kill = setTimeout(() => c.kill('SIGKILL'), 120000) // a hang guard only: nothing here is timed by the wall clock
       c.stdout.on('data', (d) => (out += d))
-      c.on('close', () => { clearTimeout(kill); res({ out, s: (Date.now() - t0) / 1000 }) })
+      c.on('close', () => { clearTimeout(kill); res({ out, reads: clock.reads() }) })
     })
   }))
   holder.kill()
-  cases.forEach(({ shell, what, D }, i) => {
-    const { out, s } = results[i]
-    ok(/^RUNJSON ok$/m.test(out) && s >= 0.9 && s < 5 && !existsSync(join(D, '.lock')) && !existsSync(join(D, '.lock.brk')), `${shell} · ${what}: broken after ${s.toFixed(1)} s (expected 1–3: whole seconds), written, nothing left`)
+  cases.forEach(({ shell, what, pid, D }, i) => {
+    const { out, reads } = results[i]
+    // a read shows what the reads before it decided: the holder's lock at every read up to the first
+    // at T+2 is a lock no read at T or T+1 broke
+    const held = `held:${pid}`
+    const at2 = reads.findIndex((r) => r.at === 2)
+    const stood = at2 > 0 && reads.slice(0, at2 + 1).every((r) => r.lock === held)
+    const at1 = reads.filter((r) => r.at === 1 && r.lock === held).length
+    const fell = reads.findIndex((r) => r.lock !== held)
+    const when = fell > 0 ? `+${reads[fell - 1].at} s` : 'no read'
+    ok(stood && at1 >= 2 && /^RUNJSON ok$/m.test(out) && !existsSync(join(D, '.lock')) && !existsSync(join(D, '.lock.brk')),
+      `${shell} · ${what}: broken when the clock read ${when} (expected +2 s; it stood through ${at1} reads at +1 s), written, nothing left`)
   })
   ok(/LS=\$\{GRIMOIRE_LOCK_STALE:-30\}/.test(WRITER) && /\[ \$\(\(N - T0\)\) -ge \$\(\(LS \* 2\)\) \] && break/.test(WRITER), 'the defaults (in the writer\'s file): broken after 30 s, given up after 60 s')
 })
