@@ -1,6 +1,6 @@
 # Data model map: design
 
-**Status:** approved 2026-11-06; shipped in 0.27.0–0.43.0 (the plan's 13 slices, then a 14th the owner added, #106; slice 15, a cache's key space read from the commands in code, #118, added by the owner) · **Plan:** [2026-11-06-data-model-map-plan.md](../plans/2026-11-06-data-model-map-plan.md) · **Date:** 2026-11-06 · **Input:** [the data model map research](../research/2026-11-06-data-model-map.md)
+**Status:** approved 2026-11-06; shipped in 0.27.0–0.43.0 (the plan's 13 slices, then a 14th the owner added, #106; slice 15, a cache's key space read from the commands in code, #118, added by the owner) · **Plan:** [2026-11-06-data-model-map-plan.md](../plans/2026-11-06-data-model-map-plan.md) · **Date:** 2026-11-06 · **Input:** [the data model map research](../research/2026-11-06-data-model-map.md) · **Amended by:** [key-value stores as diagrams](2026-11-09-key-value-diagram-design.md) (goal 3: a key-value store drawn as a diagram too)
 
 ## Problem
 
