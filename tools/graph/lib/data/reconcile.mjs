@@ -10,7 +10,18 @@
 //   - presence: an element one complete declaration states and another, describing the same
 //     entity, lacks (`absent` cites where that declaration describes the entity). Never for a
 //     migration tool's own table a dump states (`bookkeeping`), nor for an index the engine builds
-//     for a foreign key (`implicit`: MySQL's), which only a replay or a dump states.
+//     for a foreign key (`implicit`: MySQL's), which only a replay or a dump states, nor for a
+//     relation enforced by the client (below), which no migration states.
+// A relation a schema declares and its client enforces (a Prisma schema under relationMode prisma:
+// `enforced: 'client'`, model.mjs) is kept in the entity's relations, beside its foreign keys, merged
+// by the same identity: so a foreign key the migrations still create on the same columns is one
+// element, and the two sides' disagreement on who enforces it (`enforced`: database | client) is its
+// conflict, the schema edited and no migration generated. One no other declaration states is merged
+// as `kind: client`, never a foreign key: counted apart (storeSummary), labelled a relation
+// (elementsOf), and not expected of the migrations, as an implicit index is not. (A list of its own
+// would have kept it from the diff, the delta targets, the leads it replaces and the diagram's lines,
+// each to be taught a second list; a kind on the one list keeps all of them, and only what names a
+// foreign key in words tells them apart.)
 // Nothing is resolved by precedence: the disagreement is the finding. A replay that stopped early
 // (`partial`) is listed with its sources but compared with nothing, since it describes the store as
 // it was partway. Drizzle v1 snapshots form a DAG through prevIds: only its leaves declare a store.
@@ -48,7 +59,7 @@ const ATTRS = {
   field: (f, kv, dialect) => { const u = f.unstated || []; return { type: u.includes('type') ? undefined : kv ? String(f.type ?? '') : normType(f.type, dialect), nullable: u.includes('nullable') ? undefined : f.nullable, default: u.includes('default') ? undefined : normDefault(f.default, dialect), generated: f.generated ?? null } },
   key: (k) => (k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}),
   index: (i, kv, dialect) => (kvIndex(i) ? { kind: i.kind, partition: i.partition.join(', '), sort: i.sort.join(', '), projection: projectionText(i) } : { unique: !!i.unique, columns: i.columns.map((c) => normColumn(c, dialect)).join(', '), partial: !!i.partial }),
-  relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate }),
+  relation: (r) => ({ onDelete: r.onDelete, onUpdate: r.onUpdate, enforced: r.enforced === 'client' ? 'client' : 'database' }),
 }
 const SHAPE = {
   entity: (e) => ({ name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nameTemplate: e.nameTemplate } : {}), ...(e.bookkeeping ? { bookkeeping: true } : {}) }),
@@ -300,7 +311,7 @@ function merge(id, ds) {
     name: ds[0].store,
     dialect: store.dialect ?? null,
     dialectFrom: store.dialectFrom ?? null,
-    declarations: ds.map((d) => ({ extractor: d.extractor, kind: d.source.kind, path: d.source.path, line: d.source.line, status: d.status, label: d.label, stopped: d.stopped ?? null, error: d.error ?? null, notes: d.notes || [], files: d.files ?? null, implicitIndexes: d.implicitIndexes ?? 0, dialect: d.dialect ?? null, dialectFrom: d.dialectFrom ?? null })),
+    declarations: ds.map((d) => ({ extractor: d.extractor, kind: d.source.kind, path: d.source.path, line: d.source.line, status: d.status, label: d.label, stopped: d.stopped ?? null, error: d.error ?? null, notes: d.notes || [], files: d.files ?? null, implicitIndexes: d.implicitIndexes ?? 0, dialect: d.dialect ?? null, dialectFrom: d.dialectFrom ?? null, ...(d.clients ? { clients: d.clients } : {}) })),
     ...(enums.size ? { enums: [...enums.values()].sort(byName) } : {}),
     entities: [...entities.values()].sort(byName).map((E) => {
       // the declarations that describe this entity whole: a complete one, or one stating it whole,
@@ -308,8 +319,15 @@ function merge(id, ds) {
       const covering = ds.filter((d) => E.at.has(d) && (d.complete || E.whole.has(d)) && !E.part.has(d))
       // a migration tool's own table (a dump's): stated as it is, never a presence conflict
       const out = { id: `${id}/${E.name}`, ...done(E, E.bookkeeping ? [] : complete, (d) => source(d, null)) }
-      // an index the engine builds for a foreign key is compared where two state it, never missing
-      for (const [, list] of PARTS) out[list] = [...E[list].values()].map((x) => done(x, x.implicit ? [] : covering, (d) => E.at.get(d)))
+      // an index the engine builds for a foreign key is compared where two state it, never missing;
+      // so is a relation every declaration stating it says its client enforces (no foreign key in the
+      // database, so none in the migrations): `kind: client`
+      for (const [, list] of PARTS) {
+        out[list] = [...E[list].values()].map((x) => {
+          const client = list === 'relations' && [...x.by.values()].every((v) => v.attrs.enforced === 'client')
+          return { ...done(x, x.implicit || client ? [] : covering, (d) => E.at.get(d)), ...(client ? { kind: 'client' } : {}) }
+        })
+      }
       return out
     }),
   }
@@ -323,7 +341,10 @@ export const schemaDrift = (c) => c.values.some((v) => v.sources.length && v.sou
 export const SCHEMA_DRIFT = 'the code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand'
 
 // An entity and each of its elements, labelled as a conflict line names them.
-export const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name}.${f.name}`, f]), ...e.keys.map((k) => [`${e.name} ${k.role} (${k.parts.join(', ')})`, k]), ...e.indexes.map((i) => [`${e.name} index ${i.name}`, i]), ...e.relations.map((r) => [`${e.name} foreign key (${r.columns.join(', ')})`, r])]
+export const elementsOf = (e) => [[e.name, e], ...e.fields.map((f) => [`${e.name}.${f.name}`, f]), ...e.keys.map((k) => [`${e.name} ${k.role} (${k.parts.join(', ')})`, k]), ...e.indexes.map((i) => [`${e.name} index ${i.name}`, i]), ...e.relations.map((r) => [`${e.name} ${relationWord(r)} (${r.columns.join(', ')})`, r])]
+// What a relation is called: a foreign key, unless its client enforces it (no foreign key in the database)
+export const relationWord = (r) => (r.kind === 'client' ? 'relation (enforced by the client)' : 'foreign key')
+export const isClient = (r) => r.kind === 'client'
 
 // A merged store in one line: its counts, or how it was found when nothing was read
 // (graph_data and the page's Data tab say the same).
@@ -344,10 +365,18 @@ export function storeSummary(st) {
     const items = new Set(tables.flatMap((e) => (e.bound || []).map((b) => b.item))).size
     return [n(tables.length, 'table'), n(k('gsi'), 'GSI'), k('lsi') && n(k('lsi'), 'LSI'), items && `${n(items, 'item type')} bound`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
   }
+  // a document store declared in code (Mongoose, a schema language on MongoDB): its collections and the
+  // references between them, which no database enforces
+  if (st.dialect === 'mongodb') {
+    const cols = st.entities.filter((e) => e.kind === 'collection')
+    return [n(cols.length, 'collection'), n(cols.reduce((a, e) => a + e.relations.length, 0), 'reference'), n(cols.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes'), conflicts ? n(conflicts, 'conflict') : 'no conflicts'].join(' · ')
+  }
   // the indexes SQLite builds for keys, and MySQL for foreign keys, beside the declared ones
   const built = tables.reduce((a, e) => a + e.indexes.filter((i) => i.implicit).length, 0)
   const implicit = Math.max(0, ...st.declarations.map((d) => d.implicitIndexes)) + built
-  return [n(tables.length, 'table'), views && n(views, 'view'), n(tables.reduce((a, e) => a + e.relations.length, 0), 'foreign key'), `${n(tables.reduce((a, e) => a + e.indexes.length, 0) - built, 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
+  // a relation its client enforces is no foreign key: counted apart, when there is one
+  const rels = tables.flatMap((e) => e.relations), client = rels.filter(isClient).length
+  return [n(tables.length, 'table'), views && n(views, 'view'), n(rels.length - client, 'foreign key'), client && `${n(client, 'relation')} enforced by the client`, `${n(tables.reduce((a, e) => a + e.indexes.length, 0) - built, 'index', 'indexes')}${implicit ? ` (+${implicit} implicit, for keys)` : ''}`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
 }
 
 // An element's conflicts. presence: the complete declarations expected to state it; absent(d): what

@@ -528,7 +528,8 @@ function driftOf(c) {
 // The datastores a client import reaches (arch.mjs KNOWN's databases, and DynamoDB's own clients),
 // each with the dialects of the extracted stores that cover it; none: only a refined store covers it.
 // A client of a repository whose queries the code sends are read (queries.mjs), or whose commands to a
-// key-value cache are (redis.mjs), is no gap either.
+// key-value cache are (redis.mjs), is no gap either; nor is an ORM an extracted store was read through
+// (its declarations' `clients`: the models or migrations of Django, SQLAlchemy, TypeORM, JPA, Knex…).
 const COVERS = { postgres: ['postgres'], mysql: ['mysql'], sqlite: ['sqlite'], 'sql-db': ['sqlite', 'postgres', 'mysql'], dynamodb: ['dynamodb'] }
 export const DATASTORES = [
   ...KNOWN.filter((k) => k.type === 'database').map((k) => ({ id: k.id, label: k.label, imports: k.imports })),
@@ -546,7 +547,9 @@ export function gapsOf(model, stores, imports) {
     if (model.stores.some((s) => !s.inferred && dialects.includes(s.dialect) && s.entities.length)) continue
     // an import a refined store names, or a client whose queries (queries.mjs) or commands (redis.mjs) are read
     const read = [...(model.queries?.clients || []), ...(model.redis?.clients || [])]
-    const open = seen.filter((im) => !stores.some((s) => s.imports.some((p) => importMatches(im.source, p))) && !read.some((c) => c.repo === im.repo && c.source === im.source))
+    // and the ORM a store was read through (its models, its migrations): `clients` on its declarations
+    const orm = model.stores.filter((s) => !s.inferred && s.entities.length).flatMap((s) => s.declarations.flatMap((x) => x.clients || []))
+    const open = seen.filter((im) => !stores.some((s) => s.imports.some((p) => importMatches(im.source, p))) && !read.some((c) => c.repo === im.repo && c.source === im.source) && !orm.some((p) => importMatches(im.source, p)))
     if (!open.length) continue
     const files = [...new Set(open.map((im) => `${im.repo}\0${im.path}`))].sort()
     out.push({ id: d.id, label: d.label, sources: [...new Set(open.map((im) => im.source))].sort(), files: files.slice(0, FILES_SHOWN).map((k) => ({ repo: k.slice(0, k.indexOf('\0')), path: k.slice(k.indexOf('\0') + 1) })), n: files.length })

@@ -7,13 +7,22 @@
 //                 marker? } · source: { path, line, kind, confidence } · complete: it describes the
 //                 whole store (an element it lacks is a disagreement) · partial: a replay stopped
 //                 early · status: read | partial | not-read · label · stopped?: { path, line } ·
-//                 error · notes[] · files · snapshot?: { id, prevIds } (Drizzle v1) · entities[] }
-//   Entity      { name, kind: table | view, path, line, fields[], keys[], indexes[], relations[] }
+//                 error · notes[] · files · snapshot?: { id, prevIds } (Drizzle v1) · clients?: the
+//                 client packages (an ORM's) the store was read through, no gap then (check.mjs) ·
+//                 entities[] }
+//   Entity      { name, kind: table | view | collection, path, line, fields[], keys[], indexes[],
+//                 relations[] } · as?: the class an ORM maps to it (`class User`), cited beside it ·
+//                 whole?: the declaration states it whole though not the store · part?: it states
+//                 the entity, not all of its parts
 //   Field       { name (a dotted path when nested), type: as declared, nullable: true | false,
 //                 default: as declared or null, generated: virtual | stored | null, path, line }
 //   Key         { role: primary | unique, parts: [field] }   compared as a whole, never per column
 //   Index       { name, unique, columns, partial }
-//   Relation    { columns, to, toColumns, onDelete, onUpdate } (a foreign key)
+//   Relation    { columns, to, toColumns, onDelete, onUpdate } (a foreign key), enforced?: 'client':
+//                 a relation the schema declares and its client enforces, no foreign key in the
+//                 database (a Prisma schema under relationMode prisma, or on MongoDB). Merged, a
+//                 relation is `kind: fk`, or `kind: client` when every declaration stating it says
+//                 so (reconcile.mjs); a deduced store's are `kind: join` (queries.mjs)
 // An element's path defaults to its declaration's source path.
 //
 // A key-value table (DynamoDB: readers/dynamodb.mjs; the store `dynamodb`, dialect `dynamodb`) says

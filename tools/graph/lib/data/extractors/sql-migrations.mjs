@@ -213,7 +213,7 @@ function dumped(key, d, configs, journal, override, DatabaseSync) {
 }
 
 // What readers/ddl.mjs read, as a declaration's facts: what it skipped counted per file by kind.
-function ddlFacts(r, notes, what) {
+export function ddlFacts(r, notes, what) {
   const skipped = r.skipped.reduce((a, s) => a + s.n, 0)
   const per = r.skipped.slice(0, NOTES).map((s) => `skipped in ${s.path}: ${s.n} statement${s.n === 1 ? ' that does' : 's that do'} not shape the store (${Object.entries(s.kinds).map(([k, n]) => `${k} ${n}`).join(', ')})`)
   if (r.skipped.length > NOTES) per.push(`… and ${r.skipped.length - NOTES} more files with skipped statements`)
@@ -260,7 +260,7 @@ function dialectOf(folder, configs, members, override, journal, statedOnly = fal
   return s.dialect ? { dialect: s.dialect, from: { how: 'sniffed', marker: s.marker, path: s.path, line: s.line } } : { dialect: null, reason: s.reason }
 }
 
-function orderOf(folder, members, journal) {
+export function orderOf(folder, members, journal) {
   const notes = []
   const nameOf = (p) => (folder === '.' ? p : p.slice(folder.length + 1)).split('/')[0] // the file, or its versioned subfolder
   if (journal?.tags) {
