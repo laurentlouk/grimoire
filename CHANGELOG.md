@@ -34,6 +34,26 @@ The Data tab drew an ERD per SQL store and a grid of unconnected cards for every
 
   The key-card tests in `data.test.mjs` switch to Cards first.
 
+## 0.44.0 — the code graph past its edges: what a change touches that the edges miss, the impact of a diff, the project at a glance
+
+An agent about to change something asked `graph_impact`, then grepped, because the edges miss whatever is not a call or an import the resolver can link. On a fixture of such cases (`tools/graph/tests/fixtures/edge`) the old answer found 1 of the 5 places that name `createSession`, none of the 2 callers of a method reached through its interface, and no call on an untyped receiver. The graph now finds them itself, sorted and explained, and checks a whole diff the same way.
+
+- **`graph_impact` beyond the edges** (`lib/reach.mjs`):
+  - *dispatch*: a method's declarations on its interfaces, traits and base classes, whose callers may land on it, join the impact; the overrides and implementations that redefine it are listed;
+  - *unlinked call sites*: the calls naming it that resolution left unlinked (receiver of unknown type, too many same-named definitions), as possible callers;
+  - *mentions*: every other line of the project naming it (`git grep`, `.gitignore` and the graph's skips honoured, credential files never read), minus the lines an edge, an import or an unlinked site already explains, minus local bindings of the name. Each is classified, never quoted: a reference passed as a value, an unresolved import, a string key or prose, an object key, a property, config, markup, scripts, docs, comments. `mentions: false` leaves the search out.
+- **`graph_diff`** (`lib/change.mjs`, `lib/symbols-aside.mjs`): the working tree (committed, staged, unstaged, untracked) against a base (`graph_changes`'s default; `base: "HEAD"` for what is not committed):
+  - each definition added, removed, moved or modified, with its old and new signature, the base parsed through git in a child process, nothing checked out;
+  - for each contract change (removed, moved, new signature), who still names it: linked callers in and outside the diff, unlinked call sites, mentions; for a renamed or removed file, the imports that still name its old path;
+  - the files reaching the changed code outside the diff, dispatch, the overrides and implementations left unchanged;
+  - the tests to run, the changed functions no test reaches, the tests the diff edits;
+  - the files that usually change with the changed ones (git history) and are missing;
+  - a risk line (high, medium, low) with its reasons.
+- **`graph_overview`** (`lib/overview.mjs`): per repository its languages, definitions and tests; its modules, users first, with what each uses and the share of its functions a test reaches; its entry points; its most used definitions; its hotspots.
+- **The index** reads JavaScript and TypeScript functions defined by assignment (`exports.x = function`, `obj.x = () => …`, `X.prototype.y = function`): a CommonJS library's whole public API was invisible. JSX text is a literal, kept as `…` like any string. The index's schema moves to 15: an older index is rebuilt.
+- **`graph_search` with several words** (`session refresh`): each word in the qualified name or the path, a word starting a name segment ranked first.
+- **Agents.** The team-agent template, `migration-engineer` and `test-engineer` run `graph_diff` against their `startSha` before they return, and fix or rule out in the code what it lists; `codebase-scout` starts on an unknown codebase with `graph_overview`. `AGENTS.md` says what the two tools cover past the edges; the reviewer still never uses the graph.
+- Tests: section 6 of `tools/graph/tests/graph.test.mjs`, on the edge fixture copied into a temporary repository: each case the edges miss, a diff with a new signature, a removed function still called, a moved class, a renamed file still imported, a body change, an untracked file, a co-change gap, a clean tree, the overview, the several-word search, and a planted secret no answer quotes. Section 6b holds the cases a four-lens review found (CommonJS definitions, calls from another repository, a typed call beside an untyped one, a local bound to the method, a namespace-qualified callback, a keyword argument, a Ruby symbol, credential files, a 600 KB one-line data file, JSX text, a path with a space, a removed SQL file, a binary, a double move, a nested function, a rename into a skipped folder, overloads).
 
 ## 0.43.2 — crystallize: what the data model map (#74) taught
 
