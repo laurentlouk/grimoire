@@ -18,6 +18,8 @@
 //     risk); graph_overview; several-word search; no literal quoted in any of them
 //  6b. the review's cases: CommonJS definitions, cross-repository calls, local bindings, namespaces,
 //     keyword arguments, Ruby symbols, credential files, a huge line, JSX text, the diff's parsing
+//  6c. dependency injection: fields typed by their declaration or their constructor (TypeScript, Java,
+//     Python), no self-recursion from a call on a field, a Python bare call never the class's method
 //  1b-1d (between 1 and 2): which files count and as what, modules and the system map, the page's helpers
 //
 //  Needs the parser runtime (web-tree-sitter + grammars): `npm ci --prefix tools/graph`, or a
@@ -993,6 +995,39 @@ console.log('\n6b · beyond the edges: the review\'s cases')
   const dir = path.join(R, '.grimoire/graph')
   const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-rev-[12]/g) || []))
   ok(!bytes.length, `review: JSX text is not kept in the index (${bytes.length})`)
+}
+
+// ── 6c · injected collaborators: a field's type from its declaration or its constructor ──
+console.log('\n6c · dependency injection: calls on a field typed by its declaration or its constructor')
+{
+  const DI = path.join(SANDBOX, 'di')
+  const put = (rel, txt) => { mkdirSync(path.dirname(path.join(DI, rel)), { recursive: true }); writeFileSync(path.join(DI, rel), txt) }
+  put('grimoire.config.json', '{ "graph": {} }\n')
+  // a NestJS-shaped controller and service: the controller's findAll delegates to the service's
+  put('src/article.service.ts', "export class ArticleService {\n  findAll() { return [] }\n}\n")
+  put('src/article.controller.ts', "import { ArticleService } from './article.service'\nimport { Repo } from './repo'\nexport class ArticleController {\n  private repo: Repo\n  constructor(private readonly articleService: ArticleService) {}\n  findAll() {\n    return this.articleService.findAll()\n  }\n  save() {\n    return this.repo.save()\n  }\n}\n")
+  put('src/repo.ts', "export class Repo {\n  save() { return 1 }\n}\n")
+  // Spring: a field-injected repository, read with and without `this`
+  put('java/OwnerController.java', "class OwnerController {\n  @Autowired private OwnerRepository owners;\n  private final VetRepository vets;\n  OwnerController(VetRepository v) { this.vets = v; }\n  void list() { owners.findAll(); this.vets.findAll(); }\n}\n")
+  put('java/OwnerRepository.java', "interface OwnerRepository {\n  void findAll();\n}\n")
+  put('java/VetRepository.java', "class VetRepository {\n  void findAll() {}\n}\n")
+  // Python: a field set from a typed constructor parameter; a bare call in a method is a module function
+  put('py/svc.py', "from py.repo import Repo, get_domain\n\nclass Service:\n    def __init__(self, repo: Repo):\n        self.repo = repo\n\n    def save(self):\n        return self.repo.save()\n\n    def get_domain(self):\n        return get_domain()\n")
+  put('py/repo.py', "class Repo:\n    def save(self):\n        return 1\n\ndef get_domain():\n    return 'x'\n")
+  const dq = (tool, args = {}) => call(`graph_${tool}`, args, { root: DI })
+  await dq('index')
+  const c1 = await dq('callers', { symbol: 'ArticleService.findAll' })
+  has(c1, 'ArticleController.findAll  method  src/article.controller.ts:6  [typed]', 'TypeScript: a constructor parameter property types the field; the call reaches the injected service')
+  const loops = await dq('sql', { sql: "SELECT count(*) AS n FROM edges WHERE kind = 'CALLS' AND src = dst" })
+  ok(/\n0\b/.test(loops), `no call on a field links a method to itself (self-loops: ${loops.split('\n').pop()})`)
+  has(await dq('callers', { symbol: 'Repo.save', repo: undefined }), 'ArticleController.save  method  src/article.controller.ts:9  [typed]', 'TypeScript: a typed field declaration types `this.repo`')
+  const c2 = await dq('callers', { symbol: 'OwnerRepository.findAll' })
+  has(c2, 'OwnerController.list', 'Java: an annotated field types a bare `owners.findAll()`')
+  has(await dq('callers', { symbol: 'VetRepository.findAll' }), 'OwnerController.list', 'Java: a field the constructor sets from a typed parameter types `this.vets`')
+  has(await dq('callers', { symbol: 'Repo.save', depth: 1 }), 'Service.save  method  py/svc.py:7  [typed]', 'Python: `self.repo = repo` from a typed parameter types `self.repo`')
+  const gd = await dq('callers', { symbol: 'get_domain' })
+  has(gd, 'Service.get_domain  method  py/svc.py:10  [import]', 'Python: a bare call in a method is the imported module function')
+  lacks(gd, '[same-class]', '… never the method itself (no self-recursion)')
 }
 
 rmSync(SANDBOX, { recursive: true, force: true })

@@ -21,6 +21,7 @@ import path from 'node:path'
 import { familyOf, COMMON_METHODS } from './langs.mjs'
 
 const MAX_AMBIGUOUS = 3
+const IMPLICIT_SELF = new Set(['jvm', 'csharp', 'swift', 'c', 'ruby'])
 const CALLABLE = new Set(['function', 'method', 'constructor'])
 const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'enum', 'protocol', 'module', 'object', 'type'])
 const SELF = /^(self|this|Self|super|cls|static|\$this|@)$/
@@ -283,7 +284,10 @@ export function resolveRepo(db, repo, repoAbs) {
         pick = { nodes: members.slice(0, MAX_AMBIGUOUS), conf: 'typed' }
       } else if (!(byName.get(`${from.family}|${r.qtype}`) || []).length) continue // a dependency's type (HashMap, List, Request …)
     }
-    if (!pick && (SELF.test(qual) || (!qual && selfType))) {
+    // a bare call inside a class is one of its members only where a method reaches its siblings
+    // without `this`/`self` (Java, Kotlin, C#, Swift, C++, Ruby); in Python, JavaScript, PHP or Rust
+    // a bare name is a module-level function or an import, never the class's method
+    if (!pick && (SELF.test(qual) || (!qual && selfType && IMPLICIT_SELF.has(from.family)))) {
       const own = selfType ? membersUp([selfType], cands) : []
       if (own.length) pick = { nodes: own, conf: 'same-class' }
       else if (SELF.test(qual)) pick = pickBy(cands.filter((c) => c.parent_id && nodeById.get(c.parent_id) && CLASSY.has(nodeById.get(c.parent_id).kind)), [['same-file', (c) => c.file_id === from.id]])
@@ -318,7 +322,13 @@ export function resolveRepo(db, repo, repoAbs) {
         }
       }
       if (!pick) {
-        const methods = cands.filter((c) => c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
+        // a receiver of unknown type: by name, in this file, else an imported one. A field of this
+        // object (`this.svc.findAll()`, `self.repo.save()`) holds another object: never this class's
+        // own method of that name, never the caller itself (Nest, Spring and Django delegation would
+        // read as self-recursion and hide the real callee's callers)
+        const ownField = /^(this|self|@)[.>-]*[\p{L}_$][\p{L}\p{N}_$]*$/u.test(qual) || /^(this|self)\??\.[\p{L}_$]/u.test(qual)
+        const methods = cands.filter((c) => (c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
+          && !(srcNode && c.id === srcNode.id) && !(ownField && selfType && c.parent_id === selfType.id))
         pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import', (c) => b.files.has(c.file_id)]])
       }
     }

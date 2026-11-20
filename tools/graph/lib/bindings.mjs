@@ -5,6 +5,11 @@
 //   locals      `let c: Circle`, `Circle c = …`, and a value built by a constructor:
 //               `new Circle()`, `Circle()`, `Circle::new()`, `Circle.new`, `&Circle{}`
 // Wrappers (`Box<T>`, `Option<T>`, `Arc<T>` …) are looked through; collections are not typed.
+//   fields      a class's fields where the syntax states their type (fieldBindings): a typed field
+//               declaration, a constructor parameter property (`constructor(private svc: Svc)`), a
+//               Kotlin `val` constructor parameter, a Python class-level annotation, and a field the
+//               constructor sets from a typed parameter (`this.repo = repo`, `self.repo = repo`,
+//               `_repo = repo`): how dependency injection hands a class its collaborators.
 import { calleeOf, lastSegment } from './langs.mjs'
 
 const field = (n, f) => n.childForFieldName(f)
@@ -91,5 +96,57 @@ export function bindingsOf(n, spec) {
   const declared = typeName(field(n, 'type') || (target && target.type === 'variable_declaration' ? named(target).find((c) => TYPE_NODE.test(c.type)) : null) || named(n).find((c) => c.type === 'type_annotation'))
   const value = field(n, 'value') || field(n, 'right') || named(n).find((c) => CALLISH.test(c.type) || /creation|new_expression/.test(c.type))
   put(bound(target), declared || typeOfValue(value, spec))
+  return out
+}
+
+// A class's fields whose type the syntax states: [[fieldName, TypeName], …] (see the header).
+const FIELD_DECL = new Set(['public_field_definition', 'field_definition', 'field_declaration', 'property_declaration'])
+const SELFISH = /^(this|self)$/
+const hasToken = (n, tok) => { for (let i = 0; i < n.childCount; i++) if (!n.child(i).isNamed && n.child(i).type === tok) return true; return false }
+export function fieldBindings(cls, spec) {
+  const out = []
+  const put = (name, type) => { if (name && type && /^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(name)) out.push([name, type]) }
+  // Kotlin: `class C(private val repo: Repo)`
+  for (const pc of named(cls).filter((c) => c.type === 'primary_constructor')) {
+    for (const p of named(pc).filter((c) => c.type === 'class_parameter' && named(c).some((k) => k.type === 'binding_pattern_kind'))) put(named(p).find((c) => c.type === 'simple_identifier')?.text, typeName(named(p).find((c) => TYPE_NODE.test(c.type) && !IDENTISH.test(c.type))))
+  }
+  const body = field(cls, 'body') || named(cls).find((c) => /^(class_body|declaration_list|block|body)$/.test(c.type))
+  if (!body) return out
+  for (const m of named(body)) {
+    if (FIELD_DECL.has(m.type)) {
+      if (m.type === 'public_field_definition' || m.type === 'field_definition') put(lastSegment(field(m, 'name') || field(m, 'property')), typeName(field(m, 'type')) || typeOfValue(field(m, 'value'), spec))
+      else if (m.type === 'field_declaration') {
+        const vd = named(m).find((c) => c.type === 'variable_declaration')
+        if (vd) for (const [n, t] of bindingsOf(vd, spec)) put(n, t) // C#
+        else { const t = typeName(field(m, 'type')); for (const d of named(m).filter((c) => c.type === 'variable_declarator')) put(bound(d), t || typeOfValue(field(d, 'value'), spec)) } // Java
+      } else for (const [n, t] of bindingsOf(m, spec)) put(n, t) // Kotlin, PHP properties
+      continue
+    }
+    if (m.type === 'expression_statement') { for (const a of named(m)) if (a.type === 'assignment' && field(a, 'type')) for (const [n, t] of bindingsOf(a, spec)) put(n, t); continue } // Python `repo: Repo`
+    const name = field(m, 'name')?.text
+    const ctor = m.type === 'constructor_declaration' || (m.type === 'method_definition' && name === 'constructor') || (m.type === 'function_definition' && name === '__init__')
+    if (!ctor) continue
+    const params = new Map()
+    const plist = field(m, 'parameters') || named(m).find((c) => /^(formal_parameters|parameters|parameter_list)$/.test(c.type))
+    for (const p of plist ? named(plist) : []) for (const [n, t] of bindingsOf(p, spec)) {
+      params.set(n, t)
+      if (named(p).some((c) => c.type === 'accessibility_modifier') || hasToken(p, 'readonly')) put(n, t) // a TypeScript parameter property
+    }
+    // `this.repo = repo`, `self.repo = repo`, `_repo = repo`: a field set from a typed parameter
+    const walk = (n, d) => {
+      if (d > 6) return
+      if (/^(assignment_expression|assignment)$/.test(n.type)) {
+        const l = field(n, 'left'), r = field(n, 'right')
+        if (l && r && IDENTISH.test(r.type) && params.has(r.text)) {
+          const obj = field(l, 'object'), prop = field(l, 'field') || field(l, 'property') || field(l, 'attribute')
+          if (obj && prop && SELFISH.test(obj.text)) put(prop.text, params.get(r.text))
+          else if (IDENTISH.test(l.type) && l.text !== r.text) put(l.text, params.get(r.text))
+        }
+      }
+      for (const c of named(n)) walk(c, d + 1)
+    }
+    const b = field(m, 'body') || named(m).find((c) => /body|block/.test(c.type))
+    if (b) walk(b, 0)
+  }
   return out
 }

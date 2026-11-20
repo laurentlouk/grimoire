@@ -24,8 +24,8 @@ There is no type checker. A call is linked by name, narrowed by what the syntax 
 
 | Confidence | Meaning |
 | --- | --- |
-| `same-class` | `self.m()` / `this.m()`, or a bare call inside a class, to a member of that class or a supertype |
-| `typed` | `x.m()` where the syntax states x's type (a typed parameter, `x = new T()`, `T::new()`, a Go receiver), to a member of `T` or a supertype |
+| `same-class` | `self.m()` / `this.m()`, or a bare call inside a class where the language reaches a sibling without `this` (Java, Kotlin, C#, Swift, C++, Ruby; never Python, JavaScript, PHP or Rust, where a bare name is a function), to a member of that class or a supertype |
+| `typed` | `x.m()` where the syntax states x's type (a typed parameter, `x = new T()`, `T::new()`, a Go receiver, or a field of the class: a typed field declaration, a constructor parameter property `constructor(private svc: Svc)`, a Kotlin `val` constructor parameter, a Python class annotation, a field the constructor sets from a typed parameter `this.repo = repo` / `self.repo = repo`, which is how dependency injection hands a class its collaborators), to a member of `T` or a supertype. A call on a field whose type is unknown (`this.svc.findAll()`) is never linked to the calling class's own method of that name, nor to the caller itself |
 | `qualified` | `Type.m()` / `Type::m()` to a member of that type |
 | `import` | the name or its qualifier is bound by an import of the calling file |
 | `same-file` · `same-package` | defined in the calling file, or its directory (Go, Java, Kotlin, Swift, C#) |

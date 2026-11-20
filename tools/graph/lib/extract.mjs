@@ -1,11 +1,14 @@
 // grimoire graph · extraction. One parsed file → its symbols, call/inheritance refs and imports,
 // still unresolved: resolve.mjs turns names into edges once every file of the repo is known.
 import { LANGS, nameOf, calleeOf, bare } from './langs.mjs'
-import { bindingsOf, varName } from './bindings.mjs'
+import { bindingsOf, varName, fieldBindings } from './bindings.mjs'
 
 const CALLABLE = new Set(['function', 'method', 'constructor', 'macro'])
 // A function declared directly in one of these is a method (modules and namespaces do not count).
 const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'enum', 'protocol', 'object'])
+const FIELDED = new Set(['class', 'struct', 'object'])
+// languages where a method reads a field by its bare name (no `this.`)
+const IMPLICIT_THIS = new Set(['java', 'kotlin', 'csharp', 'swift', 'cpp'])
 const IDENT = /^[\p{L}_$][\p{L}\p{N}_$]*[!?]?$/u
 // A definition's signature: its first line up to its body (name, parameters, return type), with
 // no literal's value and no comment in it (langs.mjs bare), at most 160 characters. The body is
@@ -68,7 +71,14 @@ export function extract(tree, lang, isTestFile) {
           isTest: isTestFile || !!(spec.isTest && spec.isTest(node, name)),
         })
         for (const s of (spec.supers ? spec.supers(node) : [])) if (s.name && IDENT.test(s.name)) ref({ kind: s.kind, name: s.name, qual: '', line, src: idx })
-        next = { parent: idx, fn: CALLABLE.has(kind) ? idx : ctx.fn >= 0 ? ctx.fn : idx, scopeType: null, scopeOwner: -2, types: CALLABLE.has(kind) ? new Map(ctx.types) : ctx.types }
+        // a class's own scope: its fields' types (bindings.mjs fieldBindings), as `this.f` / `self.f`
+        // (and the bare name where a language reads a field without `this`), seen by its methods
+        let types = CALLABLE.has(kind) ? new Map(ctx.types) : ctx.types
+        if (FIELDED.has(kind)) {
+          types = new Map(ctx.types)
+          for (const [f, t] of fieldBindings(node, spec)) { for (const pre of ['this.', 'self.', 'this->']) types.set(`${pre}${f}`, t); if (IMPLICIT_THIS.has(lang)) types.set(f, t) }
+        }
+        next = { parent: idx, fn: CALLABLE.has(kind) ? idx : ctx.fn >= 0 ? ctx.fn : idx, scopeType: null, scopeOwner: -2, types }
       }
     } else if (sc && sc.type) {
       if (sc.super) ref({ kind: 'implements', name: sc.super, qual: '', line, src: -1, fromType: sc.type })
