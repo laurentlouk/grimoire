@@ -59,7 +59,7 @@ export async function indexProject(project, { full = false, only = null, log = (
       if (f.lang !== 'other') {
         const parser = await (await runtime()).parserFor(f.lang)
         if (parser) {
-          try { const tree = parser.parse(src); try { result = extract(tree, f.lang, TEST_PATH.test(f.path)) } finally { tree.delete() } } catch (e) { rs.failed.push(`${f.path}: ${e.message.slice(0, 80)}`) }
+          try { const tree = parser.parse(src); try { result = extract(tree, f.lang, TEST_PATH.test(f.path), f.path) } finally { tree.delete() } } catch (e) { rs.failed.push(`${f.path}: ${e.message.slice(0, 80)}`) }
         }
       }
       parsedFiles.push({ ...f, hash, result })
@@ -69,7 +69,7 @@ export async function indexProject(project, { full = false, only = null, log = (
       for (const f of parsedFiles) { writeFile(db, repo.name, f); rs.parsed++ }
       const r = db.prepare('SELECT head FROM repos WHERE name = ?').get(repo.name)
       const needsResolve = full || rs.parsed || rs.removed || !r
-      if (needsResolve) { resolveRepo(db, repo.name, repo.abs); rs.resolved = true }
+      if (needsResolve) { resolveRepo(db, repo.name, repo.abs, rels); rs.resolved = true }
       const head = gitHead(repo)
       db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES(?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET root = excluded.root, head = excluded.head, indexed_at = excluded.indexed_at')
         .run(repo.name, rootRel, head, new Date().toISOString())

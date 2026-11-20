@@ -84,7 +84,8 @@ function valueNames(v, spec, out = [], d = 0) {
   return out
 }
 
-export function extract(tree, lang, isTestFile) {
+// file: the file's repository path, which names a definition that has no name of its own (a default export).
+export function extract(tree, lang, isTestFile, file = null) {
   const spec = LANGS[lang].spec
   const symbols = [], refs = [], imports = []
   const seen = new Set()
@@ -147,7 +148,7 @@ export function extract(tree, lang, isTestFile) {
         if (mem.owns && names.length === 1) next = { parent: idx, fn: idx, scopeType: null, scopeOwner: -2, types: new Map(ctx.types), locals: new Set() }
       }
     } else if (kind) {
-      const name = (spec.name || nameOf)(node)
+      const name = (spec.name || nameOf)(node, file)
       if (name && (IDENT.test(name) || kind === 'namespace')) {
         const parentSym = ctx.parent >= 0 ? symbols[ctx.parent] : null
         const scopeType = (sc && sc.type) || (ctx.parent === ctx.scopeOwner ? ctx.scopeType : null) || (spec.container && spec.container(node)) || null

@@ -1,0 +1,1 @@
+{ "name": "@acme/api", "main": "./src/root.ts" }
