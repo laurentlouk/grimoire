@@ -825,6 +825,8 @@ console.log('\n6 · beyond the edges (fixtures/edge): dispatch, unlinked calls, 
   has(cs, 'testCreate  function test  test/session.test.ts:3', 'impact: the test on the path')
   has(cs, 'register:3  d1 [import] by reference', 'impact: a function passed as a value (a callback) is linked by reference')
   lacks(cs, 'src/api/routes.ts  :4', '… and so no longer a mention the edges miss')
+  // a function passed as a route's handler (a callback): listed with its route (routes.test.mjs), its line explained by it
+  has(cs, 'POST {…}/login  (http, node)  declared src/api/routes.ts:4', 'impact: a function passed as a value to a router is listed with the route it handles')
   has(cs, 'src/jobs/runner.ts  :5 string in run', 'impact: a string key naming it is a mention')
   has(cs, 'config/jobs.yaml  :3 config', 'impact: config naming it is a mention')
   has(cs, 'docs/auth.md  :3 docs', 'impact: docs naming it are a mention')

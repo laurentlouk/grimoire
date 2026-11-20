@@ -559,7 +559,7 @@ export function loadIndex(db) {
     repos: db.prepare('SELECT name FROM repos ORDER BY name').all().map((r) => r.name),
     files: db.prepare('SELECT id, repo, path, lang, is_test, node_id FROM files ORDER BY repo, path').all(),
     nodes: db.prepare("SELECT id, file_id FROM nodes WHERE kind != 'file'").all(),
-    edges: db.prepare('SELECT src, dst, kind, confidence FROM edges').all(),
+    edges: db.prepare("SELECT src, dst, kind, confidence FROM edges WHERE kind != 'ROUTES_TO'").all(),
     imports: db.prepare('SELECT file_id, source FROM imports').all(),
   }
 }

@@ -22,6 +22,8 @@ import { ACCESS_LANGS } from './data/extractors/dynamo-access.mjs'
 import { readYaml } from './data/readers/yaml.mjs'
 import { resolveRepo } from './resolve.mjs'
 import { cochange } from './cochange.mjs'
+import { extractRoutes } from './routes.mjs'
+import { writeRoutes, removeRoutes, resolveRoutes, linkRoutes } from './route-graph.mjs'
 
 export async function indexProject(project, { full = false, only = null, log = () => {} } = {}) {
   const db = await openStore(project.dbPath)
@@ -31,7 +33,8 @@ export async function indexProject(project, { full = false, only = null, log = (
   const runtime = async () => (rt ||= await loadRuntime({ log }))
 
   const known = new Set(project.repos.map((r) => r.name))
-  for (const { name } of db.prepare('SELECT name FROM repos').all()) if (!known.has(name)) dropRepo(db, name) // left the config
+  let relink = false // routes link across repositories: once any of them changed, after them all
+  for (const { name } of db.prepare('SELECT name FROM repos').all()) if (!known.has(name)) { dropRepo(db, name); relink = true } // left the config
 
   for (const repo of project.repos) {
     if (only && repo.name !== only) continue
@@ -59,7 +62,13 @@ export async function indexProject(project, { full = false, only = null, log = (
       if (f.lang !== 'other') {
         const parser = await (await runtime()).parserFor(f.lang)
         if (parser) {
-          try { const tree = parser.parse(src); try { result = extract(tree, f.lang, TEST_PATH.test(f.path), f.path) } finally { tree.delete() } } catch (e) { rs.failed.push(`${f.path}: ${e.message.slice(0, 80)}`) }
+          try {
+            const tree = parser.parse(src)
+            try {
+              result = extract(tree, f.lang, TEST_PATH.test(f.path), f.path)
+              try { result.routes = extractRoutes(tree, f.lang, f.path, result) } catch (e) { rs.failed.push(`${f.path}: routes: ${e.message.slice(0, 80)}`) }
+            } finally { tree.delete() }
+          } catch (e) { rs.failed.push(`${f.path}: ${e.message.slice(0, 80)}`) }
         }
       }
       parsedFiles.push({ ...f, hash, result })
@@ -69,7 +78,12 @@ export async function indexProject(project, { full = false, only = null, log = (
       for (const f of parsedFiles) { writeFile(db, repo.name, f); rs.parsed++ }
       const r = db.prepare('SELECT head FROM repos WHERE name = ?').get(repo.name)
       const needsResolve = full || rs.parsed || rs.removed || !r
-      if (needsResolve) { resolveRepo(db, repo.name, repo.abs, rels); rs.resolved = true }
+      if (needsResolve) {
+        resolveRepo(db, repo.name, repo.abs, rels)
+        // the routes' composition is a lead like the rest: a failure loses the routes, never the index
+        try { resolveRoutes(db, repo.name) } catch (e) { rs.failed.push(`routes: ${e.message.slice(0, 120)}`) }
+        rs.resolved = true; relink = true
+      }
       const head = gitHead(repo)
       db.prepare('INSERT INTO repos(name, root, head, indexed_at) VALUES(?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET root = excluded.root, head = excluded.head, indexed_at = excluded.indexed_at')
         .run(repo.name, rootRel, head, new Date().toISOString())
@@ -79,6 +93,9 @@ export async function indexProject(project, { full = false, only = null, log = (
     rs.data = await indexData(db, project, repo, rels, runtime)
     log(`${repo.name}: ${rs.files} files, ${rs.parsed} parsed, ${rs.removed} removed${rs.data.extracted ? `, ${rs.data.extracted} data job(s) run` : ''}`)
     summary.repos.push(rs)
+  }
+  if (relink || !db.prepare('SELECT 1 FROM meta WHERE key = ?').get('routes:linked')) {
+    try { tx(db, () => { linkRoutes(db); db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('routes:linked', ?)").run(new Date().toISOString()) }) } catch (e) { log(`routes: their callers were not linked (${e.message.slice(0, 120)})`) }
   }
   summary.ms = Date.now() - t0
   db.close()
@@ -181,6 +198,7 @@ function writeFile(db, repo, f) {
   for (const s of f.result.symbols) {
     ids.push(Number(insNode.run(fileId, s.kind, s.name, s.qualname, s.parent >= 0 ? ids[s.parent] : null, s.container, s.line, s.endLine, s.signature, s.isTest ? 1 : 0, s.via || null).lastInsertRowid))
   }
+  writeRoutes(db, fileId, fileNode, ids, f.result.routes || null)
   const insRef = db.prepare('INSERT INTO refs(file_id, src_id, kind, name, qual, qtype, from_type, line) VALUES(?, ?, ?, ?, ?, ?, ?, ?)')
   for (const r of f.result.refs) insRef.run(fileId, r.src >= 0 ? ids[r.src] : fileNode, r.kind, r.name, r.qual || '', r.qtype || null, r.fromType || null, r.line)
   const insImp = db.prepare('INSERT INTO imports(file_id, source, names, alias, flags, line) VALUES(?, ?, ?, ?, ?, ?)')
@@ -193,6 +211,7 @@ function writeFile(db, repo, f) {
 function removeFile(db, fileId) {
   db.prepare('DELETE FROM edges WHERE src IN (SELECT id FROM nodes WHERE file_id = ?) OR dst IN (SELECT id FROM nodes WHERE file_id = ?)').run(fileId, fileId)
   for (const t of ['refs', 'imports', 'nodes']) db.prepare(`DELETE FROM ${t} WHERE file_id = ?`).run(fileId)
+  removeRoutes(db, fileId)
   db.prepare('DELETE FROM files WHERE id = ?').run(fileId)
 }
 

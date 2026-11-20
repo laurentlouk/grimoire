@@ -23,6 +23,11 @@
 //            the index does not hold (an image, a JSON file)
 //   cochange files that changed in the same commits (from git log), n = commits shared
 //   churn    per file, n = recent commits that touched it (same window as cochange)
+//   routes · route_facts · route_refs · route_links   HTTP routes and navigation screens, the
+//            routers and mounts that compose their paths, the call sites naming one (literal
+//            segments hashed: no literal's text), and which site reaches which route
+//            (lib/routes.mjs, lib/route-graph.mjs); edges ROUTES_TO run from a site's definition
+//            to the route's handler
 //   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
 //            ddl, what its content declares (registry.mjs inspect): for a .sql file its schema
 //            statements (3 a schema dump's header over a table, 2 creates or alters a table or an
@@ -42,7 +47,7 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '18'
+export const SCHEMA_VERSION = '19'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
@@ -55,7 +60,7 @@ export async function driver() {
 }
 
 // Every table of the index, in DDL order.
-export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts']
+export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts', 'routes', 'route_facts', 'route_refs', 'route_links']
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -78,6 +83,15 @@ CREATE TABLE IF NOT EXISTS churn(repo TEXT, path TEXT, n INTEGER);
 CREATE INDEX IF NOT EXISTS churn_repo ON churn(repo, path);
 CREATE TABLE IF NOT EXISTS data_inputs(repo TEXT, path TEXT, size INTEGER, mtime INTEGER, hash TEXT, ddl INTEGER, PRIMARY KEY(repo, path));
 CREATE TABLE IF NOT EXISTS data_facts(repo TEXT, scope TEXT, key TEXT, extractor TEXT, sig TEXT, facts TEXT, error TEXT, PRIMARY KEY(repo, extractor, key));
+CREATE TABLE IF NOT EXISTS routes(id INTEGER PRIMARY KEY, file_id INTEGER, line INTEGER, kind TEXT, method TEXT, path TEXT, framework TEXT, router TEXT, handler TEXT, handler_line INTEGER, middleware TEXT, app_root TEXT, full TEXT, handler_id INTEGER);
+CREATE INDEX IF NOT EXISTS routes_file ON routes(file_id);
+CREATE INDEX IF NOT EXISTS routes_handler ON routes(handler_id);
+CREATE TABLE IF NOT EXISTS route_facts(file_id INTEGER PRIMARY KEY, facts TEXT);
+CREATE TABLE IF NOT EXISTS route_refs(id INTEGER PRIMARY KEY, file_id INTEGER, src_id INTEGER, line INTEGER, kind TEXT, method TEXT, toks TEXT, lead INTEGER, named INTEGER);
+CREATE INDEX IF NOT EXISTS route_refs_file ON route_refs(file_id);
+CREATE TABLE IF NOT EXISTS route_links(ref_id INTEGER, route_id INTEGER, how TEXT);
+CREATE INDEX IF NOT EXISTS route_links_route ON route_links(route_id);
+CREATE INDEX IF NOT EXISTS route_links_ref ON route_links(ref_id);
 `
 
 export async function openStore(dbPath, { readOnly = false } = {}) {

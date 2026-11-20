@@ -82,7 +82,7 @@ export async function renderGraph(project, opts = {}) {
     const repos = db.prepare('SELECT name, root, head, indexed_at FROM repos ORDER BY name').all()
     const files = db.prepare('SELECT id, repo, path, lang, size, is_test, node_id FROM files ORDER BY repo, path').all()
     const nodes = db.prepare("SELECT id, file_id, kind, COALESCE(qualname, name) AS name, line, is_test FROM nodes WHERE kind != 'file'").all()
-    const edges = db.prepare('SELECT src, dst, kind, confidence FROM edges').all()
+    const edges = db.prepare("SELECT src, dst, kind, confidence FROM edges WHERE kind != 'ROUTES_TO'").all()
     // each repository's 25 strongest pairs, each once: cochange.mjs stores a pair both ways unless one
     // side's partner cap cut it, so keep a < b, or the one way it was stored
     const cochange = db.prepare(`SELECT repo, a, b, n FROM (SELECT c.repo, c.a, c.b, c.n, ROW_NUMBER() OVER (PARTITION BY c.repo ORDER BY c.n DESC, c.a, c.b) AS rk FROM cochange c

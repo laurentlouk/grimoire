@@ -16,6 +16,7 @@ import { formOf } from './data/readers/redis-cmd.mjs'
 import { modelLinks, LEAD_SAYS, lackText } from './data/links.mjs'
 import { docRoots } from './docs.mjs'
 import { dispatchStarts, dispatchLines, unresolved, unresolvedLines, mentions, mentionLines } from './reach.mjs'
+import { routesServedBy, routeLines, routeTitle } from './route-graph.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files (or deduced from the SQL or the cache commands the code sends, labelled inferred), never from a database. Open path:line before relying on any of it.'
@@ -300,8 +301,10 @@ export class Graph {
       const rin = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind = 'REFERENCES'")
       const sup = this.q("SELECT e.kind, d.qualname FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.kind IN ('EXTENDS','IMPLEMENTS')", n.id)
       const sub = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind IN ('EXTENDS','IMPLEMENTS')")
-      // a test reaches it by calls, or through a definition passing it as a value (a route, a handler)
-      const tests = [...this.walk([n.id], ['CALLS', 'REFERENCES'], 'in', 4).keys()].map((id) => this.node(id)).filter((x) => x.is_test && x.id !== n.id)
+      // a test reaches it by calls, through a definition passing it as a value (a route, a handler), or by its route (URL, navigation)
+      const tests = [...this.walk([n.id], ['CALLS', 'REFERENCES', 'ROUTES_TO'], 'in', 4).keys()].map((id) => this.node(id)).filter((x) => x.is_test && x.id !== n.id)
+      const served = routesServedBy(this, [n.id])
+      if (served.length) lines.push(`  routes: ${served.slice(0, 6).map((r) => `${routeTitle(r)} (#r${r.id})`).join(', ')}${served.length > 6 ? `, … ${served.length - 6} more` : ''}`)
       lines.push(`  callers ${cin} · callees ${cout}${rin ? ` · referenced as a value by ${rin}` : ''}${sup.length ? ` · ${sup.map((s) => `${s.kind.toLowerCase()} ${s.qualname}`).join(', ')}` : ''}${sub ? ` · subtypes ${sub}` : ''} · tests reaching it ${tests.length}`)
       return lines.join('\n')
     })].filter(Boolean).join('\n\n')
@@ -374,7 +377,9 @@ export class Graph {
     }
     const disp = dispatchStarts(this, hits.filter((h) => h.kind !== 'file'))
     start = [...new Set(start.concat(disp.extra))]
-    const reached = this.walk(start, ['CALLS', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS'], 'in', depth, strict)
+    const reached = this.walk(start, ['CALLS', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS', 'ROUTES_TO'], 'in', depth, strict)
+    // the routes these definitions handle (or their class does): reached by URL or by navigation
+    const routes = routesServedBy(this, [...new Set([...start, ...hits.filter((h) => h.parent_id).map((h) => h.parent_id)])])
     const byFile = new Map()
     const tests = []
     for (const [id, info] of reached) {
@@ -403,19 +408,21 @@ export class Graph {
         const n = this.one("SELECT count(*) c FROM nodes WHERE name = ? AND kind != 'file'", term).c
         if (n > 1) ambiguous.push({ name: term, n })
       }
-      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })), { sites })
+      // a route's declaration naming its handler (`component={X}`, `router.get('/a', x)`) is explained by the route
+      const declared = routes.map((x) => ({ ref: { repo: x.repo, path: x.fpath, line: x.line } }))
+      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })), { sites: [...sites, ...declared] })
     }
     const cochange = []
     for (const fid of files) {
       const f = this.one('SELECT repo, path FROM files WHERE id = ?', fid)
       for (const c of this.q('SELECT b, n FROM cochange WHERE repo = ? AND a = ? ORDER BY n DESC LIMIT 8', f.repo, f.path)) cochange.push({ repo: f.repo, from: f.path, path: c.b, n: c.n })
     }
-    return { byFile, tests, dispatch: disp.info, sites, mentions: text_, ambiguous, cochange }
+    return { byFile, tests, dispatch: disp.info, sites, mentions: text_, ambiguous, cochange, routes }
   }
   reachLines(hits, opts = {}) {
     const r = this.reachData(hits, opts)
     const out = []
-    if (!r.byFile.size && !r.tests.length && !r.sites.length && !r.dispatch.length) out.push('  nothing in the index reaches it (dynamic dispatch, config wiring and other repositories are invisible to the edges: see the mentions below)')
+    if (!r.byFile.size && !r.tests.length && !r.sites.length && !r.dispatch.length && !r.routes.length) out.push('  nothing in the index reaches it (dynamic dispatch, config wiring and other repositories are invisible to the edges: see the mentions below)')
     const groups = [...r.byFile.values()].sort((a, b) => Math.min(...a.map(([, i]) => i.depth)) - Math.min(...b.map(([, i]) => i.depth)))
     for (const g of groups.slice(0, 60)) {
       const f = g[0][0]
@@ -428,6 +435,11 @@ export class Graph {
     }
     if (groups.length > 60) out.push(`  … ${groups.length - 60} more files`)
     out.push(...dispatchLines(this, r.dispatch))
+    if (r.routes.length) {
+      out.push(`Routes it handles (${r.routes.length}; a call site naming the route reaches it: [route] above, its tests below):`)
+      for (const x of r.routes.slice(0, 10)) out.push(...routeLines(this, x, { indent: '  ', limit: 10 }))
+      if (r.routes.length > 10) out.push(`  … ${r.routes.length - 10} more (graph_routes)`)
+    }
     const looseTests = r.sites.filter((x) => x.src?.is_test).length
     out.push(r.tests.length ? `Tests on these paths (${r.tests.length}):` : looseTests ? `Tests on these paths: none linked; ${looseTests} unlinked call site(s) in tests, below` : 'Tests on these paths: none found by the graph (search the test tree by name before concluding it is untested)')
     for (const [n, i] of r.tests.sort((a, b) => a[1].depth - b[1].depth).slice(0, 25)) out.push(`  ${this.row(n, `d${i.depth}`)}`)

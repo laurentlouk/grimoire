@@ -23,6 +23,7 @@ import { loadIndex } from './arch.mjs'
 import { archScope, archImpact, archLines, archDeltaStates, archDeltaLines } from './arch-change.mjs'
 import { changeImpact } from './change.mjs'
 import { overview } from './overview.mjs'
+import { routesTool } from './route-graph.mjs'
 import { Graph, sql, baseText, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER, ARCH_CHANGES_FOOTER, ARCH_DELTA_FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
@@ -42,7 +43,7 @@ export const TOOLS = [
   },
   {
     name: 'graph_overview',
-    description: 'The project at a glance, to start on an unknown codebase: per repository its languages, definitions and tests; its modules (folders of production code, users first) with what each uses and the share of its functions a test reaches; its entry points (functions nothing calls that call the most: where flows start, or code reached through config or a framework); its most used definitions; and its hotspots (often changed and large). Then go to graph_file, graph_search or graph_impact.',
+    description: 'The project at a glance, to start on an unknown codebase: per repository its languages, definitions and tests; its modules (folders of production code, users first) with what each uses and the share of its functions a test reaches; its routes (count, top prefixes); its entry points (functions nothing calls that call the most: where flows start, or code reached through config or a framework), the route handlers and screens listed apart; its most used definitions; and its hotspots (often changed and large). Then go to graph_file, graph_search or graph_impact.',
     params: { repo: repoParam, limit: { type: 'integer', default: 12, description: 'Rows per list (default 12).' } },
     run: (g, a) => overview(g, { repo: a.repo || null, limit: Math.max(1, Math.min(Number(a.limit) || 12, 50)) }),
   },
@@ -82,14 +83,14 @@ export const TOOLS = [
   },
   {
     name: 'graph_impact',
-    description: 'Blast radius of changing a symbol or a file, beyond what grep or the call edges alone show: everything reaching it through calls, inheritance and imports up to `depth` hops, grouped by file with distance; dispatch (a method\'s declarations on its interfaces, traits and base classes, whose callers may land on it, and the overrides or implementations that redefine it); the tests on those paths; the call sites naming it that resolution could not link (receiver of unknown type, too many same-named definitions); every other mention of its name in any file of the project that no edge explains, classified (a reference passed as a value, an unresolved import, a string key, config, markup, scripts, docs, comments) and never quoted; and the files that change together with it in git history. Use it before changing something, to scope a plan, a task\'s declared files, or a review.',
+    description: 'Blast radius of changing a symbol or a file, beyond what grep or the call edges alone show: everything reaching it through calls, inheritance, imports and routes (a call site naming a URL or a screen it handles) up to `depth` hops, grouped by file with distance; dispatch (a method\'s declarations on its interfaces, traits and base classes, whose callers may land on it, and the overrides or implementations that redefine it); the routes it handles with their callers in code and tests; the tests on those paths (a test calling its route among them); the call sites naming it that resolution could not link (receiver of unknown type, too many same-named definitions); every other mention of its name in any file of the project that no edge explains, classified (a reference passed as a value, an unresolved import, a string key, config, markup, scripts, docs, comments) and never quoted; and the files that change together with it in git history. Use it before changing something, to scope a plan, a task\'s declared files, or a review.',
     params: { target: { type: 'string', description: 'A symbol (as for graph_symbol) or a file path.' }, depth: depthParam(3, 6), strict: strictParam, mentions: { type: 'boolean', default: true, description: 'Search the project\'s files for the name\'s mentions no edge explains (default true).' }, repo: repoParam },
     required: ['target'],
     run: (g, a, ctx) => g.impact(a, ctx.project),
   },
   {
     name: 'graph_diff',
-    description: 'The impact of a change: what the working tree (committed, staged, unstaged and untracked) changed against a base, definition by definition, and what that can break that the diff does not show. Each definition added, removed, moved or modified, with its old and new signature when it changed (the base read through git, nothing checked out); for every contract change (removed, moved, new signature) who still names it: linked callers (inside or outside this diff), call sites resolution could not link, and the name\'s other mentions in the project (references passed as values, unresolved imports, string keys, config, scripts), classified and never quoted; the files reaching the changed definitions outside the diff (calls, inheritance, imports, dispatch through interfaces, overrides and implementations left unchanged); the tests to run and the changed code no test reaches; the files that usually change with the changed ones (git history) and are not in the diff; and a risk line with its reasons. Use it before committing, to review a branch, or to check a task\'s footprint. `base: "HEAD"` limits it to the uncommitted changes.',
+    description: 'The impact of a change: what the working tree (committed, staged, unstaged and untracked) changed against a base, definition by definition, and what that can break that the diff does not show. Each definition added, removed, moved or modified, with its old and new signature when it changed (the base read through git, nothing checked out); for every contract change (removed, moved, new signature) who still names it: linked callers (inside or outside this diff), call sites resolution could not link, and the name\'s other mentions in the project (references passed as values, unresolved imports, string keys, config, scripts), classified and never quoted; the files reaching the changed definitions outside the diff (calls, inheritance, imports, dispatch through interfaces, overrides and implementations left unchanged); the routes the changed handlers serve; the tests to run (a test calling a changed handler\'s route among them) and the changed code no test reaches; the files that usually change with the changed ones (git history) and are not in the diff; and a risk line with its reasons. Use it before committing, to review a branch, or to check a task\'s footprint. `base: "HEAD"` limits it to the uncommitted changes.',
     params: { base: { type: 'string', description: 'A branch, tag or commit; compared at its merge base with HEAD (default: baseBranch, else the base branch, else main). HEAD: only what is not committed.' }, depth: depthParam(2, 5), mentions: { type: 'boolean', default: true, description: 'Search the project for the mentions of contract changes (default true).' }, repo: repoParam },
     run: (g, a, ctx) => {
       const base = resolveBase(ctx.project, { explicit: a.base || null, repo: a.repo || null })
@@ -97,6 +98,12 @@ export const TOOLS = [
       base.text = baseText(base)
       return changeImpact(g, ctx.project, base, { repo: a.repo || null, depth: Math.max(1, Math.min(Number(a.depth) || 2, 5)), text: a.mentions !== false && a.mentions !== 'false' })
     },
+  },
+  {
+    name: 'graph_routes',
+    description: 'The project\'s routes: HTTP routes (method + path template → handler definition: Express, Koa, Hono, Fastify, NestJS, Next.js route files and pages/api, Expo API routes, FastAPI, Flask, Django urls.py, Spring, Go net/http, gin, echo, chi, gorilla/mux, Rails config/routes.rb) and app navigation screens (Expo Router files, React Navigation screens), each path composed through the routers, groups and mounts the syntax states (a prefix the code computes is `{…}`, never guessed). No argument: every route with its handler and how many places call it. A path fragment, `GET /users`, a method or `kind` filters; one route (its path, or #r<id>) shows its handler path:line, its middleware where the syntax shows it, and its callers in code and in tests: the strings that are a URL matching its template (`/users/me`, `` `/a/${id}` ``, `\'/a/\' + slug`, a generated client\'s path, a `<Link href>`, `router.push`) or a screen name given to `navigate`, each with how it matched (exact, template, prefix unknown, name). Only the route\'s own path template is ever shown, never a call\'s text, query string or host.',
+    params: { query: { type: 'string', description: 'A path fragment (`/users`), `METHOD /path`, a screen name, or #r<id> from an earlier answer.' }, method: { type: 'string', description: 'Only routes answering this method (GET, POST, …).' }, kind: { type: 'string', description: '`http` or `screen`.' }, repo: repoParam, limit: { type: 'integer', default: 60 } },
+    run: (g, a) => routesTool(g, { query: a.query || '', method: a.method || '', kind: a.kind || '', repo: a.repo || '', limit: a.limit }),
   },
   {
     name: 'graph_file',
@@ -164,7 +171,7 @@ export const TOOLS = [
   },
   {
     name: 'graph_sql',
-    description: 'A read-only SELECT over the graph for questions the other tools do not answer. Tables: files(id, repo, path, lang, is_test, node_id), nodes(id, file_id, kind, name, qualname, parent_id, line, end_line, signature, is_test, via: framework for a member a framework call declares), edges(src, dst, kind CALLS|IMPORTS|EXTENDS|IMPLEMENTS|REFERENCES, confidence, line), imports(file_id, source, names, resolved), cochange(repo, a, b, n), churn(repo, path, n: recent commits touching the file), repos(name, root, head, indexed_at).',
+    description: 'A read-only SELECT over the graph for questions the other tools do not answer. Tables: files(id, repo, path, lang, is_test, node_id), nodes(id, file_id, kind, name, qualname, parent_id, line, end_line, signature, is_test, via: framework for a member a framework call declares), edges(src, dst, kind CALLS|IMPORTS|EXTENDS|IMPLEMENTS|REFERENCES|ROUTES_TO, confidence, line), imports(file_id, source, names, resolved), cochange(repo, a, b, n), churn(repo, path, n: recent commits touching the file), repos(name, root, head, indexed_at), routes(id, file_id, line, kind http|screen, method, path, framework, handler_id, full: JSON paths it serves under), route_refs(id, file_id, src_id, line, kind, method), route_links(ref_id, route_id, how).',
     params: { sql: { type: 'string', description: 'One SELECT or WITH … SELECT statement.' } },
     required: ['sql'],
     raw: true,

@@ -24,6 +24,7 @@ import { skipped } from './project.mjs'
 import { treeAt, blobs } from './data/base.mjs'
 import { symbolsAside } from './symbols-aside.mjs'
 import { unresolved, mentions, kindOfPath, USE_KINDS, siteText, dispatch } from './reach.mjs'
+import { routesServedBy, routeCallers, routeTitle } from './route-graph.mjs'
 
 const dispatchUp = (g, n) => dispatch(g, n).up.map((u) => u.node)
 
@@ -306,6 +307,19 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
     for (const x of d.down) if (!inDiff.has(`${x.node.repo}|${x.node.path}`) || !live.some((c) => c.node && c.node.id === x.node.id)) out.push(`  ${['interface', 'trait', 'protocol'].includes(d.owner.kind) ? 'implementation' : 'override'} not changed here: ${g.row(x.node)}`)
   }
 
+  // ── routes: what the changed definitions serve, and who calls those routes ──
+  const served = routesServedBy(g, live.filter((c) => c.node && c.op !== '+').map((c) => c.node.id))
+  if (served.length) {
+    out.push(`Routes these changes handle (${served.length}): their callers reach the change through the URL or the screen`)
+    for (const x of served.slice(0, 20)) {
+      const cs = routeCallers(g, x.id)
+      const t = cs.filter((c) => c.ftest || c.stest).length
+      const outside = cs.filter((c) => !inDiff.has(`${c.repo}|${c.path}`)).length
+      out.push(`  ${routeTitle(x)}  → ${x.handler_id ? g.node(x.handler_id).qualname : '?'}  ${cs.length} caller(s), ${t} in tests, ${outside} outside this diff  (#r${x.id})`)
+    }
+    if (served.length > 20) out.push(`  … ${served.length - 20} more`)
+  }
+
   // ── tests ──
   // A function nested in another is tested through it: the outermost callable around a changed one
   // stands for it (its tests, its callers).
@@ -316,7 +330,8 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
   for (const c of live) {
     if (!c.node || c.node.is_test) continue
     const rep = outer(c.node)
-    const ts = [...g.walk([rep.id], ['CALLS', 'REFERENCES', 'IMPORTS'], 'in', TEST_DEPTH).entries()].filter(([id, i]) => i.depth > 0 && g.node(id).is_test).map(([id, i]) => [g.node(id), i])
+    // a test calling the route it handles, by URL or by navigation, is a test on its path (ROUTES_TO)
+    const ts = [...g.walk([rep.id], ['CALLS', 'REFERENCES', 'IMPORTS', 'ROUTES_TO'], 'in', TEST_DEPTH).entries()].filter(([id, i]) => i.depth > 0 && g.node(id).is_test).map(([id, i]) => [g.node(id), i])
     // a test calling it on a receiver the graph could not type is a test of it too
     const loose = c.op === '+' ? [] : unresolved(g, [rep]).filter((x) => x.src?.is_test)
     testsOf.set(c, ts.length + loose.length)
