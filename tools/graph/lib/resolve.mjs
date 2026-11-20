@@ -10,6 +10,8 @@
 //   import        the name (or its qualifier) is bound by an import of the calling file
 //   same-file     defined in the calling file
 //   same-package  defined in the calling file's directory (Go/Java/Kotlin/Swift/C# packages)
+//   import-guess  a method on a receiver of unknown type, picked because its file is imported:
+//                 a name guess (counted with unique-name and ambiguous, hidden like ambiguous)
 //   unique-name   the only definition of that name in the repository
 //   ambiguous     one of ≤ MAX_AMBIGUOUS definitions of that name (each gets an edge)
 //   path          an import resolved to a file by its path
@@ -35,8 +37,14 @@ import path from 'node:path'
 import { familyOf, COMMON_METHODS } from './langs.mjs'
 import { jsModules, platformBase } from './js-modules.mjs'
 import { listPaths, SKIP_DIRS } from './project.mjs'
+import { linkContracts } from './contracts.mjs'
 
 const MAX_AMBIGUOUS = 3
+// The confidences that are name guesses: graph_status's share, the overview's "most used" and the
+// page's links resolved by syntax leave them out; `strict` and the page's default hide the last two.
+export const GUESSES = ['unique-name', 'ambiguous', 'import-guess']
+export const HIDDEN_GUESSES = ['ambiguous', 'import-guess']
+export const guessSql = (list = GUESSES) => `(${list.map((c) => `'${c}'`).join(',')})`
 const IMPLICIT_SELF = new Set(['jvm', 'csharp', 'swift', 'c', 'ruby'])
 const CALLABLE = new Set(['function', 'method', 'constructor'])
 const REFERABLE = new Set(['function', 'method'])
@@ -157,6 +165,7 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
       }
       case 'c': return flags.system ? suffix(from, noExt(s).split('/')).filter((f) => f.path.endsWith(s)).slice(0, 1) : [...exact(from, path.posix.join(from.dir, noExt(s))), ...suffix(from, noExt(s).split('/'))].filter((f) => f.path.endsWith(path.posix.basename(s))).slice(0, 1)
       case 'csharp': return namespaces.get(s) || []
+      case 'proto': return [...exact(from, path.posix.join(from.dir, noExt(s))), ...suffix(from, noExt(s).split('/'))].slice(0, 1)
       case 'ruby': return flags.relative ? exact(from, path.posix.join(from.dir, noExt(s))) : suffix(from, noExt(s).split('/')).slice(0, 1)
       case 'php': {
         if (flags.relative) return exact(from, path.posix.join(from.dir, noExt(s.replace(/^\//, '')))).slice(0, 1)
@@ -194,7 +203,11 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
 
   // ── refs → edges ──
   // Supertypes first: `typed` and `same-class` resolution climb them to find inherited members.
-  const refs = db.prepare('SELECT r.file_id, r.src_id, r.kind, r.name, r.qual, r.qtype, r.from_type, r.line FROM refs r JOIN files f ON f.id = r.file_id WHERE f.repo = ?').all(repo)
+  const allRefs = db.prepare('SELECT r.file_id, r.src_id, r.kind, r.name, r.qual, r.qtype, r.from_type, r.line FROM refs r JOIN files f ON f.id = r.file_id WHERE f.repo = ?').all(repo)
+  // a contract hint (code implementing an API contract) and a GraphQL selection are linked apart,
+  // once every call is (contracts.mjs linkContracts)
+  const contractRefs = allRefs.filter((r) => r.kind === 'contract' || r.kind === 'select')
+  const refs = allRefs.filter((r) => r.kind !== 'contract' && r.kind !== 'select')
     .sort((a, b) => (a.kind === 'extends' || a.kind === 'implements' ? 0 : 1) - (b.kind === 'extends' || b.kind === 'implements' ? 0 : 1))
   const supers = new Map()
   // Members of `types` named like the candidates, else of their supertypes, nearest level first:
@@ -436,14 +449,15 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
         }
       }
       if (!pick) {
-        // a receiver of unknown type: by name, in this file, else an imported one. A field of this
+        // a receiver of unknown type: by name, in this file, else an imported one (a name guess: the
+        // import binds the file, not the receiver: `x.save()` is any `save` the file can see). A field of this
         // object (`this.svc.findAll()`, `self.repo.save()`) holds another object: never this class's
         // own method of that name, never the caller itself (Nest, Spring and Django delegation would
         // read as self-recursion and hide the real callee's callers)
         const ownField = /^(this|self|@)[.>-]*[\p{L}_$][\p{L}\p{N}_$]*$/u.test(qual) || /^(this|self)\??\.[\p{L}_$]/u.test(qual)
         const methods = guess.filter((c) => (c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
           && !(srcNode && c.id === srcNode.id) && !(ownField && selfType && c.parent_id === selfType.id))
-        pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import', (c) => b.files.has(c.file_id)]], undefined, variantOf)
+        pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import-guess', (c) => b.files.has(c.file_id)]], undefined, variantOf)
       }
     }
     if (!pick && !qual) {
@@ -459,6 +473,7 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
     const src = srcNode ? srcNode.id : from.node_id
     for (const c of pick.nodes) emit(src, c.id, 'CALLS', pick.conf, r.line)
   }
+  if (contractRefs.length) { const sig = db.prepare('SELECT signature FROM nodes WHERE id = ?'); const sel = linkContracts({ refs: contractRefs, nodes, nodeById, byName, fileById, bindOf: (fid) => bind.get(fid), emit, signatureOf: (id) => sig.get(id)?.signature || '' }); if (sel) { stats.calls += sel.calls; stats.resolved += sel.resolved } }
   db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)").run(`calls:${repo}`, JSON.stringify(stats))
 }
 

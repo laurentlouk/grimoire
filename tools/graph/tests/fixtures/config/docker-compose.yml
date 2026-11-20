@@ -1,0 +1,12 @@
+services:
+  api:
+    image: api
+    command: |
+      environment:
+        NOT_A_KEY: canary-cfg-value-4
+    environment:
+      - DATABASE_URL=postgres://canary-cfg-value-5
+      - REDIS_URL
+  worker:
+    environment:
+      QUEUE_NAME: canary-cfg-value-6

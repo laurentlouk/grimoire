@@ -6,7 +6,8 @@
 //   graph.enabled  false turns every tool into a pointer back to grep/read
 //   graph.repos    names from repos[] to index (default: all of them)
 //   graph.dir      index location (default .grimoire/graph, next to the loop's telemetry)
-//   graph.exclude  extra path globs to skip; graph.maxFileKB (default 512)
+//   graph.exclude  extra path globs to skip; graph.maxFileKB (default 512); graph.maxContractKB, the
+//                  cap for API contract files: GraphQL, protobuf, OpenAPI, Swagger (default 4096)
 //   graph.architectureDir  where the architecture diagrams live (default docs/architecture)
 //   graph.data.migrations  [{ path, dialect }]: a migration folder's dialect, stated (path is
 //                  repo-relative, `repo:path` to name one repository of several)
@@ -14,7 +15,7 @@
 import { readdirSync, statSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
-import { langOf } from './langs.mjs'
+import { langOf, isContract } from './langs.mjs'
 import { loadConfig, mainCheckout } from '../../../scripts/project-config.mjs'
 
 export function projectRoot(explicit) {
@@ -44,6 +45,7 @@ export function loadProject(rootArg) {
     dbPath: path.join(root, g.dir || '.grimoire/graph', 'graph.db'),
     exclude: compileGlobs(g.exclude || []),
     maxBytes: (Number(g.maxFileKB) || 512) * 1024,
+    maxContractBytes: (Number(g.maxContractKB) || 4096) * 1024,
     architectureDir: path.resolve(root, g.architectureDir || 'docs/architecture'),
     dataMigrations: (Array.isArray(g.data?.migrations) ? g.data.migrations : [])
       .filter((m) => m && typeof m.path === 'string' && m.path.trim() && typeof m.dialect === 'string')
@@ -68,6 +70,9 @@ export function compileGlobs(globs) {
     return new RegExp(`^${re}$|^${re}/`)
   })
 }
+
+// The size cap of a file: a contract file's is the larger of the two caps.
+export const maxBytesOf = (project, rel) => (isContract(rel) ? Math.max(project.maxBytes, project.maxContractBytes || 0) : project.maxBytes)
 
 export const skipped = (rel, project) => rel.split('/').some((s) => SKIP_DIRS.has(s)) || SKIP_FILE.test(rel) || project.exclude.some((re) => re.test(rel))
 
@@ -98,7 +103,7 @@ export function scanRepo(repo, project, rels = listPaths(repo.abs)) {
     if (!lang || skipped(rel, project)) continue
     let st
     try { st = statSync(path.join(repo.abs, rel)) } catch { continue }
-    if (!st.isFile() || st.size > project.maxBytes) continue
+    if (!st.isFile() || st.size > maxBytesOf(project, rel)) continue
     out.push({ path: rel, lang, size: st.size, mtime: Math.floor(st.mtimeMs) })
   }
   return out

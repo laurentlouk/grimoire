@@ -37,10 +37,19 @@ if (process.argv[1] === HERE) {
   let rt = null, why = null
   try { rt = await (await import('./deps.mjs')).loadRuntime({ install: false }) } catch (e) { why = `no parser runtime: ${e.message}` }
   const { extract } = await import('./extract.mjs')
-  const { TEST_PATH } = await import('./langs.mjs')
+  const { TEST_PATH, LANGS } = await import('./langs.mjs')
+  const { parseContract } = await import('./contracts.mjs')
   const out = []
+  const pick = (s) => ({ kind: s.kind, name: s.name, qualname: s.qualname, line: s.line, endLine: s.endLine, signature: s.signature, isTest: s.isTest })
   for (const x of items) {
     try {
+      // an API contract is read by hand (contracts.mjs), as the indexer reads it
+      if (LANGS[x.lang]?.hand) {
+        const r = parseContract(x.lang, x.text, TEST_PATH.test(x.path))
+        // extend blocks attach their fields to the type they extend: the qualified name says so already
+        out.push({ symbols: r.symbols.map(pick) })
+        continue
+      }
       if (!rt) throw new Error(why)
       const parser = await rt.parserFor(x.lang)
       if (!parser) throw new Error(`no ${x.lang} grammar`)

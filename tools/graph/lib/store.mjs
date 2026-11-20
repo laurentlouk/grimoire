@@ -44,10 +44,15 @@
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
+//   config   configuration keys (config.mjs), names only: repo, path, file_id (NULL for a declaration
+//            file the index does not parse: an env template, a compose file, a CI workflow, app.json,
+//            a Spring file), node_id (the innermost definition holding the line, else the file node),
+//            key, kind env | config, role read | declare | map, src_key (a mapping's source), via, line
+//   config_inputs  the declaration files config.mjs reads: size, mtime, hash
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '19'
+export const SCHEMA_VERSION = '20'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
@@ -60,7 +65,7 @@ export async function driver() {
 }
 
 // Every table of the index, in DDL order.
-export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts', 'routes', 'route_facts', 'route_refs', 'route_links']
+export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts', 'routes', 'route_facts', 'route_refs', 'route_links', 'config', 'config_inputs']
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -92,6 +97,12 @@ CREATE INDEX IF NOT EXISTS route_refs_file ON route_refs(file_id);
 CREATE TABLE IF NOT EXISTS route_links(ref_id INTEGER, route_id INTEGER, how TEXT);
 CREATE INDEX IF NOT EXISTS route_links_route ON route_links(route_id);
 CREATE INDEX IF NOT EXISTS route_links_ref ON route_links(ref_id);
+CREATE TABLE IF NOT EXISTS config(repo TEXT, path TEXT, file_id INTEGER, node_id INTEGER, key TEXT, kind TEXT, role TEXT, src_key TEXT, via TEXT, line INTEGER);
+CREATE INDEX IF NOT EXISTS config_key ON config(key);
+CREATE INDEX IF NOT EXISTS config_src ON config(src_key);
+CREATE INDEX IF NOT EXISTS config_file ON config(file_id);
+CREATE INDEX IF NOT EXISTS config_path ON config(repo, path);
+CREATE TABLE IF NOT EXISTS config_inputs(repo TEXT, path TEXT, size INTEGER, mtime INTEGER, hash TEXT, PRIMARY KEY(repo, path));
 `
 
 export async function openStore(dbPath, { readOnly = false } = {}) {

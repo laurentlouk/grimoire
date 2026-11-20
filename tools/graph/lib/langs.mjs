@@ -544,12 +544,15 @@ export const LANGS = {
   ruby: { wasm: 'ruby', family: 'ruby', exts: ['.rb', '.rake'], spec: ruby },
   php: { wasm: 'php', family: 'php', exts: ['.php'], spec: php },
   swift: { wasm: 'swift', family: 'swift', exts: ['.swift'], spec: swift },
+  // API contracts, read by hand (contracts.mjs): the pinned runtime has no grammar for them
+  graphql: { wasm: null, family: 'graphql', exts: ['.graphql', '.gql'], spec: null, hand: true },
+  proto: { wasm: null, family: 'proto', exts: ['.proto'], spec: null, hand: true },
   // A data grammar, not a code language: no extension maps to it, so no file is indexed as YAML
   // code; the data model's extractors read YAML through it (lib/data/readers/yaml.mjs).
   yaml: { wasm: 'yaml', family: 'yaml', exts: [], spec: null },
 }
 // Indexed as file nodes only (searchable by path, reachable through imports), no symbols.
-export const FILE_ONLY_EXTS = ['.vue', '.svelte', '.scala', '.dart', '.lua', '.ex', '.exs', '.zig', '.sol', '.ml', '.m', '.mm', '.sh', '.bash', '.sql', '.proto', '.graphql', '.gql', '.tf', '.tfvars', '.hcl']
+export const FILE_ONLY_EXTS = ['.vue', '.svelte', '.scala', '.dart', '.lua', '.ex', '.exs', '.zig', '.sol', '.ml', '.m', '.mm', '.sh', '.bash', '.sql', '.tf', '.tfvars', '.hcl']
 
 // Method names each family's standard library defines on its everyday types (collections,
 // strings, options, results, promises, streams). A call `x.len()` on a receiver whose type the
@@ -581,7 +584,11 @@ export const COMMON_METHODS = {
 
 const BY_EXT = new Map()
 for (const [id, l] of Object.entries(LANGS)) for (const e of l.exts) BY_EXT.set(e, id)
-export const langOf = (file) => { const m = /(\.[^./]+)$/.exec(file); return m ? BY_EXT.get(m[1].toLowerCase()) || (FILE_ONLY_EXTS.includes(m[1].toLowerCase()) ? 'other' : null) : null }
+// An OpenAPI or Swagger document: a file node (searchable by path, its mentions read), no symbols.
+const OPENAPI = /(^|\/)(openapi|swagger)[\w.-]*\.(ya?ml|json)$/i
+export const langOf = (file) => { const m = /(\.[^./]+)$/.exec(file); return m ? BY_EXT.get(m[1].toLowerCase()) || (FILE_ONLY_EXTS.includes(m[1].toLowerCase()) || OPENAPI.test(file) ? 'other' : null) : null }
+// API contract files (GraphQL, protobuf, OpenAPI, Swagger): indexed up to graph.maxContractKB, not maxFileKB
+export const isContract = (file) => /\.(graphql|gql|proto)$/i.test(file) || OPENAPI.test(file)
 export const familyOf = (lang) => (LANGS[lang] ? LANGS[lang].family : lang)
 
 // A file is test code when its path says so, in any of the usual conventions. Test-support code

@@ -1,0 +1,11 @@
+name: ci
+on: push
+env:
+  NODE_ENV: test
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI_TOKEN: ${{ secrets.CANARY_CFG_SECRET }}
+    steps:
+      - run: echo canary-cfg-value-7

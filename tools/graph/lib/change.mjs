@@ -20,7 +20,7 @@
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { langOf, familyOf } from './langs.mjs'
-import { skipped } from './project.mjs'
+import { skipped, maxBytesOf } from './project.mjs'
 import { treeAt, blobs } from './data/base.mjs'
 import { symbolsAside } from './symbols-aside.mjs'
 import { unresolved, mentions, kindOfPath, USE_KINDS, siteText, dispatch } from './reach.mjs'
@@ -147,8 +147,8 @@ function baseDefs(files, project) {
     const { abs, commit } = list[0]
     let tree
     try { tree = treeAt(abs, commit, list.map((f) => f.oldPath)) } catch (e) { for (const f of list) out.set(`${f.repo}|${f.oldPath}`, e); continue }
-    for (const f of list) { const e = tree.get(f.oldPath); if (e && e.size > project.maxBytes) out.set(`${f.repo}|${f.oldPath}`, new Error(`over ${Math.round(project.maxBytes / 1024)} KB at the base: not read`)) }
-    const want = list.map((f) => ({ f, entry: tree.get(f.oldPath) })).filter((x) => x.entry && x.entry.size <= project.maxBytes)
+    for (const f of list) { const e = tree.get(f.oldPath), cap = maxBytesOf(project, f.oldPath); if (e && e.size > cap) out.set(`${f.repo}|${f.oldPath}`, new Error(`over ${Math.round(cap / 1024)} KB at the base: not read`)) }
+    const want = list.map((f) => ({ f, entry: tree.get(f.oldPath) })).filter((x) => x.entry && x.entry.size <= maxBytesOf(project, x.f.oldPath))
     const got = blobs(abs, want.map((x) => x.entry))
     for (const { f, entry } of want) {
       const buf = got.get(entry.oid)

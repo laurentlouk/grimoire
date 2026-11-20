@@ -25,7 +25,8 @@
 //              editable only when the page is served (serve.mjs), which adds connect-src 'self'
 // The file map and the Architecture and Data diagrams share one way to move around (stage-view.mjs):
 // drag the background (it never selects the page) or focus the stage and use the arrow keys, + − 0.
-// Test code and ambiguous links are hidden until asked for; unique-name matches are drawn dashed.
+// Test code and ambiguous links (and import-guess ones, a method picked by its imported file) are
+// hidden until asked for; unique-name matches are drawn dashed.
 // Views have plain anchors (#sym-12, #file-3, #mod-4, #arch-0, #data-1, #doc-7): they hold for the
 // index the page was rendered from (a re-parsed file gets new ids; module, diagram, store and note
 // numbers shift as those change).
@@ -729,8 +730,9 @@ export function mapData(files, nodes, edges) {
     if (a === undefined || b === undefined || a === b) continue
     const k = a < b ? `${a},${b}` : `${b},${a}`
     w.set(k, (w.get(k) || 0) + 1)
-    if (e.confidence !== 'ambiguous') shown.set(k, true)
-    if (e.confidence !== 'ambiguous' && e.confidence !== 'unique-name') sure.set(k, (sure.get(k) || 0) + 1)
+    const hidden = e.confidence === 'ambiguous' || e.confidence === 'import-guess' // hidden until asked, as ambiguous
+    if (!hidden) shown.set(k, true)
+    if (!hidden && e.confidence !== 'unique-name') sure.set(k, (sure.get(k) || 0) + 1)
   }
   for (const k of sure.keys()) { const [a, b] = k.split(',').map(Number); deg.set(a, (deg.get(a) || 0) + 1); deg.set(b, (deg.get(b) || 0) + 1) }
   // Production code first: test files only take slots production code leaves free. The cap is
@@ -1064,8 +1066,9 @@ function client() {
   }
   const PALETTE = ['#6d4aff', '#e0527a', '#1f9d8a', '#e38b22', '#3b82f6', '#8b5cf6', '#16a34a', '#d946ef', '#0ea5e9', '#f43f5e']
   const repoColor = new Map(D.repos.map((r, i) => [r.name, PALETTE[i % PALETTE.length]]))
-  const GUESS = new Set(['ambiguous', 'unique-name'])
-  const confRank = (c) => (c === 'ambiguous' ? 2 : c === 'unique-name' ? 1 : 0)
+  const GUESS = new Set(['ambiguous', 'unique-name', 'import-guess'])
+  const hiddenConf = (c) => c === 'ambiguous' || c === 'import-guess' // hidden until asked
+  const confRank = (c) => (hiddenConf(c) ? 2 : c === 'unique-name' ? 1 : 0)
   const activate = (e) => e.key === 'Enter' || e.key === ' ' // a role=button answers both
   const nav = stageClient() // drag and keys on the stages: the file map, the Architecture and Data tabs (stage-view.mjs)
 
@@ -1113,7 +1116,7 @@ function client() {
   const edgeCount = {}
   let calls = 0, guesses = 0
   // a file link counts its edges: [all, resolved by syntax, unique-name, ambiguous]
-  const bump = (m, k, conf) => { const v = m.get(k) || [0, 0, 0, 0]; v[0]++; v[conf === 'ambiguous' ? 3 : conf === 'unique-name' ? 2 : 1]++; m.set(k, v) }
+  const bump = (m, k, conf) => { const v = m.get(k) || [0, 0, 0, 0]; v[0]++; v[hiddenConf(conf) ? 3 : conf === 'unique-name' ? 2 : 1]++; m.set(k, v) }
   for (const [src, dst, k, c] of D.edges) {
     const kind = D.edgeKinds[k], conf = D.confs[c]
     edgeCount[kind] = (edgeCount[kind] || 0) + 1
@@ -1179,7 +1182,7 @@ function client() {
       h('div', { class: 'cards' }, card(fs.filter((f) => !f.test).length, 'production files'), card(fs.filter((f) => f.test).length, 'test and support files'),
         card(ns.length, 'symbols'), card(modules.filter((m) => !st.repo || m.repo === st.repo).length, 'modules'),
         ...D.edgeKinds.map((k) => card(edgeCount[k] || 0, `${k} links (all repos)`)),
-        card(calls ? `${Math.round((100 * guesses) / calls)}%` : '0%', 'of call links are name guesses: unique-name or ambiguous')),
+        card(calls ? `${Math.round((100 * guesses) / calls)}%` : '0%', 'of call links are name guesses: unique-name, ambiguous or import-guess')),
       h('h2', null, 'Repositories'),
       h('table', null, h('tr', null, h('th', null, 'repo'), h('th', null, 'root'), h('th', { class: 'n' }, 'files'), h('th', { class: 'n' }, 'tests'), h('th', { class: 'n' }, 'modules'), h('th', { class: 'n' }, 'symbols'), h('th', null, 'HEAD'), h('th', null, 'indexed')),
         D.repos.filter((r) => !st.repo || r.name === st.repo).map((r) => h('tr', null,
@@ -1197,7 +1200,7 @@ function client() {
   function neighbourhood(focus, leftTitle, left, rightTitle, right) {
     const prep = (items) => {
       const shown = [], hid = { test: 0, amb: 0 }
-      for (const it of items) { if (it.test && !st.tests) hid.test++; else if (it.conf === 'ambiguous' && !st.guesses) hid.amb++; else shown.push(it) }
+      for (const it of items) { if (it.test && !st.tests) hid.test++; else if (hiddenConf(it.conf) && !st.guesses) hid.amb++; else shown.push(it) }
       shown.sort((a, b) => confRank(a.conf) - confRank(b.conf) || (b.n || 0) - (a.n || 0) || (a.label < b.label ? -1 : 1))
       const pills = []
       if (shown.length > MAXCOL) pills.push(`+${shown.length - MAXCOL} more in the lists below`)
@@ -1214,7 +1217,7 @@ function client() {
       '<defs><marker id="nb-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0L8,4L0,8z" class="arrow"/></marker></defs>',
       `<text class="head" x="0" y="14">${esc(leftTitle.toUpperCase())} · ${L.total}</text>`,
       `<text class="head" x="${R0}" y="14">${esc(rightTitle.toUpperCase())} · ${R.total}</text>`]
-    const cls = (c) => `edge${c === 'unique-name' ? ' dash' : c === 'ambiguous' ? ' dot' : ''}`
+    const cls = (c) => `edge${c === 'unique-name' ? ' dash' : hiddenConf(c) ? ' dot' : ''}`
     const item = (it, x, y) => {
       const attr = it.sym !== undefined ? `data-sym="${it.sym}"` : `data-file="${it.file}"`
       const tag = it.n > 1 ? ` · ${it.n} links` : it.conf && it.conf !== 'resolved' ? ` · ${it.conf}` : ''
@@ -1255,7 +1258,7 @@ function client() {
       h('h3', null, n.name, h('span', { class: 'pill' }, n.kind), n.test ? h('span', { class: 'pill' }, 'test') : null),
       h('div', null, 'at ', h('code', null, loc(n)), ' · in ', n.file ? jumpFile(n.file) : '?'),
       neighbourhood({ label: n.name, sub: loc(n), kind: n.kind, repo: n.file && n.file.repo }, 'Callers', n.callers.map(it), 'Callees', n.callees.map(it)),
-      h('p', { class: 'note' }, 'Solid: resolved by syntax · dashed: the only definition of that name (unique-name) · dotted: one of several (ambiguous). Arrows point from the caller to what it calls.'),
+      h('p', { class: 'note' }, 'Solid: resolved by syntax · dashed: the only definition of that name (unique-name) · dotted: one of several (ambiguous), or a method picked by its imported file on a receiver of unknown type (import-guess). Arrows point from the caller to what it calls.'),
       n.supers.length || n.subs.length ? h('div', { class: 'grid2' }, list('Extends / implements', n.supers, true), list('Extended / implemented by', n.subs, true)) : null,
       h('details', null, h('summary', null, `Every caller (${n.callers.length}) and callee (${n.callees.length}), as lists, test code and guesses included`),
         h('div', { class: 'grid2' }, list('Callers', n.callers), list('Callees', n.callees))))
@@ -1349,7 +1352,7 @@ function client() {
       rows.map(([f, v]) => h('tr', { class: 'click', onclick: () => select({ file: f }) }, h('td', { class: 'mono' }, jumpFile(f)), h('td', { class: 'n' }, v)))))
     const co = D.cochange.filter(([repo]) => !st.repo || repo === st.repo).slice(0, 25) // already strongest first
     return h('section', null,
-      h('p', { class: 'note' }, `Ranked by links resolved by syntax; name guesses (unique-name, ambiguous) are counted apart.${st.tests ? '' : ' Test code hidden.'}`),
+      h('p', { class: 'note' }, `Ranked by links resolved by syntax; name guesses (unique-name, ambiguous, import-guess) are counted apart.${st.tests ? '' : ' Test code hidden.'}`),
       h('h2', null, 'Size and churn'), treemap(fs),
       h('div', { class: 'grid2' }, symTable('Most called', top(ns, (n) => resolved(n.callers)), 'callers', 'callers'), symTable('Widest fan-out', top(ns, (n) => resolved(n.callees)), 'callees', 'callees')),
       h('div', { class: 'grid2' }, fileTable('Most used files', top(fs, (f) => resolvedOf(f.in).length), 'files using it'), fileTable('Files using the most', top(fs, (f) => resolvedOf(f.out).length), 'files it uses')),

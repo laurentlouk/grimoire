@@ -12,8 +12,9 @@
 //     changes them.
 import { systemMap } from './modules.mjs'
 import { routeSummary, routesServedBy, routeTitle } from './route-graph.mjs'
+import { guessSql } from './resolve.mjs'
 
-const GUESSES = "('ambiguous','unique-name')"
+const GUESSES = guessSql()
 const TEST_DEPTH = 6
 const CALLABLE = "('function','method','constructor')"
 

@@ -265,7 +265,7 @@ has(st, 'EXTENDS 1, IMPLEMENTS 1', 'status: edge counts per kind')
 // [same-package], NewBuilder → Builder (`&Builder{}`), Build → NewBuilder and Build → BuildThing
 // (`NewBuilder().BuildThing()`) [same-file], and `c.Total()` on `c := New()`, whose type the syntax
 // does not state: the one name guess of its 7 call links.
-has(st, 'name guesses: 14% of 7 call links (ambiguous + unique-name)', 'status: the share of call links that are name guesses, per repo')
+has(st, 'name guesses: 14% of 7 call links (unique-name + ambiguous + import-guess)', 'status: the share of call links that are name guesses, per repo')
 
 let r = await q('callers', { symbol: 'square', repo: 'web', depth: 3 })
 has(r, 'Circle.area  method  web/src/geo/circle.ts:8  [import]', 'TS: a named import resolves the call to the imported file')

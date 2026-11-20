@@ -10,10 +10,12 @@
 // every module that uses it (cycles cut), so entry points come first and shared code last.
 // Pure functions: the same index always gives the same map.
 
+import { GUESSES as GUESS_LIST } from './resolve.mjs'
+
 const SPLIT_SHARE = 0.35 // a folder above this share of its repository's files splits
 const MIN_SPLIT = 5 // … when it has at least this many
 const MAX_DEPTH = 4 // folder segments in a module key
-const GUESSES = new Set(['ambiguous', 'unique-name'])
+const GUESSES = new Set(GUESS_LIST)
 
 const dirsOf = (p) => p.split('/').slice(0, -1)
 
