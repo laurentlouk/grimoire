@@ -5265,5 +5265,28 @@ async function indexed() {
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 
+// ── the constants a table may be named by, and only those, reach the index ──
+console.log('\nconstants: a settings file\'s secrets never reach the index; a table name constant still names its table')
+{
+  const { tableConsts } = await import('../lib/data/readers/code.mjs')
+  eq(tableConsts([{ name: 'ORDERS_TABLE', line: 1, names: [{ text: 'orders', line: 1 }], env: [] }, { name: 'SECRET_KEY', line: 2, names: [{ text: 'abc', line: 2 }], env: [] }, { name: 'DB_URL', line: 3, names: [{ text: 'postgres://u:p@h/db', line: 3 }], env: [] }, { name: 'TPL', line: 4, names: [{ text: '{}-orders', line: 4 }], env: [] }, { name: 'DB_PASSWORD', line: 5, value: 'hunter2' }, { name: 'TABLE', line: 6, value: 'carts' }]).map((c) => c.name),
+    ['ORDERS_TABLE', 'TPL', 'TABLE'], 'tableConsts: a table-shaped value under a name that says nothing of a secret; a URL, a password or a key never')
+  const { findDeps } = await import('../lib/deps.mjs')
+  if (findDeps()) {
+    const SB = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-consts-')))
+    try {
+      const put = (rel, txt) => { mkdirSync(path.dirname(path.join(SB, rel)), { recursive: true }); writeFileSync(path.join(SB, rel), txt) }
+      put('grimoire.config.json', '{ "graph": {} }\n')
+      put('app/settings.py', "SECRET_KEY = 'canary-const-1'\nDB_PASSWORD = \"canary-const-2\"\nDATABASES = {'default': {'PASSWORD': 'canary-const-3'}}\nORDERS_TABLE = 'orders'\nAPI_TOKEN = 'canaryconst4'\n")
+      put('app/orders.py', "import boto3\nfrom app.settings import ORDERS_TABLE\n\ndef get_order(oid):\n    return boto3.client('dynamodb').get_item(TableName=ORDERS_TABLE, Key={'id': {'S': oid}})\n")
+      const { call: callC } = await import('../lib/commands.mjs')
+      await callC('graph_index', {}, { root: SB })
+      const dir = path.join(SB, '.grimoire/graph')
+      const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-?const-?\d/g) || []))
+      ok(!bytes.length, `a settings file's secret, password or token constant is not kept in the index (${bytes.length ? [...new Set(bytes)].join(', ') : 'none'})`)
+    } finally { rmSync(SB, { recursive: true, force: true }) }
+  }
+}
+
 console.log(`\n${PASS} passed, ${FAIL} failed`)
 process.exit(FAIL ? 1 : 0)

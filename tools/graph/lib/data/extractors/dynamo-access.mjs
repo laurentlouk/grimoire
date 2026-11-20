@@ -49,7 +49,7 @@
 //   Const  { name, line, names, env, test? }
 // A base's file is not read (graph_changes does not compare access patterns; data/base.mjs).
 import { codeName } from '../readers/names.mjs'
-import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each } from '../readers/code.mjs'
+import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each, tableConsts } from '../readers/code.mjs'
 import { readRust, scanUses as rsScan, strOf, isStr, attrOf, isTestAttr, formatParts } from './serde.mjs'
 import { readTs, scanUses as tsScan, strVal, knownOf, decls } from './ts-types.mjs'
 import { TEST_PATH } from '../../langs.mjs'
@@ -865,6 +865,7 @@ export default {
     const tree = ctx.tree(lang, text)
     try {
       const a = readAccess(tree, lang, file)
+      a.consts = tableConsts(a.consts) // a constant no table can be named by never reaches the index (readers/code.mjs)
       // a file with no call keeps its constants, for the calls of other files to name (not its functions)
       if (a.sites.length) return { declarations: [], access: { path: file, ...a } }
       return a.consts.length ? { declarations: [], access: { path: file, lang: a.lang, sites: [], fns: [], consts: a.consts, notes: [] } } : { declarations: [] }

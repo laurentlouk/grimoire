@@ -52,5 +52,30 @@ export function each(n, visit) {
 // files through their constants alone); no code entry at all when nothing is left.
 export function codeFacts(code) {
   const fns = code.fns.some((f) => f.converts.length) ? code.fns : []
-  return code.types.length || fns.length || code.consts.length ? { declarations: [], code: { ...code, fns } } : { declarations: [] }
+  const consts = tableConsts(code.consts)
+  return code.types.length || fns.length || consts.length ? { declarations: [], code: { ...code, consts, fns } } : { declarations: [] }
+}
+
+// The constants a table may be named by, and only those, reach the index: a value shaped like a table
+// name or a name template (letters, digits, `_ . - :`, `{}` where code fills in, at most 255) under a
+// name that says nothing of a secret. A settings file's password, a token or a URL with credentials
+// never is one, so no such literal is kept (the canary tests check every byte of the index).
+const TABLE_TEXT = /^[A-Za-z0-9_.:{}-]{1,255}$/
+const SECRET_NAME = /pass(word|wd)?|secret|token|api_?key|private|credential|auth|salt|cert|dsn|signing|access_?key|session_?key|^key$|_key$/i
+export function tableConsts(list) {
+  const out = []
+  for (const c of list || []) {
+    if (SECRET_NAME.test(String(c.name || ''))) continue
+    if ('value' in c) { if (typeof c.value === 'string' && TABLE_TEXT.test(c.value)) out.push(c); continue } // a reader's own shape
+    // a container's strings in order (`{'default': {'PASSWORD': '…'}}`): a secret's key drops itself
+    // and the value that follows it
+    const names = []
+    for (let i = 0, src = c.names || []; i < src.length; i++) {
+      const t = String(src[i].text ?? '')
+      if (SECRET_NAME.test(t)) { i++; continue }
+      if (TABLE_TEXT.test(t)) names.push(src[i])
+    }
+    if (names.length || (c.env || []).length) out.push({ ...c, names })
+  }
+  return out
 }
