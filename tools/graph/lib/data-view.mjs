@@ -5,7 +5,9 @@
 // foreign key), searches table and column names, focuses a table (it and its foreign key neighbours
 // lit, its passport beside: every column with the files that declare it), and lists what was found
 // but not read. A store of more than 60 tables starts as names only: a focus or a search draws the
-// tables it concerns with their columns, laid out by the same function render.mjs used.
+// tables it concerns with their columns, laid out by the same function render.mjs used. A relation
+// the schema declares and its client enforces (`cl`: no foreign key in the database) has a line of its
+// own (dash-dot-dot) and a legend entry, its column no FK mark, its own section in the passport.
 //
 // A key-value store (render.mjs packs it with `cards`) is drawn as a key card per table instead: its
 // partition and sort keys with their attribute types, its TTL (on, off, not said), each GSI and LSI
@@ -110,6 +112,8 @@ export function dataClient(ctx) {
   const memo = new Map(), overlays = new Map()
   // what a refine file states, labelled so wherever it is drawn
   const REFINED = (title = 'refined: an agent read the code and wrote it in a refine file beside the diagrams; re-checked on every render, never extracted') => h('span', { class: 'pill refined', title }, 'refined')
+  // a relation the schema declares and its client enforces (render.mjs `cl`): no foreign key in the database
+  const CLIENT_PILL = () => h('span', { class: 'pill client', title: 'declared by the schema, enforced by the client: no foreign key in the database' }, 'enforced by the client')
   const purpose = (x) => (x.pur && x.pur.length ? x.pur.map(([p, at]) => h('div', { class: 'srcline kpur', title: at || null }, REFINED(), ' ', p)) : null)
   const lower = (s) => String(s).toLowerCase()
   const CLS = { added: 'add', removed: 'del', modified: 'mod' }
@@ -190,6 +194,8 @@ export function dataClient(ctx) {
 
   // ── links to other stores: a stub per entity a link reaches, at the drawing's right edge (D5) ──
   const LEAD = 'a lead from the name, never checked: read the code before relying on it'
+  // a relation the schema declares and its client enforces (`cl`): never drawn like a foreign key
+  const CLIENT = 'declared by the schema, enforced by the client: no foreign key in the database'
   const MKSAY = { SK: 'sort key', TTL: 'time to live', KEY: 'a part of the key code fills in (a placeholder)', K: 'a key part' }
   const STUB_MAX = 12, SW = 214, SH = 38, SG = 12, STUB_TOP = 76
   const STUB_SAY = { lead: 'lead', refined: 'refined', lineage: 'mirrors · refined', fold: 'more links' }
@@ -303,7 +309,9 @@ export function dataClient(ctx) {
       : d.kd === 'ks' ? [h('span', null, h('span', { class: 'mkl k-sk' }, 'KEY'), 'a part code fills in'), h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'its lifetime')]
         : null,
     d.kd === 'kv' ? h('span', { class: 'muted' }, 'S string · N number · B binary') : null,
-    d.kd ? null : h('span', null, h('i', { class: 'lnk fkl' }), 'foreign key, declared'), h('span', null, h('i', { class: 'lnk rfl' }), 'refined: a refine file, re-checked'),
+    d.kd ? null : h('span', null, h('i', { class: 'lnk fkl' }), 'foreign key, declared'),
+    !d.kd && (d.tables || []).some((t) => t.rels.some((r) => r.cl)) ? h('span', null, h('i', { class: 'lnk cll' }), 'relation: declared by the schema, enforced by the client (no foreign key)') : null,
+    h('span', null, h('i', { class: 'lnk rfl' }), 'refined: a refine file, re-checked'),
     h('span', null, h('i', { class: 'lnk ldl' }), 'lead: from a name ending in id, never checked'), d.kd === 'ks' ? h('span', null, h('i', { class: 'lnk exl' }), 'extracted: a search index covers it') : null,
     (d.links && d.links.st && d.links.st.length) ? h('span', null, h('i', { class: 'stubk' }), 'another store: click to open it') : null,
     d.kd ? h('span', { class: 'muted' }, 'a line runs from the attribute that holds the reference (many) to the key it names (one)') : null)
@@ -359,8 +367,8 @@ export function dataClient(ctx) {
   const chTip = (s, x) => (s.ov && x.ch ? `\n${SINCE[x.ch]}${x.was ? `: ${x.was.join('; ')}` : ''}${x.bsrc && x.bsrc.length ? ` (at the base: ${x.bsrc.map((p) => bsrcText(s, p)).join(' · ')})` : ''}${x.ren !== null && x.ren !== undefined ? `\n${s.ch.renames[x.ren].text}` : ''}` : '')
   function table(s, ti, b, g, cls, sc) {
     const t = s.tables[ti], { x, y, w } = b
-    const fkTo = new Map()
-    for (const r of t.rels) r.columns.forEach((c, j) => { if (!fkTo.has(c)) fkTo.set(c, `${r.jn ? 'joined with ' : ''}${r.to} (${r.toColumns[j] || r.toColumns[0] || '?'})`) })
+    const fkTo = new Map(), clTo = new Set() // (a column a relation its client enforces covers: no foreign key)
+    for (const r of t.rels) r.columns.forEach((c, j) => { if (!fkTo.has(c)) { fkTo.set(c, `${r.jn ? 'joined with ' : ''}${r.to} (${r.toColumns[j] || r.toColumns[0] || '?'})`); if (r.cl) clTo.add(c) } })
     const ov = s.ov && t.ch ? ` ${CLS[t.ch]}${t.ch === 'removed' ? ' ghost' : ''}` : ''
     const dv = dcls(s, t)
     const label = `${t.name}, ${t.kind}${t.inf ? ' deduced from the queries in code' : ''}, ${plural(t.fields.length, t.inf ? 'column seen' : 'column', t.inf ? 'columns seen' : 'columns')}${g.conflicts ? `, ${plural(g.conflicts, 'conflict')}` : ''}${ov ? `, ${SINCE[t.ch]}` : ''}${dv ? `, ${t.dl.gone && t.dl.s === 'built' ? 'removed as planned' : t.dl.gone ? 'removed, not in the plan' : DSAY[t.dl.s]}${stale(s, t) ? ', acknowledgement stale' : ''}` : ''}: open its passport`
@@ -401,7 +409,7 @@ export function dataClient(ctx) {
         mid.set(f, ry + 10)
         const ftip = t.inf ? `${f.name} · seen in code (${(f.seen || []).join(', ')}) · ${f.cast ? `cast to ${f.cast.join(' | ')}` : 'type unknown'} · nullability unknown · default unknown${f.lk ? ` · used in lookups (${f.lk.join(', ')}): a lead for an index` : ''}${fkTo.has(f.name) ? ` · ${fkTo.get(f.name)}` : ''}`
           : f.mk && f.mk !== 'PK' ? `${f.name} ${f.type || ''} · ${MKSAY[f.mk] || f.mk}${fkTo.has(f.name) ? ` · → ${fkTo.get(f.name)}` : ''}${f.src && f.src.length ? `\n${f.src.map((p) => srcText(s, p)).join(' · ')}` : ''}`
-          : `${f.name} ${f.type} · ${f.nullable === null ? 'nullability unknown' : f.nullable ? 'nullable' : 'not null'}${f.def !== null && f.def !== undefined ? ` · default ${f.def}` : ''}${f.gen ? ` · generated ${f.gen}` : ''}${f.pk ? ' · primary key' : ''}${fkTo.has(f.name) ? ` · foreign key → ${fkTo.get(f.name)}` : ''}${chTip(s, f)}${dTip(s, f)}`
+          : `${f.name} ${f.type} · ${f.nullable === null ? 'nullability unknown' : f.nullable ? 'nullable' : 'not null'}${f.def !== null && f.def !== undefined ? ` · default ${f.def}` : ''}${f.gen ? ` · generated ${f.gen}` : ''}${f.pk ? ' · primary key' : ''}${fkTo.has(f.name) ? ` · ${clTo.has(f.name) ? 'relation enforced by the client' : 'foreign key'} → ${fkTo.get(f.name)}` : ''}${chTip(s, f)}${dTip(s, f)}`
         out.push(`<g class="row${t.inf ? ' inf' : ''}${sc.colHit(f) ? ' hit' : ''}${rc}" data-col="${esc(f.name)}"><title>${esc(ftip)}</title><rect class="rowbg" x="${x + 1}" y="${ry}" width="${w - 2}" height="20"/>`, bar,
           f.mk || f.pk ? `<text class="mk m${esc(String(f.mk || 'PK').toLowerCase())}" x="${x + 8}" y="${ry + 13.5}">${esc(f.mk || 'PK')}</text>` : '',
           f.fk ? `<text class="mk mfk" x="${x + (f.pk || f.mk ? 25 : 8)}" y="${ry + 13.5}">FK</text>` : '',
@@ -450,11 +458,12 @@ export function dataClient(ctx) {
       const tip = r.ld ? `lead: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}): "${r.columns[0]}" names ${r.stem}, ${LEAD}${r.sort === 'partition' ? '\nsort key only: the item also needs its partition key' : r.sort ? '\npartition key only: the item also needs its sort key' : ''}`
         : r.ex ? `extracted: ${r.why}`
         : r.rf ? `refined: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), no foreign key states it\n${r.why}${r.at.length ? `\n${r.at.join(' · ')}` : ''}`
+        : r.cl ? `relation: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), ${CLIENT}\non delete ${r.onDelete} · on update ${r.onUpdate}, as the client emulates them${r.src.length ? `\n${r.src.map((p) => srcText(s, p)).join(' · ')}` : ''}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
         : r.jn ? `inferred from a join: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), never a foreign key${r.dir === 'as written' ? '\ndirection as written: neither side is an id' : ''}${r.src.length ? `\n${r.src.map((p) => srcText(s, p)).join(' · ')}` : ''}`
           : `${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')})\non delete ${r.onDelete} · on update ${r.onUpdate}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
       if (r.ex) { parts.push(`<path class="fk ex${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}"><title>${esc(tip)}</title></path>`); continue }
       if (r.ld) { over.push(`<path class="fk ld${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`); continue }
-      parts.push(`<path class="fk${r.rf ? ' rf' : ''}${r.ld ? ' ld' : ''}${r.jn ? ' jn' : ''}${s.ov && r.ch ? ` ${CLS[r.ch]}` : ''}${dcls(s, r)}${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`)
+      parts.push(`<path class="fk${r.rf ? ' rf' : ''}${r.ld ? ' ld' : ''}${r.jn ? ' jn' : ''}${r.cl ? ' cl' : ''}${s.ov && r.ch ? ` ${CLS[r.ch]}` : ''}${dcls(s, r)}${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`)
     }
     if (s.ov) sc.list.forEach((ti, j) => {
       const t = s.tables[ti]
@@ -522,7 +531,7 @@ export function dataClient(ctx) {
     const known = new Set(s.tables.map((o) => o.name))
     const warn = (x) => (x.cf.length ? h('span', { class: 'pill warn', title: x.cf.map((c) => cfTip(s, c)).join('\n') }, plural(x.cf.length, 'conflict')) : null)
     const by = s.tables.flatMap((o) => o.rels.filter((r) => r.to === t.name && o !== t).map((r) => [o, r]))
-    const conflicts = [[t.kind, t], ...t.fields.map((f) => [`column ${f.name}`, f]), ...t.keys.map((k) => [`${k.role} key (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x]), ...t.rels.map((r) => [`foreign key (${r.columns.join(', ')}) → ${r.to}`, r])]
+    const conflicts = [[t.kind, t], ...t.fields.map((f) => [`column ${f.name}`, f]), ...t.keys.map((k) => [`${k.role} key (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x]), ...t.rels.map((r) => [`${r.cl ? 'relation' : 'foreign key'} (${r.columns.join(', ')}) → ${r.to}`, r])]
       .flatMap(([label, x]) => x.cf.map((c) => [c.inf ? `[inferred] column ${c.label}` : label, c])) // a column only the queries in code name
     const section = (title, list, row) => [h('h2', null, `${title} (${list.length})`), list.length ? h('ul', { class: 'links dlist' }, list.map(row)) : h('div', { class: 'muted' }, 'none')]
     // in the overlay: what changed since the base, its before → after, and where it stood there
@@ -536,7 +545,7 @@ export function dataClient(ctx) {
     const dPill = (x) => (s.dv && x.dl ? h('span', { class: `pill d-${x.dl.s}` }, x.dl.gone && x.dl.s === 'built' ? 'removed as planned' : x.dl.gone ? 'removed, not in the plan' : DSAY[x.dl.s]) : null)
     const item = (x, ...head) => h('li', { class: ov(x) ? `ch-${CLS[x.ch]}` : s.dv && x.dl ? `dl-${x.dl.s}` : null }, h('div', null, ...head, chPill(x), dPill(x)), where(x), was(x))
     // the table itself only when it was added, removed, or changed its own kind (not merely its elements)
-    const changed = s.ov ? [...(t.ch && (t.ch !== 'modified' || t.was) ? [[`${t.kind} ${t.name}`, t]] : []), ...t.fields.map((f) => [`column ${f.name}`, f]), ...t.keys.map((k) => [`${k.role} key (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x]), ...t.rels.map((r) => [`foreign key (${r.columns.join(', ')}) → ${r.to}`, r])].filter(([, x]) => x.ch) : []
+    const changed = s.ov ? [...(t.ch && (t.ch !== 'modified' || t.was) ? [[`${t.kind} ${t.name}`, t]] : []), ...t.fields.map((f) => [`column ${f.name}`, f]), ...t.keys.map((k) => [`${k.role} key (${k.parts.join(', ')})`, k]), ...t.indexes.map((x) => [`index ${x.name}`, x]), ...t.rels.map((r) => [`${r.cl ? 'relation' : 'foreign key'} (${r.columns.join(', ')}) → ${r.to}`, r])].filter(([, x]) => x.ch) : []
     const rens = s.ov ? [...new Set([t, ...t.fields, ...t.keys, ...t.indexes, ...t.rels].map((x) => x.ren).filter((r) => r !== null && r !== undefined))] : []
     // in the delta overlay: the changes this table carries, and what the branch did to it outside them
     const dks = s.dv ? s.dl.ks.filter((k) => s.delta.changes[k].tbl === ti) : [], dus = s.dv ? s.dl.us.filter((j) => s.delta.unplanned[j].tbl === ti) : []
@@ -555,11 +564,15 @@ export function dataClient(ctx) {
         f.comp ? h('span', { class: 'muted' }, ' · computed ', h('code', null, f.comp)) : null, f.en ? h('span', { class: 'muted' }, ` · enum (${f.en.join(' | ')})`) : null, warn(f))),
       t.keys.length ? section('Keys', t.keys, (k) => item(k, name(k, 'span', `${k.role} (${k.parts.join(', ')})`), warn(k))) : null,
       section('Indexes', t.indexes, (x) => item(x, name(x, 'span', `${x.name}${x.unique ? ' unique' : ''} (${x.columns.join(', ')})${x.partial ? ' partial' : ''}`), warn(x), purpose(x))),
-      section('Foreign keys', t.rels.filter((r) => !r.rf), (r) => item(r,
+      section('Foreign keys', t.rels.filter((r) => !r.rf && !r.cl), (r) => item(r,
         name(r, 'span', `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), h('span', { class: 'muted' }, ` · on delete ${r.onDelete} · on update ${r.onUpdate}`), warn(r))),
+      // a relation the schema declares and its client enforces: its own section, never a foreign key
+      t.rels.some((r) => r.cl) ? [...section('Relations enforced by the client', t.rels.filter((r) => r.cl), (r) => item(r,
+        name(r, 'span', `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), h('span', { class: 'muted' }, ` · on delete ${r.onDelete} · on update ${r.onUpdate}`), CLIENT_PILL(), warn(r))),
+        h('p', { class: 'note' }, 'Declared by the schema, enforced by the client: no foreign key in the database. The client emulates its actions; no migration states it.')] : null,
       t.rels.some((r) => r.rf) ? section('Relations no foreign key states', t.rels.filter((r) => r.rf), (r) => h('li', null, h('div', null, h('span', { class: 'mono' }, `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), REFINED()),
         h('div', { class: 'srcline' }, r.why), r.at.length ? h('div', { class: 'srcline' }, r.at.join(' · ')) : null)) : null,
-      section('Referenced by', by, ([o, r]) => h('li', null, go(o.name), h('span', { class: 'mono muted' }, ` (${r.columns.join(', ')}) → (${r.toColumns.join(', ')})`), r.rf ? REFINED() : null)),
+      section('Referenced by', by, ([o, r]) => h('li', null, go(o.name), h('span', { class: 'mono muted' }, ` (${r.columns.join(', ')}) → (${r.toColumns.join(', ')})`), r.rf ? REFINED() : r.cl ? CLIENT_PILL() : null)),
       sqList(s, t),
       conflicts.length ? [h('h2', null, `Conflicts (${conflicts.length})`), h('p', { class: 'note' }, `The declarations disagree${conflicts.some(([, c]) => c.inf) ? `, or the queries in code name a column they lack (inferred, never overriding them${s.q ? `; they attach as ${s.q.why}` : ''})` : ''}; each side is kept, none is resolved.`),
         conflicts.some(([, c]) => c.drift) ? h('p', { class: 'note' }, 'The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.') : null,

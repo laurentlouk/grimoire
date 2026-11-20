@@ -53,7 +53,7 @@ import { layoutErd, erdBox } from './data/layout.mjs'
 import { diffModels } from './data/diff.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
 import { parseDelta, deltaStates, findTarget, changeText, diffText } from './data/delta.mjs'
-import { changeVal, renameText, baseText, refName, CHANGE_KIND, symbolAt } from './query.mjs'
+import { changeVal, renameText, baseText, refName, changeKind, symbolAt } from './query.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, CAP, LABELS } from './data/access.mjs'
 import { sqlFunctions, NOT_DECLARED } from './data/queries.mjs'
 import { redisFunctions, templatesOf, indexesOf, streamsOf, prefixTree, ttlText, NO_EXPIRY, NO_QUERY, ASSEMBLED, UNKNOWN as KS_UNKNOWN } from './data/redis.mjs'
@@ -210,6 +210,10 @@ function packArch(doc, r, extra) {
 // link to another store (a lead, a refined relation, a lineage claim) a stub, packed on the store as
 // `links: { st: [{ kind, dir, from, column, store, n: that store's index or -1, entity, toColumn,
 // why, stem }], rv: the names several tables share }`.
+// A relation the schema declares and its client enforces (data/reconcile.mjs `kind: client`: no
+// foreign key in the database) is packed among the table's own relations, `cl: 1`: drawn with a line
+// of its own (dash-dot-dot), its column with no FK mark, and it replaces a lead on its columns as a
+// foreign key does (data/links.mjs).
 export function dataData(db, files, repos, changes = null, deltas = [], refined = null) {
   const out = { stores: [], unread: [], failed: [], refine: null, changes: { base: null, why: changes?.why || 'no base was resolved' } }
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'data_facts'").get()) return out // an index built before the data model
@@ -328,7 +332,7 @@ function packDelta(file, { model, base, diff, why, stores, packedAt, shown }) {
   const overlay = stores.map((ps, n) => (byStore.has(n) && !ps.ks ? packDeltaStore(ps, model.stores.find((x) => x.id === ps.id), byStore.get(n), { base, diff, changes, unplanned, shown }) : null))
   return { ...head, errors: [], spec: delta.spec, changes, unplanned, stores: overlay, unplWhy: diff ? null : why || 'no base was resolved' }
 }
-const describeChange = (c, dialect = null) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${dialect === 'dynamodb' && c.kind === 'field' ? 'attribute' : CHANGE_KIND[c.kind]} ${c.entity} · ${c.name} ${c.change}`)
+const describeChange = (c, dialect = null) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${dialect === 'dynamodb' && c.kind === 'field' ? 'attribute' : changeKind(c)} ${c.entity} · ${c.name} ${c.change}`)
 // What `after` states, in a line (shown as text in the passport).
 function afterText(kind, c) {
   const a = c.after
@@ -506,7 +510,8 @@ function packer(entities, src, cf, bsrc = null) {
   return (e) => {
     const rels = e.relations.map((r) => { const to = entity(r.to); return { r, columns: r.columns.map((c) => column(e, c)), to: to ? to.name : r.to, toColumns: r.toColumns.map((c) => column(to, c)) } })
     const keys = e.keys.map((k) => ({ k, parts: k.parts.map((c) => column(e, c)) }))
-    const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
+    // (a relation its client enforces is no foreign key: its column gets no FK mark)
+    const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.filter(({ r }) => r.kind !== 'client').flatMap(({ columns }) => columns))
     return {
       name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nt: e.nameTemplate } : {}), ...cite(e),
       fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, ...cite(f),
@@ -514,7 +519,7 @@ function packer(entities, src, cf, bsrc = null) {
         ...(f.item ? { it: f.item.map((i) => ({ t: i.type, raw: i.raw, kind: i.kind, nul: i.nullable ? 1 : 0, def: i.default ?? null, vals: i.values ?? null })), ...(f.sources.every((s) => s.kind === 'code') ? { code: 1 } : {}) } : {}) })),
       keys: keys.map(({ k, parts }) => ({ role: k.role, parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}), ...cite(k) })),
       indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, ...(kvIndex(x) ? kvPack(x) : {}), ...cite(x) })),
-      rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, ...cite(r) })),
+      rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, ...(r.kind === 'client' ? { cl: 1 } : {}), ...cite(r) })),
     }
   }
 }
@@ -945,10 +950,10 @@ ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4
 .mkl.k-gsi,.mkl.k-lsi,.mkl.k-idx{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 12%,var(--panel))}.mkl.k-a{color:var(--muted);background:var(--hover)}
 .mkl.k-i{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 10%,var(--panel))}ul.kitem .krow.d1{padding-left:20px}ul.kitem .krow.d2{padding-left:34px}ul.kitem .krow.d3{padding-left:48px}ul.kitem .krow.d4,ul.kitem .krow.d5,ul.kitem .krow.d6{padding-left:62px}
 .krow .kacc{margin:1px 0 2px 30px;font-size:12px}.krow .kacc .pill{margin:0 4px 0 0}.kfn{overflow-wrap:anywhere}.mkl.k-r{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,var(--panel))}.mkl.k-w{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel))}.mkl.k-u{color:var(--muted);background:var(--hover)}ul.kaccess .krow.test{opacity:.8}
-.pill.refined{color:var(--t-worker);border-color:currentColor;border-style:dashed}.rent{font-size:12.5px;margin:10px 0 3px;overflow-wrap:anywhere}.rent .mono{font-weight:600}.krow .kpur{margin:1px 0 2px 30px}.note.unused{color:var(--warn)}svg.erd .fk.rf{stroke:var(--t-worker);stroke-dasharray:4 4}
+.pill.refined{color:var(--t-worker);border-color:currentColor;border-style:dashed}.pill.client{color:var(--link);border-color:currentColor}.rent{font-size:12.5px;margin:10px 0 3px;overflow-wrap:anywhere}.rent .mono{font-weight:600}.krow .kpur{margin:1px 0 2px 30px}.note.unused{color:var(--warn)}svg.erd .fk.rf{stroke:var(--t-worker);stroke-dasharray:4 4}
 svg.erd .tbl rect{fill-opacity:.86}svg.erd .port{fill:var(--panel);stroke:var(--muted);stroke-width:1.4}svg.erd .port.rf{stroke:var(--t-worker)}svg.erd .port.on{stroke:var(--accent)}svg.erd .port.dim{opacity:.25}svg.erd .fk.ld{stroke:var(--muted);stroke-dasharray:1.5 4.5;stroke-linecap:round;stroke-width:1.8}svg.erd .fk.ex{stroke:color-mix(in srgb,var(--t-cloud) 70%,var(--line));stroke-width:1.1}svg.erd .fk.lin{stroke-dasharray:8 3 2 3}svg.erd .stub{cursor:pointer}svg.erd .stub rect{fill:color-mix(in srgb,var(--t-database) 4%,var(--panel));stroke:color-mix(in srgb,var(--t-database) 45%,var(--line));stroke-width:1.2;stroke-dasharray:5 3}svg.erd .stub.ld rect{stroke:var(--muted)}svg.erd .stub.off{cursor:default;opacity:.6}svg.erd .stub .sst{font:500 10px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--muted)}svg.erd .stub .sen{font:600 12.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink)}svg.erd .stub .sgo{fill:none;stroke:var(--muted);stroke-width:1.4}svg.erd .stub:hover rect,svg.erd .stub:focus rect{stroke:var(--accent);stroke-dasharray:none}
-svg.erd .mk.msk{fill:var(--t-worker)}svg.erd .mk.mttl{fill:var(--warn)}svg.erd .mk.mkey{fill:var(--t-cloud)}svg.erd .mk.mk{fill:var(--muted)}svg.erd .xr.more .xrow{fill:var(--muted);font-style:italic}.dlegend .lnk{display:inline-block;width:24px;height:0;margin:0 4px;vertical-align:middle;border:0;border-radius:0;background:none;transform:none}.dlegend .fkl{border-top:1.6px solid var(--link)}.dlegend .rfl{border-top:1.6px dashed var(--t-worker)}.dlegend .ldl{border-top:2px dotted var(--muted)}.dlegend .exl{border-top:1.1px solid var(--t-cloud)}.dlegend .stubk{display:inline-block;width:18px;height:11px;border:1.2px dashed var(--t-database);border-radius:3px;margin:0 4px;vertical-align:middle}.kvpass .kcard{margin:0}
-svg.erd .tbl.inf .tframe{stroke-dasharray:6 4;stroke-width:1.5}svg.erd .tbl.inf .thead{fill:color-mix(in srgb,var(--t-database) 5%,var(--panel))}svg.erd .fk.jn{stroke-dasharray:6 4}svg.erd .unk{fill:var(--panel);stroke:var(--muted);stroke-width:1;stroke-dasharray:2 1.6}svg.erd .row.inf .ctype{font-style:italic}
+svg.erd .mk.msk{fill:var(--t-worker)}svg.erd .mk.mttl{fill:var(--warn)}svg.erd .mk.mkey{fill:var(--t-cloud)}svg.erd .mk.mk{fill:var(--muted)}svg.erd .xr.more .xrow{fill:var(--muted);font-style:italic}.dlegend .lnk{display:inline-block;width:24px;height:0;margin:0 4px;vertical-align:middle;border:0;border-radius:0;background:none;transform:none}.dlegend .fkl{border-top:1.6px solid var(--link)}.dlegend .rfl{border-top:1.6px dashed var(--t-worker)}.dlegend .ldl{border-top:2px dotted var(--muted)}.dlegend .exl{border-top:1.1px solid var(--t-cloud)}.dlegend .cll{height:1.6px;background:repeating-linear-gradient(90deg,var(--link) 0 6px,transparent 6px 8px,var(--link) 8px 9.5px,transparent 9.5px 11.5px,var(--link) 11.5px 13px,transparent 13px 15px)}.dlegend .stubk{display:inline-block;width:18px;height:11px;border:1.2px dashed var(--t-database);border-radius:3px;margin:0 4px;vertical-align:middle}.kvpass .kcard{margin:0}
+svg.erd .tbl.inf .tframe{stroke-dasharray:6 4;stroke-width:1.5}svg.erd .tbl.inf .thead{fill:color-mix(in srgb,var(--t-database) 5%,var(--panel))}svg.erd .fk.jn{stroke-dasharray:6 4}svg.erd .fk.cl{stroke-dasharray:9 3 2 3 2 3}svg.erd .unk{fill:var(--panel);stroke:var(--muted);stroke-width:1;stroke-dasharray:2 1.6}svg.erd .row.inf .ctype{font-style:italic}
 .pill.inferred{color:var(--muted);border-color:currentColor;border-style:dashed}.dia.unk{border-style:dashed;background:transparent}.dlegend .jnline{display:inline-block;width:22px;border-top:1.6px dashed var(--link);margin:0 3px}.dlegend .infbox{display:inline-block;width:16px;height:10px;border:1.4px dashed var(--muted);border-radius:3px;margin:0 3px}
 .kcard.kspace{max-width:none}.kshead{flex-wrap:wrap;gap:4px 6px}ul.ktree .krow.d1{padding-left:18px}ul.ktree .krow.d2{padding-left:34px}ul.ktree .krow.d3{padding-left:50px}ul.ktree .krow.d4,ul.ktree .krow.d5,ul.ktree .krow.d6{padding-left:66px}ul.ktree .krow.cf{background:color-mix(in srgb,var(--warn) 7%,transparent)}ul.ktree .kfields,ul.ktree .kaccess{margin-left:30px;font-size:12px}.kcard.kix.lead{border-style:dashed}.mkl.k-hash,.mkl.k-string,.mkl.k-set,.mkl.k-sorted,.mkl.k-list,.mkl.k-json,.mkl.k-geo,.mkl.k-hyperloglog,.mkl.k-bitmap,.mkl.k-time{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 10%,var(--panel))}.mkl.k-stream,.mkl.k-ch{color:var(--link);background:color-mix(in srgb,var(--link) 10%,var(--panel))}
 details.refine{margin:0 0 14px}details.refine h2{font-size:14px;margin:14px 0 6px}.lineagebox{margin:6px 0}.lineagebox svg{min-width:640px;max-width:900px}svg.lineage .lbox rect{fill:var(--panel);stroke:color-mix(in srgb,var(--t-database) 55%,var(--line));stroke-width:1.3}svg.lineage .lbox.rf rect{stroke:var(--t-worker);stroke-dasharray:5 4}svg.lineage .lbox.go{cursor:pointer}

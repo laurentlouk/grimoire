@@ -102,7 +102,9 @@
 //      errors at their line and never their text, hostile text bounded) and its extractor (Postgres
 //      and SQLite types, maps, native types, defaults in the migration's terms, computed defaults,
 //      relations and their default actions, an implicit many-to-many table, views, enums, a folder
-//      schema, a config's migrations path); the conflict rule on hand-built declarations (a schema
+//      schema, a config's migrations path; relations under relationMode prisma and on MongoDB kept,
+//      enforced by the client: never a conflict against migrations without their foreign keys,
+//      counted and named apart, a foreign key turned into one modified in the diff); the conflict rule on hand-built declarations (a schema
 //      agreeing with its migrations, one edited without a migration, a table stated in part); then,
 //      with the parser runtime, the TypeScript table builders (SQLite, Postgres and MySQL builders,
 //      the third argument, a pgSchema, a creator, helpers and spreads, casing, a customType, a config
@@ -169,6 +171,11 @@
 //      writers, each at its path:line; unknown stays unknown; the Data tab's dashed ERD and banner,
 //      escaping; then migrations added: the declared model wins, a column only the code names an
 //      [inferred] conflict
+//  37. relations a schema declares and its client enforces (fixtures/prisma-client: relationMode
+//      prisma, a role-named relation and a plain one, Postgres migrations without foreign keys) through
+//      call(): counted apart from foreign keys, no conflict, no lead on their columns; a migration that
+//      adds the foreign key after all (one element, its `enforced` the conflict); a branch adding one
+//      (graph_changes names it a relation enforced by the client); the page's packing
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, realpathSync, utimesSync, readdirSync, mkdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
@@ -2705,7 +2712,57 @@ console.log('\n28 · code-declared SQL models: the schema-language reader (reade
     ['Q', ['id TEXT [@default(cuid())]'], []],
   ], 'SQLite: an enum is TEXT, autoincrement no default, cuid() computed; Json not typed by any rule (kept, not compared); a required relation: Restrict on delete, Cascade on update')
   const rm = px({ 'prisma/schema.prisma': SQ('\n  relationMode = "prisma"') }).declarations[0]
-  ok(rm.entities.every((e) => !e.relations.length) && rm.notes.some((n) => n.includes('relationMode = "prisma"')), `relationMode = "prisma": no foreign key in the database, none modeled, noted (${rm.notes.join(' | ')})`)
+  eq([rm.entities.map((e) => [e.name, e.relations.map((r) => `(${r.columns})->${r.to}(${r.toColumns}) ${r.onDelete}/${r.onUpdate} ${r.enforced}:${r.line}`)]), rm.notes.some((n) => n.includes('relationMode = "prisma"'))],
+    [[['P', ['(qId)->Q(id) restrict/cascade client:17']], ['Q', []]], true], 'relationMode = "prisma": no foreign key in the database, so each relation is kept as the schema declares it, marked enforced by the client, at its line, its actions those the client emulates; noted')
+
+  // relationMode prisma, on Postgres: a role-named relation (two to one model, told apart by their names),
+  // a plain one, and an implicit many-to-many, whose join table prisma migrate still creates
+  const CR = ['datasource db {', '  provider     = "postgresql"', '  url          = env("DATABASE_URL")', '  relationMode = "prisma"', '}',
+    'model User {', '  id      String    @id @db.Uuid', '  owned   Website[] @relation("owner")', '  created Website[] @relation("createUser")', '  @@map("user")', '}',
+    'model Website {', '  id         String    @id @db.Uuid', '  userId     String?   @map("user_id") @db.Uuid', '  createdBy  String?   @map("created_by") @db.Uuid',
+    '  user       User?     @relation("owner", fields: [userId], references: [id])', '  createUser User?     @relation("createUser", fields: [createdBy], references: [id], onDelete: Cascade)',
+    '  sessions   Session[]', '  tags       Tag[]', '  @@map("website")', '}',
+    'model Session {', '  id        String  @id @db.Uuid', '  websiteId String  @map("website_id") @db.Uuid', '  website   Website @relation(fields: [websiteId], references: [id])', '  @@map("session")', '}',
+    'model Tag {', '  id       String    @id @db.Uuid', '  websites Website[]', '}'].join('\n')
+  const cr = px({ 'prisma/schema.prisma': CR }).declarations[0]
+  const relsOf = (d) => d.entities.flatMap((e) => e.relations.map((r) => `${e.name}(${r.columns})->${r.to}(${r.toColumns}) ${r.onDelete} ${r.enforced || 'database'}:${r.line}`))
+  eq(relsOf(cr), ['website(user_id)->user(id) set null client:16', 'website(created_by)->user(id) cascade client:17', 'session(website_id)->website(id) restrict client:25', '_TagToWebsite(A)->Tag(id) cascade client:19', '_TagToWebsite(B)->website(id) cascade client:19'],
+    'relationMode prisma: every relation kept, enforced by the client, by its mapped columns and tables (a role-named one by its own fields: created_by → user), the implicit many-to-many\'s join table too')
+  // MongoDB: no foreign key either; a relation is the schema's, enforced by the client; no join table
+  const MG = 'datasource db {\n  provider = "mongodb"\n  url = env("DATABASE_URL")\n}\nmodel Author {\n  id    String @id @default(auto()) @map("_id") @db.ObjectId\n  posts Post[]\n}\nmodel Post {\n  id       String @id @default(auto()) @map("_id") @db.ObjectId\n  authorId String @db.ObjectId\n  author   Author @relation(fields: [authorId], references: [id])\n}\n'
+  eq(relsOf(px({ 'prisma/schema.prisma': MG }).declarations[0]), ['Post(authorId)->Author(_id) restrict client:12'], 'MongoDB: a relation kept as the schema declares it, enforced by the client (the database holds no foreign key)')
+
+  // reconcile: against migrations without a foreign key, no conflict; counted and named apart from foreign keys
+  {
+    const { reconcile, storeSummary } = await import('../lib/data/reconcile.mjs')
+    const { diffModels } = await import('../lib/data/diff.mjs')
+    const col = (name, type, nullable = false) => ({ name, type, nullable, default: null, generated: null, path: 'prisma/migrations/1_init/migration.sql', line: 1 })
+    const T = (name, fields, rels = []) => ({ name, kind: 'table', path: 'prisma/migrations/1_init/migration.sql', line: 1, fields, keys: [{ role: 'primary', parts: ['id'] }], indexes: [], relations: rels })
+    const mig = (fks) => ({ store: 'prisma/migrations', dialect: 'postgres', source: { path: 'prisma/migrations/1_init/migration.sql', line: 1, kind: 'migration', confidence: 'declared' }, complete: true, partial: false, status: 'read', label: 'replayed', notes: [], files: 1,
+      entities: [T('user', [col('id', 'UUID')]), T('website', [col('id', 'UUID'), col('user_id', 'UUID', true), col('created_by', 'UUID', true)], fks), T('session', [col('id', 'UUID'), col('website_id', 'UUID')]), T('Tag', [col('id', 'UUID')]),
+        { ...T('_TagToWebsite', [col('A', 'UUID'), col('B', 'UUID')]), keys: [] }] })
+    const rows = (fks = []) => [{ repo: 'site', extractor: 'prisma@3', facts: { declarations: [cr] } }, { repo: 'site', extractor: 'sql-migrations@2', facts: { declarations: [mig(fks)] } }]
+    const M = reconcile(rows())
+    const st = M.stores[0], web = st.entities.find((e) => e.name === 'website')
+    eq([M.stores.length, web.relations.map((r) => `${r.kind} (${r.columns})->${r.to} ${r.conflicts.length}`), st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0)],
+      [1, ['client (user_id)->user 0', 'client (created_by)->user 0'], 0], 'reconcile: a relation the client enforces is kept beside the migrations\' columns, `kind: client`, and the migrations lacking its foreign key is no conflict')
+    eq(storeSummary(st), '5 tables · 0 foreign keys · 5 relations enforced by the client · 0 indexes · no conflicts', 'the store\'s summary counts them apart: never foreign keys')
+    eq(elementsOf(web).filter(([l]) => /\(user_id\)/.test(l)).map(([l]) => l), ['website relation (enforced by the client) (user_id)'], 'a conflict line names it a relation enforced by the client, never a foreign key')
+    // the migrations still create the foreign key (relationMode changed, no migration generated): one element, its enforcement the conflict
+    const fk = { columns: ['user_id'], to: 'user', toColumns: ['id'], onDelete: 'set null', onUpdate: 'cascade', path: 'prisma/migrations/1_init/migration.sql', line: 9 }
+    const M2 = reconcile(rows([fk]))
+    const r2 = M2.stores[0].entities.find((e) => e.name === 'website').relations.find((r) => r.columns[0] === 'user_id')
+    eq([r2.kind, r2.conflicts.map((c) => `${c.attr}: ${c.values.map((v) => `${v.value} ${v.sources.map((x) => x.kind)}`).join(' | ')}`), schemaDrift(r2.conflicts[0])], ['fk', ['enforced: database migration | client code'], true],
+      'a foreign key the migrations create where the schema says its client enforces the relation: one element, a foreign key, its `enforced` the conflict (the schema edited, no migration generated)')
+    // the diff: a foreign key that becomes a relation its client enforces is modified; adding one is a relation added
+    const before = reconcile([{ repo: 'site', extractor: 'sql-migrations@2', facts: { declarations: [mig([fk])] } }])
+    const dd = diffModels(before, M).stores[0].changes.filter((c) => c.kind === 'relation')
+    eq(dd.map((c) => `${c.change} ${c.name}${c.attrs.map((a) => ` ${a.attr}: ${a.before} → ${a.after}`).join('')}`).sort(), ['added (A) → Tag (id)', 'added (B) → website (id)', 'added (created_by) → user (id)', 'added (website_id) → website (id)', 'modified (user_id) → user (id) enforced: database → client'],
+      'the diff: a relation the client enforces added is a relation added; a foreign key turned into one is modified, `enforced` database → client')
+    const { describe, changeKind } = await import('../lib/query.mjs')
+    const added = dd.find((c) => c.name.startsWith('(created_by)'))
+    eq([describe(added, added.after, 'postgres'), changeKind(added)], ['website relation (created_by) → user(id), enforced by the client', 'relation enforced by the client'], 'graph_changes says what it is: a relation enforced by the client')
+  }
   // the sides of a relation pair by its name: a one-to-many's list side beside a many-to-many of another
   // name is no join table (the migration tool's own output, fixtures/sqlcode/golden/prisma, has only _likes and _admin)
   const NAMED = 'datasource db {\n  provider = "sqlite"\n}\nmodel User {\n  id    Int    @id @default(autoincrement())\n  posts Post[]\n  liked Post[] @relation("likes")\n}\nmodel Post {\n  id       Int    @id @default(autoincrement())\n  authorId Int\n  author   User   @relation(fields: [authorId], references: [id])\n  likers   User[] @relation("likes")\n}\nmodel Org {\n  id      Int      @id @default(autoincrement())\n  members Member[] @relation("membership")\n  admins  Member[] @relation("admin")\n}\nmodel Member {\n  id      Int   @id @default(autoincrement())\n  orgId   Int\n  org     Org   @relation("membership", fields: [orgId], references: [id])\n  adminOf Org[] @relation(name: "admin")\n}\nmodel Node {\n  id   Int    @id\n  next Node[] @relation("chain")\n  prev Node[] @relation("chain")\n}\n'
@@ -3908,7 +3965,7 @@ async function indexed() {
       'web:supabase/migrations  postgres  1 table · 1 foreign key · 0 indexes · no conflicts',
     ], 'graph_data: a store per migration folder, found by its DDL whatever its name; the Drizzle replay and snapshot agree')
     has(list, 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql', "Drizzle: the newest snapshot (0005) and the replay in the journal's order, its DROP-only migration included, are two declarations of one store")
-    has(list, '  migration  sql-migrations@2  replayed 3 files, 6 statements  api/prisma/migrations/20240105090000_init/migration.sql\n  code  prisma@2  schema, read 1 file: 3 models  api/prisma/schema.prisma\n  dialect: stated at api/prisma/migrations/migration_lock.toml:3', 'Prisma: one migration per versioned subfolder, the dialect from its lock file; schema.prisma beside them a second declaration of the store, agreeing with the replay')
+    has(list, '  migration  sql-migrations@2  replayed 3 files, 6 statements  api/prisma/migrations/20240105090000_init/migration.sql\n  code  prisma@3  schema, read 1 file: 3 models  api/prisma/schema.prisma\n  dialect: stated at api/prisma/migrations/migration_lock.toml:3', 'Prisma: one migration per versioned subfolder, the dialect from its lock file; schema.prisma beside them a second declaration of the store, agreeing with the replay')
     has(list, '  migration  sql-migrations@2  replayed 3 files, 5 statements  kiosk/storage/schema-changes/0001_visits.up.sql\n  dialect: sniffed: AUTOINCREMENT at kiosk/storage/schema-changes/0001_visits.up.sql:2', 'no tool named: the dialect sniffed; the down migrations and the seed left out, the migration holding only a DROP and a view kept')
     has(list, 'web:db/changes  dialect unknown  found, not read (2 files)\n  migration  sql-migrations@2  not read: dialect unknown (no config states it, and no dialect marker in the SQL)  web/db/changes/0001_events.sql', 'no dialect stated or seen: found, never replayed as SQLite by assumption')
     has(list, 'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes (+2 implicit, for keys) · no conflicts\n  migration  sql-migrations@2  replayed 2 files, 2 statements  web/db/legacy/0001_accounts.sql\n  dialect: set in grimoire.config.json (graph.data.migrations)', 'the same kind of SQL is read once grimoire.config.json states its dialect')
@@ -4717,7 +4774,7 @@ async function indexed() {
       'Data stores (2), read from migrations, snapshots, schemas and table declarations:',
       'lending:prisma/migrations  sqlite  6 tables · 1 view · 5 foreign keys · 7 indexes (+2 implicit, for keys) · no conflicts',
       '  migration  sql-migrations@2  replayed 2 files, 14 statements  lending/prisma/migrations/20240501090000_init/migration.sql',
-      '  code  prisma@2  schema, read 1 file: 5 models, 1 enum, 1 view  lending/prisma/schema.prisma',
+      '  code  prisma@3  schema, read 1 file: 5 models, 1 enum, 1 view  lending/prisma/schema.prisma',
       '  dialect: stated at lending/prisma/migrations/migration_lock.toml:3',
       'notes:drizzle  sqlite  3 tables · 3 foreign keys · 2 indexes · no conflicts',
       '  code  drizzle-ts@3  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
@@ -4761,7 +4818,7 @@ async function indexed() {
     ].join('\n'), 'the schema and the replay: every table at both its lines (the @@map\'ed one, the view, the implicit many-to-many join table), the enum at its line')
     eq(await sq('data', { entity: 'patrons' }), [
       'lending:prisma/migrations/patrons  table  (sqlite)',
-      '  declared at lending/prisma/migrations/20240501090000_init/migration.sql:2 [migration sql-migrations@2] · lending/prisma/schema.prisma:18 [code prisma@2]',
+      '  declared at lending/prisma/migrations/20240501090000_init/migration.sql:2 [migration sql-migrations@2] · lending/prisma/schema.prisma:18 [code prisma@3]',
       'Fields (5):',
       '  id  TEXT  not null  computed @default(cuid())  — lending/prisma/migrations/20240501090000_init/migration.sql:3 · lending/prisma/schema.prisma:19',
       '  email  TEXT  not null  — lending/prisma/migrations/20240501090000_init/migration.sql:4 · lending/prisma/schema.prisma:20',
@@ -5152,6 +5209,59 @@ async function indexed() {
     const mu = MD.stores[0].tables.find((t) => t.name === 'users')
     eq([MD.stores.map((s) => s.id), MD.stores[0].inf || null, mu.cf.map((c) => [c.label, c.inf, c.values.map((v) => v.value)]), mu.sq.rw.map((f) => f.n)], [['shop:db/migrations'], null, [['display_name', 1, ['named in code (inferred)', 'absent from the declarations']]], ['findUser', 'upsertUser', 'recentOrders']],
       'the page: the declared store drawn solid, the column only the code names among its table\'s conflicts as [inferred], its readers and writers')
+
+    // ── 37 · relations a schema declares and its client enforces ──
+    console.log('\n37 · relations the schema declares and the client enforces (fixtures/prisma-client: relationMode = "prisma", Postgres migrations without a foreign key)')
+    {
+    const CP = path.join(SANDBOX, 'prisma-client')
+    cpSync(path.join(HERE, 'fixtures', 'prisma-client'), CP, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    const cq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: CP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    ok(!(await cq('index')).includes('failure'), 'index: no extractor failure')
+    const clist = await cq('data')
+    has(clist, 'site:prisma/migrations  postgres  3 tables · 0 foreign keys · 3 relations enforced by the client · 4 indexes · no conflicts', 'graph_data: the relations counted apart from foreign keys, and the migrations lacking their foreign keys no conflict')
+    has(clist, '  code  prisma@3  schema, read 1 file: 3 models  site/prisma/schema.prisma\n    note: relationMode = "prisma"', '… the schema\'s declaration, its relation mode noted')
+    const cstore = await cq('data', { store: 'site:prisma/migrations' })
+    has(cstore, '  website  table  5 fields · primary (id) · 2 indexes · relations → user (enforced by the client)  site/prisma/migrations/20240110120000_init/migration.sql:11 · site/prisma/schema.prisma:19', '… a table lists the relations its client enforces, never as foreign keys')
+    ok(!cstore.includes('Leads ('), 'no lead: a declared relation replaces the lead on its columns (website.user_id, session.website_id)')
+    const cweb = await cq('data', { entity: 'website' })
+    eq(cweb.split('\n').filter((l) => /^(Foreign keys|Relations declared)/.test(l) || /^  \(/.test(l)), [
+      'Relations declared by the schema, enforced by the client: no foreign key in the database (2):',
+      '  (user_id) → user(id)  on delete set null · on update cascade (as the client emulates them)  — site/prisma/schema.prisma:26',
+      '  (created_by) → user(id)  on delete set null · on update cascade (as the client emulates them)  — site/prisma/schema.prisma:27',
+    ], 'graph_data, an entity: its relations as declared by the schema, client-enforced, each at its path:line (the role-named created_by → user among them); no foreign key section')
+    has(cweb, 'Conflicts: none', '… and no conflict with the migrations that state no foreign key')
+    // a migration that creates the foreign key after all: one element, a foreign key, its enforcement the conflict
+    mkdirSync(path.join(CP, 'site/prisma/migrations/20240201090000_fk'))
+    writeFileSync(path.join(CP, 'site/prisma/migrations/20240201090000_fk/migration.sql'), '-- AddForeignKey\nALTER TABLE "session" ADD CONSTRAINT "session_website_id_fkey" FOREIGN KEY ("website_id") REFERENCES "website"("id") ON DELETE RESTRICT ON UPDATE CASCADE;\n')
+    await cq('index')
+    has(await cq('data'), 'site:prisma/migrations  postgres  3 tables · 1 foreign key · 2 relations enforced by the client · 4 indexes · 1 conflict', 'a foreign key the migrations create on the same columns: a foreign key, counted so')
+    has(await cq('data', { entity: 'session' }), '  session foreign key (website_id)  enforced: database — site/prisma/migrations/20240201090000_fk/migration.sql:2 [migration] | client — site/prisma/schema.prisma:41 [code]', '… its conflict: the database enforces it, the schema says its client does')
+    rmSync(path.join(CP, 'site/prisma/migrations/20240201090000_fk'), { recursive: true })
+    await cq('index')
+    // a branch adding one: graph_changes says it is a relation enforced by the client
+    git(CP, 'init', '-q', '-b', 'main')
+    commit(CP, 'init')
+    const cpSchema = path.join(CP, 'site/prisma/schema.prisma')
+    writeFileSync(cpSchema, readFileSync(cpSchema, 'utf8').replace('  created   Website[] @relation("createUser")\n', '  created   Website[] @relation("createUser")\n  sessions  Session[]\n')
+      .replace('  browser   String?   @db.VarChar(20)\n', '  browser   String?   @db.VarChar(20)\n  userId    String?   @map("user_id") @db.Uuid\n').replace('  website Website @relation(fields: [websiteId], references: [id])\n', '  website Website @relation(fields: [websiteId], references: [id])\n  user    User?   @relation(fields: [userId], references: [id])\n'))
+    mkdirSync(path.join(CP, 'site/prisma/migrations/20240301090000_session_user'))
+    writeFileSync(path.join(CP, 'site/prisma/migrations/20240301090000_session_user/migration.sql'), '-- AlterTable\nALTER TABLE "session" ADD COLUMN "user_id" UUID;\n')
+    commit(CP, 'a session knows its user')
+    git(CP, 'switch', '-q', '-c', 'feat')
+    git(CP, 'branch', '-f', 'main', 'HEAD~1')
+    await cq('index')
+    const cchg = await cq('changes')
+    has(cchg, '  + session relation (user_id) → user(id), enforced by the client  — site/prisma/schema.prisma:44', 'graph_changes: a relation the client enforces, added, said as what it is (never a foreign key), at its line')
+    has(cchg, '  + session.user_id  column UUID, nullable', '… beside the column its migration adds')
+    // the page: its own line style, no FK mark, a legend entry, its own passport section
+    const { renderGraph: renderC } = await import('../lib/render.mjs')
+    const { loadProject: loadC } = await import('../lib/project.mjs')
+    const cpage = await renderC(loadC(CP))
+    const CS = dataOf(cpage).data.stores[0]
+    eq([CS.summary, CS.tables.map((t) => [t.name, t.rels.map((r) => `${r.columns}->${r.to}${r.cl ? ' client' : ''}`), t.fields.filter((f) => f.fk).length])],
+      ['3 tables · 0 foreign keys · 4 relations enforced by the client · 4 indexes · no conflicts', [['session', ['website_id->website client', 'user_id->user client'], 0], ['user', [], 0], ['website', ['user_id->user client', 'created_by->user client'], 0]]],
+      'the page packs them among the tables\' relations, `cl`, and their columns get no FK mark')
+    }
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

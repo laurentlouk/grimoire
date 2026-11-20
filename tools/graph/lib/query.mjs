@@ -3,7 +3,7 @@
 // The graph is a map for research (what relates to what, how far a change reaches). It is never
 // the source of truth for what code does: that is read in the code, at the path:line given here.
 import { langOf } from './langs.mjs'
-import { reconcile, elementsOf, storeSummary, schemaDrift, SCHEMA_DRIFT } from './data/reconcile.mjs'
+import { reconcile, elementsOf, storeSummary, schemaDrift, SCHEMA_DRIFT, isClient } from './data/reconcile.mjs'
 import { bindingHow } from './data/binding.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, capList, CAP, LABELS, FANOUT } from './data/access.mjs'
 import { kvIndex, projectionText } from './data/model.mjs'
@@ -45,6 +45,11 @@ export function clean(x, seen = new Map()) {
 const plural = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
 export const changeVal = (attr, v, at = (p) => p) => (Array.isArray(v) ? v.map(at).join(', ') : attr === 'nullable' ? (v ? 'nullable' : 'not null') : attr === 'unique' ? (v ? 'unique' : 'not unique') : attr === 'partial' ? (v ? 'partial' : 'whole') : attr === 'enabled' ? (v === true ? 'on' : v === false ? 'off' : 'not said') : v === null || v === undefined || v === '' ? 'none' : String(v))
 export const CHANGE_KIND = { field: 'column', key: 'key', index: 'index', relation: 'foreign key' }
+// a relation its client enforces is no foreign key (data/reconcile.mjs): its changes say so
+export const CLIENT_RELATION = 'relation enforced by the client'
+export const changeKind = (c) => (c.kind === 'relation' && isClient(c.after || c.before || {}) ? CLIENT_RELATION : CHANGE_KIND[c.kind])
+// what graph_data and the page say of one (the schema declares it; no foreign key in the database)
+export const CLIENT_SAYS = 'declared by the schema, enforced by the client: no foreign key in the database'
 const typeOf = (x) => x.type?.raw ?? x.type
 // A key-value table's elements in words (graph_data, graph_changes): a key, an index, the table.
 export const kvKeyText = (k) => (k.role === 'ttl' ? `TTL (${k.parts.length ? k.parts.join(', ') : 'no attribute'})${k.enabled === true ? ' on' : k.enabled === false ? ' off' : typeof k.enabled === 'string' ? ` ${k.enabled}` : ''}` : `${k.role} (${k.parts.join(', ')})`)
@@ -64,10 +69,11 @@ export function describe(c, el, dialect = null) {
   if (c.kind === 'key') return `${c.entity} ${el.role} key (${el.parts.join(', ')})`
   if (c.kind === 'index' && kvIndex(el)) return `${c.entity} index ${el.name} ${kvIndexText(el)}`
   if (c.kind === 'index') return `${c.entity} index ${el.name}${el.unique ? ' unique' : ''} (${el.columns.join(', ')})${el.partial ? ' partial' : ''}`
+  if (isClient(el)) return `${c.entity} relation (${el.columns.join(', ')}) → ${el.to}(${el.toColumns.join(', ')}), enforced by the client`
   return `${c.entity} foreign key (${el.columns.join(', ')}) → ${el.to}(${el.toColumns.join(', ')})`
 }
 export const renameText = (s, r) => {
-  const word = r.kind === 'entity' ? (s.changes[r.from[0]].before.kind || 'table') : CHANGE_KIND[r.kind]
+  const word = r.kind === 'entity' ? (s.changes[r.from[0]].before.kind || 'table') : changeKind(s.changes[r.from[0]])
   const names = (list) => list.map((i) => s.changes[i].name).join(', ')
   return r.ambiguous ? `possible renames, ambiguous, not decided: ${word}s ${names(r.from)} → ${names(r.to)}${r.entity ? ` in ${r.entity}` : ''} (each with the ${r.shape.replace('same ', '')}: any may pair)`
     : `possible rename, not decided: ${word} ${names(r.from)} → ${names(r.to)}${r.entity ? ` in ${r.entity}` : ''} (${r.shape})`
@@ -763,7 +769,7 @@ export class Graph {
       const count = (kind) => e.indexes.filter((i) => i.kind === kind).length
       const itemOnly = e.fields.filter((f) => f.item && f.sources.every((s) => s.kind === 'code')).length
       const parts = kv ? [plural(e.fields.length - itemOnly, 'attribute'), itemOnly ? plural(itemOnly, 'item field') : null, ...e.keys.map(kvKeyText), count('gsi') ? plural(count('gsi'), 'GSI') : null, count('lsi') ? plural(count('lsi'), 'LSI') : null, kvTableText(e)].filter(Boolean)
-        : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.length ? `foreign keys → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null, e.bookkeeping ? "a migration tool's own record (not compared)" : null].filter(Boolean)
+        : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.some((r) => !isClient(r)) ? `foreign keys → ${[...new Set(e.relations.filter((r) => !isClient(r)).map((r) => r.to))].join(', ')}` : null, e.relations.some(isClient) ? `relations → ${[...new Set(e.relations.filter(isClient).map((r) => r.to))].join(', ')} (enforced by the client)` : null, e.bookkeeping ? "a migration tool's own record (not compared)" : null].filter(Boolean)
       const items = (e.bound || []).map((b) => `${b.type} (${b.confidence})`)
       out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}${items.length ? `  items: ${items.join(', ')}` : ''}${e.logical ? `  [one table with ${e.logical.members.filter((m) => m !== e.id).join(', ')}]` : ''}`)
     }
@@ -829,7 +835,9 @@ export class Graph {
     else section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}${f.computed ? `  computed ${f.computed}` : ''}${f.enum ? `  enum${f.enum.name ? ` ${f.enum.name}` : ''} (${f.enum.values.join(' | ')})` : ''}${f.unstated ? `  (${f.unstated.join(', ')} as written, not compared)` : ''}`)
     section('Keys', e.keys, (k) => (kv ? kvKeyText(k) : `${k.role} (${k.parts.join(', ')})`))
     section('Indexes', e.indexes, (i) => (kvIndex(i) ? `${i.name}  ${kvIndexText(i)}` : `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}${i.implicit ? ' (built for a foreign key)' : ''}`))
-    section('Foreign keys', e.relations, (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
+    section('Foreign keys', e.relations.filter((r) => !isClient(r)), (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
+    // a relation the schema declares and its client enforces: no foreign key in the database
+    section(`Relations ${CLIENT_SAYS}`, e.relations.filter(isClient), (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate} (as the client emulates them)`)
     if (kv) {
       const item = e.fields.filter((f) => f.item)
       const types = [...new Set(item.flatMap((f) => f.item.map((i) => i.type)))]

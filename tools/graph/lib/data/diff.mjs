@@ -29,7 +29,8 @@
 // Rename candidates: a removed and an added element of the same kind and the same shape are paired,
 // never decided (drizzle-kit asks; this only flags). Shapes: a table or view, its columns (names and
 // types, in order; one with no column is never a candidate); a column, its type and position; an
-// index, its columns, uniqueness and partiality; a foreign key, its columns on both sides. Keys have
+// index, its columns, uniqueness and partiality; a foreign key (or a relation its client enforces:
+// `enforced`, database | client, is one of its attributes), its columns on both sides. Keys have
 // no name to change. When several removed and several added elements share a shape, they are one
 // candidate group listing them all (ambiguous), never a guess at which goes with which.
 //
@@ -86,7 +87,9 @@ const ATTRS = {
   key: (k) => (k.role === 'ttl' ? { enabled: same(k.enabled) } : {}),
   index: (i, f) => (kvIndex(i) ? { kind: same(i.kind), partition: [i.partition.join(','), i.partition.join(', ')], sort: [i.sort.join(','), i.sort.join(', ')], projection: same(projectionText(i)) }
     : { unique: [!!i.unique, !!i.unique], columns: [i.columns.map((c) => f(normColumn(c, f.dialect))).join(','), i.columns.join(', ')], partial: [!!i.partial, !!i.partial] }),
-  relation: (r) => ({ onDelete: [r.onDelete, r.onDelete], onUpdate: [r.onUpdate, r.onUpdate] }),
+  // who enforces it: the database (a foreign key), or the client (reconcile.mjs `kind: client`), so a
+  // foreign key turned into a relation its client enforces is modified, by the same identity
+  relation: (r) => ({ onDelete: [r.onDelete, r.onDelete], onUpdate: [r.onUpdate, r.onUpdate], enforced: same(r.kind === 'client' ? 'client' : 'database') }),
 }
 const SHAPE = {
   entity: (e, f) => (e.fields?.length ? [`${e.kind}|${e.fields.map((x) => `${f(x.name)} ${normType(typeOf(x), f.dialect)}`).join(',')}`, 'same columns'] : null),
