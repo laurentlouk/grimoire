@@ -16,6 +16,8 @@
 //  6. beyond the edges (fixtures/edge): dispatch, unlinked call sites and mentions in graph_impact;
 //     graph_diff (definitions against the base, contract changes still named, tests, co-change gaps,
 //     risk); graph_overview; several-word search; no literal quoted in any of them
+//  6b. the review's cases: CommonJS definitions, cross-repository calls, local bindings, namespaces,
+//     keyword arguments, Ruby symbols, credential files, a huge line, JSX text, the diff's parsing
 //  1b-1d (between 1 and 2): which files count and as what, modules and the system map, the page's helpers
 //
 //  Needs the parser runtime (web-tree-sitter + grammars): `npm ci --prefix tools/graph`, or a
@@ -861,9 +863,9 @@ console.log('\n6 · beyond the edges (fixtures/edge): dispatch, unlinked calls, 
   has(d, 'test/session.test.ts  (distance 1)', 'diff: the tests to run')
   has(d, 'Changed code no test reaches', 'diff: the changed code no test reaches')
   has(d, 'Risk: high', 'diff: a removed function still called is high risk')
-  has(d, 'removed newId is still named outside this diff', 'diff: … with the reason')
+  has(d, 'removed newId is still named outside the lines this diff changed', 'diff: … with the reason')
   const all = await eq('diff', { base: 'HEAD~1' }); answers.push(all)
-  has(all, 'call    src/api/legacy.ts:2  in legacy  newId  (in this diff)', 'diff: against an older base, a caller the diff adds is marked in it')
+  has(all, 'call    src/api/legacy.ts:2  in legacy  newId  (changed in this diff)', 'diff: against an older base, a caller the diff adds is marked changed by it')
   commit('all'); has(await eq('diff', { base: 'HEAD' }), 'none (the working tree matches it)', 'diff: nothing to say on a clean tree')
 
   // co-change: a file that changed with session.ts in every commit is missed by a diff leaving it out
@@ -892,6 +894,105 @@ console.log('\n6 · beyond the edges (fixtures/edge): dispatch, unlinked calls, 
 
   const leaked = answers.flatMap((a) => a.match(/canary-edge-\d/g) || [])
   ok(!leaked.length, `no impact, diff or overview answer quotes a literal (${leaked.length ? [...new Set(leaked)].join(', ') : 'none'})`)
+}
+
+// ── 6b · the review's cases: each one a use the first version missed, a crash or a leak ──
+console.log('\n6b · beyond the edges: the review\'s cases')
+{
+  const R = path.join(SANDBOX, 'rev')
+  const put = (rel, txt) => { mkdirSync(path.dirname(path.join(R, rel)), { recursive: true }); writeFileSync(path.join(R, rel), txt) }
+  put('grimoire.config.json', JSON.stringify({ repos: [{ name: 'a', path: 'a' }, { name: 'b', path: 'b' }], graph: {} }) + '\n')
+  // CommonJS: functions defined by assignment (exports.x, obj.x, X.prototype.y)
+  put('a/lib/utils.js', "exports.normalizeType = function (type) {\n  return type\n}\nexports.normalizeTypes = function (types) {\n  return types.map(exports.normalizeType)\n}\n")
+  put('a/lib/response.js', "const { normalizeType } = require('./utils')\nconst res = {}\nres.sendStatus = function sendStatus(code) {\n  return normalizeType(code)\n}\nres.json = function (x) {\n  return this.sendStatus(200)\n}\nmodule.exports = res\n")
+  put('a/lib/app.js', "function View(name) { this.name = name }\nView.prototype.render = function () {\n  return 1\n}\nconst app = { set() {} }\napp.set('view', View)\nnew View('x')\n")
+  // a typed call to another `get` beside an untyped one; a method bound to a local of its name
+  put('a/src/store.ts', "export class Store {\n  get(k: string) { return k }\n  load(k: string) { return k }\n}\nexport class Cache {\n  get(k: string) { return k }\n}\nexport class Q1 { get() {} }\nexport class Q2 { get() {} }\nexport class Q3 { get() {} }\n")
+  put('a/src/use.ts', "import { Cache, Store } from './store'\nimport * as ns from './fns'\nexport function viaAny(y: any) {\n  const c = new Cache()\n  c.get('a')\n  y.get('b')\n}\nexport function bind(store: Store) {\n  const load = store.load\n  return load\n}\nexport function each(xs: string[]) {\n  return xs.map(ns.slugify)\n}\n")
+  put('a/src/fns.ts', "export function slugify(s: string) { return s }\n")
+  // JSX text is a literal: never in an answer
+  put('a/src/view.tsx', "export function View2() {\n  return (<b>canary-rev-1</b>).refreshToken()\n}\nexport function withJsx(a = <i>canary-rev-2</i>) { return a }\n")
+  // Python: a keyword argument naming a method; Ruby: a method passed as a symbol
+  put('a/py/app.py', "class Flask:\n    def url_for(self, e):\n        return e\n\n    def setup(self, env):\n        env.update(url_for=self.url_for)\n")
+  put('a/rb/user.rb', "class User\n  def valid?\n    true\n  end\nend\n\ndef check(us)\n  us.select(&:valid?)\nend\n")
+  // credential files and a huge one-line data file naming a target: never searched / not quadratic
+  put('a/secrets.env', 'slugify=canary-rev-3\n'); put('a/.git-credentials', 'slugify canary-rev-4\n')
+  put('a/data.json', '[' + Array(20000).fill('"slugify"').join(',') + ']\n')
+  // another repository calling into a
+  put('b/src/client.ts', "export function go(api: any) {\n  return api.fetchUser('1')\n}\nexport function slugOf(s: string) {\n  return makeSlug(s)\n}\n")
+  put('a/src/api.ts', "export class Api {\n  fetchUser(id: string) { return id }\n}\nexport function makeSlug(s: string) { return s }\n")
+  const commit = (dir, m) => { git(dir, 'add', '-A'); git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m) }
+  for (const r of ['a', 'b']) { git(path.join(R, r), 'init', '-q', '-b', 'main'); commit(path.join(R, r), 'init') }
+  const rq = (tool, args = {}) => call(`graph_${tool}`, args, { root: R })
+  await rq('index')
+  const answers = []
+  const rimp = async (target, extra = {}) => { const a = await rq('impact', { target, ...extra }); answers.push(a); return a }
+
+  const nt = await rimp('normalizeType')
+  has(nt, 'normalizeType  function  a/lib/utils.js:1', 'review: `exports.x = function` is a definition')
+  has(nt, 'a/lib/response.js  (distance 1)', 'review: … and its caller is linked')
+  ok(/a\/lib\/utils\.js  .*:5 reference in normalizeTypes/.test(nt), 'review: `exports.x` passed as a value is a use of the module\'s own export')
+  const ss = await rimp('sendStatus')
+  has(ss, 'res.sendStatus  method  a/lib/response.js:3', 'review: `obj.x = function` is a method of obj')
+  has(await rimp('View.render'), 'View.render  method  a/lib/app.js:2', 'review: `X.prototype.y = function` is a method of X')
+  const vw = await rimp('View', { repo: 'a' })
+  ok(/a\/lib\/app\.js  .*:6 reference/.test(vw), 'review: a file-level value use (`app.set(\'view\', View)`) is a mention, whatever else the top level calls')
+  const nf = await rimp('compileETag')
+  has(nf, 'No symbol or file matches', 'review: a name the index does not hold is said so')
+  has(nf, 'Its name as text', 'review: … and its mentions are still searched')
+  const gt = await rimp('Store.get')
+  has(gt, 'a/src/use.ts:6  in viaAny  y.get', 'review: an untyped call beside a typed call to another same-named method is still a possible caller')
+  const ld = await rimp('Store.load')
+  has(ld, 'a/src/use.ts  :9 reference in bind', 'review: `const load = store.load`: the use on the declaring line stays')
+  const sl = await rimp('slugify')
+  has(sl, 'a/src/use.ts  :13 reference in each', 'review: `ns.slugify` qualified by an imported namespace is a use, not a property')
+  lacks(sl, 'secrets.env', 'review: a credential file is never searched')
+  lacks(sl, '.git-credentials', 'review: … nor .git-credentials')
+  has(sl, 'a/data.json  :1 config', 'review: a huge one-line data file is listed by its file, its line not read')
+  const uf = await rimp('Flask.url_for')
+  has(uf, 'a/py/app.py  :6 reference in Flask.setup', 'review: a keyword argument passing a method (`url_for=self.url_for`) is a use, not a local binding')
+  const rb = await rimp('User.valid?')
+  has(rb, 'a/rb/user.rb  :8 reference in check', 'review: a Ruby symbol naming a method (`&:valid?`) is a use')
+  const fu = await rimp('Api.fetchUser')
+  has(fu, 'b/src/client.ts:2  in go  api.fetchUser', 'review: a call from another repository is a possible caller')
+  const ms = await rimp('makeSlug')
+  has(ms, 'b/src/client.ts:5  in slugOf  makeSlug', 'review: … for a function too')
+  answers.push(await rq('search', { query: 'refreshToken' }), await rq('symbol', { symbol: 'withJsx' }))
+
+  // the diff's parsing: a path with a space, a removed SQL comment line, a binary, a double move,
+  // a nested function, a rename into a skipped folder, overloads
+  put('a/src/my dir/b é.ts', "export function gamma(y: string) { return y }\n")
+  put('a/db/schema.sql', '-- create users\nCREATE TABLE users (id INTEGER);\n')
+  writeFileSync(path.join(R, 'a/img.bin'), Buffer.from([0, 1, 2, 3, 0, 255]))
+  put('a/src/s1.ts', 'export function shared() { return 1 }\n'); put('a/src/s2.ts', 'export function shared() { return 2 }\n')
+  put('a/src/outer.ts', "export function outer() {\n  function inner() {\n    return 1\n  }\n  return inner()\n}\n"); put('a/src/useouter.ts', "import { outer } from './outer'\nexport function u() { return outer() }\n")
+  put('a/src/lib1.ts', 'export function lib1() { return 1 }\n'); put('a/src/k.ts', "import { lib1 } from './lib1'\nexport function k() { return lib1() }\n")
+  put('a/py/m.py', 'def f(a):\n    return a\n\n\ndef f(a, b):\n    return b\n')
+  commit(path.join(R, 'a'), 'more'); await rq('index')
+  put('a/src/my dir/b é.ts', "export function gamma(y: string, z = 1) { return y }\n")
+  git(path.join(R, 'a'), 'rm', '-q', 'db/schema.sql')
+  writeFileSync(path.join(R, 'a/img.bin'), Buffer.from([0, 9, 9, 9, 0, 255]))
+  rmSync(path.join(R, 'a/src/s1.ts')); rmSync(path.join(R, 'a/src/s2.ts')); put('a/src/s3.ts', 'export function shared(x: number) { return x }\n')
+  put('a/src/outer.ts', "export function outer() {\n  function inner() {\n    return 2\n  }\n  return inner()\n}\n")
+  mkdirSync(path.join(R, 'a/third_party'), { recursive: true }); git(path.join(R, 'a'), 'mv', 'src/lib1.ts', 'third_party/lib1.ts')
+  put('a/py/m.py', 'def f():\n    return 0\n\n\ndef f(a):\n    return a\n\n\ndef f(a, b):\n    return b\n')
+  const d = await rq('diff', { base: 'HEAD', repo: 'a' }); answers.push(d)
+  has(d, '~ gamma  function  a/src/my dir/b é.ts:1  signature changed', 'review: a path with a space and a non-ASCII letter is code, compared')
+  has(d, 'a/db/schema.sql (removed script)', 'review: a removed SQL file is named by its path, its `-- ` lines never read as a header')
+  has(d, 'a/img.bin', 'review: a binary change is listed')
+  ok((d.match(/> shared  function  moved/g) || []).length === 1, `review: two removals and one addition of a name make one move (${(d.match(/> shared  function  moved/g) || []).length})`)
+  has(d, '- shared  function', 'review: … and the other removal stays a removal')
+  has(d, 'outer  function  a/src/outer.ts:1  (through outer.inner)', 'review: a change in a nested function is the outer one\'s, untested')
+  has(d, '- lib1  function  (was a/src/lib1.ts:1)', 'review: a file renamed into a skipped folder is a removal')
+  has(d, 'import  a/src/k.ts:1', 'review: … and its importer is a break')
+  has(d, '+ f  function  a/py/m.py:1', 'review: an overload added above the others is one addition')
+  lacks(d, '~ f  function', 'review: … the overloads it pushed down are not changed')
+
+  const leaked = answers.flatMap((a) => a.match(/canary-rev-\d/g) || [])
+  ok(!leaked.length, `review: no answer quotes JSX text or a credential file (${leaked.length ? [...new Set(leaked)].join(', ') : 'none'})`)
+  const dir = path.join(R, '.grimoire/graph')
+  const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-rev-[12]/g) || []))
+  ok(!bytes.length, `review: JSX text is not kept in the index (${bytes.length})`)
 }
 
 rmSync(SANDBOX, { recursive: true, force: true })

@@ -330,10 +330,18 @@ export class Graph {
   // project (with a project; `mentions: false` leaves them out).
   impact({ target, repo, depth = 3, strict = false, mentions: text = true }, project = null) {
     const t = this.targets(target, { repo })
+    const withText = text !== false && text !== 'false'
+    // no definition by that name (code the index does not see, another language, a name being
+    // introduced): its mentions are still what a grep would find, sorted
+    if (t.error && t.error.startsWith('No symbol or file') && project && withText) {
+      const name = String(target).trim().split(/[/\\]/).pop().split(/::|\.|#|->|:/).filter(Boolean).pop() || ''
+      const m = mentions(this, project, [{ term: name, targets: [{ id: -1, name, kind: 'function', repo: null, path: null, line: -1 }] }])
+      return [t.error, ...(m.searched.length ? [`Its name as text, since no definition holds it:`, ...mentionLines(this, m)] : [])].join('\n')
+    }
     if (t.error) return t.error
     const d = Math.max(1, Math.min(Number(depth) || 3, 6))
     const out = [t.note, `Impact of ${t.hits.map((h) => this.row(h)).join(' + ')} — depth ${d}`].filter(Boolean)
-    out.push(...this.reachLines(t.hits, { depth: d, strict: !!strict, project, text: text !== false && text !== 'false' }))
+    out.push(...this.reachLines(t.hits, { depth: d, strict: !!strict, project, text: withText }))
     return out.join('\n')
   }
   // The impact of a set of nodes: reached code by file, tests, dispatch, unresolved sites, mentions,
@@ -378,7 +386,7 @@ export class Graph {
         const n = this.one("SELECT count(*) c FROM nodes WHERE name = ? AND kind != 'file'", term).c
         if (n > 1) ambiguous.push({ name: term, n })
       }
-      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })))
+      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })), { sites })
     }
     const cochange = []
     for (const fid of files) {
@@ -401,7 +409,8 @@ export class Graph {
     }
     if (groups.length > 60) out.push(`  … ${groups.length - 60} more files`)
     out.push(...dispatchLines(this, r.dispatch))
-    out.push(r.tests.length ? `Tests on these paths (${r.tests.length}):` : 'Tests on these paths: none found by the graph (search the test tree by name before concluding it is untested)')
+    const looseTests = r.sites.filter((x) => x.src?.is_test).length
+    out.push(r.tests.length ? `Tests on these paths (${r.tests.length}):` : looseTests ? `Tests on these paths: none linked; ${looseTests} unlinked call site(s) in tests, below` : 'Tests on these paths: none found by the graph (search the test tree by name before concluding it is untested)')
     for (const [n, i] of r.tests.sort((a, b) => a[1].depth - b[1].depth).slice(0, 25)) out.push(`  ${this.row(n, `d${i.depth}`)}`)
     out.push(...unresolvedLines(this, r.sites))
     if (r.mentions) out.push(...mentionLines(this, r.mentions, { ambiguous: r.ambiguous }))

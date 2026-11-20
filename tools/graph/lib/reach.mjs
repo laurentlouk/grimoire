@@ -24,8 +24,13 @@ import { listPaths, skipped } from './project.mjs'
 const MIN_NAME = 3 // shorter names are not searched as text
 const MAX_HITS = 2000 // per term and repository: past it, the name is too common to sort hit by hit
 const LISTED_FILES = 30, PER_FILE = 4, LISTED_SITES = 25
-// files that may hold credentials: never searched, never named
-const SECRETISH = /(^|\/)\.env(\.|$)|\.(pem|key|p12|pfx|jks|keystore|crt|cer|der)$|(^|\/)(id_rsa|id_ed25519|credentials|\.npmrc|\.pypirc|\.netrc)$/i
+// files that may hold credentials: never searched (excluded from git grep, skipped before a read by
+// the walk), never named. SECRET_GLOBS and SECRETISH say the same thing, for git and for the walk.
+export const SECRET_GLOBS = ['.env*', '*.env', '.envrc', '*.pem', '*.key', '*.p12', '*.pfx', '*.jks', '*.keystore', '*.crt', '*.cer', '*.der', 'id_rsa*', 'id_dsa*', 'id_ecdsa*', 'id_ed25519*', 'credentials*', '.npmrc*', '.pypirc*', '.netrc', '.git-credentials', '.pgpass', '.htpasswd', '*.tfstate', '*.tfstate.*', '.docker/config.json']
+export const SECRETISH = /(^|\/)(\.env[^/]*|[^/]*\.env|\.envrc|id_(rsa|dsa|ecdsa|ed25519)[^/]*|credentials[^/]*|\.npmrc[^/]*|\.pypirc[^/]*|\.netrc|\.git-credentials|\.pgpass|\.htpasswd|[^/]*\.tfstate(\.[^/]*)?|\.docker\/config\.json)$|\.(pem|key|p12|pfx|jks|keystore|crt|cer|der)$/i
+// a line past this length (minified code, data) is classified by its file alone; at most this many
+// occurrences of a name are read per line: classification stays linear in the input
+const MAX_LINE = 1000, PER_LINE = 8
 const ABSTRACT = new Set(['interface', 'trait', 'protocol'])
 const CALL_KINDS = "('call','new','macro')"
 
@@ -76,20 +81,22 @@ export function dispatchLines(g, info) {
 }
 
 // ── unresolved call sites ──
-// [{ ref, src (node), file }] for refs naming one of the targets, in the target's language family and
-// repository, with no CALLS edge from their site to anything of that name (one that resolved to
-// another definition of the name is that definition's caller, not a lead).
+// [{ ref, src (node), file }] for refs naming one of the targets, in the target's language family, in
+// any repository of the project (no edge crosses repositories), that no CALLS edge accounts for: the
+// site's definition is not already a linked caller of the target, and no edge from it links that very
+// line to another definition of the name (that one is the other definition's caller, not a lead).
 export function unresolved(g, targets) {
   const out = [], seen = new Set()
-  const linked = g.db.prepare("SELECT 1 FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.kind = 'CALLS' AND d.name = ? LIMIT 1")
+  const callsTarget = g.db.prepare("SELECT 1 FROM edges WHERE src = ? AND dst = ? AND kind = 'CALLS' LIMIT 1")
+  const linkedHere = g.db.prepare("SELECT 1 FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.kind = 'CALLS' AND d.name = ? AND e.line = ? LIMIT 1")
   for (const t of targets) {
     if (t.kind === 'file' || t.name.length < 2) continue
     const fam = familyOf(t.lang)
     const kinds = ['class', 'struct'].includes(t.kind) ? "('new','call')" : CALL_KINDS
-    const rows = g.q(`SELECT r.*, f.repo, f.path, f.lang FROM refs r JOIN files f ON f.id = r.file_id WHERE r.name = ? AND r.kind IN ${kinds} AND f.repo = ? ORDER BY f.path, r.line`, t.name, t.repo)
+    const rows = g.q(`SELECT r.*, f.repo, f.path, f.lang FROM refs r JOIN files f ON f.id = r.file_id WHERE r.name = ? AND r.kind IN ${kinds} ORDER BY f.repo != ?, f.repo, f.path, r.line`, t.name, t.repo || '')
     for (const r of rows) {
       if (familyOf(r.lang) !== fam || r.src_id === t.id) continue
-      if (linked.get(r.src_id, r.name)) continue
+      if ((t.id > 0 && callsTarget.get(r.src_id, t.id)) || linkedHere.get(r.src_id, r.name, r.line)) continue
       const k = `${r.file_id}|${r.line}|${r.name}`
       if (seen.has(k)) continue
       seen.add(k)
@@ -98,13 +105,15 @@ export function unresolved(g, targets) {
   }
   return out
 }
+// a call site as `receiver.name`, on one line (a receiver's text can span lines)
+export const siteText = (r) => `${r.qual ? `${r.qual.replace(/\s+/g, ' ').slice(0, 80)}.` : ''}${r.name}`
 export function unresolvedLines(g, sites) {
   if (!sites.length) return []
   const tests = sites.filter((s) => s.src?.is_test).length
   const out = [`Possible callers the graph could not link (a call by this name on a receiver of unknown type, or a name with many definitions; ${sites.length}${tests ? `, ${tests} in tests` : ''}): read each`]
   for (const s of sites.slice(0, LISTED_SITES)) {
     const where = s.src && s.src.kind !== 'file' ? `in ${s.src.qualname}` : 'at file level'
-    out.push(`  ${g.loc({ repo: s.ref.repo, path: s.ref.path, kind: 'x', line: s.ref.line })}  ${where}  ${s.ref.qual ? `${s.ref.qual}.` : ''}${s.ref.name}${s.src?.is_test ? '  test' : ''}`)
+    out.push(`  ${g.loc({ repo: s.ref.repo, path: s.ref.path, kind: 'x', line: s.ref.line })}  ${where}  ${siteText(s.ref)}${s.src?.is_test ? '  test' : ''}`)
   }
   if (sites.length > LISTED_SITES) out.push(`  … ${sites.length - LISTED_SITES} more`)
   return out
@@ -123,7 +132,8 @@ const HASH_COMMENT = new Set(['python', 'ruby', 'php'])
 // comment marker, or in code. Multi-line strings and block comments are only caught by a line that
 // opens with `*`, `/*`, `<!--` or `#`.
 export function classify(text, at, lang = null) {
-  if (/^\s*(\*|\/\*|<!--|\/\/)/.test(text) || (HASH_COMMENT.has(familyOf(lang)) && /^\s*#/.test(text))) return 'comment'
+  if (/^\s*(\*(\s|\/|$)|\/\*|<!--|\/\/)/.test(text) || (HASH_COMMENT.has(familyOf(lang)) && /^\s*#/.test(text))) return 'comment'
+  const rust = familyOf(lang) === 'rust'
   let q = null, from = -1
   for (let i = 0; i < at; i++) {
     const c = text[i]
@@ -133,7 +143,8 @@ export function classify(text, at, lang = null) {
       else if (q === '`' && c === '$' && text[i + 1] === '{') { const close = text.indexOf('}', i); if (close < 0 || close > at) return 'reference' } // inside a template's ${…}: code
       continue
     }
-    if (c === '"' || c === '`' || (c === "'" && familyOf(lang) !== 'rust')) { q = c; from = i; continue }
+    if (rust && c === "'") { const m = /^'(\\.[^']*|[^\\'])'/.exec(text.slice(i)); if (m) i += m[0].length - 1; continue } // a char literal, never a lifetime's quote
+    if (c === '"' || c === '`' || c === "'") { q = c; from = i; continue }
     if (c === '/' && text[i + 1] === '/') return 'comment'
     if (c === '/' && text[i + 1] === '*') { const end = text.indexOf('*/', i + 2); if (end < 0 || end > at) return 'comment'; i = end + 1; continue }
     if (c === '#' && HASH_COMMENT.has(familyOf(lang))) return 'comment'
@@ -151,13 +162,25 @@ export const USE_KINDS = new Set(['reference', 'import', 'string', 'key', 'confi
 // A code occurrence read closer: a local binding of the same name (`const x =`, `def x`, `fn x`) is
 // another thing, dropped; `x:` an object key or a named parameter (a dispatch table's key is a lead);
 // `.x` a property of something else, unless the target is a method (then a method passed as a value).
+// A line of prose inside a docstring: five words or more, no code punctuation, the name not called
+const PROSE_LANGS = new Set(['python'])
+const prose = (text, at, len) => !/[=(){}[\]]/.test(text) && !/^\s*[.(]/.test(text.slice(at + len)) && (text.match(/[\p{L}]{2,}/gu) || []).length >= 5
 const DECL_BEFORE = /(^|[^\p{L}\p{N}_$])(const|let|var|val|def|fn|func|function|class|struct|enum|interface|type|my|local)\s+$/u
-export function refine(text, at, len, kind, targetKind) {
+// Returns the kind, 'decl' for a local binding (it shadows the name in its definition), or null.
+const SELF_MODULE = new Set(['exports']) // `exports.x`: a CommonJS module's own export
+export function refine(text, at, len, kind, targetKind, lang = null, modules = null) {
   if (kind !== 'reference') return kind
   const before = text.slice(0, at), after = text.slice(at + len)
-  if (DECL_BEFORE.test(before)) return null
+  if (familyOf(lang) === 'ruby' && /(^|[^:]):$/.test(before)) return 'reference' // a symbol: `&:valid?`, `send(:x)`, `before_action :x`
+  if (/::\s*$/.test(before)) return 'reference' // a path: `util::triple`, `Type::make`
+  if (DECL_BEFORE.test(before)) return 'decl'
   if (/^\s*:(?!:)/.test(after) && !/\?\s*$/.test(before)) return 'key'
-  const member = /(\.|->|::)\s*$/.test(before)
+  if (/^\s*=(?![=>])/.test(after) && /[(,]\s*$/.test(before)) return 'key' // a keyword argument: `f(name=…)`
+  if (PROSE_LANGS.has(familyOf(lang)) && prose(text, at, len)) return 'text' // a docstring's line
+  const member = /(\.|->)\s*$/.test(before)
+  // `util.slug`, `ns.fn`: qualified by a module the file imports is a use, not another object's property
+  const qual = /([\p{L}_$][\p{L}\p{N}_$]*)\s*(\.|->)\s*$/u.exec(before)
+  if (member && targetKind !== 'method' && qual && ((modules && modules.has(qual[1])) || SELF_MODULE.has(qual[1]))) return 'reference'
   if (member && targetKind !== 'method') return 'property'
   // a method is reached through a receiver (or `self`/`this`, which the edges cover): a bare name in
   // another definition is another binding
@@ -168,7 +191,7 @@ const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 // One repository's lines holding any of the terms as a whole word: [{ path, line, text }].
 function grepRepo(abs, terms, project) {
-  const r = spawnSync('git', ['-C', abs, 'grep', '-n', '-I', '-w', '-z', '--untracked', '--full-name', '-F', ...terms.flatMap((t) => ['-e', t]), '--', '.'], { encoding: 'utf8', maxBuffer: 1 << 27 })
+  const r = spawnSync('git', ['-C', abs, 'grep', '-n', '-I', '-w', '-z', '--untracked', '--full-name', '-F', ...terms.flatMap((t) => ['-e', t]), '--', '.', ...SECRET_GLOBS.map((x) => `:(exclude,glob)**/${x}`)], { encoding: 'utf8', maxBuffer: 1 << 27 })
   const prefix = spawnSync('git', ['-C', abs, 'rev-parse', '--show-prefix'], { encoding: 'utf8' })
   if (r.status === 0 || r.status === 1) {
     const pre = prefix.status === 0 ? prefix.stdout.trim() : ''
@@ -187,7 +210,7 @@ function grepRepo(abs, terms, project) {
   const re = new RegExp(`(^|[^\\p{L}\\p{N}_$])(${terms.map(esc).join('|')})(?![\\p{L}\\p{N}_$])`, 'u')
   const out = []
   for (const rel of listPaths(abs)) {
-    if (skipped(rel, project)) continue
+    if (skipped(rel, project) || SECRETISH.test(rel)) continue
     let text
     try { if (statSync(path.join(abs, rel)).size > project.maxBytes) continue; text = readFileSync(path.join(abs, rel), 'utf8') } catch { continue }
     if (text.includes('\u0000')) continue
@@ -199,7 +222,8 @@ function grepRepo(abs, terms, project) {
 // terms: [{ term, targets: [node] }] (a node's name, a file's basename). explained: Set of node ids
 // whose edges, refs and imports already account for a hit (the targets, and everything the impact
 // reached is not needed: a hit is explained by its own line's edges).
-export function mentions(g, project, terms) {
+// opts.sites: the unlinked call sites already listed (unresolved()): their lines are explained.
+export function mentions(g, project, terms, { sites = [] } = {}) {
   const usable = terms.filter((t) => t.term.length >= MIN_NAME)
   const res = { hits: [], common: [], searched: usable.map((t) => t.term) }
   if (!usable.length) return res
@@ -209,9 +233,25 @@ export function mentions(g, project, terms) {
   const around = g.db.prepare("SELECT id, kind, qualname, line, end_line FROM nodes WHERE file_id = ? AND kind != 'file' AND line <= ? AND end_line >= ? ORDER BY (end_line - line) ASC")
   const otherDef = g.db.prepare("SELECT 1 FROM nodes WHERE file_id = ? AND line = ? AND name = ? AND kind != 'file' LIMIT 1")
   const edgeTo = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND kind IN ('CALLS','EXTENDS','IMPLEMENTS')")
-  const refNamed = g.db.prepare('SELECT 1 FROM refs WHERE src_id = ? AND name = ? LIMIT 1')
+  const siteLines = new Set(sites.map((x) => `${x.ref.repo}|${x.ref.path}|${x.ref.line}`))
+  // a call on this line linked to another definition of the name: that definition's caller
+  const linkedOther = g.db.prepare("SELECT d.id FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.line = ? AND e.kind = 'CALLS' AND d.name = ?")
+  // the names a file's imports bind (a module, a namespace, an imported name): `util.slug` is a use
+  const importNames = g.db.prepare('SELECT names, alias FROM imports WHERE file_id = ?')
+  const modulesOf = new Map()
+  const modules = (fid) => {
+    if (!modulesOf.has(fid)) {
+      const set = new Set()
+      for (const i of importNames.all(fid)) { if (i.alias) set.add(i.alias); for (const n of JSON.parse(i.names || '[]')) set.add(String(n).split('=')[0]) }
+      modulesOf.set(fid, set)
+    }
+    return modulesOf.get(fid)
+  }
+  const sizeOf = new Map()
+  const tooBig = (abs, rel) => { const k = `${abs}|${rel}`; if (!sizeOf.has(k)) { let n = 0; try { n = statSync(path.join(abs, rel)).size } catch {} sizeOf.set(k, n) } return sizeOf.get(k) > project.maxBytes }
   const importAt = g.db.prepare('SELECT resolved FROM imports WHERE file_id = ? AND line = ?')
-  const shadow = new Set()
+  const edgeAt = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND line = ? AND kind IN ('CALLS','EXTENDS','IMPLEMENTS')")
+  const shadow = new Map() // scope → the lines declaring the local
   const callsTarget = new Map()
   const reachesTarget = (id) => { if (!callsTarget.has(id)) callsTarget.set(id, edgeTo.all(id).some((e) => targetIds.has(e.dst))); return callsTarget.get(id) }
 
@@ -222,20 +262,25 @@ export function mentions(g, project, terms) {
     const tooMany = new Set([...perTerm].filter(([, n]) => n > MAX_HITS).map(([t]) => t))
     for (const t of tooMany) res.common.push({ repo: repo.name, term: t, n: perTerm.get(t) })
     for (const h of hits) {
-      if (SECRETISH.test(h.path) || skipped(h.path, project)) continue
+      if (SECRETISH.test(h.path) || skipped(h.path, project) || tooBig(repo.abs, h.path)) continue
       const terms = usable.filter((t) => !tooMany.has(t.term))
       let kind = null, term = null
       const f = fileRow.get(repo.name, h.path)
       const nodes = f ? around.all(f.id, h.line, h.line) : []
+      const codeLang = f ? (f.lang === 'other' ? null : f.lang) : langOf(h.path) === 'other' ? null : langOf(h.path)
+      if (h.text.length > MAX_LINE) { // minified code or data: its file says what it is, its line is not read
+        const t = terms.find((x) => h.text.includes(x.term))
+        if (t) res.hits.push({ repo: repo.name, path: h.path, line: h.line, kind: codeLang ? 'other' : kindOfPath(h.path), term: t.term, where: nodes[0] ? nodes[0].qualname : null, scope: null, test: f ? !!f.is_test : false })
+        continue
+      }
       for (const t of terms) {
         const re = new RegExp(`(^|[^\\p{L}\\p{N}_$])(${esc(t.term)})(?![\\p{L}\\p{N}_$])`, 'gu')
-        let m
-        while ((m = re.exec(h.text))) {
+        let m, seen = 0
+        while ((m = re.exec(h.text)) && seen++ < PER_LINE) {
           const at = m.index + m[1].length
           let k
-          const codeLang = f ? (f.lang === 'other' ? null : f.lang) : langOf(h.path) === 'other' ? null : langOf(h.path)
           if (!codeLang) { k = kindOfPath(h.path); if (k === 'config' && classify(h.text, at) === 'text') k = 'text' } // prose in a config value
-          else if (!f) k = refine(h.text, at, t.term.length, classify(h.text, at, codeLang), t.targets[0].kind) // too large to index: read as text
+          else if (!f) { k = refine(h.text, at, t.term.length, classify(h.text, at, codeLang), t.targets[0].kind, codeLang); if (k === 'decl') k = null } // too large to index: read as text
           else {
             if (defLines.has(`${repo.name}|${h.path}|${h.line}`)) continue // the definition itself
             if (otherDef.get(f.id, h.line, t.term)) continue // another definition of the same name
@@ -243,11 +288,14 @@ export function mentions(g, project, terms) {
             // package or repository), it is a lead the graph cannot follow
             const imp = importAt.all(f.id, h.line)
             if (imp.length) { if (imp.some((i) => i.resolved)) continue; k = 'import' }
-            // the line's enclosing definitions (or the file) already call the target, or carry an
-            // unresolved site of that name (listed apart): explained
-            else if ([...nodes.map((n) => n.id), f.node_id].some((id) => reachesTarget(id) || refNamed.get(id, t.term))) continue
-            else k = refine(h.text, at, t.term.length, classify(h.text, at, f.lang), t.targets[0].kind)
-            if (k === null) { if (nodes[0]) shadow.add(`${f.id}|${nodes[0].id}|${t.term}`); continue }
+            // the line's enclosing definitions already call the target, or carry an unresolved site
+            // of that name (listed apart): explained. At file level (no definition around it), only
+            // a call or a site on this very line explains it: top-level code is one big scope
+            else if (siteLines.has(`${repo.name}|${h.path}|${h.line}`) || nodes.some((n) => reachesTarget(n.id)) || (!nodes.length && edgeAt.all(f.node_id, h.line).some((e) => targetIds.has(e.dst)))) continue
+            // a call here linked to another definition of the name is that one's
+            else if ([...nodes.map((n) => n.id), f.node_id].some((id) => linkedOther.all(id, h.line, t.term).some((d) => !targetIds.has(d.id)))) continue
+            else k = refine(h.text, at, t.term.length, classify(h.text, at, f.lang), t.targets[0].kind, f.lang, modules(f.id))
+            if (k === 'decl') { if (nodes[0]) { const sc = `${f.id}|${nodes[0].id}|${t.term}`; (shadow.get(sc) || shadow.set(sc, new Set()).get(sc)).add(h.line) } continue }
           }
           if (k === null) continue
           if (kind === null || RANK[k] < RANK[kind]) { kind = k; term = t.term }
@@ -259,7 +307,8 @@ export function mentions(g, project, terms) {
     }
   }
   // a local binding of the name shadows it in its whole definition: its other hits there are that local
-  res.hits = res.hits.filter((h) => !(h.scope && !['string', 'text', 'comment'].includes(h.kind) && shadow.has(h.scope)))
+  // (a use on the declaring line itself, `const load = store.load`, stays)
+  res.hits = res.hits.filter((h) => !(h.scope && !['string', 'text', 'comment'].includes(h.kind) && shadow.has(h.scope) && !shadow.get(h.scope).has(h.line)))
   res.hits.sort((a, b) => RANK[a.kind] - RANK[b.kind] || (a.test - b.test) || (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line))
   return res
 }
