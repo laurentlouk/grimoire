@@ -4232,7 +4232,7 @@ async function indexed() {
     const kq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: KV })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const kidx = await kq('index')
     ok(/lending: /.test(kidx) && !kidx.includes('failure'), `index: the YAML template and the JSON tables read, no extractor failure (${kidx.split('\n').find((l) => l.startsWith('lending')) || kidx})`)
-    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@2\nlocal/tables/loans.json\tdynamodb-table@2\nsrc/handler.ts\tts-types@1\ntemplate.yaml\tcloudformation@3',
+    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@2\nlocal/tables/loans.json\tdynamodb-table@2\nsrc/handler.ts\tts-types@2\ntemplate.yaml\tcloudformation@3',
       'found by content: the template and the two CreateTable files are jobs, and the handler for its item shapes; the CI workflow and the settings file (JSON and YAML declaring no table) are not')
     const klist = await kq('data')
     eq(klist.split('\n').slice(1), [
@@ -4542,7 +4542,7 @@ async function indexed() {
     const bidx2 = await bq('index')
     ok(/infra: 3 files/.test(bidx2) && /api: 7 files/.test(bidx2) && !bidx2.includes('failure'), `index: both repositories, no extractor failure (${bidx2.replace(/\n/g, ' | ')})`)
     eq(await bq('sql', { sql: "SELECT repo, key, extractor FROM data_facts WHERE extractor LIKE 'serde%' OR extractor LIKE 'ts-types%' ORDER BY repo, key" }),
-      'repo\tkey\textractor\napi\tnode/src/orders.ts\tts-types@1\napi\tnode/src/types.ts\tts-types@1\napi\tsrc/carts.rs\tserde@1\napi\tsrc/customers.rs\tserde@1\napi\tsrc/model.rs\tserde@1\napi\tsrc/orders.rs\tserde@1\napi\tsrc/reviews.rs\tserde@1',
+      'repo\tkey\textractor\napi\tnode/src/orders.ts\tts-types@2\napi\tnode/src/types.ts\tts-types@2\napi\tsrc/carts.rs\tserde@2\napi\tsrc/customers.rs\tserde@2\napi\tsrc/model.rs\tserde@2\napi\tsrc/orders.rs\tserde@2\napi\tsrc/reviews.rs\tserde@2',
       'found by content: each Rust and TypeScript file with a serde derive, a type, a conversion or an environment read is a job of its own')
     const ORD = '{env}-{project}-orders', TFMAIN = 'infra/modules/shop-tables/main.tf'
     eq((await bq('data')).split('\n').filter((l) => !/^ {2}(infra|  note)/.test(l)), [
@@ -4677,7 +4677,7 @@ async function indexed() {
     const aq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: AP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const aidx = await aq('index')
     ok(/catalog: 4 files/.test(aidx) && /reports: 1 files/.test(aidx) && !aidx.includes('failure'), `index: both repositories, no extractor failure (${aidx.replace(/\n/g, ' | ')})`)
-    eq(await aq('sql', { sql: "SELECT repo, key, extractor, facts LIKE '%\"access\"%' AS calls FROM data_facts WHERE extractor LIKE 'dynamo-access%' ORDER BY repo, key" }), 'repo\tkey\textractor\tcalls\ncatalog\tsrc/books.rs\tdynamo-access@2\t1\ncatalog\tsrc/setup.rs\tdynamo-access@2\t0\nreports\treports/genres.py\tdynamo-access@2\t1',
+    eq(await aq('sql', { sql: "SELECT repo, key, extractor, facts LIKE '%\"access\"%' AS calls FROM data_facts WHERE extractor LIKE 'dynamo-access%' ORDER BY repo, key" }), 'repo\tkey\textractor\tcalls\ncatalog\tsrc/books.rs\tdynamo-access@3\t1\ncatalog\tsrc/setup.rs\tdynamo-access@3\t0\nreports\treports/genres.py\tdynamo-access@3\t1',
       'found by content: the Rust and the Python file making key-value calls; the table\'s declaration in code (create_table with a GSI builder) read, and holding none')
     const alist = (await aq('data')).split('\n')
     eq([alist[1], alist[alist.length - 1]], ['catalog:dynamodb  dynamodb  1 table · 4 GSIs · 1 item type bound · 1 conflict', 'Access patterns (inferred from key-value SDK calls; leads, never verdicts): 7 calls in 2 files, 7 reaching a table; 1 index with no access found (graph_data with a table lists them)'],
@@ -5271,6 +5271,18 @@ console.log('\nconstants: a settings file\'s secrets never reach the index; a ta
   const { tableConsts } = await import('../lib/data/readers/code.mjs')
   eq(tableConsts([{ name: 'ORDERS_TABLE', line: 1, names: [{ text: 'orders', line: 1 }], env: [] }, { name: 'SECRET_KEY', line: 2, names: [{ text: 'abc', line: 2 }], env: [] }, { name: 'DB_URL', line: 3, names: [{ text: 'postgres://u:p@h/db', line: 3 }], env: [] }, { name: 'TPL', line: 4, names: [{ text: '{}-orders', line: 4 }], env: [] }, { name: 'DB_PASSWORD', line: 5, value: 'hunter2' }, { name: 'TABLE', line: 6, value: 'carts' }]).map((c) => c.name),
     ['ORDERS_TABLE', 'TPL', 'TABLE'], 'tableConsts: a table-shaped value under a name that says nothing of a secret; a URL, a password or a key never')
+  // an allow-list: the names the fixtures and real code name tables and indexes by are kept…
+  const KEPT = [['ORDERS_TABLE', 'orders'], ['TABLE_NAME', 'orders'], ['TABLE', 'carts'], ['ordersTable', 'orders'], ['Repo.TABLE', 'repo'], ['GENRE_INDEX', 'genre-index'], ['SHARED_INDEX', 'by-shared'],
+    ['BY_ISBN', 'byIsbn'], ['BY_OWNER', 'gsi1'], ['ByStatus', 'status-idx'], ['GSI1', 'gsi1'], ['LSI_BY_DATE', 'lsi-date'], ['USERS_COLLECTION', 'users'], ['EVENTS_STREAM', 'events'], ['JOBS_QUEUE', 'jobs'],
+    ['UPLOADS_BUCKET', 'uploads'], ['ORDER_ENTITY', 'order'], ['USER_MODEL', 'user'], ['KEYSPACE', 'shop'], ['KEY_PREFIX', 'app'], ['TABLE_PREFIX', 'dev-'], ['DDB_ORDERS', 'orders'], ['ORDERS', 'orders2'],
+    ['TPL', '{}-orders'], ['EVENTS', 'events-{}'], ['SESSIONS_TABLE', 'sessions'], ['TOKENS_TABLE', 'tokens'], ['AUTH_TABLE', 'auth_users']]
+  const kept = (rows) => tableConsts(rows.map(([name, text], i) => ({ name, line: i + 1, names: [{ text, line: i + 1 }], env: [] }))).filter((c) => c.names.length).map((c) => c.name)
+  eq(kept(KEPT), KEPT.map(([n]) => n), 'tableConsts: an allow-list — a name that says table, index, collection, stream, queue, bucket, entity, model, keyspace, prefix or *_NAME, an index named by its key (BY_…), a template hole, or a value spelling its name')
+  // …and nothing else: a secret is named any way, and a credential's value is never table-shaped enough
+  eq(kept([['STRIPE_SK', 'sk_live_abc'], ['DB_PWD', 'hunter2x'], ['ADMIN_PW', 'hunter2x'], ['CREDS', 'abcdef'], ['GITHUB_PAT', 'ghp_abc'], ['HMAC_SEED', 'abcdef'], ['LICENSE', 'ABC-DEF-123'], ['PASSPHRASE_X', 'a-b-c'], ['T', 'orders'], ['SHARED', 'orders'],
+    ['ORDERS_TABLE', 'sk_live_orders'], ['ORDERS_TABLE', 'ghp_orders'], ['ORDERS_TABLE', 'xoxb-1-2'], ['ORDERS_TABLE', 'AKIAORDERS'], ['ORDERS_TABLE', 'AIzaOrders'], ['ORDERS_TABLE', 'eyJorders'], ['ORDERS_TABLE', 'aB3dE5gH7jK9mN1pQ3sT'], ['ORDERS_TABLE', '0123456789abcdef0123456789abcdef'],
+    ['SECRET_PREFIX', 'abc'], ['DB_PASSWORD_NAME', 'abc'], ['API_KEY', '{}-key'], ['PASSWORD', 'my-password']]), [], 'tableConsts: no other constant — a secret by any name, a token prefix, a high-entropy value, a weak reason under a secret\'s name')
+  eq(tableConsts([{ name: 'ORDERS', line: 1, env: [{ name: 'ORDERS_TABLE', line: 1 }], names: [] }]).map((c) => c.env.map((e) => e.name)), [['ORDERS_TABLE']], 'tableConsts: an environment variable a constant reads is a name: kept whatever the constant is called')
   const { findDeps } = await import('../lib/deps.mjs')
   if (findDeps()) {
     const SB = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-consts-')))
@@ -5279,11 +5291,22 @@ console.log('\nconstants: a settings file\'s secrets never reach the index; a ta
       put('grimoire.config.json', '{ "graph": {} }\n')
       put('app/settings.py', "SECRET_KEY = 'canary-const-1'\nDB_PASSWORD = \"canary-const-2\"\nDATABASES = {'default': {'PASSWORD': 'canary-const-3'}}\nORDERS_TABLE = 'orders'\nAPI_TOKEN = 'canaryconst4'\n")
       put('app/orders.py', "import boto3\nfrom app.settings import ORDERS_TABLE\n\ndef get_order(oid):\n    return boto3.client('dynamodb').get_item(TableName=ORDERS_TABLE, Key={'id': {'S': oid}})\n")
+      // secrets under names a deny-list never thought of, a container's secret beside its table-like key
+      put('app/more_settings.py', "STRIPE_SK = 'sk_live_canaryconst5'\nDB_PWD = 'canaryconst6'\nADMIN_PW = 'canaryconst7'\nCREDS = 'canaryconst8'\nGITHUB_PAT = 'ghp_canaryconst9'\nHMAC_SEED = 'canary-const-10'\nDATABASES2 = {'default': {'PWD': 'canary-const-11', 'NAME': 'app'}}\nPASSPHRASE_X = 'canary-const-12'\nLICENSE = 'CANARY-CONST-13'\nCONF = dict(PWD='canary-const-14', TABLE_NAME='orders')\n")
+      put('src/consts.ts', "export const STRIPE_SK = 'sk_live_canaryconst15'\nexport const DB_PWD = 'canaryconst16'\nexport const CFG = { pwd: 'canary-const-17', tableName: 'orders' }\nexport const ORDERS = 'orders2'\n")
+      put('src/use.ts', "import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb'\nimport { ORDERS } from './consts'\nconst c = new DynamoDBClient({})\nexport const f = () => c.send(new GetItemCommand({ TableName: ORDERS, Key: {} }))\n")
+      for (const t of ['orders', 'orders2']) put(`tables/${t}.json`, JSON.stringify({ TableName: t, KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }] }))
       const { call: callC } = await import('../lib/commands.mjs')
       await callC('graph_index', {}, { root: SB })
       const dir = path.join(SB, '.grimoire/graph')
-      const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-?const-?\d/g) || []))
+      const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-?const-?\d+/gi) || []))
       ok(!bytes.length, `a settings file's secret, password or token constant is not kept in the index (${bytes.length ? [...new Set(bytes)].join(', ') : 'none'})`)
+      const dt = await callC('graph_data', {}, { root: SB })
+      has(dt, '2 calls in 2 files, 2 reaching a table', 'the binding still reaches its tables through the constants kept (ORDERS_TABLE, and ORDERS = \'orders2\' in another file)')
+      const { renderGraph: renderK } = await import('../lib/render.mjs')
+      const { loadProject: loadK } = await import('../lib/project.mjs')
+      const answers = [dt, await callC('graph_data', { entity: 'orders2' }, { root: SB }), await renderK(loadK(SB))].join('\n')
+      ok(!/canary-?const-?\d+/i.test(answers), 'no such constant in an answer or the page')
     } finally { rmSync(SB, { recursive: true, force: true }) }
   }
 }

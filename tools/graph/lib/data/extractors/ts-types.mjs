@@ -23,7 +23,7 @@
 // Constants (a file-level const, a class field) holding a name or reading the environment are listed
 // with what they hold. Nothing is evaluated.
 import { codeName } from '../readers/names.mjs'
-import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each, codeFacts } from '../readers/code.mjs'
+import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each, codeFacts, keyed } from '../readers/code.mjs'
 
 export const TS_CONV = /^(?:to|into|from)(?:[A-Z][A-Za-z0-9]*)?Items?$/
 const TS = /\.(?:ts|mts|cts|tsx)$/i
@@ -186,7 +186,7 @@ export function scanUses(root, ctx, sink) {
       const parts = partsOf(n)
       if (parts && (n.type !== 'binary_expression' || parts.some((p) => p !== null))) {
         const p = codeName(parts)
-        if (p) push(sink.names, { text: p, line: lineOf(n) })
+        if (p) push(sink.names, keyed({ text: p, line: lineOf(n) }, n))
         // what fills its parts in may read the environment: look inside, never at its strings again
         if (n.type === 'template_string') { for (const s of named(n)) if (s.type === 'template_substitution') scanUses(s, ctx, sink) }
         else if (n.type === 'binary_expression') each(n, (x) => (x === n ? true : x.type === 'string' || x.type === 'template_string' ? false : visitOne(x, ctx, sink) !== false))
@@ -332,7 +332,7 @@ export function readTs(tree, file) {
 
 export default {
   id: 'ts-types',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'file',
   tree: true,

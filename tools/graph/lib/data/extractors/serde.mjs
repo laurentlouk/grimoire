@@ -35,7 +35,7 @@
 // Constants (`const`, `static`, an impl's associated const) holding a name or reading the environment
 // are listed with what they hold. Nothing is evaluated: a name built some other way is not seen.
 import { codeName } from '../readers/names.mjs'
-import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each, codeFacts } from '../readers/code.mjs'
+import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each, codeFacts, keyed } from '../readers/code.mjs'
 
 export const CONV = /^(?:try_)?(?:to|into|from)_(?:[a-z0-9]+_)*items?(?:_[a-z0-9]+)*$/
 const RS = /\.rs$/i
@@ -285,7 +285,7 @@ export function scanUses(root, ctx, sink) {
       const tt = named(n).find((x) => x.type === 'token_tree')
       if (tt && FORMAT.has(mname)) {
         const first = named(tt).find(isStr)
-        if (first) { consumed.add(first.startIndex); const v = strOf(first); const p = v === null ? null : codeName(formatParts(v)); if (p) push(sink.names, { text: p, line: lineOf(first) }) }
+        if (first) { consumed.add(first.startIndex); const v = strOf(first); const p = v === null ? null : codeName(formatParts(v)); if (p) push(sink.names, keyed({ text: p, line: lineOf(first) }, n)) }
       }
       if (tt && (mname === 'env' || mname === 'option_env')) { const first = named(tt).find(isStr); if (first) { consumed.add(first.startIndex); const v = strOf(first); if (v) push(sink.env, { name: v, line: lineOf(first) }) } }
       return true
@@ -294,7 +294,7 @@ export function scanUses(root, ctx, sink) {
       if (consumed.has(n.startIndex)) return false
       const v = strOf(n)
       const p = v === null ? null : codeName([v])
-      if (p) push(sink.names, { text: p, line: lineOf(n) })
+      if (p) push(sink.names, keyed({ text: p, line: lineOf(n) }, n))
       return false
     }
     if (n.type === 'call_expression') {
@@ -447,7 +447,7 @@ export function readRust(tree) {
 
 export default {
   id: 'serde',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'file',
   tree: true,
