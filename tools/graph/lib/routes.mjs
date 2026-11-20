@@ -116,11 +116,14 @@ const GO_ROUTE = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTI
 const GO_HANDLERISH = new Set(['identifier', 'selector_expression', 'func_literal', 'call_expression'])
 const NAV_RECV = /(^|[^a-z])(router|navigation|navigator|nav|navigationRef|navRef)$|useRouter\(\)|useNavigation\(\)/i
 const NAV_CALLS = new Set(['push', 'replace', 'navigate', 'prefetch', 'dismissTo', 'jumpTo', 'reset', 'popTo'])
+const FILE_ROUTER = /^(create(Lazy)?FileRoute|createRoute|createRootRoute(WithContext)?|createLazyRoute)$/
+// a browser test driving the app (Playwright's `page.goto`, Cypress's `cy.visit`): navigation, not HTTP
+const BROWSER_NAV = (name, recv) => (name === 'goto' && /(^|\.)page$/i.test(recv)) || (name === 'visit' && recv === 'cy')
 const FETCHES = new Set(['fetch', '$fetch', 'ofetch', 'useFetch', 'request', 'ky', 'got', 'superagent', 'axios'])
 const NEXT_FILES = /^(page|layout|loading|error|not-found|template|default|global-error|head|opengraph-image|twitter-image|icon|apple-icon|sitemap|robots|manifest)$/
 const SCREEN_PLATFORM = /\.(web|ios|android|native)$/
 const SCANNED = new Set([...STRINGS_LIST(), 'call_expression', 'call', 'method_invocation', 'jsx_self_closing_element', 'jsx_opening_element', 'binary_expression', 'binary_operator'])
-const SKIP = new Set(['import_statement', 'import_declaration', 'import_from_statement', 'import_spec_list', 'import_spec', 'comment', 'line_comment', 'block_comment'])
+const SKIP = new Set(['literal_type', 'import_statement', 'import_declaration', 'import_from_statement', 'import_spec_list', 'import_spec', 'comment', 'line_comment', 'block_comment'])
 
 // The callee of a call: { name, recv: receiver node | null }
 const calleeMemo = new WeakMap()
@@ -209,6 +212,8 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
   const echoFile = family === 'go' && importSources.some((s) => /labstack\/echo/.test(s))
   const isRoutesRb = family === 'ruby' && /(^|\/)config\/routes(\.rb$|\/[^/]+\.rb$)/.test(relPath)
   const isUrlsPy = family === 'python' && fileBase === 'urls'
+  // a generated route tree (TanStack Router's `routeTree.gen.ts`): every string in it is a declaration
+  const routeTree = family === 'js' && (/^routeTree\.gen$/.test(fileBase) || (/\.gen$/.test(fileBase) && importSources.some((s) => /^@tanstack\/([\w-]+-)?router$/.test(s))))
 
   // the innermost callable symbol holding a line (a ref's source), else -1 (the file)
   const srcAt = (ln) => {
@@ -344,6 +349,7 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     else if (family === 'python' && t === 'decorated_definition') pyDecorated(n, sc)
     else if (family === 'python' && t === 'call') pyCall(n, sc)
     else if (family === 'go' && t === 'call_expression') goCall(n, sc, inner)
+    else if (family === 'go' && t === 'composite_literal') goTable(n)
     else if (family === 'jvm' && t === 'class_declaration') springClass(n)
     else if (family === 'js' && (t === 'class_declaration' || t === 'abstract_class_declaration')) nestClass(n)
     else if (family === 'js' && (t === 'jsx_self_closing_element' || t === 'jsx_opening_element')) jsxElement(n)
@@ -356,6 +362,8 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     const c = callee(n)
     if (!c || !c.name) return
     const a = argsOf(n)
+    // a file router's own declaration (TanStack `createFileRoute('/x')`, `createRoute({ path })`): no call site
+    if (FILE_ROUTER.test(c.name)) { for (const x of a) { if (strContent(x)) consumed.add(x.id); else if (x.type === 'object') for (const k of ['path', 'id', 'to']) { const v = pairVal(x, k); if (v && strContent(v)) consumed.add(v.id) } } return }
     if (/^create\w*Navigator$/.test(c.name) && a[0]?.type === 'object') return navigatorConfig(a[0])
     if (c.name === 'setGlobalPrefix' && a[0]) { out.meta.globalPrefix = pathOf(a[0]); if (strContent(a[0])) consumed.add(a[0].id); return }
     if (!c.recv) return callMounts(n, sc, a, c)
@@ -473,8 +481,23 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     if (/(^|\.)Screen$/.test(nm) && at.get('name') && lit(at.get('name')) !== null) {
       const name = lit(at.get('name'))
       consumed.add(at.get('name').id)
-      addRoute({ kind: 'screen', method: null, path: name, framework: 'react-navigation', handler: handlerRef(at.get('component')), line: line(n), router: 'nav' })
+      addRoute({ kind: 'screen', method: null, path: name, framework: 'react-navigation', handler: screenComponent(at.get('component')) || screenComponent(at.get('getComponent')), line: line(n), router: 'nav' })
     }
+  }
+  // a screen's component: `ProfileScreen`, `getComponent={() => ProfileScreen}`, or
+  // `() => require('./ProfileScreen').default` (that file's default export)
+  const screenComponent = (v) => {
+    for (let d = 0; v && d < 4 && /^(jsx_expression|parenthesized_expression|arrow_function|statement_block|return_statement)$/.test(v.type); d++) {
+      if (v.type === 'arrow_function') v = field(v, 'body')
+      else if (v.type === 'statement_block') { const st = named(v).filter((x) => !/comment/.test(x.type)); v = st.length === 1 ? st[0] : null }
+      else v = v.namedChild(0)
+    }
+    if (!v) return null
+    if (v.type === 'member_expression' && field(v, 'object')?.type === 'call_expression' && callee(field(v, 'object'))?.name === 'require') {
+      const src = lit(argsOf(field(v, 'object'))[0])
+      return src && src.startsWith('.') ? { name: null, qual: '', module: src } : null
+    }
+    return /^(identifier|member_expression)$/.test(v.type) ? handlerRef(v) : null
   }
   const navigatorConfig = (obj) => {
     const screens = pairVal(obj, 'screens') || obj
@@ -483,14 +506,24 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
       const k = field(p, 'key'), v = field(p, 'value')
       const name = k.type === 'property_identifier' || k.type === 'identifier' ? k.text : lit(k)
       if (!name || !SCREEN_NAME.test(name)) continue
-      const comp = v && v.type === 'object' ? pairVal(v, 'screen') : v
-      if (!comp || !/^(identifier|member_expression)$/.test(comp.type)) continue
+      const comp = v && v.type === 'object' ? pairVal(v, 'screen') || pairVal(v, 'getComponent') : v
+      const h = screenComponent(comp)
+      if (!h) continue
       if (strContent(k)) consumed.add(k.id)
-      addRoute({ kind: 'screen', method: null, path: name, framework: 'react-navigation', handler: handlerRef(comp), line: line(p), router: 'nav' })
+      addRoute({ kind: 'screen', method: null, path: name, framework: 'react-navigation', handler: h, line: line(p), router: 'nav' })
     }
   }
 
   // ── Python ──
+  // `methods=` as Flask and FastAPI take it: a list, a tuple, a set, or one string; its strings consumed
+  const pyMethods = (ms) => {
+    let x = ms
+    while (x && x.type === 'parenthesized_expression' && x.namedChildCount === 1) x = x.namedChild(0)
+    const items = !x ? null : /^(list|tuple|set)$/.test(x.type) ? named(x) : STRINGS.has(x.type) ? [x] : null
+    if (!items) return null
+    for (const y of items) consumed.add(y.id)
+    return items.map(lit).filter((v) => v && VERB_OF(v)).map((v) => v.toUpperCase()).join(',') || null
+  }
   const PY_VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'route', 'api_route'])
   const pyDecorated = (n, sc) => {
     const def = field(n, 'definition')
@@ -508,7 +541,7 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
         consumed.add(p.id)
         const r = recvRouter(c.recv, sc) || { key: `g:${c.recv.text}`, prefix: '' }
         let method = VERB_OF(c.name)
-        if (!method) { const ms = kwarg(a, 'methods'); method = ms && ms.type === 'list' ? named(ms).map(lit).filter(Boolean).map((x) => x.toUpperCase()).join(',') : c.name === 'route' ? 'GET' : 'ANY'; if (ms) for (const x of named(ms)) consumed.add(x.id) }
+        if (!method) method = pyMethods(kwarg(a, 'methods')) || (c.name === 'route' ? 'GET' : 'ANY')
         const deps = kwarg(a, 'dependencies')
         const mw = deps && deps.type === 'list' ? named(deps).map((x) => (x.type === 'call' && /^(Depends|Security)$/.test(callee(x)?.name || '') ? nameText(positional(argsOf(x))[0]) : nameText(x))).filter(Boolean) : []
         routes.push({ method, path: r.prefix + pathOf(p), router: r.key, framework: 'python', handler: { name: field(def, 'name')?.text, qual: '' }, handlerLine: line(def), middleware: mw, line: line(d) })
@@ -550,9 +583,7 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     if ((c.name === 'add_url_rule' || c.name === 'add_api_route') && pos[0] && strContent(pos[0])) {
       consumed.add(pos[0].id)
       const view = kwarg(a, c.name === 'add_url_rule' ? 'view_func' : 'endpoint') || (c.name === 'add_url_rule' ? pos[2] : pos[1])
-      const ms = kwarg(a, 'methods')
-      if (ms) for (const x of named(ms)) consumed.add(x.id)
-      addRoute({ method: ms && ms.type === 'list' ? named(ms).map(lit).filter(Boolean).map((x) => x.toUpperCase()).join(',') : 'GET', path: r.prefix + pathOf(pos[0]), router: r.key, framework: 'python', handler: handlerRef(view), line: line(n) })
+      addRoute({ method: pyMethods(kwarg(a, 'methods')) || 'GET', path: r.prefix + pathOf(pos[0]), router: r.key, framework: 'python', handler: handlerRef(view), line: line(n) })
       return
     }
     // Django REST framework: `router.register(r'articles', ArticleViewSet)` → its list and detail routes
@@ -610,6 +641,47 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     callMounts(n, sc, a, c)
   }
   const methodsFor = new Map()
+  // A table-driven test: a struct literal stating a method and a URL side by side, by key
+  // (`{Method: "GET", URL: "/x"}`) or by position under the struct type's fields (`url, method string`),
+  // pairs them: the URL is an HTTP call site with that method
+  const URL_FIELD = /^(url|path|uri|endpoint|route|target)$/i, METHOD_FIELD = /^(method|verb|httpmethod)$/i
+  const verbOf = (x) => { if (!x) return null; const v = lit(x); if (v && v === v.toUpperCase() && VERB_OF(v)) return VERB_OF(v); return /^http\.Method[A-Z]\w*$/.test(x.text) ? VERB_OF(x.text.slice(11)) : null }
+  const pair = (u, m) => { const v = verbOf(m); if (!u || !v || !(strContent(u) || u.type === 'binary_expression')) return; pairedMethod.set(u.id, v); consumed.add(m.id) }
+  const structTypes = new Map()
+  const fieldsOf = (ty, d = 0) => {
+    if (!ty || d > 3) return null
+    if (ty.type === 'slice_type' || ty.type === 'array_type' || ty.type === 'implicit_length_array_type' || ty.type === 'map_type') return fieldsOf(field(ty, 'element') || field(ty, 'value'), d + 1)
+    if (ty.type === 'pointer_type') return fieldsOf(ty.namedChild(0), d + 1)
+    if (ty.type === 'type_identifier') {
+      if (!structTypes.size) for (const td of named(tree.rootNode)) if (td.type === 'type_declaration') for (const sp of named(td)) if (sp.type === 'type_spec' && field(sp, 'name')) structTypes.set(field(sp, 'name').text, field(sp, 'type'))
+      const st = structTypes.get(ty.text)
+      return st && st.type === 'struct_type' ? fieldsOf(st, d + 1) : null
+    }
+    if (ty.type !== 'struct_type') return null
+    const out2 = []
+    for (const fl of named(ty)) for (const fd of named(fl)) if (fd.type === 'field_declaration') { const ns = named(fd).filter((x) => x.type === 'field_identifier'); if (ns.length) out2.push(...ns.map((x) => x.text)); else out2.push(null) }
+    return out2
+  }
+  const elementValue = (e) => (e && e.type === 'literal_element' ? e.namedChild(0) : e)
+  const keyedPairs = (lv) => {
+    let u = null, m = null
+    for (const k of named(lv)) if (k.type === 'keyed_element') { const [kk, vv] = named(k); const key = elementValue(kk)?.text || ''; if (URL_FIELD.test(key)) u = elementValue(vv); else if (METHOD_FIELD.test(key)) m = elementValue(vv) }
+    pair(u, m)
+  }
+  const goTable = (n) => {
+    const body = field(n, 'body')
+    if (!body) return
+    keyedPairs(body)
+    const fs = fieldsOf(field(n, 'type'))
+    const ui = fs ? fs.findIndex((x) => x && URL_FIELD.test(x)) : -1, mi = fs ? fs.findIndex((x) => x && METHOD_FIELD.test(x)) : -1
+    for (const el of named(body)) {
+      const lv = elementValue(el)
+      if (!lv || lv.type !== 'literal_value') continue
+      keyedPairs(lv)
+      const items = named(lv).filter((x) => !/comment/.test(x.type))
+      if (ui >= 0 && mi >= 0 && items.length === fs.length && items.every((x) => x.type === 'literal_element')) pair(elementValue(items[ui]), elementValue(items[mi]))
+    }
+  }
   const paramTypeOf = (key, sc) => {
     const [, ln, i] = key.split(':')
     for (let s = sc; s; s = s.parent) if (String(s.line) === ln && s.node) return paramType(s.node, Number(i))
@@ -681,8 +753,13 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
         const call = p.parent, c = callee(call)
         if (!c || !c.name) return { kind: objMethod ? 'http' : 'any', method: objMethod, inCall: false }
         const recvText = c.recv ? c.recv.text.replace(/\s+/g, '') : ''
+        // a format call building the URL (`fmt.Sprintf("/a/%s", x)`) passes it on: read what it is given to
+        if (!key && /^(Sprintf|sprintf|format|Format)$/.test(c.name) && argsOf(call)[0]?.id === x.id) { x = call; continue }
         const verb = VERB_OF(c.name)
         if (verb && !key) return { kind: 'http', method: verb, inCall: true }
+        if (/^redirect(_to)?$/.test(c.name) && !key) return { kind: 'http', method: 'GET', inCall: false } // a redirect is followed with a GET
+        // a generated client's `client.get<…>({ url: '/x' })`: one request object, the verb its callee
+        if (verb && /^(url|path|uri)$/.test(key) && argsOf(call).length === 1) return { kind: 'http', method: objMethod || verb, inCall: true }
         if (/^(get|post|put|patch|delete)For(Object|Entity|Location)$/.test(c.name)) return { kind: 'http', method: c.name.replace(/For.*$/, '').toUpperCase(), inCall: true }
         if (FETCHES.has(c.name) || c.name === 'NewRequest' || c.name === 'NewRequestWithContext') {
           const args = argsOf(call)
@@ -692,6 +769,7 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
         }
         if ((c.name === 'uri' || c.name === 'url') && c.recv && /^(call_expression|method_invocation)$/.test(c.recv.type)) { const v = VERB_OF(callee(c.recv)?.name); return { kind: 'http', method: v, inCall: true } }
         if (NAV_CALLS.has(c.name) && (NAV_RECV.test(recvText) || c.name === 'navigate')) return { kind: 'screen', inCall: false }
+        if (BROWSER_NAV(c.name, recvText)) return { kind: 'screen', inCall: false }
         return { kind: objMethod ? 'http' : 'any', method: objMethod, inCall: false }
       }
       return { kind: objMethod ? 'http' : 'any', method: objMethod }
@@ -699,6 +777,7 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     return { kind: objMethod ? 'http' : 'any', method: objMethod }
   }
   const seenRef = new Set()
+  const pairedMethod = new Map() // a URL node → the method its table-driven test case states
   // one node, in the same walk as the declarations (after them, so their strings are consumed
   // first): true when its subtree holds nothing more to read (a string, a concatenation, an import)
   const scanNode = (n, t) => {
@@ -739,8 +818,8 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     return false
   }
   const emit = (n, text) => {
-    if (!text.includes('/') || !urlPattern(text, { inCall: true })) return // climb only for what may be a URL
-    const ctx = ctxOf(n)
+    if (routeTree || !text.includes('/') || !urlPattern(text, { inCall: true })) return // climb only for what may be a URL
+    const ctx = pairedMethod.has(n.id) ? { kind: 'http', method: pairedMethod.get(n.id), inCall: true } : ctxOf(n)
     const u = urlPattern(text, { inCall: !!ctx.inCall })
     if (!u) return
     const k = `${line(n)}|${u.toks.join('/')}`
@@ -780,12 +859,29 @@ function exportsOf(tree) {
   for (const s of named(tree.rootNode)) {
     if (s.type !== 'export_statement') continue
     const d = field(s, 'declaration'), v = field(s, 'value')
-    if (hasToken(s, 'default')) { out.default = d ? { name: field(d, 'name')?.text || null, line: line(d) } : v && v.type === 'identifier' ? { name: v.text, line: null } : { name: null, line: line(s) }; continue }
+    if (hasToken(s, 'default')) { out.default = d ? { name: field(d, 'name')?.text || null, line: line(d), comp: COMPONENTISH.test(d.type) } : v && v.type === 'identifier' ? { name: v.text, line: null, comp: componentish(tree, v.text) } : { name: null, line: line(s), comp: !!v && valueComponentish(v) }; continue }
     if (!d) { for (const sp of named(s).filter((x) => x.type === 'export_clause').flatMap(named)) { const nm = field(sp, 'alias')?.text || field(sp, 'name')?.text; if (VERB_OF(nm) && nm === nm.toUpperCase()) out.verbs.push({ verb: nm, name: field(sp, 'name')?.text, line: line(sp) }) } continue }
     if (d.type === 'function_declaration' && VERB_OF(field(d, 'name')?.text) && field(d, 'name').text === field(d, 'name').text.toUpperCase()) out.verbs.push({ verb: field(d, 'name').text, name: field(d, 'name').text, line: line(d) })
     if (d.type === 'lexical_declaration') for (const vd of named(d)) { const nm = field(vd, 'name')?.text; if (nm && VERB_OF(nm) && nm === nm.toUpperCase()) out.verbs.push({ verb: nm, name: nm, line: line(vd) }) }
   }
   return out
+}
+// A default export that may be a component (a screen): a function, a class, a call (`memo(X)`,
+// `observer(…)`), a name the file imports; never an object, an array or a literal (a config, a
+// translation table)
+const COMPONENTISH = /^(function_declaration|generator_function_declaration|class_declaration|abstract_class_declaration|function_expression|function|arrow_function|class|call_expression|identifier|member_expression)$/
+const valueComponentish = (v) => {
+  for (let d = 0; v && d < 4 && /^(as_expression|satisfies_expression|parenthesized_expression|non_null_expression)$/.test(v.type); d++) v = v.namedChild(0)
+  return !!v && COMPONENTISH.test(v.type)
+}
+function componentish(tree, name) {
+  for (const s of named(tree.rootNode)) {
+    const d = s.type === 'export_statement' ? field(s, 'declaration') : s
+    if (!d) continue
+    if (/^(function_declaration|generator_function_declaration|class_declaration|abstract_class_declaration)$/.test(d.type) && field(d, 'name')?.text === name) return true
+    if (d.type === 'lexical_declaration' || d.type === 'variable_declaration') for (const vd of named(d)) if (vd.type === 'variable_declarator' && field(vd, 'name')?.text === name) return valueComponentish(field(vd, 'value'))
+  }
+  return true // imported, or declared where this scan does not look: may be a component
 }
 // a folder segment as a route's: `[id]` a parameter, `[...slug]` the rest, `(group)` and `@slot` nothing
 const fileSegs = (segs) => segs.filter((g) => !/^\(.*\)$/.test(g) && !g.startsWith('@'))
@@ -813,8 +909,9 @@ function fileRoutes(tree, lang, rel, out, addRoute) {
       return
     }
     if (base.startsWith('_') || base.startsWith('+')) return // a layout, +not-found, +html, +native-intent
+    if (!/\.(tsx|ts|jsx|js)$/.test(rel)) return // Expo Router reads no other extension as a screen
     const ex = exportsOf(tree)
-    if (!ex.default) return
+    if (!ex.default || !ex.default.comp) return
     const segs = fileSegs([...under, base])
     if (segs[segs.length - 1] === 'index') segs.pop()
     addRoute({ kind: 'screen', method: null, path: '/' + segs.join('/'), framework: 'expo-router', handler: ex.default.name ? { name: ex.default.name, qual: '' } : null, handlerLine: ex.default.line, line: ex.default.line || 1, router: 'file', appRoot: root })
@@ -835,9 +932,10 @@ const singular = (s) => (/ies$/.test(s) ? s.replace(/ies$/, 'y') : /(ss|sh|ch|x|
 const RES_ACTIONS = [['index', 'GET', ''], ['create', 'POST', ''], ['new', 'GET', '/new'], ['edit', 'GET', '/:id/edit'], ['show', 'GET', '/:id'], ['update', 'PATCH,PUT', '/:id'], ['destroy', 'DELETE', '/:id']]
 const RES1_ACTIONS = [['create', 'POST', ''], ['new', 'GET', '/new'], ['edit', 'GET', '/edit'], ['show', 'GET', ''], ['update', 'PATCH,PUT', ''], ['destroy', 'DELETE', '']]
 function railsRoutes(rootNode, addRoute, consumed) {
-  const sym = (n) => (n && n.type === 'simple_symbol' ? n.text.slice(1) : n && n.type === 'string' ? lit(n) : null)
+  const sym = (n) => (n && n.type === 'simple_symbol' ? n.text.slice(1) : n && (n.type === 'bare_symbol' || n.type === 'bare_string') ? n.text : n && n.type === 'string' ? lit(n) : null)
   const opt = (args, k) => { for (const a of args) if (a.type === 'pair') { const key = field(a, 'key'); const kt = key.type === 'hash_key_symbol' ? key.text : sym(key); if (kt === k) return field(a, 'value') } return null }
-  const symList = (v) => (!v ? null : v.type === 'array' ? named(v).map(sym).filter(Boolean) : [sym(v)].filter(Boolean))
+  // `[:a, :b]`, `%i[a b]` (a symbol_array of bare_symbol), `%w[a b]`, or one symbol
+  const symList = (v) => (!v ? null : /^(array|symbol_array|string_array)$/.test(v.type) ? named(v).map(sym).filter(Boolean) : [sym(v)].filter(Boolean))
   const handlerOf = (to, ctx) => { const s = to ? lit(to) : null; if (!s || !s.includes('#')) return null; const [c, a] = s.split('#'); return { name: a, qual: [ctx.module, c].filter(Boolean).join('/'), rails: true } }
   const visit = (n, ctx) => {
     if (n.type === 'call' && !field(n, 'receiver')) {
@@ -882,7 +980,10 @@ function railsRoutes(rootNode, addRoute, consumed) {
         else p = sym(first)
         if (p === null) return
         let handler = handlerOf(to, ctx)
-        if (!handler && ctx.member && first.type === 'simple_symbol') handler = { name: p, qual: ctx.controller, rails: true }
+        // a bare action inside `resources … do`, `member` or `collection` (`post "archive"`, `get :preview`):
+        // that resource's controller's action
+        const bare = /^[a-z_]\w*$/.test(p) && (first.type === 'simple_symbol' || first.type === 'string')
+        if (!handler && !to && bare && (ctx.member ? ctx.controller : ctx.resource)) handler = { name: p, qual: ctx.member ? ctx.controller : ctx.resource.controller, rails: true }
         else if (!handler) { const action = sym(opt(args, 'action')), ctl = sym(opt(args, 'controller')); if (action && ctl) handler = { name: action, qual: [ctx.module, ctl].filter(Boolean).join('/'), rails: true } }
         const via = m === 'match' ? (symList(opt(args, 'via')) || ['any']).map((x) => x.toUpperCase()).join(',') : m.toUpperCase()
         addRoute({ method: via === 'ALL' ? 'ANY' : via, path: joinPath(ctx.prefix, p), framework: 'rails', handler, line: line(n), router: 'rails' })

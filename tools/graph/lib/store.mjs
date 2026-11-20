@@ -50,13 +50,15 @@
 //            or error when the extractor threw
 //   config   configuration keys (config.mjs), names only: repo, path, file_id (NULL for a declaration
 //            file the index does not parse: an env template, a compose file, a CI workflow, app.json,
-//            a Spring file), node_id (the innermost definition holding the line, else the file node),
-//            key, kind env | config, role read | declare | map, src_key (a mapping's source), via, line
+//            a Spring file, a Prisma schema), node_id (the innermost definition holding the line, else
+//            the file node), key, kind env | config, role read | declare | map | helper (an env helper
+//            a file defines, `@name`) | defer (a read resolved through the imports: `@helper|KEY`,
+//            `@factory().k`; config.mjs linkConfig), src_key (a mapping's source), via, line
 //   config_inputs  the declaration files config.mjs reads: size, mtime, hash
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '22'
+export const SCHEMA_VERSION = '23'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.

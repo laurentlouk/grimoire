@@ -26,7 +26,9 @@
 //   protobuf a class or struct named after its service by the generated code: a subclass of
 //            `XServicer` (Python), `XImplBase` / `XCoroutineImplBase` (Java, Kotlin), `X.XBase` (C#),
 //            a struct embedding `UnimplementedXServer` (Go), a class implementing `IXServer` or
-//            extending `UnimplementedXService` (TypeScript), NestJS `@GrpcMethod('X', 'M')`: the class
+//            extending `UnimplementedXService` (TypeScript), NestJS `@GrpcMethod('X', 'M')`, a class
+//            deriving in its file from one of these, Node's `server.addService(pkg.X.service, { rpc: impl })`
+//            (each entry's function implements that rpc): the class
 //            implements the service (`contract`), and its methods named like an rpc (or its lower
 //            camel case) implement that rpc
 import { masked, lineAt, closing, objectEntries, camel } from './lex.mjs'
@@ -295,7 +297,7 @@ export function parseContract(lang, src, isTest = false) { return HAND_PARSED[la
 // A hint: { kind: 'contract', name: the contract element (a field or a service), qual: its type, or
 // an rpc's name for a service, qtype: how (`gql` a field, `gql-type` a type, `grpc` a service),
 // fromType: the implementing definition's name when it is not the hint's own definition, line, src }.
-const TRIGGER = /resolve_|graphene|strawberry|@Resolver|@Query|@Mutation|@ObjectType|@InputType|[Rr]esolvers|Servicer|Unimplemented|ImplBase|@GrpcMethod|Server\b|Base\b/
+const TRIGGER = /resolve_|graphene|strawberry|@Resolver|@Query|@Mutation|@ObjectType|@InputType|[Rr]esolvers|Servicer|Unimplemented|ImplBase|@GrpcMethod|addService|Server\b|Base\b/
 const SVC_SUPER = [/^(\w+)Servicer$/, /^(\w+?)(?:Coroutine)?ImplBase$/, /^Unimplemented(\w+?)(?:Server|Service)$/, /^I(\w+)Server$/]
 export function contractHints(lang, family, src, symbols, refs) {
   if (!TRIGGER.test(src)) return []
@@ -315,13 +317,32 @@ export function contractHints(lang, family, src, symbols, refs) {
     if (family === 'csharp') { const x = /^(\w+)Base$/.exec(r.name); if (x) hint({ name: x[1], qtype: 'grpc', line: r.line, src: r.src }) }
     if (family === 'python' && /ObjectType$/.test(r.name) && r.src >= 0 && symbols[r.src]) hint({ name: symbols[r.src].name, qtype: 'gql-type', line: r.line, src: r.src })
   }
+  // a class of this file deriving from one that implements a service or holds resolvers (a servicer's
+  // subclass, a graphene mixin): the classes deriving from class k, transitively (3 levels)
+  const subclasses = (k) => {
+    const out2 = [], seen = new Set([k])
+    let wave = [k]
+    for (let d = 0; d < 3 && wave.length; d++) {
+      const next = []
+      for (const c of wave) for (const r of refs) if (r.kind === 'extends' && r.name === symbols[c].name && r.src >= 0 && symbols[r.src]?.kind === 'class' && !seen.has(r.src)) { seen.add(r.src); next.push(r.src); out2.push(r.src) }
+      wave = next
+    }
+    return out2
+  }
+  if (family === 'python' || family === 'js') for (const h of [...out]) if (h.qtype === 'grpc' && h.src >= 0 && symbols[h.src]?.kind === 'class') for (const d of subclasses(h.src)) hint({ name: h.name, qtype: 'grpc', line: symbols[d].line, src: d })
   if (family === 'go') for (const x of m.matchAll(/\bUnimplemented(\w{1,100}?)Server\b/g)) { const line = at(x.index), k = inner(line, ['struct']); if (k >= 0) hint({ name: x[1], qtype: 'grpc', line, src: k }) }
   if (family === 'python') {
     const graphene = /\bgraphene\b/.test(src)
     for (let k = 0; k < symbols.length; k++) {
       const s = symbols[k]
       const parent = s.parent >= 0 ? symbols[s.parent] : null
-      if (graphene && s.kind === 'method' && parent && parent.kind === 'class' && /^resolve_\w/.test(s.name)) hint({ name: camel(s.name.slice(8)), qual: parent.name, line: s.line, src: k })
+      if (graphene && s.kind === 'method' && parent && parent.kind === 'class' && /^resolve_\w/.test(s.name)) {
+        // a mixin's resolver (`class AuthorBase: def resolve_author`) resolves the field of each type
+        // deriving from it in this file, rather than a field its own name guesses
+        const subs = subclasses(s.parent)
+        const mixin = subs.length && refs.filter((r) => r.kind === 'extends' && r.src === s.parent).every((r) => /^(AbstractType|object)$/.test(r.name))
+        for (const q of [...(mixin ? [] : [parent.name]), ...subs.map((d) => symbols[d].name)]) hint({ name: camel(s.name.slice(8)), qual: q, line: s.line, src: k })
+      }
     }
     if (graphene) for (const x of m.matchAll(/^[ \t]+([a-z_]\w{0,99})[ \t]*=[ \t]*([A-Z]\w{0,99})\.Field\(/gm)) { const line = at(x.index), k = inner(line, ['class']); if (k >= 0) hint({ name: camel(x[1]), qual: symbols[k].name, fromType: x[2], line, src: k }) }
     if (/\bstrawberry\b/.test(src)) {
@@ -344,6 +365,20 @@ export function contractHints(lang, family, src, symbols, refs) {
       hint({ name: named ? named[1] : symbols[k].name, qual: type || '', line: symbols[k].line, src: k })
     }
     for (const x of m.matchAll(/@(ObjectType|InputType|InterfaceType)\(\s*(?:['"]([A-Za-z_]\w*)['"])?/g)) { const k = decorated(at(x.index), ['class']); if (k >= 0) hint({ name: x[2] || symbols[k].name, qtype: 'gql-type', line: symbols[k].line, src: k }) }
+    // Node gRPC: `server.addService(pkg.X.service, { rpc: impl, other })`: each entry implements that
+    // rpc (its lower camel case name); `addService(pkg.X.service, impl)`: impl implements the service
+    for (const x of m.matchAll(/\.addService\(\s*(?:[\w$]+\s*\.\s*)*([A-Za-z_]\w*)\s*\.\s*service\s*,\s*/g)) {
+      const open = x.index + x[0].length
+      if (m[open] === '{') for (const e of objectEntries(m, open)) {
+        // the implementation a value names: `impl`, `Server.impl`, `Server.impl.bind(this)`; an inline
+        // function is no definition of its own, and links nothing
+        const value = e.kind === 'pair' ? m.slice(e.from, e.to).trim().replace(/\.bind\([^()]*\)$/, '') : e.key
+        const fromType = ident.test(value) ? value : /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$/.test(value) ? value.split('.').pop() : null
+        const line = at(e.at)
+        const own = e.kind === 'method' ? symbols.findIndex((s) => s.line === line && s.name === e.key) : -1
+        if (fromType || own >= 0) hint({ name: x[1], qual: e.key, qtype: 'grpc', fromType: own >= 0 ? null : fromType, line, src: own >= 0 ? own : inner(line) })
+      } else { const v = /^([A-Za-z_$][\w$]*)\s*\)/.exec(m.slice(open, open + 120)); if (v) { const line = at(open); hint({ name: x[1], qtype: 'grpc', fromType: v[1], line, src: inner(line) }) } }
+    }
     for (const x of m.matchAll(/@GrpcMethod\(\s*['"]([A-Za-z_]\w*)['"](?:\s*,\s*['"]([A-Za-z_]\w*)['"])?/g)) { const k = decorated(at(x.index), ['method']); if (k >= 0) hint({ name: x[1], qual: x[2] || symbols[k].name.replace(/^./, (c) => c.toUpperCase()), qtype: 'grpc', line: symbols[k].line, src: k }) }
     // a resolver map: `const resolvers = { Query: { user: … } }`, `resolvers: { … }`
     for (const x of m.matchAll(/\b\w*[Rr]esolvers?\b[^=;\n{]{0,80}(?:=|:)\s*\{/g)) {
@@ -406,7 +441,7 @@ export function linkContracts(ctx) {
     if (r.qtype === 'grpc') {
       for (const svc of named('proto', r.name, ['interface'])) {
         const rpcs = nodes.filter((n) => n.parent_id === svc.id && n.kind === 'method')
-        if (r.qual) { for (const rpc of rpcs.filter((x) => x.name === r.qual)) emit(src, rpc.id, 'IMPLEMENTS', 'contract', r.line); continue }
+        if (r.qual) { for (const rpc of rpcs.filter((x) => x.name === r.qual || x.name.replace(/^./, (c) => c.toLowerCase()) === r.qual)) emit(src, rpc.id, 'IMPLEMENTS', 'contract', r.line); continue }
         emit(src, svc.id, 'IMPLEMENTS', 'contract', r.line)
         const members = nodes.filter((n) => n.parent_id === src && (n.kind === 'method' || n.kind === 'function'))
         for (const rpc of rpcs) for (const m of members) if (m.name === rpc.name || m.name === rpc.name.replace(/^./, (c) => c.toLowerCase())) emit(m.id, rpc.id, 'IMPLEMENTS', 'contract', r.line)

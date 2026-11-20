@@ -9,7 +9,8 @@
     { "name": "django", "path": "django" },
     { "name": "next", "path": "next" },
     { "name": "expo", "path": "expo" },
-    { "name": "rnav", "path": "rnav" }
+    { "name": "rnav", "path": "rnav" },
+    { "name": "expo2", "path": "expo2" }
   ],
   "graph": { "dir": ".grimoire/graph" }
 }

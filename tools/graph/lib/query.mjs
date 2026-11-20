@@ -229,7 +229,7 @@ export class Graph {
         const impl = this.one("SELECT count(*) c, sum(e.confidence = 'contract-name') g FROM edges e JOIN nodes n ON n.id = e.src JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND e.kind = 'IMPLEMENTS' AND e.confidence IN ('contract','contract-name')", r.name)
         lines.push(`  API contracts: ${contract.map((c) => `${c.lang} ${c.c} definitions`).join(', ')}; ${impl.c} implementation link(s) from code${impl.g ? ` (${impl.g} by name only, contract-name)` : ''}`)
       }
-      const cfg = (() => { try { return this.one("SELECT count(DISTINCT key) k, sum(role = 'read') r, sum(role = 'declare') d FROM config WHERE repo = ?", r.name) } catch { return null } })()
+      const cfg = (() => { try { return this.one("SELECT count(DISTINCT key) k, sum(role = 'read') r, sum(role = 'declare') d FROM config WHERE repo = ? AND role IN ('read', 'declare', 'map')", r.name) } catch { return null } })()
       if (cfg && cfg.k) lines.push(`  configuration keys: ${cfg.k} (${cfg.r || 0} reads, ${cfg.d || 0} declarations: graph_config)`)
       const data = this.q('SELECT key, extractor, facts, error FROM data_facts WHERE repo = ? ORDER BY key', r.name)
       if (data.length) {

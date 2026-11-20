@@ -21,6 +21,9 @@ class PostsController < ApplicationController
   def destroy
   end
 
+  def archive
+  end
+
   def publish
     redirect_to "/posts/#{params[:id]}"
   end

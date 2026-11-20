@@ -16,7 +16,13 @@ class UserQueries(graphene.ObjectType):
         return None
 
 
-class Post(graphene.ObjectType):
+class AuthorBase:
+    @staticmethod
+    def resolve_author(root, info):
+        return None
+
+
+class Post(graphene.ObjectType, AuthorBase):
     def resolve_title(root, info):
         return root.title
 

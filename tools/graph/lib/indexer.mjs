@@ -16,7 +16,7 @@ import { extract } from './extract.mjs'
 import { TEST_PATH, LANGS, familyOf } from './langs.mjs'
 import { scanRepo, gitHead, listPaths } from './project.mjs'
 import { parseContract, contractHints } from './contracts.mjs'
-import { configOfCode, configOfDecl, declKind, configDeclPaths, DECL_MAX } from './config.mjs'
+import { configOfCode, configOfDecl, declKind, configDeclPaths, DECL_MAX, linkConfig } from './config.mjs'
 import { openStore, tx, driver } from './store.mjs'
 import { candidates, inspect, plan, run, idOf, readsYaml, readsCode, keeps, MAX_BYTES } from './data/registry.mjs'
 import { CODE_LANGS } from './data/readers/code-aside.mjs'
@@ -92,7 +92,8 @@ export async function indexProject(project, { full = false, only = null, log = (
       if (needsResolve) {
         resolveRepo(db, repo.name, repo.abs, rels)
         // the routes' composition is a lead like the rest: a failure loses the routes, never the index
-        try { resolveRoutes(db, repo.name) } catch (e) { rs.failed.push(`routes: ${e.message.slice(0, 120)}`) }
+        try { resolveRoutes(db, repo.name, repo.abs) } catch (e) { rs.failed.push(`routes: ${e.message.slice(0, 120)}`) }
+        try { linkConfig(db, repo.name) } catch (e) { rs.failed.push(`configuration keys: ${e.message.slice(0, 120)}`) }
         rs.resolved = true; relink = true
       }
       const head = gitHead(repo)

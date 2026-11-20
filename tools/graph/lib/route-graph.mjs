@@ -14,6 +14,7 @@
 // walks that find callers and tests (graph_impact, graph_diff, graph_symbol, test reach) follow it.
 // The composition reads the edges (IMPORTS for a mounted file, CALLS for a router passed to a
 // function), so it runs after resolve.mjs; the links span repositories, so they run last.
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { familyOf } from './langs.mjs'
 import { UNKNOWN, hashSeg, joinPath } from './routes.mjs'
@@ -39,7 +40,7 @@ export function removeRoutes(db, fileId) {
 }
 
 // ── composing a repository's routes: prefixes through mounts, handlers to definitions ──
-export function resolveRoutes(db, repo) {
+export function resolveRoutes(db, repo, abs = null) {
   const routes = db.prepare('SELECT r.*, f.path AS fpath FROM routes r JOIN files f ON f.id = r.file_id WHERE f.repo = ?').all(repo)
   const facts = new Map(db.prepare('SELECT rf.file_id, rf.facts FROM route_facts rf JOIN files f ON f.id = rf.file_id WHERE f.repo = ?').all(repo).map((r) => [r.file_id, JSON.parse(r.facts)]))
   if (!routes.length) return
@@ -159,6 +160,12 @@ export function resolveRoutes(db, repo) {
       const at = defs.filter((n) => n.line === r.handler_line && (CALLABLE.has(n.kind) || CLASSY.has(n.kind)))
       if (at.length) return at.find((n) => n.name === h?.name) || at[0]
     }
+    // `require('./ProfileScreen').default`: the file it names stands for its default export
+    if (h && h.module) {
+      const base = path.posix.normalize(path.posix.join(f.dir, h.module))
+      for (const c of [base, ...['.tsx', '.ts', '.jsx', '.js'].map((e) => base + e), ...['.tsx', '.ts', '.jsx', '.js'].map((e) => `${base}/index${e}`)]) { const t = byPath.get(c); if (t && t.node_id) return { id: t.node_id } }
+      return null
+    }
     if (!h || !h.name) return null
     const fam = f.family
     const pool = (byName.get(h.name) || []).filter((n) => familyOf(files.get(n.file_id)?.lang) === fam && (CALLABLE.has(n.kind) || CLASSY.has(n.kind)))
@@ -187,12 +194,21 @@ export function resolveRoutes(db, repo) {
     return methods.length === 1 ? methods[0] : null
   }
 
-  // Expo Router: screens only in a package that uses expo-router
+  // Expo Router: one root per package (`src/app` when the package has one, else `app`), served when
+  // the package starts at `expo-router/entry`, or uses expo-router and has a `_layout` at that root
   const usesExpo = new Map()
   const expoIn = (root) => {
+    if (usesExpo.has(root)) return usesExpo.get(root)
     const pkg = root.replace(/(^|\/)(src\/)?app$/, '')
-    if (!usesExpo.has(pkg)) usesExpo.set(pkg, !!db.prepare("SELECT 1 FROM imports i JOIN files f ON f.id = i.file_id WHERE f.repo = ? AND (i.source = 'expo-router' OR i.source LIKE 'expo-router/%') AND (? = '' OR f.path LIKE ? || '/%') LIMIT 1").get(repo, pkg, pkg))
-    return usesExpo.get(pkg)
+    const under = (d) => `${pkg ? `${pkg}/` : ''}${d}`
+    const chosen = [...files.values()].some((f) => f.path.startsWith(`${under('src/app')}/`)) ? under('src/app') : under('app')
+    let entry = false
+    if (abs) { try { entry = /^expo-router\/entry(\.\w+)?$/.test(String(JSON.parse(readFileSync(path.join(abs, pkg, 'package.json'), 'utf8')).main || '')) } catch { entry = false } }
+    const layout = ['tsx', 'ts', 'jsx', 'js'].some((e) => byPath.has(`${chosen}/_layout.${e}`))
+    const imports = () => !!db.prepare("SELECT 1 FROM imports i JOIN files f ON f.id = i.file_id WHERE f.repo = ? AND (i.source = 'expo-router' OR i.source LIKE 'expo-router/%') AND (? = '' OR f.path LIKE ? || '/%') LIMIT 1").get(repo, pkg, pkg)
+    const on = root === chosen && (entry || (layout && imports()))
+    usesExpo.set(root, on)
+    return on
   }
   const globalPrefix = [...facts.values()].map((f) => f.meta?.globalPrefix).find((x) => x !== undefined)
   const upd = db.prepare('UPDATE routes SET full = ?, handler_id = ? WHERE id = ?')
@@ -213,15 +229,19 @@ export function resolveRoutes(db, repo) {
 
 // ── matching a call site to the routes ──
 // A template's segments: L a literal (hashed), P a parameter (`:id`, `{id}`, `[id]`, `<int:pk>`),
-// M any number of segments (`{…}`, `*`, `**`, `[...slug]`, `{path...}`, `<path:x>`).
+// M any number of segments (`*`, `**`, `[...slug]`, `{path...}`, `<path:x>`), U a part the code
+// computes (`{…}`, a prefix from a constant): one segment or more, never none.
 export function templateSegs(p) {
   return p.split('/').filter(Boolean).map((g) => {
-    if (g === UNKNOWN || /^\*/.test(g) || /^\[\[?\.\.\./.test(g) || /^\{[^}]*\.\.\.\}$/.test(g) || /^<path:/.test(g) || /^\{\*/.test(g)) return { t: 'M' }
+    if (g === UNKNOWN) return { t: 'U' }
+    if (/^\*/.test(g) || /^\[\[?\.\.\./.test(g) || /^\{[^}]*\.\.\.\}$/.test(g) || /^<path:/.test(g) || /^\{\*/.test(g)) return { t: 'M' }
     if (/^[:*]/.test(g) || /[{}[\]<>]/.test(g) || /:\w/.test(g)) return { t: 'P' }
     return { t: 'L', h: hashSeg(g) }
   })
 }
-export function matchSegs(segs, toks, lead) {
+export function matchSegs(segs0, toks, lead) {
+  // a computed part stands for at least one segment: one of any value, then any number
+  const segs = segs0.flatMap((s) => (s.t === 'U' ? [{ t: 'A' }, { t: 'M' }] : [s]))
   const R = segs.length, T = toks.length
   const memo = new Map()
   const better = (a, b) => !b || a.lits > b.lits || (a.lits === b.lits && a.params + 2 * a.wild < b.params + 2 * b.wild)
@@ -235,6 +255,7 @@ export function matchSegs(segs, toks, lead) {
       const s = segs[i], t = toks[j]
       if (s.t === 'M') { take(f(i + 1, j), 0, 0, 0); take(f(i, j + 1), 0, 0, 1) }
       else if (s.t === 'P') take(f(i + 1, j + 1), 0, 1, 0)
+      else if (s.t === 'A') take(f(i + 1, j + 1), 0, 0, 1)
       else if (t === s.h) take(f(i + 1, j + 1), 1, 0, 0)
     }
     memo.set(k, best)
@@ -242,7 +263,9 @@ export function matchSegs(segs, toks, lead) {
   }
   if (!lead) return f(0, 0)
   let best = null
-  for (let i = 0; i <= R; i++) { const r = f(i, 0); if (r) { const x = { ...r, wild: r.wild + (i ? 1 : 0) }; if (better(x, best)) best = x } }
+  // the call's unknown prefix absorbs the route's first i segments: free when they are the route's
+  // own computed part (an unknown for an unknown), a wildcard's worth when a stated segment is among them
+  for (let i = 0; i <= R; i++) { const r = f(i, 0); if (r) { const x = { ...r, wild: r.wild + (segs.slice(0, i).some((s) => s.t === 'L' || s.t === 'P') ? 1 : 0) }; if (better(x, best)) best = x } }
   return best
 }
 const methodsOf = (m) => (!m || m === 'ANY' ? null : m.split(','))
@@ -284,10 +307,13 @@ export function linkRoutes(db) {
         if (!best) continue
         // a method the call states and the route names, then the call's own repository, break a tie
         const score = best.lits * 10 - best.params - 2 * best.wild + (ref.method && ms ? 1 : 0) + (r.repo === ref.repo ? 0.5 : 0)
-        picks.push({ r, score, how: best.wild ? 'prefix unknown' : best.params ? 'template' : 'exact' })
+        // a call's own unknown prefix, or a part either side computes, is never `exact`
+        picks.push({ r, score, how: best.wild || ref.lead ? 'prefix unknown' : best.params ? 'template' : 'exact' })
       }
       const top = Math.max(-Infinity, ...picks.map((p) => p.score))
       picks = picks.filter((p) => p.score === top)
+      // the call states no method and routes of several methods tie: each is linked, and said so
+      if (!ref.method && new Set(picks.map((p) => p.r.method).filter((m) => m && m !== 'ANY')).size > 1) picks = picks.map((p) => ({ ...p, how: `${p.how}, method unknown` }))
     }
     for (const p of picks.slice(0, MAX_TIES)) {
       insL.run(ref.id, p.r.id, p.how)
@@ -326,7 +352,7 @@ export function routeLines(g, r, { callers = true, indent = '  ', limit = 25 } =
   if (full.length > 1) out.push(`${indent}  also served as: ${full.filter((x) => x.p !== primaryPath(r)).map((x) => `${x.p}${x.test ? ' (mounted in a test)' : ''}`).join(', ')}`)
   const h = r.handler_id ? g.node(r.handler_id) : null
   const named = r.handler ? JSON.parse(r.handler) : null
-  out.push(`${indent}  handler: ${h ? g.row(h) : named ? `${named.qual ? `${named.qual}${named.rails ? '#' : '.'}` : ''}${named.name} (not resolved to a definition)` : 'inline (no definition of its own)'}`)
+  out.push(`${indent}  handler: ${h ? g.row(h) : named ? `${named.qual ? `${named.qual}${named.rails ? '#' : '.'}` : ''}${named.name || `the default export of ${named.module}`} (not resolved to a definition)` : 'inline (no definition of its own)'}`)
   const mw = JSON.parse(r.middleware || '[]')
   if (mw.length) out.push(`${indent}  middleware (where the syntax shows it): ${mw.join(', ')}`)
   if (!callers) return out
@@ -371,7 +397,7 @@ export function routesTool(g, { query = '', method = '', kind = '', repo = '', l
   for (const r of rows.slice(0, lim)) {
     const h = r.handler_id ? g.node(r.handler_id) : null
     const c = cnt.get(r.id)
-    out.push(`  #r${r.id}  ${routeTitle(r)}  → ${h ? `${h.qualname}  ${g.loc(h)}` : r.handler ? `${JSON.parse(r.handler).name} (not resolved)` : 'inline'}  · ${c.c} caller(s)${c.t ? `, ${c.t} in tests` : ''}  · ${r.framework}`)
+    out.push(`  #r${r.id}  ${routeTitle(r)}  → ${h ? `${h.qualname}  ${g.loc(h)}` : r.handler ? `${JSON.parse(r.handler).name || JSON.parse(r.handler).module} (not resolved)` : 'inline'}  · ${c.c} caller(s)${c.t ? `, ${c.t} in tests` : ''}  · ${r.framework}`)
   }
   if (rows.length > lim) out.push(`  … ${rows.length - lim} more (filter by a path fragment or a method)`)
   return out.join('\n')

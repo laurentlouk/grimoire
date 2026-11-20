@@ -57,13 +57,14 @@ console.log('\n1 · URLs, templates, matching')
   ok(urlPattern('/') === null && urlPattern('/42') === null && urlPattern('hello world') === null && urlPattern('/a b') === null && urlPattern('ftp://x/a') === null, 'no letter, a space or another scheme: no URL')
   ok(urlPattern('/post/[id]').toks[1] === '*' && urlPattern('/users/{id}').toks[1] === '*' && urlPattern('/a/:id').toks[1] === '*' && urlPattern('/a/%s').toks[1] === '*', 'a template\'s parameter in a call (`[id]`, `{id}`, `:id`, `%s`) is one unknown segment')
   const segs = (p) => templateSegs(p).map((s) => s.t).join('')
-  ok(segs('/a/:id') === 'LP' && segs('/a/{id}') === 'LP' && segs('/a/[id]') === 'LP' && segs('/a/<int:pk>/') === 'LP' && segs(`${UNKNOWN}/a`) === 'ML' && segs('/a/[...rest]') === 'LM' && segs('/a/*') === 'LM' && segs('/files/{path...}') === 'LM', 'templates: literals, parameters, and what takes any number of segments')
+  ok(segs('/a/:id') === 'LP' && segs('/a/{id}') === 'LP' && segs('/a/[id]') === 'LP' && segs('/a/<int:pk>/') === 'LP' && segs(`${UNKNOWN}/a`) === 'UL' && segs('/a/[...rest]') === 'LM' && segs('/a/*') === 'LM' && segs('/files/{path...}') === 'LM', 'templates: literals, parameters, what takes any number of segments, and a part the code computes')
   const m = (route, url, lead = false) => matchSegs(templateSegs(route), urlPattern(url, {}).toks, lead || urlPattern(url).lead)
   ok(m('/api/books/:id', '/api/books/7')?.params === 1, 'a literal fills a parameter')
   ok(m('/api/books/:id', '/api/books') === null && m('/api/books', '/api/books/7') === null, 'segment counts must agree')
   ok(m(`${UNKNOWN}/users/me`, '/api/v1/users/me')?.lits === 2, 'an unknown prefix of the route absorbs the call\'s leading segments')
   ok(m('/api/v1/users/me', '\0/users/me')?.lits === 2, 'an unknown prefix of the call absorbs the route\'s')
   ok(m('/articles/feed', '/articles/\0') === null, 'a part the code fills in never stands for a literal of the route')
+  ok(m(`${UNKNOWN}/items/`, '/items') === null && m(`/api/${UNKNOWN}/items`, '/api/items') === null && m(`${UNKNOWN}/items/`, '/api/v1/items')?.wild === 2, 'a part the code computes stands for one segment or more, never none')
   ok(joinPath('/api', '/') === '/api/' && joinPath('', '') === '/' && joinPath('/api/', 'users') === '/api/users' && joinPath(UNKNOWN, '/me') === `${UNKNOWN}/me`, 'prefixes join with one slash')
 }
 
@@ -104,6 +105,39 @@ console.log('\n1b · declarations, file by file')
   ok(!axios.routes.length && axios.refs[0]?.method === 'POST', 'a client call with data is a call site, not a route')
   const nav = await read('tsx', 'src/x.tsx', "export function A({ navigation }) { return <Link screen=\"Profile\" /> }\n")
   ok(nav.refs.some((r) => r.named && r.kind === 'screen'), '<Link screen="X"> names a screen')
+
+  // methods= as a tuple, a set, one string (Flask, FastAPI)
+  const flaskT = await read('python', 'app.py', "from flask import Blueprint\nbp = Blueprint('a', __name__)\n\n@bp.route('/a', methods=('POST',))\ndef a():\n    pass\n\n@bp.route('/b', methods={'PUT'})\ndef b():\n    pass\n\n@bp.route('/d', methods=('DELETE'))\ndef d():\n    pass\n\nbp.add_url_rule('/c', view_func=c, methods=('PATCH', 'PUT'))\n")
+  ok(['POST /a a', 'PUT /b b', 'DELETE /d d', 'PATCH,PUT /c c'].every((x) => rows(flaskT).includes(x)), `flask: methods= as a tuple, a set or one string (${rows(flaskT)})`)
+  // a generated client's object-argument calls: the method is the callee's
+  const gen = await read('typescript', 'src/client/sdk.gen.ts', "export const readItems = () => (options?.client ?? client).get<A, B>({ responseType: 'json', url: '/api/v1/items/' })\nexport const addItem = () => client.post({ url: '/api/v1/items/' })\n")
+  ok(gen.refs.map((r) => `${r.kind}/${r.method}`).join(' ') === 'http/GET http/POST', `a generated client's client.get<…>({ url }) and client.post({ url }) state their method (${gen.refs.map((r) => `${r.kind}/${r.method}`).join(' ')})`)
+  // a file router's declarations, a generated route tree, a URL in a type: no call site
+  const tan = await read('tsx', 'src/routes/items.tsx', "import { createFileRoute, createRoute } from '@tanstack/react-router'\nexport const Route = createFileRoute('/_layout/items')({ component: Items })\nexport const About = createRoute({ getParentRoute: () => Root, path: '/about/team' })\n")
+  ok(!tan.refs.length, `TanStack createFileRoute('/x') and createRoute({ path }) are declarations, no call site (${tan.refs.length})`)
+  const tree = await read('typescript', 'src/routeTree.gen.ts', "const R = X.update({ id: '/items/all', path: '/items/all' } as any)\nexport interface ByPath { '/items/all': typeof R }\n")
+  ok(!tree.refs.length, 'a generated route tree (routeTree.gen.ts) holds no call site')
+  const types = await read('typescript', 'src/client/types.gen.ts', "export type ReadItemsData = { url: '/api/v1/items/' }\n")
+  ok(!types.refs.length, 'a URL in a type (a string literal type) is no call site')
+  const e2e = await read('typescript', 'tests/items.spec.ts', "test('x', async ({ page }) => { await page.goto('/items/all') })\nit('y', () => { cy.visit('/login/now') })\n")
+  ok(e2e.refs.length === 2 && e2e.refs.every((r) => r.kind === 'screen'), `Playwright page.goto and Cypress cy.visit are navigation, not HTTP (${e2e.refs.map((r) => r.kind)})`)
+  // Go table-driven tests: a method and a URL side by side in one test case
+  const table = await read('go', 'users/unit_test.go', 'package users\n\nimport (\n\t"fmt"\n\t"net/http"\n)\n\nvar tests = []struct {\n\turl, body string\n\tmethod    string\n}{\n\t{"/api/users/login", "{}", "POST"},\n}\n\nvar keyed = []tc{{Method: http.MethodPut, Path: "/api/user/me"}}\nvar loose = []string{"/api/profiles/x"}\n\nfunc T(slug string) {\n\thttp.NewRequest("DELETE", fmt.Sprintf("/api/articles/%s", slug), nil)\n}\n')
+  ok(table.refs.map((r) => `${r.line}:${r.kind}/${r.method}`).join(' ') === '12:http/POST 15:http/PUT 16:any/null 19:http/DELETE', `go: a table-driven test's method paired with its URL, by position or by key; fmt.Sprintf passes the URL on (${table.refs.map((r) => `${r.line}:${r.kind}/${r.method}`).join(' ')})`)
+  // Rails: %i[…], a bare action inside resources, member; a redirect is a GET
+  const rails = await read('ruby', 'config/routes.rb', "Rails.application.routes.draw do\n  resources :articles, except: %i[index new edit update destroy] do\n    post \"archive\"\n    member do\n      get :preview\n    end\n  end\n  resources :tags, only: %i[edit]\nend\n")
+  ok(['POST /articles articles.create', 'GET /articles/:id articles.show', 'POST /articles/:article_id/archive articles.archive', 'GET /articles/:id/preview articles.preview', 'GET /tags/:id/edit tags.edit'].every((x) => rows(rails).includes(x)) && rows(rails).length === 5, `rails: %i[…] in only:/except:, a bare action inside resources maps to its controller (${rows(rails)})`)
+  const redirect = await read('ruby', 'app/controllers/a_controller.rb', 'class AController\n  def x\n    redirect_to "/login/now"\n  end\nend\n')
+  ok(redirect.refs[0]?.kind === 'http' && redirect.refs[0]?.method === 'GET', 'rails: redirect_to "/x" is a GET')
+  // React Navigation: getComponent, and a static config's require('./X').default
+  const rn = await read('tsx', 'src/Navigation.tsx', "export function N() {\n  return <Stack.Screen name=\"Profile\" getComponent={() => ProfileScreen} />\n}\nexport const S = createStackNavigator({ screens: { Feed: { getComponent: () => require('./Feed').default } } })\n")
+  ok(rn.routes.find((r) => r.path === 'Profile')?.handler?.name === 'ProfileScreen' && rn.routes.find((r) => r.path === 'Feed')?.handler?.module === './Feed', 'react-navigation: getComponent={() => X}, getComponent: () => require(\'./X\').default')
+  // Expo Router: a screen is a .tsx/.jsx/.ts/.js file exporting a default component
+  const cfg = await read('typescript', 'app/config/index.ts', 'const Config = { api: 1 }\nexport default Config\n')
+  const i18n = await read('typescript', 'app/i18n/en.ts', 'export default { hello: 1 } as const\n')
+  const home = await read('tsx', 'app/home.tsx', 'export default function Home() {\n  return null\n}\n')
+  const mjs = await read('javascript', 'app/tool.mjs', 'export default function Tool() {}\n')
+  ok(!cfg.routes.length && !i18n.routes.length && home.routes.length === 1 && !mjs.routes.length, 'expo: a default export that is an object is no screen, nor an .mjs file')
 }
 
 // ── 2 · the fixtures ──
@@ -111,7 +145,7 @@ console.log('\n2 · fixtures/routes: one repository per framework')
 const SANDBOX = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-routes-')))
 const P = path.join(SANDBOX, 'routes')
 cpSync(path.join(HERE, 'fixtures', 'routes'), P, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
-for (const repo of ['express', 'nest', 'fastapi', 'spring', 'gin', 'rails', 'django', 'next', 'expo', 'rnav']) {
+for (const repo of ['express', 'nest', 'fastapi', 'spring', 'gin', 'rails', 'django', 'next', 'expo', 'rnav', 'expo2']) {
   const d = path.join(P, repo)
   git(d, 'init', '-q', '-b', 'main'); git(d, 'add', '-A'); git(d, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'init')
 }
@@ -120,7 +154,7 @@ const answers = []
 const ask = async (tool, args) => { const a = await q(tool, args); answers.push(a); return a }
 await q('index')
 const all = await ask('routes')
-has(all, 'Routes (47: 41 http, 6 screen)', 'graph_routes: every route, by kind')
+has(all, 'Routes (53: 44 http, 9 screen)', 'graph_routes: every route, by kind')
 
 // Express: a mounted router, a `.route()` chain, middleware, a test and a client by URL
 has(all, 'GET /api/books/  → listBooks  express/src/controllers/books.js:3', 'express: a router mounted at a prefix (`app.use(\'/api/books\', router)`, the router from another file), its handler imported')
@@ -143,12 +177,16 @@ has(await ask('routes', { query: '/api/cats/:id' }), 'nest/test/cats.e2e-spec.ts
 // FastAPI: APIRouter(prefix=…), include_router(…, prefix=a constant) as {…}, a test and a generated client
 const me = await ask('routes', { query: '/users/me', method: 'GET' })
 has(me, `GET ${UNKNOWN}/users/me  (http, python)`, 'fastapi: the router\'s prefix, under a prefix the code computes (settings.API_V1_STR) kept as {…}')
-has(me, 'fastapi/backend/tests/api/routes/test_users.py:5  in test_get_users_me  (exact)  test', 'fastapi: a test\'s f-string URL, its leading constant an unknown prefix')
+has(me, 'fastapi/backend/tests/api/routes/test_users.py:5  in test_get_users_me  (prefix unknown)  test', 'fastapi: a test\'s f-string URL, its leading constant an unknown prefix (never exact)')
 has(me, 'fastapi/frontend/src/client/sdk.gen.ts:5  in UsersService.readUserMe  (prefix unknown)', 'fastapi: a generated client\'s `{ method, url }`')
 const patch = await ask('routes', { query: '/users/me', method: 'PATCH' })
 lacks(patch, 'sdk.gen.ts', 'fastapi: a client call stating GET does not reach the PATCH route')
 has(patch, 'middleware (where the syntax shows it): get_current_user', 'fastapi: dependencies=[Depends(x)]')
 has(all, `GET ${UNKNOWN}/items/  → read_items`, 'fastapi: include_router(items.router, prefix="/items")')
+const items = await ask('routes', { query: '/items/', repo: 'fastapi' })
+has(items, 'callers in code (1):\n      fastapi/frontend/src/client/sdk.gen.ts:11  in UsersService.readItems  (prefix unknown)', 'fastapi: a generated client\'s client.get<…>({ url }) reaches the GET route, its method the callee\'s')
+has(items, 'fastapi/frontend/src/client/sdk.gen.ts:16  in UsersService.createItem  (prefix unknown)', '… client.post({ url }) the POST route')
+for (const f of ['routes/items.tsx', 'routeTree.gen.ts', 'types.gen.ts', 'items.spec.ts', 'Sidebar.tsx']) lacks(items, f, `fastapi: no frontend page path reaches an API route under a computed prefix (${f}: a file router's declaration, a generated route tree, a type, a browser test, a bare '/items')`)
 
 // Spring: class @RequestMapping + method mappings
 has(all, 'GET /api/owners/{ownerId}  → OwnerController.show', 'spring: @RequestMapping on the class + @GetMapping("/{ownerId}")')
@@ -171,6 +209,13 @@ lacks(all, 'GET /posts/:post_id/comments  ', 'rails: … only the actions listed
 has(all, 'POST /posts/:id/publish  → PostsController.publish', 'rails: a member route')
 has(all, 'GET /admin/photos/:id  → Admin.PhotosController.show', 'rails: a namespace, its controller in the module')
 has(all, 'GET /  → PagesController.home', 'rails: root')
+has(all, 'POST /posts/:post_id/archive  → PostsController.archive', 'rails: a bare action inside resources … do is the resource controller\'s action')
+has(all, 'GET /tags  → index (not resolved)', 'rails: except: %i[…] read')
+has(all, 'POST /tags  → create (not resolved)', '… the actions it leaves')
+lacks(all, '/tags/', '… and none it names')
+const postShow = await ask('routes', { query: 'GET /posts/:id' })
+has(postShow, 'rails/app/controllers/posts_controller.rb:28  in PostsController.publish  (template)', 'rails: redirect_to "/x" is a GET call site')
+has(postShow, 'rails/spec/requests/posts_spec.rb:13  at file level  (template, method unknown)  test', 'a URL stating no method tied between several methods: each linked, and said so')
 has(await ask('routes', { query: 'POST /posts/:id/publish' }), 'rails/spec/requests/posts_spec.rb:9  at file level  (template)  test', 'rails: a request spec\'s interpolated URL')
 
 // Django, Next.js
@@ -202,6 +247,14 @@ const demo = await ask('routes', { query: 'Demo', kind: 'screen' })
 has(demo, 'rnav/screens/WelcomeScreen.tsx:3  in WelcomeScreen.goNext  (name)', 'react-navigation: navigation.navigate(\'Demo\')')
 has(demo, 'rnav/__tests__/navigation.test.tsx:4  at file level  (name)  test', 'react-navigation: … from a test')
 has(await ask('routes', { query: 'Settings', kind: 'screen' }), 'rnav/screens/DemoScreen.tsx:5  in DemoScreen.back  (name)', 'react-navigation: a nested { screen: \'Settings\' }')
+const screens = await ask('routes', { kind: 'screen' })
+has(screens, 'SCREEN Profile  → ProfileScreen  rnav/screens/ProfileScreen.tsx:1  · 1 caller(s)', 'react-navigation: getComponent={() => ProfileScreen}')
+has(screens, 'SCREEN Notifications  → screens/NotificationsScreen.tsx  rnav/screens/NotificationsScreen.tsx  · 1 caller(s)', 'react-navigation: getComponent: () => require(\'./X\').default is that file')
+has(await ask('impact', { target: 'rnav/screens/ProfileScreen.tsx:1' }), 'WelcomeScreen.openProfile:5  d1 [route]', 'impact on a getComponent screen: the code navigating to it')
+// Expo Router: one root per package, a default component
+lacks(screens, 'theme', 'expo: a default export that is no component (a theme object) is no screen')
+has(screens, 'SCREEN /  → Start  expo2/src/app/index.tsx:1', 'expo: a package starting at expo-router/entry serves src/app')
+lacks(screens, 'Legacy', 'expo: … and not its app/ folder too (one root per package)')
 
 // ── 3 · the other tools use them ──
 console.log('\n3 · impact, symbol, overview, diff')

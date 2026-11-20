@@ -9,10 +9,12 @@
 //             `'X' in os.environ` · os.Getenv / os.LookupEnv · Go struct tags env:"X" · System.getenv · @Value("${X}") ·
 //             ENV['X'] / ENV.fetch · std::env::var · env!() · clap's env = "X" · getenv / $_ENV / env() ·
 //             Environment.GetEnvironmentVariable · ProcessInfo environment · a ConfigService.get of
-//             an upper-case name
+//             an upper-case name · a one-hop env helper's calls with a literal name (`env_flag("X")`,
+//             here or in a file importing it) · urfave/cli EnvVars · a Prisma schema's env("X")
 //     config  ConfigService.get('a.b') (Nest; a key that names a namespace reads all of it) ·
 //             Constants.expoConfig.extra.x (Expo: `extra.x`) · @Value("${a.b}") · environment.getProperty ·
-//             viper.Get*("a.b") · config('a.b') (Laravel) · Configuration["A:B"] / GetValue<T>("A:B")
+//             viper.Get*("a.b") · config('a.b') (Laravel) · Configuration["A:B"] / GetValue<T>("A:B") ·
+//             a registerAs factory called and read (`(mailConfig() as T).host`: `ns.host`)
 //   declarations (names only; each file kind below, and no other file that may hold credentials)
 //     .env.example · .env.sample · .env.template (and .env.<x>.example, env-example-<x> …): the names before `=`
 //     docker-compose / compose files: `environment:` names · CI workflows (.github/workflows):
@@ -44,24 +46,28 @@ const PC = '([A-Za-z_][\\w.:-]{0,200})' // .NET's `Section:Key`
 const Q = `(['"\`])`
 const READS = {
   js: [
-    [new RegExp(`\\bprocess\\.env\\.${K}`, 'g'), 1, 'env', 'process.env'],
-    [new RegExp(`\\bprocess\\.env\\[\\s*${Q}${K}\\1\\s*\\]`, 'g'), 2, 'env', 'process.env'],
-    [new RegExp(`\\bimport\\.meta\\.env\\.${K}`, 'g'), 1, 'env', 'import.meta.env'],
+    // `process.env.X`, `process.env?.X`, `process.env\n  .X` (a formatter's line break before the dot)
+    [new RegExp(`\\bprocess\\.env\\s*\\??\\.\\s*${K}`, 'g'), 1, 'env', 'process.env'],
+    [new RegExp(`\\bprocess\\.env\\s*(?:\\?\\.)?\\[\\s*${Q}${K}\\1\\s*\\]`, 'g'), 2, 'env', 'process.env'],
+    [new RegExp(`\\bimport\\.meta\\.env\\s*\\??\\.\\s*${K}`, 'g'), 1, 'env', 'import.meta.env'],
     [new RegExp(`\\bDeno\\.env\\.get\\(\\s*${Q}${K}\\1`, 'g'), 2, 'env', 'Deno.env'],
     [new RegExp(`\\bBun\\.env\\.${K}`, 'g'), 1, 'env', 'Bun.env'],
     [new RegExp(`\\b[\\w$]{0,60}[cC]onfig[\\w$]{0,60}\\s*\\??\\.\\s*get(?:OrThrow)?\\s*(?:<[^<>()\\n]{0,200}>)?\\s*\\(\\s*${Q}${P}\\1`, 'g'), 2, 'auto', 'ConfigService.get'],
     [new RegExp(`\\bConstants\\s*\\.\\s*(?:expoConfig|manifest2?(?:\\s*\\??\\.\\s*extra\\s*\\??\\.\\s*expoClient)?)\\s*\\??\\.\\s*extra\\s*\\??\\.\\s*${K}`, 'g'), 1, 'extra', 'Expo extra'],
   ],
+  // `environ` is `os.environ`, or a bare `environ` only where `from os import environ` binds it
+  // (PY_ENVIRON below): never a request's WSGI `environ` or django-environ's module
   python: [
-    [new RegExp(`\\b(?:os\\.)?environ\\[\\s*${Q}${K}\\1\\s*\\]`, 'g'), 2, 'env', 'os.environ'],
-    [new RegExp(`\\b(?:os\\.)?environ\\.(?:get|setdefault|pop)\\(\\s*${Q}${K}\\1`, 'g'), 2, 'env', 'os.environ'],
+    [new RegExp(`\\bos\\.environ\\[\\s*${Q}${K}\\1\\s*\\]`, 'g'), 2, 'env', 'os.environ'],
+    [new RegExp(`\\bos\\.environ\\.(?:get|setdefault|pop)\\(\\s*${Q}${K}\\1`, 'g'), 2, 'env', 'os.environ'],
     [new RegExp(`\\b(?:os\\.)?getenv\\(\\s*${Q}${K}\\1`, 'g'), 2, 'env', 'os.getenv'],
-    [new RegExp(`${Q}${K}\\1\\s+(?:not\\s+)?in\\s+(?:os\\.)?environ\\b`, 'g'), 2, 'env', 'os.environ'],
+    [new RegExp(`${Q}${K}\\1\\s+(?:not\\s+)?in\\s+os\\.environ\\b`, 'g'), 2, 'env', 'os.environ'],
   ],
   go: [
     [new RegExp(`\\bos\\.(?:Getenv|LookupEnv)\\(\\s*"${K}"`, 'g'), 1, 'env', 'os.Getenv'],
     [new RegExp(`\\bviper\\.(?:Get\\w{0,20}|IsSet)\\(\\s*"${P}"`, 'g'), 1, 'auto', 'viper'],
     [new RegExp(`\`[^\`\\n]{0,400}?\\b(?:env|envconfig)\\s*:\\s*"${K}`, 'g'), 1, 'env', 'struct tag'],
+    [new RegExp(`\\bEnvVar\\s*:\\s*"${K}"`, 'g'), 1, 'env', 'urfave/cli'], // v1; v2's `EnvVars: []string{…}` in configOfCode
   ],
   jvm: [
     [new RegExp(`\\bSystem\\.getenv\\(\\s*"${K}"`, 'g'), 1, 'env', 'System.getenv'],
@@ -94,6 +100,32 @@ const READS = {
   ],
 }
 const TRIGGER = /env|ENV|Env|onfig|@Value|extra|getenv|environ|BaseSettings|viper|registerAs/
+const PY_ENVIRON = [
+  new RegExp(`(?<![.\\w])environ\\[\\s*${Q}${K}\\1\\s*\\]`, 'g'),
+  new RegExp(`(?<![.\\w])environ\\.(?:get|setdefault|pop)\\(\\s*${Q}${K}\\1`, 'g'),
+  new RegExp(`${Q}${K}\\1\\s+(?:not\\s+)?in\\s+environ\\b`, 'g'),
+]
+// A one-hop env helper: a function passing its first parameter to the environment read
+// (`def env_bool(name, default): … os.environ.get(name)`); its calls with a literal name are reads.
+const HELPER_READ = {
+  js: (p) => new RegExp(`\\bprocess\\.env\\s*(?:\\?\\.)?\\[\\s*${p}\\s*\\]|\\bDeno\\.env\\.get\\(\\s*${p}\\s*[,)]`),
+  python: (p) => new RegExp(`\\b(?:os\\.)?(?:environ\\.(?:get|setdefault|pop)\\(|getenv\\()\\s*${p}\\s*[,)]|\\b(?:os\\.)?environ\\[\\s*${p}\\s*\\]|\\b${p}\\s+(?:not\\s+)?in\\s+(?:os\\.)?environ\\b`),
+  go: (p) => new RegExp(`\\bos\\.(?:Getenv|LookupEnv)\\(\\s*${p}\\s*\\)`),
+  ruby: (p) => new RegExp(`\\bENV(?:\\[\\s*${p}\\s*\\]|\\.fetch\\(\\s*${p}\\s*[,)])`),
+}
+const IDENT = /^[A-Za-z_$][\w$]*$/
+const reEsc = (s) => s.replace(/\$/g, '\\$')
+// the names a file imports (JavaScript, TypeScript, Python): a deferred read names one of them
+function importedNames(m, family) {
+  const out = new Set()
+  const add = (part) => { const n = part.trim().split(/\s+as\s+/).pop(); if (IDENT.test(n || '')) out.add(n) }
+  if (family === 'js') {
+    for (const x of m.matchAll(/\bimport\s+(?:type\s+)?([A-Za-z_$][\w$]*)?\s*,?\s*(?:\{([^{}]{0,2000})\})?\s*from\b/g)) { if (x[1]) out.add(x[1]); for (const part of (x[2] || '').split(',')) add(part) }
+    for (const x of m.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(/g)) out.add(x[1])
+  }
+  if (family === 'python') for (const x of m.matchAll(/^[ \t]*from[ \t]+[\w.]+[ \t]+import[ \t]+\(?([^)\n]{1,2000})/gm)) for (const part of x[1].split(',')) add(part)
+  return out
+}
 
 // A code file's reads, declarations and mappings: [{ key, kind, role, srcKey, via, line, src }], src
 // the index of the innermost symbol holding the line (-1: the file).
@@ -114,7 +146,36 @@ export function configOfCode(lang, family, rel, src, symbols) {
     seen.add(k)
     reads.push({ key, kind, via, off })
   }
-  for (const [re, g, kind, via] of READS[family]) for (const x of m.matchAll(re)) read(x[g], kind, via, x.index)
+  // a name the code completes (`"APP_FLAG_" + name`) is a prefix, not a key
+  const partial = (x) => /['"`]$/.test(x[0]) && /^\s*\+/.test(m.slice(x.index + x[0].length, x.index + x[0].length + 40))
+  for (const [re, g, kind, via] of READS[family]) for (const x of m.matchAll(re)) if (!partial(x)) read(x[g], kind, via, x.index)
+  if (family === 'python' && /^[ \t]*from[ \t]+os[ \t]+import[^\n]*\benviron\b/m.test(m)) for (const re of PY_ENVIRON) for (const x of m.matchAll(re)) if (!partial(x)) read(x[2], 'env', 'os.environ', x.index)
+  // urfave/cli v2: `EnvVars: []string{"A", "B"}`
+  if (family === 'go') for (const x of m.matchAll(/\bEnvVars\s*:\s*\[\]string\s*\{([^{}]{0,400})\}/g)) for (const k of x[1].matchAll(/"([A-Za-z_][A-Za-z0-9_]{0,99})"/g)) read(k[1], 'env', 'urfave/cli', x.index + x[0].indexOf('{') + 1 + k.index)
+  // one-hop env helpers defined here, and their calls here with a literal name
+  const helpers = new Set()
+  if (HELPER_READ[family]) {
+    const lines = m.split('\n')
+    for (const s of symbols) {
+      if (!/^(function|method)$/.test(s.kind) || !IDENT.test(s.name || '')) continue
+      const body = lines.slice(s.line - 1, s.endLine).join('\n')
+      const pm = new RegExp(`${reEsc(s.name)}\\s*(?:=\\s*(?:async\\s*)?(?:function\\s*)?)?\\(\\s*(?:(?:self|cls)\\s*,\\s*)?([A-Za-z_$][\\w$]*)`).exec(body.slice(0, 400))
+      if (pm && HELPER_READ[family](reEsc(pm[1])).test(body)) helpers.add(s.name)
+    }
+    if (helpers.size) for (const x of m.matchAll(new RegExp(`(?<![\\w$])(?:${[...helpers].map(reEsc).join('|')})\\s*\\(\\s*${Q}([A-Z][A-Z0-9_]{0,99})\\1`, 'g'))) if (!partial(x)) read(x[2], 'env', 'env helper', x.index)
+  }
+  // deferred, resolved once the imports are (linkConfig): a helper another file defines, called here
+  // with a literal name; a registerAs factory's object read here (`(mailConfig() as T).host`)
+  const deferred = []
+  if (family === 'js' || family === 'python') {
+    const imp = importedNames(m, family)
+    if (imp.size) {
+      for (const x of m.matchAll(new RegExp(`(?<![\\w$.])([a-z_$][\\w$]*)\\s*\\(\\s*${Q}([A-Z][A-Z0-9_]{0,99})\\2`, 'g'))) if (imp.has(x[1]) && !helpers.has(x[1]) && !partial(x)) deferred.push({ key: `@${x[1]}|${x[3]}`, off: x.index })
+      if (family === 'js') for (const x of m.matchAll(/(?<![\w$.])(?:\(\s*([A-Za-z_$][\w$]*)\s*\(\s*\)\s*(?:as\s+[\w$.]+(?:<[^<>()\n]{0,200}>)?\s*)?\)|([A-Za-z_$][\w$]*)\s*\(\s*\))\s*\??\.\s*([A-Za-z_$][\w$]*)/g)) { const f = x[1] || x[2]; if (imp.has(f) && (x[1] || /onfig/.test(f))) deferred.push({ key: `@${f}().${x[3]}`, off: x.index + x[0].lastIndexOf(x[3]) }) }
+    }
+  }
+  for (const h of helpers) { const k = symbols.findIndex((y) => y.name === h); if (k >= 0) out.push({ key: `@${h}`, kind: 'env', role: 'helper', srcKey: null, via: 'env helper', line: symbols[k].line, src: k }) }
+  for (const d of deferred.slice(0, 2000)) { const line = at(d.off); out.push({ key: d.key, kind: 'env', role: 'defer', srcKey: null, via: 'deferred', line, src: inner(line) }) }
   if (family === 'js') {
     // `const { A, B: b, C = 1 } = process.env`
     for (const x of m.matchAll(/\{([^{}]{1,2000})\}\s*=\s*process\.env\b/g)) for (const part of x[1].split(',')) { const name = part.trim().split(/[\s:=]/)[0]; if (name) read(name, 'env', 'process.env', x.index) }
@@ -193,6 +254,7 @@ const DECL = [
   [/^app\.json$/, 'app.json'],
   [/^application(-[\w-]+)?\.properties$/, 'application.properties'],
   [/^application(-[\w-]+)?\.ya?ml$/, 'application.yml'],
+  [/\.prisma$/, 'prisma'],
 ]
 export const DECL_MAX = 1 << 20
 // The kind of declaration a file is, or null. A file that may hold credentials is never one, but for
@@ -252,6 +314,10 @@ export function configOfDecl(kind, text) {
     text.split('\n').forEach((l, i) => { const x = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]{0,99})\s*=/.exec(l); if (x) decl(x[1], i + 1) })
     return out
   }
+  if (kind === 'prisma') { // a Prisma schema reads its datasource from the environment: `url = env("DATABASE_URL")`
+    text.split('\n').forEach((l, i) => { if (/^\s*\/\//.test(l)) return; for (const x of l.matchAll(/\benv\(\s*"([A-Za-z_][A-Za-z0-9_]{0,99})"\s*\)/g)) if (ENV_KEY.test(x[1])) out.push({ key: x[1], kind: 'env', role: 'read', srcKey: null, via: 'prisma', line: i + 1 }) })
+    return out
+  }
   if (kind === 'app.json') {
     let j = null
     try { j = JSON.parse(text) } catch { return out }
@@ -308,8 +374,53 @@ export function configOfDecl(kind, text) {
   return out
 }
 
+// ── deferred reads, resolved through the imports once a repository's are (resolve.mjs ran) ──
+// `@f|KEY` (a call of an imported env helper with a literal name) reads KEY when the file `f` is
+// imported from defines `f` as one; `@f().k` (a call of an imported registerAs factory, a property of
+// what it returns) reads `ns.k` when that file's registerAs names `ns`. The derived reads are
+// rewritten whenever the repository is resolved again.
+const DERIVED = ['registerAs factory', 'env helper, imported']
+export function linkConfig(db, repo) {
+  db.prepare(`DELETE FROM config WHERE repo = ? AND role = 'read' AND via IN (${DERIVED.map(() => '?').join(',')})`).run(repo, ...DERIVED)
+  const defers = db.prepare("SELECT c.*, f.node_id AS fnode FROM config c JOIN files f ON f.id = c.file_id WHERE c.repo = ? AND c.role = 'defer'").all(repo)
+  if (!defers.length) return 0
+  const importRows = db.prepare('SELECT line, names, alias FROM imports WHERE file_id = ?')
+  const importEdges = db.prepare("SELECT e.line, d.file_id FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.kind = 'IMPORTS'")
+  const nsOf = db.prepare("SELECT DISTINCT key FROM config WHERE file_id = ? AND role = 'declare' AND via = 'registerAs'")
+  const helperIn = db.prepare("SELECT 1 FROM config WHERE file_id = ? AND role = 'helper' AND key = ? LIMIT 1")
+  const ins = db.prepare('INSERT INTO config(repo, path, file_id, node_id, key, kind, role, src_key, via, line) VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)')
+  const targets = new Map()
+  // the files a local name of a file is imported from, with the name it has there
+  const from = (d, local) => {
+    const k = `${d.file_id}|${local}`
+    if (targets.has(k)) return targets.get(k)
+    const edges = importEdges.all(d.fnode)
+    const out = []
+    for (const i of importRows.all(d.file_id)) {
+      const names = JSON.parse(i.names || '[]').map(String)
+      const hit = i.alias === local ? local : names.map((n) => n.split('=')).find((p) => p.includes(local))
+      if (!hit) continue
+      const orig = Array.isArray(hit) ? hit.find((x) => x !== local) || local : local
+      for (const e of edges) if (e.line === i.line) out.push({ fid: e.file_id, name: orig })
+    }
+    targets.set(k, out)
+    return out
+  }
+  let n = 0
+  for (const d of defers) {
+    const h = /^@([A-Za-z_$][\w$]*)\|([A-Za-z_][A-Za-z0-9_]*)$/.exec(d.key)
+    const f = /^@([A-Za-z_$][\w$]*)\(\)\.([A-Za-z_$][\w$]*)$/.exec(d.key)
+    if (h) { if (from(d, h[1]).some((t) => helperIn.get(t.fid, `@${t.name}`))) { ins.run(repo, d.path, d.file_id, d.node_id, h[2], 'env', 'read', 'env helper, imported', d.line); n++ } continue }
+    if (!f) continue
+    const ns = new Set(from(d, f[1]).flatMap((t) => nsOf.all(t.fid).map((r) => r.key.split('.')[0])))
+    for (const x of ns) { const key = `${x}.${f[2]}`; if (PATH_KEY.test(key)) { ins.run(repo, d.path, d.file_id, d.node_id, key, 'config', 'read', 'registerAs factory', d.line); n++ } }
+  }
+  return n
+}
+
 // ── answers ──
 const LISTED = 40, READERS = 25
+const FRAMEWORK_OWNED = /^(spring|server|management|logging)\./
 const where = (g, r) => {
   const n = r.node_id ? g.node(r.node_id) : null
   const inDef = n && n.kind !== 'file' ? `in ${n.qualname}` : r.file_id ? 'at file level' : ''
@@ -384,7 +495,7 @@ export function keyAnswer(g, key, repo = null) {
 // The listing: every key (or those matching `query`: a fragment, or a `*` pattern), then the gaps.
 export function configList(g, { query = null, kind = null, repo = null, limit = 60 } = {}) {
   const R = repo ? ' AND repo = ?' : '', ra = repo ? [repo] : []
-  const all = g.q(`SELECT key, kind, role, src_key, via, repo, path, line FROM config WHERE 1=1${R} ORDER BY key`, ...ra)
+  const all = g.q(`SELECT key, kind, role, src_key, via, repo, path, line FROM config WHERE role IN ('read', 'declare', 'map')${R} ORDER BY key`, ...ra)
   if (!all.length) return 'No configuration key found: no environment read (process.env, os.environ, os.Getenv, System.getenv, ENV, std::env …), no config path read (ConfigService.get, @Value, viper …) and no declaration (.env.example, compose environment, CI env, app.json extra, application.properties) in the indexed repositories.'
   const keys = new Map()
   for (const r of all) {
@@ -416,7 +527,14 @@ export function configList(g, { query = null, kind = null, repo = null, limit = 
   const unread = list.filter((k) => !k.read.length && !k.feeds.size && (k.declare.length || k.map.length) && !coveredByNs(k))
   const show = (title, xs, line) => { if (!xs.length) return; out.push(title); for (const k of xs.slice(0, LISTED)) out.push(`  ${line(k)}`); if (xs.length > LISTED) out.push(`  … ${xs.length - LISTED} more`) }
   show(`Read but declared nowhere the index reads (${undeclared.length}): the code needs it and no template, compose file or workflow names it`, undeclared, (k) => `${k.key}  ${k.kind}  ${g.loc({ repo: k.read[0].repo, path: k.read[0].path, kind: 'x', line: k.read[0].line })}${k.read.length > 1 ? ` (+${k.read.length - 1})` : ''}`)
-  show(`Declared but read nowhere in the index (${unread.length}): a script, a container, a tool or another repository may read it`, unread, (k) => { const d = k.declare[0] || k.map[0]; return `${k.key}  ${k.kind}  ${g.loc({ repo: d.repo, path: d.path, kind: 'x', line: d.line })}  ${d.via}` })
+  // a key only a CI workflow declares is the workflow's own (its steps read it); a framework's own
+  // namespace (Spring's spring.*, server.*, management.*, logging.*) is read by the framework
+  const ciOnly = (k) => k.declare.length && !k.map.length && k.declare.every((d) => d.via === 'workflow' || d.via === 'gitlab-ci')
+  const framework = (k) => k.kind === 'config' && FRAMEWORK_OWNED.test(k.key)
+  const declLine = (k) => { const d = k.declare[0] || k.map[0]; return `${k.key}  ${k.kind}  ${g.loc({ repo: d.repo, path: d.path, kind: 'x', line: d.line })}  ${d.via}` }
+  show(`Declared but read nowhere in the index (${unread.filter((k) => !ciOnly(k) && !framework(k)).length}): a script, a container, a tool or another repository may read it`, unread.filter((k) => !ciOnly(k) && !framework(k)), declLine)
+  show(`Declared only by a CI workflow (${unread.filter(ciOnly).length}): the workflow's steps read it`, unread.filter(ciOnly), declLine)
+  show(`A framework's own settings (${unread.filter((k) => !ciOnly(k) && framework(k)).length}): read by the framework, not the code`, unread.filter((k) => !ciOnly(k) && framework(k)), declLine)
   return out.join('\n')
 }
 
