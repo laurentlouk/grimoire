@@ -10,6 +10,7 @@
 //   - test reach per module: the share of its functions a test reaches within TEST_DEPTH calls, so
 //     the untested areas show before anyone changes them.
 import { systemMap } from './modules.mjs'
+import { routeSummary, routesServedBy, routeTitle } from './route-graph.mjs'
 
 const GUESSES = "('ambiguous','unique-name')"
 const TEST_DEPTH = 6
@@ -26,19 +27,23 @@ export function overview(g, { repo = null, limit = 12 } = {}) {
     const defs = g.one("SELECT count(*) c FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND n.kind != 'file' AND n.is_test = 0", r.name).c
     const tests = g.one('SELECT count(*) c FROM files WHERE repo = ? AND is_test = 1', r.name).c
     out.push(`${r.name}  (${r.root})  files: ${langs} · ${defs} production definitions · ${tests} test file(s)`)
+    const rs = routeSummary(g, r.name)
+    if (rs) out.push(rs)
   }
 
   // ── modules ──
   const files = g.q(`SELECT f.id, f.repo, f.path, f.is_test, f.node_id FROM files f WHERE 1=1${R}`, ...ra)
   const nodes = g.q(`SELECT n.id, n.file_id FROM nodes n JOIN files f ON f.id = n.file_id WHERE 1=1${R}`, ...ra)
-  const edges = g.q(`SELECT e.src, e.dst, e.kind, e.confidence FROM edges e JOIN nodes n ON n.id = e.src JOIN files f ON f.id = n.file_id WHERE 1=1${R}`, ...ra)
+  const edges = g.q(`SELECT e.src, e.dst, e.kind, e.confidence FROM edges e JOIN nodes n ON n.id = e.src JOIN files f ON f.id = n.file_id WHERE e.kind != 'ROUTES_TO'${R}`, ...ra)
   const sys = systemMap(files, nodes, edges)
   const name = (m) => (repos.length > 1 ? `${m.repo}:${m.key}` : m.key)
   const usesOf = new Map(), usedBy = new Map()
   for (const [a, b, n] of sys.links) { (usesOf.get(a) || usesOf.set(a, []).get(a)).push([b, n]); (usedBy.get(b) || usedBy.set(b, []).get(b)).push([a, n]) }
   // test reach: production callables a test reaches within TEST_DEPTH calls
   const testIds = g.q(`SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id WHERE n.is_test = 1${R}`, ...ra).map((x) => x.id)
-  const reached = testIds.length ? g.walk(testIds, ['CALLS'], 'out', TEST_DEPTH) : new Map()
+  // a test reaching a handler through its route (by URL, by navigation) reaches it too
+  const fileTests = g.q(`SELECT f.node_id AS id FROM files f WHERE f.is_test = 1${R}`, ...ra).map((x) => x.id)
+  const reached = testIds.length || fileTests.length ? g.walk([...testIds, ...fileTests], ['CALLS', 'ROUTES_TO'], 'out', TEST_DEPTH) : new Map()
   const callables = g.q(`SELECT n.id, n.file_id FROM nodes n JOIN files f ON f.id = n.file_id WHERE n.kind IN ${CALLABLE} AND n.is_test = 0${R}`, ...ra)
   const modOfFile = new Map(sys.fileModule)
   const reach = new Map()
@@ -59,14 +64,22 @@ export function overview(g, { repo = null, limit = 12 } = {}) {
   if (sys.modules.length > 30) out.push(`  … ${sys.modules.length - 30} more`)
 
   // ── entry points ──
+  // a route's handler or screen is an entry point reached through HTTP or navigation: listed apart
   const entries = g.q(`SELECT n.*, f.repo, f.path,
       (SELECT count(*) FROM edges e WHERE e.src = n.id AND e.kind = 'CALLS' AND e.confidence NOT IN ${GUESSES}) AS fanout
     FROM nodes n JOIN files f ON f.id = n.file_id
     WHERE n.kind IN ${CALLABLE} AND n.is_test = 0 AND n.parent_id IS NULL${R}
       AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst = n.id AND e.kind = 'CALLS')
+      AND NOT EXISTS (SELECT 1 FROM routes r WHERE r.handler_id = n.id AND r.full IS NOT NULL)
     ORDER BY fanout DESC, f.path LIMIT ?`, ...ra, limit)
   out.push('Entry points (nothing in the index calls them; they call the most): where a flow starts, or code reached through config, a framework or another repository')
   for (const n of entries.filter((x) => x.fanout > 0)) out.push(`  ${g.row(n, `calls ${n.fanout}`)}`)
+  const handlers = g.q(`SELECT DISTINCT n.*, f.repo, f.path, (SELECT count(*) FROM edges e WHERE e.dst = n.id AND e.kind = 'ROUTES_TO') AS hits
+    FROM routes r JOIN nodes n ON n.id = r.handler_id JOIN files f ON f.id = n.file_id WHERE r.full IS NOT NULL${R} ORDER BY hits DESC, f.path, n.line LIMIT ?`, ...ra, limit)
+  if (handlers.length) {
+    out.push('Route handlers and screens (entry points through HTTP or navigation; graph_routes lists every route):')
+    for (const n of handlers) { const rs = routesServedBy(g, [n.id]); out.push(`  ${g.row(n, `${rs.slice(0, 2).map(routeTitle).join(', ')}${rs.length > 2 ? ', …' : ''} · reached from ${n.hits} place(s)`)}`) }
+  }
 
   // ── most used ──
   const used = g.q(`SELECT n.*, f.repo, f.path, count(DISTINCT e.src) AS callers FROM edges e JOIN nodes n ON n.id = e.dst JOIN files f ON f.id = n.file_id

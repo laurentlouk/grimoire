@@ -1,0 +1,1 @@
+{ "name": "mobile", "private": true, "dependencies": { "@react-navigation/native": "^6.1.0", "@react-navigation/native-stack": "^6.9.0", "@react-navigation/bottom-tabs": "^6.5.0" } }

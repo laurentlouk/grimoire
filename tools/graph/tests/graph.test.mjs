@@ -816,7 +816,9 @@ console.log('\n6 · beyond the edges (fixtures/edge): dispatch, unlinked calls, 
   const cs = await imp('createSession')
   has(cs, 'login:3  d1 [import]', 'impact: a linked caller is listed as before')
   has(cs, 'testCreate  function test  test/session.test.ts:3', 'impact: the test on the path')
-  has(cs, 'src/api/routes.ts  :4 reference in register', 'impact: a function passed as a value (a callback) is a mention the edges miss')
+  // a function passed as a route's handler (a callback): listed with its route (routes.test.mjs), its line explained by it
+  has(cs, 'POST {…}/login  (http, node)  declared src/api/routes.ts:4', 'impact: a function passed as a value to a router is listed with the route it handles')
+  lacks(cs, 'src/api/routes.ts  :4 reference', 'impact: … and its declaration line is no unexplained mention')
   has(cs, 'src/jobs/runner.ts  :5 string in run', 'impact: a string key naming it is a mention')
   has(cs, 'config/jobs.yaml  :3 config', 'impact: config naming it is a mention')
   has(cs, 'docs/auth.md  :3 docs', 'impact: docs naming it are a mention')
