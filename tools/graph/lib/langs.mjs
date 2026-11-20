@@ -8,12 +8,15 @@
 //            Swift `extension T`, Go method receivers, C++ `T::m`): (node) => { type, super? }
 //   calls    call sites → a CALLS ref. value: [field holding the callee (null = the call node
 //            itself carries name + receiver fields), ref kind]; `callee(node)` overrides both
+//            (null: the default; an object with no name: this node calls nothing)
 //   imports  (node, file) => [{ source, names: [local names], alias? }]
 //   supers   (defNode) => [{ name, kind: 'extends' | 'implements' }]
+//   name     (defNode, file) => the definition's name, when nameOf() is not it
 //   isTest   (defNode, name) => bool, on top of the file-path test heuristic
 //   container  (defNode) => type name | null: the type a definition attaches to that no enclosing
 //            block names (JavaScript `X.prototype.y = function`)
-//   tokenCalls  node type → (node) => [{ name, qual }]: calls hidden in unparsed token trees
+//   tokenCalls  node type → (node) => [{ name, qual }]: calls the syntax holds no call node for
+//            (in unparsed token trees, a wrapper's wrapped component)
 //   import names are local names, or `local=original` when aliased (`import { a as b }` → `b=a`).
 // Anything a spec does not name is walked through, never extracted. Files in a language with no
 // spec (or none of these) still become file nodes, so path search covers them.
@@ -138,20 +141,115 @@ const jsSupers = (n) => {
   for (const e of kids(n, 'extends_type_clause', 'extends_clause')) for (const v of named(e)) out.push({ name: lastSegment(v), kind: 'extends' })
   return out
 }
+// A function made by a call: `const Text = forwardRef(function Text(…) {…})`, `memo(…)`,
+// `React.memo(…)`, `styled.View\`…\``, `styled(View)`, `withX(Component)`, `connect(…)(Component)`,
+// `create<State>()((set) => …)`, `debounce(() => …)`. At module level the value is a call whose callee
+// is a known wrapper (a `withX` given a component), or whose first or last argument is a function (or
+// such a call); deeper, only a component wrapper counts. What the call returns is taken to be a
+// function of the variable's name. Not a value built from a callback: an array method
+// (`list.map(…)`), a timer, a hook that returns a value (`useMemo`).
+const WRAPPER = /^(forwardRef|memo|observer|lazy|styled|connect|compose|create\w*Component)$/
+const COMPONENT_WRAPPER = /^(forwardRef|memo|observer|styled|create\w*Component)$/
+const same = (a, b) => !!a && !!b && a.id === b.id
+const NOT_WRAPPER = /^(setTimeout|setInterval|setImmediate|requestAnimationFrame|queueMicrotask|Promise|describe|it|test|use(?!\w*(Callback|Event)$)[A-Z]\w*)$/
+const unwrapValue = (v) => { while (v && /^(satisfies_expression|as_expression|parenthesized_expression|non_null_expression)$/.test(v.type)) v = v.namedChild(0); return v }
+const calleeHead = (f) => { // the name a callee is known by: `styled` in `styled.View` / `styled(View)`, `memo` in `React.memo`
+  if (!f) return null
+  if (f.type === 'call_expression') return calleeHead(field(f, 'function'))
+  if (f.type === 'member_expression') { const o = field(f, 'object'); return o && /^styled\b/.test(o.text) ? 'styled' : text(field(f, 'property')) }
+  return f.type === 'identifier' ? f.text : null
+}
+const wrapsFn = (call, depth = 0) => {
+  if (!call || call.type !== 'call_expression' || depth > 4) return false
+  const f = field(call, 'function'), head = calleeHead(f)
+  if (head && NOT_WRAPPER.test(head)) return false
+  if (f && f.type === 'member_expression' && COMMON_METHODS.js.has(text(field(f, 'property')))) return false
+  if (head && WRAPPER.test(head)) return true
+  const args = field(call, 'arguments')
+  const list = args && args.type === 'arguments' ? named(args) : []
+  if (head && /^with[A-Z]/.test(head) && list.some((a) => a.type === 'identifier' && /^\p{Lu}/u.test(a.text))) return true // an HOC, not `withTiming(1)`
+  const ends = [list[0], list[list.length - 1]].filter(Boolean).map(unwrapValue)
+  return ends.some((a) => FN_VALUE.test(a.type) || wrapsFn(a, depth + 1)) || (f && f.type === 'call_expression' && wrapsFn(f, depth + 1))
+}
+const atModuleLevel = (decl) => { const d = decl.parent, p = d && d.parent; return !!p && /^(lexical_declaration|variable_declaration)$/.test(d.type) && (p.type === 'program' || p.type === 'export_statement') }
+// a known wrapper defines a component at any depth (`const View = memo(…)` inside a test); any other
+// call with a function argument only at module level
+const knownWrap = (v) => !!v && v.type === 'call_expression' && COMPONENT_WRAPPER.test(calleeHead(field(v, 'function')) || '')
+const wrappedFn = (n) => field(n, 'name')?.type === 'identifier' && (atModuleLevel(n) ? wrapsFn(unwrapValue(field(n, 'value'))) : knownWrap(unwrapValue(field(n, 'value'))))
+// A router of procedures: `createTRPCRouter({ … })`, `router({ … })`, `t.router({ … })`, or an object
+// literal `satisfies TRPCRouterRecord`. The router is an object definition; each of its keys a member.
+const ROUTER_CALL = /^(createTRPCRouter|createRouter|router|mergeRouters)$/
+const routerObject = (v) => {
+  v = unwrapValue(v)
+  if (!v) return null
+  if (v.type === 'call_expression') { const f = field(v, 'function'), a = field(v, 'arguments'); const first = a && named(a)[0]; return f && ROUTER_CALL.test(lastSegment(f) || '') && first && first.type === 'object' ? first : null }
+  return null
+}
+const routerOf = (decl) => {
+  const v = field(decl, 'value')
+  if (!v || !atModuleLevel(decl) || field(decl, 'name')?.type !== 'identifier') return null
+  if (v.type === 'satisfies_expression' && /Router/.test(text(v.namedChild(1)))) { const o = unwrapValue(v.namedChild(0)); return o && o.type === 'object' ? o : null }
+  return routerObject(v)
+}
+const routerPair = (n) => { const o = n.parent; if (!o || o.type !== 'object') return false; let d = o.parent; while (d && d.type !== 'variable_declarator' && /^(arguments|call_expression|satisfies_expression|as_expression|parenthesized_expression)$/.test(d.type)) d = d.parent; return !!d && d.type === 'variable_declarator' && same(routerOf(d), o) }
+// `export default () => …`, `export default function () {}`, `export default memo(…)`: a definition
+// with no name of its own, known by its file's (`Home.tsx` → Home; `index.tsx` → its folder's name).
+const defaultFn = (n) => { const v = unwrapValue(field(n, 'value')); return !!v && (FN_VALUE.test(v.type) && !field(v, 'name') || wrapsFn(v)) }
+export const nameFromFile = (file) => {
+  if (!file) return null
+  const parts = file.split('/')
+  let stem = parts.pop().replace(/\.[^.]+$/, '').replace(/\.(ios|android|native|web)$/, '')
+  if (stem === 'index' && parts.length) stem = parts.pop()
+  const words = stem.split(/[^\p{L}\p{N}_$]+/u).filter(Boolean)
+  const id = words.map((w, i) => (i ? w[0].toUpperCase() + w.slice(1) : w)).join('')
+  return /^[\p{L}_$]/u.test(id) ? id : null
+}
+// `export default memo(Card)` beside `function Card`: the file's name is the wrapped one's, no new definition
+const defaultName = (n, file) => {
+  const name = nameFromFile(file), v = unwrapValue(field(n, 'value'))
+  const wrapsOwn = (c) => c && c.type === 'call_expression' && (named(field(c, 'arguments') || c).some((a) => a.type === 'identifier' && a.text === name) || wrapsOwn(field(c, 'function')))
+  return name && !wrapsOwn(v) ? name : null
+}
+// JSX: rendering `<Button />`, `<Button>…</Button>` or `<UI.Row />` calls the component. A lowercase
+// tag (`<div>`, `<path>`) is the host's own element, never a call.
+const jsxCallee = (n) => {
+  const t = field(n, 'name')
+  if (!t) return { name: null }
+  if (t.type === 'identifier') return /^[\p{Lu}_$]/u.test(t.text) ? { name: t.text, qual: '' } : { name: null }
+  if (t.type === 'member_expression') return calleeOf(t) || { name: null }
+  return { name: null }
+}
+// What a wrapper wraps: `memo(Button)`, `withTheme(Card)`, `styled(View)`, `connect(…)(Screen)`: the
+// wrapped definition renders what it wraps, a call the syntax holds no call node for.
+const wrappedArgs = (n) => {
+  const call = n.parent
+  if (!call || call.type !== 'call_expression' || !same(field(call, 'arguments'), n)) return []
+  let up = call
+  while (up.parent && up.parent.type === 'call_expression') up = up.parent
+  while (up.parent && /^(satisfies_expression|as_expression|parenthesized_expression)$/.test(up.parent.type)) up = up.parent
+  const owner = up.parent
+  const defined = owner && ((owner.type === 'variable_declarator' && same(field(owner, 'value'), up) && wrappedFn(owner)) || (owner.type === 'export_statement' && same(field(owner, 'value'), up) && defaultFn(owner)))
+  return defined ? named(n).filter((a) => a.type === 'identifier' && /^\p{Lu}/u.test(a.text)).map((a) => ({ name: a.text, qual: '' })) : []
+}
 const js = {
   defs: {
     function_declaration: 'function', generator_function_declaration: 'function', function_signature: 'function',
     class_declaration: 'class', abstract_class_declaration: 'class', class: 'class',
     method_definition: 'method', method_signature: 'method', abstract_method_signature: 'method',
     interface_declaration: 'interface', type_alias_declaration: 'type', enum_declaration: 'enum',
-    variable_declarator: (n) => (fnValue(n) ? 'function' : null),
+    variable_declarator: (n) => (fnValue(n) || wrappedFn(n) ? 'function' : routerOf(n) ? 'object' : null),
     public_field_definition: (n) => (fnValue(n) ? 'method' : null),
     field_definition: (n) => (fnValue(n) ? 'method' : null),
     assignment_expression: (n) => (assignedFn(n) ? (assignedOwner(n) ? 'method' : 'function') : null),
+    export_statement: (n) => (defaultFn(n) ? 'function' : null),
+    pair: (n) => (routerPair(n) ? 'method' : null),
   },
-  name: (n) => (n.type === 'field_definition' ? lastSegment(field(n, 'property')) : n.type === 'assignment_expression' ? text(field(field(n, 'left'), 'property')) : nameOf(n)),
+  name: (n, file) => (n.type === 'field_definition' ? lastSegment(field(n, 'property')) : n.type === 'assignment_expression' ? text(field(field(n, 'left'), 'property'))
+    : n.type === 'export_statement' ? defaultName(n, file) : n.type === 'pair' ? unquote(text(field(n, 'key'))) : nameOf(n)),
   container: (n) => (n.type === 'assignment_expression' ? assignedOwner(n) : null),
-  calls: { call_expression: ['function', 'call'], new_expression: ['constructor', 'new'] },
+  calls: { call_expression: ['function', 'call'], new_expression: ['constructor', 'new'], jsx_opening_element: ['name', 'call'], jsx_self_closing_element: ['name', 'call'] },
+  callee: (n) => (n.type === 'jsx_opening_element' || n.type === 'jsx_self_closing_element' ? jsxCallee(n) : null),
+  tokenCalls: { arguments: wrappedArgs },
   imports: {
     import_statement: jsImports,
     export_statement: jsImports,

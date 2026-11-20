@@ -19,15 +19,19 @@
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { familyOf, COMMON_METHODS } from './langs.mjs'
+import { jsModules, platformBase } from './js-modules.mjs'
+import { listPaths, SKIP_DIRS } from './project.mjs'
 
 const MAX_AMBIGUOUS = 3
 const IMPLICIT_SELF = new Set(['jvm', 'csharp', 'swift', 'c', 'ruby'])
 const CALLABLE = new Set(['function', 'method', 'constructor'])
 const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'enum', 'protocol', 'module', 'object', 'type'])
+const TYPE_ONLY = new Set(['type', 'interface'])
 const SELF = /^(self|this|Self|super|cls|static|\$this|@)$/
 const noExt = (p) => p.replace(/\.[^./]+$/, '')
 
-export function resolveRepo(db, repo, repoAbs) {
+// rels: the repository's file list (project.mjs listPaths), when the caller has it already.
+export function resolveRepo(db, repo, repoAbs, rels = null) {
   const files = db.prepare('SELECT id, path, lang, node_id FROM files WHERE repo = ?').all(repo)
   const fileById = new Map(files.map((f) => [f.id, { ...f, family: familyOf(f.lang), dir: path.posix.dirname(f.path) }]))
   const nodes = db.prepare('SELECT n.id, n.file_id, n.kind, n.name, n.parent_id, n.container FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ?').all(repo)
@@ -82,14 +86,26 @@ export function resolveRepo(db, repo, repoAbs) {
   }
   const namespaces = new Map()
   for (const n of nodes) if (n.kind === 'namespace') add(namespaces, n.name, fileById.get(n.file_id))
+  // JavaScript and TypeScript: the bundler's view (js-modules.mjs), from every file of the repository
+  // (a configuration, an image, a JSON file is no indexed file but can be imported)
+  const resolveJs = files.some((f) => familyOf(f.lang) === 'js')
+    ? jsModules({ files: [...fileById.values()], paths: (rels || listPaths(repoAbs)).filter((p) => !p.split('/').some((x) => SKIP_DIRS.has(x))), abs: repoAbs })
+    : null
+  const outside = new Set() // imports naming a file of the repository the index does not hold
+  // One definition in its platform variants (Button.ios.tsx, Button.android.tsx, Button.web.tsx, the
+  // same name in the same place): one candidate, every variant linked, never an ambiguity among them.
+  const variantOf = (c) => {
+    const f = fileById.get(c.file_id)
+    return f.family === 'js' ? `${resolveJs.moduleOf(f.id) || platformBase(f.path)}|${c.parent_id ? nodeById.get(c.parent_id)?.name : ''}|${c.name}` : c.id
+  }
 
   function targetsOf(from, imp) {
     const s = imp.source, flags = imp.flags
     switch (from.family) {
       case 'js': {
-        if (s.startsWith('.')) return exact(from, path.posix.join(from.dir, s)).slice(0, 1)
-        const alias = /^(@|~|#)\/(.+)$/.exec(s) // tsconfig-style path aliases: @/x, ~/x
-        return alias ? suffix(from, alias[2].split('/')).slice(0, 1) : []
+        const r = resolveJs(from, s)
+        if (r.outside) outside.add(imp.id)
+        return r.files
       }
       case 'python': {
         const m = /^(\.*)(.*)$/.exec(s)
@@ -147,7 +163,7 @@ export function resolveRepo(db, repo, repoAbs) {
     const from = fileById.get(imp.file_id)
     imp.names = JSON.parse(imp.names || '[]'); imp.flags = JSON.parse(imp.flags || '{}')
     const targets = targetsOf(from, imp).filter((t) => t.id !== from.id)
-    setResolved.run(targets.length, imp.id)
+    setResolved.run(targets.length || (outside.has(imp.id) ? -1 : 0), imp.id) // -1: a file outside the index
     const b = bindingOf(from.id)
     for (const t of targets) {
       b.files.add(t.id)
@@ -183,6 +199,23 @@ export function resolveRepo(db, repo, repoAbs) {
   const seen = new Set()
   const emit = (src, dst, kind, conf, line) => { const k = `${src}|${dst}|${kind}`; if (seen.has(k) || src === dst && kind !== 'CALLS') return; seen.add(k); edgeIns.run(src, dst, kind, conf, line) }
   const inFiles = (cands, files) => cands.filter((c) => files.some((f) => f.id === c.file_id))
+  // The files a JavaScript barrel passes `name` on from, up to three files deep, until `found` holds;
+  // null when one of them takes it from a dependency.
+  const reexported = (files, name, found) => {
+    let level = files
+    for (let d = 0; d < 3; d++) {
+      const next = new Set()
+      for (const f of level) {
+        const bb = bind.get(f.id)
+        if (!bb) continue
+        const n = bb.names.get(name)
+        if (n) { if (n.external) return null; for (const t of n.files) next.add(t) } else for (const id of bb.files) next.add(fileById.get(id))
+      }
+      level = [...next]
+      if (!level.length || found(level)) return level
+    }
+    return level
+  }
   // A receiver that starts at a type the repository does not define (`Utc::now().timestamp()`,
   // `UpdateItemOutput::builder().build()`, `new Intl.NumberFormat(..).format()`) or, in Rust, at a
   // crate the repository does not have (`chrono::Utc::now()`, `std::env::var`) yields a dependency's
@@ -258,7 +291,7 @@ export function resolveRepo(db, repo, repoAbs) {
         ['same-file', (c) => c.file_id === from.id],
         ['import', (c) => (bound ? bound.files.some((f) => f.id === c.file_id) : b.files.has(c.file_id))],
         ['same-package', (c) => fileById.get(c.file_id).dir === from.dir],
-      ])
+      ], undefined, variantOf)
       if (pick) for (const c of pick.nodes) { emit(src.id, c.id, r.kind === 'extends' ? 'EXTENDS' : 'IMPLEMENTS', pick.conf, r.line); add(supers, src.id, c.id) }
       continue
     }
@@ -268,8 +301,16 @@ export function resolveRepo(db, repo, repoAbs) {
     const bound = !r.qual && b.names.get(r.name)
     if (bound && bound.external) continue // imported from a dependency
     const name = bound ? bound.orig : r.name
-    let cands = (byName.get(`${from.family}|${name}`) || []).filter((c) => (r.kind === 'macro' ? c.kind === 'macro' : r.kind === 'new' ? CLASSY.has(c.kind) || c.kind === 'constructor' : CALLABLE.has(c.kind) || CLASSY.has(c.kind)))
+    let cands = (byName.get(`${from.family}|${name}`) || []).filter((c) => (r.kind === 'macro' ? c.kind === 'macro' : r.kind === 'new' ? CLASSY.has(c.kind) || c.kind === 'constructor' : CALLABLE.has(c.kind) || CLASSY.has(c.kind))
+      && !(from.family === 'js' && TYPE_ONLY.has(c.kind))) // a TypeScript type or interface is no value: never called, never rendered
     if (!cands.length) continue
+    // a name imported from a file that only passes it on (`export { X } from './x'`, `export * from`):
+    // the files it passes on from; a dependency's (`export { Text as Span } from 'react-native'`): no link
+    let boundFiles = bound ? bound.files : null
+    if (bound && from.family === 'js' && boundFiles.length && !inFiles(cands, boundFiles).length) {
+      boundFiles = reexported(boundFiles, name, (fs) => inFiles(cands, fs).length > 0)
+      if (!boundFiles) continue
+    }
     const qual = r.qual || ''
     const qHead = qual.split(/::|\.|->|\\/)[0]
     const qLast = qual.split(/::|\.|->|\\/).pop()
@@ -329,16 +370,16 @@ export function resolveRepo(db, repo, repoAbs) {
         const ownField = /^(this|self|@)[.>-]*[\p{L}_$][\p{L}\p{N}_$]*$/u.test(qual) || /^(this|self)\??\.[\p{L}_$]/u.test(qual)
         const methods = cands.filter((c) => (c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
           && !(srcNode && c.id === srcNode.id) && !(ownField && selfType && c.parent_id === selfType.id))
-        pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import', (c) => b.files.has(c.file_id)]])
+        pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import', (c) => b.files.has(c.file_id)]], undefined, variantOf)
       }
     }
     if (!pick && !qual) {
       pick = pickBy(cands, [
-        ['import', (c) => bound && bound.files.some((f) => f.id === c.file_id)],
+        ['import', (c) => boundFiles && boundFiles.some((f) => f.id === c.file_id)],
         ['same-file', (c) => c.file_id === from.id && !c.parent_id],
         ['import', (c) => b.files.has(c.file_id) && !c.parent_id],
         ['same-package', (c) => fileById.get(c.file_id).dir === from.dir && !c.parent_id && /^(go|jvm|swift|csharp)$/.test(from.family)],
-      ], (c) => !c.parent_id || CLASSY.has(c.kind))
+      ], (c) => !c.parent_id || CLASSY.has(c.kind), variantOf)
     }
     if (!pick) continue
     stats.resolved++
@@ -349,11 +390,16 @@ export function resolveRepo(db, repo, repoAbs) {
 }
 
 // First rule that matches wins; otherwise a unique candidate, otherwise ≤ MAX_AMBIGUOUS of them.
-function pickBy(cands, rules, fallbackFilter = () => true) {
+// groupOf: candidates that are one definition (its platform variants) count once, and are all kept.
+function pickBy(cands, rules, fallbackFilter = () => true, groupOf = (c) => c.id) {
   if (!cands.length) return null
-  for (const [conf, test] of rules) { const hit = cands.filter(test); if (hit.length) return { nodes: hit.slice(0, MAX_AMBIGUOUS), conf: hit.length === 1 ? conf : 'ambiguous' } }
-  const rest = cands.filter(fallbackFilter)
-  if (rest.length === 1) return { nodes: rest, conf: 'unique-name' }
-  if (rest.length > 1 && rest.length <= MAX_AMBIGUOUS) return { nodes: rest, conf: 'ambiguous' }
+  const groups = (xs) => new Set(xs.map(groupOf)).size
+  for (const [conf, test] of rules) {
+    const hit = cands.filter(test)
+    if (hit.length) { const g = groups(hit); return { nodes: g === hit.length ? hit.slice(0, MAX_AMBIGUOUS) : g <= MAX_AMBIGUOUS ? hit : hit.slice(0, MAX_AMBIGUOUS), conf: g === 1 ? conf : 'ambiguous' } }
+  }
+  const rest = cands.filter(fallbackFilter), g = groups(rest)
+  if (g === 1) return { nodes: rest, conf: 'unique-name' }
+  if (g > 1 && g <= MAX_AMBIGUOUS) return { nodes: rest, conf: 'ambiguous' }
   return null
 }

@@ -26,7 +26,8 @@ const signature = (n) => {
   return bare(n, to).replace(/\s+/g, ' ').replace(/\s*[{:=]\s*$/, '').trim().slice(0, 160)
 }
 
-export function extract(tree, lang, isTestFile) {
+// file: the file's repository path, which names a definition that has no name of its own (a default export).
+export function extract(tree, lang, isTestFile, file = null) {
   const spec = LANGS[lang].spec
   const symbols = [], refs = [], imports = []
   const seen = new Set()
@@ -57,7 +58,7 @@ export function extract(tree, lang, isTestFile) {
     const sc = spec.scopes && spec.scopes[t] ? spec.scopes[t](node) : null
     let next = ctx
     if (kind) {
-      const name = (spec.name || nameOf)(node)
+      const name = (spec.name || nameOf)(node, file)
       if (name && (IDENT.test(name) || kind === 'namespace')) {
         const parentSym = ctx.parent >= 0 ? symbols[ctx.parent] : null
         const scopeType = (sc && sc.type) || (ctx.parent === ctx.scopeOwner ? ctx.scopeType : null) || (spec.container && spec.container(node)) || null

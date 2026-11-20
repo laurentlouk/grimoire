@@ -46,7 +46,7 @@ if (process.argv[1] === HERE) {
       if (!parser) throw new Error(`no ${x.lang} grammar`)
       const tree = parser.parse(x.text)
       try {
-        const r = extract(tree, x.lang, TEST_PATH.test(x.path))
+        const r = extract(tree, x.lang, TEST_PATH.test(x.path), x.path)
         out.push({ symbols: r.symbols.map((s) => ({ kind: s.kind, name: s.name, qualname: s.qualname, line: s.line, endLine: s.endLine, signature: s.signature, isTest: s.isTest })) })
       } finally { tree.delete() }
     } catch (e) { out.push({ error: String(e.message || e).split('\n')[0].slice(0, 200) }) }

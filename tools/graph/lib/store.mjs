@@ -3,14 +3,17 @@
 //   repos    name, root (project-relative), head (git HEAD at the last index), indexed_at
 //   files    one row per indexed file; node_id = its `file` node
 //   nodes    kind: file | function | method | constructor | class | struct | interface | trait |
-//            protocol | enum | type | module | namespace | macro; qualname = Container.name;
+//            protocol | enum | type | module | namespace | macro | object (a JavaScript router of
+//            procedures); qualname = Container.name;
 //            parent_id = the enclosing type or module (NULL at top level); is_test; signature = the
 //            first line up to the body, each literal's text shown as `…` (extract.mjs)
 //   edges    src → dst, kind: CALLS | IMPORTS | EXTENDS | IMPLEMENTS; confidence: how the name
 //            was resolved (same-class, qualified, import, same-file, same-package, unique-name,
 //            ambiguous, path)
 //   refs     unresolved names as extracted (call sites with the receiver's text, literals as `…`,
-//            and its stated type when the syntax gives it, supertypes); imports: import statements
+//            and its stated type when the syntax gives it, supertypes); imports: import statements,
+//            resolved = the files linked, 0 none (external), -1 a file of the repository the index does
+//            not hold (an image, a JSON file)
 //   cochange files that changed in the same commits (from git log), n = commits shared
 //   churn    per file, n = recent commits that touched it (same window as cochange)
 //   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
@@ -32,7 +35,7 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '16'
+export const SCHEMA_VERSION = '17'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.

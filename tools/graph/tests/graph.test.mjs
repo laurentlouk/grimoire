@@ -65,7 +65,7 @@ for (const f of readdirSync(path.join(HERE, 'fixtures', 'langs')).sort()) {
   const parser = await rt.parserFor(lang)
   const src = readFileSync(path.join(HERE, 'fixtures', 'langs', f), 'utf8')
   const tree = parser.parse(src)
-  const r = extract(tree, lang, false)
+  const r = extract(tree, lang, false, f)
   const binds = []
   const walk = (n) => { for (const b of bindingsOf(n, LANGS[lang].spec)) binds.push(b.join(':')); for (let i = 0; i < n.namedChildCount; i++) walk(n.namedChild(i)) }
   walk(tree.rootNode)
@@ -80,6 +80,7 @@ for (const f of readdirSync(path.join(HERE, 'fixtures', 'langs')).sort()) {
 }
 const expect = {
   'a.ts': { defs: ['interface Shape', 'class Circle', 'method Circle.area', 'function run', 'function arrow', 'type Alias', 'enum Color'], calls: ['helper', 'Circle', 'c.area', 'fs.readFileSync'], supers: ['Circle extends Base', 'Circle implements Shape'], imports: ['./util', 'node:fs'], binds: ['a:Circle', 'y:Circle'] },
+  'a.tsx': { defs: ['function Text', 'function Fancy', 'function Box', 'function Themed', 'function useStore', 'function Card', 'function a'], calls: ['View', 'UI.Row', 'Label', 'Text', 'Card', 'format', 'count'], imports: ['react-native', './ui'] },
   'a.js': { defs: ['class Circle', 'method Circle.area', 'function run', 'function arrow'], calls: ['helper', 'c.area'], imports: ['./util', './lib'] },
   'a.py': { defs: ['class Circle', 'method Circle.area', 'method Circle.make', 'function run'], calls: ['helper', 'Circle', 'c.area'], supers: ['Circle extends Base', 'Circle extends Shape'], imports: ['os.path', '.util', 'pkg.mod'], binds: ['c:Circle'] },
   'a.rs': { defs: ['trait Shape', 'struct Circle', 'enum Color', 'method Circle.area', 'method Circle.new', 'function run', 'function test_run', 'type Alias'], calls: ['helper', 'Circle.new', 'c.area', 'fs.read', 'println', 'run'], supers: ['Circle implements Shape'], imports: ['crate::util', 'std', 'self::inner'], binds: ['c:Circle'] },
@@ -100,6 +101,8 @@ for (const [f, want] of Object.entries(expect)) {
   ok(!missing.length, `${f} (${langOf(f)})${missing.length ? `: missing ${missing.join(' · ')}\n       got ${JSON.stringify(got)}` : ''}`)
 }
 ok(!facts['a.js'].calls.includes('require'), 'a require() is an import, not a call')
+ok(!facts['a.tsx'].calls.includes('div'), 'JSX: a lowercase tag is the host\'s element, never a call')
+ok(!facts['a.tsx'].defs.some((d) => /doubled|timer|onPress/.test(d)), `JSX: an array built by a callback, a timer, a hook inside a component are no definitions (${facts['a.tsx'].defs.join(', ')})`)
 ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every((d) => !d.startsWith('method run')), 'Rust: free functions stay functions; impl members become methods of their type')
 { // A literal may hold a secret: a signature keeps the name, parameters and return type, up to the
   // body; each string, template, character or regex literal in it shows as `…` between its
@@ -1028,6 +1031,63 @@ console.log('\n6c · dependency injection: calls on a field typed by its declara
   const gd = await dq('callers', { symbol: 'get_domain' })
   has(gd, 'Service.get_domain  method  py/svc.py:10  [import]', 'Python: a bare call in a method is the imported module function')
   lacks(gd, '[same-class]', '… never the method itself (no self-recursion)')
+}
+
+// ── 6d · a React Native workspace: JSX, wrapped components, aliases, workspace packages, platform files ──
+console.log('\n6d · a React Native workspace (fixtures/rn): JSX renders, aliases, workspace packages, platform files, files outside the index')
+{
+  const RN = path.join(SANDBOX, 'rn')
+  cpSync(path.join(HERE, 'fixtures', 'rn'), RN, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+  const commit = (m) => { git(RN, 'add', '-A'); git(RN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m) }
+  git(RN, 'init', '-q', '-b', 'main'); commit('init')
+  const nq = (tool, args = {}) => call(`graph_${tool}`, args, { root: RN })
+  const sql = async (s) => (await nq('sql', { sql: s })).split('\n').slice(1).filter((l) => l && !l.startsWith('Leads')).map((l) => l.trim())
+  await nq('index')
+
+  const home = await nq('file', { path: 'apps/mobile/src/screens/Home.tsx' })
+  has(home, 'Home  function  :13', '`export default () => …` is a definition named after its file')
+  has(home, '  apps/mobile/src/ui.ts', 'relative: `../ui` resolves as before')
+  has(home, '  apps/mobile/src/components/Card.tsx', 'babel module-resolver: `@components/Card` (no slash after the prefix) resolves through the literal alias')
+  has(home, '  apps/mobile/src/alf/index.tsx', 'an alias no config maps (`~/alf`) reaches a folder\'s index file below the repository root')
+  has(home, '  packages/db/src/schema.ts', 'workspace: `@acme/db/schema` resolves through the package\'s conditional exports, a dist target mapped to its source')
+  has(home, '  packages/db/src/index.ts', 'workspace: `@acme/db` resolves through the package\'s `.` export')
+  has(home, '  packages/ui/src/button.tsx', 'workspace: `@acme/ui/button` resolves through a subpath pattern (`./*`)')
+  has(home, '  packages/api/src/root.ts', 'workspace: `@acme/api` resolves through `main`')
+  has(home, '  apps/mobile/src/sql/posts.sql', 'a relative import of a non-code file the index holds (`.sql`) is an IMPORTS edge to it')
+  has(home, 'files outside the index: @assets/logo.png, ../data.json', 'an image through a tsconfig alias (`@assets/*`) and a JSON file are files outside the index, not external')
+  lacks(home, 'external: ', '… so nothing in that file is called external')
+  const card = await nq('file', { path: 'apps/mobile/src/components/Card.tsx' })
+  for (const p of ['ios', 'android', 'web', 'mobile']) has(card, `apps/mobile/src/components/Button.${p}.tsx`, `platform files: \`./Button\` resolves to Button.${p}.tsx${p === 'mobile' ? ' (a suffix the tsconfig\'s moduleSuffixes adds, through extends)' : ''}`)
+  has(await nq('file', { path: 'packages/db/src/config.ts' }), '  packages/db/src/config.base.ts', 'a dotted file name (`./config.base`) keeps its dots')
+  has(await nq('callers', { symbol: 'baseConfig' }), 'config  function  packages/db/src/config.ts:3  [import]', '… and its function is called through the import')
+
+  // JSX renders are calls; a test rendering a component is its test
+  const cc = await nq('callers', { symbol: 'Card' })
+  has(cc, 'Home  function  apps/mobile/src/screens/Home.tsx:13  [import]', 'JSX: `<Card />` calls Card, through its default import')
+  has(await nq('callers', { symbol: 'Row' }), 'Home  function  apps/mobile/src/screens/Home.tsx:13  [import]', 'JSX: `<UI.Row>` calls Row through the namespace import')
+  has(await nq('callers', { symbol: 'Button', repo: 'rn' }), 'Home  function  apps/mobile/src/screens/Home.tsx:13  [import]', 'JSX: an aliased import (`Button as UIButton`) renders the workspace package\'s forwardRef component')
+  has(await nq('callers', { symbol: 'postTable' }), 'postRouter.all  method  packages/api/src/router/post.ts:4  [import]', 'tRPC: a procedure of a `satisfies TRPCRouterRecord` object is a member, and calls through a workspace package')
+  has(await nq('callers', { symbol: 'ping' }), 'appRouter.health  method  packages/api/src/root.ts:5  [same-file]', 'tRPC: a procedure of `createTRPCRouter({…})` is a member of the router')
+  has(await nq('callers', { symbol: 'count' }), 'useStore  function  apps/mobile/src/store.ts:1  [same-file]', 'a store made by `create<State>()((set) => …)` is a definition: its calls are its own')
+  const variants = await sql("SELECT count(*) AS n FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst JOIN files f ON f.id = d.file_id WHERE e.kind = 'CALLS' AND s.name = 'Card' AND d.name = 'Button' AND e.confidence = 'import' AND f.path LIKE 'apps/%'")
+  ok(variants[0] === '4', `platform files: Card's \`<Button>\` links each of the 4 variants, by import, not as an ambiguity (${variants.join(',')})`)
+  const shared = await sql("SELECT f.path, e.confidence FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst JOIN files f ON f.id = d.file_id WHERE e.kind = 'CALLS' AND s.name = 'Card' AND f.path LIKE 'packages/%'")
+  ok(shared.length === 1 && /^packages\/ui\/src\/button\.tsx\s+import$/.test(shared[0]), `a barrel's re-export (\`export { Button } from './button'\`) is followed to the definition (${shared.join(' · ')})`)
+  const span = await sql("SELECT count(*) AS n FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.kind = 'CALLS' AND d.name = 'Span'")
+  ok(span[0] === '0', `a barrel passing on a dependency's component (\`export { Text as Span } from 'react-native'\`) links nothing, never the repository's \`type Span\` (${span.join(',')})`)
+  has(await nq('callers', { symbol: 'Home' }), 'Framed  function test', 'a component wrapped by `memo(…)` inside a test is a definition: it renders Home')
+  const intrinsic = await sql("SELECT count(*) AS n FROM refs WHERE name IN ('div', 'button')")
+  ok(intrinsic[0] === '0', `JSX: a lowercase tag is never a call (${intrinsic.join(',')})`)
+  const ih = await nq('impact', { target: 'Home', mentions: false })
+  has(ih, 'apps/mobile/src/screens/Home.test.tsx  file test', 'impact: a test rendering `<Home />` is a test of Home')
+  const ov = await nq('overview')
+  const entries = ov.slice(ov.indexOf('Entry points'), ov.indexOf('Most used'))
+  lacks(entries, 'Card  function', 'overview: a component something renders is no entry point')
+  writeFileSync(path.join(RN, 'apps/mobile/src/screens/Home.tsx'), readFileSync(path.join(RN, 'apps/mobile/src/screens/Home.tsx'), 'utf8').replace('<Card />', '<Card />\n    <Card />'))
+  const d = await nq('diff', { base: 'HEAD' })
+  has(d, '~ Home  function  apps/mobile/src/screens/Home.tsx:13  body', 'diff: the default export, named after its file, is the changed definition')
+  has(d, 'apps/mobile/src/screens/Home.test.tsx', 'diff: … and the test rendering it is the test to run')
+  lacks(d, 'Changed code no test reaches', 'diff: … so the change is not untested')
 }
 
 rmSync(SANDBOX, { recursive: true, force: true })
