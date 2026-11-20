@@ -32,6 +32,8 @@
 //   Site { repo, path, line, extractor, fn, fnLine, cmd, store, reads: [entity id], writes: [entity id],
 //          batch?, via?, how }
 import { globMatches, literalPrefix, TYPE_OF, segments, formOf } from './readers/redis-cmd.mjs'
+// (as extractors/redis-commands.mjs modulePath names a module: no extension, no /index)
+const MOD_EXT = /\.(?:[cm]?[jt]sx?)$/
 
 export const MAX_SOURCES = 8, CAP = 25
 export const NO_EXPIRY = 'no expiry found (lead): written, and no EXPIRE, SET … EX, SETEX or GETEX sets a lifetime on it anywhere in the indexed code; it may be set by code the extractor does not read, a script, or a server-wide policy'
@@ -50,7 +52,7 @@ const cite = (el, s) => { if (!el.sources) el.sources = []; if (el.sources.lengt
 // rows: [{ repo, extractor, facts: { redis } }]; model: the merged model; instances: [{ id, repo, name,
 // … , wires: [{ env, repos: [repo] | null (any) }] }] (data/redis-infra.mjs) → { stores, redis }
 export function resolveRedis(rows, model, instances = []) {
-  const files = rows.filter((r) => r.facts?.redis).map((r) => ({ repo: r.repo, extractor: r.extractor, r: r.facts.redis }))
+  const files = followWrappers(rows.filter((r) => r.facts?.redis).map((r) => ({ repo: r.repo, extractor: r.extractor, r: r.facts.redis })))
   const out = { files: 0, commands: 0, sites: [], clients: [], tests: 0, dyn: 0 }
   // each repository's key space: an instance wired to it (one, by an environment variable a file holding
   // its commands or its client reads), else its own
@@ -85,6 +87,43 @@ export function resolveRedis(rows, model, instances = []) {
   for (const f of files) if (spaces.has(spaceOf.get(f.repo).id)) for (const c of f.r.clients) if (!out.clients.some((x) => x.repo === f.repo && x.source === c.source)) out.clients.push({ repo: f.repo, source: c.source })
   out.files = files.filter((f) => f.r.sites.length).length
   return { stores: stores.sort((a, b) => (a.id < b.id ? -1 : 1)), redis: out }
+}
+
+// A command sent through a wrapper another file of the same repository exports (`const { get } =
+// require('./redis')`, then `get(\`user:${id}\`)`): the caller's file reads the call as the command the
+// imported name says (site.wrap: { from, name, cmd }); it is kept only where the file `from` names is
+// read and exports a wrapper of that name sending that command (its `exports`), else dropped and noted.
+// A wrapper's own command, whose key is its parameter (site.pass), is dropped once a call of it is kept:
+// the calls hold its keys. Never across repositories.
+const modKey = (p) => String(p).replace(MOD_EXT, '').replace(/\/index$/, '')
+export function followWrappers(files) {
+  if (!files.some((f) => f.r.sites.some((s) => s.wrap))) return files
+  const mods = new Map()
+  for (const f of files) { const k = `${f.repo}\0${modKey(f.r.path)}`; if (!mods.has(k)) mods.set(k, f) }
+  const used = new Map() // the file exporting a wrapper → the indexes of its wrappers' functions called
+  const kept = files.map((f) => {
+    if (!f.r.sites.some((s) => s.wrap)) return f
+    let dyn = f.r.dyn || 0
+    const lost = new Set()
+    const sites = f.r.sites.filter((s) => {
+      if (!s.wrap) return true
+      const d = mods.get(`${f.repo}\0${s.wrap.from}`)
+      const ex = d && d !== f ? (d.r.exports || []).find((e) => e.name === s.wrap.name && e.cmd === s.wrap.cmd) : null
+      if (ex) { if (ex.fn !== undefined) { if (!used.has(d)) used.set(d, new Set()); used.get(d).add(ex.fn) } return true }
+      dyn -= s.dyn || 0
+      if (lost.size < 4) lost.add(s.wrap.name)
+      return false
+    })
+    if (sites.length === f.r.sites.length) return f
+    const note = `a call of ${[...lost].join(', ')} (imported from another file) not read as a command: no file of the repository read exports a wrapper of it`
+    return { ...f, r: { ...f.r, sites, dyn, notes: f.r.notes.length < 8 ? [...f.r.notes, note] : f.r.notes } }
+  })
+  return kept.map((f, i) => {
+    const u = used.get(files[i])
+    if (!u) return f
+    const sites = f.r.sites.filter((s) => !(s.pass && u.has(s.fn)))
+    return sites.length === f.r.sites.length ? f : { ...f, r: { ...f.r, sites, dyn: (f.r.dyn || 0) - f.r.sites.filter((s) => s.pass && u.has(s.fn)).reduce((a, s) => a + (s.dyn || 0), 0) } }
+  })
 }
 
 function keySpace(g, out) {
@@ -233,7 +272,7 @@ function keySpace(g, out) {
   for (const p of channels.filter((c) => c.pattern)) for (const c of channels) if (!c.pattern && globMatches(p.name, c.name)) { c.psub = [...(c.psub || []), p.name] }
   const repos = [...g.repos].sort()
   const n = g.files.length
-  const decl = { extractor: g.files[0]?.extractor || 'redis-commands@1', kind: 'inferred', repo: g.files[0]?.repo, path: g.files[0]?.r.path || null, line: null, status: 'read', label: n ? `deduced from ${plural(commands, 'command')} in ${plural(n, 'file')}, not declared` : 'declared by the infrastructure; no command in the indexed code reaches it', stopped: null, error: null, notes, files: n, implicitIndexes: 0, dialect: 'redis', dialectFrom: null }
+  const decl = { extractor: g.files[0]?.extractor || 'redis-commands@2', kind: 'inferred', repo: g.files[0]?.repo, path: g.files[0]?.r.path || null, line: null, status: 'read', label: n ? `deduced from ${plural(commands, 'command')} in ${plural(n, 'file')}, not declared` : 'declared by the infrastructure; no command in the indexed code reaches it', stopped: null, error: null, notes, files: n, implicitIndexes: 0, dialect: 'redis', dialectFrom: null }
   const inst = g.instance
   // an allkeys-* eviction policy: what is written with no lifetime may be evicted (a lead)
   const noTtl = templates.filter((e) => e.written && !e.ttl && e.base && e.base !== 'stream')

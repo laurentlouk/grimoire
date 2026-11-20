@@ -44,11 +44,21 @@
 // MAX_SITES commands a file, one walk down the tree (a call's function, class and test status come down
 // with it) within FILE_MS; the content filter linear in the text.
 //
+// Wrappers (TypeScript and JavaScript; `wrappers` and `modules` below): a name bound to a client's method
+// promisified or bound, or a function sending one command with its own parameters in order, is read as
+// that command at each call of it in the file; a call of a name imported from a relative module is read
+// as the command its exported name says, with the module (`wrap`), for data/redis.mjs to keep only where
+// that module exports such a wrapper (`exports`). A CommonJS require at the top of a file is an import.
+// node-redis v3's trailing callback is no argument.
+//
 // Facts: { declarations: [], redis: { lang, path, clients: [{ source, line }], env: [{ name, line }],
-//   dbs: [{ db, line, how }], sites: [Site], fns: [{ name, line, end }], notes, tests } }
-//   Site { line, fn: index into fns (-1 at top level), how (bound | typed | name | command | builder),
-//          batch?: pipeline | multi, via?: lua, …readers/redis-cmd.mjs Fact (cmd, family, base, rw,
-//          creates, keys, dyn, fields, paths, ttl, glob, channel, stream, index, script, db, tx) }
+//   dbs: [{ db, line, how }], sites: [Site], fns: [{ name, line, end }], notes, tests,
+//   exports: [{ name, cmd, line, fn? }] (the wrappers the file exports) } }
+//   Site { line, fn: index into fns (-1 at top level), how (bound | typed | name | command | builder |
+//          wrapper), batch?: pipeline | multi, via?: lua, wrap?: { from, name, cmd } (a wrapper another
+//          file exports), pass?: true (an exported wrapper's own command, its key a parameter),
+//          …readers/redis-cmd.mjs Fact (cmd, family, base, rw, creates, keys, dyn, fields, paths, ttl,
+//          glob, channel, stream, index, script, db, tx) }
 // A base's file is read too, aside (readers/code-aside.mjs): graph_changes compares key templates and
 // FT.CREATE declarations, never the access.
 import { readCommand, readLua, mapKeys, urlDb, COMMANDS, lit, template, MAX_ARGS } from '../readers/redis-cmd.mjs'
@@ -57,6 +67,7 @@ import { SRC, treeLang } from './dynamo-access.mjs'
 import { familyOf, FN, CLASS, TEST_ATTR, TEST_FILE, isTestName, fnName, unescape, FILE_MS } from './sql-queries.mjs'
 import { importMatches } from '../../arch.mjs'
 import { LANGS, TEST_PATH } from '../../langs.mjs'
+import { posix } from 'node:path'
 
 const DTS = /\.d\.[cm]?ts$/i
 export const MAX_SITES = 1000, MAX_ENV = 16, MAX_DBS = 8
@@ -151,6 +162,41 @@ const argNodes = (call, fam) => {
   return a.namedChildren.filter((c) => c.type !== 'comment')
 }
 const lastName = (t) => { const m = /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/.exec(String(t).slice(-80)); return m ? m[1] : '' }
+// A trailing callback (node-redis v3, `client.get(key, cb)`): a function; a name or a call named like one
+// (`cb`, `done`, `resolveWith(a, b)`); a call, or a name, made only of the resolve and reject of the
+// promise executor around it (`new Promise((ok, fail) => client.get(key, settle(ok, fail)))`). Never an
+// argument of the command, never read.
+const CALLBACK = /^(?:cb|callback|done|next|resolve\w*|reject\w*|handler|on[A-Z]\w*|\w+(?:Callback|Cb|Handler))$/
+const FN_NODE = /^(?:arrow_function|function_expression|function)$/
+// the parameters of the promise executor around a node (`new Promise((resolve, reject) => …)`), or null
+function executorParams(n) {
+  for (let x = n.parent, i = 0; x && i < 32; x = x.parent, i++) {
+    if (!FN_NODE.test(x.type)) continue
+    const args = x.parent?.type === 'arguments' ? x.parent : null, nw = args?.parent
+    if (nw?.type !== 'new_expression' || !/^Promise$/.test(field(nw, 'constructor')?.text || '') || args.namedChildren[0]?.id !== x.id) continue
+    const ps = field(x, 'parameters') || field(x, 'parameter')
+    return new Set(ps ? (ps.type === 'identifier' ? [ps.text] : ps.namedChildren.map((p) => p.text)) : [])
+  }
+  return null
+}
+function dropCallback(nodes, fam) {
+  if (fam !== 'ts' || nodes.length < 2) return nodes
+  const last = unwrap(nodes[nodes.length - 1], fam)
+  if (!last) return nodes
+  if (FN_NODE.test(last.type)) return nodes.slice(0, -1)
+  const f = last.type === 'call_expression' ? field(last, 'function') : null
+  const nm = last.type === 'identifier' ? last.text : f?.type === 'identifier' ? f.text : ''
+  if (nm && CALLBACK.test(nm)) return nodes.slice(0, -1)
+  if (last.type !== 'identifier' && last.type !== 'call_expression') return nodes
+  const ids = last.type === 'identifier' ? [last] : argNodes(last, fam)
+  if (!ids.length || !ids.every((a) => a.type === 'identifier')) return nodes
+  const ex = executorParams(last)
+  return ex && ids.every((a) => ex.has(a.text)) ? nodes.slice(0, -1) : nodes
+}
+// a module a relative specifier names, from the file importing it (no extension: `./redis.js`,
+// `./redis` and `./redis/index` are one); a package's: none
+export const MOD_EXT = /\.(?:[cm]?[jt]sx?)$/
+export const modulePath = (file, spec) => (typeof spec === 'string' && /^\.\.?(?:\/|$)/.test(spec) && spec.length <= 200 ? posix.normalize(posix.join(posix.dirname(file), spec)).replace(MOD_EXT, '').replace(/\/index$/, '') : null)
 
 // A method chain, from its outermost call: { root: { call?, node, name, args? }, links: [{ name, call?,
 // args?, prop? }] } in order from the root outward. Bounded.
@@ -198,6 +244,8 @@ const S = (t) => ({ s: [t] })
 function sub(n, F, depth) {
   const u = unwrap(n, F.fam)
   if (u && u.type === 'identifier' && F.bind && F.bind.has(u.text)) { const a = F.bind.get(u.text); return a.s ? a.s : a.n !== undefined ? [String(a.n)] : [{ h: a.x || u.text }] }
+  // a number written in the key (`room:${0}:name`): its literal text
+  if (u && /^(?:number|integer|int_literal|integer_literal)$/.test(u.type) && /^\d{1,12}$/.test(u.text)) return [u.text]
   if (u && (u.type === 'identifier' ? F.consts.has(u.text) || !!local(u.text, F) : /^(?:string|string_literal|raw_string_literal|interpreted_string_literal)$/.test(u.type) || (u.type === CALL[F.fam] && !!keyFnOf(u, F)))) { const a = argOf(u, F, depth + 1); if (a.s) return a.s }
   return [H(n, F.fam)]
 }
@@ -241,10 +289,15 @@ function paramsOf(n, fam) {
     if (fam === 'rust') { if (p.type === 'parameter') out.push(lastName(field(p, 'pattern')?.text || '')); continue }
     if (fam === 'go') { for (const x of p.namedChildren) if (x.type === 'identifier') out.push(x.text); continue }
     if (fam === 'python') { const nm = p.type === 'identifier' ? p.text : lastName((p.namedChildren[0] || p).text); if (nm !== 'self' && nm !== 'cls') out.push(nm); continue }
-    out.push(lastName((field(p, 'pattern') || p).text))
+    out.push(tsParam(p))
   }
   return out.slice(0, 32)
 }
+// a TypeScript or JavaScript parameter's name: its pattern's, a default's left side (`key = "key"`), a
+// rest parameter's (`...args`)
+const tsParam = (p) => lastName((p.type === 'assignment_pattern' ? field(p, 'left') : p.type === 'rest_pattern' ? p.namedChildren[0] : field(p, 'pattern') || p)?.text || '')
+// the index of a function's rest parameter, or -1
+const restAt = (n) => { const ps = field(n, 'parameters'); if (!ps || ps.type === 'identifier') return -1; const list = ps.namedChildren.filter((c) => c.type !== 'comment'); const i = list.findIndex((p) => p.type === 'rest_pattern' || field(p, 'pattern')?.type === 'rest_pattern'); return i === list.length - 1 ? i : -1 }
 
 // the key functions of a file: its top-level functions, an impl's or a class's methods (a module's too)
 const KEY_BODY = /^(?:string|template_string|binary_expression|string_literal|raw_string_literal|macro_invocation|interpreted_string_literal|call_expression|call|concatenated_string|binary_operator)$/
@@ -264,9 +317,17 @@ function keyFns(root, F) {
       const fn = t === 'variable_declarator' ? field(n, 'value') : n
       const b = field(fn, 'body')
       if (b && b.type !== 'statement_block') body = b
-      else if (b) { const kids = b.namedChildren.filter((c) => c.type !== 'comment'); if (kids.length === 1 && kids[0].type === 'return_statement') body = kids[0].namedChildren[0] || null }
+      else if (b) {
+        const kids = b.namedChildren.filter((c) => c.type !== 'comment')
+        if (kids.length === 1 && kids[0].type === 'return_statement') body = kids[0].namedChildren[0] || null
+        // `{ const key = \`user:${id}\`; return key }`: the one local it returns
+        else if (kids.length === 2 && kids[0].type === 'lexical_declaration' && kids[1].type === 'return_statement') {
+          const ds = kids[0].namedChildren.filter((c) => c.type === 'variable_declarator'), r = kids[1].namedChildren[0]
+          if (ds.length === 1 && field(ds[0], 'name')?.type === 'identifier' && r?.type === 'identifier' && r.text === field(ds[0], 'name').text) body = field(ds[0], 'value') || null
+        }
+      }
       const ps = field(fn, 'parameters') || field(fn, 'parameter')
-      params = ps ? (ps.type === 'identifier' ? [ps.text] : ps.namedChildren.map((p) => lastName((field(p, 'pattern') || p).text))) : []
+      params = ps ? (ps.type === 'identifier' ? [ps.text] : ps.namedChildren.filter((c) => c.type !== 'comment').map(tsParam)) : []
       name = field(n, 'name')?.text
     } else if (fam === 'python' && t === 'function_definition') {
       const kids = (field(n, 'body')?.namedChildren || []).filter((c) => c.type !== 'comment' && !(c.type === 'expression_statement' && c.namedChildren[0]?.type === 'string'))
@@ -803,13 +864,72 @@ function topDecls(root, F) {
   for (const n of F.twice) F.consts.delete(n)
 }
 
+// ── TypeScript and JavaScript modules: what a file imports from another file of its repository by name,
+// and what it exports (read at the top of the file only; bounded) ──
+//   imports  `import { get, set as put } from './redis'`, `const { get, set: put } = require('./redis')`:
+//            F.wrapIn, local name → { from: the module's path (modulePath), name: the name it exports }
+//   exports  `module.exports = { get, set: put, incr: (key) => … }`, `module.exports.get = …`,
+//            `exports.get = …`, `export const get = …`, `export function get(…)`, `export { get, put as set }`:
+//            F.exportsRaw [{ name, local | fnNode | expr, line }], resolved to wrappers once the file is read
+const MAX_MOD = 200
+function modules(root, file, F) {
+  const imp = (local, from, name) => { if (local && name && F.wrapIn.size < MAX_MOD && /^[A-Za-z_$][\w$]*$/.test(local) && local.length <= 60) F.wrapIn.set(local, { from, name: String(name).slice(0, 60) }) }
+  const exp = (name, v, line) => {
+    if (!name || F.exportsRaw.length >= MAX_MOD * 2 || name.length > 60) return
+    const u = v ? unwrap(v, 'ts') : null
+    if (!u) F.exportsRaw.push({ name, local: name, line })
+    else if (u.type === 'identifier') F.exportsRaw.push({ name, local: u.text, line })
+    else if (/^(?:arrow_function|function_expression|function)$/.test(u.type)) F.exportsRaw.push({ name, fnNode: u, line })
+    else if (u.type === 'call_expression') F.exportsRaw.push({ name, expr: u, line })
+  }
+  const keyName = (k) => (!k ? null : k.type === 'property_identifier' || k.type === 'identifier' ? k.text : k.type === 'string' ? k.namedChildren.map((c) => c.text).join('') : null)
+  const requireOf = (v) => { const u = unwrap(v, 'ts'); if (u?.type !== 'call_expression' || field(u, 'function')?.text !== 'require') return null; const a = argNodes(u, 'ts')[0]; return a?.type === 'string' ? a.namedChildren.map((c) => c.text).join('') : null }
+  for (const top of root.namedChildren.slice(0, 4000)) {
+    // imports from a file of the repository
+    if (top.type === 'import_statement' && !/^import\s+type\b/.test(top.text.slice(0, 20))) {
+      const src = field(top, 'source'), from = modulePath(file, src ? src.namedChildren.map((c) => c.text).join('') : null)
+      if (from) each(top, (x) => { if (x.type === 'import_specifier') { imp((field(x, 'alias') || field(x, 'name'))?.text, from, field(x, 'name')?.text); return false } return true })
+      continue
+    }
+    if (top.type === 'lexical_declaration' || top.type === 'variable_declaration') {
+      for (const d of top.namedChildren) {
+        if (d.type !== 'variable_declarator') continue
+        const nm = field(d, 'name'), from = modulePath(file, requireOf(field(d, 'value')))
+        if (!from || nm?.type !== 'object_pattern') continue
+        for (const p of nm.namedChildren) {
+          if (p.type === 'shorthand_property_identifier_pattern') imp(p.text, from, p.text)
+          else if (p.type === 'pair_pattern') { const v = field(p, 'value'); imp((v?.type === 'assignment_pattern' ? field(v, 'left') : v)?.text, from, keyName(field(p, 'key'))) }
+        }
+      }
+      continue
+    }
+    // exports
+    if (top.type === 'expression_statement') {
+      const a = top.namedChildren[0]
+      if (a?.type !== 'assignment_expression') continue
+      const l = field(a, 'left'), r = field(a, 'right')
+      if (l?.type !== 'member_expression' || !r) continue
+      const o = field(l, 'object')?.text, p = field(l, 'property')?.text
+      if (l.text === 'module.exports') { const u = unwrap(r, 'ts'); if (u?.type === 'object') for (const c of u.namedChildren) { if (c.type === 'shorthand_property_identifier') exp(c.text, null, lineOf(c)); else if (c.type === 'pair') exp(keyName(field(c, 'key')), field(c, 'value'), lineOf(c)) } }
+      else if (o === 'module.exports' || o === 'exports') exp(p, r, lineOf(top))
+      continue
+    }
+    if (top.type === 'export_statement' && !field(top, 'source')) {
+      const d = field(top, 'declaration')
+      if (d && (d.type === 'lexical_declaration' || d.type === 'variable_declaration')) { for (const v of d.namedChildren) if (v.type === 'variable_declarator' && field(v, 'name')?.type === 'identifier') exp(field(v, 'name').text, null, lineOf(v)) }
+      else if (d && /^(?:function_declaration|generator_function_declaration)$/.test(d.type)) exp(field(d, 'name')?.text, null, lineOf(d))
+      else if (!d) each(top, (x) => { if (x.type === 'export_specifier') { const nm = field(x, 'name')?.text, as = (field(x, 'alias') || field(x, 'name'))?.text; if (nm && as && as.length <= 60 && F.exportsRaw.length < MAX_MOD * 2) F.exportsRaw.push({ name: as, local: nm, line: lineOf(x) }); return false } return true })
+    }
+  }
+}
+
 // ── one file ──
 export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
   const fam = familyOf(lang)
   const root = tree.rootNode
-  const out = { lang: fam, path: file, clients: [], env: [], dbs: [], sites: [], fns: [], notes: [], tests: 0 }
+  const out = { lang: fam, path: file, clients: [], env: [], dbs: [], sites: [], fns: [], notes: [], tests: 0, exports: [] }
   const note = (s) => { if (out.notes.length < 8 && !out.notes.includes(s)) out.notes.push(s) }
-  const F = { fam, consts: new Map(), twice: new Set(), vals: new Map(), locals: new Map(), keyFns: new Map(), fnNames: new Set(), calls: new Map(), bind: null, cur: null, skip: new Set(), arrays: new Map(), memo: new Map(), keyMemo: new Map(), work: 0, over: false, deadline: Date.now() + ms, note: null, known: new Map(), ctors: new Set(), mods: new Set(), scripts: new Map(), defined: new Map(), builders: new Map(), returns: new Map() }
+  const F = { fam, consts: new Map(), twice: new Set(), vals: new Map(), locals: new Map(), keyFns: new Map(), fnNames: new Set(), calls: new Map(), bind: null, cur: null, skip: new Set(), arrays: new Map(), memo: new Map(), keyMemo: new Map(), work: 0, over: false, deadline: Date.now() + ms, note: null, known: new Map(), ctors: new Set(), mods: new Set(), scripts: new Map(), defined: new Map(), builders: new Map(), returns: new Map(), wraps: new Map(), wrapIn: new Map(), bare: [], exportsRaw: [], fnOf: new Map() }
   const fileTest = TEST_PATH.test(file) || TEST_FILE[fam].test(file)
   const deadline = Date.now() + ms
   let steps = 0, stopped = false
@@ -819,7 +939,8 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
   each(root, (n) => {
     if (stopped || (late() && (stopped = true))) return false
     const imp = spec?.imports?.[n.type]
-    if (!imp) return n.type === 'program' || n.type === 'source_file' || n.type === 'module' || n.type === 'import_declaration' || n.type === 'import_spec_list'
+    // (a CommonJS require at the top of the file too: `const redis = require('redis')`)
+    if (!imp) return n.type === 'program' || n.type === 'source_file' || n.type === 'module' || n.type === 'import_declaration' || n.type === 'import_spec_list' || (fam === 'ts' && (n.type === 'lexical_declaration' || n.type === 'variable_declaration' || n.type === 'variable_declarator'))
     let list = []
     try { list = imp(n) || [] } catch {}
     for (const im of list) {
@@ -838,19 +959,35 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
   F.known = scopedNames(F)
   topDecls(root, F)
   keyFns(root, F)
+  if (fam === 'ts' && !stopped) modules(root, file, F)
   const evidence = () => out.clients.length > 0 || F.known.size > 0 || F.mods.size > 0
   let dyn = 0
   const pending = [] // commands read once the file is walked: [{ c: { name, args }, line, ctx, how, batch, via }]
   // a site
   const fnIdx = (ctx) => { if (!ctx.fn) return -1; if (ctx.fn.idx < 0) { ctx.fn.idx = out.fns.length; out.fns.push({ name: ctx.fn.name, line: ctx.fn.line, end: ctx.fn.end }) } return ctx.fn.idx }
   const emit = (c, line, ctx, how, extra = {}) => {
-    if (fileTest || ctx.test) { out.tests++; return }
-    if (pending.length >= MAX_SITES) { if (!out.capped) { out.capped = true; note(`more than ${MAX_SITES} commands: the first ${MAX_SITES} read`) } return }
+    if (fileTest || ctx.test) { out.tests++; return false }
+    if (pending.length >= MAX_SITES) { if (!out.capped) { out.capped = true; note(`more than ${MAX_SITES} commands: the first ${MAX_SITES} read`) } return false }
     pending.push({ c, line, ctx, how, seq: pending.length, ...extra })
+    return true
   }
   // whether a root or a link names a client: how it is known, or null
   const clientName = (nm, prop = false) => (prop ? F.known.any(nm) : F.known.get(nm)) ?? (nm && STORE_NAME.test(nm) && nm.length <= 40 ? 'name' : F.mods.has(nm) && !F.known.rebound(nm) ? 'bound' : null)
   const isMaker = (n) => { const t = n.text.slice(0, 300); return MAKER[fam].test(t) || (fam === 'ts' && [...F.ctors].some((c) => new RegExp(`^(?:await\\s+)?(?:new\\s+)?${c.replace(/[$]/g, '\\$')}(?:\\.\\w+)?\\s*\\(`).test(t))) || (fam === 'python' && [...F.ctors].some((c) => new RegExp(`^(?:await\\s+)?${c.replace(/[$]/g, '\\$')}(?:\\.\\w+)*\\s*\\(`).test(t))) }
+  // ── wrappers (TypeScript and JavaScript): a client's method promisified or bound, the command it sends ──
+  // `promisify(client.get)`, `util.promisify(client.get)`, each with or without `.bind(client)` (outside or
+  // inside), `client.get.bind(client)`: the command (GET), or null
+  const clientExpr = (n) => { n = unwrap(n, fam); if (!n) return null; if (n.type === 'identifier') return clientName(n.text); if (n.type === MEMBER.ts[0]) return clientName(field(n, 'property')?.text || '', true); return null }
+  const wrappedOf = (v) => {
+    let n = unwrap(v, fam), bound = false, prom = false
+    const unbind = () => { if (n?.type === 'call_expression') { const c = callee(n, fam); if (c?.recv && c.name === 'bind' && argNodes(n, fam).length <= 1) { n = unwrap(c.recv, fam); bound = true } } }
+    unbind()
+    if (n?.type === 'call_expression' && /^(?:(?:util|utils|node_util)\.)?promisify$|^require\(\s*['"](?:node:)?util['"]\s*\)\.promisify$/.test((field(n, 'function')?.text || '').slice(0, 60))) { const a = argNodes(n, fam); n = a.length === 1 ? unwrap(a[0], fam) : null; prom = true; unbind() }
+    if ((!prom && !bound) || n?.type !== MEMBER.ts[0]) return null
+    const m = field(n, 'property')?.text
+    const tc = m ? typedCommand(m) : null
+    return tc && clientExpr(field(n, 'object')) ? tc.cmd : null
+  }
   // what a declaration's value makes: a client, a script, a command assembled in steps, an array
   const bindValue = (name, val, ctx, line) => {
     if (!name || !val) return
@@ -860,6 +997,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     const itself = new RegExp(`^&?\\s*${name.replace(/[$]/g, '\\$')}(?:\\s*\\.\\s*(?:to_string|clone|to_owned|as_str|as_ref|into)\\s*\\(\\s*\\))?$`).test(v.text.slice(0, 200))
     if (ctx.fn && F.locals.size < 4000 && !itself) { const was = F.locals.get(name); F.locals.set(name, { node: v, fn: ctx.fn, twice: !!(was && was.fn === ctx.fn) }) }
     if (itself) return
+    if (fam === 'ts' && v.type === 'call_expression') { const w = wrappedOf(v); if (w) { const was = F.wraps.get(name); F.wraps.set(name, was && was.fn === (ctx.fn || null) ? { ...was, twice: true } : { cmd: w, fn: ctx.fn || null, line }); return } }
     const skip = () => { let cur = v; for (let g = 0; g < 64 && cur; g++) { cur = unwrap(cur, fam); if (!cur || cur.type !== CALL[fam]) break; F.skip.add(cur.id); const c = callee(cur, fam); cur = c?.recv || null } }
     if (isMaker(v)) { F.known.set(name, 'bound'); return }
     // an array: a command's arguments when it starts with a command's name, else elements a spread inlines
@@ -909,12 +1047,24 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
   }
   // Rust's .arg(&[…]) and .arg(vec![…]) send each element
   const flatArg = (a) => (a.a ? a.a : a.call ? [{ call: a.call }] : [a])
+  // a call's arguments, a trailing callback left out; a wrapper's, as the protocol takes them
+  const callArgs = (call) => dropCallback(argNodes(call, fam), fam).map((a) => argOf(a, F)).filter((a) => !isFn(a))
+  const wrapArgs = (cmd, args) => { const p = protocol(cmd, cmd.toLowerCase(), args, fam, null, F); return p === undefined || p === null ? expand(args) : Array.isArray(p) ? p : p.args }
   // ── the chain of one outermost call ──
   const chainSites = (n, ctx) => {
     const ch = chainOf(n, fam)
     const r = ch.root
     let state = null, how = null, batch = null, ns = null, ftIndex = null, raw = null, script = null
     const flushRaw = () => { if (raw) { emit({ name: raw.name, args: raw.args }, raw.line, ctx, how || 'bound', batch ? { batch } : {}); raw = null } }
+    // a wrapper called by its name: one another file of the repository exports (read as the command its
+    // name says, kept by data/redis.mjs only where that file exports a wrapper of it), or one of this
+    // file (read once the file is walked, where its wrappers are known)
+    if (fam === 'ts' && r.call && !ch.links.length && r.node.type === 'call_expression' && /^[A-Za-z_$][\w$]*$/.test(r.name) && !F.known.rebound(r.name)) {
+      const im = F.wrapIn.get(r.name)
+      const tc = im ? typedCommand(im.name) : null
+      if (tc) { emit({ name: tc.cmd, args: wrapArgs(tc.cmd, callArgs(r.call)) }, lineOf(r.call), ctx, 'wrapper', { wrap: { from: im.from, name: im.name, cmd: tc.cmd } }); return }
+      if (!im && (F.wraps.has(r.name) || F.fnNames.has(r.name)) && F.bare.length < 4000) F.bare.push({ name: r.name, args: callArgs(r.call), line: lineOf(r.call), ctx })
+    }
     // the root
     if (r.call) {
       if (fam === 'rust' && /(?:^|::)cmd$/.test(r.name)) { const nm = lit(argOf(r.args[0], F)); if (nm && COMMANDS.has(nm.toUpperCase())) { raw = { name: nm.toUpperCase(), args: [], line: lineOf(r.call) }; state = 'raw'; how = 'command' } }
@@ -966,7 +1116,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
         if (state === null) { const k = clientName(l.name, true); if (k) { state = 'client'; how = k } }
         continue
       }
-      const args = (l.args || []).map((a) => argOf(a, F))
+      const args = dropCallback(l.args || [], fam).map((a) => argOf(a, F))
       if (state === 'client' || state === null) {
         if (state === 'client' && PIPES.has(l.name) && !args.some((a) => !isFn(a) && a.kw === undefined)) { batch = PIPES.get(l.name) === 'multi' || batch === 'multi' ? 'multi' : 'pipeline'; continue }
         if (state === 'client' && (l.name === 'json' || l.name === 'ft' || l.name === 'ts') && fam === 'python') { ns = l.name; ftIndex = l.name === 'ft' ? args[0] || S('idx') : null; continue }
@@ -1005,7 +1155,8 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
           luaSites(d.body, keys && keys.every((k) => k.s || k.n !== undefined || k.x !== undefined) ? keys : null, lineOf(l.call), ctx, how)
           continue
         }
-        const tc = typedCommand(l.name, ns)
+        // (a client promisified whole, `client.getAsync(…)`: its command)
+        const tc = typedCommand(l.name, ns) || (fam === 'ts' && !ns && /^[a-z][A-Za-z]{1,30}Async$/.test(l.name) ? typedCommand(l.name.slice(0, -5)) : null)
         if (!tc) { if (state === null) { const k = clientName(l.name); if (k && MAKES.has(l.name)) { state = 'client'; how = k } } continue }
         if (state === null && (GENERIC.has(tc.cmd) || !evidence())) continue
         const pyMapped = fam === 'python' ? pyArgs(tc.norm, ns, args) : args
@@ -1074,6 +1225,45 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     try { list.push(argNodes(n, fam).filter((a) => a.type !== 'keyword_argument').map((a) => argOf(a, F))) } catch { list.over = true }
     F.calls.set(name, list)
   }
+  // ── wrappers, once the file is walked (TypeScript and JavaScript) ──
+  // A function sending one command whose arguments are its own parameters, in order (`(key) => new
+  // Promise((a, b) => client.get(key, cb(a, b)))`, `(...args) => client.get(...args)`), wraps that command;
+  // so does a name bound to a promisified or bound method (F.wraps). Each call of one by its name in this
+  // file is read as the command with the call's arguments (at the call, in the calling function), and the
+  // function's own command (its key a parameter) is then dropped; an exported wrapper is listed in
+  // `exports` (its name, its command, its function), for data/redis.mjs to follow the calls other files of
+  // the repository make of it. Never a wrapper of a wrapper; never across repositories.
+  function wrappers() {
+    const byFn = new Map()
+    for (const p of pending) if (p.ctx.fn) { if (!byFn.has(p.ctx.fn)) byFn.set(p.ctx.fn, []); byFn.get(p.ctx.fn).push(p) }
+    // the functions calling one of the file's that sends a command (or a promisified method)
+    const sending = new Set([...byFn.keys()].filter((fn) => fn.top && fn.named).map((fn) => fn.name))
+    const calling = new Set(F.bare.filter((b) => F.wraps.has(b.name) || sending.has(b.name)).map((b) => b.ctx.fn))
+    const fnWrap = new Map(), byName = new Map()
+    for (const [fn, list] of byFn) {
+      if (list.length !== 1 || calling.has(fn)) continue // (one command, and no call of a function of the file that may send another)
+      const p = list[0], a = p.c.args || [], ps = fn.params || []
+      if (p.via || p.batch || p.scriptOf || p.how === 'builder' || p.how === 'wrapper' || !a.length || a.length > ps.length) continue
+      if (!a.every((x, i) => x && ((x.param && x.param.i === i && x.param.fn === fn.short) || (i === a.length - 1 && fn.rest === i && x.spread === ps[i])))) continue
+      const w = { cmd: p.c.name, p, fn, used: false }
+      fnWrap.set(fn, w)
+      if (fn.top && fn.named) byName.set(fn.name, byName.has(fn.name) ? null : w)
+    }
+    const top = (name) => { const w = F.wraps.get(name); if (w && !w.twice && w.fn === null) return w; return byName.get(name) || null }
+    for (const b of F.bare) {
+      const fw = F.wraps.get(b.name)
+      const w = fw && !fw.twice && (fw.fn === null || fw.fn === b.ctx.fn) ? fw : byName.get(b.name)
+      if (!w || w.fn === b.ctx.fn && w.p) continue // (a wrapper calling itself)
+      if (emit({ name: w.cmd, args: wrapArgs(w.cmd, b.args) }, b.line, b.ctx, 'wrapper')) w.used = true
+    }
+    for (const x of F.exportsRaw) {
+      const w = x.local ? top(x.local) : x.fnNode ? fnWrap.get(F.fnOf.get(x.fnNode.id)) : x.expr ? (() => { const c = wrappedOf(x.expr); return c ? { cmd: c } : null })() : null
+      if (!w || out.exports.length >= MAX_MOD || out.exports.some((e) => e.name === x.name)) continue
+      out.exports.push({ name: x.name, cmd: w.cmd, line: x.line, ...(w.p ? { fn: fnIdx(w.p.ctx) } : {}) })
+      if (w.p && !w.used) w.p.pass = true
+    }
+    for (const w of fnWrap.values()) if (w.used) w.p.drop = true
+  }
   // ── the walk ──
   const handled = new Set()
   const top = { fn: null, cls: null, pyCls: null, impl: null, test: false }
@@ -1110,8 +1300,10 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     // the context its children get
     let c = ctx
     if (FN[fam].test(t)) {
-      const name = fnName(n, parent, fam, ctx)
-      c = name !== null ? { ...ctx, fn: { name: name.slice(0, 120), short: name.split(/::|\./).pop(), params: paramsOf(n, fam), line: lineOf(n), end: endOf(n), idx: -1 }, test: ctx.test || isTestName(fam, name), pyCls: null } : { ...ctx, pyCls: fam === 'python' ? null : ctx.pyCls }
+      // (`module.exports.get = (key) => …`, `exports.get = …`: named after what it is exported as)
+      const name = fnName(n, parent, fam, ctx) ?? (fam === 'ts' && parent?.type === 'assignment_expression' && /^(?:module\.)?exports$/.test(field(field(parent, 'left'), 'object')?.text || '') ? field(field(parent, 'left'), 'property')?.text ?? null : null)
+      c = name !== null ? { ...ctx, fn: { name: name.slice(0, 120), short: name.split(/::|\./).pop(), params: paramsOf(n, fam), line: lineOf(n), end: endOf(n), idx: -1, ...(fam === 'ts' ? { rest: restAt(n), top: !ctx.fn, named: parent?.type === 'variable_declarator' || /^(?:function_declaration|generator_function_declaration)$/.test(t) } : {}) }, test: ctx.test || isTestName(fam, name), pyCls: null } : { ...ctx, pyCls: fam === 'python' ? null : ctx.pyCls }
+      if (fam === 'ts' && c.fn && c.fn !== ctx.fn && F.fnOf.size < 4000) F.fnOf.set(n.id, c.fn)
     } else if (CLASS[fam]?.test(t)) {
       const name = field(n, 'name')?.text || '(class)'
       c = fam === 'python' ? { ...ctx, pyCls: name, test: ctx.test || /^Test/.test(name) } : { ...ctx, cls: name }
@@ -1129,6 +1321,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
   if (stopped) note(`the file took more than ${ms / 1000} s to read: the calls after that not read`)
   // commands assembled in steps no call was seen sending: read where they are made
   for (const b of F.builders.values()) if (!b.used) emit({ name: b.name, args: b.args }, b.line, b.ctx, 'builder')
+  if (fam === 'ts' && !stopped) wrappers()
   pending.sort((a, b) => a.line - b.line || a.seq - b.seq)
   // ── each command read, its spreads resolved ──
   // a parameter's value: what every call of its function in the file passes it, when they agree
@@ -1157,10 +1350,11 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
     return outA
   }
   for (const p of pending) {
+    if (p.drop) continue
     const f = readCommand({ name: p.c.name, args: resolve(p.c.args || []) })
     if (!f || f.family === 'tx' || (f.family === 'server' && f.cmd !== 'SELECT')) continue // MULTI, EXEC, PING: no key
     dyn += f.dyn
-    const s = { line: p.line, fn: fnIdx(p.ctx), how: p.how, ...(p.batch ? { batch: p.batch } : {}), ...(p.via ? { via: p.via, scriptAt: p.scriptAt } : {}), ...(p.scriptOf ? { scriptOf: true } : {}), ...f }
+    const s = { line: p.line, fn: fnIdx(p.ctx), how: p.how, ...(p.batch ? { batch: p.batch } : {}), ...(p.via ? { via: p.via, scriptAt: p.scriptAt } : {}), ...(p.scriptOf ? { scriptOf: true } : {}), ...(p.wrap ? { wrap: p.wrap } : {}), ...(p.pass ? { pass: true } : {}), ...f }
     out.sites.push(s)
   }
   out.dyn = dyn
@@ -1169,7 +1363,7 @@ export function readRedisFile(tree, lang, file, { ms = FILE_MS } = {}) {
 
 export default {
   id: 'redis-commands',
-  version: 1,
+  version: 2,
   kind: 'inferred',
   scope: 'file',
   tree: true,
@@ -1184,7 +1378,7 @@ export default {
     const tree = ctx.tree(lang, text)
     try {
       const r = readRedisFile(tree, lang, file)
-      return r.sites.length || r.clients.length || r.tests ? { declarations: [], redis: r } : { declarations: [] }
+      return r.sites.length || r.clients.length || r.tests || r.exports.length ? { declarations: [], redis: r } : { declarations: [] }
     } finally { tree.delete?.() }
   },
 }
