@@ -993,6 +993,8 @@ export class Graph {
         : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.some((r) => !isClient(r)) ? `foreign keys → ${[...new Set(e.relations.filter((r) => !isClient(r)).map((r) => r.to))].join(', ')}` : null, e.relations.some(isClient) ? `relations → ${[...new Set(e.relations.filter(isClient).map((r) => r.to))].join(', ')} (enforced by the client)` : null, e.bookkeeping ? "a migration tool's own record (not compared)" : null].filter(Boolean)
       const items = (e.bound || []).map((b) => `${b.type} (${b.confidence})`)
       out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}${items.length ? `  items: ${items.join(', ')}` : ''}${e.logical ? `  [one table with ${e.logical.members.filter((m) => m !== e.id).join(', ')}]` : ''}`)
+      // the classes a code model maps to the table (an ORM's entity or model), each at its line
+      if (!kv) for (const s of e.sources.filter((x) => x.kind === 'code' && x.as)) out.push(`    ${s.as}  ${this.dloc({ repo: s.repo ?? st.repo, path: s.path, line: s.line })}`)
     }
     // the enums a code model declares
     for (const en of st.enums || []) out.push(`  enum ${en.name}  ${en.values.join(' | ')}  ${this.sources(st.repo, en.sources)}`)

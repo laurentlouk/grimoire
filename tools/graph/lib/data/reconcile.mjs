@@ -340,7 +340,7 @@ function merge(id, ds) {
     name: ds[0].store,
     dialect: store.dialect ?? null,
     dialectFrom: store.dialectFrom ?? null,
-    declarations: ds.map((d) => ({ extractor: d.extractor, kind: d.source.kind, path: d.source.path, line: d.source.line, status: d.status, label: d.label, stopped: d.stopped ?? null, error: d.error ?? null, notes: d.notes || [], files: d.files ?? null, implicitIndexes: d.implicitIndexes ?? 0, dialect: d.dialect ?? null, dialectFrom: d.dialectFrom ?? null })),
+    declarations: ds.map((d) => ({ extractor: d.extractor, kind: d.source.kind, path: d.source.path, line: d.source.line, status: d.status, label: d.label, stopped: d.stopped ?? null, error: d.error ?? null, notes: d.notes || [], files: d.files ?? null, implicitIndexes: d.implicitIndexes ?? 0, dialect: d.dialect ?? null, dialectFrom: d.dialectFrom ?? null, ...(d.clients ? { clients: d.clients } : {}) })),
     ...(enums.size ? { enums: [...enums.values()].sort(byName) } : {}),
     entities: [...entities.values()].sort(byName).map((E) => {
       // the declarations that describe this entity whole: a complete one, or one stating it whole,
@@ -393,6 +393,12 @@ export function storeSummary(st) {
     const k = (kind) => tables.reduce((a, e) => a + e.indexes.filter((i) => i.kind === kind).length, 0)
     const items = new Set(tables.flatMap((e) => (e.bound || []).map((b) => b.item))).size
     return [n(tables.length, 'table'), n(k('gsi'), 'GSI'), k('lsi') && n(k('lsi'), 'LSI'), items && `${n(items, 'item type')} bound`, conflicts ? n(conflicts, 'conflict') : 'no conflicts'].filter(Boolean).join(' · ')
+  }
+  // a document store declared in code (Mongoose, a schema language on MongoDB): its collections and the
+  // references between them, which no database enforces
+  if (st.dialect === 'mongodb') {
+    const cols = st.entities.filter((e) => e.kind === 'collection')
+    return [n(cols.length, 'collection'), n(cols.reduce((a, e) => a + e.relations.length, 0), 'reference'), n(cols.reduce((a, e) => a + e.indexes.length, 0), 'index', 'indexes'), conflicts ? n(conflicts, 'conflict') : 'no conflicts'].join(' · ')
   }
   // the indexes SQLite builds for keys, and MySQL for foreign keys, beside the declared ones
   const built = tables.reduce((a, e) => a + e.indexes.filter((i) => i.implicit).length, 0)

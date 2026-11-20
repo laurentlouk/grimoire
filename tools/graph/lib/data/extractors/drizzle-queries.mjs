@@ -57,7 +57,7 @@ const DTS = /\.d\.[cm]?ts$/i
 export const MAX = { sites: 400, cols: 200, refs: 400, nodes: 20000, with: 64, notes: 8 }
 // A source file's level bit (registry.mjs): a Drizzle query-builder shape beside an import a schema
 // may come through. Linear whatever the text: no two repetitions match the same characters.
-export const LEVEL = 16384
+export const LEVEL = 2097152 // above the ORMs' bits (registry.mjs)
 const SHAPE = /\.(?:insert|update|delete|from|innerJoin|leftJoin|\$count)\s*\(\s*[\w$]+(?:\.[\w$]+)?\s*[,)]|\.query\.[\w$]+\.find(?:Many|First)\s*\(|\b(?:useMigrations|migrate)\s*\(/
 const SOURCE = /\bfrom\s*['"](?:drizzle-orm(?:\/[^'"\n]{0,200})?|[^'"\n]{0,200}(?:schema|db|database|drizzle|tables|models)[^'"\n]{0,200})['"]/i
 export const drizzleQueryLevel = (text) => (SHAPE.test(text) && SOURCE.test(text) ? LEVEL : 0)

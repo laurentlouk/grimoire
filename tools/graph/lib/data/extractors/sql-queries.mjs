@@ -97,7 +97,7 @@ export const queryLevel = (p, text) => {
 const ESCAPED = { n: ' ', t: ' ', r: ' ', 0: ' ', b: ' ', f: ' ', v: ' ' }
 export const unescape = (s) => s.replace(/\\(?:u\{[0-9a-fA-F]{1,6}\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|([\s\S]))/g, (m, c) => (c === undefined ? ' ' : c === '\n' ? '\n' : ESCAPED[c] ?? c))
 const rowOf = (n) => n.startPosition.row
-function assemble(segs) {
+export function assemble(segs) {
   if (!segs || !segs.length || segs.every((s) => s.text === PARAM)) return null
   const first = segs[0].row
   let text = '', row = first
@@ -111,7 +111,7 @@ function assemble(segs) {
 const hole = (n) => [{ text: PARAM, row: rowOf(n) }]
 
 // TS and JS
-function tsSegs(n, consts, depth = 0) {
+export function tsSegs(n, consts, depth = 0) {
   if (!n || depth > 32) return null
   switch (n.type) {
     case 'string': return named(n).length ? named(n).map((c) => ({ text: c.type === 'escape_sequence' ? unescape(c.text) : c.text, row: rowOf(c) })) : [{ text: '', row: rowOf(n) }]
@@ -149,7 +149,7 @@ function goSegs(n, consts, depth = 0) {
   }
 }
 // Python
-function pySegs(n, consts, depth = 0) {
+export function pySegs(n, consts, depth = 0) {
   if (!n || depth > 32) return null
   switch (n.type) {
     case 'string': {

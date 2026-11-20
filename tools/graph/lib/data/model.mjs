@@ -7,8 +7,13 @@
 //                 marker? } · source: { path, line, kind, confidence } · complete: it describes the
 //                 whole store (an element it lacks is a disagreement) · partial: a replay stopped
 //                 early · status: read | partial | not-read · label · stopped?: { path, line } ·
-//                 error · notes[] · files · snapshot?: { id, prevIds } (Drizzle v1) · entities[] }
-//   Entity      { name, kind: table | view, path, line, fields[], keys[], indexes[], relations[] }
+//                 error · notes[] · files · snapshot?: { id, prevIds } (Drizzle v1) · clients?: the
+//                 client packages (an ORM's) the store was read through, no gap then (check.mjs) ·
+//                 entities[] }
+//   Entity      { name, kind: table | view | collection, path, line, fields[], keys[], indexes[],
+//                 relations[] } · as?: the class an ORM maps to it (`class User`), cited beside it ·
+//                 whole?: the declaration states it whole though not the store · part?: it states
+//                 the entity, not all of its parts
 //   Field       { name (a dotted path when nested), type: as declared, nullable: true | false,
 //                 default: as declared or null, generated: virtual | stored | null, path, line }
 //   Key         { role: primary | unique, parts: [field] }   compared as a whole, never per column

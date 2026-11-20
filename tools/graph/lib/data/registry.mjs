@@ -13,7 +13,10 @@
 // in a process of its own (readers/code-aside.mjs) }
 // An extractor may also say: tree (it parses source through the pinned grammars), parses(path, text)
 // (whether it parses this file so: its level > 0 when absent), config(path) (a file it reads as
-// configuration, kept whatever its content: a drizzle.config.*, a prisma.config.*).
+// configuration, kept whatever its content: a drizzle.config.*, a prisma.config.*), source (its files are
+// source code, inspected by level, though its kind is not code: migrations written as code), aside (a
+// base parses its files aside though its kind is not code). An ORM extractor's declaration may name the
+// client packages it read the store through, `clients` (model.mjs): they are then no gap (check.mjs).
 // A job runs again when the hash of any input, the extractor's version or its salt changes. One
 // that throws loses its facts and leaves its error for graph_status; the index goes on. The text
 // comes from the working tree (the index) or from a commit (extractAll, for the base of a diff):
@@ -33,13 +36,22 @@ import sqlQueries from './extractors/sql-queries.mjs'
 import redisCommands from './extractors/redis-commands.mjs'
 import redisInfra from './extractors/redis-infra.mjs'
 import drizzleQueries from './extractors/drizzle-queries.mjs'
+import rails from './extractors/rails.mjs'
+import codeMigrations from './extractors/code-migrations.mjs'
+import django from './extractors/django.mjs'
+import sqlalchemy from './extractors/sqlalchemy.mjs'
+import typeorm from './extractors/typeorm.mjs'
+import jpa from './extractors/jpa.mjs'
+import mongoose from './extractors/mongoose.mjs'
+import alembic from './extractors/alembic.mjs'
 import { DOC } from './readers/documents.mjs'
 import { tableLevel } from './readers/dynamodb.mjs'
 import { skipped } from '../project.mjs'
 
-export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma, sqlQueries, redisCommands, redisInfra, drizzleQueries]
-// the code and inferred extractors: their files are source (code, or a schema language), inspected by level
-export const SOURCE = EXTRACTORS.filter((ex) => ex.kind === 'code' || ex.kind === 'inferred')
+export const EXTRACTORS = [sqlMigrations, drizzleSnapshot, dynamodbTable, cloudformation, terraform, serde, tsTypes, dynamoAccess, drizzleTs, prisma, sqlQueries, redisCommands, redisInfra, rails, codeMigrations, django, sqlalchemy, typeorm, jpa, mongoose, alembic, drizzleQueries]
+// the code and inferred extractors, and those saying `source` (migrations written as code): their files
+// are source (code, or a schema language), inspected by level
+export const SOURCE = EXTRACTORS.filter((ex) => ex.kind === 'code' || ex.kind === 'inferred' || ex.source)
 // those parsing source through the pinned grammars (ctx.tree), and the ones of them a base reads
 // aside (readers/code-aside.mjs; a base does not compare access patterns or the SQL code sends, but
 // does compare a key-value cache's key templates: extractors/redis-commands.mjs says `aside`)
@@ -52,7 +64,14 @@ export const asideOf = (p, text) => ASIDE.filter((ex) => ex.wants(p) && (ex.pars
 // re-exporting relative modules (extractors/drizzle-ts.mjs), 16 a model, view or enum block and 32 a
 // datasource block of a schema-language file (extractors/prisma.mjs), 64 a query call beside SQL text,
 // or a SQL client import (extractors/sql-queries.mjs), 128 a key-value cache's client or command
-// (extractors/redis-commands.mjs), 16384 a Drizzle query-builder call (extractors/drizzle-queries.mjs).
+// (extractors/redis-commands.mjs); the ORMs': 256 a Rails db/schema.rb and 512 an Active Record model
+// (extractors/rails.mjs), 1024 a migration sending DDL as raw SQL and 2048 a TypeORM data source
+// (extractors/code-migrations.mjs), 4096 a Django model file and 8192 Django settings
+// (extractors/django.mjs), 16384 SQLAlchemy or SQLModel models and 32768 an engine URL
+// (extractors/sqlalchemy.mjs), 65536 a TypeORM entity (extractors/typeorm.mjs), 131072 a JPA entity
+// (extractors/jpa.mjs), 262144 a Mongoose schema (extractors/mongoose.mjs), 524288 an Alembic revision
+// and 1048576 an Alembic environment (extractors/alembic.mjs); 2097152 a Drizzle query-builder call
+// (extractors/drizzle-queries.mjs).
 export const sourceLevel = (p, text) => { let l = 0; for (const ex of SOURCE) if (ex.wants(p)) l |= ex.level(p, text); return l }
 const isSource = (p) => SOURCE.some((ex) => ex.wants(p))
 export const MAX_BYTES = 8 << 20 // an input past this is not read (its job reports it)
@@ -75,7 +94,8 @@ export const candidates = (rels, project) => rels.filter((p) => EXTRACTORS.some(
 // a serde derive, a type declaration, a conversion, an environment read, a string constant; 2: a
 // key-value SDK call shape; 4, 8: a table-builder schema, a barrel; 16, 32: a schema-language file's
 // models, its datasource; 64: a query call beside SQL text, a SQL client import; 128: a key-value cache's
-// client or command; 16384: a Drizzle query-builder call; 0: none). A change to
+// client or command; 256 and up: an ORM's schema, models, entities or migrations, and 2097152 a Drizzle
+// query-builder call, as sourceLevel lists them; 0: none). A change to
 // what this computes moves the store's SCHEMA_VERSION, so no
 // stale level survives in an index.
 export const inspect = (p, text) => (/\.sql$/i.test(p) ? schemaLevel(upOnly(text)) : wantsTf(p) ? tfLevel(p, text) : DOC.test(p) ? tableLevel(text) : isSource(p) ? sourceLevel(p, text) : null)

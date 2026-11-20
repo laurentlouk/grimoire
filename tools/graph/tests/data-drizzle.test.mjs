@@ -49,7 +49,7 @@ console.log('\n1 · import paths, migrators, the content filter, a primary key n
     [true, true, true, false], 'a migrator\'s migrations (a bundle in the folder, an alias to it, a migrationsFolder) name the store\'s folder')
   const { drizzleQueryLevel } = await import('../lib/data/extractors/drizzle-queries.mjs')
   eq([drizzleQueryLevel("import { notes } from './db/schema'\ndb.insert(notes).values({})"), drizzleQueryLevel("import { x } from 'lodash'\nmap.delete(key)"), drizzleQueryLevel("import { db } from '@acme/db'\nctx.db.query.Post.findMany({})")],
-    [16384, 0, 16384], 'the content filter: a query-builder shape beside an import a schema may come through; a Map\'s delete beside another import is none')
+    [2097152, 0, 2097152], 'the content filter: a query-builder shape beside an import a schema may come through; a Map\'s delete beside another import is none')
   const t0 = Date.now()
   drizzleQueryLevel(`import { a } from 'drizzle-orm'\n${'db.insert('.repeat(20000)}${' '.repeat(50000)}`)
   ok(Date.now() - t0 < 500, `the content filter stays linear on a hostile text (${Date.now() - t0} ms)`)
