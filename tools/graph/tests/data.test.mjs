@@ -2857,11 +2857,11 @@ console.log('\n28 · code-declared SQL models: the schema-language reader (reade
     eq([s0.store, s0.dialect, s0.dialectFrom, s0.complete, s0.label, s0.source], ['drizzle', 'sqlite', { how: 'stated', path: 'src/db/schema.ts', line: 1 }, true, 'table builders, read 1 file: 2 tables', { path: 'src/db/schema.ts', line: 1, kind: 'code', confidence: 'declared' }],
       'the store is the folder drizzle-kit writes into (out, default drizzle), the dialect from the builders\' core module')
     eq(s0.entities.map(brief), [
-      { name: 'users', kind: 'table', at: 3, fields: ['id integer', 'email text(320)', 'score real? =1.5', 'avatar blob?', 'balance numeric?', 'admin integer =false', "nick text? ='it''s'", 'created_at integer =(unixepoch())', 'token text? [$defaultFn(() => makeToken())]', 'touched integer? [$onUpdate(() => Date.now())]', 'slug text?', 'odd text? =someConstant (default)'],
+      { name: 'users', kind: 'table', at: 3, fields: ['id integer', 'email text(320)', 'score real? =1.5', 'avatar blob?', 'balance numeric?', 'admin integer =false', "nick text? ='…' (default)", 'created_at integer =(unixepoch())', 'token text? [$defaultFn(…)]', 'touched integer? [$onUpdate(…)]', 'slug text?', 'odd text? =(expression) (default)'],
         keys: ['primary(id):4'], indexes: ['users_email_unique!(email):5'], rels: [] },
       { name: 'posts', kind: 'table', at: 17, fields: ['author_id integer', 'slug text', 'editor_id integer?'], keys: ['primary(author_id,slug):22'],
         indexes: ['posts_slug_idx(slug) partial:23', 'posts_lower_slug!(lower("slug")):24', 'posts_author_editor!(author_id,editor_id):25'], rels: ['(author_id)->users(id) cascade/restrict:18', '(editor_id)->users(id) set null/no action:26'] },
-    ], 'SQLite: each column builder\'s type, notNull, primaryKey (not null), unique() an index named as drizzle-kit names it, references() with its actions, defaults as the snapshot writes them (a literal quoted, sql`…` its text, another expression kept and not compared), $defaultFn and $onUpdate computed and never evaluated; the third argument: a composite key, a partial index, an expression index, a table-level unique() the unique index drizzle-kit creates, a foreign key with its action')
+    ], 'SQLite: each column builder\'s type, notNull, primaryKey (not null), unique() an index named as drizzle-kit names it, references() with its actions, defaults with no literal\'s text (a number, a boolean, sql`…` a function of no argument, as the snapshot writes them; a string \'…\' and another expression (expression), only that there is one, not compared), $defaultFn and $onUpdate computed, never evaluated, their code never kept; the third argument: a composite key, a partial index, an expression index, a table-level unique() the unique index drizzle-kit creates, a foreign key with its action')
     eq([s0.entities[0].fields.find((f) => f.name === 'slug').generated, s0.notes], ['stored', ['schema named by drizzle.config.ts', "relations() at src/db/schema.ts:28: the query API's, app-level, never foreign keys: 1 without fields (a many(), or the other side's)"]], 'generatedAlwaysAs stored; relations() noted, never a foreign key (a many() names no column)')
 
     const PGS = [
@@ -4777,7 +4777,7 @@ async function indexed() {
       '  code  prisma@3  schema, read 1 file: 5 models, 1 enum, 1 view  lending/prisma/schema.prisma',
       '  dialect: stated at lending/prisma/migrations/migration_lock.toml:3',
       'notes:drizzle  sqlite  3 tables · 3 foreign keys · 2 indexes · no conflicts',
-      '  code  drizzle-ts@4  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
+      '  code  drizzle-ts@5  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
       '    note: schema named by drizzle.config.ts (casing snake_case)',
       "    note: relations() at src/db/tables/notes.ts:27: the query API's, app-level, never foreign keys: 1 the same as a foreign key",
       '  dialect: stated at notes/src/db/tables/notes.ts:1',
@@ -4790,13 +4790,13 @@ async function indexed() {
     ].join('\n'), 'its tables, each at the line that declares it')
     eq(await sq('data', { entity: 'people' }), [
       'notes:drizzle/people  table  (sqlite)',
-      '  declared at notes/src/db/tables/people.ts:8 [code drizzle-ts@4]',
+      '  declared at notes/src/db/tables/people.ts:8 [code drizzle-ts@5]',
       'Fields (5):',
       '  id  integer  not null  — notes/src/db/tables/people.ts:9',
       '  handle  text  not null  — notes/src/db/tables/people.ts:10',
       '  name  text  null  — notes/src/db/tables/people.ts:11',
-      '  created_at  integer  not null  computed $defaultFn(() => new Date())  — notes/src/db/tables/people.ts:4',
-      '  updated_at  integer  null  computed $onUpdate(() => new Date())  — notes/src/db/tables/people.ts:5',
+      '  created_at  integer  not null  computed $defaultFn(…)  — notes/src/db/tables/people.ts:4',
+      '  updated_at  integer  null  computed $onUpdate(…)  — notes/src/db/tables/people.ts:5',
       'Keys (1):',
       '  primary (id)  — notes/src/db/tables/people.ts:9',
       'Indexes (1):',
@@ -4850,7 +4850,7 @@ async function indexed() {
     git(MB, 'init', '-q', '-b', 'main')
     commit(MB, 'the schema and its migrations')
     await sq('index', {}, MB)
-    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@4  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
+    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@5  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
       'the schema, the newest snapshot and the replay: three declarations of one store (the config\'s out), agreeing')
     has(await sq('data', { entity: 'streaks' }, MB), "  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9 · mobile/src/db/schema.ts:42\nKeys (1):\n  primary (day)  — mobile/drizzle/meta/0005_snapshot.json:208 · mobile/drizzle/0004_streaks.sql:7 · mobile/src/db/schema.ts:40",
       'a sql`(unixepoch())` default as the snapshot and the replay write it; every element at its three lines')
@@ -4870,7 +4870,7 @@ async function indexed() {
     const mdata = dataOf(mpage).data
     const mbooks = mdata.stores[0].tables.find((t) => t.name === 'books')
     const mrating = mbooks.fields.find((f) => f.name === 'rating')
-    ok(mrating.cf.length === 1 && mrating.cf[0].drift === 1 && mdata.stores[0].decls.some((d) => d.kind === 'code' && d.extractor === 'drizzle-ts@4'), 'the Data tab: the column carries its conflict, marked as the schema against its migrations; the schema among the declarations')
+    ok(mrating.cf.length === 1 && mrating.cf[0].drift === 1 && mdata.stores[0].decls.some((d) => d.kind === 'code' && d.extractor === 'drizzle-ts@5'), 'the Data tab: the column carries its conflict, marked as the schema against its migrations; the schema among the declarations')
     const mpg = asCards(await stubPage(mpage, '#data-0'))
     mpg.click(mdata.stores[0].tables.findIndex((t) => t.name === 'books'))
     ok(mpg.text().includes('The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.'), '… and its passport says so under the conflicts')
@@ -4899,7 +4899,7 @@ async function indexed() {
       'prisma:prisma/migrations  sqlite  6 tables · 6 foreign keys · 4 indexes · no conflicts',
     ], 'each schema against what its tool generated from it: SQLite, Postgres and MySQL table builders (numeric defaults, a table-level unique() in SQLite, time(p), unsigned decimals, a MySQL serial, an enum value with a quote), and a schema-language file with named relations (no phantom join table); in MySQL a unique index is the unique key it is')
     for (const s of ['pg1', 'pg2', 'my1', 'my2']) has(golden, `  migration  sql-migrations@2  replayed 1 file, `, `${s}: its migrations read too`)
-    has(golden, 'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  pg2/drizzle/meta/0000_snapshot.json\n  migration  sql-migrations@2  replayed 1 file, 9 statements  pg2/drizzle/0000_fuzzy_mongoose.sql\n  code  drizzle-ts@4  table builders, read 1 file: 2 tables, 2 enums  pg2/src/schema.ts',
+    has(golden, 'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  pg2/drizzle/meta/0000_snapshot.json\n  migration  sql-migrations@2  replayed 1 file, 9 statements  pg2/drizzle/0000_fuzzy_mongoose.sql\n  code  drizzle-ts@5  table builders, read 1 file: 2 tables, 2 enums  pg2/src/schema.ts',
       'Postgres: the snapshot, the migration read statement by statement and the schema, three declarations of one store')
     has(await gq('data', { entity: 'lite2:drizzle/users' }), '  users_email_lower unique (lower("email"))  — lite2/drizzle/meta/0000_snapshot.json:119 · lite2/drizzle/0000_thin_whistler.sql:19 · lite2/src/schema.ts:18',
       'an expression index: its text as the snapshot keeps it, as the SQLite replay\'s CREATE INDEX writes it, and as the schema\'s sql`lower(${t.email})` renders it')
