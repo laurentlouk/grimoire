@@ -13,6 +13,9 @@
 //  3. incremental refresh: an edit, a new file and a deletion show up in the next query
 //  4. the MCP server over stdio: initialize, tools/list, tools/call, read-only SQL
 //  5. worktrees, the lock, the hook's refresh, churn, and the page (data, CSP, its script run in a stub DOM)
+//  6. beyond the edges (fixtures/edge): dispatch, unlinked call sites and mentions in graph_impact;
+//     graph_diff (definitions against the base, contract changes still named, tests, co-change gaps,
+//     risk); graph_overview; several-word search; no literal quoted in any of them
 //  1b-1d (between 1 and 2): which files count and as what, modules and the system map, the page's helpers
 //
 //  Needs the parser runtime (web-tree-sitter + grammars): `npm ci --prefix tools/graph`, or a
@@ -791,6 +794,105 @@ const recover = await Promise.all([...Array(6)].map(() => new Promise((res) => {
 })))
 const trace = existsSync(MARK) ? readFileSync(MARK, 'utf8') : ''
 ok(/^(\+-)+$/.test(trace) && recover.every((r) => r !== ''), `six processes recovering one dead lock: never two inside at once (${trace}; ${recover.join(' ')})`)
+
+// ── 6 · beyond the edges: impact, diff, overview, search ──
+console.log('\n6 · beyond the edges (fixtures/edge): dispatch, unlinked calls, mentions, the diff, the overview')
+{
+  const E = path.join(SANDBOX, 'edge')
+  cpSync(path.join(HERE, 'fixtures', 'edge'), E, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+  // a string holding the name and a secret: a mention names its line and kind, never its text
+  writeFileSync(path.join(E, 'src/jobs/secret.ts'), "export const boot = { createSession: 'canary-edge-1' }\nexport const note = 'createSession canary-edge-2'\n")
+  const commit = (m) => { git(E, 'add', '-A'); git(E, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m) }
+  git(E, 'init', '-q', '-b', 'main'); commit('init')
+  const eq = (tool, args = {}) => call(`graph_${tool}`, args, { root: E })
+  await eq('index')
+  const answers = []
+  const imp = (target, extra = {}) => eq('impact', { target, ...extra }).then((a) => { answers.push(a); return a })
+
+  const cs = await imp('createSession')
+  has(cs, 'login:3  d1 [import]', 'impact: a linked caller is listed as before')
+  has(cs, 'testCreate  function test  test/session.test.ts:3', 'impact: the test on the path')
+  has(cs, 'src/api/routes.ts  :4 reference in register', 'impact: a function passed as a value (a callback) is a mention the edges miss')
+  has(cs, 'src/jobs/runner.ts  :5 string in run', 'impact: a string key naming it is a mention')
+  has(cs, 'config/jobs.yaml  :3 config', 'impact: config naming it is a mention')
+  has(cs, 'docs/auth.md  :3 docs', 'impact: docs naming it are a mention')
+  has(cs, 'src/jobs/secret.ts  :1 key', 'impact: an object key named like it is a mention (a dispatch table)')
+  lacks(cs, 'src/api/login.ts  :', 'impact: a line an edge explains is not repeated as a mention')
+  lacks(cs, 'test/session.test.ts  :', 'impact: an import or a linked call is not a mention')
+  const quiet = await imp('createSession', { mentions: false })
+  lacks(quiet, 'Mentions', 'impact: mentions: false leaves the text search out')
+
+  const rf = await imp('Session.refresh')
+  has(rf, 'src/api/admin.ts:2  in rotate  s.refresh', 'impact: a call on a receiver of unknown type is a possible caller, not dropped')
+  lacks(rf, 'src/misc/caches.ts', 'impact: another class\'s same-named method is not a mention (its own definition)')
+
+  const ml = await imp('MemoryStore.load')
+  has(ml, 'handle:3  d1 [typed]', 'impact: a caller through the interface the method implements (dispatch)')
+  has(ml, 'Store.load  method  src/auth/session.ts:2  (interface Store)', 'impact: the interface declaration it may be called through')
+  has(ml, 'CachedStore.load  method  src/auth/store.ts:10  (class CachedStore)', 'impact: the override in a subclass')
+  const sl = await imp('Store.load')
+  has(sl, 'Implementations of Store.load', 'impact: an interface method lists its implementations')
+  has(sl, 'MemoryStore.load  method  src/auth/store.ts:4', 'impact: … each of them')
+
+  // the diff: a new signature, a removed function still called, a moved one, a body change, an added file
+  writeFileSync(path.join(E, 'src/api/legacy.ts'), 'export function legacy() {\n  return newId()\n}\n')
+  commit('legacy')
+  const edit = (rel, a, b) => { const f = path.join(E, rel); const t = readFileSync(f, 'utf8'); ok(t.includes(a), `fixture edit applies to ${rel}`); writeFileSync(f, t.replace(a, b)) }
+  edit('src/auth/session.ts', 'refresh(ttl: number): Session {', 'refresh(ttl: number, force: boolean): Session {')
+  edit('src/auth/session.ts', 'function newId(): string {\n  return Math.random().toString(36)\n}\n', '')
+  edit('src/auth/session.ts', 'new Session(newId(), user)', 'new Session(makeId(), user)')
+  edit('src/auth/store.ts', '    return null\n  }\n}\n\nexport class Cached', '    return id ? null : null\n  }\n}\n\nexport class Cached')
+  writeFileSync(path.join(E, 'src/auth/ids.ts'), 'export function makeId(): string {\n  return Date.now().toString(36)\n}\n')
+  rmSync(path.join(E, 'src/misc/caches.ts')); writeFileSync(path.join(E, 'src/misc/pools.ts'), 'export class Cache { refresh(): void {} }\nexport class Token { refresh(): void {} }\nexport class Feed { refresh(): void {} }\nexport class Pool { refresh(): void {} }\n')
+  const d = await eq('diff', { base: 'HEAD' }); answers.push(d)
+  has(d, 'Changes against HEAD', 'diff: against the base given')
+  has(d, '~ Session.refresh  method  src/auth/session.ts:7  signature changed', 'diff: a changed signature')
+  has(d, 'was: refresh(ttl: number): Session', 'diff: … with the signature it had')
+  has(d, 'now: refresh(ttl: number, force: boolean): Session', 'diff: … and the one it has')
+  has(d, '- newId  function  (was src/auth/session.ts:16)', 'diff: a removed definition, read from the base')
+  has(d, 'call    src/api/legacy.ts:2  in legacy  newId', 'diff: a removed function still called outside the diff (the break a diff hides)')
+  has(d, 'call    src/api/admin.ts:2  in rotate  s.refresh', 'diff: an unlinked call site of a changed signature')
+  has(d, '~ createSession  function  src/auth/session.ts:12  body', 'diff: a body change')
+  has(d, '+ makeId  function  src/auth/ids.ts:1', 'diff: an untracked file\'s definitions are added')
+  has(d, '> Cache  class  moved: src/misc/caches.ts:1 → src/misc/pools.ts:1', 'diff: a definition removed here and added there is moved')
+  has(d, 'src/api/login.ts  (distance 1)', 'diff: a caller outside the diff is in the impact')
+  has(d, 'dispatch: MemoryStore.load is declared on interface Store', 'diff: dispatch through the interface')
+  has(d, 'override not changed here: CachedStore.load', 'diff: an override the diff leaves alone')
+  has(d, 'test/session.test.ts  (distance 1)', 'diff: the tests to run')
+  has(d, 'Changed code no test reaches', 'diff: the changed code no test reaches')
+  has(d, 'Risk: high', 'diff: a removed function still called is high risk')
+  has(d, 'removed newId is still named outside this diff', 'diff: … with the reason')
+  const all = await eq('diff', { base: 'HEAD~1' }); answers.push(all)
+  has(all, 'call    src/api/legacy.ts:2  in legacy  newId  (in this diff)', 'diff: against an older base, a caller the diff adds is marked in it')
+  commit('all'); has(await eq('diff', { base: 'HEAD' }), 'none (the working tree matches it)', 'diff: nothing to say on a clean tree')
+
+  // co-change: a file that changed with session.ts in every commit is missed by a diff leaving it out
+  for (let i = 0; i < 3; i++) { writeFileSync(path.join(E, 'src/auth/session.ts'), readFileSync(path.join(E, 'src/auth/session.ts'), 'utf8') + `// ${i}\n`); writeFileSync(path.join(E, 'docs/auth.md'), readFileSync(path.join(E, 'docs/auth.md'), 'utf8') + `${i}\n`); writeFileSync(path.join(E, 'src/auth/store.ts'), readFileSync(path.join(E, 'src/auth/store.ts'), 'utf8') + `// ${i}\n`); commit(`pair ${i}`) }
+  await eq('index')
+  edit('src/auth/session.ts', 'return new Session(this.id, this.user)', 'return new Session(this.id, this.user + "")')
+  const gap = await eq('diff', { base: 'HEAD' }); answers.push(gap)
+  has(gap, 'src/auth/store.ts  with src/auth/session.ts: 5/5', 'diff: a file that usually changes with a changed one, missing from the diff')
+
+  // a renamed file: the imports that still name its old path no longer resolve
+  git(E, 'checkout', '-q', '--', '.'); git(E, 'mv', 'src/auth/session.ts', 'src/auth/sessions.ts')
+  const mv = await eq('diff', { base: 'HEAD' }); answers.push(mv)
+  has(mv, 'renamed src/auth/session.ts → src/auth/sessions.ts: 5 unresolved import(s) still name it (5 outside this diff)', 'diff: a renamed file still imported by its old path')
+  has(mv, 'import  src/api/handler.ts:1', 'diff: … each import, at its line')
+  has(mv, 'is still imported outside this diff', 'diff: … and the risk says so')
+  git(E, 'mv', 'src/auth/sessions.ts', 'src/auth/session.ts')
+
+  const ov = await eq('overview'); answers.push(ov)
+  has(ov, 'Modules (', 'overview: the modules')
+  has(ov, 'tests reach', 'overview: test reach per module')
+  has(ov, 'Entry points', 'overview: entry points')
+  has(ov, 'Most used', 'overview: most used definitions')
+  const sw = await eq('search', { query: 'session create' }); answers.push(sw)
+  ok(sw.split('\n')[0].includes('createSession'), `search: several words, every one in the name or path, best first (${sw.split('\n')[0]})`)
+  has(await eq('search', { query: 'nothing here' }), 'Nothing holds all of', 'search: several words, none found')
+
+  const leaked = answers.flatMap((a) => a.match(/canary-edge-\d/g) || [])
+  ok(!leaked.length, `no impact, diff or overview answer quotes a literal (${leaked.length ? [...new Set(leaked)].join(', ') : 'none'})`)
+}
 
 rmSync(SANDBOX, { recursive: true, force: true })
 console.log(`\n${PASS} passed, ${FAIL} failed`)
