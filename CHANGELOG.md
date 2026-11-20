@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.45.0 — one data model diagram for every store: key-value tables and caches drawn like SQL, and the links no key states
+
+The Data tab drew an ERD per SQL store and a grid of unconnected cards for everything else, so the model of a NoSQL project could not be seen as a model: a message's `orbit_id`, a review's `ownerId`, a cache keyed by `{cartId}` all point somewhere, and nothing drew it. This implements the approved design `docs/specs/2026-11-09-key-value-diagram-design.md`, amended by its owner on 2026-11-20 to put SQL and SQLite in the same system (D10).
+
+- **One visual system** (`lib/data-view.mjs`, `lib/data/layout.mjs`):
+  - every store is drawn with the ERD's boxes: a header with the entity's name and its kind as a pill, keys marked, types aligned;
+  - one line vocabulary in a shared legend: a foreign key solid, an inferred join long-dashed, a refined relation dashed, a name lead dotted, a search index's coverage thin.
+- **A key-value table store opens as a diagram** (slice 1, the Fields switch of slice 3):
+  - each table is a compact box: its `PK`, `SK` and `TTL` attributes, the attributes a line attaches to or named like an id, then *+ N more fields*. *Fields* draws them all.
+  - its GSIs and LSIs are rows; its refined relations are lines (they were only listed);
+  - a click opens the table's key card beside it, and *Cards* shows the cards as before;
+  - with an overlay on, the cards are drawn, with a note.
+- **Leads** (slice 2, D10; `lib/data/links.mjs`):
+  - matched: an attribute, a SQL column no foreign key covers, or a key template's placeholder named like an id is matched to the one table of the same repository its stem names;
+  - drawn dotted: never a foreign key, so its column gets no FK mark;
+  - not drawn: a stem two tables share, listed as rivals;
+  - replaced by a refined relation on the same column.
+- **`graph_data`** with a store lists its *Leads*, *Ambiguous names* and *Links to other stores*; with an entity, its own.
+- **Stubs across stores** (slice 4):
+  - each entity of another store that a lead, a refined relation or a lineage claim reaches is a box at the diagram's right edge, on every diagram, the SQL ERDs included;
+  - a click opens that store on that entity; past 12, one stub per store.
+- **A key space's Diagram mode** (slice 5): templates are boxes, with their placeholders marked `KEY`, their fields and their lifetime; search indexes are boxes, with a thin line to each template they cover; placeholders naming a table are stubs. The prefix tree stays the default.
+- **Refining the links** (slice 6):
+  - a refine claim may name a key template's placeholder as a column (`shop:redis/cart:{cartId}`, `["cartId"]`);
+  - `/grimoire:data-model` reads the leads and turns them into refined relations by reading the lookups that use them. New eval case `data-model-7`.
+- Not yet: D9, the overlays drawn inside the diagram.
+- Tests: `tools/graph/tests/data-diagram.test.mjs`. It covers the lead rule on hand-built models, then `fixtures/diagram` (a SQLite store, a key-value table store with refined relations, a key space with a search index):
+  - `graph_data`'s links;
+  - every diagram, the switches, a stub's click and an overlay's fallback;
+  - escaped names, and a claim on a missing placeholder reported as drift.
+
+  The key-card tests in `data.test.mjs` switch to Cards first.
+
+
 ## 0.43.2 — crystallize: what the data model map (#74) taught
 
 The crystallize pass on the data model map's 20 merged PRs (#73 to #110). Report: `docs/crystallize/2026-11-07-grimoire-data-model-map.md`.

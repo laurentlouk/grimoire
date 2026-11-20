@@ -1,6 +1,6 @@
 # Key-value stores as diagrams: design
 
-**Status:** approved 2026-11-09 · **Amends:** [the data model map](2026-11-06-data-model-map-design.md), goal 3 ("a key card per NoSQL table") · **Real case:** the project the data model map was probed on (its hub and four repositories; read, never changed)
+**Status:** approved 2026-11-09 · amended 2026-11-20 by the owner (D10: SQL stores in the same system) · implemented 2026-11-20: slices 1, 2, 4, 5, 6, the Fields switch of slice 3, and D10; D9 (the overlays drawn in the diagram) not yet, an overlay draws the cards · **Amends:** [the data model map](2026-11-06-data-model-map-design.md), goal 3 ("a key card per NoSQL table") · **Real case:** the project the data model map was probed on (its hub and four repositories; read, never changed)
 
 ## Problem
 
@@ -30,7 +30,6 @@ Relations are also lost where they already exist.
 - **A canvas of every store on one page.** The owner chose stubs (D5).
 - **Name leads across repositories.** All 10 such matches on the probed project were wrong (D4).
 - **One box per item type for a single-table design.** No extractor records a discriminator, and nothing in `lib/data/` mentions one. This waits for an extractor that does.
-- **Name leads on SQL columns** that no foreign key covers (a deduced store's columns, for example).
 - **Relations inferred from data flow**, such as an attribute read from one item and then used as the key of a `GetItem` on another table. `access.mjs` places calls on tables but does not follow values.
 - **Leads in a diff.** Leads are neither stored data nor refine claims, so `graph_changes`, the change overlay and the delta never list them.
 - **Cardinality beyond many → one.** An attribute holding another item's key is drawn many → one, as the ERD draws a foreign key.
@@ -134,6 +133,12 @@ Relations are also lost where they already exist.
 - `graph.mjs data show` prints the same.
 - The rule lives in one module, `lib/data/links.mjs`, used by `dataData` (`render.mjs`) and by `graph_data`, so the page and the tools cannot disagree.
 
+**D10. One visual system for every store, SQL included.** *(owner, 2026-11-20)*
+- The owner's request: "a view like UML but more modern where we can view the actual model and its relations, even for NoSQL; it should also do SQL and SQLite". So the SQL ERDs and the key-value diagrams are one system: the same boxes (`erdBox`: a header with the entity's name and its kind as a pill, keys marked, types aligned), the same line vocabulary, the same legend, the same stubs.
+- **Lines, every diagram:** a foreign key solid; an inferred join long-dashed; a refined relation dashed; a lead dotted; an extracted coverage thin. Many → one markers on all but coverage and lineage.
+- **Name leads on SQL columns** that no foreign key covers, by the D4 rule (same repository only, rivals listed, `id` alone no candidate). A lead is packed as a relation of its own kind after the store's foreign keys and refined relations, so the overlays' positions hold, and its column gets no FK mark: a lead is never drawn like a foreign key.
+- Rejected: **leads only on key-value stores.** A SQLite store with `coupon_id` and no `REFERENCES` has the same gap a DynamoDB attribute has.
+
 **D9. The overlays carry over to the diagram.**
 - With the change overlay ("Changes vs base") or the delta on, the diagram is drawn as the ERD draws them:
   - marks on boxes and rows;
@@ -152,6 +157,7 @@ Each is demoed on a fixture of its own and, read only, on the probed project.
 4. **Stubs across stores** (D5), in every diagram including the SQL ERDs. *Demo:* the probed project's `orbit` ↔ `{}orbit:{orbit_id}` and `message` ↔ `chat_messages`, each opening the other store.
 5. **Redis in diagram mode** (D6). *Demo:* `backend:redis` with its coverage lines and lead stubs. `web:redis` still opens as its tree.
 6. **Refining the links** (D7). Placeholders in the check, the data-model skill's new step and its eval. *Demo:* the fixture refined until no dotted line is left. The probed project's own refine pass is its owner's call.
+7. **SQL in the same system** (D10). Leads on un-keyed `*_id` columns, the shared legend and stubs on the ERDs. *Demo:* `fixtures/diagram`'s SQLite store: `orders.coupon_id`, `audit_log.actor_user_id` and `audit_log.order_id` dotted, the DynamoDB tables and key templates that name its tables as stubs.
 
 ## Edge cases and failure modes
 
@@ -171,7 +177,6 @@ Each is demoed on a fixture of its own and, read only, on the probed project.
 
 - **Slice order.** The list above is a default.
 - **Later, not now:**
-  - name leads on SQL ERDs for columns no foreign key covers;
   - a store-level map;
   - one box per item type once an extractor states a single-table design's discriminator.
 
