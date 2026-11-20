@@ -57,7 +57,7 @@ export function extract(tree, lang, isTestFile) {
       const name = (spec.name || nameOf)(node)
       if (name && (IDENT.test(name) || kind === 'namespace')) {
         const parentSym = ctx.parent >= 0 ? symbols[ctx.parent] : null
-        const scopeType = (sc && sc.type) || (ctx.parent === ctx.scopeOwner ? ctx.scopeType : null)
+        const scopeType = (sc && sc.type) || (ctx.parent === ctx.scopeOwner ? ctx.scopeType : null) || (spec.container && spec.container(node)) || null
         if (kind === 'function' && ((parentSym && CLASSY.has(parentSym.kind)) || scopeType)) kind = 'method'
         const container = scopeType || (parentSym && parentSym.kind !== 'namespace' ? parentSym.qualname : null)
         const idx = symbols.length

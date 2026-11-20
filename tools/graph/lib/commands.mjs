@@ -21,6 +21,8 @@ import { readRefines, groupingFor } from './data/check.mjs'
 import { docRoots } from './docs.mjs'
 import { loadIndex } from './arch.mjs'
 import { archScope, archImpact, archLines, archDeltaStates, archDeltaLines } from './arch-change.mjs'
+import { changeImpact } from './change.mjs'
+import { overview } from './overview.mjs'
 import { Graph, sql, baseText, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER, ARCH_CHANGES_FOOTER, ARCH_DELTA_FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
@@ -39,6 +41,12 @@ export const TOOLS = [
     run: (g, a, ctx) => g.status(ctx.fresh),
   },
   {
+    name: 'graph_overview',
+    description: 'The project at a glance, to start on an unknown codebase: per repository its languages, definitions and tests; its modules (folders of production code, users first) with what each uses and the share of its functions a test reaches; its entry points (functions nothing calls that call the most: where flows start, or code reached through config or a framework); its most used definitions; and its hotspots (often changed and large). Then go to graph_file, graph_search or graph_impact.',
+    params: { repo: repoParam, limit: { type: 'integer', default: 12, description: 'Rows per list (default 12).' } },
+    run: (g, a) => overview(g, { repo: a.repo || null, limit: Math.max(1, Math.min(Number(a.limit) || 12, 50)) }),
+  },
+  {
     name: 'graph_index',
     description: 'Build or refresh the code graph (incremental: only changed files are re-parsed). The first run installs the parser runtime (~50 MB, once per machine) and may take a minute on a large tree. `full: true` rebuilds from scratch.',
     params: { full: { type: 'boolean', default: false }, repo: repoParam },
@@ -46,8 +54,8 @@ export const TOOLS = [
   },
   {
     name: 'graph_search',
-    description: 'Find definitions (functions, methods, classes, structs, traits, interfaces, enums, types, modules) by name or fragment (`*` wildcards), or files by path fragment. Returns #id, kind, path:line and signature.',
-    params: { query: { type: 'string', description: 'Name, fragment, `get*User`, or a path fragment like `auth/session`.' }, kind: { type: 'string', description: 'Only this kind, e.g. function, method, class, struct, trait, interface.' }, repo: repoParam, limit: { type: 'integer', default: 30 } },
+    description: 'Find definitions (functions, methods, classes, structs, traits, interfaces, enums, types, modules) by name or fragment (`*` wildcards), or files by path fragment. Several words (`session refresh`) match definitions whose qualified name or path holds every word, best first. Returns #id, kind, path:line and signature.',
+    params: { query: { type: 'string', description: 'Name, fragment, `get*User`, several words (`user session`), or a path fragment like `auth/session`.' }, kind: { type: 'string', description: 'Only this kind, e.g. function, method, class, struct, trait, interface.' }, repo: repoParam, limit: { type: 'integer', default: 30 } },
     required: ['query'],
     run: (g, a) => g.search(a),
   },
@@ -74,10 +82,21 @@ export const TOOLS = [
   },
   {
     name: 'graph_impact',
-    description: 'Blast radius of changing a symbol or a file: everything reaching it through calls, inheritance and imports up to `depth` hops, grouped by file with distance, the tests on those paths, and the files that change together with it in git history. Use it to scope a plan, a task\'s declared files, or a review.',
-    params: { target: { type: 'string', description: 'A symbol (as for graph_symbol) or a file path.' }, depth: depthParam(3, 6), strict: strictParam, repo: repoParam },
+    description: 'Blast radius of changing a symbol or a file, beyond what grep or the call edges alone show: everything reaching it through calls, inheritance and imports up to `depth` hops, grouped by file with distance; dispatch (a method\'s declarations on its interfaces, traits and base classes, whose callers may land on it, and the overrides or implementations that redefine it); the tests on those paths; the call sites naming it that resolution could not link (receiver of unknown type, too many same-named definitions); every other mention of its name in any file of the project that no edge explains, classified (a reference passed as a value, an unresolved import, a string key, config, markup, scripts, docs, comments) and never quoted; and the files that change together with it in git history. Use it before changing something, to scope a plan, a task\'s declared files, or a review.',
+    params: { target: { type: 'string', description: 'A symbol (as for graph_symbol) or a file path.' }, depth: depthParam(3, 6), strict: strictParam, mentions: { type: 'boolean', default: true, description: 'Search the project\'s files for the name\'s mentions no edge explains (default true).' }, repo: repoParam },
     required: ['target'],
-    run: (g, a) => g.impact(a),
+    run: (g, a, ctx) => g.impact(a, ctx.project),
+  },
+  {
+    name: 'graph_diff',
+    description: 'The impact of a change: what the working tree (committed, staged, unstaged and untracked) changed against a base, definition by definition, and what that can break that the diff does not show. Each definition added, removed, moved or modified, with its old and new signature when it changed (the base read through git, nothing checked out); for every contract change (removed, moved, new signature) who still names it: linked callers (inside or outside this diff), call sites resolution could not link, and the name\'s other mentions in the project (references passed as values, unresolved imports, string keys, config, scripts), classified and never quoted; the files reaching the changed definitions outside the diff (calls, inheritance, imports, dispatch through interfaces, overrides and implementations left unchanged); the tests to run and the changed code no test reaches; the files that usually change with the changed ones (git history) and are not in the diff; and a risk line with its reasons. Use it before committing, to review a branch, or to check a task\'s footprint. `base: "HEAD"` limits it to the uncommitted changes.',
+    params: { base: { type: 'string', description: 'A branch, tag or commit; compared at its merge base with HEAD (default: baseBranch, else the base branch, else main). HEAD: only what is not committed.' }, depth: depthParam(2, 5), mentions: { type: 'boolean', default: true, description: 'Search the project for the mentions of contract changes (default true).' }, repo: repoParam },
+    run: (g, a, ctx) => {
+      const base = resolveBase(ctx.project, { explicit: a.base || null, repo: a.repo || null })
+      if (base.error) throw new Error(base.error)
+      base.text = baseText(base)
+      return changeImpact(g, ctx.project, base, { repo: a.repo || null, depth: Math.max(1, Math.min(Number(a.depth) || 2, 5)), text: a.mentions !== false && a.mentions !== 'false' })
+    },
   },
   {
     name: 'graph_file',

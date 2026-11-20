@@ -123,7 +123,7 @@ const BATCH = 32 << 20
 // Map(path → { oid, size }). Symbolic links are left out: their blob is a target path, not a text.
 // `paths`: only those folders (relative to it), listed alone (the architecture's diagrams folder).
 export function treeAt(abs, commit, paths = null) {
-  const r = git(abs, ['ls-tree', '-r', '-l', '-z', commit, ...(paths && paths.length ? ['--', ...paths] : [])])
+  const r = git(abs, ['--literal-pathspecs', 'ls-tree', '-r', '-l', '-z', commit, ...(paths && paths.length ? ['--', ...paths] : [])]) // a path is a path, never pathspec magic (`:x`)
   if (r.status !== 0) throw new Error(`git ls-tree ${commit.slice(0, 10)} failed in ${abs}: ${(r.stderr || '').trim().split('\n')[0]}`)
   const files = new Map()
   for (const entry of r.stdout.split('\0')) {

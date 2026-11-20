@@ -11,6 +11,8 @@
 //   imports  (node, file) => [{ source, names: [local names], alias? }]
 //   supers   (defNode) => [{ name, kind: 'extends' | 'implements' }]
 //   isTest   (defNode, name) => bool, on top of the file-path test heuristic
+//   container  (defNode) => type name | null: the type a definition attaches to that no enclosing
+//            block names (JavaScript `X.prototype.y = function`)
 //   tokenCalls  node type → (node) => [{ name, qual }]: calls hidden in unparsed token trees
 //   import names are local names, or `local=original` when aliased (`import { a as b }` → `b=a`).
 // Anything a spec does not name is walked through, never extracted. Files in a language with no
@@ -51,7 +53,7 @@ export function lastSegment(n) {
 // `/…/`; a heredoc, `%q(…)` or `?c` as `…` alone) and each comment dropped. A literal that runs past
 // `to` ends the text.
 const LITERAL = new Set([
-  'string', 'template_string', 'template_literal_type', 'regex', // JavaScript, TypeScript, Python, Ruby, PHP
+  'string', 'template_string', 'template_literal_type', 'regex', 'jsx_text', // JavaScript, TypeScript, Python, Ruby, PHP (JSX text is a literal too)
   'string_literal', 'raw_string_literal', 'char_literal', 'character_literal', // Rust, Java, Kotlin, C, C++, C#
   'interpreted_string_literal', 'rune_literal', // Go
   'verbatim_string_literal', 'interpolated_string_expression', // C#
@@ -104,7 +106,20 @@ export function calleeOf(n) {
 }
 
 // ───────────────────────── JavaScript / TypeScript / TSX ─────────────────────────
-const fnValue = (n) => { const v = field(n, 'value'); return v && /^(arrow_function|function_expression|function|generator_function)$/.test(v.type) }
+const FN_VALUE = /^(arrow_function|function_expression|function|generator_function)$/
+const fnValue = (n) => { const v = field(n, 'value'); return v && FN_VALUE.test(v.type) }
+// `exports.x = function`, `module.exports.x = …`, `obj.x = () => …`, `X.prototype.y = function`: a
+// function defined by assignment to a member (CommonJS modules, prototypes, mixins). Its container:
+// `X` for a prototype member, the object's name for `obj.x`, none for an export.
+const assignedFn = (n) => { const l = field(n, 'left'), r = field(n, 'right'); return !!(l && r && l.type === 'member_expression' && FN_VALUE.test(r.type) && field(l, 'property')) }
+const assignedOwner = (n) => {
+  const o = field(field(n, 'left'), 'object')
+  if (!o) return null
+  if (o.type === 'member_expression' && text(field(o, 'property')) === 'prototype') { const t = field(o, 'object'); return t && t.type === 'identifier' ? t.text : null }
+  if (o.type === 'identifier') return o.text === 'exports' || o.text === 'module' ? null : o.text
+  if (o.type === 'member_expression' && o.text === 'module.exports') return null
+  return null
+}
 const jsImports = (n) => {
   const src = field(n, 'source')
   if (!src) return []
@@ -132,8 +147,10 @@ const js = {
     variable_declarator: (n) => (fnValue(n) ? 'function' : null),
     public_field_definition: (n) => (fnValue(n) ? 'method' : null),
     field_definition: (n) => (fnValue(n) ? 'method' : null),
+    assignment_expression: (n) => (assignedFn(n) ? (assignedOwner(n) ? 'method' : 'function') : null),
   },
-  name: (n) => (n.type === 'field_definition' ? lastSegment(field(n, 'property')) : nameOf(n)),
+  name: (n) => (n.type === 'field_definition' ? lastSegment(field(n, 'property')) : n.type === 'assignment_expression' ? text(field(field(n, 'left'), 'property')) : nameOf(n)),
+  container: (n) => (n.type === 'assignment_expression' ? assignedOwner(n) : null),
   calls: { call_expression: ['function', 'call'], new_expression: ['constructor', 'new'] },
   imports: {
     import_statement: jsImports,

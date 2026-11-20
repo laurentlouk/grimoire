@@ -14,6 +14,7 @@ import { NOT_DECLARED, sqlFunctions, queryConflicts } from './data/queries.mjs'
 import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, shownName, NO_QUERY, ASSEMBLED } from './data/redis.mjs'
 import { formOf } from './data/readers/redis-cmd.mjs'
 import { docRoots } from './docs.mjs'
+import { dispatchStarts, dispatchLines, unresolved, unresolvedLines, mentions, mentionLines } from './reach.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files (or deduced from the SQL or the cache commands the code sends, labelled inferred), never from a database. Open path:line before relying on any of it.'
@@ -232,6 +233,9 @@ export class Graph {
   search({ query, kind, repo, limit = 30 }) {
     const qv = String(query || '').trim()
     if (!qv) return 'Give a name or a fragment of one.'
+    // several words: each in the qualified name or the path, ranked by how many land in the name
+    const words = qv.split(/\s+/).filter(Boolean)
+    if (words.length > 1) return this.searchWords(words, { kind, repo, limit })
     const like = qv.includes('*') ? qv.replace(/\*/g, '%') : `%${qv}%`
     const args = [like, like]
     let where = "(n.name LIKE ? OR n.qualname LIKE ?) AND n.kind != 'file'"
@@ -242,6 +246,34 @@ export class Graph {
     const rows = this.q(`SELECT n.*, f.repo, f.path FROM nodes n JOIN files f ON f.id = n.file_id WHERE ${where}
       ORDER BY (n.name = ?) DESC, (n.name LIKE ?) DESC, n.is_test, length(n.qualname), f.path LIMIT ?`, ...args, exact, `${exact}%`, Math.min(Number(limit) || 30, 200))
     if (!rows.length) return `Nothing named like "${qv}". The graph only knows definitions in indexed languages; fall back to grep for strings, config and docs.`
+    return rows.map((n) => `#${n.id}  ${this.row(n)}${n.signature ? `\n      ${n.signature}` : ''}`).join('\n')
+  }
+
+  // Each word must appear in the qualified name or the path; candidates are then ranked in JS: a word
+  // starting a name segment (`setAcks` for "ack": a camelCase hump, after `_`, `.` or `-`) scores
+  // above one inside it (`pack`), a word in the name above one only in the path.
+  searchWords(words, { kind, repo, limit = 30 }) {
+    const pats = words.map((w) => `%${w.replace(/\*/g, '%')}%`)
+    const args = []
+    let where = "n.kind != 'file'"
+    for (const p of pats) { where += ' AND (n.qualname LIKE ? OR f.path LIKE ?)'; args.push(p, p) }
+    if (kind) { where += ' AND n.kind = ?'; args.push(kind) }
+    if (repo) { where += ' AND f.repo = ?'; args.push(repo) }
+    const cands = this.q(`SELECT n.*, f.repo, f.path FROM nodes n JOIN files f ON f.id = n.file_id WHERE ${where} LIMIT 2000`, ...args)
+    if (!cands.length) return `Nothing holds all of ${words.map((w) => `"${w}"`).join(', ')} in its name or path. Try fewer words, or one fragment.`
+    const segs = (s) => s.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[\s._\-/:]+/)
+    const score = (n) => {
+      const names = segs(n.qualname), paths = segs(n.path)
+      let x = 0
+      for (const w of words.map((v) => v.toLowerCase().replace(/\*/g, ''))) {
+        if (names.some((p) => p === w)) x += 4
+        else if (names.some((p) => p.startsWith(w))) x += 3
+        else if (n.qualname.toLowerCase().includes(w)) x += 1
+        else if (paths.some((p) => p.startsWith(w))) x += 0.5
+      }
+      return x - (n.is_test ? 0.25 : 0) - n.qualname.length / 1000
+    }
+    const rows = cands.map((n) => [score(n), n]).sort((a, b) => b[0] - a[0] || (a[1].path < b[1].path ? -1 : 1)).slice(0, Math.min(Number(limit) || 30, 200)).map(([, n]) => n)
     return rows.map((n) => `#${n.id}  ${this.row(n)}${n.signature ? `\n      ${n.signature}` : ''}`).join('\n')
   }
 
@@ -292,18 +324,40 @@ export class Graph {
   }
 
   // Blast radius: everything that reaches the target through calls, inheritance and (for files)
-  // imports, grouped by file, with the tests on those paths and the files that co-change with it.
-  impact({ target, repo, depth = 3, strict = false }) {
+  // imports, grouped by file, with the tests on those paths and the files that co-change with it;
+  // then what the edges cannot show (reach.mjs): dispatch through supertypes, overrides and
+  // implementations, call sites resolution left unlinked, and the name's other mentions in the
+  // project (with a project; `mentions: false` leaves them out).
+  impact({ target, repo, depth = 3, strict = false, mentions: text = true }, project = null) {
     const t = this.targets(target, { repo })
+    const withText = text !== false && text !== 'false'
+    // no definition by that name (code the index does not see, another language, a name being
+    // introduced): its mentions are still what a grep would find, sorted
+    if (t.error && t.error.startsWith('No symbol or file') && project && withText) {
+      const name = String(target).trim().split(/[/\\]/).pop().split(/::|\.|#|->|:/).filter(Boolean).pop() || ''
+      const m = mentions(this, project, [{ term: name, targets: [{ id: -1, name, kind: 'function', repo: null, path: null, line: -1 }] }])
+      return [t.error, ...(m.searched.length ? [`Its name as text, since no definition holds it:`, ...mentionLines(this, m)] : [])].join('\n')
+    }
     if (t.error) return t.error
     const d = Math.max(1, Math.min(Number(depth) || 3, 6))
-    let start = t.hits.map((h) => h.id)
-    const files = new Set(t.hits.map((h) => h.file_id))
-    for (const h of t.hits) {
+    const out = [t.note, `Impact of ${t.hits.map((h) => this.row(h)).join(' + ')} — depth ${d}`].filter(Boolean)
+    out.push(...this.reachLines(t.hits, { depth: d, strict: !!strict, project, text: withText }))
+    return out.join('\n')
+  }
+  // The impact of a set of nodes: reached code by file, tests, dispatch, unresolved sites, mentions,
+  // co-change. `skipFiles`: files left out of the listing; `members: false` walks from the hits
+  // alone, not from a file's definitions or a type's members (a diff lists the changed ones itself).
+  reachData(hits, { depth = 3, strict = false, project = null, text = true, skipFiles = null, members = true } = {}) {
+    let start = hits.map((h) => h.id)
+    const files = new Set(hits.map((h) => h.file_id))
+    for (const h of hits) {
+      if (!members) continue
       if (h.kind === 'file') start = start.concat(this.q("SELECT id FROM nodes WHERE file_id = ? AND kind != 'file'", h.file_id).map((r) => r.id))
       else start = start.concat(this.q('SELECT id FROM nodes WHERE parent_id = ?', h.id).map((r) => r.id)) // a type's members
     }
-    const reached = this.walk(start, ['CALLS', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS'], 'in', d, !!strict)
+    const disp = dispatchStarts(this, hits.filter((h) => h.kind !== 'file'))
+    start = [...new Set(start.concat(disp.extra))]
+    const reached = this.walk(start, ['CALLS', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS'], 'in', depth, strict)
     const byFile = new Map()
     const tests = []
     for (const [id, info] of reached) {
@@ -311,12 +365,41 @@ export class Graph {
       const n = this.node(id)
       if (n.is_test) { tests.push([n, info]); continue }
       const key = `${n.repo}|${n.path}`
+      if (skipFiles && skipFiles.has(key)) continue
       if (!byFile.has(key)) byFile.set(key, [])
       byFile.get(key).push([n, info])
     }
-    const out = [t.note, `Impact of ${t.hits.map((h) => this.row(h)).join(' + ')} — depth ${d}`].filter(Boolean)
-    if (!byFile.size && !tests.length) out.push('  nothing in the index reaches it (check dynamic dispatch, config wiring, other repos, and grep the name)')
-    const groups = [...byFile.values()].sort((a, b) => Math.min(...a.map(([, i]) => i.depth)) - Math.min(...b.map(([, i]) => i.depth)))
+    const named = hits.filter((h) => h.kind !== 'file')
+    const sites = unresolved(this, named)
+    let text_ = null, ambiguous = []
+    if (project && text) {
+      const terms = new Map()
+      for (const h of hits) {
+        const term = h.kind === 'file' ? h.name : h.kind === 'constructor' && h.parent_id ? this.node(h.parent_id)?.name : h.name
+        if (!term) continue
+        if (!terms.has(term)) terms.set(term, [])
+        terms.get(term).push(h)
+      }
+      // the names other definitions share: a mention may be any of them
+      for (const [term, ts] of terms) {
+        if (ts[0].kind === 'file') continue
+        const n = this.one("SELECT count(*) c FROM nodes WHERE name = ? AND kind != 'file'", term).c
+        if (n > 1) ambiguous.push({ name: term, n })
+      }
+      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })), { sites })
+    }
+    const cochange = []
+    for (const fid of files) {
+      const f = this.one('SELECT repo, path FROM files WHERE id = ?', fid)
+      for (const c of this.q('SELECT b, n FROM cochange WHERE repo = ? AND a = ? ORDER BY n DESC LIMIT 8', f.repo, f.path)) cochange.push({ repo: f.repo, from: f.path, path: c.b, n: c.n })
+    }
+    return { byFile, tests, dispatch: disp.info, sites, mentions: text_, ambiguous, cochange }
+  }
+  reachLines(hits, opts = {}) {
+    const r = this.reachData(hits, opts)
+    const out = []
+    if (!r.byFile.size && !r.tests.length && !r.sites.length && !r.dispatch.length) out.push('  nothing in the index reaches it (dynamic dispatch, config wiring and other repositories are invisible to the edges: see the mentions below)')
+    const groups = [...r.byFile.values()].sort((a, b) => Math.min(...a.map(([, i]) => i.depth)) - Math.min(...b.map(([, i]) => i.depth)))
     for (const g of groups.slice(0, 60)) {
       const f = g[0][0]
       const syms = g.filter(([n]) => n.kind !== 'file').sort((a, b) => a[1].depth - b[1].depth)
@@ -325,15 +408,14 @@ export class Graph {
       if (syms.length > 8) out.push(`    … ${syms.length - 8} more`)
     }
     if (groups.length > 60) out.push(`  … ${groups.length - 60} more files`)
-    out.push(tests.length ? `Tests on these paths (${tests.length}):` : 'Tests on these paths: none found by the graph (search the test tree by name before concluding it is untested)')
-    for (const [n, i] of tests.sort((a, b) => a[1].depth - b[1].depth).slice(0, 25)) out.push(`  ${this.row(n, `d${i.depth}`)}`)
-    const cc = []
-    for (const fid of files) {
-      const f = this.one('SELECT repo, path FROM files WHERE id = ?', fid)
-      for (const c of this.q('SELECT b, n FROM cochange WHERE repo = ? AND a = ? ORDER BY n DESC LIMIT 8', f.repo, f.path)) cc.push(`  ${this.loc({ repo: f.repo, path: c.b, kind: 'file' })}  ${c.n} shared commits`)
-    }
-    if (cc.length) out.push('Changes together with (git history):', ...cc)
-    return out.join('\n')
+    out.push(...dispatchLines(this, r.dispatch))
+    const looseTests = r.sites.filter((x) => x.src?.is_test).length
+    out.push(r.tests.length ? `Tests on these paths (${r.tests.length}):` : looseTests ? `Tests on these paths: none linked; ${looseTests} unlinked call site(s) in tests, below` : 'Tests on these paths: none found by the graph (search the test tree by name before concluding it is untested)')
+    for (const [n, i] of r.tests.sort((a, b) => a[1].depth - b[1].depth).slice(0, 25)) out.push(`  ${this.row(n, `d${i.depth}`)}`)
+    out.push(...unresolvedLines(this, r.sites))
+    if (r.mentions) out.push(...mentionLines(this, r.mentions, { ambiguous: r.ambiguous }))
+    if (r.cochange.length) out.push('Changes together with (git history):', ...r.cochange.map((c) => `  ${this.loc({ repo: c.repo, path: c.path, kind: 'file' })}  ${c.n} shared commits`))
+    return out
   }
 
   file({ path: p, repo }) {

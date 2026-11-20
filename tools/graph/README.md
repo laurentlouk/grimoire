@@ -1,6 +1,6 @@
 # 🕸️ The code graph
 
-A local index of every repository in the project: definitions and how they relate. It answers *research* questions fast (where is X, who calls it, what reaches this file, how does A get to B, what implements this trait, what changes together) so scouts and the design skills can map a change before anyone reads a line.
+A local index of every repository in the project: definitions and how they relate. It answers *research* questions fast (where is X, who calls it, what reaches this file, how does A get to B, what implements this trait, what changes together, what a change breaks that the diff does not show) so scouts and the design skills can map a change before anyone reads a line.
 
 **It is a map, not the territory.** It never answers what code *does* or whether it is *right*: that is read in the code, at the `path:line` every answer carries, before anything is stated, planned or reviewed. The rule and who applies it are in `AGENTS.md` (*The code graph*).
 
@@ -8,8 +8,8 @@ A local index of every repository in the project: definitions and how they relat
 
 | | |
 | --- | --- |
-| **Nodes** | files, functions, methods, constructors, classes, structs, interfaces, traits, protocols, enums, types, modules, namespaces, macros (test code is marked, and so is test-support code: Storybook stories, mocks, fixtures) |
-| **Signatures** | a definition's first line up to its body (a macro's, up to its value): its name, parameters and return type. A string, template, character or regex literal in it, or in a call's receiver, is kept as `…` between its delimiters (`'…'`, `r#"…"#`, `/…/`), a comment is dropped, and a call by a string key names nothing: a literal may hold a secret, so no string literal's text is kept there (numbers are, and module paths, which resolution reads). An index from another version is deleted, not emptied, so none of its text stays in the file |
+| **Nodes** | files, functions, methods, constructors, classes, structs, interfaces, traits, protocols, enums, types, modules, namespaces, macros (test code is marked, and so is test-support code: Storybook stories, mocks, fixtures); in JavaScript and TypeScript also functions defined by assignment: `exports.x = function`, `module.exports.x = …`, `obj.x = () => …` (a method of `obj`), `X.prototype.y = function` (a method of `X`) |
+| **Signatures** | a definition's first line up to its body (a macro's, up to its value): its name, parameters and return type. A string, template, character, regex literal or JSX text in it, or in a call's receiver, is kept as `…` between its delimiters (`'…'`, `r#"…"#`, `/…/`), a comment is dropped, and a call by a string key names nothing: a literal may hold a secret, so no string literal's text is kept there (numbers are, and module paths, which resolution reads). An index from another version is deleted, not emptied, so none of its text stays in the file |
 | **Edges** | `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, plus co-change pairs from git history |
 | **History** | per-file churn: how many of the last 400 non-merge commits touched the file (commits touching more than 25 indexed files skipped) |
 | **Languages** | TypeScript, TSX, JavaScript, Python, Rust, Go, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift (definitions and relations); Vue, Svelte, Scala, Dart, Lua, Elixir, Zig, Solidity, OCaml, Objective-C, shell, SQL, proto, GraphQL, HCL / Terraform (file nodes only, searchable by path) |
@@ -34,7 +34,15 @@ There is no type checker. A call is linked by name, narrowed by what the syntax 
 
 `unique-name` and `ambiguous` are the **name guesses**: `graph_status` reports their share per repository, and the page draws them apart (dashed, or hidden until asked). Every other confidence is called *resolved by syntax* here, though `import`, `same-file` and `same-package` still match a name within the scope the syntax gives.
 
-A call on a receiver whose type the repository does not define (a `HashMap`, a `Request`), or a name with more than three candidates, stays unresolved: those go to dependencies. So does a standard-library method name (`len`, `get`, `has`, `map`… listed per language in `COMMON_METHODS`, `lib/langs.mjs`) on a receiver whose type the syntax does not state, and any method on a chain that starts at a type or crate the repository does not define (`Utc::now().timestamp()`, `PutItemOutput::builder().build()`). Without that, the one `len` a repository defines collects every `.len()` in it. **A missing edge proves nothing**: dynamic dispatch, callbacks, reflection, config wiring, string-keyed routes and other repositories are invisible, so "no callers" is confirmed with grep.
+A call on a receiver whose type the repository does not define (a `HashMap`, a `Request`), or a name with more than three candidates, stays unresolved: those go to dependencies. So does a standard-library method name (`len`, `get`, `has`, `map`… listed per language in `COMMON_METHODS`, `lib/langs.mjs`) on a receiver whose type the syntax does not state, and any method on a chain that starts at a type or crate the repository does not define (`Utc::now().timestamp()`, `PutItemOutput::builder().build()`). Without that, the one `len` a repository defines collects every `.len()` in it. **A missing edge proves nothing**: dynamic dispatch, callbacks, reflection, config wiring, string-keyed routes and other repositories are invisible to the edges. `graph_impact` and `graph_diff` cover that ground themselves ([Beyond the edges](#beyond-the-edges)), so "no callers" is confirmed by their mentions, or with grep.
+
+### Beyond the edges
+
+Where the edges go blind, `graph_impact` (and `graph_diff` for each contract change) adds what a grep would find, sorted and explained instead of raw (`lib/reach.mjs`):
+
+- **Dispatch.** A method's declarations up its supertypes (an interface, a trait, a base class): a call typed to them may land on it at run time, so their callers join the impact. Down its subtypes, the overrides (for a class) or implementations (for an interface, trait or protocol, which also join the impact's start) that redefine it.
+- **Unlinked call sites.** The call sites naming the target that resolution left unlinked (a receiver of unknown type, a name with more than three definitions, a call from another repository of the project: no edge crosses repositories), from the `refs` table, in the target's language family: possible callers, never a verdict. A site whose definition already calls the target is not repeated; one whose very line is linked to another same-named definition is that definition's, not listed.
+- **Mentions.** Every other line of every file of the project naming it as a whole word (`git grep`, `.gitignore` honoured, the graph's skips and excludes applied, files over `maxFileKB` left out; a directory walk outside git; files that may hold credentials never searched: `.env*`, `*.env`, `.envrc`, keys and certificates, `id_rsa*` and the like, `credentials*`, `.npmrc*`, `.pypirc*`, `.netrc`, `.git-credentials`, `.pgpass`, `.htpasswd`, `*.tfstate*`, `.docker/config.json`, excluded from `git grep` and skipped by the walk before any read): a function passed as a value, an import the resolver could not follow, a string key, an object key, a property, config, markup, scripts, docs, comments. A line already explained is dropped: the target's own definition, another definition of the name, a resolved import, an unlinked site already listed, a line whose enclosing definition already calls the target (at file level, only a call on that very line), a call on that line linked to another definition of the name. A local binding of the name (`const x =`, `def x`) shadows it in the rest of its definition (a use on the declaring line itself, `const load = store.load`, stays). A method is only mentioned through a receiver (`.load`), a Ruby symbol (`&:valid?`) or a keyword argument (`url_for=self.url_for`), never by its bare name; a function qualified by a module the file imports (`ns.slugify`, `util::triple`, `exports.x`) is a reference, by another object a property. A Python line of prose (a docstring's) is text. A string is a *string* when the name is a key (alone, or in a path, a dotted name or a route) and *text* when it sits in prose. Each hit is classified lexically (no parse) and **never quoted**: `path:line`, its kind and the enclosing definition, so no literal's value reaches an answer. A name of fewer than 3 characters is not searched, and one on more than 2,000 lines of a repository is counted, not sorted. A line longer than 1,000 characters (minified code, data) is listed by its file's kind without being read, and at most 8 occurrences are read on a line, so the classification stays linear. A name no definition holds (code the index does not see, a name about to be introduced) still gets its mentions.
 
 ## Using it
 
@@ -43,11 +51,13 @@ As MCP tools (the plugin declares the server in `.mcp.json`; agents see `mcp__pl
 | Tool | Answers |
 | --- | --- |
 | `graph_status` | what is indexed, how much resolved, how many call links are name guesses, what changed since |
+| `graph_overview` | the project at a glance, to start on an unknown codebase: per repository its languages, definitions and tests; its modules (users first) with what each uses and the share of its functions a test reaches; its entry points (functions nothing calls that call the most); its most used definitions; its hotspots |
 | `graph_index` | build or refresh (incremental); `full: true` rebuilds |
-| `graph_search` | definitions by name or `*` pattern, files by path fragment |
+| `graph_search` | definitions by name or `*` pattern, files by path fragment; several words (`session refresh`) match definitions holding each in their qualified name or path, a word starting a name segment ranked first |
 | `graph_symbol` | one definition: signature, container, members, caller/callee/subtype/test counts |
 | `graph_callers` · `graph_callees` | call trees, `depth` 1–5 |
-| `graph_impact` | blast radius of a symbol or file: what reaches it by calls, inheritance and imports, grouped by file, the tests on those paths, co-changing files |
+| `graph_impact` | blast radius of a symbol or file: what reaches it by calls, inheritance and imports, grouped by file, then dispatch (supertype declarations, overrides, implementations), the tests on those paths, the unlinked call sites, the mentions no edge explains ([Beyond the edges](#beyond-the-edges); `mentions: false` leaves them out), co-changing files |
+| `graph_diff` | the impact of a change: the working tree against a base ([The impact of a change](#the-impact-of-a-change-graph_diff)), definition by definition, who still names what it removed, moved or re-signed, what reaches it outside the diff, the tests to run and the changed code none reaches, the usual partners it leaves out, a risk line |
 | `graph_file` | outline, imports (resolved or external), importers, co-change |
 | `graph_hierarchy` | supertypes and subtypes / implementors |
 | `graph_path` | the shortest call chain from A to B |
@@ -63,6 +73,9 @@ From a shell, the same commands:
 node tools/graph/graph.mjs index                 # or: npm run graph -- index
 node tools/graph/graph.mjs impact src/auth/session.ts --depth 2
 node tools/graph/graph.mjs callers Session.refresh --strict
+node tools/graph/graph.mjs diff [--base main]         # the working tree against a base (HEAD: only what is not committed)
+node tools/graph/graph.mjs overview                   # the project at a glance
+node tools/graph/graph.mjs search "session refresh"   # several words
 node tools/graph/graph.mjs sql "SELECT kind, count(*) FROM nodes GROUP BY kind"
 node tools/graph/graph.mjs data list [<store>]        # the stores, or one store's entities
 node tools/graph/graph.mjs data show books            # one entity: books, drizzle/books or repo:drizzle/books
@@ -72,6 +85,19 @@ node tools/graph/graph.mjs changes --delta docs/specs/2026-11-06-loans.delta.jso
 ```
 
 `--root <dir>` points it at another project; otherwise it serves `$GRIMOIRE_PROJECT_DIR`, `$CLAUDE_PROJECT_DIR` or the current directory.
+
+### The impact of a change (`graph_diff`)
+
+`lib/change.mjs`. The base is `graph_changes`'s (`base`, else `baseBranch`, else the index's base branch, else `main`), compared at its merge base with HEAD; `base: "HEAD"` keeps only what is not committed.
+
+1. **The diff**: `git diff --name-status -z <merge base>` per repository for the files (staged and unstaged, renames followed, binary, empty and mode-only changes included, any path) and `git diff -U0` for their line ranges, plus the untracked files; the graph's skips applied (a file moved into a skipped folder is a removal, out of one an addition).
+2. **Definitions**: the index's (the working tree) against the same files at the base, read through git (`git ls-tree`, `git cat-file`, nothing checked out) and parsed in a process of their own (`lib/symbols-aside.mjs`, the indexer's flags), matched by kind and qualified name (several of one name, overloads or conditional definitions, pair by identical signature first, then one left on each side). Each is *added*, *removed*, *moved* (removed in one file, added in another under the same name), or *modified* (the innermost definition holding a changed line), with its old and new signature when it changed (literal-free, as every signature). A rename reads as removed + added. Test definitions the diff adds are counted, not listed.
+3. **Contract changes** (removed, moved, new signature): their linked callers, their unlinked call sites, the imports naming a removed or moved name (they fail at load time), and their mentions, the uses listed and the words about them (text, docs, comments) counted. Each is judged by line: a caller whose definition the diff changed, or a site on a line it changed, is *changed in this diff*; any other, in a changed file or not, is still at risk. A removed function still called is the break a diff hides.
+   A file renamed or removed: the imports the resolver can no longer follow whose last segment is its old name (`../auth/session`, `app.auth.session`), in its language family, each at its line (a folder's entry, `index`, `__init__`, `mod`, is too common to match).
+4. **Impact**: the files reaching the modified and moved definitions (depth 2 by default) outside the diff, dispatch through their interfaces, and the overrides and implementations the diff leaves unchanged.
+5. **Tests**: the test files reaching each changed definition within 6 hops, or calling it on a receiver the graph could not type (tests to run: closest first, a test file named after a changed definition or file first at one distance, the rest counted), the test files the diff edits, and the changed functions no test reaches (a nested function's change is its outermost function's).
+6. **Co-change gaps**: a file that shared at least 2 commits and 30% of a changed file's commits (the co-change window; a renamed file's history under its old path) and is not in the diff.
+7. **Risk**: *high* when a contract change is still named, or a renamed or removed file still imported, outside the diff, *medium* for changed code with callers and no test, or a usual partner (half the time or more) left out, *low* otherwise, with the reasons.
 
 ## Seeing it
 
@@ -311,6 +337,9 @@ tools/graph/
   lib/resolve.mjs              names → edges, per repository, with confidence
   lib/indexer.mjs · worker.mjs · run.mjs   incremental indexing, in a child process
   lib/store.mjs · query.mjs · cochange.mjs · project.mjs · deps.mjs
+  lib/reach.mjs                beyond the edges: dispatch, unlinked call sites, mentions (classified, never quoted)
+  lib/change.mjs · symbols-aside.mjs   graph_diff: the diff's definitions against the base (parsed in a child process), contract changes, tests, co-change gaps, risk
+  lib/overview.mjs             graph_overview: modules, test reach, entry points, most used, hotspots
   lib/modules.mjs · layout.mjs · render.mjs   the page: modules and the system map, the file map's layout, the HTML
   lib/arch.mjs · arch-view.mjs architecture diagrams: draft, check, layout · the Architecture tab
   lib/arch-change.mjs · arch-pack.mjs   the architecture change view: the diagrams at the base, their diff, the findings
@@ -329,7 +358,7 @@ tools/graph/
   lib/data/redis.mjs           a key-value cache's key spaces: templates, types and conflicts, lifetimes and leads, channels, streams, indexes; per instance wired, else per repository
   lib/data/readers/            sql-split · sql-dialect · sqlite-replay · ddl (Postgres and MySQL: the statement splitter and tokenizer, the interpreter) · json-lines · yaml (through the pinned grammar) · yaml-aside (a base ref's YAML, parsed in a child process) · documents (JSON or YAML, with lines) · dynamodb (a table in the AWS shape, references kept) · hcl (HCL by hand, into a syntax tree) · hcl-eval (Terraform and Terragrunt evaluated as far as the files say, unknowns never guessed) · names (table names as patterns, matched on a template's literal parts) · code (what a code file gives the binding) · code-aside (a base ref's code, read in a child process) · prisma (the schema language by hand: blocks, fields, attributes) · sql-query (the SQL code sends, statement by statement: tables, columns, joins, ON CONFLICT keys, lookups, casts) · redis-cmd (a key-value cache's commands: the command table, key templates, fields, lifetimes, channels, streams, globs, FT.CREATE schemas, Lua bodies, a URL's database index)
   lib/data/extractors/         sql-migrations (and schema dumps) · drizzle-snapshot · dynamodb-table (CreateTable inputs) · cloudformation (CloudFormation, SAM and Serverless table resources) · terraform (aws_dynamodb_table, per module instance: Terragrunt, tfvars) · serde (Rust item shapes, serde's rules) · ts-types (TypeScript item shapes) · dynamo-access (key-value SDK calls in Rust, TypeScript, JavaScript, Python and Go: inferred) · drizzle-ts (Drizzle TypeScript schemas: code) · prisma (Prisma schemas: code) · sql-queries (the SQL TypeScript, JavaScript, Go, Python and Rust code sends: inferred) · redis-commands (the commands TypeScript, JavaScript, Rust, Python and Go code sends a key-value cache: inferred) · redis-infra (the instances Terraform, CloudFormation and Compose declare: infra)
-  tests/graph.test.mjs         node tools/graph/tests/graph.test.mjs
+  tests/graph.test.mjs         node tools/graph/tests/graph.test.mjs (section 6: fixtures/edge, a project of edge cases the edges miss, and a diff over it; 6b: the review's cases)
   tests/arch-docs.test.mjs     node tools/graph/tests/arch-docs.test.mjs (no parser runtime needed; the change view on hand-built indexes)
   tests/data.test.mjs          node tools/graph/tests/data.test.mjs (part 1 needs no parser runtime, but for its YAML section)
   tests/data-redis.test.mjs    node tools/graph/tests/data-redis.test.mjs (a key-value cache's key space; its first section needs no parser runtime)
