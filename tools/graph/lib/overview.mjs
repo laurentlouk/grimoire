@@ -10,8 +10,9 @@
 //   - test reach per module: the share of its functions a test reaches within TEST_DEPTH calls, so
 //     the untested areas show before anyone changes them.
 import { systemMap } from './modules.mjs'
+import { guessSql } from './resolve.mjs'
 
-const GUESSES = "('ambiguous','unique-name')"
+const GUESSES = guessSql()
 const TEST_DEPTH = 6
 const CALLABLE = "('function','method','constructor')"
 

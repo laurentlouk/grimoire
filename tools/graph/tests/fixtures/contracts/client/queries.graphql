@@ -1,0 +1,16 @@
+query GetUser($id: ID!) {
+  user(id: $id) {
+    name
+    posts {
+      title
+    }
+  }
+}
+
+fragment AuthorBits on Post {
+  author { name }
+}
+
+mutation NewUser {
+  createUser(name: "canary-gql-arg") { id }
+}

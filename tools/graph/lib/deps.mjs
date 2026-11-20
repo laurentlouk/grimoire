@@ -93,7 +93,7 @@ export async function loadRuntime({ install = true, log } = {}) {
     async parserFor(lang) {
       if (parsers.has(lang)) return parsers.get(lang)
       let p = null
-      const wasm = LANGS[lang] && path.join(nm, 'tree-sitter-wasms', 'out', `tree-sitter-${LANGS[lang].wasm}.wasm`)
+      const wasm = LANGS[lang] && LANGS[lang].wasm && path.join(nm, 'tree-sitter-wasms', 'out', `tree-sitter-${LANGS[lang].wasm}.wasm`)
       if (wasm && existsSync(wasm)) {
         try { p = new TS.Parser(); p.setLanguage(await TS.Language.load(cxxShim(new Uint8Array(readFileSync(wasm))))) } catch { p = null }
       }

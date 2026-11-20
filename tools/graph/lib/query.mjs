@@ -2,7 +2,7 @@
 // with its kind, a project-relative `path:line` to open, and for edges how the name was resolved.
 // The graph is a map for research (what relates to what, how far a change reaches). It is never
 // the source of truth for what code does: that is read in the code, at the path:line given here.
-import { langOf } from './langs.mjs'
+import { langOf, isContract } from './langs.mjs'
 import { reconcile, elementsOf, storeSummary, schemaDrift, SCHEMA_DRIFT } from './data/reconcile.mjs'
 import { bindingHow } from './data/binding.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, capList, CAP, LABELS, FANOUT } from './data/access.mjs'
@@ -15,6 +15,8 @@ import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, shownName, 
 import { formOf } from './data/readers/redis-cmd.mjs'
 import { modelLinks, LEAD_SAYS, lackText } from './data/links.mjs'
 import { docRoots } from './docs.mjs'
+import { GUESSES, guessSql, HIDDEN_GUESSES } from './resolve.mjs'
+import { keyAnswer, readsOf, readsLines } from './config.mjs'
 import { dispatchStarts, dispatchLines, unresolved, unresolvedLines, mentions, mentionLines } from './reach.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
@@ -162,7 +164,7 @@ export class Graph {
   // Breadth-first over edges of `kinds`, `dir` = 'in' (who points here) or 'out'. Returns
   // Map(id → { depth, via: parent id, conf, line }).
   walk(startIds, kinds, dir, depth, strict = false) {
-    const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? " AND confidence != 'ambiguous'" : '')
+    const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? ` AND confidence NOT IN ${guessSql(HIDDEN_GUESSES)}` : '')
     const sql = dir === 'in' ? `SELECT src AS id, confidence, line FROM edges WHERE dst = ? AND kind IN (${K}` : `SELECT dst AS id, confidence, line FROM edges WHERE src = ? AND kind IN (${K}`
     const st = this.db.prepare(sql)
     const seen = new Map(startIds.map((id) => [id, { depth: 0, via: null }]))
@@ -175,8 +177,8 @@ export class Graph {
     return seen
   }
   tree(start, kinds, dir, depth, strict = false, limit = 80) {
-    const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? " AND confidence != 'ambiguous'" : '')
-    const order = "ORDER BY confidence = 'ambiguous', line"
+    const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? ` AND confidence NOT IN ${guessSql(HIDDEN_GUESSES)}` : '')
+    const order = `ORDER BY confidence IN ${guessSql(HIDDEN_GUESSES)}, line`
     const sql = dir === 'in' ? `SELECT src AS id, confidence, line, kind FROM edges WHERE dst = ? AND kind IN (${K} ${order}` : `SELECT dst AS id, confidence, line, kind FROM edges WHERE src = ? AND kind IN (${K} ${order}`
     const st = this.db.prepare(sql)
     const out = [], seen = new Set([start.id])
@@ -212,8 +214,15 @@ export class Graph {
       lines.push(`  files: ${langs}`)
       lines.push(`  symbols: ${counts}   edges: ${edges || 'none'}`)
       lines.push(`  call sites resolved: ${calls.resolved}/${calls.calls}${conf ? ` (${conf})` : ''}`)
-      const n = byConf.reduce((a, e) => a + e.c, 0), guessed = byConf.filter((e) => e.confidence === 'ambiguous' || e.confidence === 'unique-name').reduce((a, e) => a + e.c, 0)
-      if (n) lines.push(`  name guesses: ${Math.round((100 * guessed) / n)}% of ${n} call links (ambiguous + unique-name)`)
+      const n = byConf.reduce((a, e) => a + e.c, 0), guessed = byConf.filter((e) => GUESSES.includes(e.confidence)).reduce((a, e) => a + e.c, 0)
+      if (n) lines.push(`  name guesses: ${Math.round((100 * guessed) / n)}% of ${n} call links (${GUESSES.join(' + ')})`)
+      const contract = this.q("SELECT f.lang, count(*) c FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND f.lang IN ('graphql','proto') AND n.kind != 'file' GROUP BY f.lang", r.name)
+      if (contract.length) {
+        const impl = this.one("SELECT count(*) c, sum(e.confidence = 'contract-name') g FROM edges e JOIN nodes n ON n.id = e.src JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND e.kind = 'IMPLEMENTS' AND e.confidence IN ('contract','contract-name')", r.name)
+        lines.push(`  API contracts: ${contract.map((c) => `${c.lang} ${c.c} definitions`).join(', ')}; ${impl.c} implementation link(s) from code${impl.g ? ` (${impl.g} by name only, contract-name)` : ''}`)
+      }
+      const cfg = (() => { try { return this.one("SELECT count(DISTINCT key) k, sum(role = 'read') r, sum(role = 'declare') d FROM config WHERE repo = ?", r.name) } catch { return null } })()
+      if (cfg && cfg.k) lines.push(`  configuration keys: ${cfg.k} (${cfg.r || 0} reads, ${cfg.d || 0} declarations: graph_config)`)
       const data = this.q('SELECT key, extractor, facts, error FROM data_facts WHERE repo = ? ORDER BY key', r.name)
       if (data.length) {
         const facts = data.map((x) => (x.facts ? JSON.parse(x.facts) : null))
@@ -240,7 +249,7 @@ export class Graph {
     const like = qv.includes('*') ? qv.replace(/\*/g, '%') : `%${qv}%`
     const args = [like, like]
     let where = "(n.name LIKE ? OR n.qualname LIKE ?) AND n.kind != 'file'"
-    if (/[/\\]|\.[a-z]{1,5}$/.test(qv)) { where = "(f.path LIKE ?) AND n.kind = 'file'"; args.length = 0; args.push(like) }
+    if (/[/\\]|\.[a-z]{1,5}$/.test(qv) || isContract(qv)) { where = "(f.path LIKE ?) AND n.kind = 'file'"; args.length = 0; args.push(like) }
     if (kind) { where += ' AND n.kind = ?'; args.push(kind) }
     if (repo) { where += ' AND f.repo = ?'; args.push(repo) }
     const exact = qv.replace(/\*/g, '')
@@ -332,6 +341,23 @@ export class Graph {
   impact({ target, repo, depth = 3, strict = false, mentions: text = true }, project = null) {
     const t = this.targets(target, { repo })
     const withText = text !== false && text !== 'false'
+    const d0 = Math.max(1, Math.min(Number(depth) || 3, 6))
+    // a configuration key no definition holds (`AUTH_JWT_SECRET`, `auth.secret`): who reads it, what it
+    // sets and who reads that (config.mjs), the reach of those readers, then its other mentions
+    if (t.error && t.error.startsWith('No symbol or file')) {
+      const key = String(target).trim()
+      const a = /^[A-Za-z_][\w.:-]*$/.test(key) ? keyAnswer(this, key, repo || null) : null
+      if (a) {
+        const out = [`Impact of the configuration key ${a.lines[0]} — depth ${d0}`, ...a.lines.slice(1).map((l) => `  ${l}`)]
+        const readers = [...new Map(a.readers.filter((r) => r.node_id).map((r) => [r.node_id, r])).keys()].map((id) => this.node(id)).filter(Boolean)
+        if (readers.length) out.push(`What reaches its readers (${readers.length}):`, ...this.reachLines(readers, { depth: d0, strict: !!strict, project: null, text: false, config: false }))
+        if (project && withText) {
+          const m = mentions(this, project, [{ term: key, targets: [{ id: -1, name: key, kind: 'function', repo: null, path: null, line: -1 }] }])
+          if (m.searched.length) out.push('Its name as text, the reads and declarations above left out:', ...mentionLines(this, m))
+        }
+        return out.join('\n')
+      }
+    }
     // no definition by that name (code the index does not see, another language, a name being
     // introduced): its mentions are still what a grep would find, sorted
     if (t.error && t.error.startsWith('No symbol or file') && project && withText) {
@@ -348,7 +374,7 @@ export class Graph {
   // The impact of a set of nodes: reached code by file, tests, dispatch, unresolved sites, mentions,
   // co-change. `skipFiles`: files left out of the listing; `members: false` walks from the hits
   // alone, not from a file's definitions or a type's members (a diff lists the changed ones itself).
-  reachData(hits, { depth = 3, strict = false, project = null, text = true, skipFiles = null, members = true } = {}) {
+  reachData(hits, { depth = 3, strict = false, project = null, text = true, skipFiles = null, members = true, config: withConfig = true } = {}) {
     let start = hits.map((h) => h.id)
     const files = new Set(hits.map((h) => h.file_id))
     for (const h of hits) {
@@ -394,7 +420,9 @@ export class Graph {
       const f = this.one('SELECT repo, path FROM files WHERE id = ?', fid)
       for (const c of this.q('SELECT b, n FROM cochange WHERE repo = ? AND a = ? ORDER BY n DESC LIMIT 8', f.repo, f.path)) cochange.push({ repo: f.repo, from: f.path, path: c.b, n: c.n })
     }
-    return { byFile, tests, dispatch: disp.info, sites, mentions: text_, ambiguous, cochange }
+    let config = []
+    if (withConfig) try { config = readsOf(this, hits) } catch {} // an index without the table
+    return { byFile, tests, dispatch: disp.info, sites, mentions: text_, ambiguous, cochange, config }
   }
   reachLines(hits, opts = {}) {
     const r = this.reachData(hits, opts)
@@ -414,6 +442,7 @@ export class Graph {
     out.push(r.tests.length ? `Tests on these paths (${r.tests.length}):` : looseTests ? `Tests on these paths: none linked; ${looseTests} unlinked call site(s) in tests, below` : 'Tests on these paths: none found by the graph (search the test tree by name before concluding it is untested)')
     for (const [n, i] of r.tests.sort((a, b) => a[1].depth - b[1].depth).slice(0, 25)) out.push(`  ${this.row(n, `d${i.depth}`)}`)
     out.push(...unresolvedLines(this, r.sites))
+    out.push(...readsLines(this, r.config))
     if (r.mentions) out.push(...mentionLines(this, r.mentions, { ambiguous: r.ambiguous }))
     if (r.cochange.length) out.push('Changes together with (git history):', ...r.cochange.map((c) => `  ${this.loc({ repo: c.repo, path: c.path, kind: 'file' })}  ${c.n} shared commits`))
     return out

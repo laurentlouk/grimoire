@@ -7,7 +7,7 @@
 // can take a while on a large tree. A checkout with no index is seeded from its base checkout's
 // (the branch it is based on, else the main checkout: freshness.mjs), and every index run re-bases
 // onto it when that saves parsing, so a worktree only re-parses what its branch changed.
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, statSync, lstatSync } from 'node:fs'
 import path from 'node:path'
 import { loadProject, scanRepo, listPaths } from './project.mjs'
 import { openStore, SCHEMA_VERSION } from './store.mjs'
@@ -23,6 +23,7 @@ import { loadIndex } from './arch.mjs'
 import { archScope, archImpact, archLines, archDeltaStates, archDeltaLines } from './arch-change.mjs'
 import { changeImpact } from './change.mjs'
 import { overview } from './overview.mjs'
+import { configAnswer, configDeclPaths } from './config.mjs'
 import { Graph, sql, baseText, FOOTER, DATA_FOOTER, CHANGES_FOOTER, DELTA_FOOTER, ARCH_CHANGES_FOOTER, ARCH_DELTA_FOOTER } from './query.mjs'
 
 const FRESH_MS = Number(process.env.GRIMOIRE_GRAPH_FRESH_MS ?? 15_000)
@@ -30,7 +31,7 @@ let lastFresh = 0
 
 const symbolParam = { type: 'string', description: 'A name (`area`), a qualified name (`Circle.area`, `Circle::area`), `path/to/file.ext:line`, or `#id` from an earlier answer.' }
 const repoParam = { type: 'string', description: 'Limit to one repository of the project (its name in grimoire.config.json).' }
-const strictParam = { type: 'boolean', default: false, description: 'Drop `ambiguous` edges (a name with several same-named definitions): fewer leads, fewer false ones.' }
+const strictParam = { type: 'boolean', default: false, description: 'Drop `ambiguous` edges (a name with several same-named definitions) and `import-guess` ones (a method on a receiver of unknown type, picked because its file is imported): fewer leads, fewer false ones.' }
 const depthParam = (d, max) => ({ type: 'integer', minimum: 1, maximum: max, default: d, description: `How many hops to follow (default ${d}, max ${max}).` })
 
 export const TOOLS = [
@@ -68,7 +69,7 @@ export const TOOLS = [
   },
   {
     name: 'graph_callers',
-    description: 'Who calls this symbol, as a tree up to `depth` hops. Each edge says how its name was resolved (same-class, typed, qualified, import, same-file, same-package, unique-name, ambiguous).',
+    description: 'Who calls this symbol, as a tree up to `depth` hops. Each edge says how its name was resolved (same-class, typed, qualified, import, same-file, same-package; the name guesses unique-name, ambiguous and import-guess, a method on a receiver of unknown type picked because its file is imported).',
     params: { symbol: symbolParam, depth: depthParam(1, 5), strict: strictParam, repo: repoParam },
     required: ['symbol'],
     run: (g, a) => g.calls(a, 'in'),
@@ -82,7 +83,7 @@ export const TOOLS = [
   },
   {
     name: 'graph_impact',
-    description: 'Blast radius of changing a symbol or a file, beyond what grep or the call edges alone show: everything reaching it through calls, inheritance and imports up to `depth` hops, grouped by file with distance; dispatch (a method\'s declarations on its interfaces, traits and base classes, whose callers may land on it, and the overrides or implementations that redefine it); the tests on those paths; the call sites naming it that resolution could not link (receiver of unknown type, too many same-named definitions); every other mention of its name in any file of the project that no edge explains, classified (a reference passed as a value, an unresolved import, a string key, config, markup, scripts, docs, comments) and never quoted; and the files that change together with it in git history. Use it before changing something, to scope a plan, a task\'s declared files, or a review.',
+    description: 'Blast radius of changing a symbol or a file, beyond what grep or the call edges alone show: everything reaching it through calls, inheritance and imports up to `depth` hops, grouped by file with distance; dispatch (a method\'s declarations on its interfaces, traits and base classes, whose callers may land on it, and the overrides or implementations that redefine it); the tests on those paths; the call sites naming it that resolution could not link (receiver of unknown type, too many same-named definitions); the configuration keys it reads (graph_config); every other mention of its name in any file of the project that no edge explains, classified (a reference passed as a value, an unresolved import, a string key, config, markup, scripts, docs, comments) and never quoted; and the files that change together with it in git history. A configuration key no definition holds (`AUTH_JWT_SECRET`, `auth.secret`) answers with its readers, the keys it sets and their readers, what reaches them, and its other mentions. Use it before changing something, to scope a plan, a task\'s declared files, or a review.',
     params: { target: { type: 'string', description: 'A symbol (as for graph_symbol) or a file path.' }, depth: depthParam(3, 6), strict: strictParam, mentions: { type: 'boolean', default: true, description: 'Search the project\'s files for the name\'s mentions no edge explains (default true).' }, repo: repoParam },
     required: ['target'],
     run: (g, a, ctx) => g.impact(a, ctx.project),
@@ -163,8 +164,14 @@ export const TOOLS = [
     footer: CHANGES_FOOTER,
   },
   {
+    name: 'graph_config',
+    description: 'Configuration keys, names only (never a value): environment variables and config paths, where the code reads them and where the project declares them. Reads: process.env.X, import.meta.env.X, Deno.env, os.environ / os.getenv / environ, pydantic BaseSettings fields (upper-cased, env_prefix), os.Getenv and env struct tags, System.getenv and @Value("${a.b}"), ENV[\'X\'] / ENV.fetch, std::env::var, getenv / env() / config(), Environment.GetEnvironmentVariable / Configuration["A:B"], NestJS ConfigService.get(\'a.b\'), Expo Constants.expoConfig.extra.x; each with the definition that reads it and its path:line. Declarations: .env.example / .env.sample / .env.template (names only; no other env or credential file is ever read), docker-compose environment:, CI workflow env:, .gitlab-ci.yml variables:, app.json expo.extra, application.properties / application.yml, and in code registerAs(\'ns\', () => ({ k: … })), a Nest config factory and app.config extra. Mappings where the syntax states them: `ns.k` ← X for registerAs\'s `k: process.env.X`, so an environment variable is followed to the code that reads the config path it sets. No key: every key (or those matching a fragment or a * pattern) with its reads, declarations and mappings, then the keys read but declared nowhere and those declared but read nowhere. One key: who reads it (definitions, path:line), what it sets and who reads that, what sets it, where it is declared. graph_impact on a definition lists the keys it reads.',
+    params: { key: { type: 'string', description: 'A key (`AUTH_JWT_SECRET`, `auth.secret`, `extra.apiUrl`), a fragment, or a `*` pattern (`AUTH_*`). Omit to list every key.' }, kind: { type: 'string', enum: ['env', 'config'], description: 'Only environment variables, or only config paths.' }, repo: repoParam, limit: { type: 'integer', default: 60, description: 'Keys listed (default 60).' } },
+    run: (g, a) => configAnswer(g, { key: a.key || null, kind: a.kind || null, repo: a.repo || null, limit: a.limit }),
+  },
+  {
     name: 'graph_sql',
-    description: 'A read-only SELECT over the graph for questions the other tools do not answer. Tables: files(id, repo, path, lang, is_test, node_id), nodes(id, file_id, kind, name, qualname, parent_id, line, end_line, signature, is_test), edges(src, dst, kind CALLS|IMPORTS|EXTENDS|IMPLEMENTS, confidence, line), imports(file_id, source, names, resolved), cochange(repo, a, b, n), churn(repo, path, n: recent commits touching the file), repos(name, root, head, indexed_at).',
+    description: 'A read-only SELECT over the graph for questions the other tools do not answer. Tables: files(id, repo, path, lang, is_test, node_id), nodes(id, file_id, kind, name, qualname, parent_id, line, end_line, signature, is_test), edges(src, dst, kind CALLS|IMPORTS|EXTENDS|IMPLEMENTS, confidence, line), imports(file_id, source, names, resolved), cochange(repo, a, b, n), churn(repo, path, n: recent commits touching the file), repos(name, root, head, indexed_at), config(repo, path, file_id, node_id, key, kind env|config, role read|declare|map, src_key, via, line: configuration key names, never values).',
     params: { sql: { type: 'string', description: 'One SELECT or WITH … SELECT statement.' } },
     required: ['sql'],
     raw: true,
@@ -193,6 +200,15 @@ function staleness(project, db) {
       inputs.delete(p)
     }
     changed += inputs.size
+    const decls = new Map(db.prepare('SELECT path, size, mtime FROM config_inputs WHERE repo = ?').all(repo.name).map((f) => [f.path, f]))
+    for (const p of configDeclPaths(rels, project)) {
+      let st
+      try { st = lstatSync(path.join(repo.abs, p)) } catch { continue }
+      const k = decls.get(p)
+      if (!k || k.size !== st.size || k.mtime !== Math.floor(st.mtimeMs)) changed++
+      decls.delete(p)
+    }
+    changed += decls.size
     if (changed) out[repo.name] = `${changed} file(s) changed since`
   }
   return out

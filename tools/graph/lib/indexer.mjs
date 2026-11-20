@@ -13,8 +13,10 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { loadRuntime } from './deps.mjs'
 import { extract } from './extract.mjs'
-import { TEST_PATH } from './langs.mjs'
+import { TEST_PATH, LANGS, familyOf } from './langs.mjs'
 import { scanRepo, gitHead, listPaths } from './project.mjs'
+import { parseContract, contractHints } from './contracts.mjs'
+import { configOfCode, configOfDecl, declKind, configDeclPaths, DECL_MAX } from './config.mjs'
 import { openStore, tx, driver } from './store.mjs'
 import { candidates, inspect, plan, run, idOf, readsYaml, readsCode, keeps, MAX_BYTES } from './data/registry.mjs'
 import { CODE_LANGS } from './data/readers/code-aside.mjs'
@@ -56,11 +58,20 @@ export async function indexProject(project, { full = false, only = null, log = (
       const hash = createHash('sha1').update(src).digest('hex')
       if (hash === f.prevHash) { db.prepare('UPDATE files SET size = ?, mtime = ? WHERE id = ?').run(f.size, f.mtime, f.prevId); continue }
       let result = { symbols: [], refs: [], imports: [] }
-      if (f.lang !== 'other') {
+      if (LANGS[f.lang]?.hand) { // an API contract, read by hand (contracts.mjs)
+        try { result = parseContract(f.lang, src, TEST_PATH.test(f.path)) } catch (e) { rs.failed.push(`${f.path}: ${e.message.slice(0, 80)}`) }
+      } else if (f.lang !== 'other') {
         const parser = await (await runtime()).parserFor(f.lang)
         if (parser) {
           try { const tree = parser.parse(src); try { result = extract(tree, f.lang, TEST_PATH.test(f.path)) } finally { tree.delete() } } catch (e) { rs.failed.push(`${f.path}: ${e.message.slice(0, 80)}`) }
         }
+      }
+      // what no syntax tree here shows: the code that implements an API contract, and the
+      // configuration keys the file reads (lexical scans, names only)
+      if (!LANGS[f.lang]?.hand && f.lang !== 'other') {
+        const fam = familyOf(f.lang)
+        try { result.refs.push(...contractHints(f.lang, fam, src, result.symbols, result.refs)) } catch (e) { rs.failed.push(`${f.path}: contract hints: ${e.message.slice(0, 60)}`) }
+        try { result.config = configOfCode(f.lang, fam, f.path, src, result.symbols) } catch (e) { rs.failed.push(`${f.path}: configuration keys: ${e.message.slice(0, 60)}`) }
       }
       parsedFiles.push({ ...f, hash, result })
     }
@@ -76,6 +87,7 @@ export async function indexProject(project, { full = false, only = null, log = (
       const cc = db.prepare('SELECT cochange_head FROM repos WHERE name = ?').get(repo.name)
       if (head && (cc.cochange_head !== head || needsResolve)) { cochange(db, repo); db.prepare('UPDATE repos SET cochange_head = ? WHERE name = ?').run(head, repo.name) }
     })
+    rs.config = indexConfigDecls(db, project, repo, rels)
     rs.data = await indexData(db, project, repo, rels, runtime)
     log(`${repo.name}: ${rs.files} files, ${rs.parsed} parsed, ${rs.removed} removed${rs.data.extracted ? `, ${rs.data.extracted} data job(s) run` : ''}`)
     summary.repos.push(rs)
@@ -170,6 +182,40 @@ async function indexData(db, project, repo, rels, runtime) {
   return out
 }
 
+// A repository's configuration declaration files (config.mjs declKind: env templates, compose files,
+// CI workflows, app.json, Spring files), re-read when their size or mtime moved and their hash
+// changed. Names only: a line is matched for its key, its value never kept. A symbolic link is never
+// followed (an outside file's names would read as the repository's).
+function indexConfigDecls(db, project, repo, rels) {
+  const out = { read: 0 }
+  const prev = new Map(db.prepare('SELECT path, size, mtime, hash FROM config_inputs WHERE repo = ?').all(repo.name).map((r) => [r.path, r]))
+  const put = db.prepare('INSERT INTO config_inputs(repo, path, size, mtime, hash) VALUES(?, ?, ?, ?, ?) ON CONFLICT(repo, path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime, hash = excluded.hash')
+  const drop = db.prepare('DELETE FROM config WHERE repo = ? AND path = ? AND file_id IS NULL')
+  const ins = db.prepare('INSERT INTO config(repo, path, file_id, node_id, key, kind, role, src_key, via, line) VALUES(?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)')
+  tx(db, () => {
+    for (const p of configDeclPaths(rels, project)) {
+      let st
+      try { st = lstatSync(path.join(repo.abs, p)) } catch { continue }
+      const r = prev.get(p), mtime = Math.floor(st.mtimeMs)
+      prev.delete(p)
+      if (r && r.size === st.size && r.mtime === mtime) continue
+      // a symbolic link, a directory, a huge file: tracked (so a query does not count it as changed), not read
+      if (!st.isFile() || st.size > DECL_MAX) { put.run(repo.name, p, st.size, mtime, null); drop.run(repo.name, p); continue }
+      let text
+      try { text = readFileSync(path.join(repo.abs, p), 'utf8') } catch { continue }
+      const hash = createHash('sha1').update(text).digest('hex')
+      put.run(repo.name, p, st.size, mtime, hash)
+      if (r && r.hash === hash) continue
+      drop.run(repo.name, p)
+      for (const c of configOfDecl(declKind(p), text)) ins.run(repo.name, p, c.key, c.kind, c.role, c.srcKey, c.via, c.line)
+      text = null
+      out.read++
+    }
+    for (const p of prev.keys()) { db.prepare('DELETE FROM config_inputs WHERE repo = ? AND path = ?').run(repo.name, p); drop.run(repo.name, p) }
+  })
+  return out
+}
+
 function writeFile(db, repo, f) {
   if (f.prevId) removeFile(db, f.prevId)
   const isTest = TEST_PATH.test(f.path) ? 1 : 0
@@ -188,11 +234,13 @@ function writeFile(db, repo, f) {
     const { source, names, alias, line, ...flags } = i
     insImp.run(fileId, source, JSON.stringify(names || []), alias || null, JSON.stringify(flags), line)
   }
+  const insCfg = db.prepare('INSERT INTO config(repo, path, file_id, node_id, key, kind, role, src_key, via, line) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  for (const c of f.result.config || []) insCfg.run(repo, f.path, fileId, c.src >= 0 ? ids[c.src] : fileNode, c.key, c.kind, c.role, c.srcKey || null, c.via, c.line)
 }
 
 function removeFile(db, fileId) {
   db.prepare('DELETE FROM edges WHERE src IN (SELECT id FROM nodes WHERE file_id = ?) OR dst IN (SELECT id FROM nodes WHERE file_id = ?)').run(fileId, fileId)
-  for (const t of ['refs', 'imports', 'nodes']) db.prepare(`DELETE FROM ${t} WHERE file_id = ?`).run(fileId)
+  for (const t of ['refs', 'imports', 'nodes', 'config']) db.prepare(`DELETE FROM ${t} WHERE file_id = ?`).run(fileId)
   db.prepare('DELETE FROM files WHERE id = ?').run(fileId)
 }
 
@@ -203,6 +251,8 @@ function dropRepo(db, repo) {
     db.prepare('DELETE FROM churn WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM data_inputs WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM data_facts WHERE repo = ?').run(repo)
+    db.prepare('DELETE FROM config WHERE repo = ?').run(repo)
+    db.prepare('DELETE FROM config_inputs WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM repos WHERE name = ?').run(repo)
   })
 }

@@ -18,6 +18,7 @@
 import { readFileSync, readdirSync, existsSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { systemMap } from './modules.mjs'
+import { GUESSES as GUESS_LIST } from './resolve.mjs'
 import { docRoots } from './docs.mjs'
 
 export const TYPES = ['frontend', 'backend', 'worker', 'database', 'messagebus', 'cloud', 'security', 'external', 'library', 'cli']
@@ -25,7 +26,7 @@ export const VARIANTS = ['default', 'emphasis', 'security', 'async', 'dashed']
 export const BOUNDARY_KINDS = ['repo', 'deploy', 'trust', 'region', 'network', 'group']
 export const CARD_COLORS = ['cyan', 'emerald', 'violet', 'amber', 'rose', 'orange', 'slate']
 export const SUFFIX = '.architecture.json'
-const GUESSES = new Set(['ambiguous', 'unique-name'])
+const GUESSES = new Set(GUESS_LIST)
 export const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 
 // External services an import names. `imports` are package prefixes (see importMatches).
