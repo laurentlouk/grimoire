@@ -32,14 +32,16 @@ export const SECRETISH = /(^|\/)(\.env[^/]*|[^/]*\.env|\.envrc|id_(rsa|dsa|ecdsa
 // occurrences of a name are read per line: classification stays linear in the input
 const MAX_LINE = 1000, PER_LINE = 8
 const ABSTRACT = new Set(['interface', 'trait', 'protocol'])
+// a type's members a call, an override and a receiver reach: methods, and fields (an annotated hook, a settings value)
+const MEMBERS = new Set(['method', 'field'])
 const CALL_KINDS = "('call','new','macro')"
 
 // ── dispatch ──
 export function dispatch(g, n) {
-  if (n.kind !== 'method' || !n.parent_id) return { up: [], down: [] }
+  if (!MEMBERS.has(n.kind) || !n.parent_id) return { up: [], down: [] }
   const owner = g.node(n.parent_id)
   if (!owner) return { up: [], down: [] }
-  const member = g.db.prepare("SELECT n.*, f.repo, f.path, f.lang FROM nodes n JOIN files f ON f.id = n.file_id WHERE n.parent_id = ? AND n.name = ? AND n.kind IN ('method','function') ORDER BY n.line LIMIT 1")
+  const member = g.db.prepare("SELECT n.*, f.repo, f.path, f.lang FROM nodes n JOIN files f ON f.id = n.file_id WHERE n.parent_id = ? AND n.name = ? AND n.kind IN ('method','function','field') ORDER BY n.line LIMIT 1")
   const side = (dir) => {
     const out = []
     for (const [id, info] of g.walk([owner.id], ['EXTENDS', 'IMPLEMENTS'], dir, 4)) {
@@ -164,7 +166,8 @@ export const USE_KINDS = new Set(['reference', 'import', 'string', 'key', 'confi
 // `.x` a property of something else, unless the target is a method (then a method passed as a value).
 // A line of prose inside a docstring: five words or more, no code punctuation, the name not called
 const PROSE_LANGS = new Set(['python'])
-const prose = (text, at, len) => !/[=(){}[\]]/.test(text) && !/^\s*[.(]/.test(text.slice(at + len)) && (text.match(/[\p{L}]{2,}/gu) || []).length >= 5
+// (a member access `settings.SOME_NAME` is code; the name's own words, `ACCESS_TOKEN_EXPIRE`, are not counted)
+const prose = (text, at, len) => !/[=(){}[\]]/.test(text) && !/^\s*[.(]/.test(text.slice(at + len)) && !/(\.|->)\s*$/.test(text.slice(0, at)) && ((text.slice(0, at) + text.slice(at + len)).match(/[\p{L}]{2,}/gu) || []).length >= 5
 const DECL_BEFORE = /(^|[^\p{L}\p{N}_$])(const|let|var|val|def|fn|func|function|class|struct|enum|interface|type|my|local)\s+$/u
 // Returns the kind, 'decl' for a local binding (it shadows the name in its definition), or null.
 const SELF_MODULE = new Set(['exports']) // `exports.x`: a CommonJS module's own export
@@ -180,11 +183,11 @@ export function refine(text, at, len, kind, targetKind, lang = null, modules = n
   const member = /(\.|->)\s*$/.test(before)
   // `util.slug`, `ns.fn`: qualified by a module the file imports is a use, not another object's property
   const qual = /([\p{L}_$][\p{L}\p{N}_$]*)\s*(\.|->)\s*$/u.exec(before)
-  if (member && targetKind !== 'method' && qual && ((modules && modules.has(qual[1])) || SELF_MODULE.has(qual[1]))) return 'reference'
-  if (member && targetKind !== 'method') return 'property'
+  if (member && !MEMBERS.has(targetKind) && qual && ((modules && modules.has(qual[1])) || SELF_MODULE.has(qual[1]))) return 'reference'
+  if (member && !MEMBERS.has(targetKind)) return 'property'
   // a method is reached through a receiver (or `self`/`this`, which the edges cover): a bare name in
   // another definition is another binding
-  if (!member && targetKind === 'method') return null
+  if (!member && MEMBERS.has(targetKind)) return null
   return 'reference'
 }
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -232,10 +235,10 @@ export function mentions(g, project, terms, { sites = [] } = {}) {
   const fileRow = g.db.prepare('SELECT * FROM files WHERE repo = ? AND path = ?')
   const around = g.db.prepare("SELECT id, kind, qualname, line, end_line FROM nodes WHERE file_id = ? AND kind != 'file' AND line <= ? AND end_line >= ? ORDER BY (end_line - line) ASC")
   const otherDef = g.db.prepare("SELECT 1 FROM nodes WHERE file_id = ? AND line = ? AND name = ? AND kind != 'file' LIMIT 1")
-  const edgeTo = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND kind IN ('CALLS','EXTENDS','IMPLEMENTS')")
+  const edgeTo = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND kind IN ('CALLS','REFERENCES','EXTENDS','IMPLEMENTS')")
   const siteLines = new Set(sites.map((x) => `${x.ref.repo}|${x.ref.path}|${x.ref.line}`))
   // a call on this line linked to another definition of the name: that definition's caller
-  const linkedOther = g.db.prepare("SELECT d.id FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.line = ? AND e.kind = 'CALLS' AND d.name = ?")
+  const linkedOther = g.db.prepare("SELECT d.id FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.line = ? AND e.kind IN ('CALLS','REFERENCES') AND d.name = ?")
   // the names a file's imports bind (a module, a namespace, an imported name): `util.slug` is a use
   const importNames = g.db.prepare('SELECT names, alias FROM imports WHERE file_id = ?')
   const modulesOf = new Map()
@@ -250,7 +253,7 @@ export function mentions(g, project, terms, { sites = [] } = {}) {
   const sizeOf = new Map()
   const tooBig = (abs, rel) => { const k = `${abs}|${rel}`; if (!sizeOf.has(k)) { let n = 0; try { n = statSync(path.join(abs, rel)).size } catch {} sizeOf.set(k, n) } return sizeOf.get(k) > project.maxBytes }
   const importAt = g.db.prepare('SELECT resolved FROM imports WHERE file_id = ? AND line = ?')
-  const edgeAt = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND line = ? AND kind IN ('CALLS','EXTENDS','IMPLEMENTS')")
+  const edgeAt = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND line = ? AND kind IN ('CALLS','REFERENCES','EXTENDS','IMPLEMENTS')")
   const shadow = new Map() // scope → the lines declaring the local
   const callsTarget = new Map()
   const reachesTarget = (id) => { if (!callsTarget.has(id)) callsTarget.set(id, edgeTo.all(id).some((e) => targetIds.has(e.dst))); return callsTarget.get(id) }

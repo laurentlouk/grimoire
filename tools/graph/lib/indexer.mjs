@@ -174,12 +174,12 @@ function writeFile(db, repo, f) {
   if (f.prevId) removeFile(db, f.prevId)
   const isTest = TEST_PATH.test(f.path) ? 1 : 0
   const fileId = Number(db.prepare('INSERT INTO files(repo, path, lang, size, mtime, hash, is_test) VALUES(?, ?, ?, ?, ?, ?, ?)').run(repo, f.path, f.lang, f.size, f.mtime, f.hash, isTest).lastInsertRowid)
-  const insNode = db.prepare('INSERT INTO nodes(file_id, kind, name, qualname, parent_id, container, line, end_line, signature, is_test) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-  const fileNode = Number(insNode.run(fileId, 'file', path.basename(f.path), f.path, null, null, 1, 1, null, isTest).lastInsertRowid)
+  const insNode = db.prepare('INSERT INTO nodes(file_id, kind, name, qualname, parent_id, container, line, end_line, signature, is_test, via) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  const fileNode = Number(insNode.run(fileId, 'file', path.basename(f.path), f.path, null, null, 1, 1, null, isTest, null).lastInsertRowid)
   db.prepare('UPDATE files SET node_id = ? WHERE id = ?').run(fileNode, fileId)
   const ids = []
   for (const s of f.result.symbols) {
-    ids.push(Number(insNode.run(fileId, s.kind, s.name, s.qualname, s.parent >= 0 ? ids[s.parent] : null, s.container, s.line, s.endLine, s.signature, s.isTest ? 1 : 0).lastInsertRowid))
+    ids.push(Number(insNode.run(fileId, s.kind, s.name, s.qualname, s.parent >= 0 ? ids[s.parent] : null, s.container, s.line, s.endLine, s.signature, s.isTest ? 1 : 0, s.via || null).lastInsertRowid))
   }
   const insRef = db.prepare('INSERT INTO refs(file_id, src_id, kind, name, qual, qtype, from_type, line) VALUES(?, ?, ?, ?, ?, ?, ?, ?)')
   for (const r of f.result.refs) insRef.run(fileId, r.src >= 0 ? ids[r.src] : fileNode, r.kind, r.name, r.qual || '', r.qtype || null, r.fromType || null, r.line)

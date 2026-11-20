@@ -3,14 +3,21 @@
 //   repos    name, root (project-relative), head (git HEAD at the last index), indexed_at
 //   files    one row per indexed file; node_id = its `file` node
 //   nodes    kind: file | function | method | constructor | class | struct | interface | trait |
-//            protocol | enum | type | module | namespace | macro; qualname = Container.name;
+//            protocol | enum | type | module | namespace | macro | field; qualname = Container.name;
 //            parent_id = the enclosing type or module (NULL at top level); is_test; signature = the
-//            first line up to the body, each literal's text shown as `…` (extract.mjs)
-//   edges    src → dst, kind: CALLS | IMPORTS | EXTENDS | IMPLEMENTS; confidence: how the name
-//            was resolved (same-class, qualified, import, same-file, same-package, unique-name,
-//            ambiguous, path)
-//   refs     unresolved names as extracted (call sites with the receiver's text, literals as `…`,
-//            and its stated type when the syntax gives it, supertypes); imports: import statements
+//            first line up to the body, each literal's text shown as `…` (extract.mjs). A field is a
+//            class's annotated attribute (Python) or class field (TypeScript, JavaScript), its
+//            signature up to its value; a framework's declaration in a class body (Ruby `scope`,
+//            `has_many`, `delegate`, `attr_reader`, `define_method`) is a method of that class, its
+//            via 'framework' (NULL for every definition the language's own syntax makes)
+//   edges    src → dst, kind: CALLS | IMPORTS | EXTENDS | IMPLEMENTS | REFERENCES (a function or
+//            method named as a value: an argument, a property value, an assignment, a return, a
+//            `task.delay()`); confidence: how the name was resolved (same-class, typed, qualified,
+//            import, same-file, same-package, unique-name, ambiguous, path; REFERENCES never by a
+//            name alone)
+//   refs     unresolved names as extracted (kind call | new | macro: call sites with the receiver's
+//            text, literals as `…`, and its stated type when the syntax gives it; extends | implements:
+//            supertypes; ref: a name in a value position, its qualifier's text); imports: import statements
 //   cochange files that changed in the same commits (from git log), n = commits shared
 //   churn    per file, n = recent commits that touched it (same window as cochange)
 //   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
@@ -32,7 +39,7 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '16'
+export const SCHEMA_VERSION = '17'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
@@ -51,7 +58,7 @@ const DDL = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS repos(name TEXT PRIMARY KEY, root TEXT, head TEXT, indexed_at TEXT, cochange_head TEXT);
 CREATE TABLE IF NOT EXISTS files(id INTEGER PRIMARY KEY, repo TEXT, path TEXT, lang TEXT, size INTEGER, mtime INTEGER, hash TEXT, is_test INTEGER, node_id INTEGER, UNIQUE(repo, path));
-CREATE TABLE IF NOT EXISTS nodes(id INTEGER PRIMARY KEY, file_id INTEGER, kind TEXT, name TEXT, qualname TEXT, parent_id INTEGER, container TEXT, line INTEGER, end_line INTEGER, signature TEXT, is_test INTEGER);
+CREATE TABLE IF NOT EXISTS nodes(id INTEGER PRIMARY KEY, file_id INTEGER, kind TEXT, name TEXT, qualname TEXT, parent_id INTEGER, container TEXT, line INTEGER, end_line INTEGER, signature TEXT, is_test INTEGER, via TEXT);
 CREATE INDEX IF NOT EXISTS nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS nodes_file ON nodes(file_id);
 CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(parent_id);

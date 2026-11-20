@@ -7,8 +7,9 @@
 //   - entry points: production functions nothing in the index calls that call the most (a CLI, a
 //     handler, a job: whatever starts the flow, or code reached only through config or a framework);
 //   - most used definitions (callers resolved by syntax) and hotspots (git churn × definitions);
-//   - test reach per module: the share of its functions a test reaches within TEST_DEPTH calls, so
-//     the untested areas show before anyone changes them.
+//   - test reach per module: the share of its functions a test reaches within TEST_DEPTH calls or
+//     references (a handler the code a test calls registers), so the untested areas show before anyone
+//     changes them.
 import { systemMap } from './modules.mjs'
 
 const GUESSES = "('ambiguous','unique-name')"
@@ -36,9 +37,9 @@ export function overview(g, { repo = null, limit = 12 } = {}) {
   const name = (m) => (repos.length > 1 ? `${m.repo}:${m.key}` : m.key)
   const usesOf = new Map(), usedBy = new Map()
   for (const [a, b, n] of sys.links) { (usesOf.get(a) || usesOf.set(a, []).get(a)).push([b, n]); (usedBy.get(b) || usedBy.set(b, []).get(b)).push([a, n]) }
-  // test reach: production callables a test reaches within TEST_DEPTH calls
+  // test reach: production callables a test reaches within TEST_DEPTH calls or references
   const testIds = g.q(`SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id WHERE n.is_test = 1${R}`, ...ra).map((x) => x.id)
-  const reached = testIds.length ? g.walk(testIds, ['CALLS'], 'out', TEST_DEPTH) : new Map()
+  const reached = testIds.length ? g.walk(testIds, ['CALLS', 'REFERENCES'], 'out', TEST_DEPTH) : new Map()
   const callables = g.q(`SELECT n.id, n.file_id FROM nodes n JOIN files f ON f.id = n.file_id WHERE n.kind IN ${CALLABLE} AND n.is_test = 0${R}`, ...ra)
   const modOfFile = new Map(sys.fileModule)
   const reach = new Map()

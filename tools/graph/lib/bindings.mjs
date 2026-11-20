@@ -99,6 +99,29 @@ export function bindingsOf(n, spec) {
   return out
 }
 
+// The names a node binds in the scope around it, typed or not: a parameter, a declared or assigned
+// variable, a loop variable, a caught error, a `with … as` alias. A value by such a name is the local,
+// never a function of the same name (extract.mjs). Over-approximate: a name counted local is only a
+// reference not linked.
+const PARAM_LISTS = new Set(['parameters', 'formal_parameters', 'method_parameters', 'lambda_parameters', 'block_parameters', 'parameter_list', 'function_value_parameters'])
+const LOOPS = new Set(['for_statement', 'for_in_statement', 'range_clause', 'for_in_clause', 'catch_clause', 'as_pattern', 'for_expression', 'enhanced_for_statement'])
+const idents = (n, out = [], d = 0) => { if (!n || d > 4) return out; if (IDENTISH.test(n.type) && n.namedChildCount === 0) out.push(n.text); else if (!TYPE_NODE.test(n.type)) for (const c of named(n)) idents(c, out, d + 1); return out }
+export function localsOf(n) {
+  if (PARAMS.has(n.type) || n.type === 'default_parameter' || n.type === 'typed_default_parameter') { const b = bound(field(n, 'name') || field(n, 'pattern') || n); return b ? [b] : [] }
+  if (PARAM_LISTS.has(n.type)) return named(n).filter((c) => IDENTISH.test(c.type)).map((c) => c.text)
+  if (ASSIGN.has(n.type)) {
+    // `const onSave = () => …` is a nested function's definition, which a value may name
+    if (n.type === 'variable_declarator' && field(n, 'value') && /^(arrow_function|function_expression|function|generator_function)$/.test(field(n, 'value').type)) return []
+    const target = field(n, 'name') || field(n, 'pattern') || field(n, 'left') || field(n, 'declarator')
+    if (!target) return []
+    if (/^(identifier|expression_list|pattern_list|tuple_pattern|array_pattern|object_pattern|list_pattern)$/.test(target.type)) return idents(target)
+    const b = /member|attribute|selector|field|subscript|index/.test(target.type) ? null : bound(target)
+    return b ? [b] : []
+  }
+  if (LOOPS.has(n.type)) return idents(field(n, 'left') || field(n, 'alias') || field(n, 'parameter') || field(n, 'name') || null)
+  return []
+}
+
 // A class's fields whose type the syntax states: [[fieldName, TypeName], …] (see the header).
 const FIELD_DECL = new Set(['public_field_definition', 'field_definition', 'field_declaration', 'property_declaration'])
 const SELFISH = /^(this|self)$/
