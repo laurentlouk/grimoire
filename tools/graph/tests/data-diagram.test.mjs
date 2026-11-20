@@ -37,8 +37,14 @@ const { idStems, tableStem, placeholders, modelLinks } = await import('../lib/da
 console.log('\n1 · the lead rule (lib/data/links.mjs)')
 eq(['orbit_id', 'orbitId', 'actor_user_id', 'ORBIT_ID', 'reactions[].user_id', 'id', 'name', 'identity', 'orbitIds'].map(idStems),
   [['orbit'], ['orbit'], ['actoruser', 'user'], ['orbit'], ['user'], [], [], [], []], 'a name ending in id gives its stems, longest first; `id` alone, `identity` and a plural are none')
-eq(['users', 'Orbit', '{env}-{project}-orbit', 'chat_messages', 'categories', '{env}-{project}', 'user:{id}'].map(tableStem), ['user', 'orbit', 'orbit', 'chatmessage', 'category', null, null],
-  'a table\'s stem: its name after the last unknown part, singular, no case nor separator; none when nothing literal follows')
+eq(['users', 'Orbit', '{env}-{project}-orbit', 'chat_messages', 'categories', '{env}-{project}', 'user:{id}', 'auth.users'].map(tableStem), ['users', 'orbit', 'orbit', 'chatmessages', 'categories', null, null, 'users'],
+  'a table\'s stem: its name after the last unknown part (or its schema), no case nor separator; none when nothing literal follows')
+{
+  const { forms } = await import('../lib/data/links.mjs')
+  const sg = (w) => forms(w).slice(1)
+  ok(['users:user', 'addresses:address', 'movies:movie', 'categories:category', 'statuses:status', 'boxes:box', 'branches:branch', 'class:'].every((x) => { const [w, f] = x.split(':'); return f ? sg(w).includes(f) : !sg(w).length }),
+    `a table name's singular forms (addresses → address, movies → movie, statuses → status; class stays): ${['addresses', 'movies', 'statuses', 'class'].map((w) => `${w}: ${forms(w).join('/')}`).join(' · ')}`)
+}
 eq(placeholders('{}orbit:{orbit_id}:members:{user_id}'), ['orbit_id', 'user_id'], 'a key template\'s placeholders, in order (a hash tag `{}` is none)')
 {
   const T = (name, fields, keys = [], extra = {}) => ({ name, kind: 'table', fields: fields.map((n) => ({ name: n })), keys, relations: [], indexes: [], ...extra })
@@ -64,6 +70,44 @@ eq(placeholders('{}orbit:{orbit_id}:members:{user_id}'), ['orbit_id', 'user_id']
   eq(R.get('api:dynamodb').stubs.map((x) => `${x.kind}:${x.from}.${x.column}${x.dir === 'out' ? '→' : '←'}${x.store}/${x.entity}`), ['lead:carts.orderId→api:db/orders', 'lead:carts.userId→api:db/users', 'lineage:carts.cartId→web:db/sessions'],
     'a claim that does not hold changes nothing; a lineage claim across repositories is a stub (refined, not a name guess)')
   eq(R.get('web:db').stubs.map((x) => `${x.kind}:${x.from}.${x.column}←${x.store}/${x.entity}`), ['lineage:sessions.cart_id←api:dynamodb/carts'], '… on both sides')
+}
+
+// ── 1b · the review's cases ──
+console.log('\n1b · the lead rule: the review\'s cases')
+{
+  const T = (name, fields, keys = [], extra = {}) => ({ name, kind: 'table', fields: fields.map((n) => ({ name: n })), keys, relations: [], indexes: [], ...extra })
+  const pk = (c) => ({ role: 'primary', parts: [c] })
+  const part = (c) => ({ role: 'partition', parts: [c] })
+  const model = { stores: [
+    // two declarations of one logical table: one's key is never a lead to the other
+    { id: 'infra:dynamodb', repo: 'infra', dialect: 'dynamodb', entities: [T('{env}-{project}-order', ['orderId', 'memberId'], [part('orderId')], { id: 'infra:dynamodb/{env}-{project}-order', logical: { id: 'L:order' } }), T('{env}-{project}-member', ['memberId'], [part('memberId')], { id: 'infra:dynamodb/{env}-{project}-member', logical: { id: 'L:member' } })] },
+    { id: 'infra:local', repo: 'infra', dialect: 'dynamodb', entities: [T('Orders', ['orderId', 'memberId'], [part('orderId')], { id: 'infra:local/Orders', logical: { id: 'L:order' } }), T('Members', ['memberId'], [part('memberId')], { id: 'infra:local/Members', logical: { id: 'L:member' } })] },
+    // plurals, a schema, a key named like an id, a two-part key reached at its sort part
+    { id: 'app:db', repo: 'app', dialect: 'postgres', entities: [T('addresses', ['id'], [pk('id')]), T('movies', ['id'], [pk('id')]), T('auth.users', ['id'], [pk('id')]), T('error_issue', ['issue_id'], [pk('issue_id')]),
+      T('rentals', ['id', 'address_id', 'movie_id', 'user_id', 'issue_id'], [pk('id')])] },
+    { id: 'app:dynamodb', repo: 'app', dialect: 'dynamodb', entities: [T('carts', ['userId', 'cartId'], [part('userId'), { role: 'sort', parts: ['cartId'] }]), T('cart_items', ['cartId', 'lineNo'], [part('cartId'), { role: 'sort', parts: ['lineNo'] }])] },
+    // a key space shared by two repositories: a template is matched in the repositories that write it
+    { id: 'infra:redis', repo: 'infra', dialect: 'redis', entities: [T('cart:{cart_id}', [], [], { sources: [{ repo: 'web', path: 'a.ts', line: 1 }] }), T('member:{member_id}', [], [], { sources: [{ repo: 'infra', path: 'b.rs', line: 1 }] })] },
+    { id: 'web:db', repo: 'web', dialect: 'postgres', entities: [T('carts', ['id'], [pk('id')])] },
+  ] }
+  const L = modelLinks(model, [])
+  const all = (id) => [...L.get(id).leads.map((x) => `${x.from}.${x.column}→${x.to}`), ...L.get(id).stubs.filter((x) => x.dir === 'out').map((x) => `${x.from}.${x.column}→${x.store}/${x.entity}`)]
+  ok(!all('infra:dynamodb').some((x) => /orderId|Orders/.test(x)) && !all('infra:local').some((x) => /orderId→/.test(x)), `a table's own key is no lead to another declaration of the same logical table (${[...all('infra:dynamodb'), ...all('infra:local')].join(', ')})`)
+  eq(L.get('app:db').leads.map((x) => `${x.column}→${x.to}.${x.toColumn}`), ['address_id→addresses.id', 'issue_id→error_issue.issue_id', 'movie_id→movies.id', 'user_id→auth.users.id'],
+    'plurals (addresses, movies), a schema-qualified table (auth.users), and a column named exactly like another table\'s id key (issue_id → error_issue)')
+  const ci = L.get('app:dynamodb').leads.find((x) => x.from === 'cart_items')
+  eq([ci.toColumn, ci.sort], ['cartId', 'partition'], 'a lead ending at the sort key of a two-part key says the partition key is what it lacks')
+  eq(all('infra:redis').sort(), ['cart:{cart_id}.cart_id→web:db/carts', 'member:{member_id}.member_id→infra:dynamodb/{env}-{project}-member'], 'a shared key space: each template is matched in the repositories whose code writes it')
+  const t0 = Date.now(), huge = idStems('a_'.repeat(40000) + 'id')
+  ok(!huge.length && Date.now() - t0 < 200, `a name of 80,000 characters ending in id gives no stem, at once (${Date.now() - t0} ms)`)
+  eq(placeholders('\\{order_id\\}:cart:{x}'), ['x'], 'an escaped brace (a cluster hash tag the reader escaped) is no placeholder')
+  // a refined relation on one declaration of a logical table is drawn on the others where both ends are, and on every column
+  const R = modelLinks(model, [{ kind: 'relation', ok: true, from: 'infra:dynamodb/{env}-{project}-order', columns: ['memberId'], to: 'infra:dynamodb/{env}-{project}-member', toColumns: ['memberId'], why: 'w' },
+    { kind: 'relation', ok: true, from: 'app:dynamodb/carts', columns: ['userId', 'cartId'], to: 'app:db/rentals', toColumns: ['user_id', 'id'], why: 'two' }])
+  eq(R.get('infra:local').refined.map((x) => `${x.from}.${x.columns}→${x.to}`), ['Orders.memberId→Members'], 'a refined relation stated on one declaration is drawn on the other declaration whose store has both ends')
+  ok(!R.get('infra:local').leads.some((x) => x.from === 'Orders' && x.column === 'memberId'), '… and replaces the lead there')
+  eq(R.get('app:dynamodb').stubs.filter((x) => x.dir === 'out' && x.kind === 'refined').map((x) => `${x.column}→${x.toColumn}`), ['cartId→id', 'userId→user_id'], 'a multi-column refined relation: a stub per column pair')
+  ok(!R.get('app:dynamodb').stubs.some((x) => x.kind === 'lead' && x.from === 'carts'), '… replacing the leads on each of its columns')
 }
 
 // ── 2 · through call(), on fixtures/diagram ──
@@ -122,7 +166,7 @@ if (!deps.findDeps()) {
     // DynamoDB: a diagram by default, the key card as passport, Fields and Cards
     const kp = await stubPage(page, `#data-${at('shop:dynamodb')}`)
     const kd = kp.erd()
-    ok(!!kd && /DynamoDB/.test(kd.html), 'a DynamoDB store opens as a diagram: a box per table, its kind in the header')
+    ok(!!kd && /data-tbl=/.test(kd.html) && !/>DynamoDB</.test(kd.html), 'a DynamoDB store opens as a diagram: a box per table, no pill repeating the store\'s kind')
     has(kd.html, 'class="mk msk"', '… its sort keys marked SK')
     has(kd.html, 'class="mk mttl"', '… its time to live marked TTL')
     has(kd.html, 'GSI ByOwner (ownerId) all', '… each GSI as a row with its keys and projection')

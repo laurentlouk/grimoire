@@ -5026,7 +5026,9 @@ async function indexed() {
       '  orders  table  6 columns seen · joins → users · 3 lookup columns  shop/web/src/users.ts:24 · shop/worker/orders.go:9 · shop/worker/orders.go:18',
       '  products  table  2 columns seen  shop/worker/orders.go:31',
       '  users  table  3 columns seen · unique (email) · 2 lookup columns  shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25',
-    ], 'graph_data store: the tables, each at every statement naming it (a table in a parameter is none; SELECT * reveals nothing)')
+      'Leads (1), from a name ending in id: a lead from the attribute\'s name, never checked: read the code before relying on it',
+      '  order_lines(order_id) → orders(id)  lead: "order_id" names order',
+    ], 'graph_data store: the tables, each at every statement naming it (a table in a parameter is none; SELECT * reveals nothing); then the leads the page draws on it')
     const qusers = await qq('data', { entity: 'users' })
     has(qusers, 'shop:sql (inferred, postgres)/users  table  (postgres; deduced from the queries in code, not declared)\n  seen at shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25 [inferred sql-queries@1]\nColumns seen in code (3): type, nullability and default unknown:', 'graph_data entity: a deduced table, every statement that names it')
     has(qusers, '  display_name  type unknown  seen in select, insert, set, expr  — shop/web/src/users.ts:5 · shop/web/src/users.ts:14 · shop/web/src/users.ts:16', '… each column with the statements that name it, its type unknown')

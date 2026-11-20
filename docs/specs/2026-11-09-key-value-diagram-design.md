@@ -71,7 +71,7 @@ Relations are also lost where they already exist.
 
 **D4. The lead rule: deterministic, same repository only.** *(owner)*
 - **Candidates.** An attribute (declared, or a bound item's field; for a nested one, its last segment), or a key template's placeholder, whose name splits into words ending in `id` (`orbit_id`, `orbitId`, `actor_user_id`).
-- **Stems.** The words before `id`, tried from the longest suffix to the shortest (`actoruser`, then `user`). Letter case and `_` are ignored; a trailing `s` or `ies` is dropped on both sides.
+- **Stems.** The words before `id`, tried from the longest suffix to the shortest (`actoruser`, then `user`). Letter case and `_` are ignored; a trailing `s` or `ies` is dropped on both sides. *(Amended after the review of 2026-11-20: a table matches in its singular forms, `addresses` and `movies` included; a schema-qualified table by its table part; a column named exactly like another table's whole one-column key is a lead to it; a placeholder is matched in the repositories that write its template; names over 128 characters or 8 words are none.)*
 - **Targets.** A table whose name stem matches. A name template is cut after its last unknown part (`{env}-{project}-orbit` → `orbit`); a name with no literal part has no stem. The target must be:
   - in the same store; or
   - in another store of the same repository; or
@@ -101,7 +101,7 @@ Relations are also lost where they already exist.
   - a lead to a table of another store of the same repository.
 - **A logical table's declarations count as one end,** so a link to it is drawn on each declaration's diagram (D3).
 - **Every diagram gets stubs:** DynamoDB, Redis in diagram mode, and the SQL ERDs. That is how `app:drizzle/chat_messages` shows the `message` table it mirrors.
-- **At most 12 stubs per diagram.** Beyond that, one "+k in `<store>`" stub per store lists the rest on hover.
+- **At most 12 stubs per diagram.** Beyond that, the first are drawn and the rest fold into one "+k more" stub per other store, listed on hover. Stubs are ordered by the height of the rows that reach them; their lines pass behind the boxes, which let them show through, from a port drawn over the row they leave.
 - The Refined section's lineage drawing stays as it is: a list of every lineage claim.
 - Rejected:
   - **One project canvas.** About 77 boxes on the probed project, and the 12 local and prod duplicates double the DynamoDB part.

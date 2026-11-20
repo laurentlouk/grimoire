@@ -13,7 +13,7 @@ import { refineModel, refineCheck } from './data/check.mjs'
 import { NOT_DECLARED, sqlFunctions, queryConflicts } from './data/queries.mjs'
 import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, shownName, NO_QUERY, ASSEMBLED } from './data/redis.mjs'
 import { formOf } from './data/readers/redis-cmd.mjs'
-import { modelLinks, LEAD_SAYS } from './data/links.mjs'
+import { modelLinks, LEAD_SAYS, lackText } from './data/links.mjs'
 import { docRoots } from './docs.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
@@ -671,6 +671,7 @@ export class Graph {
         const parts = [plural(e.fields.length, 'column') + ' seen', ...e.keys.map((k) => `unique (${k.parts.join(', ')})`), e.relations.length ? `joins → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null, e.lookups.length ? plural(e.lookups.length, 'lookup column') : null].filter(Boolean)
         out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${e.more ? ` and ${plural(e.more, 'more statement')}` : ''}`)
       }
+      out.push(...this.linkLines(model, refine, st)) // what the page draws on it, leads included
       return out.join('\n')
     }
     if (st.queries) for (const c of st.queries.conflicts) out.push(`  [inferred] ${c.label}  named in code, absent from the declarations  — ${this.sources(st.repo, c.values[0].sources)}`)
@@ -695,12 +696,18 @@ export class Graph {
     const L = modelLinks(model, refine ? refine.claims : []).get(st.id)
     if (!L) return []
     const mine = (x) => !e || x.from === e.name || x.to === e.name
+    const refinedHere = (L.refined || []).filter(mine)
     const leads = L.leads.filter(mine), rivals = L.rivals.filter((x) => !e || x.from === e.name), stubs = L.stubs.filter((x) => !e || x.from === e.name)
     const out = []
     const col = (c) => (c === null || c === undefined ? '' : `(${c})`)
-    if (leads.length) out.push(`Leads (${leads.length}), from a name ending in id: ${LEAD_SAYS}`, ...leads.map((x) => `  ${x.from}${col(x.column)} → ${x.to}${col(x.toColumn)}  lead: "${x.column}" names ${x.stem}${x.sort ? '; partition key only: the item also needs its sort key' : ''}`))
-    if (rivals.length) out.push(`Ambiguous names (${rivals.length}): several tables share the stem, so no lead`, ...rivals.map((x) => `  ${x.from}${col(x.column)} → ${x.targets.join(' | ')}  (stem ${x.stem})`))
-    if (stubs.length) out.push(`Links to other stores (${stubs.length}):`, ...stubs.map((x) => `  ${x.from}${col(x.column)} ${x.dir === 'out' ? '→' : '←'} ${x.store}/${x.entity}${col(x.toColumn)}  ${x.kind === 'lead' ? `lead: "${x.dir === 'out' ? x.column : x.toColumn}" names ${x.stem}` : x.kind === 'lineage' ? `mirrors · refined${x.why ? `: ${x.why}` : ''}` : `refined${x.why ? `: ${x.why}` : ''}`}`))
+    // each list capped, the rest counted: a store with thousands of id-like columns stays readable
+    const LINKS_SHOWN = 60
+    const cap = (xs) => xs.slice(0, LINKS_SHOWN)
+    const more = (xs) => (xs.length > LINKS_SHOWN ? [`  … ${xs.length - LINKS_SHOWN} more`] : [])
+    if (leads.length) out.push(`Leads (${leads.length}), from a name ending in id: ${LEAD_SAYS}`, ...cap(leads).map((x) => `  ${x.from}${col(x.column)} → ${x.to}${col(x.toColumn)}  lead: "${x.column}" names ${x.stem}${x.sort ? `; ${lackText(x.sort)}` : ''}`), ...more(leads))
+    if (refinedHere.length) out.push(`Refined on another declaration of the same logical table (${refinedHere.length}):`, ...cap(refinedHere).map((x) => `  ${x.from}(${x.columns.join(', ')}) → ${x.to}(${x.toColumns.join(', ')})  refined${x.why ? `: ${x.why}` : ''}`), ...more(refinedHere))
+    if (rivals.length) out.push(`Ambiguous names (${rivals.length}): several tables share the stem, so no lead`, ...cap(rivals).map((x) => `  ${x.from}${col(x.column)} → ${x.targets.join(' | ')}  (stem ${x.stem})`), ...more(rivals))
+    if (stubs.length) out.push(`Links to other stores (${stubs.length}):`, ...cap(stubs).map((x) => `  ${x.from}${col(x.column)} ${x.dir === 'out' ? '→' : '←'} ${x.store}/${x.entity}${col(x.toColumn)}  ${x.kind === 'lead' ? `lead: "${x.dir === 'out' ? x.column : x.toColumn}" names ${x.stem}${x.sort ? `; ${lackText(x.sort)}` : ''}` : x.kind === 'lineage' ? `mirrors · refined${x.why ? `: ${x.why}` : ''}` : `refined${x.why ? `: ${x.why}` : ''}`}`), ...more(stubs))
     return out
   }
   dataEntity(model, spec, refine = null) {
@@ -725,7 +732,7 @@ export class Graph {
     if (!hits.length) return `No entity "${spec}" in the data model. Try graph_data with no argument for the stores, or with a store for its entities.`
     if (hits.length > 1) return `"${spec}" names ${hits.length} entities; give store/entity or repo:store/entity: ${hits.map(([, e]) => e.id).join(', ')}`
     const [[st, e]] = hits
-    if (st.inferred) return [this.dataInferredEntity(model, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
+    if (st.inferred) return [this.dataInferredEntity(model, st, e), ...this.linkLines(model, refine, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
     if (st.dialect === 'redis') return [this.redisEntity(model, st, e), ...this.linkLines(model, refine, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
     const kv = st.dialect === 'dynamodb'
     const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}${s.as ? `, ${s.as}` : ''}]`).join(' · ')}`]

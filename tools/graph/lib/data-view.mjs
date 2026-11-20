@@ -175,7 +175,7 @@ export function dataClient(ctx) {
 
   // natural size by default; Fit shows it all (at full size, the window less the passport beside it)
   const zoomOf = (L) => {
-    if (st.dataZoom !== 'fit') return st.dataZoom || 1
+    if (st.dataZoom !== 'fit' && st.dataZoom) return st.dataZoom // unset: fit the width, never above 100%
     if (st.full === 'data') {
       const vw = window.innerWidth || 1400, w = vw - 48 - (st.dataSel !== null ? Math.min(420, vw * 0.38) + 12 : 0), hgt = (window.innerHeight || 900) - 48
       return Math.min(2, Math.max(ZMIN, Math.min(w / (L.W + 8), hgt / (L.H + 8))))
@@ -191,30 +191,37 @@ export function dataClient(ctx) {
   // ── links to other stores: a stub per entity a link reaches, at the drawing's right edge (D5) ──
   const LEAD = 'a lead from the name, never checked: read the code before relying on it'
   const MKSAY = { SK: 'sort key', TTL: 'time to live', KEY: 'a part of the key code fills in (a placeholder)', K: 'a key part' }
-  const STUB_MAX = 12, SW = 214, SH = 38, SG = 12
+  const STUB_MAX = 12, SW = 214, SH = 38, SG = 12, STUB_TOP = 76
   const STUB_SAY = { lead: 'lead', refined: 'refined', lineage: 'mirrors · refined', fold: 'more links' }
   function stubsOf(s, sc) {
     const L0 = sc.L, list = ((s.links && s.links.st) || [])
     const at = new Map(sc.list.map((ti, j) => [s.tables[ti].name, j]))
     let links = list.filter((x) => at.has(x.from))
-    if (!links.length) return { L: L0, parts: [], lines: [], boxes: [] }
-    // one box per other entity; past STUB_MAX boxes, one per other store, the rest on hover
+    if (!links.length) return { L: L0, parts: [], lines: [], ports: [], boxes: [] }
+    // one box per other entity; past STUB_MAX boxes, the first STUB_MAX - (stores folded) drawn and
+    // the rest folded into one box per other store, "+k" counting its entities, listed on hover
     const key = (x) => `${x.store}\u0000${x.entity}`
-    let ents = [...new Set(links.map(key))]
-    let fold = null
+    const ents = [...new Set(links.map(key))]
+    let kept = ents, folded = []
     if (ents.length > STUB_MAX) {
-      fold = new Map()
-      for (const x of links) { if (!fold.has(x.store)) fold.set(x.store, []); fold.get(x.store).push(x) }
-      ents = [...fold.keys()]
+      for (let n = STUB_MAX - 1; n >= 0; n--) {
+        const rest = ents.slice(n), stores = new Set(rest.map((k) => k.split('\u0000')[0]))
+        if (n + stores.size <= STUB_MAX) { kept = ents.slice(0, n); folded = rest; break }
+      }
     }
-    const boxes = ents.map((k, i) => {
-      const x = fold ? fold.get(k)[0] : links.find((y) => key(y) === k)
-      const many = fold ? fold.get(k) : null
-      return { x: L0.W + 20, y: 56 + i * (SH + SG), w: SW, h: SH, store: x.store, n: x.n, entity: many ? null : x.entity, label: many ? `+${many.length} in ${x.store}` : x.entity, many, kinds: [...new Set((many || links.filter((y) => key(y) === k)).map((y) => y.kind))] }
-    })
-    const boxOf = (x) => boxes.findIndex((b) => (fold ? b.store === x.store : b.store === x.store && b.entity === x.entity))
-    const W = L0.W + 20 + SW + 24, H = Math.max(L0.H, 56 + boxes.length * (SH + SG) + 24)
-    const parts = [], lines = []
+    const foldOf = new Map() // store → the links to its folded entities
+    for (const x of links) if (folded.includes(key(x))) { if (!foldOf.has(x.store)) foldOf.set(x.store, []); foldOf.get(x.store).push(x) }
+    // each stub at the height of the rows that reach it (the mean of their y), in that order, so the
+    // lines cross as little as they can; the first below the drawing's zoom controls
+    const srcY = (x) => { const j = at.get(x.from), A = L0.boxes[j], g = erdBox(s.tables[sc.list[j]], sc.names), fi = s.tables[sc.list[j]].fields.findIndex((f) => f.name === x.column); return A.y + (fi >= 0 && g.fieldY[fi] !== undefined ? g.fieldY[fi] : 15) }
+    const meanY = (xs) => xs.reduce((a, x) => a + srcY(x), 0) / xs.length
+    const boxes = [
+      ...kept.map((k) => { const xs = links.filter((y) => key(y) === k), x = xs[0]; return { store: x.store, n: x.n, entity: x.entity, label: x.entity, many: null, kinds: [...new Set(xs.map((y) => y.kind))], my: meanY(xs) } }).sort((a, b) => a.my - b.my),
+      ...[...foldOf].map(([store, many]) => ({ store, n: many[0].n, entity: null, label: `+${new Set(many.map((y) => y.entity)).size} more (hover)`, many, kinds: [...new Set(many.map((y) => y.kind))], my: Infinity })),
+    ].map((b, i) => ({ x: L0.W + 20, y: STUB_TOP + i * (SH + SG), w: SW, h: SH, ...b }))
+    const boxOf = (x) => (folded.includes(key(x)) ? boxes.findIndex((b) => b.many && b.store === x.store) : boxes.findIndex((b) => !b.many && b.store === x.store && b.entity === x.entity))
+    const W = L0.W + 20 + SW + 24, H = Math.max(L0.H, STUB_TOP + boxes.length * (SH + SG) + 24)
+    const parts = [], lines = [], ports = []
     const r1 = (v) => Math.round(v * 10) / 10
     for (const x of links) {
       const j = at.get(x.from), ti = sc.list[j], A = L0.boxes[j], g = erdBox(s.tables[ti], sc.names), b = boxes[boxOf(x)]
@@ -224,6 +231,8 @@ export function dataClient(ctx) {
       const cls = `${x.kind === 'lead' ? ' ld' : x.kind === 'lineage' ? ' rf lin' : ' rf'}${selName === null ? '' : x.from === selName ? ' on' : ' dim'}`
       const tip = `${x.kind === 'lead' ? `lead: "${x.dir === 'out' ? x.column : x.toColumn}" names ${x.stem}, ${LEAD}` : x.kind === 'lineage' ? `mirrors · refined${x.why ? `: ${x.why}` : ''}` : `refined${x.why ? `: ${x.why}` : ''}`}\n${x.dir === 'out' ? `${x.from} (${x.column || '?'}) → ${x.store}/${x.entity} (${x.toColumn || '?'})` : `${x.store}/${x.entity} (${x.toColumn || '?'}) → ${x.from} (${x.column || '?'})`}`
       const [m1, m2] = x.kind === 'lineage' ? [null, null] : x.dir === 'out' ? ['erd-many', 'erd-one'] : ['erd-one', 'erd-many']
+      const d = `M${x1},${r1(y1)} C${r1(x1 + c)},${r1(y1)} ${r1(x2 - c)},${r1(y2)} ${x2},${r1(y2)}`
+      ports.push(`<circle class="port${cls}" cx="${x1}" cy="${r1(y1)}" r="3"/>`)
       lines.push(`<path class="fk xs${cls}" d="M${x1},${r1(y1)} C${r1(x1 + c)},${r1(y1)} ${r1(x2 - c)},${r1(y2)} ${x2},${r1(y2)}"${m1 ? ` marker-start="url(#${m1})" marker-end="url(#${m2})"` : ''}><title>${esc(tip)}</title></path>`)
     }
     const selName = sc.sel >= 0 ? s.tables[sc.sel].name : null
@@ -232,12 +241,13 @@ export function dataClient(ctx) {
       const tip = b.many ? `${b.label}:\n${b.many.map((x) => `${x.from} ${x.dir === 'out' ? '→' : '←'} ${x.entity} (${STUB_SAY[x.kind]})`).join('\n')}` : `${b.store}/${b.entity}: ${b.kinds.map((k) => STUB_SAY[k]).join(', ')}${b.n >= 0 ? '\nclick to open that store on it' : '\nthat store is not drawn'}`
       parts.push(`<g class="stub${b.kinds.includes('lead') && b.kinds.length === 1 ? ' ld' : ''}${b.n < 0 ? ' off' : ''}${lit ? '' : ' dim'}" data-stub="${k}" tabindex="0" role="button" aria-label="${esc(`${b.store}: ${b.label}`)}"><title>${esc(tip)}</title><rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="8"/><text class="sst" x="${b.x + 10}" y="${b.y + 14}">${esc(b.store.length > 34 ? `${b.store.slice(0, 33)}…` : b.store)}</text><text class="sen" x="${b.x + 10}" y="${b.y + 30}">${esc(b.label.length > 28 ? `${b.label.slice(0, 27)}…` : b.label)}</text><path class="sgo" d="M${b.x + b.w - 16},${b.y + 14}l5,5l-5,5"/></g>`)
     })
-    return { L: { ...L0, W, H }, parts, lines, boxes }
+    return { L: { ...L0, W, H }, parts, lines, ports, boxes }
   }
   function goStub(b) {
     if (!b || b.n < 0 || !S[b.n]) return
     if (st.repo && !S[b.n].id.startsWith(`${st.repo}:`)) st.repo = null // a filter hiding that store would leave a dead click
     st.data = b.n; st.dataSel = b.entity; st.dataAll = false; st.dataScroll = null; st.focusMain = !!b.entity
+    if (b.entity && S[b.n].dialect === 'redis') st.ksMode = { ...(st.ksMode || {}), [b.n]: 'diagram' } // a template is focused in the diagram, never lost in the tree
     rerender(false)
   }
 
@@ -260,13 +270,13 @@ export function dataClient(ctx) {
       const byName = new Map(t.fields.map((f) => [f.name, f]))
       const fields = shown.map((n) => { const f = byName.get(n) || { name: n, type: '', src: [], cf: [] }, r = role.get(n); return { ...f, type: f.type || (r === 'TTL' ? 'epoch' : ''), pk: r === 'PK' ? 1 : 0, fk: 0, mk: r || null, nullable: r && r !== 'TTL' ? false : null } })
       const indexes = t.indexes.map((x) => ({ ...x, unique: false, label: `${x.kind === 'lsi' ? 'LSI' : 'GSI'} ${x.name} (${[...(x.partition || []), ...(x.sort || [])].join(' · ') || x.columns.join(', ')})${x.projection ? ` ${String(x.projection).toLowerCase().replace(/_/g, ' ')}` : ''}` }))
-      return { ...t, kind: 'table', tag: 'DynamoDB', keys: [], fields, indexes, more: Math.max(0, names.length - shown.length) }
+      return { ...t, kind: 'table', keys: [], fields, indexes, more: Math.max(0, names.length - shown.length) } // no pill: the store says its kind
     })
   }
   // a key space's templates and search indexes as boxes (D6)
   function ksTables(s) {
     const K = s.ks
-    const ph = (n) => [...String(n).matchAll(/\{([^{}]+)\}/g)].map((m) => m[1]).filter(Boolean)
+    const ph = (n) => [...String(n).matchAll(/(?<!\\)\{([A-Za-z0-9_$]+)\}/g)].map((m) => m[1]) // an escaped brace (a hash tag) is none
     const tpl = K.tpl.map((t, i) => ({ name: t.n, kind: 'key template', tag: t.type || '?', src: t.src, cf: [], keys: [], indexes: [], rels: [], ks: ['tpl', i],
       fields: [...ph(t.n).map((p) => ({ name: p, type: 'placeholder', mk: 'KEY', pk: 0, fk: 0, nullable: false, src: t.src, cf: [] })),
         ...t.f.map(([n, how, src]) => ({ name: n, type: how === 'path' ? 'JSON path' : how === 'stream' ? 'stream field' : 'field', pk: 0, fk: 0, nullable: null, src, cf: [] })),
@@ -292,7 +302,8 @@ export function dataClient(ctx) {
     !d.kd ? null : d.kd === 'kv' ? [h('span', null, h('span', { class: 'mkl k-pk' }, 'PK'), 'partition key'), h('span', null, h('span', { class: 'mkl k-sk' }, 'SK'), 'sort key'), h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'time to live')]
       : d.kd === 'ks' ? [h('span', null, h('span', { class: 'mkl k-sk' }, 'KEY'), 'a part code fills in'), h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'its lifetime')]
         : null,
-    h('span', null, h('i', { class: 'lnk fkl' }), 'foreign key, declared'), h('span', null, h('i', { class: 'lnk rfl' }), 'refined: a refine file, re-checked'),
+    d.kd === 'kv' ? h('span', { class: 'muted' }, 'S string · N number · B binary') : null,
+    d.kd ? null : h('span', null, h('i', { class: 'lnk fkl' }), 'foreign key, declared'), h('span', null, h('i', { class: 'lnk rfl' }), 'refined: a refine file, re-checked'),
     h('span', null, h('i', { class: 'lnk ldl' }), 'lead: from a name ending in id, never checked'), d.kd === 'ks' ? h('span', null, h('i', { class: 'lnk exl' }), 'extracted: a search index covers it') : null,
     (d.links && d.links.st && d.links.st.length) ? h('span', null, h('i', { class: 'stubk' }), 'another store: click to open it') : null,
     d.kd ? h('span', { class: 'muted' }, 'a line runs from the attribute that holds the reference (many) to the key it names (one)') : null)
@@ -432,15 +443,17 @@ export function dataClient(ctx) {
     const parts = [`<svg viewBox="0 0 ${L.W} ${L.H}" width="${Math.round(L.W * z)}" height="${Math.round(L.H * z)}" class="erd${sc.names ? ' collapsed' : ''}${lit ? ' lit' : ''}${sc.q && sc.mode === 'all' ? ' q' : ''}${s.ov ? ' ov' : ''}${s.dv ? ' dv' : ''}" role="group" focusable="false" aria-label="${esc(s.id)}: ${plural(sc.list.length, 'table')}, ${plural(L.links.length, 'foreign key line')}${s.ov ? `, changes since ${esc(REF)} drawn` : ''}${s.dv ? `, the delta ${esc(s.delta.shown)} drawn` : ''}">`,
       '<defs>' + ['', '-on'].map((on) => `<marker id="erd-many${on}" viewBox="-12 -7 13 14" refX="0" refY="0" markerWidth="13" markerHeight="14" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mkr${on ? ' on' : ''}" d="M-10,0L0,-5M-10,0L0,0M-10,0L0,5"/></marker>` +
         `<marker id="erd-one${on}" viewBox="-12 -7 13 14" refX="0" refY="0" markerWidth="13" markerHeight="14" markerUnits="userSpaceOnUse" orient="auto"><path class="mkr${on ? ' on' : ''}" d="M-7,-5L-7,5"/></marker>`).join('') + '</defs>']
+    const over = [] // the leads, drawn after the other lines (beneath the boxes all the same)
     for (const l of L.links) {
       const from = sc.list[l.from], to = sc.list[l.to], t = s.tables[from], r = t.rels[l.k]
       const on = lit && (from === sc.sel || to === sc.sel)
-      const tip = r.ld ? `lead: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}): "${r.columns[0]}" names ${r.stem}, ${LEAD}${r.sort ? '\npartition key only: the item also needs its sort key' : ''}`
+      const tip = r.ld ? `lead: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}): "${r.columns[0]}" names ${r.stem}, ${LEAD}${r.sort === 'partition' ? '\nsort key only: the item also needs its partition key' : r.sort ? '\npartition key only: the item also needs its sort key' : ''}`
         : r.ex ? `extracted: ${r.why}`
         : r.rf ? `refined: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), no foreign key states it\n${r.why}${r.at.length ? `\n${r.at.join(' · ')}` : ''}`
         : r.jn ? `inferred from a join: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), never a foreign key${r.dir === 'as written' ? '\ndirection as written: neither side is an id' : ''}${r.src.length ? `\n${r.src.map((p) => srcText(s, p)).join(' · ')}` : ''}`
           : `${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')})\non delete ${r.onDelete} · on update ${r.onUpdate}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
       if (r.ex) { parts.push(`<path class="fk ex${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}"><title>${esc(tip)}</title></path>`); continue }
+      if (r.ld) { over.push(`<path class="fk ld${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`); continue }
       parts.push(`<path class="fk${r.rf ? ' rf' : ''}${r.ld ? ' ld' : ''}${r.jn ? ' jn' : ''}${s.ov && r.ch ? ` ${CLS[r.ch]}` : ''}${dcls(s, r)}${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`)
     }
     if (s.ov) sc.list.forEach((ti, j) => {
@@ -448,9 +461,11 @@ export function dataClient(ctx) {
       if (t.ch !== 'removed' || t.ren === null || t.ren === undefined) return
       sc.list.forEach((tk, k) => { const u = s.tables[tk]; if (u.ch === 'added' && u.ren === t.ren) parts.push(renLink(L.boxes[j], L.boxes[k], s.ch.renames[t.ren].text, t.ren)) })
     })
-    parts.push(...S2.lines) // beneath the boxes: a line to a stub passes behind the tables it crosses
+    // beneath the boxes, which let it show through: a line to a stub or a lead that crosses a table
+    // reads as passing behind it; a port on the row it leaves, over the boxes, says where it starts
+    parts.push(...over, ...S2.lines)
     sc.list.forEach((ti, j) => parts.push(table(s, ti, L.boxes[j], erdBox(s.tables[ti], sc.names), cls(ti), sc)))
-    parts.push(...S2.parts, '</svg>')
+    parts.push(...S2.ports, ...S2.parts, '</svg>')
     const box = h('div', { class: 'svgbox archbox', id: 'data-box', ...nav.attrs('data', `ERD of ${s.id}`) })
     box.innerHTML = parts.join('')
     const svg = box.firstChild
