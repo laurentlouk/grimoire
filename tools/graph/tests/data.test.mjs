@@ -35,8 +35,9 @@
 //      line; long-form intrinsics kept as references), found by content, two declarations of one
 //      table and their conflicts, the diff by identity, the delta's targets, validation and states
 //  19. YAML through the pinned grammar (needs the parser runtime): scalars, block scalars, anchors,
-//      aliases and merges, tags kept, several documents, errors and the expansion cap; a SAM template
-//      in YAML with short-form tags, Serverless resources and SimpleTables, CreateTable inputs in YAML;
+//      aliases and merges, tags kept, several documents, errors at the line they break at and the
+//      expansion cap, flow collections whose lines sit left of their key (fixtures/kv/carts); a SAM
+//      template in YAML with short-form tags, Serverless resources and SimpleTables, CreateTable inputs in YAML;
 //      hostile YAML in bounded time (long blanks, 20 000 documents, the size cap, aliases, a deadline,
 //      a timeout parsed aside failing alone)
 //  21. hostile JSON in bounded time (nesting past the cap refused, a wide file, a long "${" run), a
@@ -1516,8 +1517,50 @@ both:
       'several documents, each with its own value and lines: a member at the line of its key, a list item where it starts')
     const fails = (t) => { try { readYaml(yp, t); return 'read' } catch (e) { return e.message } }
     const laughs = ['a: &a [x, x, x, x, x, x, x, x, x, x]', ...'bcdefgh'.split('').map((c, i) => `${c}: &${c} [${Array(10).fill(`*${'abcdefgh'[i]}`).join(', ')}]`)].join('\n')
-    eq([fails('a: [1, 2\nb: {'), fails('x: *nowhere'), fails(laughs)], ['the YAML does not parse at line 1', 'the YAML aliases *nowhere at line 1, which no anchor before it names', 'the YAML expands past 1000000 values (aliases and merges counted): not read'],
+    eq([fails('a: [1, 2\nb: {'), fails('x: *nowhere'), fails(laughs)], ['the YAML does not parse at line 2', 'the YAML aliases *nowhere at line 1, which no anchor before it names', 'the YAML expands past 1000000 values (aliases and merges counted): not read'],
       'a text that does not parse, an alias to no anchor, and one expanding past the cap (a billion laughs) are refused, each saying why')
+    // the grammar wraps what it read in a root ERROR from the first line: the line reported is
+    // where the text breaks (the token after it, or the last line of an unclosed bracket or quote)
+    eq(['a: 1\nb: 2\nc:\n  d: [1, 2\n  e: 3\nf: 4\n', 'a: 1\nb: 2\nc:\n  d: 1\n e: 2\nf: 3\n', 'a: 1\nb: 2\nc: d: e\nf: 1\n', '\n\n# c\na: 1\nb: 2\nc: [1, 2\n', 'a: 1\nb: 2\nc: "x\n\n# trailing\n', '@bad\na: 1\n'].map(fails),
+      [5, 5, 3, 6, 3, 1].map((l) => `the YAML does not parse at line ${l}`),
+      'a text that does not parse reports the line it breaks at, not line 1: a flow list running into the next key, a key indented under no mapping, a second `: ` on a line, a bracket or a quote never closed (its last line, blanks and comments after it skipped), a character no node starts with')
+
+    // a flow collection's lines left of its key, as YAML allows and the grammar refuses: the lines
+    // indented past the key before parsing, every value and line as if they had been written so
+    const flowAt = (t) => { const [d] = readYaml(yp, t); return [d.value, [...d.lines]] }
+    const asWritten = (t) => { const tr = yp.parse(t); const good = !tr.rootNode.hasError; tr.delete(); return good } // the reference parses with no line moved
+    for (const [what, text, written] of [
+      ['a closing bracket at its key\'s column, a key after it', 'a:\n  k: [\n    1\n  ]\n  j: 2\n', 'a:\n  k: [\n    1\n   ]\n  j: 2\n'],
+      ['a closing brace left of its key, at column 0', 'a:\n  k: {\n    b: 1\n}\nc: 1\n', 'a:\n  k: {\n    b: 1\n   }\nc: 1\n'],
+      ['items and a comment at the key\'s column, a quoted item holding a bracket', 'a:\n  k: [ # open\n  "x, ]",\n# low\n  \'it\'\'s\',\n    plain\n    folded\n  ] # close\n', 'a:\n  k: [ # open\n   "x, ]",\n   # low\n   \'it\'\'s\',\n    plain\n    folded\n   ] # close\n'],
+      ['nested collections closing low, under a tag', 'a:\n  k: !If [\n    c, { b: 1\n  }, [ 2,\n 3\n]\n  ]\n  j: [1, 2]\n', 'a:\n  k: !If [\n    c, { b: 1\n   }, [ 2,\n   3\n   ]\n   ]\n  j: [1, 2]\n'],
+      ['a sequence item\'s key, and a list as a sequence item', 'x:\n  - k: [\n      1\n    ]\n  - [\n      2\n  ]\n', 'x:\n  - k: [\n      1\n     ]\n  - [\n      2\n   ]\n'],
+      ['an item\'s mapping on the line after its dash, and CRLF line ends', 's:\r\n  -\r\n    Action: [\r\n      a\r\n    ]\r\n    R: 1\r\n', 's:\r\n  -\r\n    Action: [\r\n      a\r\n     ]\r\n    R: 1\r\n'],
+      ['a top-level key, after a block scalar holding a bracket, and in a second document', 't: |\n  x [\nk: [\n  1\n]\n---\nb: {\nc: 1\n}\n', 't: |\n  x [\nk: [\n  1\n ]\n---\nb: {\n c: 1\n }\n'],
+    ]) eq([flowAt(text), true], [flowAt(written), asWritten(written)], `a flow collection read whatever its lines\' indentation: ${what}`)
+    const { flowIndented } = await import('../lib/data/readers/yaml.mjs')
+    eq(['a: |\n  [\nb: 1\n', 'a: this is\n  [bracket\nb: [1\n', 'k: "x [\n  y"\nj: 1\nl: [\n', 'a: b # [\nc: ]\n', 'a:\n  k: [\n    1\n   ]\n'].map(flowIndented), [null, null, null, null, null],
+      'no line is moved when nothing is inside a flow collection (a block scalar, a plain scalar, a quote or a comment holding a bracket), when the text cannot be followed to its end (a bracket or quote left open), or when every line is already right of its key')
+    eq(fails('a:\n  k: [\n    1\n  ]\nb: c: d\n'), 'the YAML does not parse at line 5', 'a text still broken once its flow lines are indented reports its own line (the lines never move)')
+
+    // a SAM template whose Policies and Action lists close at their key's column: its table read
+    const CARTS = readFileSync(path.join(HERE, 'fixtures', 'kv', 'carts', 'template.yaml'), 'utf8')
+    const raw = yp.parse(CARTS)
+    ok(raw.rootNode.hasError, 'the grammar alone refuses the cart template (a flow list closing at its key\'s column)')
+    raw.delete()
+    const carts = cloudformation.extract(CARTS, 'carts/template.yaml', ctx).declarations[0]
+    eq([carts.label, carts.notes, carts.entities.map(kvTable)], ['SAM template, 1 table', ['CartTable: no TableName (the table is named at deploy): named by its logical id'], [[
+      'CartTable@55 PAY_PER_REQUEST stream=NEW_AND_OLD_IMAGES whole=true as CartTable (AWS::DynamoDB::Table)',
+      '  partition(pk) @64', '  sort(sk) @66', '  ttl(expirationTime) enabled=true @71',
+      '  pk S not null @59', '  sk S not null @61',
+    ]]], 'its table read at its lines past the functions\' Policies lists and the IAM statement\'s Action list closing at their keys\' column: keys, TTL, stream and billing, named by its logical id')
+    const [cartDoc] = readYaml(yp, CARTS)
+    const fn = (f) => cartDoc.value.Resources[f].Properties
+    eq([fn('CheckoutFunction').Policies, cartDoc.value.Resources.CartWritePolicy.Properties.PolicyDocument.Statement[0].Action, ['ListCartFunction', 'CheckoutFunction'].map((f) => [0, 1].map((i) => cartDoc.lines.get(pathKey('Resources', f, 'Properties', 'Policies', i)) ?? null)), cartDoc.lines.get(pathKey('Resources', 'CheckoutFunction', 'Properties', 'Events'))], [
+      [{ DynamoDBCrudPolicy: { TableName: { [TAG]: '!Ref', value: 'CartTable' } } }, { SQSSendMessagePolicy: { QueueName: { [TAG]: '!GetAtt', value: 'CheckoutQueue.QueueName' } } }],
+      ['dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'],
+      [[37, null], [45, 46]], 50,
+    ], 'the lists themselves: each policy a mapping of one key, its reference kept; each item and the key after the list at its own line')
 
     // a SAM template in YAML: short-form tags, anchors, the other resources ignored
     const SAM = readFileSync(path.join(HERE, 'fixtures', 'kv', 'lending', 'template.yaml'), 'utf8')
@@ -1819,7 +1862,7 @@ resource "aws_dynamodb_table" "c" {
     return extractAll({ paths: [...files.keys()], size: (p) => files.get(p).length, read: (p) => files.get(p) }, { exclude: [] }, [], {})
   }
   const rows = tfRun()
-  eq(rows.map((r) => [r.extractor, r.key, r.error || null]), [['dynamodb-table@1', 'local/tables/orders.json', null], ['terraform@2', 'modules/kv-tables', null], ['terraform@2', 'live/prod/legacy/terragrunt.hcl', null]],
+  eq(rows.map((r) => [r.extractor, r.key, r.error || null]), [['dynamodb-table@2', 'local/tables/orders.json', null], ['terraform@2', 'modules/kv-tables', null], ['terraform@2', 'live/prod/legacy/terragrunt.hcl', null]],
     'found by content: the module folder declaring a table resource is a job, the configuration whose module is out of reach another; the configuration of a remote module that is no table module, and the root and stage files, are none')
   const decl = rows[1].facts.declarations
   eq(decl.map((d) => [d.source.path, d.label, d.status]), [['live/prod/tables/terragrunt.hcl', 'Terraform module modules/kv-tables through Terragrunt, 3 tables', 'read']], 'one declaration per configuration that runs the module, at that configuration')
@@ -4132,14 +4175,14 @@ async function indexed() {
     const kq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: KV })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const kidx = await kq('index')
     ok(/lending: /.test(kidx) && !kidx.includes('failure'), `index: the YAML template and the JSON tables read, no extractor failure (${kidx.split('\n').find((l) => l.startsWith('lending')) || kidx})`)
-    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@1\nlocal/tables/loans.json\tdynamodb-table@1\nsrc/handler.ts\tts-types@1\ntemplate.yaml\tcloudformation@2',
+    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@2\nlocal/tables/loans.json\tdynamodb-table@2\nsrc/handler.ts\tts-types@1\ntemplate.yaml\tcloudformation@3',
       'found by content: the template and the two CreateTable files are jobs, and the handler for its item shapes; the CI workflow and the settings file (JSON and YAML declaring no table) are not')
     const klist = await kq('data')
     eq(klist.split('\n').slice(1), [
       'lending:dynamodb  dynamodb  3 tables · 2 GSIs · 1 LSI · 4 conflicts',
-      '  infra  dynamodb-table@1  CreateTable input  lending/local/tables/fines.json',
-      '  infra  dynamodb-table@1  CreateTable input  lending/local/tables/loans.json',
-      '  infra  cloudformation@2  SAM template, 2 tables  lending/template.yaml',
+      '  infra  dynamodb-table@2  CreateTable input  lending/local/tables/fines.json',
+      '  infra  dynamodb-table@2  CreateTable input  lending/local/tables/loans.json',
+      '  infra  cloudformation@3  SAM template, 2 tables  lending/template.yaml',
       '    note: HoldsTable: its TableName is !Sub ${AWS::StackName}-holds, a reference, not resolved: named by its logical id',
     ], 'graph_data: the repository\'s key-value store, every declaration labelled with its kind and format, the reference noted as unresolved')
     eq(await kq('data', { store: 'lending:dynamodb' }), [
@@ -4150,7 +4193,7 @@ async function indexed() {
     ].join('\n'), 'graph_data store: each table with its keys, indexes, TTL, billing and stream (where two declarations disagree, the first\'s, by kind then path, as for SQL; the conflicts say the rest), citing every declaration')
     eq(await kq('data', { entity: 'loans' }), [
       'lending:dynamodb/loans  table  (dynamodb)',
-      '  declared at lending/local/tables/loans.json:2 [infra dynamodb-table@1] · lending/template.yaml:16 [infra cloudformation@2, LoansTable (AWS::DynamoDB::Table)]',
+      '  declared at lending/local/tables/loans.json:2 [infra dynamodb-table@2] · lending/template.yaml:16 [infra cloudformation@3, LoansTable (AWS::DynamoDB::Table)]',
       '  PAY_PER_REQUEST · no stream',
       'Attributes (5):',
       '  memberId  S  a key of the table  — lending/local/tables/loans.json:4 · lending/template.yaml:21',
@@ -4221,7 +4264,7 @@ async function indexed() {
     mkdirSync(path.dirname(HUGE), { recursive: true })
     writeFileSync(HUGE, `Resources:\n  T:\n    Type: AWS::DynamoDB::Table\n# ${'x'.repeat(2 << 20)}\n`)
     const hidx = await kq('index')
-    ok(hidx.includes('infra/huge.yaml (cloudformation@2): the YAML is larger than 512 KB: not read') && (await kq('status')).includes('extractor failure(s): cloudformation@2 on lending/infra/huge.yaml: the YAML is larger than 512 KB: not read'), `a YAML template past the cap: its job fails with the reason, graph_status says it (${hidx.split('\n').find((l) => l.includes('lending')) || hidx})`)
+    ok(hidx.includes('infra/huge.yaml (cloudformation@3): the YAML is larger than 512 KB: not read') && (await kq('status')).includes('extractor failure(s): cloudformation@3 on lending/infra/huge.yaml: the YAML is larger than 512 KB: not read'), `a YAML template past the cap: its job fails with the reason, graph_status says it (${hidx.split('\n').find((l) => l.includes('lending')) || hidx})`)
     utimesSync(HUGE, new Date(Date.now() + 5000), new Date(Date.now() + 5000))
     const again = await kq('index')
     ok(!/huge\.yaml|data job\(s\) run|failure/.test(again) && (await kq('status')).includes('lending/infra/huge.yaml: the YAML is larger than 512 KB'), `indexed again, unchanged (its mtime moved, its content did not): its failure stands with its hash, the job is not run again (${again.split('\n').find((l) => l.includes('lending'))})`)
@@ -4319,7 +4362,7 @@ async function indexed() {
     const tq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: TFP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const tidx = await tq('index')
     ok(/shop: /.test(tidx) && !tidx.includes('failure'), `index: the module, its configurations and the CreateTable file read, no extractor failure (${tidx.split('\n').find((l) => l.includes('shop')) || tidx})`)
-    eq(await tq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlive/prod/legacy/terragrunt.hcl\tterraform@2\nlocal/tables/orders.json\tdynamodb-table@1\nmodules/kv-tables\tterraform@2',
+    eq(await tq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlive/prod/legacy/terragrunt.hcl\tterraform@2\nlocal/tables/orders.json\tdynamodb-table@2\nmodules/kv-tables\tterraform@2',
       'found by content: the module folder (its job reads every HCL file), the configuration whose module is out of reach, the CreateTable file; the root, the stage file and the other configurations are inputs, no jobs')
     const SH = 'shop/live/prod/tables/terragrunt.hcl', MT = 'shop/modules/kv-tables/main.tf', OJ = 'shop/local/tables/orders.json'
     eq((await tq('data')).split('\n').slice(1), [
@@ -4329,7 +4372,7 @@ async function indexed() {
       `  infra  terraform@2  Terraform module modules/kv-tables through Terragrunt, 3 tables  ${SH}`,
       '    note: prod-shop-audit: range_key is unknown (dependency.search: another configuration\'s output, known only once it is applied)',
       '    note: prod-shop-audit: its attribute blocks are unknown (dependency.search: another configuration\'s output, known only once it is applied)',
-      `  infra  dynamodb-table@1  CreateTable input  ${OJ}`,
+      `  infra  dynamodb-table@2  CreateTable input  ${OJ}`,
     ], 'graph_data: one key-value store for the repository, the Terraform module\'s instance beside the CreateTable file; the remote module found, not read; the unknown input noted')
     eq(await tq('data', { store: 'shop:dynamodb' }), [
       'shop:dynamodb  dynamodb  3 tables · 3 GSIs · 2 conflicts',
@@ -4339,7 +4382,7 @@ async function indexed() {
     ].join('\n'), 'graph_data store: a table per for_each key, named from the inputs merged through the includes, each citing its entry in the inputs and the module\'s resource')
     eq(await tq('data', { entity: 'prod-shop-orders' }), [
       'shop:dynamodb/prod-shop-orders  table  (dynamodb)',
-      `  declared at ${SH}:22 [infra terraform@2, aws_dynamodb_table.table["orders"]] · ${MT}:2 [infra terraform@2, the resource in modules/kv-tables] · ${OJ}:2 [infra dynamodb-table@1]`,
+      `  declared at ${SH}:22 [infra terraform@2, aws_dynamodb_table.table["orders"]] · ${MT}:2 [infra terraform@2, the resource in modules/kv-tables] · ${OJ}:2 [infra dynamodb-table@2]`,
       '  PAY_PER_REQUEST · stream NEW_AND_OLD_IMAGES',
       'Attributes (5):',
       `  customer_id  S  a key of the table  — ${SH}:23 · ${MT}:10 · ${OJ}:5`,
@@ -4388,7 +4431,7 @@ async function indexed() {
     symlinkSync(OUTSIDE, path.join(TFP, 'shop/modules/kv-tables/zz.auto.tfvars'))
     const bidx = await tq('index')
     const blist = await tq('data')
-    ok(blist.includes('    note: modules/kv-tables/terraform.tfvars.json does not parse: not valid JSON at line 2') && blist.includes('  dynamodb-table@1 on shop/local/tables/broken.json: not valid JSON at line 4'),
+    ok(blist.includes('    note: modules/kv-tables/terraform.tfvars.json does not parse: not valid JSON at line 2') && blist.includes('  dynamodb-table@2 on shop/local/tables/broken.json: not valid JSON at line 4'),
       `graph_data: the broken files at their line, none of their text (${blist.split('\n').filter((l) => /broken|tfvars|link/.test(l)).join(' | ')}; index: ${bidx.split('\n').find((l) => l.includes('shop'))})`)
     ok(!blist.includes('leaked') && (await tq('data', { store: 'shop:dynamodb' })).includes('  prod-shop-orders  table'), 'the link not followed: what the outside file says sets nothing')
     const stored2 = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).map((f) => readFileSync(path.join(GD, f)).toString('latin1'))

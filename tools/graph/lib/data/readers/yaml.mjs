@@ -6,8 +6,11 @@
 //   readYaml(parser, text) → [{ value, lines: Map(pathKey → line), line }]   one per document
 //   lineAt(lines, path, fallback) → the line of `path`, else of its nearest ancestor that has one
 //   tagOf(v) → '!Ref' for a value kept under a tag of its own, else null
-// Throws when the text does not parse (with the line of its first error), on an alias to no anchor,
-// and past MAX_NODES values (aliases and merges counted at their full size).
+//   flowIndented(text) → the text with its flow collections' lines indented past their key, or null
+// Throws when the text does not parse (with the line it breaks at, errorLine), on an alias to no
+// anchor, and past MAX_NODES values (aliases and merges counted at their full size). A text the
+// grammar refuses only for a flow collection's line at or left of its key's column (YAML takes it)
+// is read as if that line were indented past it (flowIndented): the same values, the same lines.
 //
 // Values, by the core schema: mappings → objects (keys as strings, a later duplicate wins; `<<`
 // merges a mapping or a list of them, the mapping's own keys first), sequences → arrays, plain
@@ -49,15 +52,26 @@ export function readYaml(parser, text, { deadline = Date.now() + READ_MS } = {})
   if (text.length > YAML_MAX) throw new Error(`the YAML is larger than ${YAML_MAX >> 10} KB: not read`)
   const budget = { count: 0, ticks: 0, deadline }
   if (Date.now() > deadline) throw late()
-  const tree = parser.parse(text)
+  let src = text, tree = parser.parse(text)
   try {
-    const bad = firstError(tree.rootNode)
-    if (bad) throw new Error(`the YAML does not parse at line ${bad.startPosition.row + 1}`)
+    // a text the grammar refuses for a flow collection's line left of its block parent is parsed
+    // again with those lines indented (flowIndented): the same lines, the same values
+    if (tree.rootNode.hasError) {
+      const fixed = flowIndented(text)
+      if (fixed !== null) {
+        if (Date.now() > deadline) throw late()
+        const again = parser.parse(fixed)
+        tree.delete()
+        tree = again, src = fixed
+      }
+    }
+    const bad = errorLine(tree.rootNode, src)
+    if (bad) throw new Error(`the YAML does not parse at line ${bad}`)
     const docs = []
     for (const d of kids(tree.rootNode, budget)) {
       if (d.type !== 'document') continue
       const body = kids(d, budget).find((c) => c.type === 'block_node' || c.type === 'flow_node') || null
-      const r = new Reader(text, budget)
+      const r = new Reader(src, budget)
       docs.push({ value: r.node(body, [], 0), lines: r.lines, line: (body || d).startPosition.row + 1 })
     }
     return docs
@@ -74,16 +88,131 @@ function kids(n, budget) {
 }
 const lineOf = (n) => n.startPosition.row + 1
 
-function firstError(root) {
-  if (!root.hasError) return null
+// The line a text that does not parse breaks at (0 when it parses). The grammar recovers by
+// wrapping what it could read, from the text's first token, in one ERROR node, the root itself,
+// and dropping the rest of the text: that node starts at the first line whatever is wrong, so the
+// line is that of the first token after it (comments and blanks skipped), or its own last line when
+// nothing follows (a bracket or a quote never closed). A MISSING node, or an ERROR node further
+// in, is at its own line.
+function errorLine(root, src) {
+  if (!root.hasError) return 0
   const stack = [root]
   while (stack.length) {
     const n = stack.pop()
-    if (n.type === 'ERROR' || n.isMissing) return n
+    if (n.isMissing) return lineOf(n)
+    if (n.type === 'ERROR') return n.parent ? lineOf(n) : lineAfter(n, src)
     const cs = n.children
     for (let i = cs.length - 1; i >= 0; i--) { const c = cs[i]; if (c.hasError || c.isMissing) stack.push(c) }
   }
-  return root
+  return lineAfter(root, src)
+}
+function lineAfter(n, src) {
+  let k = n.endIndex, line = n.endPosition.row + 1
+  while (k < src.length) {
+    const c = src[k]
+    if (c === '\n') { line++; k++ }
+    else if (c === ' ' || c === '\t' || c === '\r') k++
+    else if (c === '#' && (k === 0 || /[ \t\r\n]/.test(src[k - 1]))) { const e = src.indexOf('\n', k); k = e < 0 ? src.length : e }
+    else return line
+  }
+  return n.endPosition.column === 0 && n.endPosition.row > 0 ? n.endPosition.row : n.endPosition.row + 1
+}
+
+// The text with every line that starts inside a flow collection indented past the block node
+// holding the collection, or null when no line needs it or the text cannot be followed to its end
+// (a bracket or a quote left open: the text is then parsed as it is). YAML, and the parsers
+// templates are written against, take a flow collection's lines at any indentation, its closing
+// bracket at its key's column included:
+//     Policies: [
+//       DynamoDBCrudPolicy: { TableName: !Ref CartTable }
+//     ]
+// The grammar wants each of them right of that key's column (or of a `- ` item's), and fails the
+// whole text otherwise. Raising a line's indentation inside a flow collection changes no value
+// (indentation means nothing there, and a line folded into a scalar loses its leading blanks); a
+// line that starts inside a quoted scalar is left alone. Only blanks before a line's first character
+// change: every line stays where it is, so each member keeps its line. Read only once the text has
+// failed to parse, in one linear scan: comments, quoted scalars (across lines) and block scalars are
+// stepped over, and a `[` or `{` opens a collection only where a node starts (never inside a plain
+// scalar, `a[0]: x`).
+export function flowIndented(text) {
+  const n = text.length
+  const fix = [] // [lineStart, firstCharacter, column]
+  const flow = [] // the open flow collections: the column of the block node holding the outermost
+  let quote = null, blockAt = null, fstart = true, ls = 0, e = 0
+  const blank = (c) => c === ' ' || c === '\t' || c === '\r'
+  const ends = (k) => k >= e || blank(text[k]) // a blank or the end of the line at k
+  const quoted = (k) => { // in a quote at k → past its closing quote, or the line's end (quote stays open)
+    while (k < e) {
+      const c = text[k]
+      if (quote === "'") { if (c === "'") { if (text[k + 1] === "'") { k += 2; continue } quote = null; return k + 1 } k++ }
+      else if (c === '\\') k += 2
+      else if (c === '"') { quote = null; return k + 1 }
+      else k++
+    }
+    return e
+  }
+  const token = (k) => { while (k < e && !blank(text[k]) && !'[]{},'.includes(text[k])) k++; return k } // a tag, an anchor, an alias
+  const inFlow = (k) => { // inside a flow collection at k → where it closes on this line, else the line's end
+    while (k < e) {
+      const c = text[k]
+      if (blank(c)) { k++; continue }
+      if (c === '#' && (k === ls || blank(text[k - 1]))) return e
+      if (c === '[' || c === '{') { flow.push(flow[0]); fstart = true; k++ }
+      else if (c === ']' || c === '}') { flow.pop(); fstart = false; k++; if (!flow.length) return k }
+      else if (c === ',' || c === ':' || c === '?') { fstart = true; k++ }
+      else if ((c === '"' || c === "'") && fstart) { quote = c; fstart = false; k = quoted(k + 1); if (quote) return e }
+      else if ((c === '!' || c === '&') && fstart) k = token(k)
+      else { fstart = false; k++ }
+    }
+    return e
+  }
+  const inBlock = (k, owner, start, at) => { // block context at k: owner, the column of the block node a value here belongs to
+    while (k < e) {
+      const c = text[k]
+      if (blank(c)) { k++; continue }
+      if (c === '#' && (k === ls || blank(text[k - 1]))) return
+      if (!start) { if (c === ':' && ends(k + 1)) { owner = at; start = true } k++; continue } // after a node: its key indicator, or nothing that matters
+      if ((c === '-' || c === '?' || c === ':') && ends(k + 1)) { owner = k - ls; k++; continue }
+      if (c === '-' && k === ls && text.startsWith('---', k) && ends(k + 3)) { owner = -1; k += 3; continue }
+      if (c === '!' || c === '&') { k = token(k); continue }
+      at = k - ls
+      if (c === '[' || c === '{') { flow.push(owner); fstart = true; k = inFlow(k + 1); if (flow.length) return; start = false; continue }
+      if (c === '"' || c === "'") { quote = c; k = quoted(k + 1); if (quote) return; start = false; continue }
+      if (c === '|' || c === '>') { blockAt = owner; return }
+      if (c === '*') { k = token(k); start = false; continue }
+      // a plain scalar: to a key indicator (then a value starts), a comment, or the line's end
+      while (k < e && !(text[k] === ':' && ends(k + 1)) && !(text[k] === '#' && blank(text[k - 1]))) k++
+      start = false
+    }
+  }
+  while (ls <= n) {
+    e = text.indexOf('\n', ls)
+    if (e < 0) e = n
+    let j = ls
+    while (j < e && blank(text[j])) j++
+    const empty = j === e
+    if (quote) {
+      const k = quoted(ls)
+      if (!quote) { if (flow.length) { const m = inFlow(k); if (!flow.length) inBlock(m, -1, false, 0) } else inBlock(k, -1, false, 0) }
+    } else if (blockAt !== null && (empty || j - ls > blockAt)) {
+      // a block scalar's content
+    } else if (flow.length) {
+      blockAt = null
+      if (!empty && j - ls <= flow[0]) fix.push([ls, j, flow[0] + 1])
+      const m = inFlow(j)
+      if (!flow.length) inBlock(m, -1, false, 0)
+    } else {
+      blockAt = null
+      if (!empty) inBlock(j, j - ls - 1, true, j - ls)
+    }
+    ls = e + 1
+  }
+  if (quote || flow.length || !fix.length) return null
+  const out = []
+  let at = 0
+  for (const [s, j, col] of fix) { out.push(text.slice(at, s), ' '.repeat(col)); at = j }
+  out.push(text.slice(at))
+  return out.join('')
 }
 
 // own enumerable members only, `__proto__` included as a plain key
