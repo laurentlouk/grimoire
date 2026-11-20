@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Carts: what a shopper keeps between visits, gone a while after the last one
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref CartTable
+
+Resources:
+  CartWritePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CartWrite
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Action: [
+              "dynamodb:PutItem",
+              "dynamodb:UpdateItem",
+              "dynamodb:DeleteItem"
+            ]
+            Resource: !GetAtt CartTable.Arn
+      Roles:
+        - !Ref CartRole
+
+  ListCartFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: list_cart.handler
+      Policies: [
+        DynamoDBReadPolicy: { TableName: !Ref CartTable }
+      ]
+
+  CheckoutFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: checkout.handler
+      Policies: [
+        DynamoDBCrudPolicy: { TableName: !Ref CartTable },  # emptied on checkout
+        SQSSendMessagePolicy: {
+          QueueName: !GetAtt CheckoutQueue.QueueName
+      }
+      ]
+      Events:
+        Checkout:
+          Type: Api
+          Properties: { Path: /cart/checkout, Method: post }
+
+  CartTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: 'NEW_AND_OLD_IMAGES'
+      TimeToLiveSpecification:
+        AttributeName: expirationTime
+        Enabled: True
+
+  CheckoutQueue:
+    Type: AWS::SQS::Queue

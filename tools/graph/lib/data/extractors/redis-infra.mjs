@@ -90,7 +90,7 @@ function settle(x, conf, img) {
 
 export default {
   id: 'redis-infra',
-  version: 1,
+  version: 2,
   kind: 'infra',
   scope: 'unit',
   wants: (p) => wantsTf(p) || COMPOSE.test(p) || DOC.test(p),
