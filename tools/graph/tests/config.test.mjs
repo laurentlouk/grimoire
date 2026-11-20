@@ -64,6 +64,28 @@ console.log('\n1 · lexical readers: comments, declaration files, hand-parsed co
   ok(props.filter((r) => r.role === 'declare').map((r) => r.key).join(' ') === 'a.b.c d.e' && props.some((r) => r.role === 'map' && r.key === 'a.b.c' && r.srcKey === 'DB_HOST') && !JSON.stringify(props).includes('canary'), 'application.properties: keys, a ${PLACEHOLDER} as a mapping, no value')
   const yml = configOfDecl('application.yml', 'spring:\n  datasource:\n    url: ${DATABASE_URL}\n    pool: 4\nserver:\n  port: 8080\n')
   ok(yml.filter((r) => r.role === 'declare').map((r) => r.key).join(' ') === 'spring.datasource.url spring.datasource.pool server.port' && yml.some((r) => r.role === 'map' && r.srcKey === 'DATABASE_URL'), 'application.yml: nested keys by dotted path, placeholders mapped')
+  // a multi-line value's lines are its text, never keys: a properties continuation, a YAML quoted
+  // scalar, an env template's quoted value (a PEM key)
+  const keysOf = (rows) => rows.filter((r) => r.role === 'declare').map((r) => `${r.key}:${r.line}`).join(' ')
+  const pc = configOfDecl('application.properties', 'jwt.key=MIIBIjANBgkqhkiG9w0BAQEFAAOC\\\n   canarysec18chunk==\nother.value=first\\\n  canarysec19: second\\\\\nnext.key=${NEXT:x}\\\n  ${CONT_VAR}\n# a comment\\\nafter.comment=1\nodd=a\\\\\\\r\n  canarysec20=x\nlast=1\n')
+  ok(keysOf(pc) === 'jwt.key:1 other.value:3 next.key:5 after.comment:8 odd:9 last:11' && !/canary/.test(JSON.stringify(pc)) && pc.some((r) => r.role === 'map' && r.key === 'next.key' && r.srcKey === 'CONT_VAR'), `application.properties: a line ending in an odd number of backslashes goes on, its next lines no keys (an even number does not; a comment never does); a placeholder on them still maps the key (${keysOf(pc)})`)
+  const yq = configOfDecl('application.yml', 'spring:\n  datasource:\n    multi: "first part\n      canarysec23: rest \\" still\n      canarysec24: x"\n    single: \'it\'\'s\n      canarysec25: y\'\n    plain: "closed" # c\n    after: 1\n  items:\n    - "an item\n      canarysec26: z"\n  tail: 2\n')
+  ok(keysOf(yq) === 'spring.datasource.multi:3 spring.datasource.single:6 spring.datasource.plain:8 spring.datasource.after:9 spring.tail:13' && !/canary/.test(JSON.stringify(yq)), `application.yml: a quoted scalar's lines up to its closing quote are its text (an escaped \\" and a doubled '' inside), never keys (${keysOf(yq)})`)
+  const cq = configOfDecl('compose', 'services:\n  a:\n    environment:\n      - "ONE=first\n        canarysec27: x"\n      - TWO\n  b:\n    environment:\n      THREE: "a\n        CANARY_SEC_28: b"\n      FOUR: 1\n')
+  ok(cq.map((r) => r.key).join(' ') === 'ONE TWO THREE FOUR' && !/canary/i.test(JSON.stringify(cq)), `compose: the same, in a list and a map (${cq.map((r) => r.key).join(' ')})`)
+  const et = configOfDecl('env template', 'EXAMPLE_KEY=canary-sec-2\nPRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nCanarySec3Base64ChunkNoSlashesHere=\nESC=\\"still inside\n-----END PRIVATE KEY-----"\nSINGLE=\'a\nCANARY_SEC_4=b\'\nAFTER=1\n')
+  ok(et.map((r) => `${r.key}:${r.line}`).join(' ') === 'EXAMPLE_KEY:1 PRIVATE_KEY:2 SINGLE:6 AFTER:8' && !/canary/i.test(JSON.stringify(et)), `env template: a quoted value's lines up to its closing quote are its text (a PEM key), never names (${et.map((r) => r.key).join(' ')})`)
+  // linear: openers left unclosed, or nested deep, cost the file's length once (lex.mjs matchTable)
+  for (const [what, src, rel] of [['registerAs', "registerAs('a', () => {".repeat(21000), 'src/cfg.js'], ['a config factory', `process.env.A\n${'export default () => {'.repeat(22000)}`, 'src/config.js'], ['app.config extra', 'extra: {'.repeat(60000), 'app.config.js'],
+    ['registerAs, closed', `${"registerAs('a', () => {".repeat(20000)}return { k: process.env.X }${'})'.repeat(20000)}`, 'src/cfg.js'], ['extra, closed', `${'extra: {'.repeat(50000)}a: process.env.Y${'}'.repeat(50000)}`, 'app.config.js']]) {
+    const t1 = Date.now()
+    const rows = configOfCode('javascript', 'js', rel, src, [])
+    ok(Date.now() - t1 < 2000 && rows.length <= 5000, `configOfCode: ${what} × thousands (${src.length >> 10} KB) in ${Date.now() - t1} ms (< 2 s), ${rows.length} rows`)
+  }
+  const { matchTable, closing } = await import('../lib/lex.mjs')
+  const lexSrc = 'a({ b: [1, "]", `}`], c: { d: (e) } }) ( [ } ] { x }'
+  const mt = matchTable(lexSrc)
+  ok([...lexSrc].every((c, i) => !'([{'.includes(c) || mt[i] === closing(lexSrc, i)), 'matchTable: every opener\'s match is what closing finds by scanning (strings skipped, a wrong closer leaving the brackets open before it unmatched)')
   // which files may be read: an env template, never a .env or another credential file
   const kinds = ['.env.example', 'web/.env.sample', '.env.template', '.env.local.example', 'env-example-relational', 'docker.env.example', '.env', '.env.local', '.env.production', '.env.example.local', 'prod.env', '.envrc', 'credentials.json', '.npmrc', 'docker-compose.yml', 'compose.prod.yaml', '.github/workflows/ci.yml', '.gitlab-ci.yml', 'app.json', 'src/application.properties', 'config/application-dev.yml']
   const got = kinds.map((k) => `${k}=${declKind(k) || '-'}`).join(' ')
@@ -93,6 +115,9 @@ console.log('\n1 · lexical readers: comments, declaration files, hand-parsed co
   const p = parseContract('proto', 'syntax = "proto3";\nimport "a/b.proto";\nservice S { rpc Get(Req) returns (Res); }\nmessage Req { string id = 1 [default = "canary-unit-10"]; message In { int32 x = 1; } }\nenum E { A = 0; }\n')
   ok(p.symbols.map((s) => `${s.kind} ${s.qualname}`).join(', ') === 'interface S, method S.Get, type Req, field Req.id, type Req.In, field Req.In.x, enum E', `protobuf: services, rpcs, messages (nested), fields, enums (${p.symbols.map((s) => `${s.kind} ${s.qualname}`).join(', ')})`)
   ok(p.imports.map((i) => i.source).join() === 'a/b.proto' && !JSON.stringify(p).includes('canary'), 'protobuf: imports kept, no literal\'s text')
+  // a block string's only escape is \""": a lone backslash is literal, so a description never parses as fields
+  const bs = parseContract('graphql', 'type Query {\n  """ path C:\\\\""" canarysec600: Int """\n  f: Int\n  """ a \\ b """ g: Int\n  """\n  x\\\n  y\n  """\n  h: Int\n}\n')
+  ok(bs.symbols.map((s) => `${s.qualname}:${s.line}`).join(' ') === 'Query:1 Query.f:3 Query.g:4 Query.h:9' && !/canarysec/.test(JSON.stringify(bs)), `GraphQL: \\""" inside a block string escapes, any other backslash is literal; the lines after one are counted (${bs.symbols.map((s) => `${s.qualname}:${s.line}`).join(' ')})`)
   // linear and capped: a hostile file parses in its length
   const t0 = Date.now()
   parseContract('graphql', `type T { ${'a: [[[[[['.repeat(20000)} }`)

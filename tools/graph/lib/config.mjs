@@ -27,7 +27,7 @@
 // parse), node_id (the innermost definition holding the line, else the file), key, kind (env |
 // config), role (read | declare | map), src_key (a mapping's source key), via, line.
 import path from 'node:path'
-import { masked, lineAt, closing, objectLeaves } from './lex.mjs'
+import { masked, lineAt, closing, objectLeaves, matchTable } from './lex.mjs'
 import { SECRETISH } from './reach.mjs'
 import { skipped } from './project.mjs'
 
@@ -125,14 +125,24 @@ export function configOfCode(lang, family, rel, src, symbols) {
   }
   for (const r of reads) { const line = at(r.off); out.push({ key: r.key, kind: r.kind, role: 'read', srcKey: null, via: r.via, line, src: inner(line) }) }
   if (family === 'js') {
+    // Bounded: every bracket matched once for the file (lex.mjs matchTable), so an opener left unclosed
+    // costs a lookup, not a scan to the end of the file; the factories' bodies searched for their
+    // `return` within a budget of a few times the file's length; the rows capped as they are made.
+    let table = null
+    const T = () => (table ||= matchTable(m))
+    let budget = 4 * m.length + 4096
+    const envReads = reads.filter((r) => r.kind === 'env').sort((a, b) => a.off - b.off)
+    const firstAt = (off) => { let lo = 0, hi = envReads.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (envReads[mid].off < off) lo = mid + 1; else hi = mid } return lo }
     // the leaves of a config object: declared under its namespace, mapped from the env reads in them
     const leavesOf = (open, ns, via) => {
-      for (const leaf of objectLeaves(m, open)) {
+      if (out.length >= MAX_ROWS) return
+      for (const leaf of objectLeaves(m, open, { table: T() })) {
+        if (out.length >= MAX_ROWS) return
         const key = [ns, ...leaf.path].filter(Boolean).join('.')
         if (!PATH_KEY.test(key)) continue
         const line = at(leaf.at)
         out.push({ key, kind: 'config', role: 'declare', srcKey: null, via, line, src: inner(line) })
-        for (const r of reads) if (r.kind === 'env' && r.off >= leaf.from && r.off < leaf.to) out.push({ key, kind: 'config', role: 'map', srcKey: r.key, via, line: at(r.off), src: inner(at(r.off)) })
+        for (let k = firstAt(leaf.from); k < envReads.length && envReads[k].off < leaf.to; k++) { const r = envReads[k]; out.push({ key, kind: 'config', role: 'map', srcKey: r.key, via, line: at(r.off), src: inner(at(r.off)) }) }
       }
     }
     // the object a factory returns: `() => ({ … })`, or the last `return { … }` of `() => { … }`
@@ -142,8 +152,8 @@ export function configOfCode(lang, family, rel, src, symbols) {
       let i = from + f[0].length
       if (m[i] === '(') { i++; while (/\s/.test(m[i] || '')) i++; return m[i] === '{' ? i : -1 }
       if (m[i] !== '{') return -1
-      const end = closing(m, i)
-      if (end < 0) return -1
+      const end = closing(m, i, m.length, T())
+      if (end < 0 || (budget -= end - i) < 0) return -1
       let open = -1
       for (const r of m.slice(i, end).matchAll(/\breturn\s*\(?\s*\{/g)) open = i + r.index + r[0].length - 1
       return open
@@ -153,8 +163,9 @@ export function configOfCode(lang, family, rel, src, symbols) {
     if (/config/i.test(rel)) for (const x of m.matchAll(/\bexport\s+default\s+/g)) { const o = returned(x.index + x[0].length); if (o >= 0) leavesOf(o, '', 'config factory') }
     if (/(^|\/)app\.config\.(ts|js|mjs|cjs)$/.test(rel)) for (const x of m.matchAll(/\bextra\s*:\s*\{/g)) leavesOf(x.index + x[0].length - 1, 'extra', 'app.config')
   }
-  return out.slice(0, 5000)
+  return out.slice(0, MAX_ROWS)
 }
+const MAX_ROWS = 5000
 
 // pydantic settings: a class deriving from BaseSettings, its annotated fields read from the
 // environment by their upper-cased name after env_prefix (`Field(env=…)`, `alias=…` or
@@ -207,14 +218,35 @@ export function declKind(rel) {
 // The declaration files of a repository's file list (the graph's skips applied).
 export function configDeclPaths(rels, project) { return rels.filter((p) => declKind(p) && !skipped(p, project)) }
 
+// A quoted value that the line does not close: its quote, else null. YAML's (and a shell's) rules: in
+// double quotes a backslash escapes the next character; in single quotes `''` is a quote (YAML; a
+// shell's single quotes have no escape, and `''` then closes and reopens: open either way).
+export function openQuote(v) {
+  const q = v[0]
+  if (q !== '"' && q !== "'" && q !== '`') return null
+  return quoteEnd(v, 1, q) < 0 ? q : null
+}
+// the offset past the closing quote q in s from `from`, else -1
+function quoteEnd(s, from, q) {
+  for (let i = from; i < s.length; i++) {
+    const c = s[i]
+    if (q === '"' && c === '\\') { i++; continue }
+    if (c === q) { if (q === "'" && s[i + 1] === "'") { i++; continue } return i + 1 }
+  }
+  return -1
+}
+
 // YAML read line by line, lexically: [{ line, indent, key, rest, item }]: block scalars' content,
-// comments and blank lines skipped. `key` null for a list item without one.
+// the lines a quoted scalar continues on (`k: "first\n  more: text"`), comments and blank lines
+// skipped. `key` null for a list item without one.
 function yamlLines(text) {
   const out = []
   const lines = text.split('\n')
   let block = -1 // the indent of the key a block scalar belongs to: deeper lines are its content
+  let quote = null // the quote a scalar left open: the lines up to its close are its text
   for (let i = 0; i < lines.length && i < 100_000; i++) {
     const l = lines[i].replace(/\r$/, '')
+    if (quote) { if (quoteEnd(l, 0, quote) >= 0) quote = null; continue }
     if (!l.trim() || /^\s*#/.test(l)) continue
     const indent = /^\s*/.exec(l)[0].length
     if (block >= 0) { if (indent > block) continue; block = -1 }
@@ -224,7 +256,9 @@ function yamlLines(text) {
     const kv = /^["']?([A-Za-z_$][\w.$-]{0,200})["']?\s*:(?:\s+(.*)|$)/.exec(body)
     const at = item ? item[1].length + 2 : indent
     out.push({ line: i + 1, indent: at, key: kv ? kv[1] : null, rest: kv ? (kv[2] || '') : body, item: !!item })
-    if (kv && /^[|>][-+0-9]*\s*(#.*)?$/.test(kv[2] || '')) block = indent
+    const v = (kv ? kv[2] || '' : item ? body : '').trim()
+    if (/^[|>][-+0-9]*\s*(#.*)?$/.test(v)) block = indent
+    else quote = openQuote(v)
   }
   return out
 }
@@ -249,7 +283,15 @@ export function configOfDecl(kind, text) {
   const out = []
   const decl = (key, line, k = 'env') => { if ((k === 'env' ? ENV_KEY : PATH_KEY).test(key)) out.push({ key, kind: k, role: 'declare', srcKey: null, via: kind, line }) }
   if (kind === 'env template') {
-    text.split('\n').forEach((l, i) => { const x = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]{0,99})\s*=/.exec(l); if (x) decl(x[1], i + 1) })
+    // a quoted value may span lines (a PEM key): the lines up to its closing quote are its text
+    let quote = null
+    text.split('\n').forEach((l, i) => {
+      if (quote) { if (quoteEnd(l, 0, quote) >= 0) quote = null; return }
+      const x = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]{0,99})\s*=[ \t]*/.exec(l)
+      if (!x) return
+      decl(x[1], i + 1)
+      quote = openQuote(l.slice(x[0].length).replace(/\r$/, ''))
+    })
     return out
   }
   if (kind === 'app.json') {
@@ -271,9 +313,21 @@ export function configOfDecl(kind, text) {
     return out
   }
   if (kind === 'application.properties') {
-    text.split('\n').forEach((l, i) => {
+    // a line ending in an odd number of backslashes goes on in the next (a comment line never does):
+    // the lines it continues on are its value, never keys (their ${placeholders} still map the key)
+    const continues = (l) => { const m = /\\+$/.exec(l); return !!m && m[0].length % 2 === 1 }
+    let cont = null // the key whose value the next line continues
+    text.split('\n').forEach((raw, i) => {
+      const l = raw.replace(/\r$/, '')
+      if (cont !== null) {
+        if (cont) for (const p of placeholders(l)) if (ENV_NAME.test(p)) out.push({ key: cont, kind: 'config', role: 'map', srcKey: p, via: kind, line: i + 1 })
+        if (!continues(l)) cont = null
+        return
+      }
+      if (/^\s*[#!]/.test(l)) return
       const x = /^\s*([A-Za-z_][\w.-]{0,200})(?:\[\d+\])?\s*[=:]/.exec(l)
-      if (!x || /^\s*[#!]/.test(l)) return
+      if (continues(l)) cont = x ? x[1] : ''
+      if (!x) return
       decl(x[1], i + 1, kindOfKey(x[1]) === 'env' ? 'env' : 'config')
       for (const p of placeholders(l.slice(x[0].length))) if (ENV_NAME.test(p)) out.push({ key: x[1], kind: 'config', role: 'map', srcKey: p, via: kind, line: i + 1 })
     })
