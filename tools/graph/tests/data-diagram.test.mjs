@@ -96,7 +96,10 @@ if (!deps.findDeps()) {
     lacks(kv, 'cart_items(cartId) → carts', 'a refined relation replaces the lead on its column (cart_items.cartId)')
     lacks(kv, 'carts(cartId) → carts', 'a table\'s own key named after it is no link')
     has(kv, '  carts(userId) → shop:db/users(id)  lead: "userId" names user', 'a stub to the SQL store, ending at its primary key')
-    has(kv, '  carts(cartId) ← shop:redis/cart:{cartId}(cartId)  lead: "cartId" names cart', 'a placeholder naming a key-value table ends at its key part of the same name (the sort key)')
+    has(kv, '  carts(cartId) ← shop:redis/cart:{cartId}(cartId)  refined: the cart cache is keyed by the cart\'s id', 'a refine claim may name a key template\'s placeholder as its column (D7): it holds, and replaces the lead')
+    const ks = await q('data', { store: 'shop:redis' })
+    has(ks, '  product:{productId}(productId) → shop:dynamodb/products(id)  lead: "productId" names product', 'graph_data, a key space: a placeholder naming a key-value table is a lead')
+    has(await q('data'), '4 claims hold · 0 drifts', 'every claim holds, the one on a placeholder included')
     has(await q('data', { entity: 'shop:dynamodb/reviews' }), 'Links to other stores (1):\n  reviews(ownerId) → shop:db/users(id)  refined: a review\'s owner is a user of the SQL store', 'graph_data, an entity: its own links')
 
     const page = await renderGraph(loadProject(P))
@@ -165,6 +168,10 @@ if (!deps.findDeps()) {
     const op = await stubPage(await renderGraph(loadProject(P), { base: 'main' }), `#data-${at('shop:dynamodb')}`)
     op.press('data-changes')
     ok(!op.erd() && !!op.ctl('data-kv-overlay'), 'with Changes on, a key-value store draws its cards and says the diagram draws no overlay yet')
+
+    // a claim naming a placeholder the template does not have: drift, never drawn
+    writeFileSync(path.join(P, 'docs/architecture/bad.data.json'), JSON.stringify({ schema: 1, title: 'bad', summary: 's', relations: [{ from: 'shop:redis/cart:{cartId}', columns: ['userId'], to: 'shop:db/users', toColumns: ['id'], why: 'w', sources: ['shop:src/cache.ts:4'] }] }, null, 2))
+    has(await q('data'), 'the column userId is not in shop:redis/cart:{cartId}', 'a claim naming a placeholder the template lacks is drift')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

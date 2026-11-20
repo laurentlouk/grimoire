@@ -62,5 +62,18 @@
       { "text": "Writes a lineage naming the deduced table by its id, backend:sql (inferred, postgres)/orders, with field pairs cited at the upload code and the INSERT", "passed": null, "evidence": "" },
       { "text": "Does not add a stores entry or a type to a described entity for the inferred store", "passed": null, "evidence": "" }
     ]
+  },
+  {
+    "id": 7,
+    "query": "The Data tab draws dotted lines on our DynamoDB diagram: user_likes.like_id points at likes, and nothing links messages.sender_id or the Redis key orbit:{orbit_id} to anything solid. Refine those links.",
+    "should_trigger": true,
+    "expected_output": "Reads graph_data for the store: its Leads, Ambiguous names and Links to other stores. For each lead, reads the code that looks the target up with that attribute (the access patterns, queries and cache commands point to it) before claiming anything. Finds that like_id holds a user's id and writes a relations claim from user_likes(like_id) to the user table, which replaces the wrong lead; confirms messages.sender_id as a reference to the user table found through the lookups, though the name rule missed it; claims the Redis template's placeholder as a column (backend:redis/orbit:{orbit_id}, columns [\"orbit_id\"]) to the orbit table. Every claim cites the line that shows it; runs graph.mjs data check until nothing drifts, and says the store now shows those lines dashed, not dotted.",
+    "expectations": [
+      { "text": "Reads the store's leads, rivals and links from graph_data before writing", "passed": null, "evidence": "" },
+      { "text": "Writes a relations claim to the real target of the wrong lead (like_id to the user table), cited at the code that shows it", "passed": null, "evidence": "" },
+      { "text": "Claims a role-named reference the rule misses (sender_id) only after reading the lookup that uses it", "passed": null, "evidence": "" },
+      { "text": "Names the Redis placeholder as a column of its key template in a relations claim", "passed": null, "evidence": "" },
+      { "text": "Runs graph.mjs data check until no claim drifts", "passed": null, "evidence": "" }
+    ]
   }
 ]

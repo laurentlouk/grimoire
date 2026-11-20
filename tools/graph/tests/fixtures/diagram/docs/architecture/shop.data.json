@@ -26,6 +26,14 @@
       "toColumns": ["id"],
       "why": "a review's owner is a user of the SQL store",
       "sources": ["shop:src/reviews.ts:4"]
+    },
+    {
+      "from": "shop:redis/cart:{cartId}",
+      "columns": ["cartId"],
+      "to": "shop:dynamodb/carts",
+      "toColumns": ["cartId"],
+      "why": "the cart cache is keyed by the cart's id",
+      "sources": ["shop:src/cache.ts:4"]
     }
   ]
 }
