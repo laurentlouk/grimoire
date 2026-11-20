@@ -117,7 +117,7 @@ function readFile(root, file) {
         out.indexes.push({ schema: m[1], keys, unique: o?.k === 'obj' && bool(o.pairs.get('unique')) === true, name: o?.k === 'obj' && o.pairs.has('name') ? str(o.pairs.get('name')) : null, line: lineOf(n) })
       }
     }
-    for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i))
+    for (let cs = n.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push(cs[i])
   }
   const names = new Set(schemaNodes.map(([n]) => n))
   for (const [name, nw] of schemaNodes.slice(0, MAX.schemas)) {

@@ -194,7 +194,7 @@ export function readDrizzleFile(tree, file, { ms = FILE_MS } = {}) {
         const id = p ? (p.type === 'identifier' ? p : field(p, 'pattern')) : null
         if (id?.type === 'identifier') { next = new Map(ps || []); next.set(id.text, acc.param) }
       }
-      for (let i = x.namedChildCount - 1; i >= 0; i--) stack.push([x.namedChild(i), next])
+      for (let cs = x.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push([cs[i], next])
     }
   }
   // a sql template: `${t}` a table, `${t.c}` a column
@@ -350,7 +350,7 @@ export function readDrizzleFile(tree, file, { ms = FILE_MS } = {}) {
     } else if (CLASS[FAM].test(n.type)) c = { ...ctx, cls: field(n, 'name')?.text || '(class)' }
     else if (n.type === 'variable_declarator' && bare(field(n, 'value'))?.type === 'object' && field(n, 'name')?.type === 'identifier') c = { ...ctx, obj: ctx.fn ? null : field(n, 'name').text }
     else if (n.type === 'pair') { const k = keyText(field(n, 'key')); if (k) c = { ...ctx, pair: ctx.fn ? `${ctx.fn.name}.${k}` : ctx.obj ? `${ctx.obj}.${k}` : k } }
-    for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push([n.namedChild(i), c, n])
+    for (let cs = n.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push([cs[i], c, n])
   }
   if (stopped) note(`the file took more than ${ms / 1000} s to read: the calls after that not read`)
   if (out.sites.length >= MAX.sites) note(`more than ${MAX.sites} query calls: the first ${MAX.sites} read`)

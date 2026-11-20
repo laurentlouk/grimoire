@@ -1241,6 +1241,23 @@ console.log('\n6f · module resolution reads the configs a repository states gua
   ok(readRepoText(H, 'big.json') === null && readRepoText(H, 'big.json', { max: 2 << 20 }) !== null, 'readRepoText: a file past its cap (1 MB by default) is not read at all')
 }
 
+console.log('\n6g · a wide syntax tree is walked in its size: each node\'s children listed in one call')
+{
+  const W = path.join(SANDBOX, 'wide')
+  mkdirSync(path.join(W, 'src'), { recursive: true }); mkdirSync(path.join(W, 'py'), { recursive: true })
+  writeFileSync(path.join(W, 'grimoire.config.json'), '{ "graph": {} }\n')
+  // 440 KB of an unclosed factory (the error recovery leaves one node of 20000 children), a wide
+  // array, a Python import of 20000 names
+  writeFileSync(path.join(W, 'src/config.js'), 'export default () => {'.repeat(20000))
+  writeFileSync(path.join(W, 'src/list.js'), `export const xs = [${'f(),'.repeat(40000)}]\n`)
+  writeFileSync(path.join(W, 'py/imp.py'), `from m import ${Array.from({ length: 20000 }, (_, i) => `n${i}`).join(', ')}\n`)
+  git(W, 'init', '-q', '-b', 'main')
+  const t0 = Date.now()
+  const idx = await call('graph_index', {}, { root: W })
+  const ms = Date.now() - t0
+  ok(/Indexed in/.test(idx) && ms < 8000, `indexed in ${ms} ms (< 8 s; a child listed by its index walked the children before it: 17 s for the factory alone)`)
+}
+
 rmSync(SANDBOX, { recursive: true, force: true })
 console.log(`\n${PASS} passed, ${FAIL} failed`)
 process.exit(FAIL ? 1 : 0)

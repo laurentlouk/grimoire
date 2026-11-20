@@ -85,7 +85,7 @@ function readFile(root, file) {
     const n = stack.pop()
     if (n.type === 'ERROR' && out.errors.length < 4) out.errors.push(lineOf(n))
     if (n.type === 'class_declaration' || n.type === 'abstract_class_declaration' || n.type === 'class') { if (out.classes.length < MAX.classes) out.classes.push(readClass(n, file)); continue }
-    for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i))
+    for (let cs = n.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push(cs[i])
   }
   return out
 }

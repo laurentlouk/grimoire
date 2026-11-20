@@ -89,9 +89,10 @@ export const isStr = (n) => n.type === 'string_literal' || n.type === 'raw_strin
 function metas(tt) {
   const out = []
   let cur = null, eq = false
-  for (let i = 0; i < tt.childCount; i++) {
-    const c = tt.child(i)
-    if (i === 0 || i === tt.childCount - 1) { if (/^[([{)\]}]$/.test(c.type)) continue }
+  const cs = tt.children // one call: child(i) walks the children before i
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i]
+    if (i === 0 || i === cs.length - 1) { if (/^[([{)\]}]$/.test(c.type)) continue }
     // a name, or a keyword the grammar keeps as its own token in a token tree (`default`, `crate`, `type`)
     const word = c.type === 'identifier' || c.type === 'self' || c.type === 'crate' || (!c.isNamed && /^[a-z_]+$/.test(c.type) && c.type === c.text)
     if (word) { if (eq && cur) { cur.value = c.text; eq = false } else { cur = { key: c.text }; out.push(cur) } continue }

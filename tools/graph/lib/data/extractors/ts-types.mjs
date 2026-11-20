@@ -87,7 +87,7 @@ function tstype(n, depth = 0) {
 }
 const refName = (n) => (!n ? null : n.type === 'type_identifier' ? n.text : n.type === 'nested_type_identifier' ? n.text.split('.').pop() : n.type === 'generic_type' ? refName(field(n, 'name') || named(n)[0]) : null)
 const propName = (n) => (!n ? null : n.type === 'string' ? strVal(n) : n.type === 'property_identifier' || n.type === 'identifier' || n.type === 'number' ? n.text : null)
-const optional = (n) => { for (let i = 0; i < n.childCount; i++) if (n.child(i).type === '?') return true; return false }
+const optional = (n) => { for (const c of n.children) if (c.type === '?') return true; return false }
 // an object type's or an interface body's data members
 function membersOf(body, depth = 0) {
   const out = []

@@ -19,7 +19,7 @@ const IDENT = /^[\p{L}_$][\p{L}\p{N}_$]*[!?]?$/u
 const KOTLIN_BODY = /^(function_body|class_body|enum_class_body)$/
 // A field's body is its value (`TIMEOUT: int = 60` → `TIMEOUT: int`); a member a framework call
 // declares ends before its block or lambda (`scope :active, -> {…}` → `scope :active`).
-const named = (n) => { const out = []; for (let i = 0; i < n.namedChildCount; i++) out.push(n.namedChild(i)); return out }
+const named = (n) => (n.namedChildren ? n.namedChildren.slice() : Array.from({ length: n.namedChildCount }, (_, i) => n.namedChild(i))) // one call: namedChild(i) walks the children before i
 const bodyOf = (n, kind) => {
   if (kind === 'field') return n.childForFieldName('right') || n.childForFieldName('value')
   if (kind === 'member') { const a = n.childForFieldName('arguments'); return n.childForFieldName('block') || (a && named(a).find((c) => /^(lambda|block|do_block)$/.test(c.type))) || null }
@@ -96,6 +96,7 @@ export function extract(tree, lang, isTestFile, file = null) {
   // ctx: parent = enclosing symbol index (-1 = file), fn = enclosing callable (the caller of a
   // call found here), scopeType = the type an impl/extension block attaches its members to,
   // types = variable → type name, one map per callable scope.
+  const anc = [] // the nodes above the one walked, nearest last
   const walk = (node, ctx) => {
     const t = node.type
     const line = node.startPosition.row + 1
@@ -126,7 +127,7 @@ export function extract(tree, lang, isTestFile, file = null) {
       else if (c && c.qual && spec.bareValues === false && /^[\p{Ll}_][\p{L}\p{N}_]*[!?]?$/u.test(c.qual) && !SELFISH.test(c.qual) && !local(c.qual)) ref({ kind: 'call', name: c.qual, qual: '', qtype: null, line, src: ctx.fn })
     }
     if (!found.length) for (const v of valueSlots(node, !!call)) for (const c of valueNames(v, spec)) value(c)
-    if (spec.tokenCalls && spec.tokenCalls[t]) for (const c of spec.tokenCalls[t](node)) if (IDENT.test(c.name)) ref({ kind: 'call', name: c.name, qual: c.qual, qtype: typed(c.qual, ctx), line, src: ctx.fn })
+    if (spec.tokenCalls && spec.tokenCalls[t]) for (const c of spec.tokenCalls[t](node, anc)) if (IDENT.test(c.name)) ref({ kind: 'call', name: c.name, qual: c.qual, qtype: typed(c.qual, ctx), line, src: ctx.fn })
 
     const d = spec.defs[t]
     let kind = typeof d === 'function' ? d(node) : d || null
@@ -176,7 +177,9 @@ export function extract(tree, lang, isTestFile, file = null) {
       if (sc.super) ref({ kind: 'implements', name: sc.super, qual: '', line, src: -1, fromType: sc.type })
       next = { ...ctx, scopeType: sc.type, scopeOwner: ctx.parent }
     }
-    for (let i = 0; i < node.namedChildCount; i++) walk(node.namedChild(i), next)
+    anc.push(node) // the ancestors, for what looks up (tree-sitter finds a parent from the root: a step up costs the depth)
+    for (const c of node.namedChildren) walk(c, next) // one call for all (namedChild(i) walks the children before i: quadratic on a wide node)
+    anc.pop()
   }
   walk(tree.rootNode, { parent: -1, fn: -1, scopeType: null, scopeOwner: -2, types: new Map(), locals: null })
   return { symbols, refs, imports }

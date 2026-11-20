@@ -23,10 +23,10 @@ export const UNKNOWN = '{…}'
 const MAX_REFS = 2000, MAX_ROUTES = 2000
 export const hashSeg = (s) => createHash('sha1').update(s).digest('hex').slice(0, 12)
 
-const named = (n) => { const out = []; for (let i = 0; i < n.namedChildCount; i++) out.push(n.namedChild(i)); return out }
+const named = (n) => (n.namedChildren ? n.namedChildren.slice() : Array.from({ length: n.namedChildCount }, (_, i) => n.namedChild(i))) // one call: namedChild(i) walks the children before i
 const field = (n, f) => (n ? n.childForFieldName(f) : null)
 const line = (n) => n.startPosition.row + 1
-const hasToken = (n, tok) => { for (let i = 0; i < n.childCount; i++) { const c = n.child(i); if (!c.isNamed && c.type === tok) return true } return false }
+const hasToken = (n, tok) => { for (const c of n.children) if (!c.isNamed && c.type === tok) return true; return false }
 
 // ── literals ──
 const STRINGS_LIST = () => [...STRINGS]
@@ -348,7 +348,7 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     else if (family === 'js' && (t === 'class_declaration' || t === 'abstract_class_declaration')) nestClass(n)
     else if (family === 'js' && (t === 'jsx_self_closing_element' || t === 'jsx_opening_element')) jsxElement(n)
     if (scanNode(n, t)) return
-    for (let i = 0, k = n.namedChildCount; i < k; i++) walk(n.namedChild(i), inner)
+    for (const c of n.namedChildren) walk(c, inner) // one call for all: namedChild(i) is linear in i
   }
 
   // ── JavaScript / TypeScript ──

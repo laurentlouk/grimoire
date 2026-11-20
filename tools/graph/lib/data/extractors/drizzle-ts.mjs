@@ -219,7 +219,7 @@ export function readSchemaFile(tree, file) {
   const root = tree.rootNode
   const out = { file, dialect: null, importLine: null, tables: [], enums: [], schemas: [], creators: [], objects: [], factories: [], customs: [], relations: [], notes: [], error: null }
   const note = (s) => { if (out.notes.length < MAX.notes) out.notes.push(s) }
-  if (root.hasError) { let first = null; const stack = [root]; while (stack.length && first === null) { const x = stack.pop(); if (x.type === 'ERROR' || x.isMissing) first = lineOf(x); else for (let i = x.childCount - 1; i >= 0; i--) if (x.child(i).hasError || x.child(i).isMissing) stack.push(x.child(i)) } out.error = first ?? 1 }
+  if (root.hasError) { let first = null; const stack = [root]; while (stack.length && first === null) { const x = stack.pop(); if (x.type === 'ERROR' || x.isMissing) first = lineOf(x); else for (let cs = x.children, i = cs.length - 1; i >= 0; i--) if (cs[i].hasError || cs[i].isMissing) stack.push(cs[i]) } out.error = first ?? 1 }
   // imports: local → the builder it names; namespaces of a core module; drizzle-orm's relations and sql
   const imported = new Map(), spaces = new Set(), relationsLocal = new Set(), relationsV2 = new Set(), sqlLocal = new Set(['sql'])
   const tops = []

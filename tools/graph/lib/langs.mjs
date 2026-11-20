@@ -31,11 +31,11 @@
 
 const text = (n) => (n ? n.text : '')
 const field = (n, f) => n.childForFieldName(f)
-const named = (n) => { const out = []; for (let i = 0; i < n.namedChildCount; i++) out.push(n.namedChild(i)); return out }
+const named = (n) => (n.namedChildren ? n.namedChildren.slice() : Array.from({ length: n.namedChildCount }, (_, i) => n.namedChild(i))) // one call: namedChild(i) walks the children before i
 const kids = (n, ...types) => named(n).filter((c) => types.includes(c.type))
 const deep = (n, types, out = []) => { for (const c of named(n)) { if (types.includes(c.type)) out.push(c); else deep(c, types, out) } return out }
 const unquote = (s) => s.replace(/^[`'"<]+|[`'">]+$/g, '')
-const hasKeyword = (n, kw) => { for (let i = 0; i < n.childCount; i++) { const c = n.child(i); if (!c.isNamed && c.type === kw) return true } return false }
+const hasKeyword = (n, kw) => { for (const c of n.children) if (!c.isNamed && c.type === kw) return true; return false }
 const prevSibling = (n) => n.previousNamedSibling
 const LEAF = /^(identifier|simple_identifier|type_identifier|field_identifier|property_identifier|constant|name|namespace_identifier|package_identifier|scoped_type_identifier|private_property_identifier)$/
 
@@ -81,8 +81,7 @@ export function bare(n, to = n.endIndex) {
   const src = n.text, from = n.startIndex, out = []
   let at = from
   const visit = (p) => {
-    for (let i = 0; i < p.namedChildCount; i++) {
-      const c = p.namedChild(i)
+    for (const c of p.namedChildren) {
       if (c.startIndex >= to) return false
       if (LITERAL.has(c.type)) { out.push(src.slice(at - from, c.startIndex - from), hide(c)); at = c.endIndex }
       else if (/comment$/.test(c.type)) { out.push(src.slice(at - from, c.startIndex - from)); at = c.endIndex; while (at < to && /[ \t]/.test(src[at - from])) at++ }
@@ -229,13 +228,17 @@ const jsxCallee = (n) => {
 }
 // What a wrapper wraps: `memo(Button)`, `withTheme(Card)`, `styled(View)`, `connect(…)(Screen)`: the
 // wrapped definition renders what it wraps, a call the syntax holds no call node for.
-const wrappedArgs = (n) => {
-  const call = n.parent
+// anc: the walker's ancestors of n, nearest last (extract.mjs): a step up is a lookup there, where
+// tree-sitter's `parent` searches from the root (a nest of calls would cost the square of its depth).
+const wrappedArgs = (n, anc = null) => {
+  let k = anc ? anc.length : 0
+  const parentOf = (x) => (anc ? (k > 0 ? anc[--k] : null) : x.parent)
+  const call = parentOf(n)
   if (!call || call.type !== 'call_expression' || !same(field(call, 'arguments'), n)) return []
-  let up = call
-  while (up.parent && up.parent.type === 'call_expression') up = up.parent
-  while (up.parent && /^(satisfies_expression|as_expression|parenthesized_expression)$/.test(up.parent.type)) up = up.parent
-  const owner = up.parent
+  let up = call, p = parentOf(up)
+  while (p && p.type === 'call_expression') { up = p; p = parentOf(up) }
+  while (p && /^(satisfies_expression|as_expression|parenthesized_expression)$/.test(p.type)) { up = p; p = parentOf(up) }
+  const owner = p
   const defined = owner && ((owner.type === 'variable_declarator' && same(field(owner, 'value'), up) && wrappedFn(owner)) || (owner.type === 'export_statement' && same(field(owner, 'value'), up) && defaultFn(owner)))
   return defined ? named(n).filter((a) => a.type === 'identifier' && /^\p{Lu}/u.test(a.text)).map((a) => ({ name: a.text, qual: '' })) : []
 }
@@ -291,9 +294,7 @@ const py = {
     import_from_statement: (n) => {
       const mod = field(n, 'module_name')
       const names = []
-      for (let i = 0; i < n.childCount; i++) {
-        if (n.fieldNameForChild(i) !== 'name') continue
-        const c = n.child(i)
+      for (const c of n.childrenForFieldName('name')) { // one call: an index loop walks the children before each
         names.push(c.type === 'aliased_import' ? `${text(field(c, 'alias'))}=${lastSegment(field(c, 'name'))}` : lastSegment(c))
       }
       return [{ source: text(mod), names: names.filter(Boolean) }]

@@ -27,7 +27,7 @@
 // Every list is capped (MAX), so a hostile or generated file stays small in the index.
 export const MAX = { types: 400, fields: 200, fns: 600, per: 40, notes: 8, raw: 120 }
 
-export const named = (n) => { const out = []; for (let i = 0; i < n.namedChildCount; i++) out.push(n.namedChild(i)); return out }
+export const named = (n) => (n.namedChildren ? n.namedChildren.slice() : Array.from({ length: n.namedChildCount }, (_, i) => n.namedChild(i))) // one call: namedChild(i) walks the children before i
 export const field = (n, f) => (n ? n.childForFieldName(f) : null)
 export const lineOf = (n) => n.startPosition.row + 1
 export const endOf = (n) => n.endPosition.row + 1
@@ -43,7 +43,7 @@ export function each(n, visit) {
   while (stack.length) {
     const x = stack.pop()
     if (visit(x) === false) continue
-    for (let i = x.namedChildCount - 1; i >= 0; i--) stack.push(x.namedChild(i))
+    for (let cs = x.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push(cs[i])
   }
 }
 

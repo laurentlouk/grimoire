@@ -13,7 +13,7 @@
 import { calleeOf, lastSegment } from './langs.mjs'
 
 const field = (n, f) => n.childForFieldName(f)
-const named = (n) => { const out = []; for (let i = 0; i < n.namedChildCount; i++) out.push(n.namedChild(i)); return out }
+const named = (n) => (n.namedChildren ? n.namedChildren.slice() : Array.from({ length: n.namedChildCount }, (_, i) => n.namedChild(i))) // one call: namedChild(i) walks the children before i
 const WRAPPERS = /^(Box|Rc|Arc|Pin|Cow|Option|Optional|Ref|RefMut|RefCell|Mutex|RwLock|Nullable|Readonly|Lazy|Weak)$/
 const TYPE_NODE = /(^|_)type$|^(user_type|named_type|nullable_type|optional_type|type_annotation|type_identifier|scoped_type_identifier|qualified_type|reference_type|pointer_type)$/
 const NOT_A_TYPE = /^(array_type|slice_type|map_type|tuple_type|function_type|union_type|dictionary_type|list_type|channel_type|predefined_type|primitive_type|void_type|implicit_type|placeholder_type_specifier)$/
@@ -75,7 +75,7 @@ export function bindingsOf(n, spec) {
   const put = (name, type) => { if (name && type) out.push([varName(name), type]) }
   if (PARAMS.has(n.type)) {
     const names = []
-    for (let i = 0; i < n.childCount; i++) if (n.fieldNameForChild(i) === 'name' && !TYPE_NODE.test(n.child(i).type)) names.push(bound(n.child(i)))
+    for (const c of n.childrenForFieldName('name')) if (!TYPE_NODE.test(c.type)) names.push(bound(c))
     if (!names.length) names.push(bound(field(n, 'pattern') || field(n, 'declarator') || named(n).find((c) => IDENTISH.test(c.type)) || null))
     const type = typeName(field(n, 'type') || named(n).find((c) => TYPE_NODE.test(c.type) && !IDENTISH.test(c.type)))
     for (const nm of names) put(nm, type) // Go: `c, d Bar`
@@ -125,7 +125,7 @@ export function localsOf(n) {
 // A class's fields whose type the syntax states: [[fieldName, TypeName], …] (see the header).
 const FIELD_DECL = new Set(['public_field_definition', 'field_definition', 'field_declaration', 'property_declaration'])
 const SELFISH = /^(this|self)$/
-const hasToken = (n, tok) => { for (let i = 0; i < n.childCount; i++) if (!n.child(i).isNamed && n.child(i).type === tok) return true; return false }
+const hasToken = (n, tok) => { for (const c of n.children) if (!c.isNamed && c.type === tok) return true; return false }
 export function fieldBindings(cls, spec) {
   const out = []
   const put = (name, type) => { if (name && type && /^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(name)) out.push([name, type]) }
