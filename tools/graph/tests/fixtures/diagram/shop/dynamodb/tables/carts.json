@@ -1,0 +1,17 @@
+{
+  "TableName": "carts",
+  "AttributeDefinitions": [
+    { "AttributeName": "userId", "AttributeType": "N" },
+    { "AttributeName": "cartId", "AttributeType": "S" },
+    { "AttributeName": "couponId", "AttributeType": "N" }
+  ],
+  "KeySchema": [
+    { "AttributeName": "userId", "KeyType": "HASH" },
+    { "AttributeName": "cartId", "KeyType": "RANGE" }
+  ],
+  "GlobalSecondaryIndexes": [
+    { "IndexName": "ByCoupon", "KeySchema": [{ "AttributeName": "couponId", "KeyType": "HASH" }], "Projection": { "ProjectionType": "KEYS_ONLY" } }
+  ],
+  "TimeToLiveSpecification": { "AttributeName": "expiresAt", "Enabled": true },
+  "BillingMode": "PAY_PER_REQUEST"
+}

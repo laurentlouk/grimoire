@@ -1,0 +1,16 @@
+{
+  "TableName": "cart_items",
+  "AttributeDefinitions": [
+    { "AttributeName": "cartId", "AttributeType": "S" },
+    { "AttributeName": "lineNo", "AttributeType": "N" },
+    { "AttributeName": "productId", "AttributeType": "S" }
+  ],
+  "KeySchema": [
+    { "AttributeName": "cartId", "KeyType": "HASH" },
+    { "AttributeName": "lineNo", "KeyType": "RANGE" }
+  ],
+  "GlobalSecondaryIndexes": [
+    { "IndexName": "ByProduct", "KeySchema": [{ "AttributeName": "productId", "KeyType": "HASH" }], "Projection": { "ProjectionType": "ALL" } }
+  ],
+  "BillingMode": "PAY_PER_REQUEST"
+}

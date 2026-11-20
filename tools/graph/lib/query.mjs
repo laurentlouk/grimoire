@@ -13,6 +13,7 @@ import { refineModel, refineCheck } from './data/check.mjs'
 import { NOT_DECLARED, sqlFunctions, queryConflicts } from './data/queries.mjs'
 import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, shownName, NO_QUERY, ASSEMBLED } from './data/redis.mjs'
 import { formOf } from './data/readers/redis-cmd.mjs'
+import { modelLinks, LEAD_SAYS } from './data/links.mjs'
 import { docRoots } from './docs.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
@@ -660,7 +661,7 @@ export class Graph {
     if (!hits.length) return `No data store "${spec}". Stores: ${[...model.stores.map((s) => s.id), ...(refine ? refine.stores.map((s) => `${s.id} (refined)`) : [])].join(', ') || 'none'}.`
     if (hits.length > 1) return `"${spec}" names ${hits.length} stores; give one as repo:folder: ${hits.map((s) => s.id).join(', ')}`
     const [st] = hits
-    if (st.dialect === 'redis') return this.redisStore(model, st)
+    if (st.dialect === 'redis') return [this.redisStore(model, st), ...this.linkLines(model, refine, st)].join('\n')
     const out = [`${st.id}  ${st.dialect || 'dialect unknown'}  ${storeSummary(st)}`]
     const kv = st.dialect === 'dynamodb'
     if (st.inferred) {
@@ -685,7 +686,22 @@ export class Graph {
     }
     // the enums a code model declares
     for (const en of st.enums || []) out.push(`  enum ${en.name}  ${en.values.join(' | ')}  ${this.sources(st.repo, en.sources)}`)
+    out.push(...this.linkLines(model, refine, st))
     return out.join('\n')
+  }
+  // ── the links no key states (data/links.mjs): name leads, their rivals, and the links to other
+  // stores (leads, refined relations, lineage), for a store or one of its entities ──
+  linkLines(model, refine, st, e = null) {
+    const L = modelLinks(model, refine ? refine.claims : []).get(st.id)
+    if (!L) return []
+    const mine = (x) => !e || x.from === e.name || x.to === e.name
+    const leads = L.leads.filter(mine), rivals = L.rivals.filter((x) => !e || x.from === e.name), stubs = L.stubs.filter((x) => !e || x.from === e.name)
+    const out = []
+    const col = (c) => (c === null || c === undefined ? '' : `(${c})`)
+    if (leads.length) out.push(`Leads (${leads.length}), from a name ending in id: ${LEAD_SAYS}`, ...leads.map((x) => `  ${x.from}${col(x.column)} → ${x.to}${col(x.toColumn)}  lead: "${x.column}" names ${x.stem}${x.sort ? '; partition key only: the item also needs its sort key' : ''}`))
+    if (rivals.length) out.push(`Ambiguous names (${rivals.length}): several tables share the stem, so no lead`, ...rivals.map((x) => `  ${x.from}${col(x.column)} → ${x.targets.join(' | ')}  (stem ${x.stem})`))
+    if (stubs.length) out.push(`Links to other stores (${stubs.length}):`, ...stubs.map((x) => `  ${x.from}${col(x.column)} ${x.dir === 'out' ? '→' : '←'} ${x.store}/${x.entity}${col(x.toColumn)}  ${x.kind === 'lead' ? `lead: "${x.dir === 'out' ? x.column : x.toColumn}" names ${x.stem}` : x.kind === 'lineage' ? `mirrors · refined${x.why ? `: ${x.why}` : ''}` : `refined${x.why ? `: ${x.why}` : ''}`}`))
+    return out
   }
   dataEntity(model, spec, refine = null) {
     const all = model.stores.flatMap((st) => st.entities.map((e) => [st, e]))
@@ -710,7 +726,7 @@ export class Graph {
     if (hits.length > 1) return `"${spec}" names ${hits.length} entities; give store/entity or repo:store/entity: ${hits.map(([, e]) => e.id).join(', ')}`
     const [[st, e]] = hits
     if (st.inferred) return [this.dataInferredEntity(model, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
-    if (st.dialect === 'redis') return [this.redisEntity(model, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
+    if (st.dialect === 'redis') return [this.redisEntity(model, st, e), ...this.linkLines(model, refine, st, e), ...this.refinedAbout(refine, e.id)].join('\n')
     const kv = st.dialect === 'dynamodb'
     const out = [`${e.id}  ${e.kind}  (${st.dialect || 'dialect unknown'})`, `  declared at ${e.sources.map((s) => `${this.dloc({ repo: st.repo, path: s.path, line: s.line })} [${s.kind} ${s.extractor}${s.as ? `, ${s.as}` : ''}]`).join(' · ')}`]
     if (kv) out.push(`  ${kvTableText(e)}`)
@@ -768,7 +784,7 @@ export class Graph {
       if (g.conflicts.length) out.push(`Conflicts across them (${g.conflicts.length}): each declaration kept`, ...g.conflicts.map((c) => `  ${c.label}  ${c.attr}: ${c.values.map((v) => `${changeVal(c.attr, v.value)} — ${v.sources.map((s) => `${this.dloc(s)} [${s.kind}]`).join(' · ')}`).join(' | ')}`))
       else out.push('Conflicts across them: none')
     }
-    out.push(...this.refinedAbout(refine, e.id))
+    out.push(...this.linkLines(model, refine, st, e), ...this.refinedAbout(refine, e.id))
     return out.join('\n')
   }
 
