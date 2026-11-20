@@ -331,20 +331,32 @@ export const NOT_DECLARED = 'not declared: deduced from the SQL the code sends; 
 // The functions holding a list of SQL calls, one entry per function: `sym(site)` → the code graph's
 // symbol around it ({ key, name, line, callers }: lib/query.mjs symbolAt), else the extractor's name
 // for it. With `entity`, whether each reads or writes that table, else any.
-//   → [{ key, name, repo, path, line, reads, writes, kinds: [statement kinds], lines: [the calls'], callers }]
+// A Drizzle call (data/drizzle.mjs) also says the columns it names on that table and the tables it
+// joins (`cols`, `joins`: names; `open`: a write whose keys code builds).
+//   → [{ key, name, repo, path, line, reads, writes, kinds: [statement kinds], lines: [the calls'], callers, cols, joins, open, calls: [sql | drizzle] }]
 export function sqlFunctions(list, sym, entity = null) {
   const out = new Map()
+  const short = (id) => id.slice(id.lastIndexOf('/') + 1)
   for (const s of list) {
     const g = sym(s) || { key: `${s.repo}\0${s.path}\0${s.fn ?? s.line}`, name: s.fn || '(top level)', line: s.fnLine ?? s.line, callers: null }
-    if (!out.has(g.key)) out.set(g.key, { key: g.key, name: g.name, repo: s.repo, path: s.path, line: g.line, reads: false, writes: false, kinds: [], lines: [], callers: g.callers })
+    if (!out.has(g.key)) out.set(g.key, { key: g.key, name: g.name, repo: s.repo, path: s.path, line: g.line, reads: false, writes: false, kinds: [], lines: [], callers: g.callers, cols: [], joins: [], open: false, calls: [] })
     const f = out.get(g.key)
     if (entity ? s.reads.includes(entity) : s.reads.length) f.reads = true
     if (entity ? s.writes.includes(entity) : s.writes.length) f.writes = true
     for (const k of s.kinds) if (!f.kinds.includes(k)) f.kinds.push(k)
     if (f.lines.length < 5 && !f.lines.includes(s.line)) f.lines.push(s.line)
+    const call = s.call === 'drizzle' ? 'drizzle' : 'sql'
+    if (!f.calls.includes(call)) f.calls.push(call)
+    for (const c of s.columns || []) if ((!entity || c.entity === entity) && f.cols.length < 24 && !f.cols.includes(c.name)) f.cols.push(c.name)
+    for (const j of s.joins || []) { const other = !entity ? j.to : j.from === entity ? j.to : j.to === entity ? j.from : null; if (other && other !== entity && f.joins.length < 8 && !f.joins.includes(short(other))) f.joins.push(short(other)) }
+    if (s.open && (!entity || s.writes.includes(entity))) f.open = true
   }
   return [...out.values()]
 }
+// Where a list of functions' queries come from, in words (graph_data and the page say the same)
+export const queriesFrom = (fns) => { const c = new Set(fns.flatMap((f) => f.calls)); return c.has('drizzle') && c.has('sql') ? 'the SQL and the Drizzle queries in code' : c.has('drizzle') ? 'the Drizzle queries in code' : 'the SQL the code sends' }
+// A function's Drizzle detail: the columns it names, the tables it joins
+export const fnDetail = (f) => [f.cols.length ? `columns ${f.cols.join(', ')}${f.open ? ' (and what code builds)' : ''}` : f.open ? 'columns code builds' : null, f.joins.length ? `joins ${f.joins.join(', ')}` : null].filter(Boolean).join(' · ')
 
 // A deduced store in one line (graph_data and the Data tab say the same).
 export function inferredSummary(st) {
