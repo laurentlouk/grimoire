@@ -20,6 +20,10 @@
 //     keyword arguments, Ruby symbols, credential files, a huge line, JSX text, the diff's parsing
 //  6c. dependency injection: fields typed by their declaration or their constructor (TypeScript, Java,
 //     Python), no self-recursion from a call on a field, a Python bare call never the class's method
+//  6d. fixtures/frame: members a framework declares (Ruby scopes, associations, delegate, accessors,
+//     define_method), annotated fields (a plugin's hooks, a settings class), TypeScript class fields;
+//     functions passed as values (a router's handlers, a queued task, a signal's receiver) as
+//     REFERENCES, followed by impact, callers, test discovery, the diff and the overview
 //  1b-1d (between 1 and 2): which files count and as what, modules and the system map, the page's helpers
 //
 //  Needs the parser runtime (web-tree-sitter + grammars): `npm ci --prefix tools/graph`, or a
@@ -816,7 +820,8 @@ console.log('\n6 · beyond the edges (fixtures/edge): dispatch, unlinked calls, 
   const cs = await imp('createSession')
   has(cs, 'login:3  d1 [import]', 'impact: a linked caller is listed as before')
   has(cs, 'testCreate  function test  test/session.test.ts:3', 'impact: the test on the path')
-  has(cs, 'src/api/routes.ts  :4 reference in register', 'impact: a function passed as a value (a callback) is a mention the edges miss')
+  has(cs, 'register:3  d1 [import] by reference', 'impact: a function passed as a value (a callback) is linked by reference')
+  lacks(cs, 'src/api/routes.ts  :4', '… and so no longer a mention the edges miss')
   has(cs, 'src/jobs/runner.ts  :5 string in run', 'impact: a string key naming it is a mention')
   has(cs, 'config/jobs.yaml  :3 config', 'impact: config naming it is a mention')
   has(cs, 'docs/auth.md  :3 docs', 'impact: docs naming it are a mention')
@@ -938,21 +943,21 @@ console.log('\n6b · beyond the edges: the review\'s cases')
   has(ss, 'res.sendStatus  method  a/lib/response.js:3', 'review: `obj.x = function` is a method of obj')
   has(await rimp('View.render'), 'View.render  method  a/lib/app.js:2', 'review: `X.prototype.y = function` is a method of X')
   const vw = await rimp('View', { repo: 'a' })
-  ok(/a\/lib\/app\.js  .*:6 reference/.test(vw), 'review: a file-level value use (`app.set(\'view\', View)`) is a mention, whatever else the top level calls')
+  has(vw, 'top level:6  d1 [same-file] by reference', 'review: a file-level value use (`app.set(\'view\', View)`) is linked by reference, whatever else the top level calls')
   const nf = await rimp('compileETag')
   has(nf, 'No symbol or file matches', 'review: a name the index does not hold is said so')
   has(nf, 'Its name as text', 'review: … and its mentions are still searched')
   const gt = await rimp('Store.get')
   has(gt, 'a/src/use.ts:6  in viaAny  y.get', 'review: an untyped call beside a typed call to another same-named method is still a possible caller')
   const ld = await rimp('Store.load')
-  has(ld, 'a/src/use.ts  :9 reference in bind', 'review: `const load = store.load`: the use on the declaring line stays')
+  has(ld, 'bind:8  d1 [typed] by reference', 'review: `const load = store.load` on a typed receiver is a reference to the method')
   const sl = await rimp('slugify')
-  has(sl, 'a/src/use.ts  :13 reference in each', 'review: `ns.slugify` qualified by an imported namespace is a use, not a property')
+  has(sl, 'each:12  d1 [import] by reference', 'review: `ns.slugify` qualified by an imported namespace is a reference, not a property')
   lacks(sl, 'secrets.env', 'review: a credential file is never searched')
   lacks(sl, '.git-credentials', 'review: … nor .git-credentials')
   has(sl, 'a/data.json  :1 config', 'review: a huge one-line data file is listed by its file, its line not read')
   const uf = await rimp('Flask.url_for')
-  has(uf, 'a/py/app.py  :6 reference in Flask.setup', 'review: a keyword argument passing a method (`url_for=self.url_for`) is a use, not a local binding')
+  has(uf, 'Flask.setup:5  d1 [same-class] by reference', 'review: a keyword argument passing a method (`url_for=self.url_for`) is a reference, not a local binding')
   const rb = await rimp('User.valid?')
   has(rb, 'a/rb/user.rb  :8 reference in check', 'review: a Ruby symbol naming a method (`&:valid?`) is a use')
   const fu = await rimp('Api.fetchUser')
@@ -1028,6 +1033,106 @@ console.log('\n6c · dependency injection: calls on a field typed by its declara
   const gd = await dq('callers', { symbol: 'get_domain' })
   has(gd, 'Service.get_domain  method  py/svc.py:10  [import]', 'Python: a bare call in a method is the imported module function')
   lacks(gd, '[same-class]', '… never the method itself (no self-recursion)')
+}
+
+// ── 6d · what a framework declares, and functions passed as values ──
+console.log('\n6d · framework members (scopes, associations, annotated fields) and functions passed as values (REFERENCES)')
+{
+  const FR = path.join(SANDBOX, 'frame')
+  cpSync(path.join(HERE, 'fixtures', 'frame'), FR, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+  const commit = (dir, m) => { git(dir, 'add', '-A'); git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m) }
+  for (const r of ['rails', 'py', 'gin', 'web']) { git(path.join(FR, r), 'init', '-q', '-b', 'main'); commit(path.join(FR, r), 'init') }
+  const fq = (tool, args = {}) => call(`graph_${tool}`, args, { root: FR })
+  await fq('index')
+  const answers = []
+  const ask = async (tool, args) => { const a = await fq(tool, args); answers.push(a); return a }
+
+  // Rails: scopes, associations, delegate, accessors and define_method are methods of their class
+  const sa = await ask('symbol', { symbol: 'Story.active' })
+  has(sa, 'Story.active  method  rails/app/models/story.rb:4', 'Ruby: `scope :active, -> {…}` is a method of its class')
+  has(sa, '  scope :active\n', '… its signature ends before the lambda')
+  const ca = await ask('callers', { symbol: 'Story.active' })
+  has(ca, 'HomeController.active  method  rails/app/controllers/home_controller.rb:2  [qualified]', 'Ruby: `Story.active` resolves to the scope, qualified')
+  has(ca, 'Story.recent  method  rails/app/models/story.rb:5  [same-class]', 'Ruby: a bare receiver in a scope\'s lambda (`active.order`) is a call on self')
+  lacks(ca, 'HatsController', 'Ruby: `Hat.active` is not a caller of another class\'s scope')
+  has(await ask('callers', { symbol: 'HomeController.active' }), 'none found', 'Ruby: `Story.active` no longer resolves to a controller\'s action of that name')
+  const hw = await ask('sql', { sql: "SELECT count(*) AS n FROM edges e JOIN nodes s ON s.id = e.src WHERE s.qualname = 'HatsController.index' AND e.kind = 'CALLS'" })
+  ok(/\n0\b/.test(hw), `Ruby: a call qualified by a repository type that declares no such member (\`Hat.active\`, \`Hat.where\`) links to nothing (${hw.split('\n').pop()})`)
+  const ia = await ask('impact', { target: 'Story.active' })
+  has(ia, 'StoryTest.test_hottest  method test  rails/test/models/story_test.rb:2  d2', 'Ruby: the test reaching a scope through a class method')
+  has(ia, 'rails/app/controllers/hats_controller.rb:3  in HatsController.index  Hat.active', '… and `Hat.active` stays a possible caller, never a link')
+  has(await ask('callers', { symbol: 'Story.user' }), 'HomeController.show  method  rails/app/controllers/home_controller.rb:6  [typed]', 'Ruby: `belongs_to :user` is the accessor `story.user` reaches (typed by `Story.find`)')
+  has(await ask('callers', { symbol: 'Story.user_email' }), 'HomeController.show', 'Ruby: `delegate :email, to: :user, prefix: true` defines `user_email`')
+  const rs = await ask('search', { query: 'title_slug' })
+  has(rs, 'Story.title_slug  method  rails/app/models/story.rb:9', 'Ruby: `define_method(:title_slug)` with a literal symbol is a definition')
+  has(await ask('symbol', { symbol: 'User.token' }), 'attr_reader :token', 'Ruby: `attr_reader :token` is a method')
+  has(await ask('symbol', { symbol: 'Story.username' }), 'delegate :username, to: :user', 'Ruby: `delegate :username, to: :user` is a method')
+  const nt = await ask('callers', { symbol: 'Story.normalize_title' })
+  has(nt, 'Passed or stored as a value by', 'Ruby: a callback named by a symbol (`before_save :normalize_title`) is a reference')
+  has(nt, 'Story  class  rails/app/models/story.rb:1  [same-class]', '… from the class body declaring it')
+  has(await ask('status', {}), 'name guesses: 0% of 6 call links', 'Ruby: every call link in the app is resolved by syntax')
+
+  // Python: annotated class attributes are fields; a typed or self call reaches them; overrides dispatch
+  const pf = await ask('symbol', { symbol: 'BasePlugin.order_created' })
+  has(pf, 'BasePlugin.order_created  field  py/shop/plugins/base_plugin.py:5', 'Python: an annotated hook `order_created: Callable[…]` is a field of its class')
+  has(pf, 'order_created: Callable[["…", None], None]', '… its signature literal-free')
+  const po = await ask('callers', { symbol: 'BasePlugin.order_created' })
+  has(po, 'PluginsManager.order_created  method  py/shop/plugins/manager.py:5  [typed]', 'Python: a call on a typed receiver reaches the annotated field')
+  has(po, 'BasePlugin.notify  method  py/shop/plugins/base_plugin.py:8  [same-class]', 'Python: `self.order_created()` reaches it')
+  has(await ask('impact', { target: 'BasePlugin.order_created' }), 'WebhookPlugin.order_created  method  py/shop/plugins/webhook/plugin.py:5  (class WebhookPlugin)', 'Python: a subclass\'s method overriding the hook is listed as an override')
+  const wo = await ask('impact', { target: 'WebhookPlugin.order_created' })
+  has(wo, 'BasePlugin.order_created  field  py/shop/plugins/base_plugin.py:5  (class BasePlugin)', 'Python: … and the hook is the declaration calls may dispatch through')
+  has(wo, 'PluginsManager.order_created:5  d1 [typed]', '… whose callers join the impact')
+  const st = await ask('symbol', { symbol: 'ACCESS_TOKEN_EXPIRE_MINUTES' })
+  has(st, 'Settings.ACCESS_TOKEN_EXPIRE_MINUTES  field  py/app/settings.py:5', 'Python: a settings field `ACCESS_TOKEN_EXPIRE_MINUTES: int = 60` is a symbol')
+  has(st, '  ACCESS_TOKEN_EXPIRE_MINUTES: int\n', '… its signature stops before its value')
+  has(await ask('search', { query: 'ACCESS_TOKEN' }), 'Settings.ACCESS_TOKEN_EXPIRE_MINUTES  field', 'Python: graph_search finds a settings field')
+  has(await ask('symbol', { symbol: 'Settings.SECRET_KEY' }), '  SECRET_KEY: str\n', 'Python: a string default is not in the signature')
+  has(await ask('impact', { target: 'Settings.ACCESS_TOKEN_EXPIRE_MINUTES' }), 'py/app/security.py  :5 reference in expiry', 'Python: a field read through a receiver is a mention, a reference (not prose)')
+
+  // functions passed as values: a route's handler, a queued task, a signal's receiver
+  const fc = await ask('callers', { symbol: 'send_welcome' })
+  has(fc, 'on_user_saved  function  py/app/tasks.py:9  [same-file]', 'Python: `task.delay(…)` is a reference to the task')
+  has(fc, 'queue  function  py/app/signals.py:7  [import]', 'Python: `task.apply_async(…)` on an imported task too')
+  lacks(fc, 'shadow', 'Python: a parameter named like the function is the parameter, never a reference')
+  lacks(fc, 'by_name', 'Python: a string naming it is never a reference')
+  has(await ask('symbol', { symbol: 'send_welcome' }), 'referenced as a value by 2 · tests reaching it 1', 'Python: the test reaching the task through the code queueing it')
+  const fi = await ask('impact', { target: 'send_welcome' })
+  has(fi, 'queue:7  d1 [import] by reference', 'impact: a reference is walked, labelled by reference')
+  has(fi, 'test_queue  function test  py/tests/test_signals.py:4  d2', 'impact: … and the tests on that path')
+  lacks(fi, 'py/app/signals.py  :8', 'mentions: a line a reference explains is not a mention')
+  has(await ask('callers', { symbol: 'on_user_saved' }), 'app/signals.py  file  py/app/signals.py  [import]', 'Python: `signal.connect(handler)` at top level references the handler')
+
+  const al = await ask('symbol', { symbol: 'ArticleList' })
+  has(al, 'referenced as a value by 1 · tests reaching it 1', 'Go: a handler passed to `router.GET` is reached by the test calling the registrar')
+  const ai = await ask('impact', { target: 'ArticleList' })
+  has(ai, 'RegisterArticleRoutes:5  d1 [same-file] by reference', 'Go: the registrar passing it as a value is in the impact')
+  has(ai, 'TestArticles  function test  gin/articles/unit_test.go:5  d2', 'Go: … and so is the test hitting the registrar')
+  has(await ask('callees', { symbol: 'RegisterArticleRoutes' }), 'Functions it passes or stores as a value (by reference):\n  ArticleList', 'callees: the values a function passes are listed apart from its calls')
+  has(await ask('overview', { repo: 'gin' }), 'tests reach 75% of 4 functions', 'overview: test reach follows references (the handlers registered, not the one never registered)')
+
+  // TypeScript: class fields are definitions (fields), literal-free
+  const bx = await ask('symbol', { symbol: 'Box' })
+  has(bx, 'members: size:2, label:3, area:4', 'TypeScript: class fields are members of their class')
+  has(await ask('symbol', { symbol: 'Box.label' }), 'Box.label  field  web/src/box.ts:3\n  label\n', 'TypeScript: a field\'s signature stops before its value')
+
+  // the diff: a changed handler is tested through its registrar; a removed one still registered is a break
+  const edit = (rel, a, b) => { const f = path.join(FR, rel); const t = readFileSync(f, 'utf8'); ok(t.includes(a), `fixture edit applies to ${rel}`); writeFileSync(f, t.replace(a, b)) }
+  edit('gin/articles/routers.go', 'func ArticleList(c *gin.Context) {\n\tc.JSON(200, nil)', 'func ArticleList(c *gin.Context) {\n\tc.JSON(201, nil)')
+  edit('py/app/tasks.py', '@app.task\ndef send_welcome(user_id):\n    return user_id\n', '')
+  const d = await ask('diff', { base: 'HEAD' })
+  has(d, '~ ArticleList  function  gin/articles/routers.go:10  body', 'diff: a handler\'s body change')
+  has(d, 'gin/articles/unit_test.go  (distance 2)', 'diff: the test reaching it through its registrar is a test to run')
+  lacks(d, 'Changed code no test reaches (1', 'diff: … so the handler is not untested')
+  has(d, 'removed send_welcome', 'diff: a removed task')
+  has(d, '- send_welcome  function  (was py/app/tasks.py:5)', 'diff: … read from the base')
+  has(d, 'Risk: high', 'diff: a removed function still queued elsewhere is high risk')
+
+  const leaked = answers.flatMap((a) => a.match(/canary-frame-\d/g) || [])
+  ok(!leaked.length, `6d: no answer quotes a field's or a member's literal (${leaked.length ? [...new Set(leaked)].join(', ') : 'none'})`)
+  const dir = path.join(FR, '.grimoire/graph')
+  const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-frame-\d/g) || []))
+  ok(!bytes.length, `6d: no field default is kept in the index (${bytes.length})`)
 }
 
 rmSync(SANDBOX, { recursive: true, force: true })

@@ -166,16 +166,17 @@ export class Graph {
 
   // ── traversal ──
   // Breadth-first over edges of `kinds`, `dir` = 'in' (who points here) or 'out'. Returns
-  // Map(id → { depth, via: parent id, conf, line }).
+  // Map(id → { depth, via: parent id, conf, line, kind: the edge's }). At one depth a call wins over a
+  // reference, so a definition both calling and naming the target reads as its caller.
   walk(startIds, kinds, dir, depth, strict = false) {
     const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? " AND confidence != 'ambiguous'" : '')
-    const sql = dir === 'in' ? `SELECT src AS id, confidence, line FROM edges WHERE dst = ? AND kind IN (${K}` : `SELECT dst AS id, confidence, line FROM edges WHERE src = ? AND kind IN (${K}`
+    const sql = dir === 'in' ? `SELECT src AS id, confidence, line, kind FROM edges WHERE dst = ? AND kind IN (${K} ORDER BY kind = 'REFERENCES'` : `SELECT dst AS id, confidence, line, kind FROM edges WHERE src = ? AND kind IN (${K} ORDER BY kind = 'REFERENCES'`
     const st = this.db.prepare(sql)
     const seen = new Map(startIds.map((id) => [id, { depth: 0, via: null }]))
     let frontier = startIds
     for (let d = 1; d <= depth && frontier.length; d++) {
       const next = []
-      for (const id of frontier) for (const e of st.all(id)) if (!seen.has(e.id)) { seen.set(e.id, { depth: d, via: id, conf: e.confidence, line: e.line }); next.push(e.id) }
+      for (const id of frontier) for (const e of st.all(id)) if (!seen.has(e.id)) { seen.set(e.id, { depth: d, via: id, conf: e.confidence, line: e.line, kind: e.kind }); next.push(e.id) }
       frontier = next
     }
     return seen
@@ -296,10 +297,12 @@ export class Graph {
       const count = (sql) => this.one(sql, n.id).c
       const cin = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind = 'CALLS'")
       const cout = count("SELECT count(*) c FROM edges WHERE src = ? AND kind = 'CALLS'")
+      const rin = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind = 'REFERENCES'")
       const sup = this.q("SELECT e.kind, d.qualname FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.kind IN ('EXTENDS','IMPLEMENTS')", n.id)
       const sub = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind IN ('EXTENDS','IMPLEMENTS')")
-      const tests = [...this.walk([n.id], ['CALLS'], 'in', 4).keys()].map((id) => this.node(id)).filter((x) => x.is_test && x.id !== n.id)
-      lines.push(`  callers ${cin} · callees ${cout}${sup.length ? ` · ${sup.map((s) => `${s.kind.toLowerCase()} ${s.qualname}`).join(', ')}` : ''}${sub ? ` · subtypes ${sub}` : ''} · tests reaching it ${tests.length}`)
+      // a test reaches it by calls, or through a definition passing it as a value (a route, a handler)
+      const tests = [...this.walk([n.id], ['CALLS', 'REFERENCES'], 'in', 4).keys()].map((id) => this.node(id)).filter((x) => x.is_test && x.id !== n.id)
+      lines.push(`  callers ${cin} · callees ${cout}${rin ? ` · referenced as a value by ${rin}` : ''}${sup.length ? ` · ${sup.map((s) => `${s.kind.toLowerCase()} ${s.qualname}`).join(', ')}` : ''}${sub ? ` · subtypes ${sub}` : ''} · tests reaching it ${tests.length}`)
       return lines.join('\n')
     })].filter(Boolean).join('\n\n')
   }
@@ -311,9 +314,16 @@ export class Graph {
     const out = [t.note].filter(Boolean)
     for (const n of t.hits) {
       const { lines, truncated } = this.tree(n, ['CALLS'], dir, d, !!strict)
+      // a function passed or stored as a value (a route's handler, a task, a signal's receiver): apart
+      // from the calls, one level, since what the value is called through is not in the graph
+      const refs = this.q(`SELECT e.${dir === 'in' ? 'src' : 'dst'} AS id, e.confidence, e.line FROM edges e WHERE e.${dir === 'in' ? 'dst' : 'src'} = ? AND e.kind = 'REFERENCES'${strict ? " AND e.confidence != 'ambiguous'" : ''} ORDER BY e.line LIMIT 40`, n.id).map((e) => ({ ...e, node: this.node(e.id) }))
       out.push(`${dir === 'in' ? 'Callers of' : 'Called by'} ${this.row(n)} — depth ${d}`)
-      out.push(lines.length ? lines.join('\n') : `  none found${dir === 'in' ? ' (dynamic dispatch, callbacks, reflection and cross-repo calls are invisible to the graph: grep the name before concluding it is unused)' : ''}`)
+      out.push(lines.length ? lines.join('\n') : `  none found${dir === 'in' ? (refs.length ? ' (it is passed as a value: see below)' : ' (dynamic dispatch, callbacks, reflection and cross-repo calls are invisible to the graph: grep the name before concluding it is unused)') : ''}`)
       if (truncated) out.push('  … truncated; lower the depth or query a narrower symbol')
+      if (refs.length) {
+        out.push(dir === 'in' ? `Passed or stored as a value by (by reference: it may be called through them, the graph does not see where):` : `Functions it passes or stores as a value (by reference):`)
+        for (const e of refs) out.push(`  ${this.row(e.node, `[${e.confidence}]`)}`)
+      }
     }
     return out.join('\n')
   }
@@ -364,7 +374,7 @@ export class Graph {
     }
     const disp = dispatchStarts(this, hits.filter((h) => h.kind !== 'file'))
     start = [...new Set(start.concat(disp.extra))]
-    const reached = this.walk(start, ['CALLS', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS'], 'in', depth, strict)
+    const reached = this.walk(start, ['CALLS', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS'], 'in', depth, strict)
     const byFile = new Map()
     const tests = []
     for (const [id, info] of reached) {
@@ -411,7 +421,9 @@ export class Graph {
       const f = g[0][0]
       const syms = g.filter(([n]) => n.kind !== 'file').sort((a, b) => a[1].depth - b[1].depth)
       out.push(`  ${this.loc({ ...f, kind: 'file' })}  (distance ${Math.min(...g.map(([, i]) => i.depth))})`)
-      for (const [n, i] of syms.slice(0, 8)) out.push(`    ${n.qualname}:${n.line}  d${i.depth} [${i.conf}]`)
+      for (const [n, i] of syms.slice(0, 8)) out.push(`    ${n.qualname}:${n.line}  d${i.depth} [${i.conf}]${i.kind === 'REFERENCES' ? ' by reference' : ''}`)
+      // the file's top-level code calling it or naming it as a value (`app.get('/', handler)`)
+      for (const [, i] of g.filter(([n, i]) => n.kind === 'file' && (i.kind === 'CALLS' || i.kind === 'REFERENCES')).slice(0, 1)) out.push(`    top level:${i.line}  d${i.depth} [${i.conf}]${i.kind === 'REFERENCES' ? ' by reference' : ''}`)
       if (syms.length > 8) out.push(`    … ${syms.length - 8} more`)
     }
     if (groups.length > 60) out.push(`  … ${groups.length - 60} more files`)

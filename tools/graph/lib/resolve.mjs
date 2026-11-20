@@ -15,7 +15,21 @@
 //   path          an import resolved to a file by its path
 // A name with more candidates than that, on a receiver whose type the repository does not define,
 // or a standard-library method name (COMMON_METHODS) on a receiver whose type the syntax does not
-// state, stays unresolved: most such calls go to the standard library or a dependency.
+// state, stays unresolved: most such calls go to the standard library or a dependency. So does a call
+// qualified by a repository type that declares no member of that name, itself or up its supertypes
+// (`Story.where`, `Hat.active` with no scope of that name): it is inherited from a framework.
+//
+// A field (a class's annotated attribute, a TypeScript field) and a member a framework call declares
+// (Ruby `scope`, `has_many`, `attr_reader`, `delegate`: node via 'framework') are reached only by
+// syntax: a typed, self or type-qualified call (`self.order_created()`, `plugin.order_created()`,
+// `Story.active`, `story.user`), never by a name alone. Their names (`id`, `user`, `order`, `active`)
+// are what every model declares; an untyped `x.id` is no more this class's than another's.
+//
+// REFERENCES: a function or method named as a value (an argument, a property value, an assignment's
+// right side, a return, `task.delay()`), from the definition naming it. Linked only by syntax, with the
+// call's confidences: same-class (`self.on_done`, a Ruby symbol), typed, qualified, import, same-file,
+// same-package; never by a unique or ambiguous name (a bare name in a value position is as often a
+// local or a dependency's as the repository's function).
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { familyOf, COMMON_METHODS } from './langs.mjs'
@@ -23,6 +37,7 @@ import { familyOf, COMMON_METHODS } from './langs.mjs'
 const MAX_AMBIGUOUS = 3
 const IMPLICIT_SELF = new Set(['jvm', 'csharp', 'swift', 'c', 'ruby'])
 const CALLABLE = new Set(['function', 'method', 'constructor'])
+const REFERABLE = new Set(['function', 'method'])
 const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'enum', 'protocol', 'module', 'object', 'type'])
 const SELF = /^(self|this|Self|super|cls|static|\$this|@)$/
 const noExt = (p) => p.replace(/\.[^./]+$/, '')
@@ -30,7 +45,7 @@ const noExt = (p) => p.replace(/\.[^./]+$/, '')
 export function resolveRepo(db, repo, repoAbs) {
   const files = db.prepare('SELECT id, path, lang, node_id FROM files WHERE repo = ?').all(repo)
   const fileById = new Map(files.map((f) => [f.id, { ...f, family: familyOf(f.lang), dir: path.posix.dirname(f.path) }]))
-  const nodes = db.prepare('SELECT n.id, n.file_id, n.kind, n.name, n.parent_id, n.container FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ?').all(repo)
+  const nodes = db.prepare('SELECT n.id, n.file_id, n.kind, n.name, n.parent_id, n.container, n.via FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ?').all(repo)
   const nodeById = new Map(nodes.map((n) => [n.id, n]))
 
   db.prepare('DELETE FROM edges WHERE src IN (SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ?)').run(repo)
@@ -243,7 +258,47 @@ export function resolveRepo(db, repo, repoAbs) {
   const balanced = (t) => { let d = 0; for (const ch of t) { if (ch === '(') d++; else if (ch === ')' && --d < 0) return false } return d === 0 }
   const SELF_CLASS = /^(self\.class|self\.__class__|type\(self\)|this\.constructor)$/ // the class of `self`
   const superCall = (qual, family) => /^super\([^()]*\)$/.test(qual) || (family === 'php' && qual === 'parent')
-  const stats = { calls: 0, resolved: 0 }
+  const stats = { calls: 0, resolved: 0, values: 0, referenced: 0 }
+  // a node and its enclosing definitions: a nested function is named from inside its parent
+  const within = (n, anc) => { for (let c = n; c; c = c.parent_id ? nodeById.get(c.parent_id) : null) if (c.id === anc) return true; return false }
+  // the first rule that matches, and nothing on a name alone
+  const firstRule = (cands, rules) => { for (const [conf, test] of rules) { const hit = cands.filter(test); if (hit.length) return { nodes: hit.slice(0, MAX_AMBIGUOUS), conf: hit.length === 1 ? conf : 'ambiguous' } } return null }
+
+  // A value naming a function or method (REFERENCES): resolved by syntax only, as a call would be.
+  const referenced = (r, from, b) => {
+    const srcNode = nodeById.get(r.src_id)
+    const bound = !r.qual && b.names.get(r.name)
+    if (bound && bound.external) return null
+    const name = bound ? bound.orig : r.name
+    const cands = (byName.get(`${from.family}|${name}`) || []).filter((c) => REFERABLE.has(c.kind) && !(srcNode && c.id === srcNode.id))
+    if (!cands.length) return null
+    const qual = r.qual || ''
+    if (!qual) {
+      return firstRule(cands, [
+        ['import', (c) => bound && bound.files.some((f) => f.id === c.file_id)],
+        // a function of this file: top-level, or nested in the definition naming it
+        ['same-file', (c) => c.file_id === from.id && (!c.parent_id || (srcNode && within(srcNode, c.parent_id) && !CLASSY.has(nodeById.get(c.parent_id)?.kind)))],
+        ['import', (c) => !bound && b.files.has(c.file_id) && !c.parent_id],
+        ['same-package', (c) => fileById.get(c.file_id).dir === from.dir && !c.parent_id && /^(go|jvm|swift|csharp)$/.test(from.family)],
+      ])
+    }
+    const selfType = srcNode ? (CLASSY.has(srcNode.kind) && srcNode.kind !== 'module' ? srcNode : enclosingType(srcNode)) : null
+    if (SELF.test(qual)) { const own = selfType ? membersUp([selfType], cands) : []; return own.length ? { nodes: own.slice(0, MAX_AMBIGUOUS), conf: 'same-class' } : null }
+    if (r.qtype) { const types = classesNamed(from.family, r.qtype); const m = types.length ? membersUp(types, cands) : []; return m.length ? { nodes: m.slice(0, MAX_AMBIGUOUS), conf: 'typed' } : null }
+    const segs = qual.split(/::|\?\.|\.|->|\\/)
+    const q = b.quals.get(segs[0]) || b.quals.get(qual)
+    if (q) {
+      if (q.external) return null
+      const qLast = segs[segs.length - 1]
+      const members = cands.filter((c) => { const p = c.parent_id && nodeById.get(c.parent_id); return p && p.name === qLast && q.files.some((f) => f.id === p.file_id) })
+      if (members.length) return { nodes: members.slice(0, MAX_AMBIGUOUS), conf: 'qualified' }
+      const hit = segs.length === 1 ? inFiles(cands, q.files).filter((c) => !c.parent_id || !CLASSY.has(nodeById.get(c.parent_id)?.kind)) : []
+      return hit.length ? { nodes: hit.slice(0, MAX_AMBIGUOUS), conf: hit.length === 1 ? 'import' : 'ambiguous' } : null
+    }
+    const types = classesNamed(from.family, segs[segs.length - 1])
+    const m = types.length ? membersUp(types, cands) : []
+    return m.length ? { nodes: m.slice(0, MAX_AMBIGUOUS), conf: m.length === 1 || types.length === 1 ? 'qualified' : 'ambiguous' } : null
+  }
 
   for (const r of refs) {
     const from = fileById.get(r.file_id)
@@ -263,13 +318,28 @@ export function resolveRepo(db, repo, repoAbs) {
       continue
     }
 
+    if (r.kind === 'ref') {
+      stats.values++
+      const pick = referenced(r, from, b)
+      if (!pick) continue
+      stats.referenced++
+      const src = r.src_id && nodeById.get(r.src_id) ? r.src_id : from.node_id
+      for (const c of pick.nodes) emit(src, c.id, 'REFERENCES', pick.conf, r.line)
+      continue
+    }
+
     stats.calls++
     const srcNode = nodeById.get(r.src_id)
     const bound = !r.qual && b.names.get(r.name)
     if (bound && bound.external) continue // imported from a dependency
     const name = bound ? bound.orig : r.name
-    let cands = (byName.get(`${from.family}|${name}`) || []).filter((c) => (r.kind === 'macro' ? c.kind === 'macro' : r.kind === 'new' ? CLASSY.has(c.kind) || c.kind === 'constructor' : CALLABLE.has(c.kind) || CLASSY.has(c.kind)))
-    if (!cands.length) continue
+    const named_ = byName.get(`${from.family}|${name}`) || []
+    let cands = named_.filter((c) => (r.kind === 'macro' ? c.kind === 'macro' : r.kind === 'new' ? CLASSY.has(c.kind) || c.kind === 'constructor' : CALLABLE.has(c.kind) || CLASSY.has(c.kind)))
+    // fields join only where the syntax names their owner (typed, self, a type's name); so do the
+    // members a framework declares, which no rule below links by a name alone
+    const withFields = r.kind === 'call' ? cands.concat(named_.filter((c) => c.kind === 'field')) : cands
+    const guess = cands.filter((c) => !c.via)
+    if (!withFields.length) continue
     const qual = r.qual || ''
     const qHead = qual.split(/::|\.|->|\\/)[0]
     const qLast = qual.split(/::|\.|->|\\/).pop()
@@ -279,7 +349,7 @@ export function resolveRepo(db, repo, repoAbs) {
     if (r.qtype && !SELF.test(qual)) {
       const types = classesNamed(from.family, r.qtype)
       if (types.length) {
-        const members = membersUp(types, cands)
+        const members = membersUp(types, withFields)
         if (!members.length) continue // a method the repo's own types do not declare: inherited from a dependency
         pick = { nodes: members.slice(0, MAX_AMBIGUOUS), conf: 'typed' }
       } else if (!(byName.get(`${from.family}|${r.qtype}`) || []).length) continue // a dependency's type (HashMap, List, Request …)
@@ -288,9 +358,9 @@ export function resolveRepo(db, repo, repoAbs) {
     // without `this`/`self` (Java, Kotlin, C#, Swift, C++, Ruby); in Python, JavaScript, PHP or Rust
     // a bare name is a module-level function or an import, never the class's method
     if (!pick && (SELF.test(qual) || (!qual && selfType && IMPLICIT_SELF.has(from.family)))) {
-      const own = selfType ? membersUp([selfType], cands) : []
+      const own = selfType ? membersUp([selfType], withFields) : []
       if (own.length) pick = { nodes: own, conf: 'same-class' }
-      else if (SELF.test(qual)) pick = pickBy(cands.filter((c) => c.parent_id && nodeById.get(c.parent_id) && CLASSY.has(nodeById.get(c.parent_id).kind)), [['same-file', (c) => c.file_id === from.id]])
+      else if (SELF.test(qual)) pick = pickBy(guess.filter((c) => c.parent_id && nodeById.get(c.parent_id) && CLASSY.has(nodeById.get(c.parent_id).kind)), [['same-file', (c) => c.file_id === from.id]])
     }
     if (!pick && qual && !SELF.test(qual)) {
       const q = b.quals.get(qHead) || b.quals.get(qual)
@@ -304,9 +374,12 @@ export function resolveRepo(db, repo, repoAbs) {
       else if (startsInDependency(qual, from.family)) continue
       if (!pick) {
         const types = classesNamed(from.family, qLast)
-        const members = cands.filter((c) => types.some((t) => t.id === c.parent_id))
+        const members = types.length ? membersUp(types, withFields) : []
         if (members.length) pick = { nodes: members.slice(0, MAX_AMBIGUOUS), conf: members.length === 1 || types.length === 1 ? 'qualified' : 'ambiguous' }
         else if (/^[A-Z]/.test(qLast) && !types.length && !/[.(]/.test(qual)) continue // a type the repo does not define: a dependency
+        // `Story.where(…)`, `Hat.active`: a repository type that declares no such member, itself or up
+        // its supertypes, inherits it from a framework; another type's member of that name is not it
+        else if (types.length && /^\p{Lu}/u.test(qLast) && !/[(\[]/.test(qual)) continue
       }
       if (!pick) {
         // `x.len()`, `seen.has(k)`: an untyped receiver calling a standard-library name is that library's
@@ -327,13 +400,13 @@ export function resolveRepo(db, repo, repoAbs) {
         // own method of that name, never the caller itself (Nest, Spring and Django delegation would
         // read as self-recursion and hide the real callee's callers)
         const ownField = /^(this|self|@)[.>-]*[\p{L}_$][\p{L}\p{N}_$]*$/u.test(qual) || /^(this|self)\??\.[\p{L}_$]/u.test(qual)
-        const methods = cands.filter((c) => (c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
+        const methods = guess.filter((c) => (c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
           && !(srcNode && c.id === srcNode.id) && !(ownField && selfType && c.parent_id === selfType.id))
         pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import', (c) => b.files.has(c.file_id)]])
       }
     }
     if (!pick && !qual) {
-      pick = pickBy(cands, [
+      pick = pickBy(guess, [
         ['import', (c) => bound && bound.files.some((f) => f.id === c.file_id)],
         ['same-file', (c) => c.file_id === from.id && !c.parent_id],
         ['import', (c) => b.files.has(c.file_id) && !c.parent_id],

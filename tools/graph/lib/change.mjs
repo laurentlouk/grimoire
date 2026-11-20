@@ -248,7 +248,8 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
     out.push('Contract changes (removed, moved, new signature): who still names them')
     subjects.forEach(({ c, t, sites }, i) => {
       const what = c.op === '-' ? `removed ${c.was.qualname}` : c.op === '>' ? `moved ${c.node.qualname}` : `new signature of ${c.node.qualname}`
-      const callers = t.id > 0 ? g.q("SELECT DISTINCT s.id FROM edges e JOIN nodes s ON s.id = e.src WHERE e.dst = ? AND e.kind IN ('CALLS','EXTENDS','IMPLEMENTS')", t.id).map((r) => g.node(r.id)) : []
+      // a definition passing it as a value (REFERENCES) names it as surely as a caller
+      const callers = t.id > 0 ? g.q("SELECT s.id, min(e.kind = 'REFERENCES') AS byRef FROM edges e JOIN nodes s ON s.id = e.src WHERE e.dst = ? AND e.kind IN ('CALLS','REFERENCES','EXTENDS','IMPLEMENTS') GROUP BY s.id ORDER BY min(e.rowid)", t.id).map((r) => ({ ...g.node(r.id), byRef: !!r.byRef })) : []
       const hits = ment ? ment.hits.filter((h) => h.term === t.name && (c.op !== '>' || USE_KINDS.has(h.kind))) : []
       const imps = c.op === '-' || c.op === '>' ? allImports.filter((im) => im.names.includes(t.name) && familyOf(im.lang) === familyOf(t.lang) && !(im.repo === c.file.repo && im.path === (c.op === '>' ? c.node.path : c.file.oldPath)) && !(c.op === '>' && im.source.split(/[/.:\\]+/).filter(Boolean).pop() === stem(c.node.path))) : []
       const uses = hits.filter((h) => USE_KINDS.has(h.kind) && !(h.kind === 'import' && imps.some((im) => im.repo === h.repo && im.path === h.path && im.line === h.line)))
@@ -257,7 +258,7 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
       if (atRisk) risk.push(`${what} is still named outside the lines this diff changed (${atRisk} place(s))`)
       if (i >= 20) return
       out.push(`  ${what}: ${callers.length} linked caller(s), ${sites.length} unlinked call site(s)${imps.length ? `, ${imps.length} import(s)` : ''}, ${hits.length} other mention(s); ${atRisk} not changed by this diff`)
-      for (const n of callers.slice(0, 10)) out.push(`    caller  ${g.row(n)}${tag(changedIds.has(n.id))}`)
+      for (const n of callers.slice(0, 10)) out.push(`    ${n.byRef ? 'value ' : 'caller'}  ${g.row(n)}${n.byRef ? '  (by reference)' : ''}${tag(changedIds.has(n.id))}`)
       for (const x of sites.slice(0, 10)) out.push(`    call    ${g.loc({ repo: x.ref.repo, path: x.ref.path, kind: 'x', line: x.ref.line })}  ${x.src && x.src.kind !== 'file' ? `in ${x.src.qualname}` : 'at file level'}  ${siteText(x.ref)}${tag(lineChanged(x.ref.repo, x.ref.path, x.ref.line))}`)
       for (const im of imps.slice(0, 10)) out.push(`    import  ${g.loc({ repo: im.repo, path: im.path, kind: 'x', line: im.line })}${tag(lineChanged(im.repo, im.path, im.line))}`)
       if (hits.length > uses.length) out.push(`    (${hits.length - uses.length} more in text, docs and comments: graph_impact lists them)`)
@@ -315,7 +316,7 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
   for (const c of live) {
     if (!c.node || c.node.is_test) continue
     const rep = outer(c.node)
-    const ts = [...g.walk([rep.id], ['CALLS', 'IMPORTS'], 'in', TEST_DEPTH).entries()].filter(([id, i]) => i.depth > 0 && g.node(id).is_test).map(([id, i]) => [g.node(id), i])
+    const ts = [...g.walk([rep.id], ['CALLS', 'REFERENCES', 'IMPORTS'], 'in', TEST_DEPTH).entries()].filter(([id, i]) => i.depth > 0 && g.node(id).is_test).map(([id, i]) => [g.node(id), i])
     // a test calling it on a receiver the graph could not type is a test of it too
     const loose = c.op === '+' ? [] : unresolved(g, [rep]).filter((x) => x.src?.is_test)
     testsOf.set(c, ts.length + loose.length)
@@ -341,8 +342,9 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
     out.push(`Changed code no test reaches (${untested.length}; the graph misses tests that reach code dynamically: check before writing one):`)
     for (const c of untested.slice(0, 20)) out.push(`  ${c.via ? '~' : c.op} ${g.row(c.node)}${c.via ? `  (through ${c.via.qualname})` : ''}`)
     if (untested.length > 20) out.push(`  … ${untested.length - 20} more`)
-    // with callers: a CALLS edge into it, or into a declaration it implements (dispatch)
-    const callersIn = g.db.prepare("SELECT 1 FROM edges WHERE dst = ? AND kind = 'CALLS' LIMIT 1")
+    // with callers: a CALLS edge into it (or a REFERENCES edge: passed as a value), or into a
+    // declaration it implements (dispatch)
+    const callersIn = g.db.prepare("SELECT 1 FROM edges WHERE dst = ? AND kind IN ('CALLS','REFERENCES') LIMIT 1")
     const used = untested.filter((c) => (c.op !== '+' || c.via) && [c.node, ...(dispatchUp(g, c.node))].some((n) => callersIn.get(n.id)))
     if (used.length) risk.push(`${used.length} changed definition(s) with callers and no test reaching them`)
   }

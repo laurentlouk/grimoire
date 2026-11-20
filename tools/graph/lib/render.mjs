@@ -60,7 +60,7 @@ import { redisFunctions, templatesOf, indexesOf, streamsOf, prefixTree, ttlText,
 import { dataClient } from './data-view.mjs'
 import { stageClient } from './stage-view.mjs'
 
-const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
+const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'REFERENCES']
 const MAP_MAX_FILES = 1500 // the file map keeps the most connected production files; the other tabs keep everything
 export const DATA_COLLAPSE = 60 // a store with more tables starts collapsed: names only, until focused or searched
 

@@ -14,6 +14,14 @@
 //   container  (defNode) => type name | null: the type a definition attaches to that no enclosing
 //            block names (JavaScript `X.prototype.y = function`)
 //   tokenCalls  node type → (node) => [{ name, qual }]: calls hidden in unparsed token trees
+//   members  node type → (node) => { names, owns? } | null: definitions a framework declares by a call
+//            in a class or module body (Ruby `scope :active, -> {…}`, `has_many :comments`,
+//            `delegate :x, to: :y`, `attr_reader :a`, `define_method :x`): each name a method of the
+//            enclosing type; `owns` when the call's block or lambda is that one method's body
+//   valueRefs  node type → (node) => [{ name, qual }]: names a construct passes as a value that the
+//            generic value positions (extract.mjs) do not see (Ruby `method(:x)`, a callback symbol)
+//   bareValues  false where a bare identifier in a value position is as likely a call or a local as a
+//            function (Ruby): only valueRefs and qualified values count there
 //   import names are local names, or `local=original` when aliased (`import { a as b }` → `b=a`).
 // Anything a spec does not name is walked through, never extracted. Files in a language with no
 // spec (or none of these) still become file nodes, so path search covers them.
@@ -145,8 +153,9 @@ const js = {
     method_definition: 'method', method_signature: 'method', abstract_method_signature: 'method',
     interface_declaration: 'interface', type_alias_declaration: 'type', enum_declaration: 'enum',
     variable_declarator: (n) => (fnValue(n) ? 'function' : null),
-    public_field_definition: (n) => (fnValue(n) ? 'method' : null),
-    field_definition: (n) => (fnValue(n) ? 'method' : null),
+    // a class field holding a function is a method; any other is a field (`private repo: Repo`, `count = 0`)
+    public_field_definition: (n) => (fnValue(n) ? 'method' : 'field'),
+    field_definition: (n) => (fnValue(n) ? 'method' : 'field'),
     assignment_expression: (n) => (assignedFn(n) ? (assignedOwner(n) ? 'method' : 'function') : null),
   },
   name: (n) => (n.type === 'field_definition' ? lastSegment(field(n, 'property')) : n.type === 'assignment_expression' ? text(field(field(n, 'left'), 'property')) : nameOf(n)),
@@ -168,8 +177,14 @@ const js = {
 }
 
 // ───────────────────────── Python ─────────────────────────
+// A class-level annotated attribute (`order_created: Callable[…]`, a settings field `TIMEOUT: int = 60`,
+// a dataclass or model field): a field of its class. An unannotated assignment is not one.
+const pyClassField = (n) => {
+  const l = field(n, 'left'), st = n.parent, block = st && st.parent
+  return !!(field(n, 'type') && l && l.type === 'identifier' && st.type === 'expression_statement' && block && block.type === 'block' && block.parent && block.parent.type === 'class_definition')
+}
 const py = {
-  defs: { function_definition: 'function', class_definition: 'class' },
+  defs: { function_definition: 'function', class_definition: 'class', assignment: (n) => (pyClassField(n) ? 'field' : null) },
   calls: { call: ['function', 'call'] },
   imports: {
     import_statement: (n) => named(n).map((c) => c.type === 'aliased_import'
@@ -316,8 +331,46 @@ const csharp = {
 }
 
 // ───────────────────────── Ruby ─────────────────────────
+// What a Rails-style class body declares by a call: each a method of the class (`Story.active`,
+// `story.user`). Only literal symbols name one; a string, an interpolation or a variable never does.
+const RB_SYM = (n) => (n && n.type === 'simple_symbol' ? n.text.slice(1) : null)
+const RB_ASSOC = /^(has_many|has_one|belongs_to|has_and_belongs_to_many)$/
+const RB_ACCESSOR = /^(attr_reader|attr_accessor|cattr_reader|cattr_accessor|mattr_reader|mattr_accessor)$/
+const rbArgs = (n) => { const r = field(n, 'receiver'); if (r && r.type !== 'self') return null; const a = field(n, 'arguments'); return a ? named(a) : null }
+const rbMembers = (n) => {
+  const m = text(field(n, 'method')), a = rbArgs(n)
+  if (!a || !a.length) return null
+  if (m === 'scope' || RB_ASSOC.test(m) || m === 'define_method' || m === 'define_singleton_method') { const s = RB_SYM(a[0]); return s ? { names: [s], owns: true } : null }
+  if (RB_ACCESSOR.test(m)) return { names: a.map(RB_SYM).filter(Boolean) }
+  if (m === 'delegate') {
+    const opts = new Map(a.filter((x) => x.type === 'pair').map((p) => [text(field(p, 'key')).replace(/^:|:$/g, ''), field(p, 'value')]))
+    if (!opts.has('to')) return null
+    const pre = opts.get('prefix')
+    let prefix = ''
+    if (pre && pre.type === 'true') prefix = RB_SYM(opts.get('to')) || null
+    else if (pre && pre.type === 'simple_symbol') prefix = RB_SYM(pre)
+    else if (pre && pre.type !== 'false' && pre.type !== 'nil') prefix = null // a prefix the syntax does not state
+    if (prefix === null) return null
+    return { names: a.map(RB_SYM).filter(Boolean).map((x) => (prefix ? `${prefix}_${x}` : x)) }
+  }
+  return null
+}
+// A method named by a literal symbol a receiver-less call passes (`before_action :require_user`,
+// `validate :check`, `method(:x)`, `only: [:show]`): a reference to the class's own method of that name.
+const rbSymbols = (n, out = [], d = 0) => {
+  if (d > 2) return out
+  for (const c of named(n)) {
+    if (c.type === 'simple_symbol') out.push({ name: c.text.slice(1), qual: 'self' })
+    else if (c.type === 'pair') { const v = field(c, 'value'); if (v && v.type === 'simple_symbol') out.push({ name: v.text.slice(1), qual: 'self' }); else if (v && v.type === 'array') rbSymbols(v, out, d + 1) }
+    else if (c.type === 'array') rbSymbols(c, out, d + 1)
+  }
+  return out
+}
 const ruby = {
   defs: { method: 'function', singleton_method: 'method', class: 'class', module: 'module' },
+  members: { call: rbMembers },
+  valueRefs: { call: (n) => { const a = field(n, 'arguments'); return a && !field(n, 'receiver') && !/^(require|require_relative|load|autoload)$/.test(text(field(n, 'method'))) ? rbSymbols(a) : [] } },
+  bareValues: false,
   calls: { call: [null, 'call'] },
   imports: {
     call: (n) => {
