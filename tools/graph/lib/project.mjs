@@ -12,7 +12,7 @@
 //   graph.data.migrations  [{ path, dialect }]: a migration folder's dialect, stated (path is
 //                  repo-relative, `repo:path` to name one repository of several)
 //   baseBranch     the branch a worktree's index is based on first (freshness.mjs)
-import { readdirSync, statSync, existsSync } from 'node:fs'
+import { readdirSync, statSync, existsSync, realpathSync, openSync, fstatSync, readSync, closeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { langOf, isContract } from './langs.mjs'
@@ -56,6 +56,40 @@ export function loadProject(rootArg) {
         return { repo, path: rel, dialect: m.dialect }
       }),
   }
+}
+
+// Files that may hold credentials: never searched (excluded from git grep, skipped before a read by
+// the walk: reach.mjs), never opened by a reader of the repository's own configuration (readRepoText),
+// never named. SECRET_GLOBS and SECRETISH say the same thing, for git and for the walk.
+export const SECRET_GLOBS = ['.env*', '*.env', '.envrc', '*.pem', '*.key', '*.p12', '*.pfx', '*.jks', '*.keystore', '*.crt', '*.cer', '*.der', 'id_rsa*', 'id_dsa*', 'id_ecdsa*', 'id_ed25519*', 'credentials*', '.npmrc*', '.pypirc*', '.netrc', '.git-credentials', '.pgpass', '.htpasswd', '*.tfstate', '*.tfstate.*', '.docker/config.json']
+export const SECRETISH = /(^|\/)(\.env[^/]*|[^/]*\.env|\.envrc|id_(rsa|dsa|ecdsa|ed25519)[^/]*|credentials[^/]*|\.npmrc[^/]*|\.pypirc[^/]*|\.netrc|\.git-credentials|\.pgpass|\.htpasswd|[^/]*\.tfstate(\.[^/]*)?|\.docker\/config\.json)$|\.(pem|key|p12|pfx|jks|keystore|crt|cer|der)$/i
+
+// A repository file read as text by what follows a path the repository states (a tsconfig's
+// `extends`, a workspace's package.json, a go.mod, a Cargo.toml), guarded as the data extractors'
+// inputs are (indexer.mjs): never a path SECRETISH matches; its real path (every symbolic link
+// followed, a folder's too) inside the repository's, or it is not read; a regular file only (never a
+// device, a FIFO or a folder: `/dev/zero` is never read); at most `max` bytes (1 MB by default), a
+// larger file not read at all. null when it is not read. root: the repository's real path, when the
+// caller has it (else found once per call).
+export const MAX_REPO_TEXT = 1 << 20
+export function readRepoText(abs, rel, { max = MAX_REPO_TEXT, root = null } = {}) {
+  if (typeof rel !== 'string' || !rel || SECRETISH.test(rel)) return null
+  let rootReal = root, real
+  try { rootReal ||= realpathSync(abs); real = realpathSync(path.join(abs, rel)) } catch { return null }
+  if (real !== rootReal && !real.startsWith(rootReal + path.sep)) return null
+  if (SECRETISH.test(path.relative(rootReal, real).split(path.sep).join('/'))) return null
+  let fd = null
+  try {
+    const pre = statSync(real) // before the open: a FIFO's open would wait for a writer
+    if (!pre.isFile() || pre.size > max) return null
+    fd = openSync(real, 'r')
+    const st = fstatSync(fd)
+    if (!st.isFile() || st.size > max) return null
+    const buf = Buffer.alloc(st.size)
+    let n = 0
+    while (n < st.size) { const k = readSync(fd, buf, n, st.size - n, n); if (k <= 0) break; n += k }
+    return buf.toString('utf8', 0, n)
+  } catch { return null } finally { if (fd !== null) try { closeSync(fd) } catch {} }
 }
 
 // Directories never worth indexing: dependencies, build output, caches, generated trees.

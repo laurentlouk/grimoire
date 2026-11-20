@@ -1197,6 +1197,50 @@ console.log('\n6e · a React Native workspace (fixtures/rn): JSX renders, aliase
   lacks(d, 'Changed code no test reaches', 'diff: … so the change is not untested')
 }
 
+console.log('\n6f · module resolution reads the configs a repository states guarded: no credential file, no link out of it, no device, a size cap')
+{
+  const H = path.join(SANDBOX, 'hostile-js'), OUT = path.join(SANDBOX, 'hostile-js-outside')
+  const put = (rel, txt) => { mkdirSync(path.dirname(path.join(H, rel)), { recursive: true }); writeFileSync(path.join(H, rel), txt) }
+  mkdirSync(OUT, { recursive: true })
+  writeFileSync(path.join(OUT, 'package.json'), JSON.stringify({ name: '@leak/outside', main: 'index.ts', note: 'canary-js-1' }))
+  put('grimoire.config.json', '{ "graph": {} }\n')
+  // a tsconfig extending credential files (paths only they map) beside a config of the repository
+  put('tsconfig.json', '{ "extends": ["./.env", "./credentials.json", "./tsconfig.base.json"] }\n')
+  put('.env', '{ "compilerOptions": { "paths": { "@env/*": ["./src/*"] } }, "x": "canary-js-2" }\n')
+  put('credentials.json', '{ "compilerOptions": { "paths": { "@cred/*": ["./src/*"] } }, "token": "canary-js-3" }\n')
+  put('tsconfig.base.json', '{ "compilerOptions": { "paths": { "@ok/*": ["./src/*"] } } }\n')
+  put('package.json', JSON.stringify({ name: 'root', workspaces: ['pkgs/*'] }))
+  put('src/b.ts', 'export const b = 1\n')
+  put('src/a.ts', "import { b } from '@ok/b'\nimport { e } from '@env/b'\nimport { c } from '@cred/b'\nimport { o } from '@leak/outside'\nimport { i } from '@in/pkg'\nexport const a = () => b + e + c + o + i\n")
+  put('real/pkg/package.json', JSON.stringify({ name: '@in/pkg', main: 'index.ts' }))
+  put('real/pkg/index.ts', 'export const i = 1\n')
+  mkdirSync(path.join(H, 'pkgs'), { recursive: true })
+  const { symlinkSync } = await import('node:fs')
+  // a package.json that is a device (unbounded), one linked out of the repository, one linked inside it
+  mkdirSync(path.join(H, 'pkgs/zero')); symlinkSync('/dev/zero', path.join(H, 'pkgs/zero/package.json'))
+  mkdirSync(path.join(H, 'pkgs/out')); symlinkSync(path.join(OUT, 'package.json'), path.join(H, 'pkgs/out/package.json')); writeFileSync(path.join(H, 'pkgs/out/index.ts'), 'export const o = 1\n')
+  mkdirSync(path.join(H, 'pkgs/in')); symlinkSync('../../real/pkg/package.json', path.join(H, 'pkgs/in/package.json')); symlinkSync('../../real/pkg/index.ts', path.join(H, 'pkgs/in/index.ts'))
+  for (const f of ['babel.config.js', 'lerna.json', 'pnpm-workspace.yaml']) symlinkSync('/dev/zero', path.join(H, f))
+  put('svc/main.go', 'package main\n\nfunc main() {}\n'); symlinkSync('/dev/zero', path.join(H, 'svc/go.mod'))
+  git(H, 'init', '-q', '-b', 'main'); git(H, 'add', '-A'); git(H, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'init')
+  const t0 = Date.now()
+  const idx = await call('graph_index', {}, { root: H })
+  ok(/Indexed in/.test(idx) && Date.now() - t0 < 60000, `the index completes: a config linked to /dev/zero is never read (${idx.split('\n')[0]}, ${Date.now() - t0} ms)`)
+  const fa = await call('graph_file', { path: 'src/a.ts' }, { root: H })
+  has(fa, '  src/b.ts', 'a tsconfig\'s relative `extends` of the repository is still followed (`@ok/b`)')
+  ok((fa.match(/ {2}src\/b\.ts/g) || []).length === 1, 'an `extends` naming `.env` or `credentials.json` is never opened: the paths only they map resolve to nothing')
+  lacks(fa, 'pkgs/out/index.ts', 'a workspace package.json linked out of the repository is never read: its name maps nothing')
+  has(fa, 'pkgs/in/index.ts', 'a package.json linked inside the repository is read as before')
+  const dir = path.join(H, '.grimoire/graph')
+  const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => readFileSync(path.join(dir, f), 'latin1').match(/canary-js-\d/g) || [])
+  ok(!bytes.length && !/canary-js/.test(fa), `nothing of those files reaches an answer or the index (${bytes.length ? [...new Set(bytes)].join(', ') : 'none'})`)
+  const { readRepoText } = await import('../lib/project.mjs')
+  ok(readRepoText(H, 'pkgs/zero/package.json') === null && readRepoText(H, '.env') === null && readRepoText(H, 'pkgs/out/package.json') === null && readRepoText(H, '../hostile-js-outside/package.json') === null && readRepoText(H, 'tsconfig.base.json') !== null,
+    'readRepoText: a device, a credential file, a link out of the repository, a path out of it: null; a config of the repository: read')
+  writeFileSync(path.join(H, 'big.json'), `{"x":"${'a'.repeat(1 << 20)}"}`)
+  ok(readRepoText(H, 'big.json') === null && readRepoText(H, 'big.json', { max: 2 << 20 }) !== null, 'readRepoText: a file past its cap (1 MB by default) is not read at all')
+}
+
 rmSync(SANDBOX, { recursive: true, force: true })
 console.log(`\n${PASS} passed, ${FAIL} failed`)
 process.exit(FAIL ? 1 : 0)

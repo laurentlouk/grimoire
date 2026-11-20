@@ -18,8 +18,9 @@
 // The answer: { files (indexed files), outside (true: the path names a file of the repository the index
 // does not hold, an image, a JSON file) }. resolve.moduleOf(fileId): the module a file is one variant
 // of (`a/Button` for a/Button.ios.tsx, or for a/Button.mobile.tsx found through `moduleSuffixes`).
-import { readFileSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
 import path from 'node:path'
+import { readRepoText } from './project.mjs'
 
 const P = path.posix
 const JS_EXT = /\.(tsx?|jsx?|mjs|cjs|mts|cts)$/
@@ -62,7 +63,11 @@ export function jsModules({ files, paths, abs }) {
   }
   const all = new Set(paths)
   const moduleOf = new Map()
-  const read = (p) => { try { return readFileSync(path.join(abs, p), 'utf8') } catch { return null } }
+  // a config the repository states is read guarded (project.mjs readRepoText): never a credential file
+  // (`"extends": "./.env"`), never through a link out of the repository, never a device, at most 1 MB
+  let root = null
+  try { root = realpathSync(abs) } catch {}
+  const read = (p) => (root ? readRepoText(abs, p, { root }) : null)
   const configs = paths.filter((p) => CONFIG.test(p) && !SKIP.test(p))
   const at = (name) => new Map(configs.filter((p) => P.basename(p) === name || (name === 'babel' && /^(babel\.config\.|\.babelrc)/.test(P.basename(p)))).map((p) => [P.dirname(p), p]))
   const nearest = (map, dir, cache) => {
