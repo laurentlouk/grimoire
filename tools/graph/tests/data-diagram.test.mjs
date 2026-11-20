@@ -16,6 +16,10 @@
 //     Cards switches, an overlay falling back to cards, the key space's Diagram mode, a stub opening the
 //     other store on its entity, names escaped
 //
+//  3. a relation the schema declares and its client enforces (fixtures/prisma-client: relationMode
+//     prisma): its own line (`fk cl`, dash-dot-dot) and legend entry, no FK mark, no lead on its
+//     columns, its own section in the passport
+//
 //  Part 2 needs the parser runtime (the key space is read from code): without it, it is skipped.
 import { mkdtempSync, cpSync, rmSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -108,6 +112,16 @@ console.log('\n1b · the lead rule: the review\'s cases')
   ok(!R.get('infra:local').leads.some((x) => x.from === 'Orders' && x.column === 'memberId'), '… and replaces the lead there')
   eq(R.get('app:dynamodb').stubs.filter((x) => x.dir === 'out' && x.kind === 'refined').map((x) => `${x.column}→${x.toColumn}`), ['cartId→id', 'userId→user_id'], 'a multi-column refined relation: a stub per column pair')
   ok(!R.get('app:dynamodb').stubs.some((x) => x.kind === 'lead' && x.from === 'carts'), '… replacing the leads on each of its columns')
+}
+
+// ── 1c · a relation the schema declares and its client enforces ──
+console.log('\n1c · a relation the schema declares and its client enforces (no foreign key in the database) replaces a lead')
+{
+  const T = (name, fields, rels = []) => ({ name, kind: 'table', fields: fields.map((n) => ({ name: n })), keys: [{ role: 'primary', parts: ['id'] }], relations: rels, indexes: [] })
+  const model = (rels) => ({ stores: [{ id: 'site:prisma/migrations', repo: 'site', dialect: 'postgres', entities: [T('user', ['id']), T('website', ['id', 'user_id', 'created_by'], rels), T('session', ['id', 'website_id'])] }] })
+  const leads = (m) => modelLinks(m, []).get('site:prisma/migrations').leads.map((x) => `${x.from}.${x.column}→${x.to}`)
+  eq(leads(model([])), ['session.website_id→website', 'website.user_id→user'], 'without the relations: the id-like columns are leads (the role-named created_by is none)')
+  eq(leads(model([{ kind: 'client', columns: ['user_id'], to: 'user', toColumns: ['id'] }, { kind: 'client', columns: ['created_by'], to: 'user', toColumns: ['id'] }])), ['session.website_id→website'], 'a relation its client enforces replaces the lead on its columns, as a refined relation does')
 }
 
 // ── 2 · through call(), on fixtures/diagram ──
@@ -216,6 +230,29 @@ if (!deps.findDeps()) {
     // a claim naming a placeholder the template does not have: drift, never drawn
     writeFileSync(path.join(P, 'docs/architecture/bad.data.json'), JSON.stringify({ schema: 1, title: 'bad', summary: 's', relations: [{ from: 'shop:redis/cart:{cartId}', columns: ['userId'], to: 'shop:db/users', toColumns: ['id'], why: 'w', sources: ['shop:src/cache.ts:4'] }] }, null, 2))
     has(await q('data'), 'the column userId is not in shop:redis/cart:{cartId}', 'a claim naming a placeholder the template lacks is drift')
+
+    // ── 3 · relations the client enforces, drawn ──
+    console.log('\n3 · fixtures/prisma-client: relations the schema declares and its client enforces, drawn as their own kind')
+    const C = path.join(SANDBOX, 'prisma-client')
+    cpSync(path.join(HERE, 'fixtures', 'prisma-client'), C, { recursive: true, filter: (s) => !s.split(path.sep).includes('.grimoire') })
+    ok(!/fail/.test(await call('graph_index', {}, { root: C })), 'index: no extractor failure')
+    const cpage = await renderGraph(loadProject(C))
+    const CS = dataOf(cpage).data.stores[0]
+    const web = CS.tables.find((t) => t.name === 'website')
+    eq([web.rels.map((r) => [r.columns[0], r.to, r.cl ? 'client' : r.ld ? 'lead' : r.rf ? 'refined' : 'fk']), web.fields.filter((f) => f.fk).map((f) => f.name)],
+      [[['user_id', 'user', 'client'], ['created_by', 'user', 'client']], []], 'packed among the table\'s relations as their own kind (`cl`), the role-named one included; no lead beside them; their columns get no FK mark')
+    const cp = await stubPage(cpage, '#data-0')
+    const svg = cp.erd().html
+    eq([(svg.match(/<path class="fk cl"/g) || []).length, (svg.match(/class="fk ld/g) || []).length, (svg.match(/class="mk mfk"/g) || []).length], [3, 0, 0], 'the ERD: a dash-dot-dot line per relation (`fk cl`), no dotted lead, no FK mark')
+    has(svg, 'relation: website (created_by) → user (id), declared by the schema, enforced by the client: no foreign key in the database', '… its hover says what it is and who enforces it')
+    has(svg, 'created_by UUID · nullable · relation enforced by the client → user (id)', '… and so does its column\'s')
+    has(cp.text(), 'relation: declared by the schema, enforced by the client (no foreign key)', 'the legend names it, beside the foreign key\'s solid line')
+    cp.click(CS.tables.findIndex((t) => t.name === 'website'))
+    const pass = cp.lines('H2')
+    ok(pass.includes('Relations enforced by the client (2)') && pass.includes('Foreign keys (0)'), `the passport lists them in a section of their own, never as foreign keys (${pass.join(' · ')})`)
+    has(cp.text(), 'enforced by the client', '… marked so')
+    cp.click(CS.tables.findIndex((t) => t.name === 'user'))
+    ok(cp.lines('LI').some((l) => l.startsWith('website (created_by) → (id)') && l.includes('enforced by the client')), `the referenced table lists them as referencing it, marked so (${cp.lines('LI').filter((l) => l.startsWith('website')).join(' · ')})`)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

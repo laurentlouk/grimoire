@@ -13,7 +13,11 @@
 //                 default: as declared or null, generated: virtual | stored | null, path, line }
 //   Key         { role: primary | unique, parts: [field] }   compared as a whole, never per column
 //   Index       { name, unique, columns, partial }
-//   Relation    { columns, to, toColumns, onDelete, onUpdate } (a foreign key)
+//   Relation    { columns, to, toColumns, onDelete, onUpdate } (a foreign key), enforced?: 'client':
+//                 a relation the schema declares and its client enforces, no foreign key in the
+//                 database (a Prisma schema under relationMode prisma, or on MongoDB). Merged, a
+//                 relation is `kind: fk`, or `kind: client` when every declaration stating it says
+//                 so (reconcile.mjs); a deduced store's are `kind: join` (queries.mjs)
 // An element's path defaults to its declaration's source path.
 //
 // A key-value table (DynamoDB: readers/dynamodb.mjs; the store `dynamodb`, dialect `dynamodb`) says

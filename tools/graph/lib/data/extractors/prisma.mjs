@@ -16,7 +16,8 @@
 //
 // What is read, in the store's own terms, so it compares with the migrations:
 //   - datasource `provider` → the dialect; `relationMode = "prisma"` → no foreign keys in the
-//     database (none modeled, noted); `@@schema` (multiSchema) → `schema.table` outside `public`.
+//     database: its relations are kept as the schema declares them, enforced by the client (below),
+//     noted; `@@schema` (multiSchema) → `schema.table` outside `public`.
 //     Nothing else of a datasource is kept (its url may hold a secret).
 //   - model → a table (`@@map` its physical name), view → a view (by name; its columns are not
 //     compared, as the other readers draw a view), enum → an enum (`@@map`, `@map` per value),
@@ -36,6 +37,11 @@
 //     on update Cascade). An implicit many-to-many relation → its join table `_AToB` (or `_<name>`),
 //     columns A and B and their foreign keys; its keys and indexes vary with the version, so the table
 //     is stated in part (`part`).
+//     Under `relationMode = "prisma"`, and on MongoDB, the database holds no foreign key: each such
+//     relation is still recorded, at its field's line, marked `enforced: 'client'` (declared by the
+//     schema, enforced by the client), its actions the ones the client emulates; the join table of an
+//     implicit many-to-many too (prisma migrate still creates it, without its foreign keys; not on
+//     MongoDB, which has none). reconcile.mjs never expects the migrations to state such a relation.
 // Comments are skipped. A block that does not parse is skipped and noted, and the declaration is then
 // not complete (a model it lacks may be the one that did not parse).
 import path from 'node:path'
@@ -60,7 +66,7 @@ const cap = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
 export default {
   id: 'prisma',
-  version: 2,
+  version: 3,
   kind: 'code',
   scope: 'unit',
   wants: (p) => PRISMA.test(p) || CONFIG.test(p),
@@ -109,8 +115,11 @@ export default {
     if (provider && !dialect) note(`the datasource provider at ${ds.path}:${provider.line} is not a literal: dialect unknown`)
     const rm = entry('relationMode')
     const noFks = rm?.value.k === 'str' && rm.value.v === 'prisma'
-    if (noFks) note(`relationMode = "prisma" (${ds.path}:${rm.line}): relations are emulated by the client, no foreign key in the database`)
+    if (noFks) note(`relationMode = "prisma" (${ds.path}:${rm.line}): relations are emulated by the client, no foreign key in the database; each is kept as the schema declares it, enforced by the client`)
     const mongo = dialect === 'mongodb'
+    // no foreign key in the database: a relation is the schema's, enforced by the client
+    const client = noFks || mongo
+    const enforced = client ? { enforced: 'client' } : {}
     const config = pickConfig(configs, root)
     const store = config?.migrations ? config.migrations : root === '.' ? 'migrations' : `${root}/migrations`
 
@@ -147,10 +156,10 @@ export default {
           const rel = f.attrs.find((a) => a.name === 'relation')
           const target = models.get(f.type)
           const fields = rel && listArg(rel, 'fields'), refs = rel && listArg(rel, 'references')
-          if (fields && refs && target && !noFks && !mongo) {
+          if (fields && refs && target) {
             const del = rel.args.find((x) => x.name === 'onDelete')?.value, upd = rel.args.find((x) => x.name === 'onUpdate')?.value
-            e.relations.push({ columns: fields.map((x) => columnOf(m, x)), to: qualified(schemaOf(target), tableOf(target)), toColumns: refs.map((x) => columnOf(target, x)), onDelete: (del?.k === 'id' && ACTIONS[del.v]) || (f.optional ? 'set null' : 'restrict'), onUpdate: (upd?.k === 'id' && ACTIONS[upd.v]) || 'cascade', ...at(f.line) })
-          } else if (f.list && target && !noFks && !mongo) {
+            e.relations.push({ columns: fields.map((x) => columnOf(m, x)), to: qualified(schemaOf(target), tableOf(target)), toColumns: refs.map((x) => columnOf(target, x)), onDelete: (del?.k === 'id' && ACTIONS[del.v]) || (f.optional ? 'set null' : 'restrict'), onUpdate: (upd?.k === 'id' && ACTIONS[upd.v]) || 'cascade', ...enforced, ...at(f.line) })
+          } else if (f.list && target && !mongo) {
             // the other side of this relation: the field of the target, of this model's type, with the
             // same relation name (both unnamed alike). Both lists and neither naming its fields: an
             // implicit many-to-many relation. A list whose other side names its fields is the back
@@ -158,7 +167,7 @@ export default {
             const name = relationName(rel)
             const other = target.fields.find((x) => x !== f && x.type === m.name && relationName(x.attrs.find((a) => a.name === 'relation')) === name)
             const otherRel = other && other.attrs.find((a) => a.name === 'relation')
-            if (other && other.list && !(otherRel && listArg(otherRel, 'fields'))) implicitJoin(joins, m, f, rel, target, models, (model, id) => typeOf(id, dialect, enums))
+            if (other && other.list && !(otherRel && listArg(otherRel, 'fields'))) implicitJoin(joins, m, f, rel, target, models, (model, id) => typeOf(id, dialect, enums), enforced)
           }
           continue
         }
@@ -276,14 +285,15 @@ function valueText(v, depth = 0) {
 }
 
 // An implicit many-to-many relation's join table: `_<A>To<B>` (the two models by name), or
-// `_<relation name>`, columns A and B, each a foreign key to its model's id, cascading. Stated in
-// part: its keys and indexes vary with the version.
+// `_<relation name>`, columns A and B, each a foreign key to its model's id, cascading (enforced by
+// the client, `enforced`, under relationMode prisma). Stated in part: its keys and indexes vary with
+// the version.
 // A relation's name: @relation("name") or @relation(name: "name"), else null (unnamed).
 function relationName(rel) {
   return rel?.args.find((x) => x.name === null && x.value.k === 'str')?.value.v || rel?.args.find((x) => x.name === 'name' && x.value.k === 'str')?.value.v || null
 }
 
-function implicitJoin(joins, m, f, rel, target, models, typeOfId) {
+function implicitJoin(joins, m, f, rel, target, models, typeOfId, enforced = {}) {
   const relName = relationName(rel)
   const [a, b] = [m.name, target.name].sort()
   const name = `_${relName || `${a}To${b}`}`
@@ -301,8 +311,8 @@ function implicitJoin(joins, m, f, rel, target, models, typeOfId) {
     fields: [{ name: 'A', ...plain(ida), nullable: false, default: null, generated: null, ...at }, { name: 'B', ...plain(idb), nullable: false, default: null, generated: null, ...at }],
     keys: [], indexes: [],
     relations: [
-      { columns: ['A'], to: tableName(a), toColumns: [columnOf(ida)], onDelete: 'cascade', onUpdate: 'cascade', ...at },
-      { columns: ['B'], to: tableName(b), toColumns: [columnOf(idb)], onDelete: 'cascade', onUpdate: 'cascade', ...at },
+      { columns: ['A'], to: tableName(a), toColumns: [columnOf(ida)], onDelete: 'cascade', onUpdate: 'cascade', ...enforced, ...at },
+      { columns: ['B'], to: tableName(b), toColumns: [columnOf(idb)], onDelete: 'cascade', onUpdate: 'cascade', ...enforced, ...at },
     ],
   })
 }

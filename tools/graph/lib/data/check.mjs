@@ -370,10 +370,14 @@ function fieldIn(ent, name) {
 }
 
 // An extracted relation a refined one is compared with, as a reason or a note says it: a foreign key,
-// or a join a deduced store's queries show (queries.mjs: `inferred`, never a foreign key), at the first
-// line it was read, the others counted. SAID: the relations on a claim's columns said one by one.
+// a relation the schema declares and its client enforces (reconcile.mjs `kind: client`, no foreign key
+// in the database), or a join a deduced store's queries show (queries.mjs: `inferred`, never a foreign
+// key), at the first line it was read, the others counted. SAID: the relations on a claim's columns
+// said one by one.
 const SAID = 3
+const CLIENT_REL = 'a relation the schema declares (enforced by the client)'
 function relationAt(r, ctx) {
+  if (r.kind === 'client') return CLIENT_REL
   if (r.kind !== 'join') return 'a foreign key'
   const s = (r.sources || [])[0]
   if (!s) return 'a join inferred from the queries'
@@ -383,7 +387,7 @@ function relationAt(r, ctx) {
 }
 const relationText = (r, ctx) => (r.kind === 'join'
   ? `${relationAt(r, ctx)} reads (${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})`
-  : `a foreign key on (${r.columns.join(', ')}) references ${r.to}(${r.toColumns.join(', ')})`)
+  : `${relationAt(r, ctx)} on (${r.columns.join(', ')}) references ${r.to}(${r.toColumns.join(', ')})`)
 
 // One file's claims, checked. A claim: { kind, file, at, line, text, ok, why: [reasons], notes,
 // sources: [citation], …what it names, resolved }.
@@ -420,10 +424,10 @@ function checkFile(r, ctx) {
     // written (equal columns: which one references the other is unknown), a note
     const same = A && A.e && B ? A.e.relations.filter((r) => r.columns.join('\0').toLowerCase() === cols.join('\0').toLowerCase()) : []
     const states = same.find((r) => `${A.store}/${r.to}`.toLowerCase() === B.id.toLowerCase() && r.toColumns.join('\0').toLowerCase() === toCols.join('\0').toLowerCase())
-    if (states) notes.push(states.kind === 'join' ? `${relationAt(states, ctx)} states it` : 'a foreign key now states it')
+    if (states) notes.push(states.kind === 'join' ? `${relationAt(states, ctx)} states it` : `${relationAt(states, ctx)} now states it`)
     else {
       const asWritten = (r) => r.kind === 'join' && r.direction === 'as written'
-      const listed = (rs, text) => [...rs.slice(0, SAID).map(text), ...(rs.length > SAID ? [`and ${rs.length - SAID} more ${rs[0].kind === 'join' ? 'join' : 'foreign key'}${rs.length - SAID === 1 ? '' : 's'} on (${cols.join(', ')})`] : [])]
+      const listed = (rs, text) => [...rs.slice(0, SAID).map(text), ...(rs.length > SAID ? [`and ${rs.length - SAID} more ${rs[0].kind === 'join' ? 'join' : rs[0].kind === 'client' ? 'relation' : 'foreign key'}${rs.length - SAID === 1 ? '' : 's'} on (${cols.join(', ')})`] : [])]
       why.push(...listed(same.filter((r) => !asWritten(r)), (r) => `${relationText(r, ctx)}: the claim disagrees with it`))
       notes.push(...listed(same.filter(asWritten), (r) => `${relationText(r, ctx)}, its direction only as written (neither side is id or names the other table): too weak to contradict the claim`))
     }
