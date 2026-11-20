@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "title": "The shop's data map, refined",
+  "summary": "Relations no key states: a review's product and owner, a cart line's cart.",
+  "relations": [
+    {
+      "from": "shop:dynamodb/reviews",
+      "columns": ["productRef"],
+      "to": "shop:dynamodb/products",
+      "toColumns": ["id"],
+      "why": "a review is read by its product's id",
+      "sources": ["shop:src/reviews.ts:2"]
+    },
+    {
+      "from": "shop:dynamodb/cart_items",
+      "columns": ["cartId"],
+      "to": "shop:dynamodb/carts",
+      "toColumns": ["cartId"],
+      "why": "a cart's lines are read by its cart id",
+      "sources": ["shop:src/reviews.ts:6"]
+    },
+    {
+      "from": "shop:dynamodb/reviews",
+      "columns": ["ownerId"],
+      "to": "shop:db/users",
+      "toColumns": ["id"],
+      "why": "a review's owner is a user of the SQL store",
+      "sources": ["shop:src/reviews.ts:4"]
+    },
+    {
+      "from": "shop:redis/cart:{cartId}",
+      "columns": ["cartId"],
+      "to": "shop:dynamodb/carts",
+      "toColumns": ["cartId"],
+      "why": "the cart cache is keyed by the cart's id",
+      "sources": ["shop:src/cache.ts:4"]
+    }
+  ]
+}

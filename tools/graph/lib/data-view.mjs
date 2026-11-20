@@ -57,6 +57,18 @@
 // index's purpose sits under its row; a key card says when its logical table is refined, and when no
 // code uses its name.
 //
+// One diagram for every store kind (spec 2026-11-09 and its 2026-11-20 amendment): a key-value store
+// opens as a diagram of its tables (Diagram / Cards switch; a compact box: its keys marked PK, SK, TTL,
+// its GSIs and LSIs, the attributes a line attaches to or named like an id, "+ N more fields"; the
+// Fields switch draws them all), its key card as the passport beside it, and a key space has a Diagram
+// mode beside its tree (a key template is a box: its placeholders marked KEY, its fields, its lifetime;
+// a search index is a box, a thin line to each template its PREFIX covers). Every diagram, the SQL ERDs
+// included, draws one line vocabulary: a foreign key solid, a refined relation dashed, a name lead
+// dotted (data/links.mjs: never a foreign key, no FK mark), an inferred join long-dashed, an extracted
+// coverage thin; and a stub at its right edge for each entity of another store a link reaches (a lead,
+// a refined relation, a lineage claim), clicking it opens that store on that entity. An overlay on a
+// key-value store draws its cards, as before, with a note: the diagram does not draw overlays yet.
+//
 // A store deduced from the queries in code (render.mjs packStore `inf`, data/queries.mjs) is drawn as an
 // ERD under a banner saying so ("deduced from the queries in code, not declared", its clients, why it
 // is attached to no declared store): dashed table frames, each column "seen in code" (or the type the
@@ -143,7 +155,7 @@ export function dataClient(ctx) {
     return out
   }
   const layoutOf = (s, n, list, collapsed) => {
-    const key = `${n}|${s.ov ? 1 : s.dv ? `d${st.deltaSel}` : 0}|${collapsed ? 1 : 0}|${list.join(',')}`
+    const key = `${n}|${s.mt || ''}|${s.ov ? 1 : s.dv ? `d${st.deltaSel}` : 0}|${collapsed ? 1 : 0}|${list.join(',')}`
     if (!memo.has(key)) { if (memo.size > 60) memo.clear(); memo.set(key, layoutErd(list.map((i) => s.tables[i]), { collapsed })) }
     return memo.get(key)
   }
@@ -163,7 +175,7 @@ export function dataClient(ctx) {
 
   // natural size by default; Fit shows it all (at full size, the window less the passport beside it)
   const zoomOf = (L) => {
-    if (st.dataZoom !== 'fit') return st.dataZoom || 1
+    if (st.dataZoom !== 'fit' && st.dataZoom) return st.dataZoom // unset: fit the width, never above 100%
     if (st.full === 'data') {
       const vw = window.innerWidth || 1400, w = vw - 48 - (st.dataSel !== null ? Math.min(420, vw * 0.38) + 12 : 0), hgt = (window.innerHeight || 900) - 48
       return Math.min(2, Math.max(ZMIN, Math.min(w / (L.W + 8), hgt / (L.H + 8))))
@@ -174,6 +186,172 @@ export function dataClient(ctx) {
     const b = document.getElementById('data-box')
     st.dataScroll = keep && b ? [b.scrollLeft, b.scrollTop] : null
     render()
+  }
+
+  // ── links to other stores: a stub per entity a link reaches, at the drawing's right edge (D5) ──
+  const LEAD = 'a lead from the name, never checked: read the code before relying on it'
+  const MKSAY = { SK: 'sort key', TTL: 'time to live', KEY: 'a part of the key code fills in (a placeholder)', K: 'a key part' }
+  const STUB_MAX = 12, SW = 214, SH = 38, SG = 12, STUB_TOP = 76
+  const STUB_SAY = { lead: 'lead', refined: 'refined', lineage: 'mirrors · refined', fold: 'more links' }
+  function stubsOf(s, sc) {
+    const L0 = sc.L, list = ((s.links && s.links.st) || [])
+    const at = new Map(sc.list.map((ti, j) => [s.tables[ti].name, j]))
+    let links = list.filter((x) => at.has(x.from))
+    if (!links.length) return { L: L0, parts: [], lines: [], ports: [], boxes: [] }
+    // one box per other entity; past STUB_MAX boxes, the first STUB_MAX - (stores folded) drawn and
+    // the rest folded into one box per other store, "+k" counting its entities, listed on hover
+    const key = (x) => `${x.store}\u0000${x.entity}`
+    const ents = [...new Set(links.map(key))]
+    let kept = ents, folded = []
+    if (ents.length > STUB_MAX) {
+      for (let n = STUB_MAX - 1; n >= 0; n--) {
+        const rest = ents.slice(n), stores = new Set(rest.map((k) => k.split('\u0000')[0]))
+        if (n + stores.size <= STUB_MAX) { kept = ents.slice(0, n); folded = rest; break }
+      }
+    }
+    const foldOf = new Map() // store → the links to its folded entities
+    for (const x of links) if (folded.includes(key(x))) { if (!foldOf.has(x.store)) foldOf.set(x.store, []); foldOf.get(x.store).push(x) }
+    // each stub at the height of the rows that reach it (the mean of their y), in that order, so the
+    // lines cross as little as they can; the first below the drawing's zoom controls
+    const srcY = (x) => { const j = at.get(x.from), A = L0.boxes[j], g = erdBox(s.tables[sc.list[j]], sc.names), fi = s.tables[sc.list[j]].fields.findIndex((f) => f.name === x.column); return A.y + (fi >= 0 && g.fieldY[fi] !== undefined ? g.fieldY[fi] : 15) }
+    const meanY = (xs) => xs.reduce((a, x) => a + srcY(x), 0) / xs.length
+    const boxes = [
+      ...kept.map((k) => { const xs = links.filter((y) => key(y) === k), x = xs[0]; return { store: x.store, n: x.n, entity: x.entity, label: x.entity, many: null, kinds: [...new Set(xs.map((y) => y.kind))], my: meanY(xs) } }).sort((a, b) => a.my - b.my),
+      ...[...foldOf].map(([store, many]) => ({ store, n: many[0].n, entity: null, label: `+${new Set(many.map((y) => y.entity)).size} more (hover)`, many, kinds: [...new Set(many.map((y) => y.kind))], my: Infinity })),
+    ].map((b, i) => ({ x: L0.W + 20, y: STUB_TOP + i * (SH + SG), w: SW, h: SH, ...b }))
+    const boxOf = (x) => (folded.includes(key(x)) ? boxes.findIndex((b) => b.many && b.store === x.store) : boxes.findIndex((b) => !b.many && b.store === x.store && b.entity === x.entity))
+    const W = L0.W + 20 + SW + 24, H = Math.max(L0.H, STUB_TOP + boxes.length * (SH + SG) + 24)
+    const parts = [], lines = [], ports = []
+    const r1 = (v) => Math.round(v * 10) / 10
+    for (const x of links) {
+      const j = at.get(x.from), ti = sc.list[j], A = L0.boxes[j], g = erdBox(s.tables[ti], sc.names), b = boxes[boxOf(x)]
+      const fi = s.tables[ti].fields.findIndex((f) => f.name === x.column)
+      const y1 = A.y + (fi >= 0 && g.fieldY[fi] !== undefined ? g.fieldY[fi] : 15), x1 = A.x + A.w, x2 = b.x, y2 = b.y + SH / 2, c = Math.max(40, (x2 - x1) / 2)
+      const selName = sc.sel >= 0 ? s.tables[sc.sel].name : null
+      const cls = `${x.kind === 'lead' ? ' ld' : x.kind === 'lineage' ? ' rf lin' : ' rf'}${selName === null ? '' : x.from === selName ? ' on' : ' dim'}`
+      const tip = `${x.kind === 'lead' ? `lead: "${x.dir === 'out' ? x.column : x.toColumn}" names ${x.stem}, ${LEAD}` : x.kind === 'lineage' ? `mirrors · refined${x.why ? `: ${x.why}` : ''}` : `refined${x.why ? `: ${x.why}` : ''}`}\n${x.dir === 'out' ? `${x.from} (${x.column || '?'}) → ${x.store}/${x.entity} (${x.toColumn || '?'})` : `${x.store}/${x.entity} (${x.toColumn || '?'}) → ${x.from} (${x.column || '?'})`}`
+      const [m1, m2] = x.kind === 'lineage' ? [null, null] : x.dir === 'out' ? ['erd-many', 'erd-one'] : ['erd-one', 'erd-many']
+      const d = `M${x1},${r1(y1)} C${r1(x1 + c)},${r1(y1)} ${r1(x2 - c)},${r1(y2)} ${x2},${r1(y2)}`
+      ports.push(`<circle class="port${cls}" cx="${x1}" cy="${r1(y1)}" r="3"/>`)
+      lines.push(`<path class="fk xs${cls}" d="M${x1},${r1(y1)} C${r1(x1 + c)},${r1(y1)} ${r1(x2 - c)},${r1(y2)} ${x2},${r1(y2)}"${m1 ? ` marker-start="url(#${m1})" marker-end="url(#${m2})"` : ''}><title>${esc(tip)}</title></path>`)
+    }
+    const selName = sc.sel >= 0 ? s.tables[sc.sel].name : null
+    boxes.forEach((b, k) => {
+      const lit = selName === null || (b.many || links.filter((y) => key(y) === `${b.store}\u0000${b.entity}`)).some((y) => y.from === selName)
+      const tip = b.many ? `${b.label}:\n${b.many.map((x) => `${x.from} ${x.dir === 'out' ? '→' : '←'} ${x.entity} (${STUB_SAY[x.kind]})`).join('\n')}` : `${b.store}/${b.entity}: ${b.kinds.map((k) => STUB_SAY[k]).join(', ')}${b.n >= 0 ? '\nclick to open that store on it' : '\nthat store is not drawn'}`
+      parts.push(`<g class="stub${b.kinds.includes('lead') && b.kinds.length === 1 ? ' ld' : ''}${b.n < 0 ? ' off' : ''}${lit ? '' : ' dim'}" data-stub="${k}" tabindex="0" role="button" aria-label="${esc(`${b.store}: ${b.label}`)}"><title>${esc(tip)}</title><rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="8"/><text class="sst" x="${b.x + 10}" y="${b.y + 14}">${esc(b.store.length > 34 ? `${b.store.slice(0, 33)}…` : b.store)}</text><text class="sen" x="${b.x + 10}" y="${b.y + 30}">${esc(b.label.length > 28 ? `${b.label.slice(0, 27)}…` : b.label)}</text><path class="sgo" d="M${b.x + b.w - 16},${b.y + 14}l5,5l-5,5"/></g>`)
+    })
+    return { L: { ...L0, W, H }, parts, lines, ports, boxes }
+  }
+  function goStub(b) {
+    if (!b || b.n < 0 || !S[b.n]) return
+    if (st.repo && !S[b.n].id.startsWith(`${st.repo}:`)) st.repo = null // a filter hiding that store would leave a dead click
+    st.data = b.n; st.dataSel = b.entity; st.dataAll = false; st.dataScroll = null; st.focusMain = !!b.entity
+    if (b.entity && S[b.n].dialect === 'redis') st.ksMode = { ...(st.ksMode || {}), [b.n]: 'diagram' } // a template is focused in the diagram, never lost in the tree
+    rerender(false)
+  }
+
+  // ── diagrams of the other store kinds, in the ERD's boxes and lines ──
+  const KMK = { partition: 'PK', sort: 'SK', ttl: 'TTL' }
+  const idLike = (n) => { const w = String(n).split('.').pop().replace(/\[\]/g, ''); return w.length > 2 && /([_-][iI][dD]|[a-z0-9]Id|[a-z0-9]ID)$/.test(w) }
+  // a key-value store's tables as boxes: the keys marked first, then the attributes a line attaches to
+  // or named like an id (all of them with Fields), then its GSIs and LSIs as rows
+  function kvTables(s, every) {
+    const stubCols = new Map()
+    for (const x of (s.links && s.links.st) || []) if (x.column) { if (!stubCols.has(x.from)) stubCols.set(x.from, new Set()); stubCols.get(x.from).add(x.column) }
+    return s.tables.map((t) => {
+      const role = new Map()
+      for (const k of t.keys) for (const p of k.parts) if (!role.has(p)) role.set(p, KMK[k.role] || 'K')
+      const linked = new Set([...t.rels.flatMap((r) => r.columns), ...(stubCols.get(t.name) || []), ...s.tables.flatMap((o) => o.rels.filter((r) => r.to === t.name).flatMap((r) => r.toColumns))])
+      const names = t.fields.map((f) => f.name)
+      for (const p of role.keys()) if (!names.includes(p)) names.push(p) // a key attribute no declaration types (a TTL's)
+      const rank = (n) => ({ PK: 0, SK: 1, TTL: 3 }[role.get(n)] ?? 2)
+      const shown = names.filter((n) => every || role.has(n) || linked.has(n) || idLike(n)).sort((a, b) => rank(a) - rank(b))
+      const byName = new Map(t.fields.map((f) => [f.name, f]))
+      const fields = shown.map((n) => { const f = byName.get(n) || { name: n, type: '', src: [], cf: [] }, r = role.get(n); return { ...f, type: f.type || (r === 'TTL' ? 'epoch' : ''), pk: r === 'PK' ? 1 : 0, fk: 0, mk: r || null, nullable: r && r !== 'TTL' ? false : null } })
+      const indexes = t.indexes.map((x) => ({ ...x, unique: false, label: `${x.kind === 'lsi' ? 'LSI' : 'GSI'} ${x.name} (${[...(x.partition || []), ...(x.sort || [])].join(' · ') || x.columns.join(', ')})${x.projection ? ` ${String(x.projection).toLowerCase().replace(/_/g, ' ')}` : ''}` }))
+      return { ...t, kind: 'table', keys: [], fields, indexes, more: Math.max(0, names.length - shown.length) } // no pill: the store says its kind
+    })
+  }
+  // a key space's templates and search indexes as boxes (D6)
+  function ksTables(s) {
+    const K = s.ks
+    const ph = (n) => [...String(n).matchAll(/(?<!\\)\{([A-Za-z0-9_$]+)\}/g)].map((m) => m[1]) // an escaped brace (a hash tag) is none
+    const tpl = K.tpl.map((t, i) => ({ name: t.n, kind: 'key template', tag: t.type || '?', src: t.src, cf: [], keys: [], indexes: [], rels: [], ks: ['tpl', i],
+      fields: [...ph(t.n).map((p) => ({ name: p, type: 'placeholder', mk: 'KEY', pk: 0, fk: 0, nullable: false, src: t.src, cf: [] })),
+        ...t.f.map(([n, how, src]) => ({ name: n, type: how === 'path' ? 'JSON path' : how === 'stream' ? 'stream field' : 'field', pk: 0, fk: 0, nullable: null, src, cf: [] })),
+        { name: 'lifetime', type: t.ttl ? t.ttl[0] : t.lead ? 'no expiry (lead)' : 'not said', mk: 'TTL', pk: 0, fk: 0, nullable: null, src: t.ttl ? t.ttl[1] : [], cf: [] }] }))
+    const ix = K.ix.map((x, i) => ({ name: x.n, kind: 'search index', tag: `FT ${x.on || ''}`.trim(), src: x.src, cf: [], keys: [], indexes: [], ks: ['ix', i],
+      fields: x.f.map(([n, as, type, , src]) => ({ name: as || n, type: type || '?', pk: 0, fk: 0, nullable: null, src, cf: [] })),
+      rels: x.covers.map((to) => ({ columns: [], to, toColumns: [], ex: 1, src: [], cf: [], why: `PREFIX ${x.pre.join(' ')} covers ${to}` })) }))
+    return [...tpl, ...ix]
+  }
+  const derived = new Map()
+  function diagramStore(s, n) {
+    const every = !!(st.dataFields && st.dataFields[n])
+    const key = `${n}|${s.ks ? 'ks' : every ? 'all' : 'kv'}`
+    if (!derived.has(key)) {
+      const tables = s.ks ? ksTables(s) : kvTables(s, every)
+      const collapsed = tables.length > 60
+      derived.set(key, { ...s, tables, collapsed, layout: layoutErd(tables, { collapsed }), ov: false, dv: false, kd: s.ks ? 'ks' : 'kv', mt: key })
+    }
+    return derived.get(key)
+  }
+  // the legend every diagram shares: its marks and its lines
+  const lineLegend = (d) => h('div', { class: 'legend dlegend', 'data-ctl': 'data-lines' },
+    !d.kd ? null : d.kd === 'kv' ? [h('span', null, h('span', { class: 'mkl k-pk' }, 'PK'), 'partition key'), h('span', null, h('span', { class: 'mkl k-sk' }, 'SK'), 'sort key'), h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'time to live')]
+      : d.kd === 'ks' ? [h('span', null, h('span', { class: 'mkl k-sk' }, 'KEY'), 'a part code fills in'), h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'its lifetime')]
+        : null,
+    d.kd === 'kv' ? h('span', { class: 'muted' }, 'S string · N number · B binary') : null,
+    d.kd ? null : h('span', null, h('i', { class: 'lnk fkl' }), 'foreign key, declared'), h('span', null, h('i', { class: 'lnk rfl' }), 'refined: a refine file, re-checked'),
+    h('span', null, h('i', { class: 'lnk ldl' }), 'lead: from a name ending in id, never checked'), d.kd === 'ks' ? h('span', null, h('i', { class: 'lnk exl' }), 'extracted: a search index covers it') : null,
+    (d.links && d.links.st && d.links.st.length) ? h('span', null, h('i', { class: 'stubk' }), 'another store: click to open it') : null,
+    d.kd ? h('span', { class: 'muted' }, 'a line runs from the attribute that holds the reference (many) to the key it names (one)') : null)
+  // the names several tables share: no lead drawn, each listed with its rivals
+  const rivalsOf = (s) => (s.links && s.links.rv && s.links.rv.length ? h('details', { class: 'problems', 'data-ctl': 'data-rivals' }, h('summary', null, `Ambiguous names (${s.links.rv.length}): several tables share the stem, so no lead is drawn`),
+    h('ul', { class: 'links' }, s.links.rv.map((x) => h('li', null, h('span', { class: 'mono' }, `${x.from} (${x.column})`), h('span', { class: 'muted' }, ` names ${x.stem}: `), h('span', { class: 'mono' }, x.targets.join(' | ')))))) : null)
+  // a key template's or a search index's passport
+  function ksPassport(s, t) {
+    const K = s.ks
+    const fn = (f) => h('li', null, h('span', { class: `mkl k-${f.wr ? 'w' : 'r'}` }, f.wr && f.r ? 'RW' : f.wr ? 'W' : 'R'), ' ', h('b', { class: 'mono' }, f.n), h('span', { class: 'muted' }, ` ${f.k.join(', ')} `), srcEl(s, f.at))
+    if (t.ks[0] === 'ix') {
+      const x = K.ix[t.ks[1]]
+      return h('div', { class: 'detail passport' }, h('h3', null, h('span', { class: 'mkl k-idx' }, 'FT'), ' ', h('span', { class: 'mono' }, x.n)),
+        h('div', { class: 'muted' }, `${s.id} · search index${x.decl ? ` ON ${x.on}` : ': its creation not read'}${x.pre.length ? ` · PREFIX ${x.pre.join(' ')}` : ''}`),
+        h('h2', null, `Fields (${x.f.length})`), h('ul', { class: 'links dlist' }, x.f.map(([n, as, type, , src]) => h('li', null, h('b', { class: 'mono' }, n), as ? h('span', { class: 'muted' }, ` AS ${as}`) : null, ' ', h('span', { class: 'mono muted' }, type || '?'), h('div', { class: 'srcline' }, srcs(s, src))))),
+        h('h2', null, 'Covers'), h('div', { class: 'mono' }, x.covers.length ? x.covers.join(' · ') : 'no template read'),
+        h('h2', null, `Queried by (${x.q.length})`), x.q.length ? h('ul', { class: 'links dlist' }, x.q.map(fn)) : h('div', { class: 'muted' }, x.lead ? K.say.noQuery : 'none read'),
+        h('h2', null, x.decl ? 'Declared by code' : 'Seen'), srcs(s, x.src))
+    }
+    const p = K.tpl[t.ks[1]], parts = t.fields.filter((f) => f.mk === 'KEY')
+    return h('div', { class: 'detail passport' }, h('h3', null, h('span', { class: `mkl k-${(p.type || 'u').split(' ')[0].toLowerCase()}` }, p.type || '?'), ' ', h('span', { class: 'mono' }, p.n)),
+      h('div', { class: 'muted' }, `${s.id} · key template${parts.length ? ` · ${plural(parts.length, 'placeholder')}: ${parts.map((f) => f.name).join(', ')}` : ''}`),
+      h('h2', null, 'Lifetime'), h('div', null, p.ttl ? [h('span', { class: 'mono' }, p.ttl[0]), ' ', srcs(s, p.ttl[1])] : p.lead ? h('span', { class: 'pill warn', title: K.say.noExpiry }, 'no expiry found (lead)') : h('span', { class: 'muted' }, 'not said')),
+      h('h2', null, `Fields (${p.f.length})`), p.f.length ? h('ul', { class: 'links dlist' }, p.f.map(([n, how, src]) => h('li', null, h('b', { class: 'mono' }, n), h('span', { class: 'muted' }, ` ${how}`), h('div', { class: 'srcline' }, srcs(s, src))))) : h('div', { class: 'muted' }, 'none read'),
+      p.ix.length ? [h('h2', null, 'Search indexes covering it'), h('div', { class: 'mono' }, p.ix.join(' · '))] : null,
+      h('h2', null, `Reads and writes (${p.rw.length})`), p.rw.length ? h('ul', { class: 'links dlist' }, p.rw.map(fn)) : h('div', { class: 'muted' }, 'none read'),
+      h('h2', null, 'Seen at'), srcs(s, p.src))
+  }
+  // a key-value store or a key space as a diagram: its own toolbar (the switches), the shared legend,
+  // the passport beside it (a key card, a template's or an index's)
+  function diagramView(d, n, s) {
+    const sc = scene(d, n)
+    const kv = d.kd === 'kv'
+    const fields = !!(st.dataFields && st.dataFields[n])
+    const mode = kv
+      ? h('div', { class: 'seg', role: 'group', 'aria-label': 'Drawn as' }, h('button', { 'data-ctl': 'data-kv-diagram', 'aria-pressed': 'true' }, 'Diagram'), h('button', { 'data-ctl': 'data-kv-cards', 'aria-pressed': 'false', onclick: () => { st.kvMode = { ...(st.kvMode || {}), [n]: 'cards' }; st.dataSel = null; rerender(false) } }, 'Cards'))
+      : h('div', { class: 'seg', role: 'group', 'aria-label': 'Drawn as' }, h('button', { 'data-ctl': 'data-ks-tree', 'aria-pressed': 'false', onclick: () => { st.ksMode = { ...(st.ksMode || {}), [n]: 'tree' }; st.dataSel = null; rerender(false) } }, 'Tree'), h('button', { 'data-ctl': 'data-ks-diagram', 'aria-pressed': 'true' }, 'Diagram'))
+    const fieldSeg = kv ? h('div', { class: 'seg', role: 'group', 'aria-label': 'Fields drawn' }, h('button', { 'data-ctl': 'data-kv-compact', 'aria-pressed': String(!fields), onclick: () => { st.dataFields = { ...(st.dataFields || {}), [n]: false }; rerender(false) } }, 'Compact'), h('button', { 'data-ctl': 'data-kv-fields', 'aria-pressed': String(fields), onclick: () => { st.dataFields = { ...(st.dataFields || {}), [n]: true }; rerender(false) } }, 'Fields')) : null
+    const sel = st.dataSel !== null && sc.sel >= 0 ? (kv ? h('div', { class: 'detail passport kvpass' }, keyCard(s, sc.sel)) : ksPassport(s, d.tables[sc.sel])) : null
+    const draw = stage('data', 'Diagram', diagram(d, n, sc), zoomBar(sc), sel)
+    const lines = d.tables.reduce((a, t) => a + t.rels.length, 0), stubs = ((d.links && d.links.st) || []).length
+    return h('section', null,
+      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect), h('span', { class: 'muted' }, s.summary), mode, fieldSeg,
+        h('span', { class: 'muted', 'data-ctl': 'data-diagram-count' }, `${kv ? plural(d.tables.length, 'table') : `${d.tables.length} ${d.tables.length === 1 ? 'box' : 'boxes'}`} · ${plural(lines, 'line')}${stubs ? ` · ${plural(stubs, 'link')} to other stores` : ''}`)),
+      lineLegend(d), rivalsOf(s),
+      sel && st.full !== 'data' ? h('section', { class: 'split rev' }, h('div', null, draw), h('aside', { class: 'side' }, sel)) : draw,
+      h('p', { class: 'note' }, kv ? 'Read from the files that declare each table, never from a database. A dotted line is a lead from a name ending in id (graph_data lists them with their rivals); a dashed one a refined relation, re-checked on every render. Click a table for its key card, a stub for the other store; Cards shows every table as its card.'
+        : 'Read from the commands the code sends, never from a server. A key template is a box (its placeholders, fields and lifetime), a search index a box with a thin line to each template its PREFIX covers; a stub is another store an id-like placeholder names (a lead). Tree shows the key space as its prefix tree.'))
   }
 
   // ── the ERD ──
@@ -198,14 +376,14 @@ export function dataClient(ctx) {
       out.push(`<text class="tcount" x="${rx}" y="${y + 19.5}" text-anchor="end">${esc(g.sub)}</text>`)
       rx -= g.sub.length * 6.3 + 8
       if (g.conflicts) { out.push(`<g class="cf"><rect class="cfbg" x="${rx - 28}" y="${y + 7}" width="28" height="16" rx="8"/><text class="cft" x="${rx - 14}" y="${y + 19}" text-anchor="middle">≠${g.conflicts}</text></g>`); rx -= 34 }
-      if (g.view) out.push(`<g class="tpill"><rect x="${rx - 36}" y="${y + 7}" width="36" height="16" rx="8"/><text x="${rx - 18}" y="${y + 19}" text-anchor="middle">view</text></g>`)
+      if (g.pill) out.push(`<g class="tpill"><rect x="${rx - g.pw}" y="${y + 7}" width="${g.pw}" height="16" rx="8"/><text x="${rx - g.pw / 2}" y="${y + 19}" text-anchor="middle">${esc(g.pill)}</text></g>`)
       return `${out.join('')}</g>`
     }
     out.push(`<rect class="tframe" x="${x}" y="${y}" width="${w}" height="${b.h}" rx="9"/>`,
       `<path class="thead" d="M${x + 0.6},${y + 30}V${y + 9}Q${x + 0.6},${y + 0.6} ${x + 9},${y + 0.6}H${x + w - 9}Q${x + w - 0.6},${y + 0.6} ${x + w - 0.6},${y + 9}V${y + 30}Z"/>`,
       `<line class="tsep" x1="${x}" x2="${x + w}" y1="${y + 30}" y2="${y + 30}"/>`, glyph,
       `<text class="tname" x="${x + 30}" y="${y + 20}">${esc(g.name)}</text>`, struck, stale(s, t) ? staleMark(y + 15) : '')
-    if (g.view) out.push(`<g class="tpill"><rect x="${x + w - 46}" y="${y + 7}" width="38" height="16" rx="8"/><text x="${x + w - 27}" y="${y + 19}" text-anchor="middle">view</text></g>`)
+    if (g.pill) out.push(`<g class="tpill"><rect x="${x + w - 8 - g.pw}" y="${y + 7}" width="${g.pw}" height="16" rx="8"/><text x="${x + w - 8 - g.pw / 2}" y="${y + 19}" text-anchor="middle">${esc(g.pill)}</text></g>`)
     const badge = (bd) => `<g class="cf"><rect class="cfbg" x="${x + 8}" y="${y + bd.y + 1}" width="${w - 16}" height="15" rx="4"/><text class="cft" x="${x + 16}" y="${y + bd.y + 12}">${esc(bd.text)}</text><title>${esc(bd.cf.map(([pre, c]) => pre + cfTip(s, c)).join('\n'))}</title></g>`
     const change = (c, el) => `<g class="chg${s.dv && el.dl ? ` d-${el.dl.s}` : ''}"><rect class="chgbg" x="${x + 8}" y="${y + c.y + 1}" width="${w - 16}" height="15" rx="4"/><text class="chgt" x="${x + 16}" y="${y + c.y + 12}">${esc(c.text)}</text><title>${esc(s.dv ? c.full : `was: ${c.full}${el.bsrc && el.bsrc.length ? ` (at the base: ${el.bsrc.map((p) => bsrcText(s, p)).join(' · ')})` : ''}`)}</title></g>`
     if (g.head) out.push(badge(g.head))
@@ -213,7 +391,8 @@ export function dataClient(ctx) {
     if (g.divider !== null) out.push(`<line class="tsep" x1="${x + 8}" x2="${x + w - 8}" y1="${y + g.divider}" y2="${y + g.divider}"/>`)
     const mid = new Map() // a row's element → its middle, for the rename brackets
     for (const r of g.rows) {
-      const ry = y + r.y, re = r.kind === 'field' ? t.fields[r.i] : r.kind === 'index' ? t.indexes[r.i] : t.keys[r.i]
+      const ry = y + r.y, re = r.kind === 'field' ? t.fields[r.i] : r.kind === 'index' ? t.indexes[r.i] : r.kind === 'more' ? {} : t.keys[r.i]
+      if (r.kind === 'more') { out.push(`<g class="xr more"><title>${esc(`${r.text}: the compact box draws the keys, the indexes, the attributes a line attaches to and those named like an id; Fields draws them all, the passport lists them`)}</title><text class="xrow" x="${x + 12}" y="${ry + 13}">${esc(r.text)}</text></g>`); continue }
       const rc = s.ov && r.ch ? ` ${CLS[r.ch]}` : dcls(s, re)
       const bar = rc ? `<rect class="chbar${rc}" x="${x + 1}" y="${ry}" width="3" height="${r.kind === 'field' ? 20 : 18}"/>` : ''
       if (stale(s, re)) out.push(staleMark(ry + (r.kind === 'field' ? 10 : 9)))
@@ -221,10 +400,11 @@ export function dataClient(ctx) {
         const f = t.fields[r.i]
         mid.set(f, ry + 10)
         const ftip = t.inf ? `${f.name} · seen in code (${(f.seen || []).join(', ')}) · ${f.cast ? `cast to ${f.cast.join(' | ')}` : 'type unknown'} · nullability unknown · default unknown${f.lk ? ` · used in lookups (${f.lk.join(', ')}): a lead for an index` : ''}${fkTo.has(f.name) ? ` · ${fkTo.get(f.name)}` : ''}`
-          : `${f.name} ${f.type} · ${f.nullable ? 'nullable' : 'not null'}${f.def !== null && f.def !== undefined ? ` · default ${f.def}` : ''}${f.gen ? ` · generated ${f.gen}` : ''}${f.pk ? ' · primary key' : ''}${fkTo.has(f.name) ? ` · foreign key → ${fkTo.get(f.name)}` : ''}${chTip(s, f)}${dTip(s, f)}`
+          : f.mk && f.mk !== 'PK' ? `${f.name} ${f.type || ''} · ${MKSAY[f.mk] || f.mk}${fkTo.has(f.name) ? ` · → ${fkTo.get(f.name)}` : ''}${f.src && f.src.length ? `\n${f.src.map((p) => srcText(s, p)).join(' · ')}` : ''}`
+          : `${f.name} ${f.type} · ${f.nullable === null ? 'nullability unknown' : f.nullable ? 'nullable' : 'not null'}${f.def !== null && f.def !== undefined ? ` · default ${f.def}` : ''}${f.gen ? ` · generated ${f.gen}` : ''}${f.pk ? ' · primary key' : ''}${fkTo.has(f.name) ? ` · foreign key → ${fkTo.get(f.name)}` : ''}${chTip(s, f)}${dTip(s, f)}`
         out.push(`<g class="row${t.inf ? ' inf' : ''}${sc.colHit(f) ? ' hit' : ''}${rc}" data-col="${esc(f.name)}"><title>${esc(ftip)}</title><rect class="rowbg" x="${x + 1}" y="${ry}" width="${w - 2}" height="20"/>`, bar,
-          f.pk ? `<text class="mk mpk" x="${x + 8}" y="${ry + 13.5}">PK</text>` : '',
-          f.fk ? `<text class="mk mfk" x="${x + (f.pk ? 25 : 8)}" y="${ry + 13.5}">FK</text>` : '',
+          f.mk || f.pk ? `<text class="mk m${esc(String(f.mk || 'PK').toLowerCase())}" x="${x + 8}" y="${ry + 13.5}">${esc(f.mk || 'PK')}</text>` : '',
+          f.fk ? `<text class="mk mfk" x="${x + (f.pk || f.mk ? 25 : 8)}" y="${ry + 13.5}">FK</text>` : '',
           `<text class="cname${f.pk ? ' key' : ''}" x="${x + 43}" y="${ry + 14}">${esc(r.name)}</text><text class="ctype" x="${x + w - 24}" y="${ry + 14}" text-anchor="end">${esc(r.type)}</text>`,
           `<path class="${f.nullable === null ? 'unk' : f.nullable ? 'nul' : 'nn'}" d="M${x + w - 13},${ry + 6}l4,4l-4,4l-4,-4z"/>`,
           (r.ch === 'removed' && s.ov) || struckD(s, f) ? `<line class="strike${s.dv ? ` d-${f.dl.s}` : ''}" x1="${x + 40}" x2="${x + w - 20}" y1="${ry + 10}" y2="${ry + 10}"/>` : '', '</g>')
@@ -256,27 +436,36 @@ export function dataClient(ctx) {
     return `<path class="ren tren" data-ren="${r}" d="${d}"><title>${esc(text)}</title></path>`
   }
   function diagram(s, n, sc) {
-    const L = sc.L, z = zoomOf(L)
+    const S2 = stubsOf(s, sc)
+    const L = S2.L, z = zoomOf(L)
     const lit = sc.sel >= 0
     const cls = (ti) => `${ti === sc.sel ? ' sel' : sc.near.has(ti) ? ' on' : lit ? ' dim' : ''}${sc.q && sc.match.includes(ti) ? ' hit' : ''}`
     const parts = [`<svg viewBox="0 0 ${L.W} ${L.H}" width="${Math.round(L.W * z)}" height="${Math.round(L.H * z)}" class="erd${sc.names ? ' collapsed' : ''}${lit ? ' lit' : ''}${sc.q && sc.mode === 'all' ? ' q' : ''}${s.ov ? ' ov' : ''}${s.dv ? ' dv' : ''}" role="group" focusable="false" aria-label="${esc(s.id)}: ${plural(sc.list.length, 'table')}, ${plural(L.links.length, 'foreign key line')}${s.ov ? `, changes since ${esc(REF)} drawn` : ''}${s.dv ? `, the delta ${esc(s.delta.shown)} drawn` : ''}">`,
       '<defs>' + ['', '-on'].map((on) => `<marker id="erd-many${on}" viewBox="-12 -7 13 14" refX="0" refY="0" markerWidth="13" markerHeight="14" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mkr${on ? ' on' : ''}" d="M-10,0L0,-5M-10,0L0,0M-10,0L0,5"/></marker>` +
         `<marker id="erd-one${on}" viewBox="-12 -7 13 14" refX="0" refY="0" markerWidth="13" markerHeight="14" markerUnits="userSpaceOnUse" orient="auto"><path class="mkr${on ? ' on' : ''}" d="M-7,-5L-7,5"/></marker>`).join('') + '</defs>']
+    const over = [] // the leads, drawn after the other lines (beneath the boxes all the same)
     for (const l of L.links) {
       const from = sc.list[l.from], to = sc.list[l.to], t = s.tables[from], r = t.rels[l.k]
       const on = lit && (from === sc.sel || to === sc.sel)
-      const tip = r.rf ? `refined: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), no foreign key states it\n${r.why}${r.at.length ? `\n${r.at.join(' · ')}` : ''}`
+      const tip = r.ld ? `lead: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}): "${r.columns[0]}" names ${r.stem}, ${LEAD}${r.sort === 'partition' ? '\nsort key only: the item also needs its partition key' : r.sort ? '\npartition key only: the item also needs its sort key' : ''}`
+        : r.ex ? `extracted: ${r.why}`
+        : r.rf ? `refined: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), no foreign key states it\n${r.why}${r.at.length ? `\n${r.at.join(' · ')}` : ''}`
         : r.jn ? `inferred from a join: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), never a foreign key${r.dir === 'as written' ? '\ndirection as written: neither side is an id' : ''}${r.src.length ? `\n${r.src.map((p) => srcText(s, p)).join(' · ')}` : ''}`
           : `${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')})\non delete ${r.onDelete} · on update ${r.onUpdate}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
-      parts.push(`<path class="fk${r.rf ? ' rf' : ''}${r.jn ? ' jn' : ''}${s.ov && r.ch ? ` ${CLS[r.ch]}` : ''}${dcls(s, r)}${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`)
+      if (r.ex) { parts.push(`<path class="fk ex${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}"><title>${esc(tip)}</title></path>`); continue }
+      if (r.ld) { over.push(`<path class="fk ld${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`); continue }
+      parts.push(`<path class="fk${r.rf ? ' rf' : ''}${r.ld ? ' ld' : ''}${r.jn ? ' jn' : ''}${s.ov && r.ch ? ` ${CLS[r.ch]}` : ''}${dcls(s, r)}${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}" marker-start="url(#erd-many${on ? '-on' : ''})" marker-end="url(#erd-one${on ? '-on' : ''})"><title>${esc(tip)}</title></path>`)
     }
     if (s.ov) sc.list.forEach((ti, j) => {
       const t = s.tables[ti]
       if (t.ch !== 'removed' || t.ren === null || t.ren === undefined) return
       sc.list.forEach((tk, k) => { const u = s.tables[tk]; if (u.ch === 'added' && u.ren === t.ren) parts.push(renLink(L.boxes[j], L.boxes[k], s.ch.renames[t.ren].text, t.ren)) })
     })
+    // beneath the boxes, which let it show through: a line to a stub or a lead that crosses a table
+    // reads as passing behind it; a port on the row it leaves, over the boxes, says where it starts
+    parts.push(...over, ...S2.lines)
     sc.list.forEach((ti, j) => parts.push(table(s, ti, L.boxes[j], erdBox(s.tables[ti], sc.names), cls(ti), sc)))
-    parts.push('</svg>')
+    parts.push(...S2.ports, ...S2.parts, '</svg>')
     const box = h('div', { class: 'svgbox archbox', id: 'data-box', ...nav.attrs('data', `ERD of ${s.id}`) })
     box.innerHTML = parts.join('')
     const svg = box.firstChild
@@ -286,6 +475,8 @@ export function dataClient(ctx) {
     // drag the background or use the arrow keys to pan; the wheel, + and − zoom in place (stage-view.mjs)
     nav.scroller(box, svg, { item: '[data-tbl]', W: L.W, H: L.H, min: ZMIN, max: ZMAX, zoom: () => zoomOf(L), set: (z) => { st.dataZoom = z }, ctl: 'data', fit: () => { st.dataZoom = 'fit'; rerender() } })
     const open = (e) => {
+      const sb = e.target.closest('[data-stub]')
+      if (sb) { goStub(S2.boxes[Number(sb.dataset.stub)]); return }
       const g = e.target.closest('[data-tbl]')
       if (!g) { if (st.dataSel !== null) { st.dataSel = null; rerender(!s.collapsed) } return }
       const name = s.tables[Number(g.dataset.tbl)].name
@@ -294,7 +485,7 @@ export function dataClient(ctx) {
       rerender(!s.collapsed)
     }
     svg.addEventListener('click', open)
-    svg.addEventListener('keydown', (e) => { if (activate(e) && e.target.closest('[data-tbl]')) { e.preventDefault(); open(e) } })
+    svg.addEventListener('keydown', (e) => { if (activate(e) && (e.target.closest('[data-tbl]') || e.target.closest('[data-stub]'))) { e.preventDefault(); open(e) } })
     return box
   }
 
@@ -559,7 +750,8 @@ export function dataClient(ctx) {
         A && A.cfMore ? h('p', { class: 'muted' }, `… and ${A.cfMore} more written attribute${A.cfMore === 1 ? '' : 's'} the item does not state`) : null] : null,
       dks.length || dus.length ? [h('div', { class: 'ksub' }, `Delta: ${plural(dks.length, 'change')}${dus.length ? `, ${dus.length} not in the plan` : ''}`), h('ul', { class: 'links dlist' }, dks.map((k) => deltaItem(s.delta, k, 'p')), dus.map((j) => unplItem(s.delta, j)))] : null)
   }
-  function cardsView(s) {
+  function cardsView(s, n) {
+    const back = h('div', { class: 'seg', role: 'group', 'aria-label': 'Drawn as' }, h('button', { 'data-ctl': 'data-kv-diagram', 'aria-pressed': 'false', disabled: s.ov || s.dv ? 'disabled' : null, title: s.ov || s.dv ? 'the diagram does not draw an overlay yet: turn it off to see the diagram' : null, onclick: () => { st.kvMode = { ...(st.kvMode || {}), [n]: 'diagram' }; st.dataSel = null; rerender(false) } }, 'Diagram'), h('button', { 'data-ctl': 'data-kv-cards', 'aria-pressed': 'true' }, 'Cards'))
     const q = lower(st.q.trim())
     const hit = (t) => !q || lower(t.name).includes(q) || t.fields.some((f) => lower(f.name).includes(q)) || t.indexes.some((x) => lower(x.name).includes(q)) || (t.bound || []).some((b) => lower(b.type).includes(q)) || (t.acc ? t.acc.rw : []).some((f) => lower(f.n).includes(q))
     const shown = s.tables.map((t, i) => [t, i]).filter(([t]) => hit(t))
@@ -567,7 +759,8 @@ export function dataClient(ctx) {
       h('span', null, h('span', { class: 'mkl k-ttl' }, 'TTL'), 'time to live: on, off or not said'), h('span', null, h('span', { class: 'mkl k-gsi' }, 'GSI'), h('span', { class: 'mkl k-lsi' }, 'LSI'), 'global and local secondary indexes, with their keys and projection'),
       h('span', null, h('span', { class: 'pill warn' }, 'a ≠ b'), ' the declarations disagree, both values kept'))
     return h('section', null,
-      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect), h('span', { class: 'muted' }, s.summary), q ? h('span', { class: 'muted' }, `${plural(shown.length, 'table')} of ${s.tables.length} match “${st.q.trim()}”`) : null),
+      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect), h('span', { class: 'muted' }, s.summary), back, q ? h('span', { class: 'muted' }, `${plural(shown.length, 'table')} of ${s.tables.length} match “${st.q.trim()}”`) : null),
+      s.ov || s.dv ? h('p', { class: 'note', 'data-ctl': 'data-kv-overlay' }, 'The overlay is drawn on the cards: the diagram does not draw an overlay yet.') : null,
       h('details', { class: 'problems' }, h('summary', null, `Read from ${plural(s.decls.length, 'declaration')}: each a table declaration (a CreateTable input, a template's table resource, a Terraform module as a Terragrunt configuration or a tfvars file sets it), references kept unresolved, unknown values never guessed`), declList(s)),
       legend, changesHead(s, '(a removed table drawn as a struck card)'), s.dv ? deltaPanel(s) : null,
       h('div', { class: 'kcards', id: 'data-cards', role: 'list', 'aria-label': `${s.id}: ${plural(shown.length, 'key card')}` }, shown.map(([, i]) => keyCard(s, i))),
@@ -634,7 +827,9 @@ export function dataClient(ctx) {
       h('div', { class: 'srcline' }, h('span', { class: 'muted' }, `${plural(c.pub.length, 'publisher')}: `), c.pub.length ? c.pub.map((f) => fnEl(f)) : h('span', { class: 'muted' }, 'none read')),
       h('div', { class: 'srcline' }, h('span', { class: 'muted' }, `${plural(c.sub.length, 'subscriber')}: `), c.sub.length ? c.sub.map((f) => fnEl(f)) : h('span', { class: 'muted' }, 'none read')))
     return h('section', null,
-      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect), h('span', { class: 'muted' }, s.summary), q ? h('span', { class: 'muted' }, `${plural(shown.size, 'template')} of ${K.tpl.length} match “${st.q.trim()}”`) : null),
+      h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect), h('span', { class: 'muted' }, s.summary),
+        h('div', { class: 'seg', role: 'group', 'aria-label': 'Drawn as' }, h('button', { 'data-ctl': 'data-ks-tree', 'aria-pressed': 'true' }, 'Tree'), h('button', { 'data-ctl': 'data-ks-diagram', 'aria-pressed': 'false', onclick: () => { st.ksMode = { ...(st.ksMode || {}), [n]: 'diagram' }; st.dataSel = null; rerender(false) } }, 'Diagram')),
+        q ? h('span', { class: 'muted' }, `${plural(shown.size, 'template')} of ${K.tpl.length} match “${st.q.trim()}”`) : null),
       K.deduced && K.files ? h('div', { class: 'callout callout-warning banner', 'data-ctl': 'data-keyspace' }, h('div', { class: 'callout-title' }, 'Read from the commands in code, not declared'),
         h('p', null, `Read from ${plural(K.commands, 'command')} the code sends, in ${plural(K.files, 'file')}${K.clients.length ? `, reached through ${K.clients.join(', ')}` : ''}${K.dyn ? `; ${plural(K.dyn, 'key')} code builds wholly counted, never named` : ''}. ${K.unknown}`)) : null,
       h('article', { class: 'kcard kspace', 'aria-label': `${s.id}: key space` },
@@ -653,18 +848,22 @@ export function dataClient(ctx) {
   }
 
   // ── the tab ──
-  function storeView(s, n) {
-    if (s.ks) return keyspaceView(s, n)
-    if (s.cards) return cardsView(s, n)
-    const sc = scene(s, n)
+  function zoomBar(sc) {
     const cur = st.dataZoom === 'fit' ? 'fit' : st.dataZoom || 1
     const zoom = (z) => { st.dataZoom = z; rerender() }
     const by = (d) => () => zoom(nav.step(zoomOf(sc.L), d, ZMIN, ZMAX)) // from the zoom as it is now: the wheel or a key may have changed it
-    const zoomSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Zoom' },
+    return h('div', { class: 'seg', role: 'group', 'aria-label': 'Zoom' },
       h('button', { 'data-ctl': 'data-fit', 'aria-pressed': String(cur === 'fit'), title: 'Fit the drawing to the page (0)', onclick: () => zoom('fit') }, 'Fit'),
       h('button', { 'data-ctl': 'data-out', title: 'Zoom out (−)', 'aria-label': 'Zoom out', onclick: by(-1) }, '−'),
       h('button', { 'data-ctl': 'data-100', 'aria-pressed': String(cur === 1), title: 'Natural size', onclick: () => zoom(1) }, `${Math.round((cur === 'fit' ? zoomOf(sc.L) : cur) * 100)}%`),
       h('button', { 'data-ctl': 'data-in', title: 'Zoom in (+)', 'aria-label': 'Zoom in', onclick: by(1) }, '+'))
+  }
+  function storeView(s, n) {
+    if (s.ks) return (st.ksMode || {})[n] === 'diagram' ? diagramView(diagramStore(s, n), n, s) : keyspaceView(s, n)
+    // a key-value store opens as its diagram; an overlay is drawn on its cards (the diagram draws none yet)
+    if (s.cards) return !s.ov && !s.dv && (st.kvMode || {})[n] !== 'cards' ? diagramView(diagramStore(s, n), n, s) : cardsView(s, n)
+    const sc = scene(s, n)
+    const zoomSeg = zoomBar(sc)
     const total = s.tables.length
     const back = (label) => h('button', { class: 'linkbtn', 'data-ctl': 'data-all-tables', onclick: () => { st.dataSel = null; rerender(false) } }, label)
     const what = sc.mode === 'focus' ? h('span', null, h('b', { class: 'mono' }, st.dataSel), ` and its ${plural(sc.near.size, 'foreign key neighbour')}, of ${plural(total, 'table')} · `, back('all tables'))
@@ -698,7 +897,7 @@ export function dataClient(ctx) {
       h('div', { class: 'toolbar' }, h('b', { class: 'mono' }, s.id), h('span', { class: 'pill' }, s.dialect || 'dialect unknown'), inf ? h('span', { class: 'pill inferred' }, 'inferred') : null, h('span', { class: 'muted' }, s.summary), cols, what),
       banner, qcf,
       h('details', { class: 'problems' }, h('summary', null, inf ? `Deduced from ${plural(inf.statements, 'statement')} in ${plural(inf.files, 'file')} · dialect: ` : `Read from ${plural(s.decls.length, 'declaration')} · dialect: `, ...how), decls),
-      legend, overlay, s.dv ? deltaPanel(s) : null,
+      legend, lineLegend(s), rivalsOf(s), overlay, s.dv ? deltaPanel(s) : null,
       sel && st.full !== 'data' ? h('section', { class: 'split rev' }, h('div', null, draw), h('aside', { class: 'side' }, sel)) : draw,
       h('p', { class: 'note' }, inf ? 'Deduced from the SQL the code sends, never from a database and never run. Scroll to zoom, drag to pan; with the drawing focused, the arrow keys pan (Shift: a page), + and − zoom, 0 fits. Click a table for its passport: every column with the statements that name it, its joins, lookups, readers and writers. A map, not the database: read the code at the path:line.'
         : 'Read from migrations and schema snapshots, never from a database. Scroll to zoom, drag to pan; with the drawing focused, the arrow keys pan (Shift: a page), + and − zoom, 0 fits. Click a table for its passport: every column with the files that declare it, and its foreign keys both ways. Search names tables and columns. A map, not the database: read the code at the path:line.'))

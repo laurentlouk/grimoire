@@ -35,6 +35,7 @@ import { jsonLines, pathKey, deeperThan, jsonErrorAt, lineOfOffset } from './rea
 import { KV_DIALECTS } from './model.mjs'
 import { reconcile } from './reconcile.mjs'
 import { bindingHow } from './binding.mjs'
+import { placeholders } from './links.mjs'
 
 export const SUFFIX = '.data.json'
 export const MAX_BYTES = 1 << 20 // a refine file
@@ -350,15 +351,20 @@ export function heldEquivalences(refines, ctx) {
 
 // ── the check ──────────────────────────────────────────────────────────────────────────────
 // The entities a claim may name: the model's ({ id, name, store, fields: [names], indexes, relations,
-// kv, e }), and the refined stores' ({ …, refined: true }).
+// kv, e }), and the refined stores' ({ …, refined: true }). A key template's placeholders count as its
+// fields (spec 2026-11-09 D7): `cart:{cartId}`(cartId) can be claimed, as written.
 function entitiesOf(model) {
   const m = new Map()
-  for (const st of model.stores) for (const e of st.entities) m.set(e.id, { id: e.id, name: e.name, store: st.id, kv: KV_DIALECTS.has(st.dialect), fields: e.fields.map((f) => f.name), e })
+  for (const st of model.stores) for (const e of st.entities) {
+    const fields = e.fields.map((f) => f.name)
+    if (st.dialect === 'redis') for (const p of placeholders(e.name)) if (!fields.includes(p)) fields.push(p)
+    m.set(e.id, { id: e.id, name: e.name, store: st.id, kv: KV_DIALECTS.has(st.dialect), exact: st.dialect === 'redis', fields, e })
+  }
   return m
 }
 function fieldIn(ent, name) {
   if (ent.fields.includes(name)) return name
-  if (ent.kv || ent.refined) return null // key-value attributes and described fields: as written
+  if (ent.kv || ent.exact || ent.refined) return null // key-value attributes, template parts and described fields: as written
   const lower = name.toLowerCase() // a SQL store resolves names in any letter case
   return ent.fields.find((f) => f.toLowerCase() === lower) ?? null
 }

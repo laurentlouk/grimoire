@@ -1,0 +1,16 @@
+{
+  "TableName": "reviews",
+  "AttributeDefinitions": [
+    { "AttributeName": "productRef", "AttributeType": "S" },
+    { "AttributeName": "reviewId", "AttributeType": "S" },
+    { "AttributeName": "ownerId", "AttributeType": "N" }
+  ],
+  "KeySchema": [
+    { "AttributeName": "productRef", "KeyType": "HASH" },
+    { "AttributeName": "reviewId", "KeyType": "RANGE" }
+  ],
+  "GlobalSecondaryIndexes": [
+    { "IndexName": "ByOwner", "KeySchema": [{ "AttributeName": "ownerId", "KeyType": "HASH" }], "Projection": { "ProjectionType": "ALL" } }
+  ],
+  "BillingMode": "PROVISIONED"
+}

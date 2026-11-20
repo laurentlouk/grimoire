@@ -37,6 +37,7 @@ import path from 'node:path'
 import { openStore } from './store.mjs'
 import { layoutMap } from './layout.mjs'
 import { systemMap } from './modules.mjs'
+import { modelLinks } from './data/links.mjs'
 import { analyze, draftArch, loadIndex, readDiagrams } from './arch.mjs'
 import { archScope, archImpact, archDeltaStates, currentDiagrams } from './arch-change.mjs'
 import { packArchChanges, packArchDelta } from './arch-pack.mjs'
@@ -202,8 +203,13 @@ function packArch(doc, r, extra) {
 // `delta` is the one shown first.
 // The refine files (refined: { refines, roots, imports }, data/check.mjs): their equivalences group the
 // model, their claims are re-checked against it, and `refine` packs what holds, the drift and the gaps
-// (packRefine); a refined relation within a SQL store is drawn on its ERD as a dashed line, and an
+// (packRefine); a refined relation within a store is drawn on its diagram as a dashed line, and an
 // index's refined purpose under its row.
+// The links no key states (data/links.mjs): a store's name leads become dotted lines on its diagram
+// (`ld` relations, after its own and its refined ones, never a foreign key: no FK marker), and every
+// link to another store (a lead, a refined relation, a lineage claim) a stub, packed on the store as
+// `links: { st: [{ kind, dir, from, column, store, n: that store's index or -1, entity, toColumn,
+// why, stem }], rv: the names several tables share }`.
 export function dataData(db, files, repos, changes = null, deltas = [], refined = null) {
   const out = { stores: [], unread: [], failed: [], refine: null, changes: { base: null, why: changes?.why || 'no base was resolved' } }
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'data_facts'").get()) return out // an index built before the data model
@@ -212,7 +218,8 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
   const fileId = new Map(files.map((f) => [`${f.repo}\0${f.path}`, f.id]))
   const refines = refined?.refines || []
   const { model, refine: R } = refineCheck(db.prepare('SELECT repo, extractor, facts FROM data_facts WHERE facts IS NOT NULL ORDER BY repo, key, extractor').all().map((r) => ({ repo: r.repo, extractor: r.extractor, facts: JSON.parse(r.facts) })), refines, { roots: refined?.roots || [], imports: refined?.imports || [] })
-  // a refined relation between two tables of one store: drawn on its ERD
+  const LK = modelLinks(model, R.claims)
+  // a refined relation between two tables of one store: drawn on its diagram
   const rrel = new Map()
   for (const c of R.claims) if (c.kind === 'relation' && c.ok && c.store && c.to.startsWith(`${c.store}/`)) { if (!rrel.has(c.store)) rrel.set(c.store, []); rrel.get(c.store).push({ from: c.from.slice(c.store.length + 1), columns: c.columns, to: c.to.slice(c.store.length + 1), toColumns: c.toColumns, why: c.why, at: c.sources.filter((x) => x.ok).map((x) => `${shown(x.repo, x.path)}:${x.start}`) }) }
   // the access patterns (data/access.mjs), their calls placed in the code graph's functions
@@ -239,9 +246,9 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
       failed: changes.at.failed.map((f) => ({ extractor: f.extractor, at: shown(f.repo, f.key), error: f.error })) }
   }
   for (const st of model.stores) {
-    if (st.dialect === 'redis') { out.stores.push(packKeySpace(st, shown, fileId, kacc)); continue }
+    if (st.dialect === 'redis') { out.stores.push(packKeySpace(st, shown, fileId, kacc, LK.get(st.id))); continue }
     const n = st.entities.length ? out.stores.length : -1
-    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc, rrel.get(st.id) || [], qacc))
+    if (n >= 0) out.stores.push(packStore(st, shown, fileId, diff?.get(st.id) || null, acc, rrel.get(st.id) || [], qacc, LK.get(st.id)))
     for (const d of st.declarations) {
       if (n >= 0 && d.status !== 'not-read') continue
       const reason = d.status === 'not-read' ? d.label : d.stopped ? `replayed to ${shown(st.repo, d.stopped.path)}:${d.stopped.line}: ${d.error}` : `${d.label}: no table`
@@ -265,6 +272,7 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
   })
   out.itemsError = model.itemsError || null
   const packedAt = new Map(out.stores.map((s, i) => [s.id, i]))
+  for (const s of out.stores) for (const x of (s.links && s.links.st) || []) x.n = packedAt.has(x.store) ? packedAt.get(x.store) : -1
   // an index's refined purpose, under its row
   for (const c of R.claims) {
     if (c.kind !== 'index' || !c.ok || !packedAt.has(c.store)) continue
@@ -563,7 +571,7 @@ const CARDS = new Set(['dynamodb'])
 //   ix     each search index { n, on, pre, f: [[name, as, type, opts, src]], asm, lead, q, covers, src, decl, cf }
 //   ch     each channel { n, pat, pub, sub, psub, repos, src }; st: the streams' template indexes
 // Every function is { n, at, r, wr, k: commands, lines, c: callers }. Names only: no value.
-function packKeySpace(st, shown, fileId, kacc) {
+function packKeySpace(st, shown, fileId, kacc, lk = null) {
   const paths = [], at = new Map()
   const P = (p, kind = null, repo = st.repo) => {
     const k = `${repo}\0${p}`
@@ -579,7 +587,7 @@ function packKeySpace(st, shown, fileId, kacc) {
   return {
     id: st.id, repo: st.repo, name: st.name, dialect: 'redis', summary: storeSummary(st),
     decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: d.path ? [P(d.path, d.kind, d.repo ?? st.repo), d.line ?? null] : null, stopped: null, error: d.error ?? null, notes: d.notes || [] })),
-    paths, tables: [], collapsed: false, layout: null,
+    paths, tables: [], collapsed: false, layout: null, ...packLinks(lk),
     ks: {
       clients: ks.clients, files: ks.files, commands: ks.commands, dyn: ks.dyn, repos: ks.repos, deduced: !!ks.deduced, unknown: KS_UNKNOWN,
       inst: i ? { label: i.label || i.id, kind: i.kind, engine: i.engine ?? null, version: i.version ?? null, modules: i.modules || [], eviction: i.eviction ?? null, persistence: i.persistence ?? null, notifications: i.notifications ?? null, databases: i.databases ?? null, at: src([{ repo: i.repo, path: i.path, line: i.line, kind: 'infra' }])[0], lead: ks.evictionLead || null, from: i.modulesFrom || null } : null,
@@ -606,7 +614,12 @@ function packKeySpace(st, shown, fileId, kacc) {
 // cf: the tables only the code names } and, on a table, the columns only the code names in its
 // conflicts (`label`, `inf: 1`). Either way a table the code reads or writes carries `sq` { rw: [{ n,
 // at, r, wr, k: the statement kinds, lines, c: callers }], more }.
-function packStore(st, shown, fileId, sd = null, acc = null, rr = [], qacc = null) {
+// The links a store's diagram draws (data/links.mjs): its stubs and its rivals, when it has any.
+function packLinks(lk) {
+  if (!lk || (!lk.stubs.length && !lk.rivals.length)) return {}
+  return { links: { st: lk.stubs.map((x) => ({ kind: x.kind, dir: x.dir, from: x.from, column: x.column ?? null, store: x.store, n: -1, entity: x.entity, toColumn: x.toColumn ?? null, ...(x.why ? { why: x.why } : {}), ...(x.stem ? { stem: x.stem } : {}), ...(x.sort ? { sort: x.sort } : {}) })), rv: lk.rivals.map((x) => ({ from: x.from, column: x.column, stem: x.stem, targets: x.targets })) } }
+}
+function packStore(st, shown, fileId, sd = null, acc = null, rr = [], qacc = null, lk = null) {
   const paths = [], at = new Map()
   // a path of the store's repository, or of another (the code an item type is bound from)
   const P = (p, kind = null, repo = st.repo) => {
@@ -621,7 +634,11 @@ function packStore(st, shown, fileId, sd = null, acc = null, rr = [], qacc = nul
   // a key-value table's item types (data/binding.mjs): its bindings with their evidence and rivals,
   // the logical table it is one declaration of with the conflicts across it
   if (CARDS.has(st.dialect)) st.entities.forEach((e, i) => Object.assign(tables[i], packItems(e, src, cf), packAccess(e, src, cf, acc)))
-  else for (const r of rr) { const t = tables.find((x) => x.name === r.from); if (t) t.rels.push({ columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: null, onUpdate: null, src: [], cf: [], rf: 1, why: r.why, at: r.at }) }
+  for (const r of rr) { const t = tables.find((x) => x.name === r.from); if (t) t.rels.push({ columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: null, onUpdate: null, src: [], cf: [], rf: 1, why: r.why, at: r.at }) }
+  // a name lead within the store: a dotted line, never a foreign key (its column gets no FK mark)
+  for (const l of (lk && lk.leads) || []) { const t = tables.find((x) => x.name === l.from); if (t) t.rels.push({ columns: [l.column], to: l.to, toColumns: [l.toColumn ?? l.column], onDelete: null, onUpdate: null, src: [], cf: [], ld: 1, stem: l.stem, ...(l.sort ? { sort: l.sort } : {}) }) }
+  // a refined relation stated on another declaration of a logical table this one is part of
+  for (const r of (lk && lk.refined) || []) { const t = tables.find((x) => x.name === r.from); if (t) { t.rels = t.rels.filter((x) => !(x.ld && r.columns.includes(x.columns[0]))); t.rels.push({ columns: r.columns, to: r.to, toColumns: r.toColumns, onDelete: null, onUpdate: null, src: [], cf: [], rf: 1, why: r.why, at: [] }) } }
   // the SQL the code sends: a deduced store's tables as the queries show them, a declared one's
   // readers, writers and [inferred] conflicts
   if (st.inferred) st.entities.forEach((e, i) => {
@@ -647,7 +664,7 @@ function packStore(st, shown, fileId, sd = null, acc = null, rr = [], qacc = nul
     ...(st.queries ? { q: { why: st.queries.why, files: st.queries.files, statements: st.queries.statements, cf: st.queries.conflicts.map((c) => ({ label: c.label, src: src(c.values[0].sources), more: c.values[0].more || 0 })), more: st.queries.more || 0 } } : {}),
     decls: st.declarations.map((d) => ({ kind: d.kind, extractor: d.extractor, status: d.status, label: d.label, at: [P(d.path, d.kind), null], stopped: d.stopped ? [P(d.stopped.path, d.kind), d.stopped.line] : null, error: d.error, notes: d.notes })),
     ...(st.enums ? { enums: st.enums.map((en) => ({ name: en.name, values: en.values, src: src(en.sources) })) } : {}),
-    paths, tables, collapsed, ...(cards ? { cards: true, layout: null } : { layout: layoutErd(tables, { collapsed }) }),
+    paths, tables, collapsed, ...(cards ? { cards: true, layout: null } : { layout: layoutErd(tables, { collapsed }) }), ...packLinks(lk),
     ...(sd ? { ch: packChanges(sd, tables, collapsed, shown, cards) } : {}),
   }
 }
@@ -929,6 +946,8 @@ ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4
 .mkl.k-i{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 10%,var(--panel))}ul.kitem .krow.d1{padding-left:20px}ul.kitem .krow.d2{padding-left:34px}ul.kitem .krow.d3{padding-left:48px}ul.kitem .krow.d4,ul.kitem .krow.d5,ul.kitem .krow.d6{padding-left:62px}
 .krow .kacc{margin:1px 0 2px 30px;font-size:12px}.krow .kacc .pill{margin:0 4px 0 0}.kfn{overflow-wrap:anywhere}.mkl.k-r{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,var(--panel))}.mkl.k-w{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel))}.mkl.k-u{color:var(--muted);background:var(--hover)}ul.kaccess .krow.test{opacity:.8}
 .pill.refined{color:var(--t-worker);border-color:currentColor;border-style:dashed}.rent{font-size:12.5px;margin:10px 0 3px;overflow-wrap:anywhere}.rent .mono{font-weight:600}.krow .kpur{margin:1px 0 2px 30px}.note.unused{color:var(--warn)}svg.erd .fk.rf{stroke:var(--t-worker);stroke-dasharray:4 4}
+svg.erd .tbl rect{fill-opacity:.86}svg.erd .port{fill:var(--panel);stroke:var(--muted);stroke-width:1.4}svg.erd .port.rf{stroke:var(--t-worker)}svg.erd .port.on{stroke:var(--accent)}svg.erd .port.dim{opacity:.25}svg.erd .fk.ld{stroke:var(--muted);stroke-dasharray:1.5 4.5;stroke-linecap:round;stroke-width:1.8}svg.erd .fk.ex{stroke:color-mix(in srgb,var(--t-cloud) 70%,var(--line));stroke-width:1.1}svg.erd .fk.lin{stroke-dasharray:8 3 2 3}svg.erd .stub{cursor:pointer}svg.erd .stub rect{fill:color-mix(in srgb,var(--t-database) 4%,var(--panel));stroke:color-mix(in srgb,var(--t-database) 45%,var(--line));stroke-width:1.2;stroke-dasharray:5 3}svg.erd .stub.ld rect{stroke:var(--muted)}svg.erd .stub.off{cursor:default;opacity:.6}svg.erd .stub .sst{font:500 10px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--muted)}svg.erd .stub .sen{font:600 12.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink)}svg.erd .stub .sgo{fill:none;stroke:var(--muted);stroke-width:1.4}svg.erd .stub:hover rect,svg.erd .stub:focus rect{stroke:var(--accent);stroke-dasharray:none}
+svg.erd .mk.msk{fill:var(--t-worker)}svg.erd .mk.mttl{fill:var(--warn)}svg.erd .mk.mkey{fill:var(--t-cloud)}svg.erd .mk.mk{fill:var(--muted)}svg.erd .xr.more .xrow{fill:var(--muted);font-style:italic}.dlegend .lnk{display:inline-block;width:24px;height:0;margin:0 4px;vertical-align:middle;border:0;border-radius:0;background:none;transform:none}.dlegend .fkl{border-top:1.6px solid var(--link)}.dlegend .rfl{border-top:1.6px dashed var(--t-worker)}.dlegend .ldl{border-top:2px dotted var(--muted)}.dlegend .exl{border-top:1.1px solid var(--t-cloud)}.dlegend .stubk{display:inline-block;width:18px;height:11px;border:1.2px dashed var(--t-database);border-radius:3px;margin:0 4px;vertical-align:middle}.kvpass .kcard{margin:0}
 svg.erd .tbl.inf .tframe{stroke-dasharray:6 4;stroke-width:1.5}svg.erd .tbl.inf .thead{fill:color-mix(in srgb,var(--t-database) 5%,var(--panel))}svg.erd .fk.jn{stroke-dasharray:6 4}svg.erd .unk{fill:var(--panel);stroke:var(--muted);stroke-width:1;stroke-dasharray:2 1.6}svg.erd .row.inf .ctype{font-style:italic}
 .pill.inferred{color:var(--muted);border-color:currentColor;border-style:dashed}.dia.unk{border-style:dashed;background:transparent}.dlegend .jnline{display:inline-block;width:22px;border-top:1.6px dashed var(--link);margin:0 3px}.dlegend .infbox{display:inline-block;width:16px;height:10px;border:1.4px dashed var(--muted);border-radius:3px;margin:0 3px}
 .kcard.kspace{max-width:none}.kshead{flex-wrap:wrap;gap:4px 6px}ul.ktree .krow.d1{padding-left:18px}ul.ktree .krow.d2{padding-left:34px}ul.ktree .krow.d3{padding-left:50px}ul.ktree .krow.d4,ul.ktree .krow.d5,ul.ktree .krow.d6{padding-left:66px}ul.ktree .krow.cf{background:color-mix(in srgb,var(--warn) 7%,transparent)}ul.ktree .kfields,ul.ktree .kaccess{margin-left:30px;font-size:12px}.kcard.kix.lead{border-style:dashed}.mkl.k-hash,.mkl.k-string,.mkl.k-set,.mkl.k-sorted,.mkl.k-list,.mkl.k-json,.mkl.k-geo,.mkl.k-hyperloglog,.mkl.k-bitmap,.mkl.k-time{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 10%,var(--panel))}.mkl.k-stream,.mkl.k-ch{color:var(--link);background:color-mix(in srgb,var(--link) 10%,var(--panel))}

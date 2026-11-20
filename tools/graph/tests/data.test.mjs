@@ -195,7 +195,7 @@ const has = (hay, needle, m) => ok(hay.includes(needle), `${m}${hay.includes(nee
 const eq = (got, want, m) => { const g = JSON.stringify(got), w = JSON.stringify(want); ok(g === w, `${m}${g === w ? '' : `\n       want: ${w}\n       got:  ${g}`}`) }
 
 // The page: its data, and its own script run against a small stub DOM (data-kit.mjs).
-const { blobOf, dataOf, scriptOf, stubPage } = await import('./data-kit.mjs')
+const { blobOf, dataOf, scriptOf, stubPage, asCards } = await import('./data-kit.mjs')
 
 // what an ERD draws: each table's columns in order, and each foreign key line's first title line
 const tablesIn = (svg) => Object.fromEntries(svg.split('<g class="tbl').slice(1).map((seg) => [/aria-label="([^",]+),/.exec(seg)[1], [...seg.matchAll(/data-col="([^"]+)"/g)].map((m) => m[1])]))
@@ -4178,7 +4178,7 @@ async function indexed() {
     const kpage = await renderKv(loadKv(KV))
     const KD = dataOf(kpage).data
     eq(KD.stores.map((s) => [s.id, s.cards, s.layout, s.summary]), [['lending:dynamodb', true, null, '3 tables · 2 GSIs · 1 LSI · 4 conflicts']], 'the Data tab packs the store as key cards (no ERD layout), in graph_data\'s words')
-    const kpg = await stubPage(kpage, '#data-0')
+    const kpg = asCards(await stubPage(kpage, '#data-0'))
     const cards = kpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
     const loansCard = cards.find((c) => kpg.textOf(c).startsWith('loans'))
     eq([cards.length, !kpg.erd(), cards.map((c) => kpg.textOf(c.kids[0]))], [3, true, ['HoldsTablePAY_PER_REQUESTno stream', 'finesPROVISIONEDno stream', 'loansPAY_PER_REQUESTno stream≠4']],
@@ -4204,7 +4204,7 @@ async function indexed() {
     await kq('index')
     const opage = await renderKv(loadKv(KV))
     ok(!/<\/script><img/.test(opage) && opage.includes('odd\\u003c/script>\\u003cimg'), 'the page blob escapes a table name holding markup')
-    const opg = await stubPage(opage, '#data-0')
+    const opg = asCards(await stubPage(opage, '#data-0'))
     const oddCard = opg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || '')).find((c) => opg.textOf(c).startsWith('odd'))
     ok(!!oddCard && oddCard.kids[0].kids.some((k) => k.tagName === 'B' && k.kids[0] === 'odd</script><img src=x onerror=alert(1)>') && !opg.all((n) => /<img|<script/i.test(n.html || '')).length, 'the card shows it as text: no element of the cards holds it as markup')
     rmSync(path.join(KV, 'lending/local/tables/odd.json'))
@@ -4284,7 +4284,7 @@ async function indexed() {
 
     // the page's overlays on the key cards
     const vpage = await renderKv(loadKv(KV))
-    const vpg = await stubPage(vpage, '#data-0')
+    const vpg = asCards(await stubPage(vpage, '#data-0'))
     const cardOf = (pg, name) => pg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || '')).find((c) => pg.textOf(c.kids[0]).startsWith(name))
     // a card's marked rows: { its marker and first words: its classes }
     const rowCls = (pg, card) => Object.fromEntries(under(card, (n) => n.tagName === 'LI' && /\bkrow /.test(n.attrs.class || '')).map((n) => [n.kids.slice(0, 2).map((k) => pg.textOf(k).split(' · ')[0]).join(''), n.attrs.class.replace('krow ', '')]))
@@ -4368,7 +4368,7 @@ async function indexed() {
     const tpage = await renderTf(loadTf(TFP))
     ok(!tpage.includes(TFSECRET) && !tpage.includes(HCLSECRET), 'nor in the page')
     // the page: a key card per table, the unknown drawn as such
-    const tpg = await stubPage(tpage, '#data-0')
+    const tpg = asCards(await stubPage(tpage, '#data-0'))
     const tcards = tpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
     const tcard = (name) => tcards.find((c) => tpg.textOf(c.kids[0]).startsWith(name))
     const under2 = (n, pred, out = []) => { if (n && typeof n === 'object') { if (pred(n)) out.push(n); for (const k of n.kids || []) under2(k, pred, out) } return out }
@@ -4403,7 +4403,7 @@ async function indexed() {
       'the file that set the stage is gone: each Terraform table is named by its template, and no longer meets the CreateTable file\'s exact name')
     const tmpl = await tq('data', { entity: '{stage}-shop-orders' })
     ok(tmpl.includes('  name template {stage}-shop-orders: a part of the name is unknown (each {…}), never guessed'), `graph_data entity says it is a template (${tmpl.split('\n').slice(0, 4).join(' | ')})`)
-    const npg = await stubPage(await renderTf(loadTf(TFP)), '#data-0')
+    const npg = asCards(await stubPage(await renderTf(loadTf(TFP)), '#data-0'))
     const ncard = npg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || '')).find((c) => npg.textOf(c.kids[0]).startsWith('{stage}-shop-orders'))
     ok(!!ncard && npg.textOf(ncard.kids[0]).includes('name template'), 'its card says so, a pill beside the name')
     // a branch against its base: the inputs gain a GSI and lose a stream (the base's HCL read through git)
@@ -4522,7 +4522,7 @@ async function indexed() {
     const infraAt = bdata.stores.findIndex((s) => s.id === 'infra:dynamodb'), apiAt = bdata.stores.findIndex((s) => s.id === 'api:dynamodb')
     eq(bdata.items.map((it) => [it.id, it.bound.map((b) => `${b.table} ${b.conf}`)]), [['api:Cart', ['{env}-{project}-carts ambiguous', '{env}-{project}-saved_carts ambiguous']], ['api:Coupon', []], ['api:Customer', ['{env}-{project}-customers convention']], ['api:Order', [`${ORD} name-match`]], ['api:OrderView', [`${ORD} convention`]], ['api:Review', ['{env}-{project}-reviews name-match']]],
       'the page packs the item types with their tables, in graph_data\'s words')
-    const bpg = await stubPage(bpage2, `#data-${infraAt}`)
+    const bpg = asCards(await stubPage(bpage2, `#data-${infraAt}`))
     const kcards = bpg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
     const kcard = (name) => kcards.find((c) => bpg.textOf(c.kids[0]).startsWith(name))
     const ocard = kcard(ORD)
@@ -4537,7 +4537,7 @@ async function indexed() {
     ok(bpg.textOf(ocard).includes('One logical table: 2 declarations, 2 conflicts across them') && bpg.textOf(ocard).includes('index ByStatus'), 'the card says it is one table with the local-dev declaration, and lists the conflicts across them')
     const items = bpg.ctl('data-items')
     ok(!!items && bpg.textOf(items).includes('Item types (6), from code: 5 bound to a table, 1 unbound') && bpg.textOf(items).includes('api:Coupon unbound'), 'the Data tab lists the item types, the unbound one badged')
-    const apg = await stubPage(bpage2, `#data-${apiAt}`)
+    const apg = asCards(await stubPage(bpage2, `#data-${apiAt}`))
     const acards = apg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))
     ok(apg.textOf(acards.find((c) => apg.textOf(c.kids[0]).startsWith('local-shop-orders'))).includes('≡ 2 declarations') && !apg.textOf(acards.find((c) => apg.textOf(c.kids[0]).startsWith('Customers'))).includes('≡'), 'the local-dev card: one of two declarations; Customers, one alone')
 
@@ -4618,7 +4618,7 @@ async function indexed() {
     const apage = await renderAcc(loadAcc(AP))
     const adata = dataOf(apage).data
     eq([adata.access, adata.stores[0].tables[0].acc.ix.map((i) => [i.n, i.q.map((f) => f.n), !!i.lead])], [{ files: 2, calls: 7, placed: 7, spread: 0, leads: 1, how: ['the table named at the call'] }, [['ByAuthor', ['by_author'], false], ['ByIsbn', ['by_isbn'], false], ['ByGenre', ['by_genre'], false], ['ByStatus', [], true]]], 'the page packs the access patterns per table, in graph_data\'s words, each way a call reached its table once')
-    const accPg = await stubPage(apage, '#data-0')
+    const accPg = asCards(await stubPage(apage, '#data-0'))
     const acard = accPg.all((n) => n.tagName === 'ARTICLE' && /\bkcard\b/.test(n.attrs.class || ''))[0]
     const atext = accPg.textOf(acard)
     ok(atext.includes('queried by by_author query') && atext.includes('queried by by_genre query') && atext.includes('no access found (lead)'), `the key card: each index with the function querying it, the unqueried one with its lead (${atext.slice(0, 600)})`)
@@ -4771,7 +4771,7 @@ async function indexed() {
     const mbooks = mdata.stores[0].tables.find((t) => t.name === 'books')
     const mrating = mbooks.fields.find((f) => f.name === 'rating')
     ok(mrating.cf.length === 1 && mrating.cf[0].drift === 1 && mdata.stores[0].decls.some((d) => d.kind === 'code' && d.extractor === 'drizzle-ts@3'), 'the Data tab: the column carries its conflict, marked as the schema against its migrations; the schema among the declarations')
-    const mpg = await stubPage(mpage, '#data-0')
+    const mpg = asCards(await stubPage(mpage, '#data-0'))
     mpg.click(mdata.stores[0].tables.findIndex((t) => t.name === 'books'))
     ok(mpg.text().includes('The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.'), '… and its passport says so under the conflicts')
     const lpage = dataOf(await renderGraph(loadProject(SQ))).data
@@ -4986,7 +4986,7 @@ async function indexed() {
     eq([RFD.files.map((f) => [f.file, f.n, f.drift]), RFD.lineage.map((l) => [l.from, l.to, l.fs >= 0, l.ts >= 0, l.fields]), RFD.stores.map((s) => [s.id, s.entities.map((e) => [e.name, e.fields.map((f) => f.name)])]), RFD.drift.length, RFD.gaps.map((g) => g.label)],
       [[['docs/architecture/shop.data.json', 5, 0]], [['app:db/events', 'backend:dynamodb/{env}-{project}-event', true, true, [['id', 'eventId'], ['owner_id', 'ownerId']]]], [['backend:notes', [['Note', ['title', 'body', 'authorId']]]]], 0, ['Redis']],
       'the page packs what holds: the lineage with both stores drawn, the described store, no drift, the gap')
-    const rpg = await stubPage(rpage, '#data-0')
+    const rpg = asCards(await stubPage(rpage, '#data-0'))
     const rtext = rpg.text()
     ok(rtext.includes('Lineage across stores (1)') && rtext.includes('mirrors · refined') && rtext.includes('id → eventId') && rtext.includes('owner_id → ownerId'), 'the Data tab draws the lineage across stores: a line from the device table to the backend table, its field pairs, refined')
     ok(rtext.includes('Stores described by citation (1)') && rtext.includes('backend:notes') && rtext.includes('authorId') && rtext.includes('backend/src/notes/model.ts:6'), '… the described store as a card, each field at its line')
@@ -4994,7 +4994,7 @@ async function indexed() {
     ok(/class="fk rf[^"]*"[^>]*><title>refined: event_participants \(event_id\) → events \(id\), no foreign key states it/.test(rpg.erd().html), '… the relation no foreign key states: a dashed line on the ERD, labelled refined')
     // drift on the page: a badge and a list, the claim never drawn
     writeFileSync(SHOP, readFileSync(SHOP, 'utf8').replace('backend:src/events.ts:7', 'backend:src/events.ts:3').replace('"why": "the device pushes', '"why": "<img src=x onerror=alert(1)> the device pushes'))
-    const dpg = await stubPage(await renderRf(loadRf(RP)), '#data-0')
+    const dpg = asCards(await stubPage(await renderRf(loadRf(RP)), '#data-0'))
     const dtext = dpg.text()
     ok(!!dpg.ctl('data-drift') && !!dpg.ctl('data-drift-badge') && dtext.includes('⚠ 1 drift') && dtext.includes('backend/src/events.ts line 3 names none of: ByOwner'), 'drift: a badge and a list, with why')
     ok(!dtext.includes('What indexes are for'), '… the drifting index purpose never drawn as a fact')
@@ -5026,7 +5026,9 @@ async function indexed() {
       '  orders  table  6 columns seen · joins → users · 3 lookup columns  shop/web/src/users.ts:24 · shop/worker/orders.go:9 · shop/worker/orders.go:18',
       '  products  table  2 columns seen  shop/worker/orders.go:31',
       '  users  table  3 columns seen · unique (email) · 2 lookup columns  shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25',
-    ], 'graph_data store: the tables, each at every statement naming it (a table in a parameter is none; SELECT * reveals nothing)')
+      'Leads (1), from a name ending in id: a lead from the attribute\'s name, never checked: read the code before relying on it',
+      '  order_lines(order_id) → orders(id)  lead: "order_id" names order',
+    ], 'graph_data store: the tables, each at every statement naming it (a table in a parameter is none; SELECT * reveals nothing); then the leads the page draws on it')
     const qusers = await qq('data', { entity: 'users' })
     has(qusers, 'shop:sql (inferred, postgres)/users  table  (postgres; deduced from the queries in code, not declared)\n  seen at shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25 [inferred sql-queries@1]\nColumns seen in code (3): type, nullability and default unknown:', 'graph_data entity: a deduced table, every statement that names it')
     has(qusers, '  display_name  type unknown  seen in select, insert, set, expr  — shop/web/src/users.ts:5 · shop/web/src/users.ts:14 · shop/web/src/users.ts:16', '… each column with the statements that name it, its type unknown')
@@ -5047,7 +5049,7 @@ async function indexed() {
     eq([QS.id, QS.inf.clients, QS.inf.statements, QS.tables.map((t) => [t.name, t.inf, t.fields.map((f) => `${f.name}:${f.type}`)])], ['shop:sql (inferred, postgres)', ['database/sql', 'github.com/lib/pq', 'postgres'], 8, [
       ['order_lines', 1, ['order_id:seen in code', 'product_id:seen in code', 'quantity:seen in code']], ['orders', 1, ['user_id:seen in code', 'id:seen in code', 'total:numeric (cast)', 'created_at:seen in code', 'status:seen in code', 'shipped_at:seen in code']], ['products', 1, ['id:seen in code', 'name:seen in code']], ['users', 1, ['id:seen in code', 'email:seen in code', 'display_name:seen in code']]]],
       'the page packs the deduced store: each table inferred, each column "seen in code" or its cast')
-    const qpg = await stubPage(qpage, '#data-0')
+    const qpg = asCards(await stubPage(qpage, '#data-0'))
     const qsvg = qpg.erd().html
     ok(qpg.text().includes('Deduced from the queries in code, not declared') && !!qpg.ctl('data-inferred') && qpg.text().includes('reached through database/sql, github.com/lib/pq, postgres'), 'the Data tab: a banner saying the model is deduced from queries, not declared, and its clients')
     eq([(qsvg.match(/<g class="tbl inf/g) || []).length, (qsvg.match(/<path class="fk jn/g) || []).length, (qsvg.match(/class="unk"/g) || []).length], [4, 2, 14], '… an ERD of dashed table frames, the relations dashed lines, every column\'s nullability unknown')
@@ -5059,7 +5061,7 @@ async function indexed() {
     // everything escaped: names the code quotes
     writeFileSync(path.join(QP, 'shop/web/src/odd.ts'), "import { sql } from './db'\nexport const odd = () => sql`SELECT n.\"x<img src=y>\" FROM \"notes<b>\" n`\n")
     await qq('index')
-    const qopg = await stubPage(await renderQ(loadQ(QP)), '#data-0')
+    const qopg = asCards(await stubPage(await renderQ(loadQ(QP)), '#data-0'))
     const qosvg = qopg.erd().html
     ok(qosvg.includes('notes&lt;b&gt;') && qosvg.includes('x&lt;img src=y&gt;') && !qosvg.includes('<img') && !qosvg.includes('<b>'), 'names holding markup: escaped in the drawing')
     rmSync(path.join(QP, 'shop/web/src/odd.ts'))

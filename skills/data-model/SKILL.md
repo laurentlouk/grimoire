@@ -40,6 +40,13 @@ Use the graph to find *where* (`graph_search`, `graph_file`, `graph_callers`, a 
 | A store no extractor reads | **Gaps** (a MongoDB, search or other client imported, nothing covering it; a Redis-protocol client is no gap once its commands are read) | the code that defines its shape: a schema, the index creation, the documents written |
 | A key space read only in part | A key-value cache's key space (`graph_data`: its templates, indexes and leads): a search index whose schema is *assembled in code, not read*, a key built across files (counted as built wholly) | describe by hand only what is not read: an assembled schema's fields as a store of its own (`stores`, kind `redisearch`, an id no extractor gives: `<repo>:redis` and `<repo>:redis:<instance>` are read, so a store under them is drift), each field at the line that pushes it; a lineage from a template or an index to the table it mirrors; never a template, type or field the map already reads |
 
+**The links the diagrams draw as leads.** `graph_data` with a store lists its **Leads** (an attribute, a column no foreign key covers or a key template's placeholder named like an id, `orbit_id`, matched to the one table of the same repository its stem names), its **Ambiguous names** (a stem two tables share: no lead) and its **Links to other stores**. The Data tab draws each lead dotted, each refined relation dashed. Turn them into refined relations by reading the code:
+- confirm each lead by the code that looks its target up with that attribute (the access patterns, the queries and the cache commands point to it): a `relations` claim, cited there;
+- a lead whose target is wrong (`like_id` holding a user's id): a relation to its real target, which replaces the lead;
+- the references the rule misses, named by role (`owner_id`, `sender_id`, a polymorphic `target_id`) or ambiguous: found through the same lookups.
+
+A key template's placeholder can be claimed as a column (`backend:redis/{}orbit:{orbit_id}`, columns `["orbit_id"]`). A refined relation is re-checked on every render; a lead never is, so a fully refined store shows no dotted line.
+
 Never invent: a claim you could not tie to a line is left out. Read enough to be sure, not everything.
 
 ## 3 · Write the refine file

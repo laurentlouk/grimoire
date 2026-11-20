@@ -50,3 +50,6 @@ export async function stubPage(page, hash, globals = {}) {
   }
   return pg
 }
+// A key-value store opens as its diagram (spec 2026-11-09 D1): the tests of its key cards switch to
+// them first, as a reader would (a no-op on any other store)
+export const asCards = (pg) => { const c = pg.ctl('data-kv-cards'); if (c && c.on.click) c.on.click.forEach((f) => f({})); return pg }

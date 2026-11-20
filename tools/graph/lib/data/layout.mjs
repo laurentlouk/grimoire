@@ -9,7 +9,10 @@
 // nullable, pk, fk, cf }], keys: [{ role, parts, cf }], indexes: [{ name, unique, columns, partial,
 // cf }], rels: [{ columns, to, toColumns, cf }], cf }, every cf a conflict { attr, values: [{ value }] }.
 // In the change overlay, the table and each element may also carry ch (added | removed | modified)
-// and was: ['attr: before → after'] for a modified one.
+// and was: ['attr: before → after'] for a modified one. A diagram of another store kind (a key-value
+// table, a key template, a search index: data-view.mjs) passes the same shape with `tag` (the pill in
+// its header: its type), a field's `mk` (its mark instead of PK: SK, TTL, KEY…), an index's `label`
+// (its row's text) and `more` (the fields a compact box leaves out, said in a last row).
 
 // One table's box: its size and, unless collapsed (a name only), the rows it draws: a row per column,
 // then a row per unique key and per declared index, each followed by a conflict badge line when the
@@ -25,12 +28,13 @@ export function erdBox(t, collapsed) {
   const cutS = (s, n) => (s.length > n ? `${s.slice(0, Math.max(1, n - 1))}…` : s)
   const fields = t.fields || [], keys = t.keys || [], indexes = t.indexes || [], rels = t.rels || []
   const view = t.kind === 'view'
+  const pill = t.tag || (view ? 'view' : null), PW = pill ? Math.ceil(14 + String(pill).length * 6.4) : 0
   const all = [...(t.cf || []), ...fields.flatMap((f) => f.cf || []), ...keys.flatMap((k) => k.cf || []), ...indexes.flatMap((x) => x.cf || []), ...rels.flatMap((r) => r.cf || [])]
   if (collapsed) { // the name (after the table glyph), then the column count, a conflict count, a view pill
     const sub = `${fields.length} col${fields.length === 1 ? '' : 's'}`
-    const side = 22 + sub.length * BW + (all.length ? 34 : 0) + (view ? 44 : 0)
+    const side = 22 + sub.length * BW + (all.length ? 34 : 0) + (pill ? PW + 6 : 0)
     const w = Math.ceil(Math.min(300, Math.max(130, 30 + Math.min(32, t.name.length) * HW + side)))
-    return { w, h: HEAD, collapsed: true, name: cutS(t.name, Math.floor((w - 30 - side) / HW)), view, sub, conflicts: all.length, head: null, rows: [], fieldY: [], divider: null }
+    return { w, h: HEAD, collapsed: true, name: cutS(t.name, Math.floor((w - 30 - side) / HW)), view, pill, pw: PW, sub, conflicts: all.length, head: null, rows: [], fieldY: [], divider: null }
   }
   // what the declarations disagree about, as a badge naming every value; each conflict goes on the
   // row of its element (a primary key's or a foreign key's on its first column), else the header's
@@ -48,14 +52,15 @@ export function erdBox(t, collapsed) {
   const was = (x) => (x && x.was && x.was.length ? x.was.join('; ') : null) // the overlay's before → after
   const extra = [
     ...keys.map((k, i) => [k, i]).filter(([k]) => k.role !== 'primary').map(([k, i]) => ({ kind: 'unique', i, text: `${k.role} (${k.parts.join(', ')})`, badge: own(k.cf), ch: k.ch || null, was: was(k) })),
-    ...indexes.map((x, i) => ({ kind: 'index', i, text: `${x.unique ? 'unique index' : 'index'} ${x.name} (${x.columns.join(', ')})${x.partial ? ' partial' : ''}`, badge: own(x.cf), ch: x.ch || null, was: was(x) })),
+    ...indexes.map((x, i) => ({ kind: 'index', i, text: x.label || `${x.unique ? 'unique index' : 'index'} ${x.name} (${x.columns.join(', ')})${x.partial ? ' partial' : ''}`, badge: own(x.cf), ch: x.ch || null, was: was(x) })),
   ]
+  const moreText = t.more ? `+ ${t.more} more field${t.more === 1 ? '' : 's'}` : null
   const typeMax = Math.min(24, Math.max(0, ...fields.map((f) => String(f.type || '').length)))
   const nameMax = Math.min(30, Math.max(0, ...fields.map((f) => f.name.length)))
   const badges = [head, ...onRow, ...extra.map((x) => x.badge)].filter((b) => b.length).map((b) => b.map(say).join('; '))
   const changes = [was(t), ...fields.map(was), ...extra.map((x) => x.was)].filter(Boolean)
   const w = Math.ceil(Math.min(MAX, Math.max(MIN,
-    40 + Math.min(40, t.name.length) * HW + (view ? 50 : 0),
+    40 + Math.min(40, t.name.length) * HW + (pill ? PW + 10 : 0),
     43 + nameMax * CW + 16 + typeMax * TW + 26,
     42 + Math.min(52, Math.max(0, ...extra.map((x) => x.text.length))) * XW,
     48 + Math.min(60, Math.max(0, ...badges.map((b) => b.length), ...changes.map((c) => c.length))) * BW)))
@@ -74,6 +79,7 @@ export function erdBox(t, collapsed) {
     fieldY.push(y + ROW / 2)
     y += ROW + (b ? BADGE : 0) + (c ? BADGE : 0)
   })
+  if (moreText) { rows.push({ kind: 'more', i: -1, y, text: moreText, ch: null, badge: null, chg: null }); y += XROW }
   const divider = extra.length ? y + 3 : null
   if (extra.length) y += 6
   for (const x of extra) {
@@ -81,7 +87,7 @@ export function erdBox(t, collapsed) {
     rows.push({ kind: x.kind, i: x.i, y, text: cutS(x.text, Math.floor((w - 42) / XW)), ch: x.ch, badge: b, chg: c })
     y += XROW + (b ? BADGE : 0) + (c ? BADGE : 0)
   }
-  return { w, h: y + 6, collapsed: false, name: cutS(t.name, Math.floor((w - 40 - (view ? 50 : 0)) / HW)), view, conflicts: all.length, head: hb, headChg: hc, rows, fieldY, divider }
+  return { w, h: y + 6, collapsed: false, name: cutS(t.name, Math.floor((w - 40 - (pill ? PW + 10 : 0)) / HW)), view, pill, pw: PW, conflicts: all.length, head: hb, headChg: hc, rows, fieldY, divider }
 }
 
 // Every table of a store placed, every foreign key routed. Tables linked by foreign keys form a
