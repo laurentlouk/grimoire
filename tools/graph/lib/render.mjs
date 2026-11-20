@@ -56,7 +56,7 @@ import { resolveBase, modelAt } from './data/base.mjs'
 import { parseDelta, deltaStates, findTarget, changeText, diffText } from './data/delta.mjs'
 import { changeVal, renameText, baseText, refName, changeKind, symbolAt } from './query.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, CAP, LABELS } from './data/access.mjs'
-import { sqlFunctions, NOT_DECLARED } from './data/queries.mjs'
+import { sqlFunctions, NOT_DECLARED, queriesFrom, fnDetail } from './data/queries.mjs'
 import { redisFunctions, templatesOf, indexesOf, streamsOf, prefixTree, ttlText, NO_EXPIRY, NO_QUERY, ASSEMBLED, UNKNOWN as KS_UNKNOWN } from './data/redis.mjs'
 import { dataClient } from './data-view.mjs'
 import { stageClient } from './stage-view.mjs'
@@ -235,8 +235,12 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
   out.accessError = model.accessError || null
   // the SQL the code sends (data/queries.mjs), its calls placed in the code graph's functions
   const qacc = model.queries ? { sites: model.queries.sites, sym: acc?.sym || symbolAt(db) } : null
-  out.queries = model.queries ? { files: model.queries.files, statements: model.queries.statements, deduced: model.stores.filter((s) => s.inferred).length, attached: model.queries.attached.length, tests: model.queries.tests } : null
+  const deduced = model.stores.filter((s) => s.inferred).length
+  out.queries = model.queries && (model.queries.files || model.queries.statements || model.queries.tests || deduced) ? { files: model.queries.files, statements: model.queries.statements, deduced, attached: model.queries.attached.length, tests: model.queries.tests } : null
   out.queriesError = model.queriesError || null
+  // the Drizzle queries in code (data/drizzle.mjs), in one line: each table's passport says the rest
+  out.drizzle = model.drizzle ? { calls: model.drizzle.placed, files: model.drizzle.files, unresolved: model.drizzle.unresolved, ambiguous: model.drizzle.ambiguous, tests: model.drizzle.tests } : null
+  out.drizzleError = model.drizzleError || null
   // a key-value cache's commands (data/redis.mjs), their calls placed in the code graph's functions
   const kacc = model.redis ? { sites: model.redis.sites, sym: acc?.sym || qacc?.sym || symbolAt(db) } : null
   out.redis = model.redis ? { files: model.redis.files, commands: model.redis.commands, spaces: model.stores.filter((s) => s.dialect === 'redis').length, dyn: model.redis.dyn, tests: model.redis.tests } : null
@@ -660,7 +664,7 @@ function packStore(st, shown, fileId, sd = null, acc = null, rr = [], qacc = nul
   if (qacc) st.entities.forEach((e, i) => {
     if (!e.queries?.sites?.length) return
     const fns = sqlFunctions(e.queries.sites.map((k) => qacc.sites[k]).filter(Boolean), qacc.sym, e.id)
-    tables[i].sq = { rw: fns.slice(0, CAP).map((x) => ({ n: x.name, at: src([{ repo: x.repo, path: x.path, line: x.line, kind: 'code' }])[0], r: x.reads ? 1 : 0, wr: x.writes ? 1 : 0, k: x.kinds, lines: x.lines, c: x.callers })), more: Math.max(0, fns.length - CAP) }
+    tables[i].sq = { from: queriesFrom(fns), rw: fns.slice(0, CAP).map((x) => ({ n: x.name, at: src([{ repo: x.repo, path: x.path, line: x.line, kind: 'code' }])[0], r: x.reads ? 1 : 0, wr: x.writes ? 1 : 0, k: x.kinds, lines: x.lines, c: x.callers, ...(fnDetail(x) ? { d: fnDetail(x) } : {}) })), more: Math.max(0, fns.length - CAP) }
   })
   const f = st.dialectFrom, cards = CARDS.has(st.dialect), collapsed = !cards && tables.length > DATA_COLLAPSE
   return {

@@ -17,6 +17,8 @@
 //   6. Co-change gaps: files that usually change with a changed file (git history) and are not in
 //      this diff.
 //   7. A risk line, with its reasons. Everything is a lead: open path:line before relying on it.
+//   The data model's changes against the same base come with the definitions (dataChangeLines): a
+//   removed or retyped table or column still named by the queries in code is a contract change too.
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { langOf, familyOf } from './langs.mjs'
@@ -25,6 +27,7 @@ import { treeAt, blobs } from './data/base.mjs'
 import { symbolsAside } from './symbols-aside.mjs'
 import { unresolved, mentions, kindOfPath, USE_KINDS, siteText, dispatch } from './reach.mjs'
 import { routesServedBy, routeCallers, routeTitle } from './route-graph.mjs'
+import { describe } from './query.mjs'
 
 const dispatchUp = (g, n) => dispatch(g, n).up.map((u) => u.node)
 
@@ -161,8 +164,89 @@ function baseDefs(files, project) {
   return out
 }
 
-export function changeImpact(g, project, base, { repo = null, depth = 2, text = true } = {}) {
-  const files = readDiff(base, project, repo)
+// The data model's part of a change (step 3b): the branch's model against the base's, read as
+// graph_changes reads them (data/diff.mjs), each element added, removed or modified, and for a table
+// or a column removed or retyped, the code still naming it: the Drizzle calls naming a table no schema
+// table resolves any more (by the variable the base's schema named it by), the [inferred] conflicts
+// the queries in code add where they name a column or a table the declarations lack (the SQL the code
+// sends and the Drizzle calls alike), and for a retyped column the calls naming it (or, for SQL, the
+// calls reading or writing its table). A use outside the lines this diff changed is still at risk.
+// A column added not null with no default: the Drizzle inserts into its table that do not set it.
+//   data: { d: diffModels(base, branch), current: the branch's model, baseRows: the base's facts } | { why }
+export function dataChangeLines(g, data, inLines) {
+  if (!data) return { out: [], risk: [] }
+  if (data.why) return { out: [`Data model: not compared (${data.why})`], risk: [] }
+  const { d, current } = data
+  const k = d.counts
+  if (!d.stores.length) return { out: ['Data model changes (against the same base): none'], risk: [] }
+  const out = [`Data model changes (against the same base; graph_changes lists each in full): ${k.stores} store(s) changed · ${k.added} added · ${k.removed} removed · ${k.modified} modified${k.renames ? ` · ${k.renames} possible rename(s), never decided` : ''}`]
+  const risk = []
+  const loc = (repo, x) => g.dloc({ repo: x.repo ?? repo, path: x.path, line: x.line })
+  // the base's Drizzle names: (store id, table) → its variable, (store id, table, column) → its key
+  const baseVar = new Map(), baseKey = new Map()
+  for (const r of data.baseRows || []) {
+    if (!/^drizzle-ts@/.test(r.extractor)) continue
+    for (const dd of r.facts.declarations || []) for (const e of dd.entities || []) {
+      const sid = `${r.repo}:${dd.store}`
+      if (e.var) baseVar.set(`${sid}\0${e.name}`, e.var)
+      for (const f of e.fields || []) if (f.key) baseKey.set(`${sid}\0${e.name}\0${f.name}`, f.key)
+    }
+  }
+  const sites = current.queries?.sites || []
+  const z = current.drizzle || { unresolvedAt: [] }
+  const named = (list, what) => {
+    // a use is at risk unless this diff changed its line
+    const outside = list.filter((x) => !inLines(x.repo, x.path, x.line))
+    if (outside.length) risk.push(`${what} is still named outside the lines this diff changed (${outside.length} place(s))`)
+    return list.slice(0, 8).map((x) => `${loc(null, x)}${x.fn ? ` (${x.fn})` : ''}${x.how ? ` [${x.how}]` : ''}${inLines(x.repo, x.path, x.line) ? ' changed in this diff' : ''}`).join(' · ') + (list.length > 8 ? ` · … ${list.length - 8} more` : '')
+  }
+  for (const st of d.stores) {
+    out.push(`  ${st.id}  ${st.change === 'added' ? 'added (absent at the base)' : st.change === 'removed' ? 'removed (absent from the branch)' : 'modified'}`)
+    const now = current.stores.find((x) => x.id === st.id)
+    const entityNow = (name) => now?.entities.find((e) => e.name === name) || null
+    let shown = 0
+    for (const c of st.changes) {
+      if (shown++ >= 30) { out.push(`    … ${st.changes.length - 30} more (graph_changes lists them)`); break }
+      const el = c.after || c.before
+      const src = (c.after || c.before).sources || []
+      if (c.change === 'added') out.push(`    + ${describe(c, el, st.dialect)}  — ${src.map((x) => loc(st.repo, x)).join(' · ')}`)
+      else if (c.change === 'removed') out.push(`    - ${describe(c, el, st.dialect)}  — was ${src.map((x) => loc(st.repo, x)).join(' · ')}`)
+      else out.push(`    ~ ${describe(c, el, st.dialect)}  ${c.attrs.map((a) => `${a.attr}: ${a.before ?? 'none'} → ${a.after ?? 'none'}`).join('; ')}`)
+      // who still names what the change took away or retyped
+      if (c.kind === 'entity' && c.change === 'removed') {
+        const v = baseVar.get(`${st.id}\0${c.name}`) || c.name
+        const left = z.unresolvedAt.filter((u) => u.repo === st.repo && u.name === v).map((u) => ({ ...u, how: 'drizzle' }))
+        const sql = (now?.queries?.conflicts || []).filter((x) => x.label.toLowerCase() === c.name.toLowerCase()).flatMap((x) => x.values[0].sources.map((y) => ({ ...y, how: 'sql' })))
+        if (left.length || sql.length) out.push(`      still named: ${named([...left, ...sql], `removed table ${c.name}`)}`)
+      }
+      if (c.kind === 'field' && c.change === 'removed') {
+        const e = entityNow(c.entity)
+        const keys = new Set([c.name, baseKey.get(`${st.id}\0${c.entity}\0${c.name}`)].filter(Boolean))
+        const left = (e?.queries?.conflicts || []).filter((x) => keys.has(x.path)).flatMap((x) => x.values[0].sources.map((y) => ({ ...y, how: y.extractor && /^drizzle-queries@/.test(y.extractor) ? 'drizzle' : 'sql' })))
+        if (left.length) out.push(`      still named: ${named(left, `removed column ${c.entity}.${c.name}`)}`)
+      }
+      if (c.kind === 'field' && c.change === 'modified' && c.attrs.some((a) => a.attr === 'type')) {
+        const e = entityNow(c.entity)
+        const mine = (e?.queries?.sites || []).map((i) => sites[i]).filter(Boolean)
+        const cols = mine.filter((x) => (x.columns || []).some((y) => y.entity === e.id && y.name === el.name)).map((x) => ({ repo: x.repo, path: x.path, line: x.line, fn: x.fn, how: 'drizzle' }))
+        const sql = mine.filter((x) => x.call !== 'drizzle').map((x) => ({ repo: x.repo, path: x.path, line: x.line, fn: x.fn, how: 'sql, reads or writes its table' }))
+        if (cols.length || sql.length) out.push(`      read or written by: ${named([...cols, ...sql], `retyped column ${c.entity}.${el.name}`)}`)
+      }
+      if (c.kind === 'field' && c.change === 'added' && c.after.nullable === false && (c.after.default === null || c.after.default === undefined) && !c.after.computed && !c.after.generated) {
+        const e = entityNow(c.entity)
+        const inserts = (e?.queries?.sites || []).map((i) => sites[i]).filter((x) => x && x.call === 'drizzle' && x.kinds.includes('insert') && x.writes.includes(e.id) && !x.open && !(x.columns || []).some((y) => y.entity === e.id && y.name === el.name))
+        const outside = inserts.filter((x) => !inLines(x.repo, x.path, x.line))
+        if (inserts.length) out.push(`      inserts that do not set it (a not-null column with no default): ${inserts.slice(0, 8).map((x) => `${loc(null, x)}${x.fn ? ` (${x.fn})` : ''}`).join(' · ')}`)
+        if (outside.length) risk.push(`${outside.length} insert(s) into ${c.entity} do not set the not-null column ${el.name} added with no default`)
+      }
+    }
+    for (const r of st.renames.slice(0, 5)) out.push(`    possible rename, not decided: ${r.from.map((i) => st.changes[i].name).join(', ')} → ${r.to.map((i) => st.changes[i].name).join(', ')}`)
+  }
+  return { out, risk }
+}
+
+export function changeImpact(g, project, base, { repo = null, depth = 2, text = true, data = null, diff = null } = {}) {
+  const files = diff || readDiff(base, project, repo)
   const isCode = (p) => { const l = p && langOf(p); return !!l && l !== 'other' }
   const code = files.filter((f) => isCode(f.path || f.oldPath))
   const others = files.filter((f) => !isCode(f.path || f.oldPath))
@@ -225,9 +309,14 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
     out.push(`Other files changed: ${others.slice(0, 20).map(tag).join(', ')}${others.length > 20 ? `, … ${others.length - 20} more` : ''}`)
   }
 
+  // ── the data model: what the branch changed in it, and who still names what it removed ──
+  const inLines = (r, p, line) => files.some((f) => f.repo === r && f.path === p && f.added.some(([a, b]) => a <= line && line <= b))
+  const dm = dataChangeLines(g, data, inLines)
+  out.push(...dm.out)
+
   // ── contract changes: who still names them ──
   const contract = live.filter((c) => c.op === '-' || c.op === '>' || c.sig)
-  const risk = []
+  const risk = [...dm.risk]
   if (contract.length) {
     const pseudo = (c) => ({ id: -1, name: c.was.name, qualname: c.was.qualname, kind: c.was.kind, lang: langOf(c.file.oldPath), repo: c.file.repo, path: c.file.oldPath, line: -1, parent_id: null })
     const subjects = contract.map((c) => ({ c, t: c.op === '-' ? pseudo(c) : c.node }))

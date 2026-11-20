@@ -37,7 +37,9 @@
 // bound to and no call reaches says so (`unused`): declared, no code uses this name (never paired by a
 // guess). Last, the SQL the code sends (queries.mjs, inferred): per repository, attached to the store
 // that declares its tables (an `[inferred]` conflict where the code names what the declarations lack,
-// and its access sites), or deduced into a store of its own, `<repo>:sql (inferred, <dialect>)`.
+// and its access sites), or deduced into a store of its own, `<repo>:sql (inferred, <dialect>)`; then
+// the Drizzle queries in code (drizzle.mjs, inferred): each call resolved to the schema tables it
+// reads and writes, its sites beside the SQL's.
 //
 //   reconcile([{ repo, extractor: 'id@version', facts }], { equivalences? }) → { stores: [Store],
 //     logical, items, bindings, unresolved, equivalences, access?, accessError?, queries?,
@@ -47,6 +49,7 @@ import { KINDS, keyOf, normType, normDefault, normColumn, kvIndex, kvTable, proj
 import { logicalTables, bindItems, itemField, itemOf, tableResolver, resolveSide } from './binding.mjs'
 import { resolveAccess } from './access.mjs'
 import { resolveQueries, inferredSummary, queryConflicts } from './queries.mjs'
+import { resolveDrizzle } from './drizzle.mjs'
 import { resolveRedis, redisSummary } from './redis.mjs'
 
 // What is compared, per element: a key-value table's billing and stream, a TTL's enabled, a GSI's or
@@ -80,6 +83,17 @@ function uniqueKeys(e) {
   for (const i of uniq) if (!keys.some((k) => k.role === 'unique' && k.parts.join('\0') === i.columns.join('\0'))) keys.push({ role: 'unique', parts: i.columns, path: i.path, line: i.line })
   return { ...e, keys, indexes: e.indexes.filter((i) => !uniq.includes(i)) }
 }
+// A primary key's columns are not null, whatever the declaration writes: drizzle-kit 1.0 writes a
+// SQLite `text PRIMARY KEY` without NOT NULL (its snapshot so too) where the schema's primaryKey()
+// says not null, and Postgres and MySQL make a key's columns not null themselves. (SQLite keeps a
+// rowid alias, INTEGER PRIMARY KEY, never null; a key of another type in a rowid table that is not
+// STRICT would still take a NULL the schema never writes.) So the declarations compare alike: no
+// nullability conflict on a key column.
+function keyNotNull(e) {
+  const pk = (e.keys || []).find((k) => k.role === 'primary')
+  if (!pk || !(e.fields || []).some((f) => f.nullable && pk.parts.includes(f.name))) return e
+  return { ...e, fields: e.fields.map((f) => (f.nullable && pk.parts.includes(f.name) ? { ...f, nullable: false } : f)) }
+}
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 
 export function reconcile(rows, opts = {}) {
@@ -90,6 +104,7 @@ export function reconcile(rows, opts = {}) {
   const model = { stores: [...stores].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, ds]) => merge(id, ds)) }
   items(model, rows, decls, opts.equivalences || [])
   inferred(model, rows)
+  drizzle(model, rows)
   keyspaces(model, rows, opts.roots || [])
   return model
 }
@@ -130,6 +145,20 @@ function inferred(model, rows) {
   } catch (e) {
     for (const s of model.stores) { delete s.queries; for (const x of s.entities) delete x.queries }
     model.queriesError = `the queries in code were not read into the model: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`
+  }
+}
+
+// ── the Drizzle queries in code (drizzle.mjs): each call resolved to the schema's tables it reads and
+// writes, inferred, never overriding a declaration. A failure leaves the model as it was, with
+// `drizzleError` saying why.
+function drizzle(model, rows) {
+  if (!rows.some((r) => r.facts?.drizzle)) return
+  const sites = model.queries?.sites.length ?? null
+  try { resolveDrizzle(rows, model) } catch (e) {
+    if (model.queries) { if (sites === null) delete model.queries; else model.queries.sites.length = sites }
+    for (const s of model.stores) { delete s.drizzle; for (const x of s.entities) if (x.queries) x.queries.sites = x.queries.sites.filter((k) => k < (sites ?? 0)) }
+    delete model.drizzle
+    model.drizzleError = `the Drizzle queries in code were not read into the model: ${String(e?.message || e).split('\n')[0].slice(0, 200)}`
   }
 }
 
@@ -275,7 +304,7 @@ function merge(id, ds) {
   const entities = new Map()
   for (const d of ds) {
     for (const e0 of d.entities || []) {
-      const e = store.dialect === 'mysql' ? uniqueKeys(e0) : e0
+      const e = kv ? e0 : keyNotNull(store.dialect === 'mysql' ? uniqueKeys(e0) : e0)
       const E = slot(entities, e.name, () => ({ ...SHAPE.entity(e), fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map(), whole: new Set(), part: new Set() }))
       note(E, d, ATTRS.entity(e), source(d, e), e)
       E.at.set(d, source(d, e))

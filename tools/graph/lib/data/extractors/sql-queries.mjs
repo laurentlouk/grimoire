@@ -7,7 +7,9 @@
 //
 // The call sites, per language (the SQL is the first argument that holds SQL text, unless said):
 //   TS and JS   a call named query, execute, exec, prepare, raw, unsafe, $queryRaw, $executeRaw (and
-//               their Unsafe forms): `db.query(…)`, `knex.raw(…)`, `db.prepare(…)`; a tagged template
+//               their Unsafe forms): `db.query(…)`, `knex.raw(…)`, `db.prepare(…)`; expo-sqlite's
+//               execAsync, runAsync, getAllAsync, getFirstAsync, getEachAsync, prepareAsync (and Sync
+//               forms), op-sqlite's executeAsync and executeSync: `db.getAllAsync(…)`; a tagged template
 //               of one of those names or `sql` / `SQL` (`sql\`…\``, `prisma.$queryRaw\`…\``); a
 //               config object's `text` or `sql` (`pool.query({ text: … })`);
 //   Go          a method named Query, QueryRow, Exec, Prepare, their Context forms, sqlx's Get, Select,
@@ -60,7 +62,7 @@ export const CLIENTS = [
   ...['database/sql', 'github.com/jmoiron/sqlx'].map((source) => ({ source, dialect: null })),
   ...['tokio_postgres', 'slonik', 'sqlx::postgres', 'drizzle-orm/node-postgres', 'drizzle-orm/postgres-js', 'drizzle-orm/neon-http', 'drizzle-orm/neon-serverless', 'drizzle-orm/vercel-postgres', 'drizzle-orm/pg-core'].map((source) => ({ source, dialect: 'postgres' })),
   ...['@planetscale/database', 'aiomysql', 'mysql.connector', 'sqlx::mysql', 'drizzle-orm/mysql2', 'drizzle-orm/mysql-core', 'drizzle-orm/planetscale-serverless'].map((source) => ({ source, dialect: 'mysql' })),
-  ...['modernc.org/sqlite', '@libsql/client', 'aiosqlite', 'bun:sqlite', 'expo-sqlite', 'sqlx::sqlite', 'drizzle-orm/better-sqlite3', 'drizzle-orm/libsql', 'drizzle-orm/sqlite-core', 'drizzle-orm/bun-sqlite', 'drizzle-orm/d1', 'drizzle-orm/expo-sqlite'].map((source) => ({ source, dialect: 'sqlite' })),
+  ...['modernc.org/sqlite', '@libsql/client', 'aiosqlite', 'bun:sqlite', 'sqlx::sqlite', 'drizzle-orm/better-sqlite3', 'drizzle-orm/libsql', 'drizzle-orm/sqlite-core', 'drizzle-orm/bun-sqlite', 'drizzle-orm/d1', 'drizzle-orm/expo-sqlite', 'drizzle-orm/op-sqlite'].map((source) => ({ source, dialect: 'sqlite' })),
 ]
 // the client an import names: the most specific pattern matching it (drizzle-orm/node-postgres over drizzle-orm)
 export function clientOf(source) {
@@ -75,7 +77,7 @@ const RS_HINTS = [['postgres', /\b(?:PgPool|PgPoolOptions|PgConnection|PgRow|PgC
 // Run on every source file at index time, so linear whatever the text: no two repetitions that can
 // match the same blanks (`\s*!?\s*` backtracks quadratically over a run of blanks): an optional part
 // that repeats ends with a mark of its own (`(?:\s*!)?\s*`, `(?:\s*\()?\s*`).
-const CALL = /(?:\b(?:query|queryRow|execute|exec|prepare|raw|unsafe|sql|SQL|Query|QueryRow|QueryContext|QueryRowContext|Exec|ExecContext|Prepare|PrepareContext|Get|GetContext|Select|SelectContext|Queryx|QueryRowx|MustExec|NamedExec|NamedQuery|executemany|executescript|mogrify|fetch|fetchrow|fetchval|read_sql|text|query_as|query_scalar|query_row|query_map|query_one|query_opt|prepare_cached|execute_batch|simple_query|batch_execute|sql_query)(?:\s*!)?\s*(?:<[^>\n]{0,80}>\s*)?[(`])|\$(?:query|execute)Raw/
+const CALL = /(?:\b(?:query|queryRow|execute|exec|prepare|raw|unsafe|execAsync|execSync|runAsync|runSync|getAllAsync|getAllSync|getFirstAsync|getFirstSync|getEachAsync|getEachSync|prepareAsync|prepareSync|executeAsync|executeSync|sql|SQL|Query|QueryRow|QueryContext|QueryRowContext|Exec|ExecContext|Prepare|PrepareContext|Get|GetContext|Select|SelectContext|Queryx|QueryRowx|MustExec|NamedExec|NamedQuery|executemany|executescript|mogrify|fetch|fetchrow|fetchval|read_sql|text|query_as|query_scalar|query_row|query_map|query_one|query_opt|prepare_cached|execute_batch|simple_query|batch_execute|sql_query)(?:\s*!)?\s*(?:<[^>\n]{0,80}>\s*)?[(`])|\$(?:query|execute)Raw/
 const SQL_TEXT = /(?:["'`]|r#{0,8}")(?:\s*\()?\s*(?:SELECT|INSERT|UPDATE|DELETE|WITH|REPLACE)\b/i
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
 const CLIENT_TEXT = {
@@ -207,7 +209,10 @@ function rsSegs(n, consts, depth = 0) {
 }
 
 // ── the call sites ──
-const TS_CALLS = new Set(['query', 'execute', 'exec', 'prepare', 'raw', 'unsafe', '$queryRaw', '$executeRaw', '$queryRawUnsafe', '$executeRawUnsafe'])
+// (and the React Native SQLite clients' own: expo-sqlite's execAsync, runAsync, getAllAsync,
+// getFirstAsync, getEachAsync and their Sync forms, prepareAsync; op-sqlite's executeAsync, executeSync)
+const TS_CALLS = new Set(['query', 'execute', 'exec', 'prepare', 'raw', 'unsafe', '$queryRaw', '$executeRaw', '$queryRawUnsafe', '$executeRawUnsafe',
+  'execAsync', 'execSync', 'runAsync', 'runSync', 'getAllAsync', 'getAllSync', 'getFirstAsync', 'getFirstSync', 'getEachAsync', 'getEachSync', 'prepareAsync', 'prepareSync', 'executeAsync', 'executeSync'])
 const TS_TAGS = new Set([...TS_CALLS, 'sql', 'SQL'])
 const GO_CALLS = new Set(['Query', 'QueryRow', 'QueryContext', 'QueryRowContext', 'Exec', 'ExecContext', 'Prepare', 'PrepareContext', 'Get', 'GetContext', 'Select', 'SelectContext', 'Queryx', 'QueryRowx', 'QueryxContext', 'QueryRowxContext', 'MustExec', 'MustExecContext', 'NamedExec', 'NamedExecContext', 'NamedQuery', 'NamedQueryContext', 'Preparex', 'PreparexContext'])
 const PY_CALLS = new Set(['execute', 'executemany', 'executescript', 'mogrify', 'fetch', 'fetchrow', 'fetchval', 'read_sql', 'read_sql_query'])
@@ -455,7 +460,7 @@ export function readQueryFile(tree, lang, file, { ms = FILE_MS } = {}) {
 
 export default {
   id: 'sql-queries',
-  version: 1,
+  version: 2,
   kind: 'inferred',
   scope: 'file',
   tree: true,

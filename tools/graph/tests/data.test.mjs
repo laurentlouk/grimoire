@@ -943,7 +943,7 @@ CREATE VIEW recent AS SELECT id FROM books;`
   const delta = { schema: 1, spec: 'docs/specs/x-design.md', architecture: [], data: [
     acked, edited,
     ch('index', 'add', 'app:db/books/index:books_author_idx', { after: { columns: ['author_id'] } }),
-    ch('loans', 'add', 'app:db/loans', { after: { fields: [{ name: 'id', type: 'INTEGER', nullable: true }, { name: 'book_id', type: 'TEXT', nullable: true }, { name: 'due_on', type: 'TEXT', nullable: false }] } }),
+    ch('loans', 'add', 'app:db/loans', { after: { fields: [{ name: 'id', type: 'INTEGER', nullable: false }, { name: 'book_id', type: 'TEXT', nullable: true }, { name: 'due_on', type: 'TEXT', nullable: false }] } }),
     ch('title-default', 'change', 'app:db/books.title', { after: { default: "'draft'" } }),
     ch('name-type', 'change', 'app:db/authors.name', { after: { type: 'VARCHAR(120)' } }),
     ch('bio-default', 'change', 'app:db/authors.bio', { after: { default: "'none'" } }),
@@ -995,7 +995,7 @@ CREATE TABLE loans (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES authors(id) 
 CREATE INDEX loans_due_idx ON loans (due);
 CREATE INDEX loans_shelf_idx ON loans (shelf);`
     const b0 = modelOf(B0), b1 = modelOf(B1)
-    const fields = [{ name: 'id', type: 'INTEGER', nullable: true }, { name: 'a_id', type: 'INTEGER', nullable: true }, { name: 'due', type: 'TEXT', nullable: true }]
+    const fields = [{ name: 'id', type: 'INTEGER', nullable: false }, { name: 'a_id', type: 'INTEGER', nullable: true }, { name: 'due', type: 'TEXT', nullable: true }]
     const shelf = ch('shelf-idx', 'add', 'app:db/loans/index:loans_shelf_idx', { after: { columns: ['shelf'] } })
     const only = { schema: 1, spec: 's', architecture: [], data: [ch('loans', 'add', 'app:db/loans', { after: { fields } }), ch('shelf', 'add', 'app:db/loans.shelf', { after: { type: 'TEXT', nullable: true } }), shelf] }
     const r = deltaStates(only, b1, { base: b0, diff: diffModels(b0, b1) })
@@ -2862,7 +2862,7 @@ console.log('\n28 · code-declared SQL models: the schema-language reader (reade
       { name: 'posts', kind: 'table', at: 17, fields: ['author_id integer', 'slug text', 'editor_id integer?'], keys: ['primary(author_id,slug):22'],
         indexes: ['posts_slug_idx(slug) partial:23', 'posts_lower_slug!(lower("slug")):24', 'posts_author_editor!(author_id,editor_id):25'], rels: ['(author_id)->users(id) cascade/restrict:18', '(editor_id)->users(id) set null/no action:26'] },
     ], 'SQLite: each column builder\'s type, notNull, primaryKey (not null), unique() an index named as drizzle-kit names it, references() with its actions, defaults as the snapshot writes them (a literal quoted, sql`…` its text, another expression kept and not compared), $defaultFn and $onUpdate computed and never evaluated; the third argument: a composite key, a partial index, an expression index, a table-level unique() the unique index drizzle-kit creates, a foreign key with its action')
-    eq([s0.entities[0].fields.find((f) => f.name === 'slug').generated, s0.notes], ['stored', ['schema named by drizzle.config.ts', "relations() at src/db/schema.ts:28: the query API's, app-level only, not foreign keys"]], 'generatedAlwaysAs stored; relations() noted, never a foreign key')
+    eq([s0.entities[0].fields.find((f) => f.name === 'slug').generated, s0.notes], ['stored', ['schema named by drizzle.config.ts', "relations() at src/db/schema.ts:28: the query API's, app-level, never foreign keys: 1 without fields (a many(), or the other side's)"]], 'generatedAlwaysAs stored; relations() noted, never a foreign key (a many() names no column)')
 
     const PGS = [
       "import { pgTable, pgSchema, pgEnum, pgTableCreator, serial, varchar, timestamp, boolean, json, uuid, integer, text, doublePrecision, numeric, index } from 'drizzle-orm/pg-core'",
@@ -4777,9 +4777,9 @@ async function indexed() {
       '  code  prisma@3  schema, read 1 file: 5 models, 1 enum, 1 view  lending/prisma/schema.prisma',
       '  dialect: stated at lending/prisma/migrations/migration_lock.toml:3',
       'notes:drizzle  sqlite  3 tables · 3 foreign keys · 2 indexes · no conflicts',
-      '  code  drizzle-ts@3  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
+      '  code  drizzle-ts@4  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
       '    note: schema named by drizzle.config.ts (casing snake_case)',
-      "    note: relations() at src/db/tables/notes.ts:27: the query API's, app-level only, not foreign keys",
+      "    note: relations() at src/db/tables/notes.ts:27: the query API's, app-level, never foreign keys: 1 the same as a foreign key",
       '  dialect: stated at notes/src/db/tables/notes.ts:1',
     ], 'graph_data: a push-only schema is a store of its own, named by the folder drizzle-kit would write into (the barrel the config names, the files it re-exports); a schema-language file and its migrations are two declarations of one store, agreeing')
     eq(await sq('data', { store: 'notes:drizzle' }), [
@@ -4790,7 +4790,7 @@ async function indexed() {
     ].join('\n'), 'its tables, each at the line that declares it')
     eq(await sq('data', { entity: 'people' }), [
       'notes:drizzle/people  table  (sqlite)',
-      '  declared at notes/src/db/tables/people.ts:8 [code drizzle-ts@3]',
+      '  declared at notes/src/db/tables/people.ts:8 [code drizzle-ts@4]',
       'Fields (5):',
       '  id  integer  not null  — notes/src/db/tables/people.ts:9',
       '  handle  text  not null  — notes/src/db/tables/people.ts:10',
@@ -4850,7 +4850,7 @@ async function indexed() {
     git(MB, 'init', '-q', '-b', 'main')
     commit(MB, 'the schema and its migrations')
     await sq('index', {}, MB)
-    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@3  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
+    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@4  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
       'the schema, the newest snapshot and the replay: three declarations of one store (the config\'s out), agreeing')
     has(await sq('data', { entity: 'streaks' }, MB), "  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9 · mobile/src/db/schema.ts:42\nKeys (1):\n  primary (day)  — mobile/drizzle/meta/0005_snapshot.json:208 · mobile/drizzle/0004_streaks.sql:7 · mobile/src/db/schema.ts:40",
       'a sql`(unixepoch())` default as the snapshot and the replay write it; every element at its three lines')
@@ -4870,7 +4870,7 @@ async function indexed() {
     const mdata = dataOf(mpage).data
     const mbooks = mdata.stores[0].tables.find((t) => t.name === 'books')
     const mrating = mbooks.fields.find((f) => f.name === 'rating')
-    ok(mrating.cf.length === 1 && mrating.cf[0].drift === 1 && mdata.stores[0].decls.some((d) => d.kind === 'code' && d.extractor === 'drizzle-ts@3'), 'the Data tab: the column carries its conflict, marked as the schema against its migrations; the schema among the declarations')
+    ok(mrating.cf.length === 1 && mrating.cf[0].drift === 1 && mdata.stores[0].decls.some((d) => d.kind === 'code' && d.extractor === 'drizzle-ts@4'), 'the Data tab: the column carries its conflict, marked as the schema against its migrations; the schema among the declarations')
     const mpg = asCards(await stubPage(mpage, '#data-0'))
     mpg.click(mdata.stores[0].tables.findIndex((t) => t.name === 'books'))
     ok(mpg.text().includes('The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.'), '… and its passport says so under the conflicts')
@@ -4899,7 +4899,7 @@ async function indexed() {
       'prisma:prisma/migrations  sqlite  6 tables · 6 foreign keys · 4 indexes · no conflicts',
     ], 'each schema against what its tool generated from it: SQLite, Postgres and MySQL table builders (numeric defaults, a table-level unique() in SQLite, time(p), unsigned decimals, a MySQL serial, an enum value with a quote), and a schema-language file with named relations (no phantom join table); in MySQL a unique index is the unique key it is')
     for (const s of ['pg1', 'pg2', 'my1', 'my2']) has(golden, `  migration  sql-migrations@2  replayed 1 file, `, `${s}: its migrations read too`)
-    has(golden, 'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  pg2/drizzle/meta/0000_snapshot.json\n  migration  sql-migrations@2  replayed 1 file, 9 statements  pg2/drizzle/0000_fuzzy_mongoose.sql\n  code  drizzle-ts@3  table builders, read 1 file: 2 tables, 2 enums  pg2/src/schema.ts',
+    has(golden, 'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  pg2/drizzle/meta/0000_snapshot.json\n  migration  sql-migrations@2  replayed 1 file, 9 statements  pg2/drizzle/0000_fuzzy_mongoose.sql\n  code  drizzle-ts@4  table builders, read 1 file: 2 tables, 2 enums  pg2/src/schema.ts',
       'Postgres: the snapshot, the migration read statement by statement and the schema, three declarations of one store')
     has(await gq('data', { entity: 'lite2:drizzle/users' }), '  users_email_lower unique (lower("email"))  — lite2/drizzle/meta/0000_snapshot.json:119 · lite2/drizzle/0000_thin_whistler.sql:19 · lite2/src/schema.ts:18',
       'an expression index: its text as the snapshot keeps it, as the SQLite replay\'s CREATE INDEX writes it, and as the schema\'s sql`lower(${t.email})` renders it')
@@ -5115,7 +5115,7 @@ async function indexed() {
     eq(qlist.split('\n'), [
       'Data stores (1), read from migrations, snapshots, schemas and table declarations, or deduced from the SQL the code sends (inferred):',
       'shop:sql (inferred, postgres)  postgres  4 tables · 2 relations from joins · 2 unique keys from ON CONFLICT · 6 lookup columns · inferred from queries in code, not declared (8 statements)',
-      '  inferred  sql-queries@1  deduced from 8 statements in 2 files, not declared  shop/web/src/users.ts',
+      '  inferred  sql-queries@2  deduced from 8 statements in 2 files, not declared  shop/web/src/users.ts',
       '  reached through: database/sql, github.com/lib/pq, postgres',
       '  not declared: deduced from the SQL the code sends; types (but for casts), nullability, defaults and other constraints unknown; relations inferred from joins, never foreign keys; lookup columns are leads for an index, never indexes',
       "  dialect: the repository's client: postgres at shop/web/src/db.ts:1",
@@ -5130,7 +5130,7 @@ async function indexed() {
       '  order_lines(order_id) → orders(id)  lead: "order_id" names order',
     ], 'graph_data store: the tables, each at every statement naming it (a table in a parameter is none; SELECT * reveals nothing); then the leads the page draws on it')
     const qusers = await qq('data', { entity: 'users' })
-    has(qusers, 'shop:sql (inferred, postgres)/users  table  (postgres; deduced from the queries in code, not declared)\n  seen at shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25 [inferred sql-queries@1]\nColumns seen in code (3): type, nullability and default unknown:', 'graph_data entity: a deduced table, every statement that names it')
+    has(qusers, 'shop:sql (inferred, postgres)/users  table  (postgres; deduced from the queries in code, not declared)\n  seen at shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25 [inferred sql-queries@2]\nColumns seen in code (3): type, nullability and default unknown:', 'graph_data entity: a deduced table, every statement that names it')
     has(qusers, '  display_name  type unknown  seen in select, insert, set, expr  — shop/web/src/users.ts:5 · shop/web/src/users.ts:14 · shop/web/src/users.ts:16', '… each column with the statements that name it, its type unknown')
     has(qusers, 'Unique keys from ON CONFLICT (1):\n  unique (email)  — shop/web/src/users.ts:16\nLookup columns (2): used in lookups, a lead for an index, never one:\n  email  where  — shop/web/src/users.ts:7\n  id  where  — shop/web/src/users.ts:26', '… a unique key from ON CONFLICT, the lookup columns (leads)')
     has(qusers, 'Reads and writes, from the SQL the code sends (inferred; 3 functions: 2 reading, 1 writing):\n  findUser  reads (select)  shop/web/src/users.ts:3  (the call at line 4) · 0 callers\n  upsertUser  writes (insert)  shop/web/src/users.ts:12  (the call at line 13) · 0 callers\n  recentOrders  reads (select)  shop/web/src/users.ts:21  (the call at line 22) · 0 callers', '… its readers and writers, the code graph\'s functions')

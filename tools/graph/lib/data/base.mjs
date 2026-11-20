@@ -13,7 +13,7 @@
 //     changes. A repository where the ref names no commit (or that is not in git) is skipped, and
 //     its stores are left out of both sides.
 //     → { ref, from, repos: [{ name, abs, commit, head, at }], skipped: [{ name, why }] } | { error }
-//   modelAt(project, base) → { model: { stores }, failed: [{ repo, extractor, key, error }] }
+//   modelAt(project, base) → { model: { stores }, failed: [{ repo, extractor, key, error }], rows: the facts reconciled }
 //     Each repository's files at its `at` commit (git ls-tree), the candidates read as blobs through
 //     one `git cat-file --batch` (git show <commit>:<path>, without a process per file; binary-safe,
 //     each capped as the index caps it). Memoised in this process per (repository, commit, extractor
@@ -86,7 +86,7 @@ export async function modelAt(project, base, opts = {}) {
       else failed.push({ repo: r.name, extractor: x.extractor, key: x.key, error: x.error })
     }
   }
-  return { model: reconcile(rows, { ...opts, roots: opts.roots || (project.root ? docRoots(project) : []) }), failed }
+  return { model: reconcile(rows, { ...opts, roots: opts.roots || (project.root ? docRoots(project) : []) }), failed, rows }
 }
 
 function extractAt(abs, commit, project, overrides, ctx) {

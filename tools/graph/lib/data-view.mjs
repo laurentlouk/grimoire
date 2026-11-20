@@ -458,7 +458,7 @@ export function dataClient(ctx) {
       const tip = r.ld ? `lead: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}): "${r.columns[0]}" names ${r.stem}, ${LEAD}${r.sort === 'partition' ? '\nsort key only: the item also needs its partition key' : r.sort ? '\npartition key only: the item also needs its sort key' : ''}`
         : r.ex ? `extracted: ${r.why}`
         : r.rf ? `refined: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), no foreign key states it\n${r.why}${r.at.length ? `\n${r.at.join(' · ')}` : ''}`
-        : r.cl ? `relation: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), ${CLIENT}\non delete ${r.onDelete} · on update ${r.onUpdate}, as the client emulates them${r.src.length ? `\n${r.src.map((p) => srcText(s, p)).join(' · ')}` : ''}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
+        : r.cl ? `relation: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), ${CLIENT}\n${r.onDelete === null && r.onUpdate === null ? 'no action stated: the query API\'s relation, nothing enforces it' : `on delete ${r.onDelete} · on update ${r.onUpdate}, as the client emulates them`}${r.src.length ? `\n${r.src.map((p) => srcText(s, p)).join(' · ')}` : ''}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
         : r.jn ? `inferred from a join: ${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')}), never a foreign key${r.dir === 'as written' ? '\ndirection as written: neither side is an id' : ''}${r.src.length ? `\n${r.src.map((p) => srcText(s, p)).join(' · ')}` : ''}`
           : `${t.name} (${r.columns.join(', ')}) → ${r.to} (${r.toColumns.join(', ')})\non delete ${r.onDelete} · on update ${r.onUpdate}${r.cf.length ? `\n${r.cf.map((c) => cfTip(s, c)).join('\n')}` : ''}${chTip(s, r)}${dTip(s, r)}`
       if (r.ex) { parts.push(`<path class="fk ex${on ? ' on' : lit ? ' dim' : ''}" data-fk="${from}:${l.k}" d="${l.d}"><title>${esc(tip)}</title></path>`); continue }
@@ -499,9 +499,9 @@ export function dataClient(ctx) {
   }
 
   // the functions reading and writing a table through the SQL they send (inferred): one item each
-  const sqList = (s, t) => (t.sq ? [h('h2', null, `Reads and writes (${plural(t.sq.rw.length + (t.sq.more || 0), 'function')}, from the SQL the code sends: inferred)`),
+  const sqList = (s, t) => (t.sq ? [h('h2', null, `Reads and writes (${plural(t.sq.rw.length + (t.sq.more || 0), 'function')}, from ${t.sq.from || 'the SQL the code sends'}: inferred)`),
     h('ul', { class: 'links dlist', 'aria-label': `${t.name}: the functions reading and writing it` }, t.sq.rw.map((f) => h('li', null, h('div', null, h('span', { class: `mkl k-${f.wr ? 'w' : 'r'}` }, f.wr && f.r ? 'RW' : f.wr ? 'W' : 'R'), ' ', h('b', { class: 'mono' }, f.n), h('span', { class: 'muted' }, ` ${f.k.join(', ')} `), srcEl(s, f.at), f.c !== null && f.c !== undefined ? h('span', { class: 'muted' }, ` · ${plural(f.c, 'caller')}`) : null),
-      h('div', { class: 'srcline' }, `${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')}`)))),
+      h('div', { class: 'srcline' }, `${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')}${f.d ? ` · ${f.d}` : ''}`)))),
     t.sq.more ? h('p', { class: 'muted' }, `… and ${plural(t.sq.more, 'more function')} (graph_data lists the first ones)`) : null] : null)
   // a table deduced from the queries in code: what they show of it, and what stays unknown
   function inferredPassport(s, ti) {
@@ -568,8 +568,8 @@ export function dataClient(ctx) {
         name(r, 'span', `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), h('span', { class: 'muted' }, ` · on delete ${r.onDelete} · on update ${r.onUpdate}`), warn(r))),
       // a relation the schema declares and its client enforces: its own section, never a foreign key
       t.rels.some((r) => r.cl) ? [...section('Relations enforced by the client', t.rels.filter((r) => r.cl), (r) => item(r,
-        name(r, 'span', `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), h('span', { class: 'muted' }, ` · on delete ${r.onDelete} · on update ${r.onUpdate}`), CLIENT_PILL(), warn(r))),
-        h('p', { class: 'note' }, 'Declared by the schema, enforced by the client: no foreign key in the database. The client emulates its actions; no migration states it.')] : null,
+        name(r, 'span', `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), h('span', { class: 'muted' }, r.onDelete === null && r.onUpdate === null ? ' · no action stated' : ` · on delete ${r.onDelete} · on update ${r.onUpdate}`), CLIENT_PILL(), warn(r))),
+        h('p', { class: 'note' }, 'Declared by the schema, enforced by the client: no foreign key in the database. The client emulates its actions (a query relation that states none, Drizzle\'s relations(), only joins); no migration states it.')] : null,
       t.rels.some((r) => r.rf) ? section('Relations no foreign key states', t.rels.filter((r) => r.rf), (r) => h('li', null, h('div', null, h('span', { class: 'mono' }, `(${r.columns.join(', ')}) → `), known.has(r.to) ? go(r.to) : h('span', { class: 'mono' }, r.to), h('span', { class: 'mono' }, ` (${r.toColumns.join(', ')})`), REFINED()),
         h('div', { class: 'srcline' }, r.why), r.at.length ? h('div', { class: 'srcline' }, r.at.join(' · ')) : null)) : null,
       section('Referenced by', by, ([o, r]) => h('li', null, go(o.name), h('span', { class: 'mono muted' }, ` (${r.columns.join(', ')}) → (${r.toColumns.join(', ')})`), r.rf ? REFINED() : r.cl ? CLIENT_PILL() : null)),
@@ -967,7 +967,9 @@ export function dataClient(ctx) {
     // the SQL the code sends, in one line: each store says the rest
     const Q = DD.queries
     const qLine = DD.queriesError ? h('p', { class: 'note err' }, `Queries in code: ${DD.queriesError}.`) : Q ? h('p', { class: 'note', 'data-ctl': 'data-queries' }, `Queries in code, inferred from ${plural(Q.statements, 'statement')} in ${plural(Q.files, 'file')}: ${plural(Q.deduced, 'store')} deduced from them (dashed, never declared), ${plural(Q.attached, 'declared store')} they attach to (what they name that the declarations lack is an [inferred] conflict)${Q.tests ? `; ${plural(Q.tests, 'call')} in test code not read` : ''}. Leads, never verdicts.`) : null
-    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsErr, itemsList, accLine, qLine, refineView(RF, pick), list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
+    const Z = DD.drizzle
+    const zLine = DD.drizzleError ? h('p', { class: 'note err' }, `Drizzle queries in code: ${DD.drizzleError}.`) : Z ? h('p', { class: 'note', 'data-ctl': 'data-drizzle' }, `Drizzle queries in code, inferred from ${plural(Z.calls, 'query-builder or relational call')} in ${plural(Z.files, 'file')}: each table's passport lists the functions reading and writing it${Z.unresolved ? `; ${plural(Z.unresolved, 'table name')} no schema table resolves` : ''}${Z.ambiguous ? `; ${plural(Z.ambiguous, 'name')} several schemas declare` : ''}${Z.tests ? `; ${plural(Z.tests, 'call')} in test code not read` : ''}. Leads, never verdicts.`) : null
+    return h('section', null, toggle, why, base, don ? deltaHead(dsel) : null, picker, found, fails, itemsErr, itemsList, accLine, qLine, zLine, refineView(RF, pick), list.length ? storeView(shownStore(st.data), st.data) : h('p', { class: 'muted' }, 'No store with tables to draw for this selection.'))
   }
   // ── the refine files (render.mjs packRefine): refined facts, re-checked on every render, never
   // extracted; drift listed and never drawn; the gaps

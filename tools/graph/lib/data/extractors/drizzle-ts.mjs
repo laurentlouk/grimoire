@@ -33,7 +33,14 @@
 //   - columns spread from a shared object (`...timestamps`) and built by a helper (`id: id()`, a
 //     const arrow returning a column) are read through them; one that cannot be read leaves its
 //     table stated in part (`part`: its keys and indexes not compared for presence);
-//   - `relations()` is the query API's, app-level only: noted, never a foreign key.
+//   - `relations()` (and drizzle-orm 1.0's `defineRelations()`) is the query API's, app-level only,
+//     never a foreign key: a `one(t, { fields, references })` on columns no foreign key of the schema
+//     states is kept as a relation the schema declares and its client enforces (`enforced: client`,
+//     no action stated), as a Prisma relation under relationMode prisma is; every relation is kept by
+//     its name (the declaration's `queryRelations`: what a query's `with` joins). A file declaring
+//     only relations (its tables imported) is read for them;
+//   - each table keeps its variable (`var`) and each column its property key (`key`): what the
+//     queries in code name them by (extractors/drizzle-queries.mjs, data/drizzle.mjs).
 import path from 'node:path'
 import { named, field, lineOf, cap } from '../readers/code.mjs'
 import { strVal } from './ts-types.mjs'
@@ -46,6 +53,9 @@ const CONFIG = /(^|\/)drizzle\.config\.(?:ts|js|mjs|cjs|mts|cts|json)$/
 const CORE = /^drizzle-orm\/(sqlite|pg|mysql)-core$/
 const CORE_DIALECT = { sqlite: 'sqlite', pg: 'postgres', mysql: 'mysql' }
 const LEVEL_IMPORT = /\bfrom\s*['"]drizzle-orm\/(?:sqlite|pg|mysql)-core['"]/
+// (a file declaring the query API's relations alone, its tables imported: read for them)
+const LEVEL_ORM = /\bfrom\s*['"]drizzle-orm['"]/
+const LEVEL_REL = /\b(?:relations|defineRelations)\s*\(/
 const LEVEL_CALL = /\b(?:sqliteTable|pgTable|mysqlTable|sqliteTableCreator|pgTableCreator|mysqlTableCreator|pgSchema|mysqlSchema|pgEnum|sqliteView|pgView|pgMaterializedView|mysqlView)\s*[(<.]/
 // (each attempt bounded: a brace never closed costs 2 000 characters, not the rest of the file)
 const BARREL = /^[ \t]*export[ \t]+(?:\*(?:[ \t]+as[ \t]+[\w$]+)?|\{[^}]{0,2000}\})[ \t]*from[ \t]*['"](\.{1,2}\/[^'"\n]{1,400})['"]/gm
@@ -53,7 +63,7 @@ const BARREL = /^[ \t]*export[ \t]+(?:\*(?:[ \t]+as[ \t]+[\w$]+)?|\{[^}]{0,2000}
 // relative modules (a barrel a config may name).
 export function drizzleLevel(text) {
   BARREL.lastIndex = 0
-  return (LEVEL_IMPORT.test(text) && LEVEL_CALL.test(text) ? 4 : 0) | (BARREL.test(text) ? 8 : 0)
+  return ((LEVEL_IMPORT.test(text) && LEVEL_CALL.test(text)) || (LEVEL_ORM.test(text) && LEVEL_REL.test(text)) ? 4 : 0) | (BARREL.test(text) ? 8 : 0)
 }
 const reexports = (text) => { BARREL.lastIndex = 0; return [...text.matchAll(BARREL)].map((m) => m[1]).slice(0, 200) }
 const langOf = (p) => (/\.tsx$/i.test(p) ? 'tsx' : 'typescript')
@@ -127,6 +137,80 @@ function bodyOf(fn) {
   const ret = named(b).find((x) => x.type === 'return_statement')
   return ret ? bare(named(ret)[0]) : null
 }
+// A relations() call of the query API: `relations(t, ({ one, many }) => ({ author: one(users, { fields:
+// [t.authorId], references: [users.id] }), posts: many(posts) }))`, or drizzle-orm 1.0's
+// `defineRelations(schema, (r) => ({ posts: { author: r.one.users({ from: r.posts.authorId, to:
+// r.users.id }) } }))`: { line, rels: [{ table, name, kind: one | many, to, fields: [{ var, key }],
+// references: [{ var, key }], line }] }, names unresolved (the unit resolves them). Bounded: MAX.extras
+// relations a call.
+const refsOf = (n, param = null) => {
+  // t.col, or r.t.col in the v2 form; an array of them
+  const one = (x) => {
+    x = bare(x)
+    if (x?.type !== 'member_expression') return null
+    const o = bare(field(x, 'object')), key = field(x, 'property')?.text
+    if (!key) return null
+    if (param && o?.type === 'member_expression' && bare(field(o, 'object'))?.text === param) return { var: field(o, 'property')?.text || null, key }
+    return !param && o?.type === 'identifier' ? { var: o.text, key } : null
+  }
+  const b = bare(n)
+  if (b?.type === 'array') { const xs = named(b).map(one); return xs.every(Boolean) ? xs : [] }
+  const x = one(b)
+  return x ? [x] : []
+}
+function relationsOf(call, v2) {
+  const args = argsOf(call)
+  const out = { line: lineOf(call), rels: [] }
+  const fn = bare(args[1])
+  const body = fn && bodyOf(fn)
+  if (!body || body.type !== 'object') return out
+  const ps = field(fn, 'parameters'), p1 = ps ? named(ps)[0] : field(fn, 'parameter')
+  const p0 = p1 && (p1.type === 'required_parameter' || p1.type === 'optional_parameter') ? field(p1, 'pattern') : p1
+  const pairs = (obj) => named(obj).filter((p) => p.type === 'pair')
+  const keyOf = (p) => { const k = field(p, 'key'); return k && (k.type === 'property_identifier' ? k.text : str(k)) }
+  if (v2) {
+    // (r) => ({ <table key>: { <relation>: r.one.<target>({ from, to }) } })
+    const r = p0?.type === 'identifier' ? p0.text : null
+    if (!r) return out
+    for (const tp of pairs(body)) {
+      const table = keyOf(tp), inner = bare(field(tp, 'value'))
+      if (!table || inner?.type !== 'object') continue
+      for (const rp of pairs(inner)) {
+        if (out.rels.length >= MAX.extras) return out
+        const c = bare(field(rp, 'value'))
+        const f = c?.type === 'call_expression' ? bare(field(c, 'function')) : null
+        const kindNode = f?.type === 'member_expression' ? bare(field(f, 'object')) : null
+        const kind = kindNode?.type === 'member_expression' && bare(field(kindNode, 'object'))?.text === r ? field(kindNode, 'property')?.text : null
+        if (kind !== 'one' && kind !== 'many') continue
+        const cfg = bare(argsOf(c)[0])
+        const member = (k) => (cfg?.type === 'object' ? pairs(cfg).find((x) => keyOf(x) === k) : null)
+        out.rels.push({ table, name: keyOf(rp), kind, to: field(f, 'property')?.text || null, fields: member('from') ? refsOf(field(member('from'), 'value'), r) : [], references: member('to') ? refsOf(field(member('to'), 'value'), r) : [], line: lineOf(rp) })
+      }
+    }
+    return out
+  }
+  // ({ one, many }) => …, or (helpers) => helpers.one(…)
+  const helper = new Map() // local name → one | many
+  let helpers = null
+  if (p0?.type === 'object_pattern') {
+    for (const x of named(p0)) {
+      if (x.type === 'shorthand_property_identifier_pattern' && (x.text === 'one' || x.text === 'many')) helper.set(x.text, x.text)
+      if (x.type === 'pair_pattern') { const k = field(x, 'key')?.text, v = field(x, 'value'); if ((k === 'one' || k === 'many') && v?.type === 'identifier') helper.set(v.text, k) }
+    }
+  } else if (p0?.type === 'identifier') helpers = p0.text
+  const table = bare(args[0])
+  for (const p of pairs(body)) {
+    if (out.rels.length >= MAX.extras) break
+    const c = bare(field(p, 'value'))
+    const f = c?.type === 'call_expression' ? bare(field(c, 'function')) : null
+    const kind = f?.type === 'identifier' ? helper.get(f.text) : f?.type === 'member_expression' && helpers && bare(field(f, 'object'))?.text === helpers ? field(f, 'property')?.text : null
+    if (kind !== 'one' && kind !== 'many') continue
+    const [target, cfg] = argsOf(c).map(bare)
+    const member = (k) => (cfg?.type === 'object' ? pairs(cfg).find((x) => keyOf(x) === k) : null)
+    out.rels.push({ table: table?.type === 'identifier' ? table.text : null, name: keyOf(p), kind, to: target?.type === 'identifier' ? target.text : null, fields: member('fields') ? refsOf(field(member('fields'), 'value')) : [], references: member('references') ? refsOf(field(member('references'), 'value')) : [], line: lineOf(p) })
+  }
+  return out
+}
 const blankCol = (key, line) => ({ key, name: null, b: null, enumVar: null, customVar: null, factory: null, cfg: {}, values: null, notNull: false, pk: false, autoInc: false, unique: null, ref: null, dflt: null, computed: [], generated: null, identity: false, array: 0, line })
 const paramOf = (fn) => { const ps = field(bare(fn), 'parameters'); const p = ps && named(ps)[0]; const id = p && (p.type === 'identifier' ? p : field(p, 'pattern')); return id && id.type === 'identifier' ? id.text : null }
 
@@ -137,7 +221,7 @@ export function readSchemaFile(tree, file) {
   const note = (s) => { if (out.notes.length < MAX.notes) out.notes.push(s) }
   if (root.hasError) { let first = null; const stack = [root]; while (stack.length && first === null) { const x = stack.pop(); if (x.type === 'ERROR' || x.isMissing) first = lineOf(x); else for (let i = x.childCount - 1; i >= 0; i--) if (x.child(i).hasError || x.child(i).isMissing) stack.push(x.child(i)) } out.error = first ?? 1 }
   // imports: local → the builder it names; namespaces of a core module; drizzle-orm's relations and sql
-  const imported = new Map(), spaces = new Set(), relationsLocal = new Set(), sqlLocal = new Set(['sql'])
+  const imported = new Map(), spaces = new Set(), relationsLocal = new Set(), relationsV2 = new Set(), sqlLocal = new Set(['sql'])
   const tops = []
   for (const s of named(root)) {
     if (s.type === 'import_statement') {
@@ -154,7 +238,7 @@ export function readSchemaFile(tree, file) {
           const name = field(sp, 'name')?.text, alias = field(sp, 'alias')?.text || name
           if (!name) continue
           if (core) imported.set(alias, name)
-          else if (name === 'relations') relationsLocal.add(alias)
+          else if (name === 'relations' || name === 'defineRelations') { relationsLocal.add(alias); if (name === 'defineRelations') relationsV2.add(alias) }
           else if (name === 'sql') sqlLocal.add(alias)
         }
       }
@@ -350,7 +434,7 @@ export function readSchemaFile(tree, file) {
 
   const relCalls = []
   for (const d of tops.slice(0, 4000)) {
-    if (d.bareCall) { const c = d.bareCall; if (c?.type === 'call_expression' && relationsLocal.has(bare(field(c, 'function'))?.text)) relCalls.push(lineOf(c)); continue }
+    if (d.bareCall) { const c = d.bareCall; if (c?.type === 'call_expression' && relationsLocal.has(bare(field(c, 'function'))?.text)) relCalls.push(relationsOf(c, relationsV2.has(bare(field(c, 'function')).text))); continue }
     const id = field(d, 'name')
     const value = bare(field(d, 'value'))
     if (!id || id.type !== 'identifier' || !value) continue
@@ -371,7 +455,7 @@ export function readSchemaFile(tree, file) {
     const fn = bare(field(base, 'function'))
     const b = resolve(fn)
     const args = argsOf(base)
-    if (fn?.type === 'identifier' && relationsLocal.has(fn.text)) { relCalls.push(line); continue }
+    if (fn?.type === 'identifier' && relationsLocal.has(fn.text)) { relCalls.push(relationsOf(base, relationsV2.has(fn.text))); continue }
     if (b && COLUMNS.has(b)) { const c = column(v, value, line, null); if (c) out.factories.push({ var: v, col: c, line }); continue }
     if (b === 'pgEnum' || (b && /\.enum$/.test(b) && str(args[0]) !== null && Array.isArray(literal(args[1])))) {
       out.enums.push({ var: v, name: str(args[0]), schemaVar: b.includes('.') ? b.split('.')[0] : null, values: literal(args[1]) || [], line })
@@ -427,7 +511,7 @@ export function readSchemaFile(tree, file) {
 // ── the unit: a config and its schema files, or a folder of them ──
 export default {
   id: 'drizzle-ts',
-  version: 3,
+  version: 4,
   kind: 'code',
   scope: 'unit',
   tree: true,
@@ -492,6 +576,9 @@ export default {
         }
       }
       const store = at(cfg.out || 'drizzle')
+      // and a file under it declaring only the query API's relations of those tables (no table of its own)
+      const relOnly = (f) => { const x = (drizzleLevel(f.text) & 4) ? read(f) : null; return !!x && !x.tables.length && !x.enums.length && x.relations.length > 0 }
+      for (const f of sources) if (!named.has(f.path) && relOnly(f)) named.add(f.path)
       const mine = sources.filter((f) => named.has(f.path))
       const d = declare(mine.map(read).filter(Boolean), store, cfg, cfgFile.path)
       if (d) decls.push(d)
@@ -643,8 +730,6 @@ function declare(files, store, cfg, configPath) {
   const errors = files.filter((f) => f.error !== null)
   for (const f of errors) note(`${f.file}:${f.error}: the file does not parse cleanly; what parsed is kept, and the schema is not compared for what it lacks`)
   for (const f of files) for (const n of f.notes) note(`${f.file}: ${n}`)
-  const rel = files.filter((f) => f.relations.length)
-  if (rel.length) note(`relations() at ${rel.map((f) => `${f.file}:${f.relations[0]}`).join(', ')}: the query API's, app-level only, not foreign keys`)
   const dialects = [...new Set(tables.map((t) => t.dialect || files.find((f) => f.file === t.file)?.dialect).filter(Boolean))]
   const dialect = dialects[0] || files.find((f) => f.dialect)?.dialect || null
   if (dialects.length > 1) note(`tables of several dialects (${dialects.join(', ')}): each typed by its own`)
@@ -717,7 +802,7 @@ function declare(files, store, cfg, configPath) {
     if (name === null) { note(`${t.file}:${t.line}: a table name no literal states (${t.nameText}): not modeled`); unknownNames++; continue }
     const tdialect = t.dialect || (t.creatorVar ? creatorVar.get(t.creatorVar)?.dialect : null) || (t.schemaVar ? schemaVar.get(t.schemaVar)?.dialect : null) || dialect
     const ename = qualified(schema, name)
-    const e = { name: ename, kind: t.kind, path: t.file, line: t.line, fields: [], keys: [], indexes: [], relations: [] }
+    const e = { name: ename, var: t.var, kind: t.kind, path: t.file, line: t.line, fields: [], keys: [], indexes: [], relations: [] }
     entities.push(e)
     if (t.kind === 'view') continue
     const { cols, opaque } = colsOf(t)
@@ -731,7 +816,7 @@ function declare(files, store, cfg, configPath) {
       const cname = c.name ?? casing(c.key)
       names.set(c.key, cname)
       built.set(c.key, c.name ?? c.key)
-      const f = { name: cname, type: null, nullable: true, default: null, generated: null, ...at(c.line) }
+      const f = { name: cname, key: c.key, type: null, nullable: true, default: null, generated: null, ...at(c.line) }
       const unstated = []
       if (c.factory) { f.type = c.factory; unstated.push('type', 'nullable', 'default'); e.part = true }
       else if (c.enumVar) {
@@ -789,6 +874,34 @@ function declare(files, store, cfg, configPath) {
     const keys = r.ref.keys || [r.ref.key]
     e.relations.push({ columns: r.cols, to: target.entity.name, toColumns: keys.map((k) => target.names.get(k) ?? casing(k ?? '')), onDelete: r.ref.onDelete || 'no action', onUpdate: r.ref.onUpdate || 'no action', path: r.file, line: r.line })
   }
+  // the query API's relations (relations(), defineRelations()): an app-level declaration, never a
+  // foreign key. A one() naming its fields and references, on the columns no foreign key of the schema
+  // states, is kept as a relation the schema declares and its client enforces (model.mjs `enforced:
+  // client`: no foreign key in the database, no action stated); one a foreign key already states is
+  // that foreign key. Every relation, one() or many(), is kept by its name (`queryRelations`), so a
+  // query's `with: { author: true }` names the table it joins.
+  const queryRelations = []
+  const relCount = { kept: 0, fk: 0, back: 0, unresolved: 0 }
+  const relFiles = files.filter((f) => f.relations.length)
+  for (const f of relFiles) for (const call of f.relations) for (const r of call.rels || []) {
+    const from = r.table ? resolved.get(r.table) : null, to = r.to ? resolved.get(r.to) : null
+    if (!from || !to) { relCount.unresolved++; continue }
+    if (queryRelations.length < MAX.tables * 4) queryRelations.push({ from: from.entity.name, name: r.name, kind: r.kind, to: to.entity.name, path: f.file, line: r.line })
+    if (r.kind !== 'one' || !r.fields.length || r.fields.length !== r.references.length) { relCount.back++; continue }
+    const own = resolved.get(r.fields[0].var)
+    const other = resolved.get(r.references[0].var)
+    if (!own || !other || r.fields.some((x) => x.var !== r.fields[0].var) || r.references.some((x) => x.var !== r.references[0].var)) { relCount.unresolved++; continue }
+    const columns = r.fields.map((x) => own.names.get(x.key) ?? casing(x.key)), toColumns = r.references.map((x) => other.names.get(x.key) ?? casing(x.key))
+    const same = own.entity.relations.some((x) => x.to === other.entity.name && x.columns.join('\0') === columns.join('\0') && x.toColumns.join('\0') === toColumns.join('\0'))
+    if (same) { relCount.fk++; continue }
+    if (own.entity.relations.some((x) => x.enforced === 'client' && x.to === other.entity.name && x.columns.join('\0') === columns.join('\0'))) continue // the same relation stated twice (both sides naming fields)
+    own.entity.relations.push({ columns, to: other.entity.name, toColumns, onDelete: null, onUpdate: null, enforced: 'client', path: f.file, line: r.line })
+    relCount.kept++
+  }
+  if (relFiles.length) {
+    const said = [relCount.kept && `${relCount.kept} one() kept as ${relCount.kept === 1 ? 'a relation' : 'relations'} the schema declares (no foreign key states ${relCount.kept === 1 ? 'it' : 'them'})`, relCount.fk && `${relCount.fk} the same as a foreign key`, relCount.back && `${relCount.back} without fields (a many(), or the other side's)`, relCount.unresolved && `${relCount.unresolved} naming a table the schema does not declare`].filter(Boolean)
+    note(`relations() at ${relFiles.map((f) => `${f.file}:${f.relations[0].line}`).join(', ')}: the query API's, app-level, never foreign keys${said.length ? `: ${said.join(', ')}` : ''}`)
+  }
   const enumOut = enums.filter((e) => e.name).map((e) => ({ name: qualified(e.schemaVar ? schemaVar.get(e.schemaVar)?.name : null, e.name), values: e.values, path: e.file, line: e.line }))
   const first = files.find((f) => f.tables.length) || files[0]
   const nT = entities.filter((e) => e.kind === 'table').length, nV = entities.length - nT
@@ -802,6 +915,7 @@ function declare(files, store, cfg, configPath) {
     notes: [...(configPath ? [`schema named by ${configPath}${cfg.casing ? ` (casing ${cfg.casing})` : ''}`] : []), ...notes].slice(0, MAX.notes),
     files: files.length,
     ...(enumOut.length ? { enums: enumOut } : {}),
+    ...(queryRelations.length ? { queryRelations } : {}),
     entities,
   }
 }
