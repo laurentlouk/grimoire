@@ -18,6 +18,7 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { familyOf } from './langs.mjs'
+import { secretValue } from './data/readers/code.mjs'
 
 export const UNKNOWN = '{…}'
 const MAX_REFS = 2000, MAX_ROUTES = 2000
@@ -754,7 +755,26 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
 }
 
 function finish(out) {
+  for (const r of out.routes) r.path = routePath(r.path)
+  for (const x of [...out.scopes, ...out.mounts]) if (typeof x.prefix === 'string') x.prefix = routePath(x.prefix)
+  if (typeof out.meta.globalPrefix === 'string') out.meta.globalPrefix = routePath(out.meta.globalPrefix)
   return out.routes.length || out.refs.length || out.scopes.length || out.mounts.length || Object.keys(out.meta).length ? out : null
+}
+
+// A route's path as stored and shown: its path template only. A declaration written as a URL keeps
+// no scheme, host or user info (`https://u:p@host/x` → `/x`), and no query or fragment (`/x?key=…`
+// → `/x`); a segment that looks like a credential (a known token prefix, or 20 characters or more
+// mixing upper case, lower case and numerals: readers/code.mjs secretValue) is `{…}`, what code fills in.
+export function routePath(p) {
+  let s = String(p ?? '')
+  s = s.replace(/[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/g, '') // scheme://user:pass@host:port, anywhere
+  s = s.replace(/^\/\/[^/?#]*[.@:][^/?#]*/, '') // //host
+  s = s.replace(/^[^/?#{]*:[^/?#@]*@[^/?#]*/, '') // user:pass@host, no scheme
+  s = s.replace(/^\/{2,}/, '/') // what a joined prefix left: `/` + `//r`
+  const cut = s.search(/#|\?(?=[^/(])/) // an optional parameter (`:id?`) is no query
+  if (cut >= 0) s = s.slice(0, cut)
+  if (s.includes('/') || secretValue(s)) s = s.split('/').map((seg) => (seg && secretValue(seg) ? UNKNOWN : seg)).join('/')
+  return s || (String(p ?? '') ? '/' : s)
 }
 
 // Two path parts joined: one slash between them, none doubled; `''` + `''` is `/`
@@ -838,7 +858,8 @@ function railsRoutes(rootNode, addRoute, consumed) {
   const sym = (n) => (n && n.type === 'simple_symbol' ? n.text.slice(1) : n && n.type === 'string' ? lit(n) : null)
   const opt = (args, k) => { for (const a of args) if (a.type === 'pair') { const key = field(a, 'key'); const kt = key.type === 'hash_key_symbol' ? key.text : sym(key); if (kt === k) return field(a, 'value') } return null }
   const symList = (v) => (!v ? null : v.type === 'array' ? named(v).map(sym).filter(Boolean) : [sym(v)].filter(Boolean))
-  const handlerOf = (to, ctx) => { const s = to ? lit(to) : null; if (!s || !s.includes('#')) return null; const [c, a] = s.split('#'); return { name: a, qual: [ctx.module, c].filter(Boolean).join('/'), rails: true } }
+  // `to: 'posts#index'`: a controller and an action, never a URL (`to: 'https://…#…'` is no handler)
+  const handlerOf = (to, ctx) => { const s = to ? lit(to) : null; if (!s || !/^[A-Za-z_][\w/]*#[A-Za-z_]\w*[!?]?$/.test(s)) return null; const [c, a] = s.split('#'); return { name: a, qual: [ctx.module, c].filter(Boolean).join('/'), rails: true } }
   const visit = (n, ctx) => {
     if (n.type === 'call' && !field(n, 'receiver')) {
       const m = field(n, 'method')?.text

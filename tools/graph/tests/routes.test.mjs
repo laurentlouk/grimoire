@@ -104,6 +104,15 @@ console.log('\n1b · declarations, file by file')
   ok(!axios.routes.length && axios.refs[0]?.method === 'POST', 'a client call with data is a call site, not a route')
   const nav = await read('tsx', 'src/x.tsx', "export function A({ navigation }) { return <Link screen=\"Profile\" /> }\n")
   ok(nav.refs.some((r) => r.named && r.kind === 'screen'), '<Link screen="X"> names a screen')
+  // a declaration's path is its template only: no scheme, host, credentials, query or fragment; a
+  // segment shaped like a credential is {…}; a Rails `to:` that is a URL is no handler
+  const { routePath } = await import('../lib/routes.mjs')
+  const rp = ['https://u:canary-route-50@h.example.com/new?x=canary-route-51', '/users/:id?', '/users/:id?/x', '/x?token=canary-route-52', '/a#canary-route-53', '//cdn.example.com/x', 'u:canary-route-54@host/x', '/hooks/AbCdEf1234567890XyZw12/x', '/k/sk_live_canary', '/api/{…}/x', '/@me', '/'].map(routePath)
+  ok(JSON.stringify(rp) === JSON.stringify(['/new', '/users/:id?', '/users/:id?/x', '/x', '/a', '/x', '/x', '/hooks/{…}/x', '/k/{…}', '/api/{…}/x', '/@me', '/']), `routePath: the path template only, an optional parameter kept (${rp.join(' ')})`)
+  const urls = await read('javascript', 'src/u.js', "const express = require('express')\nconst app = express()\nconst r = express.Router()\napp.get('https://admin:canary-route-55@api.example.com/v1/items?key=canary-route-56#canary-route-57', h)\napp.use('http://canary-route-58.example.com/mnt?k=canary-route-59', r)\nr.get('/webhook/ZxCvBnM1234567890QwErTy', w)\n")
+  ok(rows(urls).includes('GET /v1/items h') && rows(urls).includes('GET /webhook/{…} w') && urls.mounts.some((m) => m.prefix === '/mnt') && !/canary-route|example\.com|ZxCvBnM/.test(JSON.stringify(urls)), `express: a route or a mount written as a URL keeps its path alone; a credential-shaped segment is {…} (${rows(urls)})`)
+  const rails = await read('ruby', 'config/routes.rb', "Rails.application.routes.draw do\n  get '/old', to: redirect('https://u:canary-route-60@h/new?x=canary-route-61')\n  get '/p', to: 'https://u:canary-route-62@h/#canary'\n  get '/q', to: 'posts#show'\n  get 'https://canary-route-63.example.com/r?x=1', to: 'admin/posts#index'\nend\n")
+  ok(rows(rails).includes('GET /p -') && rows(rails).includes('GET /q posts.show') && rows(rails).includes('GET /r admin/posts.index') && !/canary/.test(JSON.stringify(rails.routes)), `rails: a \`to:\` that is a URL is no handler; a path written as a URL keeps its path (${rows(rails)})`)
 }
 
 // ── 2 · the fixtures ──
