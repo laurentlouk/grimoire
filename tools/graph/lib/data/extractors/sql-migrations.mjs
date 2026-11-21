@@ -69,7 +69,7 @@ const isDump = (p, header) => DUMP_NAME.test(p) || (header && !VERSIONED.test(P.
 
 export default {
   id: 'sql-migrations',
-  version: 2,
+  version: 3,
   kind: 'migration',
   scope: 'unit',
   wants: (p) => (SQL.test(p) && !DOWN.test(p)) || CONFIG.test(p),
@@ -254,6 +254,7 @@ function dialectOf(folder, configs, members, override, journal, statedOnly = fal
     if (m) return { dialect: normDialect(m[1]), from: { how: 'stated', path: p, line: text.slice(0, block.index + m.index).split('\n').length } }
   }
   if (folder === 'supabase/migrations' || folder.endsWith('/supabase/migrations')) return { dialect: 'postgres', from: { how: 'supabase' } }
+  if (/(^|\/)clickhouse(\/|$)/i.test(folder)) return { dialect: 'clickhouse', from: { how: 'folder', marker: folder } } // a folder the project names for ClickHouse: no reader
   if (dump) return dump // the header of a dump beside the migrations
   if (statedOnly) return { dialect: null }
   const s = sniffDialect(members)

@@ -8,7 +8,8 @@
 //
 // Backtick identifiers are a weak marker: MySQL's, but SQLite accepts them and Drizzle writes them
 // for SQLite. They name MySQL only when no other marker is present. A `DELIMITER` line is MySQL's
-// (its client's command), and the string it sets (`$$`) is no Postgres dollar quote.
+// (its client's command), and the string it sets (`$$`) is no Postgres dollar quote. ClickHouse's
+// table engines (`ENGINE = MergeTree`) name it, not MySQL.
 import { blank } from './sql-split.mjs'
 
 const MARKERS = [
@@ -23,7 +24,11 @@ const MARKERS = [
   ['postgres', 'TIMESTAMPTZ', /\bTIMESTAMPTZ\b/i],
   ['postgres', 'CREATE EXTENSION', /\bCREATE\s+EXTENSION\b/i],
   ['postgres', 'GENERATED … AS IDENTITY', /\bGENERATED\s+(?:ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY\b/i],
-  ['mysql', 'ENGINE=', /\bENGINE\s*=/i],
+  ['mysql', 'ENGINE=', /\bENGINE\s*=(?!\s*(?:\w*MergeTree|Distributed|Kafka)\b)/i], // (never a ClickHouse table engine)
+  // ClickHouse: no reader for it (sql-migrations.mjs lists such a folder, not read), but named, so its
+  // SQL is never read as MySQL's for its ENGINE clause
+  ['clickhouse', 'ENGINE = MergeTree', /\bENGINE\s*=\s*(?:\w*MergeTree|Distributed|Kafka)\b/i],
+  ['clickhouse', 'LowCardinality', /\bLowCardinality\s*\(/],
   ['mysql', 'AUTO_INCREMENT', /\bAUTO_INCREMENT\b/i],
   ['mysql', 'UNSIGNED', /\bUNSIGNED\b/i],
   ['mysql', 'DELIMITER', /^[ \t]*DELIMITER(?:[ \t]+[^\w\s]\S*)?[ \t]*$/im], // the MySQL client's own command (its string blanked below)

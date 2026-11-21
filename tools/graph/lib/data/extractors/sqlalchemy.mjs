@@ -22,7 +22,8 @@
 //     the engine's, so not compared), nullable as SQLAlchemy decides (`nullable=` when stated; else not
 //     null for a primary key; else `Mapped[Optional[T]]` / `T | None` nullable and `Mapped[T]` not, for
 //     `mapped_column` and SQLModel; `Column` nullable), `primary_key` (several: one composite key),
-//     `unique` a unique key, `index=True` an index named by SQLAlchemy's default convention
+//     `unique` a unique key, `index=True` an index named by SQLAlchemy's default convention (both
+//     together: one unique index of that name, as SQLAlchemy creates it)
 //     (`ix_<table>_<column>`; a project's own `naming_convention` noted, names then not compared),
 //     `ForeignKey("t.c", ondelete=, onupdate=)` (or a class's attribute, `ForeignKey(User.id)`, SQLModel's
 //     `foreign_key=`) a foreign key, `server_default` the database's default (a number, a boolean,
@@ -216,7 +217,7 @@ function readFile(root, file) {
 
 export default {
   id: 'sqlalchemy',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'unit',
   tree: true,
@@ -295,10 +296,12 @@ export default {
       const colOfAttr = new Map(t.columns.map((c) => [c.attr ?? c.name, c.name]))
       const pk = []
       for (const c of t.columns) {
-        e.fields.push({ name: c.name, type: c.type || 'unknown', nullable: c.nullable, default: c.default, generated: null, ...at(c.line, c.path), unstated: ['type', ...c.unstated], ...(c.computed ? { computed: c.computed } : {}) })
+        e.fields.push({ name: c.name, ...(c.attr && c.attr !== c.name ? { attr: c.attr } : {}), type: c.type || 'unknown', nullable: c.nullable, default: c.default, generated: null, ...at(c.line, c.path), unstated: ['type', ...c.unstated], ...(c.computed ? { computed: c.computed } : {}) })
         if (c.pk) pk.push(c)
-        if (c.unique) e.keys.push({ role: 'unique', parts: [c.name], ...at(c.line, c.path) })
-        if (c.index) e.indexes.push({ name: `ix_${bare}_${c.name}`, unique: false, columns: [c.name], partial: false, ...at(c.line, c.path) })
+        // `unique=True, index=True` together are one unique index (SQLAlchemy creates `ix_<table>_<col>`
+        // UNIQUE, no constraint beside it); `unique=True` alone a unique key
+        if (c.unique && !c.index) e.keys.push({ role: 'unique', parts: [c.name], ...at(c.line, c.path) })
+        if (c.index) e.indexes.push({ name: `ix_${bare}_${c.name}`, unique: !!c.unique, columns: [c.name], partial: false, ...at(c.line, c.path) })
         for (const fk of c.fks) {
           let to = null, toCol = null
           if (fk.target) { const i = fk.target.lastIndexOf('.'); if (i > 0) { to = fk.target.slice(0, i); toCol = fk.target.slice(i + 1) } }

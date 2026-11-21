@@ -29,12 +29,22 @@
 //   9. canaries: no literal default, comment, help text, choice, password or where clause in any fact
 //  10. the gaps: an ORM a store was read through is no gap; one no extractor reads still is
 //  11. a base reads the same facts aside (readers/code-aside.mjs: Ruby and Java among its grammars)
+//  14. what real projects write that the fixtures do not: Mongoose's Schema() without `new`; a migration's
+//      named unique constraint and a schema's unique index of that name (one element); TypeORM's
+//      migrations glob from __dirname, @Index() on a relation, a uuid key on Postgres; Alembic's dialect
+//      from graph.data.migrations or sniffed from the revisions, unique=True with index=True; SQL in
+//      migration files never a query in code; Django's targets through the imports, Postgres indexes,
+//      spliced Meta lists, fields that add no column, a dot-folder's file; Rails' inverse_of (and the
+//      Gemfile.lock's version); store ids unique; ClickHouse SQL named, not read as MySQL's
 //
 //  Part 2, through call(), on the fixtures indexed as one project:
 //  12. graph_data's stores and an entity's classes, no extractor failure, no ORM listed as a gap, no
 //      canary (the planted passwords among them) in any answer or the page
 //  13. a branch against its base: a column added to a schema.rb, a Django model, a JPA entity and a
 //      Mongoose schema, each in graph_changes at its line (the base's files parsed aside)
+//  15. graph_diff on ORM projects: a removed column still named through its class (Django, Active
+//      Record), a not-null column with no default the creations leave out, a schema edited and no
+//      migration generated (a conflict this diff creates), and the risk each makes
 import { mkdtempSync, mkdirSync, cpSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -99,7 +109,7 @@ console.log('\n2 · Rails: db/schema.rb and the Active Record models, one store 
   eq(errors, [], 'no extractor fails on a Rails application')
   const st = m.stores.find((s) => s.id === 'app:db')
   eq([m.stores.map((s) => s.id), st.dialect, st.dialectFrom, st.declarations.map((d) => `${d.kind} ${d.extractor} ${d.label}`)],
-    [['app:db'], 'postgres', { how: 'stated', path: 'config/database.yml', line: 2 }, ['artifact rails@1 schema.rb, 7 tables', 'code rails@1 Active Record models, read 6 files: 6 classes mapped, 4 associations no foreign key states (6 a foreign key states)']],
+    [['app:db'], 'postgres', { how: 'stated', path: 'config/database.yml', line: 2 }, ['artifact rails@2 schema.rb, 7 tables', 'code rails@2 Active Record models, read 6 files: 6 classes mapped, 4 associations no foreign key states (6 a foreign key states)']],
     'one store, the schema file\'s folder: the schema an artifact, the models code; the dialect the adapter every database.yml entry states')
   eq(storeSummary(st), '7 tables · 4 foreign keys · 4 relations enforced by the client · 6 indexes · no conflicts', 'its summary: the associations no foreign key states counted apart from the foreign keys')
   const acc = entity(m, 'app:db', 'accounts')
@@ -149,7 +159,7 @@ console.log('\n2 · Rails: db/schema.rb and the Active Record models, one store 
 console.log('\n3 · SQL in migrations written as code: TypeORM and Knex (fixtures/orm/typeorm, fixtures/orm/knex)')
 {
   const { model: tm, rows } = modelOf(fixture('typeorm'))
-  const mig = rows.find((r) => r.extractor === 'code-migrations@1')
+  const mig = rows.find((r) => r.extractor === 'code-migrations@2')
   const md = mig.facts.declarations[0]
   eq([md.store, md.dialect, md.dialectFrom, md.label, md.complete, md.clients, md.notes],
     ['src/migration', 'postgres', { how: 'stated', path: 'src/data-source.ts', line: 7 }, 'migrations as code, replayed 2 files, 5 statements (1 skipped)', false, ['typeorm'], ['src/migration/1700000500000-AddPostIndex.ts:10: SQL with a part code fills in: not read', 'skipped in src/migration/1700000500000-AddPostIndex.ts: 1 statement that does not shape the store (UPDATE 1)']],
@@ -160,15 +170,15 @@ console.log('\n3 · SQL in migrations written as code: TypeORM and Knex (fixture
     'each column at its line in the TypeScript file, a template literal\'s lines kept, a concatenation read whole; never down()')
   eq([idx(post), post.relations.map((r) => `(${r.columns})->${r.to} ${r.onDelete}`)], [['IDX_post_title (title)'], ['(authorId)->user cascade']], '… an index from a const of the file, a foreign key from an ALTER, in migration order')
   const { model: km, rows: krows } = modelOf(fixture('knex'))
-  const kd = krows.find((r) => r.extractor === 'code-migrations@1').facts.declarations[0]
+  const kd = krows.find((r) => r.extractor === 'code-migrations@2').facts.declarations[0]
   const users = entity(km, 'app:migrations', 'users'), orders = entity(km, 'app:migrations', 'orders')
   eq([kd.dialect, kd.dialectFrom, kd.clients, kd.notes, fields(users), keys(users), idx(users), fields(orders), rels(orders)],
     ['sqlite', { how: 'stated', path: 'knexfile.js', line: 3 }, ['knex'], ['1 schema builder call (createTable, alterTable…): not read, only raw SQL is'], ['id INTEGER !', 'email TEXT !', "plan TEXT ! ='free'"], ['primary(id)', 'unique(email)'], ['users_plan (plan)'], ['id INTEGER !', 'user_id INTEGER !', 'total INTEGER'], ['(user_id)->users(id) cascade @20240212120000_orders.js:6']],
     'Knex: the knexfile\'s every client one engine (sqlite3, better-sqlite3), exports.up and an exported up, replayed into SQLite; knex.schema.raw of a concatenation; a builder call counted, not guessed')
   // no prefix: the order cannot be decided; an `up` nowhere
-  const nop = extract(new Map([['db/a.ts', 'import { MigrationInterface, QueryRunner } from "typeorm"\nexport class A implements MigrationInterface { async up(q: QueryRunner) { await q.query(`CREATE TABLE a (id int)`) } }\n'], ['db/b.ts', 'import { MigrationInterface, QueryRunner } from "typeorm"\nexport class B implements MigrationInterface { async up(q: QueryRunner) { await q.query(`CREATE TABLE b (id int)`) } }\n']])).find((r) => r.extractor === 'code-migrations@1').facts.declarations[0]
+  const nop = extract(new Map([['db/a.ts', 'import { MigrationInterface, QueryRunner } from "typeorm"\nexport class A implements MigrationInterface { async up(q: QueryRunner) { await q.query(`CREATE TABLE a (id int)`) } }\n'], ['db/b.ts', 'import { MigrationInterface, QueryRunner } from "typeorm"\nexport class B implements MigrationInterface { async up(q: QueryRunner) { await q.query(`CREATE TABLE b (id int)`) } }\n']])).find((r) => r.extractor === 'code-migrations@2').facts.declarations[0]
   eq([nop.status, nop.label], ['not-read', 'dialect unknown (no config states it, and no dialect marker in the SQL)'], 'no config and no marker: listed, never replayed as a guessed dialect')
-  const unordered = extract(new Map([['knexfile.js', "module.exports = { client: 'pg' }\n"], ['db/a.js', "exports.up = (knex) => knex.raw('CREATE TABLE a (id int)')\n"], ['db/b.js', "exports.up = (knex) => knex.raw('CREATE TABLE b (id int)')\n"]])).find((r) => r.extractor === 'code-migrations@1').facts.declarations[0]
+  const unordered = extract(new Map([['knexfile.js', "module.exports = { client: 'pg' }\n"], ['db/a.js', "exports.up = (knex) => knex.raw('CREATE TABLE a (id int)')\n"], ['db/b.js', "exports.up = (knex) => knex.raw('CREATE TABLE b (id int)')\n"]])).find((r) => r.extractor === 'code-migrations@2').facts.declarations[0]
   eq([unordered.status, unordered.label], ['not-read', 'order unknown (a.js has no numeric or timestamp prefix)'], 'names with no version prefix: the order unknown, the folder listed and not replayed')
   const { migrationLevel } = await import('../lib/data/extractors/code-migrations.mjs')
   eq([migrationLevel('src/db.js', "const pool = require('pg')\nmodule.exports = { init: () => pool.query('CREATE TABLE IF NOT EXISTS t (id int)') }\n"), migrationLevel('db/1_a.js', "module.exports = {\n  async up(knex) { await knex.raw('CREATE TABLE t (id int)') },\n}\n"), migrationLevel('db/1_a.d.ts', 'export function up(): void')],
@@ -239,7 +249,7 @@ console.log('\n5 · SQLAlchemy and SQLModel (fixtures/orm/sqlalchemy, fixtures/o
   const { model: am, errors: aerr } = modelOf(fixture('sqlalchemy'))
   const as = am.stores.find((s) => s.id === 'app:migrations/versions')
   eq([aerr, am.stores.map((s) => s.id), as.declarations.map((d) => `${d.kind} ${d.extractor} ${d.label}`), as.declarations[0].notes, as.declarations[1].notes, storeSummary(as)],
-    [[], ['app:migrations/versions'], ['migration alembic@1 Alembic revisions, replayed 2 files, 7 statements (1 skipped)', 'code sqlalchemy@1 SQLAlchemy models, read 1 file: 4 tables, 3 foreign keys (2 relationships, derived from them)'], ['operations that do not shape the store, or are not read: bulk_insert 1', 'skipped in migrations/versions/1a2b3c4d5e6f_init.py: 1 statement that does not shape the store (INSERT 1)'], ['the revisions of migrations/env.py (target_metadata): the models and those revisions are one store'], '4 tables · 3 foreign keys · 2 indexes · no conflicts'],
+    [[], ['app:migrations/versions'], ['migration alembic@2 Alembic revisions, replayed 2 files, 7 statements (1 skipped)', 'code sqlalchemy@2 SQLAlchemy models, read 1 file: 4 tables, 3 foreign keys (2 relationships, derived from them)'], ['operations that do not shape the store, or are not read: bulk_insert 1', 'skipped in migrations/versions/1a2b3c4d5e6f_init.py: 1 statement that does not shape the store (INSERT 1)'], ['the revisions of migrations/env.py (target_metadata): the models and those revisions are one store'], '4 tables · 3 foreign keys · 2 indexes · no conflicts'],
     'Alembic: its revisions replayed in revision order as the DDL each operation emits, a store of kind migration; the models its env.py autogenerates from, a declaration of the same store; they agree')
   const ab = entity(am, 'app:migrations/versions', 'books')
   eq([ab.fields.map((f) => `${f.name} ${f.type.raw} @${cites(f)}`), idx(ab).map((x, i) => `${x} @${cites(ab.indexes[i])}`), rels(ab), ab.sources.map((s) => s.as || s.kind)],
@@ -250,9 +260,9 @@ console.log('\n5 · SQLAlchemy and SQLModel (fixtures/orm/sqlalchemy, fixtures/o
   const floor = entity(a2, 'app:migrations/versions', 'shelves').fields.find((f) => f.name === 'floor')
   eq([floor.conflicts.map((c) => `${c.attr}: ${c.values.map((v) => `${v.value} ${v.sources.map((s) => `${s.kind} ${base(s.path)}:${s.line}`).join(',')}`).join(' | ')}`), schemaDrift(floor.conflicts[0])],
     [['presence: declared code models.py:56 | absent migration 1a2b3c4d5e6f_init.py:16'], true], 'a column added to a model and no revision generated: a conflict, both sides cited')
-  const twoHeads = extract(fixture('sqlalchemy', { 'migrations/versions/3c_other.py': 'from alembic import op\nimport sqlalchemy as sa\nrevision = "3c"\ndown_revision = "1a2b3c4d5e6f"\n\ndef upgrade():\n    op.drop_table("tags")\n' })).find((r) => r.extractor === 'alembic@1').facts.declarations[0]
+  const twoHeads = extract(fixture('sqlalchemy', { 'migrations/versions/3c_other.py': 'from alembic import op\nimport sqlalchemy as sa\nrevision = "3c"\ndown_revision = "1a2b3c4d5e6f"\n\ndef upgrade():\n    op.drop_table("tags")\n' })).find((r) => r.extractor === 'alembic@2').facts.declarations[0]
   eq([twoHeads.status, twoHeads.label], ['not-read', 'order unknown (2 heads: 2b3c4d5e6f7a, 3c)'], 'two heads no merge revision joins: the order unknown, never replayed in a guessed order')
-  const lite = extract(new Map([['alembic.ini', '[alembic]\nsqlalchemy.url = sqlite:///app.db\n'], ['alembic/versions/a_init.py', 'from alembic import op\nimport sqlalchemy as sa\nrevision = "a"\ndown_revision = None\n\ndef upgrade():\n    op.create_table("notes", sa.Column("id", sa.Integer(), primary_key=True), sa.Column("body", sa.Text()))\n    with op.batch_alter_table("notes") as b:\n        b.add_column(sa.Column("done", sa.Boolean(), nullable=False, server_default=sa.false()))\n        b.create_index("ix_notes_done", ["done"])\n']])).find((r) => r.extractor === 'alembic@1').facts.declarations[0]
+  const lite = extract(new Map([['alembic.ini', '[alembic]\nsqlalchemy.url = sqlite:///app.db\n'], ['alembic/versions/a_init.py', 'from alembic import op\nimport sqlalchemy as sa\nrevision = "a"\ndown_revision = None\n\ndef upgrade():\n    op.create_table("notes", sa.Column("id", sa.Integer(), primary_key=True), sa.Column("body", sa.Text()))\n    with op.batch_alter_table("notes") as b:\n        b.add_column(sa.Column("done", sa.Boolean(), nullable=False, server_default=sa.false()))\n        b.create_index("ix_notes_done", ["done"])\n']])).find((r) => r.extractor === 'alembic@2').facts.declarations[0]
   eq([lite.dialect, lite.status, lite.entities.map((e) => `${e.name}: ${e.fields.map((f) => `${f.name}${f.nullable ? '' : '!'}${f.default !== null ? `=${f.default}` : ''}@${f.line}`).join(' ')} · ${e.indexes.map((i) => i.name)}`)], ['sqlite', 'read', ["notes: id!@7 body@7 done!='…'@9 · ix_notes_done"]],
     'SQLite: replayed into node:sqlite, a batch operation\'s add_column and create_index on the batch\'s table; a default no literal of which is kept')
 
@@ -272,7 +282,7 @@ console.log('\n6 · TypeORM entities beside their migrations (fixtures/orm/typeo
   eq(errors, [], 'no extractor fails on a TypeORM project')
   const st = m.stores.find((s) => s.id === 'app:src/migration')
   eq([m.stores.map((s) => s.id), st.declarations.map((d) => `${d.kind} ${d.extractor}`), st.declarations[1].notes, storeSummary(st)],
-    [['app:src/migration'], ['migration code-migrations@1', 'code typeorm@1'], ['the migrations of src/data-source.ts (src/migration/*.ts): the entities and those migrations are one store'], '4 tables · 3 foreign keys · 3 indexes · no conflicts'],
+    [['app:src/migration'], ['migration code-migrations@2', 'code typeorm@2'], ['the migrations of src/data-source.ts (src/migration/*.ts): the entities and those migrations are one store'], '4 tables · 3 foreign keys · 3 indexes · no conflicts'],
     'the entities and the migrations generated from them: one store, the folder the data source\'s migrations glob names')
   const user = entity(m, 'app:src/migration', 'user')
   eq([user.sources.map((s) => `${s.kind} ${base(s.path)}:${s.line}${s.as ? ` ${s.as}` : ''}`), user.fields.map((f) => `${f.name}:${cites(f)}`), keys(user), user.keys.map(cites)],
@@ -304,7 +314,7 @@ console.log('\n7 · JPA entities beside Flyway\'s migrations (fixtures/orm/jpa)'
   eq(errors, [], 'no extractor fails on a Spring Boot project')
   const st = m.stores.find((s) => s.id === 'app:src/main/resources/db/migration')
   eq([m.stores.map((s) => s.id), st.dialect, st.declarations.map((d) => `${d.kind} ${d.extractor}`), st.declarations[1].notes, storeSummary(st)],
-    [['app:src/main/resources/db/migration'], 'postgres', ['migration sql-migrations@2', 'code jpa@1'], ["names in snake_case: Spring Boot's default physical naming strategy (pom.xml)", 'the migrations in src/main/resources/db/migration, where Flyway looks by default: the entities and those migrations are one store'], '4 tables · 3 foreign keys · 1 index · no conflicts'],
+    [['app:src/main/resources/db/migration'], 'postgres', ['migration sql-migrations@3', 'code jpa@2'], ["names in snake_case: Spring Boot's default physical naming strategy (pom.xml)", 'the migrations in src/main/resources/db/migration, where Flyway looks by default: the entities and those migrations are one store'], '4 tables · 3 foreign keys · 1 index · no conflicts'],
     'the entities and Flyway\'s migrations at its default location: one store; Spring Boot\'s naming')
   const order = entity(m, 'app:src/main/resources/db/migration', 'purchase_order')
   eq([order.sources.map((s) => `${s.kind} ${base(s.path)}:${s.line}${s.as ? ` ${s.as}` : ''}`), order.fields.map((f) => `${f.name}:${f.sources.map((s) => s.kind).join('+')}`), rels(order), idx(order)],
@@ -389,6 +399,130 @@ console.log('\n11 · a base reads the same facts aside (readers/code-aside.mjs)'
   for (const eco of ['rails', 'typeorm', 'django', 'sqlalchemy', 'jpa', 'mongoose']) ok(sameAside(eco), `${eco}: the facts read aside, through the child process\'s grammars, are the facts read in process`)
 }
 
+console.log('\n14 · what real projects write that the fixtures above did not: each read as its ORM reads it')
+{
+  // 14a · Mongoose: the constructor called without `new`
+  const { model: mg, errors: mge } = modelOf(new Map([
+    ['src/models/token.model.js', "const mongoose = require('mongoose')\n\nconst tokenSchema = mongoose.Schema(\n  {\n    token: { type: String, required: true, index: true },\n    user: { type: mongoose.SchemaTypes.ObjectId, ref: 'User', required: true },\n  },\n  { timestamps: true }\n)\n\nmodule.exports = mongoose.model('Token', tokenSchema)\n"],
+    ['src/models/user.model.js', "const { Schema, model } = require('mongoose')\n\nconst userSchema = Schema({ email: { type: String, unique: true } })\n\nmodule.exports = model('User', userSchema)\n"],
+  ]))
+  eq([mge, mg.stores.map((s) => `${s.id} ${storeSummary(s)}`), rels(entity(mg, 'app:src/models', 'tokens')), idx(entity(mg, 'app:src/models', 'users'))],
+    [[], ['app:src/models 2 collections · 1 reference · 2 indexes · no conflicts'], ['(user)->users(_id) no action [orm] @token.model.js:6'], ['email_1 unique (email)']],
+    'mongoose.Schema({…}) and Schema({…}) without `new` (Mongoose accepts both): their collections, references and indexes')
+
+  // 14b · Prisma: a migration's CONSTRAINT … UNIQUE and the schema's @@unique of that name are one element
+  const lock = 'provider = "postgresql"\n'
+  const schema = 'datasource db {\n  provider = "postgresql"\n  url      = env("DATABASE_URL")\n}\n\nmodel Saved {\n  id        String @id @db.Uuid\n  websiteId String @map("website_id") @db.Uuid\n  visitId   String @map("visit_id") @db.Uuid\n\n  @@unique([websiteId, visitId])\n  @@map("saved")\n}\n'
+  const sql = 'CREATE TABLE "saved" (\n    "id" UUID NOT NULL,\n    "website_id" UUID NOT NULL,\n    "visit_id" UUID NOT NULL,\n\n    CONSTRAINT "saved_pkey" PRIMARY KEY ("id"),\n    CONSTRAINT "saved_website_id_visit_id_key" UNIQUE ("website_id", "visit_id")\n);\n'
+  const { model: pz } = modelOf(new Map([['prisma/schema.prisma', schema], ['prisma/migrations/migration_lock.toml', lock], ['prisma/migrations/01_init/migration.sql', sql]]))
+  const saved = entity(pz, 'app:prisma/migrations', 'saved')
+  eq([conflictsOf(pz.stores[0]), saved.keys.map((k) => `${k.role}(${k.parts}) @${cites(k)}`), saved.indexes.map((i) => `${i.name} ${i.unique} @${cites(i)}`)],
+    [[], ['primary(id) @migration.sql:6,schema.prisma:7', 'unique(website_id,visit_id) @migration.sql:7,schema.prisma:11'], ['saved_website_id_visit_id_key true @migration.sql:7,schema.prisma:11']],
+    'a named unique constraint and the unique index of that name and columns: one key and one index, each cited on both sides, no presence conflict')
+  const { model: pz2 } = modelOf(new Map([['prisma/schema.prisma', schema.replace('@@unique([websiteId, visitId])', '@@unique([websiteId, visitId], map: "other_key")')], ['prisma/migrations/migration_lock.toml', lock], ['prisma/migrations/01_init/migration.sql', sql]]))
+  eq(conflictsOf(pz2.stores[0]), ['saved unique (website_id, visit_id) presence', 'saved index other_key presence'], '… a unique index of another name is no twin: the drift stays a conflict')
+
+  // 14c · TypeORM: migrations named from __dirname, an @Index() on a relation, a uuid primary key on Postgres
+  const { tname: tn, migrationsGlob } = await import('../lib/data/extractors/typeorm.mjs')
+  eq(["migrations: [__dirname + '/migrations/**/*{.ts,.js}'],", 'migrations: [`${__dirname}/db/*.ts`]', "migrations: [path.join(__dirname, 'migrations', '*.ts')]", "migrations: ['src/migration/*.ts']", 'migrations: [list]'].map((t) => { const g = migrationsGlob(t); return g && `${g.glob} ${g.dirname}` }),
+    ['migrations/**/*{.ts,.js} true', 'db/*.ts true', 'migrations/*.ts true', 'src/migration/*.ts false', null], 'a data source\'s migrations glob: a literal, or one built from its own folder (__dirname +, a template, path.join)')
+  const ix = tn.index('session', ['userId'])
+  const ty = new Map([
+    ['src/database/data-source.ts', "import { DataSource } from 'typeorm'\nexport const AppDataSource = new DataSource({\n  type: 'postgres',\n  entities: [__dirname + '/../**/*.entity{.ts,.js}'],\n  migrations: [__dirname + '/migrations/**/*{.ts,.js}'],\n})\n"],
+    ['src/database/migrations/1700000000000-Init.ts', `import { MigrationInterface, QueryRunner } from 'typeorm'\nexport class Init1700000000000 implements MigrationInterface {\n  public async up(queryRunner: QueryRunner): Promise<void> {\n    await queryRunner.query(\`CREATE TABLE "user" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), CONSTRAINT "PK_u" PRIMARY KEY ("id"))\`)\n    await queryRunner.query(\`CREATE TABLE "session" ("id" SERIAL NOT NULL, "userId" uuid, CONSTRAINT "PK_s" PRIMARY KEY ("id"))\`)\n    await queryRunner.query(\`CREATE INDEX "${ix}" ON "session" ("userId") \`)\n    await queryRunner.query(\`ALTER TABLE "session" ADD CONSTRAINT "FK_s" FOREIGN KEY ("userId") REFERENCES "user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION\`)\n  }\n  public async down(queryRunner: QueryRunner): Promise<void> {}\n}\n`],
+    ['src/users/user.entity.ts', "import { Entity, PrimaryGeneratedColumn } from 'typeorm'\n@Entity({ name: 'user' })\nexport class UserEntity {\n  @PrimaryGeneratedColumn('uuid')\n  id: string\n}\n"],
+    ['src/session/session.entity.ts', "import { Entity, Index, ManyToOne, PrimaryGeneratedColumn } from 'typeorm'\nimport { UserEntity } from '../users/user.entity'\n@Entity({ name: 'session' })\nexport class SessionEntity {\n  @PrimaryGeneratedColumn()\n  id: number\n\n  @ManyToOne(() => UserEntity)\n  @Index()\n  user: UserEntity\n}\n"],
+  ])
+  const { model: tm, errors: te } = modelOf(ty)
+  eq([te, tm.stores.map((s) => `${s.id} ${storeSummary(s)}`), idx(entity(tm, 'app:src/database/migrations', 'session')).map((x) => x.replace(ix, 'IDX')), fields(entity(tm, 'app:src/database/migrations', 'user'))],
+    [[], ['app:src/database/migrations 2 tables · 1 foreign key · 1 index · no conflicts'], ['IDX (userId)'], ['id uuid ! =uuid_generate_v4()']],
+    'the entities and the migrations __dirname names: one store; @Index() on a relation indexes its join column (userId, named as TypeORM names it); @PrimaryGeneratedColumn(\'uuid\') on Postgres defaults to uuid_generate_v4(): no conflict')
+  const tyEnv = new Map([...ty, ['src/database/data-source.ts', ty.get('src/database/data-source.ts').replace("type: 'postgres'", 'type: process.env.DATABASE_TYPE')]])
+  eq(conflictsOf(modelOf(tyEnv).model.stores[0]), [], '… an engine the data source reads from the environment: the uuid default is not compared (no false conflict)')
+
+  // 14d · Alembic: the dialect from graph.data.migrations, else sniffed from the revisions; unique=True, index=True
+  const rev = (r, down, body) => `"""r"""\nfrom alembic import op\nimport sqlalchemy as sa\nfrom sqlalchemy.dialects import postgresql\n\nrevision = "${r}"\ndown_revision = ${down ? `"${down}"` : 'None'}\n\n\ndef upgrade():\n${body}\n\n\ndef downgrade():\n    pass\n`
+  const alembicTree = (ini = '[alembic]\nscript_location = app/alembic\n') => new Map([
+    ['alembic.ini', ini],
+    ['app/alembic/env.py', 'from alembic import context\nfrom app.models import SQLModel\nfrom app.core.config import settings\n\ntarget_metadata = SQLModel.metadata\n\n\ndef run_migrations_online():\n    context.configure(url=str(settings.DATABASE_URL), target_metadata=target_metadata)\n'],
+    ['app/alembic/versions/a1_init.py', rev('a1', null, '    op.create_table("user", sa.Column("id", postgresql.UUID(), nullable=False), sa.Column("email", sa.String(length=255), nullable=False), sa.PrimaryKeyConstraint("id"))\n    op.create_index(op.f("ix_user_email"), "user", ["email"], unique=True)\n    op.execute("UPDATE \\"user\\" SET email = lower(email)")')],
+    ['app/models.py', 'import uuid\nfrom sqlmodel import Field, SQLModel\n\n\nclass User(SQLModel, table=True):\n    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)\n    email: str = Field(unique=True, index=True, max_length=255)\n'],
+  ])
+  const ad = (rows) => rows.find((r) => r.extractor === 'alembic@2').facts.declarations[0]
+  const sniffed = ad(rowsOf(alembicTree()))
+  eq([sniffed.dialect, sniffed.dialectFrom, sniffed.status], ['postgres', { how: 'sniffed', marker: 'from sqlalchemy.dialects import postgresql', path: 'app/alembic/versions/a1_init.py', line: 4 }, 'read'], 'no engine URL stated: the dialect sniffed from the revisions (the one engine whose dialect module they import), the revisions replayed')
+  const over = extractAll({ paths: [...alembicTree('[alembic]\nsqlalchemy.url = sqlite:///x.db\n').keys()], size: () => 1, read: (p) => alembicTree('[alembic]\nsqlalchemy.url = sqlite:///x.db\n').get(p) }, { exclude: [] }, [{ path: 'app/alembic/versions', dialect: 'postgres' }], CTX).find((r) => r.extractor === 'alembic@2').facts.declarations[0]
+  eq([over.dialect, over.dialectFrom], ['postgres', { how: 'override' }], 'graph.data.migrations names the versions folder\'s dialect: it wins over alembic.ini')
+  const { model: am } = modelOf(alembicTree())
+  const au = am.stores[0]
+  eq([am.stores.map((s) => s.id), idx(entity(am, au.id, 'user')), keys(entity(am, au.id, 'user')), conflictsOf(au), au.queries ? au.queries.statements : 0],
+    [['app:app/alembic/versions'], ['ix_user_email unique (email)'], ['primary(id)'], [], 0],
+    'unique=True, index=True: one unique index ix_<table>_<col>, as the revision creates it (no unique key beside it); the revision\'s op.execute SQL is its history, not a query in code (no [inferred] conflict)')
+
+  // 14e · SQL inside migration files is never a query in code
+  const { queryLevel } = await import('../lib/data/extractors/sql-queries.mjs')
+  const { migrationFile } = await import('../lib/data/readers/migration-file.mjs')
+  const djMig = 'from django.db import connection, migrations\n\n\ndef copy(apps, schema):\n    with connection.cursor() as cursor:\n        cursor.execute("UPDATE shop_item SET tmp = id")\n\n\nclass Migration(migrations.Migration):\n    operations = [migrations.RunPython(copy), migrations.RunSQL("UPDATE shop_item SET x = 1")]\n'
+  const views = 'from django.db import connection\n\n\ndef count():\n    with connection.cursor() as cursor:\n        cursor.execute("SELECT count(*) FROM shop_item")\n'
+  eq([migrationFile('shop/migrations/0042_copy.py', djMig), queryLevel('shop/migrations/0042_copy.py', djMig), migrationFile('app/alembic/versions/a1_init.py', alembicTree().get('app/alembic/versions/a1_init.py')), queryLevel('app/alembic/versions/a1_init.py', alembicTree().get('app/alembic/versions/a1_init.py')), queryLevel('shop/views.py', views) > 0, migrationFile('src/db/1_a.js', "module.exports = { up(knex) { return knex.raw('UPDATE a SET b = 1') }, down() {} }\n"), migrationFile('src/store.js', "module.exports = { up() { return 1 } }\n")],
+    ['django', 0, 'alembic', 0, true, 'code', null], 'a Django migration (RunSQL, a cursor in RunPython), an Alembic revision, a Knex migration: never read as queries in code; a view sending SQL still is; a module with an up() and no down() is no migration')
+
+  // 14f · Django: targets through the imports and models only, Postgres indexes, Meta lists spliced, fields that add no column
+  const dj = new Map([
+    ['manage.py', 'import os\n'],
+    ['shop/settings.py', 'DATABASES = {"default": {"ENGINE": "django.db.backends.postgresql"}}\nDEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"\n'],
+    ['.semgrep/rules/add-index.py', 'from django.db import migrations\n\n\nclass Migration(migrations.Migration):\n    operations = []\n'],
+    ['core/fields.py', 'from django.db.models import Field\n\n\nclass VirtualBase:\n    concrete = False\n\n\nclass MoneyField(VirtualBase):\n    pass\n'],
+    ['core/models.py', 'from django.contrib.postgres.indexes import GinIndex\nfrom django.db import models\n\n\nclass WithMetadata(models.Model):\n    metadata = models.JSONField(default=dict)\n\n    class Meta:\n        indexes = [GinIndex(fields=["metadata"], name="%(class)s_meta_idx")]\n        abstract = True\n'],
+    ['shipping/models.py', 'from django.db import models\n\n\nclass ShippingMethod(models.Model):\n    name = models.CharField(max_length=100)\n'],
+    ['api/types.py', 'from django.db import models\n\n\nclass ShippingMethod:\n    pass\n'],
+    ['checkout/models.py', 'from django.contrib.postgres.indexes import BTreeIndex, GinIndex\nfrom django.db import models\n\nfrom ..core.fields import MoneyField\nfrom ..core.models import WithMetadata\nfrom ..shipping.models import ShippingMethod\n\n\nclass Checkout(WithMetadata):\n    shipping_method = models.ForeignKey(ShippingMethod, null=True, on_delete=models.SET_NULL)\n    currency = models.CharField(max_length=3)\n    total_amount = models.DecimalField(max_digits=12, decimal_places=3)\n    total = MoneyField(amount_field="total_amount", currency_field="currency")\n    note = models.TextField(blank=True)\n\n    class Meta(WithMetadata.Meta):\n        indexes = [\n            *WithMetadata.Meta.indexes,\n            GinIndex(fields=["note"], name="checkout_note_gin"),\n            BTreeIndex(fields=["currency"]),\n        ]\n        indexes.extend([models.Index(fields=["-total_amount"], name="checkout_total_idx")])\n        constraints = [models.CheckConstraint(condition=models.Q(total_amount__gte=0), name="checkout_total_positive")]\n'],
+  ])
+  // (a relative import is from the file's package, as a project with an outer package writes it: here
+  // the apps sit at the root, so the test names them as their files' folders do)
+  for (const [k, v] of dj) if (k === 'checkout/models.py') dj.set(k, v.replace(/from \.\.(\w+)/g, 'from $1'))
+  const { model: dm, errors: de } = modelOf(dj)
+  const co = entity(dm, 'app:.', 'checkout_checkout')
+  const dd = dm.stores[0].declarations[0]
+  const digest = (...a) => { const h = createHash('md5'); for (const x of a) h.update(x); return h.digest('hex').slice(0, 6) }
+  eq([de, dd.path, dm.stores[0].entities.map((e) => e.name), fields(co), rels(co), idx(co).filter((x) => !/_id_/.test(x)), dd.notes],
+    [[], 'checkout/models.py', ['checkout_checkout', 'shipping_shippingmethod'],
+      ['id bigint !', 'metadata jsonb !', 'shipping_method_id bigint', 'currency varchar(3) !', 'total_amount numeric(12, 3) !', 'note text !'],
+      ['(shipping_method_id)->shipping_shippingmethod(id) no action @models.py:10'],
+      ['checkout_meta_idx (metadata)', 'checkout_note_gin (note)', `checkout_ch_currenc_${digest('checkout_checkout', 'currency', 'btree')}_btree (currency)`, 'checkout_total_idx (total_amount)'],
+      ['checkout/models.py:16: 1 constraint of Checkout not modelled (checks, exclusions)', '1 field of a class that adds no column (concrete = False: a composite of the fields beside it) not read as columns']],
+    'a ForeignKey\'s target through the file\'s imports, a model only (a GraphQL class of the same name is none); GinIndex and BTreeIndex (named as Django names them, the suffix theirs); a Meta list spliced from a parent\'s and extended; a check counted, the indexes not; a field class with concrete = False adds no column; a migration-shaped file in a dot-folder no model file; the store cites a models file')
+
+  // 14g · Rails: has_many and has_one with inverse_of: take their key from the inverse belongs_to (7.1 and later)
+  const rb = (lock) => new Map([
+    ['db/schema.rb', 'ActiveRecord::Schema[7.1].define(version: 1) do\n  create_table "comments", force: :cascade do |t|\n    t.text "body"\n  end\n  create_table "links", force: :cascade do |t|\n    t.bigint "from_comment_id"\n    t.bigint "to_comment_id"\n  end\n  create_table "notices", force: :cascade do |t|\n  end\n  create_table "activities", force: :cascade do |t|\n    t.bigint "item_id"\n    t.string "item_type"\n  end\nend\n'],
+    ['app/models/application_record.rb', 'class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n'],
+    ['app/models/comment.rb', 'class Comment < ApplicationRecord\n  has_many :links, inverse_of: :from_comment, dependent: :restrict_with_exception\n  has_many :incoming_links,\n    class_name: "Link",\n    inverse_of: :to_comment\nend\n'],
+    ['app/models/link.rb', 'class Link < ApplicationRecord\n  belongs_to :from_comment, class_name: "Comment", optional: true\n  belongs_to :to_comment, class_name: "Comment", optional: true\nend\n'],
+    ['app/models/notice.rb', 'class Notice < ApplicationRecord\n  has_one :activity, inverse_of: :item\nend\n'],
+    ['app/models/activity.rb', 'class Activity < ApplicationRecord\n  belongs_to :item, polymorphic: true\nend\n'],
+    ...(lock ? [['Gemfile.lock', `GEM\n  specs:\n    rails (${lock})\n      actionpack (= ${lock})\n`]] : []),
+  ])
+  const { model: rm } = modelOf(rb('8.0.1'))
+  const rd = rm.stores[0].declarations.find((d) => d.kind === 'code')
+  eq([rels(entity(rm, 'app:db', 'links')), rd.notes],
+    [['(from_comment_id)->comments(id) restrict [orm] @comment.rb:2,link.rb:2', '(to_comment_id)->comments(id) no action [orm] @comment.rb:3,link.rb:3'], ['app/models/activity.rb:2: belongs_to :item: polymorphic, its target named per row: no relation', 'app/models/notice.rb:2: has_one :activity: polymorphic (its inverse Activity.item is), its target named per row: no relation']],
+    'inverse_of: the key the inverse belongs_to names (from_comment_id, to_comment_id), one relation with it; an inverse that is polymorphic: polymorphic, no false "no column" note')
+  const { model: r70 } = modelOf(rb('7.0.8'))
+  ok(r70.stores[0].declarations.find((d) => d.kind === 'code').notes.some((n) => n === 'app/models/comment.rb:2: has_many :links: links has no column comment_id'), 'a Gemfile.lock locking Rails 7.0: the owner\'s <model>_id, as that version infers it')
+
+  // 14h · store ids are unique; ClickHouse SQL is named, never read as MySQL's
+  const svc = (path) => ({ repo: 'app', extractor: 'redis-infra@2', facts: { declarations: [], redisInfra: [{ name: 'redis:cache', label: 'cache', kind: 'Compose service', engine: 'Valkey', version: '8', modules: [], eviction: null, persistence: null, notifications: null, databases: null, path, line: 3, env: [], notes: [] }] } })
+  const ids = reconcile([svc('.devcontainer/docker-compose.yml'), svc('ops/docker-compose.yml')]).stores.map((s) => s.id)
+  eq([ids, new Set(ids).size === ids.length], [['app:redis:cache (.devcontainer/docker-compose.yml)', 'app:redis:cache (ops/docker-compose.yml)'], true], 'two Compose files declaring a service of one name: two stores, each named with its file, never one id twice')
+  const { sniffDialect } = await import('../lib/data/readers/sql-dialect.mjs')
+  const ch = 'CREATE TABLE analytics.events\n(\n    id UUID,\n    url_path String,\n    created_at DateTime64(6) CODEC(DoubleDelta, ZSTD(1))\n)\nENGINE = MergeTree\n    ORDER BY (id, created_at);\n'
+  eq([sniffDialect([{ path: 'db/schema.sql', text: ch }]).dialect, sniffDialect([{ path: 'a.sql', text: 'CREATE TABLE t (id int) ENGINE=InnoDB;' }]).dialect], ['clickhouse', 'mysql'], 'ENGINE = MergeTree names ClickHouse; ENGINE=InnoDB still MySQL')
+  const { model: cm } = modelOf(new Map([['db/clickhouse/migrations/01_init.sql', ch], ['db/clickhouse/migrations/02_add.sql', 'ALTER TABLE analytics.events ADD COLUMN tag LowCardinality(String);\n']]))
+  const cs = cm.stores[0]
+  eq([cs.dialect, cs.declarations.map((d) => `${d.status} ${d.label}`), cs.declarations.flatMap((d) => d.notes)], ['clickhouse', ['not-read no reader for clickhouse migrations'], []], 'a folder of ClickHouse migrations: its dialect named, listed and not read, no parse note')
+}
+
 // ════ Part 2 · through call(), the fixtures indexed as one project ════
 {
   const { call } = await import('../lib/commands.mjs')
@@ -420,7 +554,7 @@ console.log('\n11 · a base reads the same facts aside (readers/code-aside.mjs)'
     ]) has(list, line, `graph_data lists ${line.split('  ')[0]}`)
     ok(!/Gaps \(/.test(list), `no ORM listed as a gap: each was read (${(list.match(/Gaps[^\n]*\n(?:  [^\n]*\n?)*/) || [''])[0].trim()})`)
     has(await q('data', { store: 'typeorm:src/migration' }), '  user  table  5 fields · primary (id)  typeorm/src/migration/1700000000000-CreateUser.ts:7 · typeorm/src/entity/User.ts:5\n    class User  typeorm/src/entity/User.ts:5', 'a store\'s table, the entity class mapping it beside it at its line')
-    has(await q('data', { entity: 'jpa:src/main/resources/db/migration/purchase_order' }), '  declared at jpa/src/main/resources/db/migration/V1__init.sql:8 [migration sql-migrations@2] · jpa/src/main/java/com/example/shop/model/PurchaseOrder.java:7 [code jpa@1, class PurchaseOrder]', 'an entity: its migration and its class, each with its extractor')
+    has(await q('data', { entity: 'jpa:src/main/resources/db/migration/purchase_order' }), '  declared at jpa/src/main/resources/db/migration/V1__init.sql:8 [migration sql-migrations@3] · jpa/src/main/java/com/example/shop/model/PurchaseOrder.java:7 [code jpa@2, class PurchaseOrder]', 'an entity: its migration and its class, each with its extractor')
     has(await q('data', { store: 'rails:db' }), '    class User, Admin  rails/app/models/user.rb:1', 'Rails: the model classes beside their table')
     const outs = [list, ...(await Promise.all(repos.map((r) => q('data', { store: (list.match(new RegExp(`^${r}:[^ ]+`, 'm')) || [r])[0] })))), await q('status'), await renderGraph(loadProject(ROOT))]
     const left = [...new Set(outs.join('\n').match(/CANARY-[A-Z-]+/g) || [])]
@@ -447,6 +581,51 @@ console.log('\n11 · a base reads the same facts aside (readers/code-aside.mjs)'
       '  + posts.pinned  column Boolean, nullable  — mongoose/src/models/post.js:5',
     ]) has(changes, line, `graph_changes: ${line.trim().split('  ')[0]} added, at its line on the branch`)
     ok(!/CANARY-/.test(changes), 'no canary in graph_changes either')
+
+    console.log('\n15 · graph_diff on ORM projects: a column the code still names through its class, inserts that leave a not-null column out, a schema edited and no migration generated')
+    const DIFF = path.join(SANDBOX, 'diff')
+    const put = (p, t) => { mkdirSync(path.dirname(path.join(DIFF, p)), { recursive: true }); writeFileSync(path.join(DIFF, p), t) }
+    put('grimoire.config.json', JSON.stringify({ repos: [{ name: 'dj', path: 'dj' }, { name: 'rb', path: 'rb' }, { name: 'pz', path: 'pz' }], graph: { dir: '.grimoire/graph' } }))
+    put('dj/manage.py', 'import os\n')
+    put('dj/shop/settings.py', 'DATABASES = {"default": {"ENGINE": "django.db.backends.postgresql"}}\n')
+    put('dj/orders/models.py', 'from django.db import models\n\n\nclass Order(models.Model):\n    number = models.CharField(max_length=20)\n    note = models.TextField(null=True)\n')
+    put('dj/orders/views.py', 'from orders.models import Order\n\n\ndef place(number):\n    return Order.objects.create(number=number)\n\n\ndef draft():\n    order = Order()\n    order.number = "0"\n    return order\n\n\ndef noted(order):\n    return order.note or ""\n\n\ndef search(text):\n    return Order.objects.filter(note=text)\n')
+    put('rb/db/schema.rb', 'ActiveRecord::Schema[7.1].define(version: 1) do\n  create_table "comments", force: :cascade do |t|\n    t.text "body"\n    t.bigint "thread_id"\n  end\nend\n')
+    put('rb/app/models/application_record.rb', 'class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n')
+    put('rb/app/models/comment.rb', 'class Comment < ApplicationRecord\n  def root?\n    self.thread_id.nil?\n  end\nend\n')
+    put('rb/app/controllers/comments_controller.rb', 'class CommentsController\n  def index\n    @comments = Comment.where(thread_id: params[:thread])\n  end\nend\n')
+    put('pz/prisma/schema.prisma', 'datasource db {\n  provider = "postgresql"\n  url      = env("DATABASE_URL")\n}\n\nmodel Website {\n  id     String  @id @map("website_id") @db.Uuid\n  domain String? @db.VarChar(500)\n\n  @@map("website")\n}\n')
+    put('pz/prisma/migrations/migration_lock.toml', 'provider = "postgresql"\n')
+    put('pz/prisma/migrations/01_init/migration.sql', 'CREATE TABLE "website" (\n    "website_id" UUID NOT NULL,\n    "domain" VARCHAR(500),\n\n    CONSTRAINT "website_pkey" PRIMARY KEY ("website_id")\n);\n')
+    const git = (...a) => spawnSync('git', ['-C', DIFF, ...a], { encoding: 'utf8' })
+    git('init', '-q', '-b', 'main'); git('add', '-A'); git('-c', 'user.email=t@example.invalid', '-c', 'user.name=t', 'commit', '-q', '-m', 'base')
+    const dq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: DIFF })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
+    await dq('index')
+    const edit = (p, from, to) => { const f = path.join(DIFF, p); const t = readFileSync(f, 'utf8'); if (!t.includes(from)) throw new Error(`fixture edit: ${p}`); writeFileSync(f, t.replace(from, to)) }
+    edit('dj/orders/models.py', '    note = models.TextField(null=True)\n', '    priority = models.IntegerField()\n')
+    edit('rb/db/schema.rb', '    t.bigint "thread_id"\n', '')
+    edit('pz/prisma/schema.prisma', '  domain String? @db.VarChar(500)\n', '')
+    const diff = await dq('diff', { base: 'HEAD' })
+    has(diff, '    - orders_order.note  column text, nullable  — was dj/orders/models.py:6', 'the column the Django model no longer states, removed')
+    const dj = diff.split('\n')[diff.split('\n').findIndex((l) => l.includes('- orders_order.note')) + 1] || ''
+    ok(/still named through the ORM \(2 use\(s\) of \.note\): dj\/orders\/views\.py:15 \(noted\) \[reference\] · dj\/orders\/views\.py:19 \(search\) \[key\]/.test(dj), `… still named through its class: order.note, filter(note=…), each at its line (${dj.trim()})`)
+    const rbl = diff.split('\n')[diff.split('\n').findIndex((l) => l.includes('- comments.thread_id')) + 1] || ''
+    ok(/still named through the ORM \(2 use\(s\) of \.thread_id\): rb\/app\/models\/comment\.rb:3 \(Comment\.root\?\) \[call\] · rb\/app\/controllers\/comments_controller\.rb:3 \(CommentsController\.index\) \[key\]/.test(rbl), `a column schema.rb no longer states, the Active Record class mapping its table: self.thread_id, where(thread_id: …) (${rbl.trim()})`)
+    const ins = diff.split('\n')[diff.split('\n').findIndex((l) => l.includes('+ orders_order.priority')) + 1] || ''
+    ok(/inserts that do not set it \(a not-null column with no default\): dj\/orders\/views\.py:5 \(place\) \[Order\.objects\.create\(…\)\] · dj\/orders\/views\.py:9 \(draft\) \[Order\(…\)\]$/.test(ins), `a not-null column with no default added to a Django model: the class created or built with no value for it (${ins.trim()})`)
+    has(diff, 'Schema and migrations disagree, 1 conflict(s) this diff creates (a code model edited and no migration generated, or a migration edited by hand; 0 before, 1 now):\n  pz:prisma/migrations  website.domain  presence: declared — pz/prisma/migrations/01_init/migration.sql:3 [migration] | absent — pz/prisma/schema.prisma:6 [code]', 'the schema edited and no migration generated: the conflict this diff creates, listed')
+    const riskLine = diff.split('\n').find((l) => l.startsWith('Risk:')) || ''
+    ok(riskLine.startsWith('Risk: high') && riskLine.includes('removed column orders_order.note (Order.note) is still named outside the lines this diff changed (2 place(s))') && riskLine.includes('removed column comments.thread_id (Comment.thread_id) is still named') && riskLine.includes('2 insert(s) into orders_order do not set the not-null column priority added with no default') && riskLine.includes('1 conflict(s) between a code model and its migrations this diff creates'), `the risk: high, each reason said (${riskLine})`)
+    // the same diff with the uses changed too: no use left outside it, the drift alone (medium)
+    edit('dj/orders/views.py', '    return order.note or ""\n', '    return ""\n')
+    edit('dj/orders/views.py', '    return Order.objects.filter(note=text)\n', '    return Order.objects.filter(number=text)\n')
+    edit('dj/orders/views.py', '    return Order.objects.create(number=number)\n', '    return Order.objects.create(number=number, priority=0)\n')
+    edit('dj/orders/views.py', '    order.number = "0"\n', '    order.number = "0"\n    order.priority = 1\n')
+    edit('rb/app/models/comment.rb', '    self.thread_id.nil?\n', '    true\n')
+    edit('rb/app/controllers/comments_controller.rb', 'Comment.where(thread_id: params[:thread])', 'Comment.all')
+    const quiet = await dq('diff', { base: 'HEAD' })
+    const r2 = quiet.split('\n').find((l) => l.startsWith('Risk:')) || ''
+    ok(!/still named through the ORM|inserts that do not set it/.test(quiet) && r2.startsWith('Risk: medium') && r2.includes('1 conflict(s) between a code model and its migrations'), `no use left and every creation setting the column: no ORM lead, the drift alone keeps the risk medium (${r2})`)
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

@@ -83,6 +83,36 @@ function uniqueKeys(e) {
   for (const i of uniq) if (!keys.some((k) => k.role === 'unique' && k.parts.join('\0') === i.columns.join('\0'))) keys.push({ role: 'unique', parts: i.columns, path: i.path, line: i.line })
   return { ...e, keys, indexes: e.indexes.filter((i) => !uniq.includes(i)) }
 }
+// A unique constraint is the unique index the engine builds for it, under its name (Postgres, MySQL):
+// a migration's `CONSTRAINT x UNIQUE (a, b)` and a schema's unique index `x` on (a, b) (Prisma's
+// @@unique, which its migrations may write either way) are one object. So where one declaration of an
+// entity states a named unique key and another a unique index of that name and those columns, each is
+// read as stating both, at its own line: one key and one index, cited on both sides, no presence
+// conflict. A name or a column that differs is no twin (a drift the conflict then shows).
+// → Map(declaration → Map(entity name → the entity with its twins added))
+function uniqueTwins(ds) {
+  const out = new Map()
+  const same = (a, b) => a.length === b.length && a.every((c, i) => String(c).toLowerCase() === String(b[i]).toLowerCase())
+  const entitiesOf = (d) => (out.get(d)?.size ? new Map([...(d.entities || []).map((e) => [e.name, e]), ...out.get(d)]) : new Map((d.entities || []).map((e) => [e.name, e])))
+  const put = (d, e) => { if (!out.has(d)) out.set(d, new Map()); out.get(d).set(e.name, e) }
+  for (const d of ds) {
+    for (const e of d.entities || []) {
+      for (const k of e.keys || []) {
+        if (k.role !== 'unique' || !k.name) continue
+        for (const d2 of ds) {
+          if (d2 === d) continue
+          const e2 = entitiesOf(d2).get(e.name)
+          const i = e2?.indexes?.find((x) => x.name === k.name && x.unique && !x.partial && !kvIndex(x) && same(x.columns, k.parts))
+          if (!i) continue
+          const e1 = entitiesOf(d).get(e.name)
+          if (!(e1.indexes || []).some((x) => x.name === k.name)) put(d, { ...e1, indexes: [...(e1.indexes || []), { name: k.name, unique: true, columns: k.parts, partial: false, path: k.path, line: k.line }] })
+          if (!(e2.keys || []).some((x) => x.role === 'unique' && same(x.parts, k.parts))) put(d2, { ...e2, keys: [...(e2.keys || []), { role: 'unique', parts: k.parts, path: i.path, line: i.line }] })
+        }
+      }
+    }
+  }
+  return out
+}
 // A primary key's columns are not null, whatever the declaration writes: drizzle-kit 1.0 writes a
 // SQLite `text PRIMARY KEY` without NOT NULL (its snapshot so too) where the schema's primaryKey()
 // says not null, and Postgres and MySQL make a key's columns not null themselves. (SQLite keeps a
@@ -125,6 +155,11 @@ function keyspaces(model, rows, roots = []) {
       wires: (i.env || []).map((e) => { const built = buildRepo(roots, r.repo, e); return { env: e.env, at: { repo: r.repo, path: e.path, line: e.line }, repos: built ? [built] : null, ...(e.service ? { service: e.service } : {}) } }),
       declarations: [{ extractor: r.extractor, kind: 'infra', path: i.path, line: i.line, status: 'read', label: `${i.kind} ${i.label}`, stopped: null, error: null, notes: i.notes || [], files: 1, implicitIndexes: 0, dialect: 'redis', dialectFrom: null }],
     })))
+    // a store's id is unique: two files declaring an instance of one name (a Compose service `cache` in
+    // two Compose files: two deployments, each its own settings) are each named with their file
+    const named = new Map()
+    for (const i of instances) named.set(i.id, (named.get(i.id) || 0) + 1)
+    for (const i of instances) if (named.get(i.id) > 1) i.id = `${i.id} (${i.path})`
     const r = resolveRedis(rows, model, instances)
     model.stores = [...model.stores, ...r.stores].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     model.redis = r.redis
@@ -302,8 +337,10 @@ function merge(id, ds) {
   const store = ds.find((d) => d.dialect) || ds[0]
   const kv = KV_DIALECTS.has(store.dialect)
   const entities = new Map()
+  const twins = kv || store.dialect === 'mysql' ? new Map() : uniqueTwins(ds) // (MySQL's unique indexes are keys already)
   for (const d of ds) {
-    for (const e0 of d.entities || []) {
+    for (const e1 of d.entities || []) {
+      const e0 = twins.get(d)?.get(e1.name) || e1
       const e = kv ? e0 : keyNotNull(store.dialect === 'mysql' ? uniqueKeys(e0) : e0)
       const E = slot(entities, e.name, () => ({ ...SHAPE.entity(e), fields: new Map(), keys: new Map(), indexes: new Map(), relations: new Map(), at: new Map(), whole: new Set(), part: new Set() }))
       note(E, d, ATTRS.entity(e), source(d, e), e)
@@ -316,7 +353,7 @@ function merge(id, ds) {
           const el = slot(E[list], keyOf[type](x), () => SHAPE[type](x, store.dialect))
           note(el, d, ATTRS[type](x, kv, store.dialect), source(d, x), x)
           // what a code model alone says of a column: the default its client computes, its enum
-          if (type === 'field') { if (x.computed && !el.computed) el.computed = x.computed; if (x.enum && !el.enum) el.enum = x.enum }
+          if (type === 'field') { if (x.computed && !el.computed) el.computed = x.computed; if (x.enum && !el.enum) el.enum = x.enum; if (x.attr && !el.attr) el.attr = x.attr }
           // an index MySQL builds for a foreign key (a replay's, a dump's): the engine's, not a design's
           if (type === 'index' && x.implicit) el.implicit = true
         }
@@ -382,7 +419,7 @@ export function storeSummary(st) {
   if (st.dialect === 'redis') return redisSummary(st) // a key space read from the commands in code (redis.mjs)
   if (st.inferred) return inferredSummary(st) // deduced from the queries in code (queries.mjs)
   const tables = st.entities.filter((e) => e.kind === 'table' && !e.bookkeeping), views = st.entities.filter((e) => e.kind === 'view').length
-  if (!st.entities.length) { const d = st.declarations.find((x) => x.status === 'not-read'); return d ? `found, not read (${n(d.files, 'file')})` : 'no tables' }
+  if (!st.entities.length) { const ds = st.declarations.filter((x) => x.status === 'not-read'); return ds.length ? `found, not read (${n(ds.reduce((a, x) => a + (x.files || 0), 0), 'file')})` : 'no tables' } // (a dump and its migrations both counted)
   // the conflicts of its elements, and those across the declarations of a logical table it holds a
   // member of (binding.mjs), counted once
   const groups = new Map(st.entities.filter((e) => e.logical).map((e) => [e.logical.id, e.logical]))

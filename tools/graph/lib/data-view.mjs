@@ -887,7 +887,7 @@ export function dataClient(ctx) {
       h('button', { 'data-ctl': 'data-names', 'aria-pressed': String(!st.dataAll), onclick: () => { st.dataAll = false; rerender(false) } }, 'Names'),
       h('button', { 'data-ctl': 'data-columns', 'aria-pressed': String(!!st.dataAll), onclick: () => { st.dataAll = true; rerender(false) } }, 'Columns')) : null
     const HOW = { stated: 'stated at ', sniffed: 'sniffed: ', client: 'its client: ', repository: 'the repository\'s client: ', hint: 'a type naming it: ' }
-    const how = s.how ? (s.how.how === 'supabase' ? ['Supabase migrations are Postgres'] : HOW[s.how.how] ? [HOW[s.how.how], s.how.how === 'stated' ? null : `${s.how.marker} at `, s.how.at ? srcEl(s, s.how.at) : null] : ['set in grimoire.config.json (graph.data.migrations)']) : ['unknown']
+    const how = s.how ? (s.how.how === 'supabase' ? ['Supabase migrations are Postgres'] : s.how.how === 'folder' ? ['its folder\'s name: ' + s.how.marker] : HOW[s.how.how] ? [HOW[s.how.how], s.how.how === 'stated' ? null : `${s.how.marker} at `, s.how.at ? srcEl(s, s.how.at) : null] : ['set in grimoire.config.json (graph.data.migrations)']) : ['unknown']
     const decls = declList(s)
     const inf = s.inf || null
     const legend = inf ? h('div', { class: 'legend dlegend' }, h('span', null, h('i', { class: 'infbox' }), 'a table the queries name (dashed: deduced, not declared)'), h('span', null, h('span', { class: 'mono muted' }, 'seen in code'), ' a column a statement names, its type unknown (a cast says what the code casts it to)'),

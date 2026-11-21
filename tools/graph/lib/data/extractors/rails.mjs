@@ -45,8 +45,9 @@
 // (`class Blog::Post`); and each association the schema states no foreign key for, as a relation
 // **declared by the ORM** (`enforced: 'client'`, model.mjs: no foreign key in the database, the
 // models alone hold it; never a foreign key): `belongs_to` (its `foreign_key:`, `class_name:`,
-// `primary_key:`), `has_many` and `has_one` (the key on the other table, their `dependent:` as the
-// action the client takes on delete), `has_and_belongs_to_many` (its join table's two columns). A
+// `primary_key:`), `has_many` and `has_one` (the key on the other table: `foreign_key:`, else the
+// inverse belongs_to's key under `inverse_of:` (Rails 7.1 and later, the Gemfile.lock's version), else
+// `<model>_id`; their `dependent:` as the action the client takes on delete), `has_and_belongs_to_many` (its join table's two columns). A
 // `through:` association derives from two others; a polymorphic one (`polymorphic: true`, `as:`)
 // names its target per row: neither is a relation. An association whose table, target or column the
 // schema lacks is noted at its line, never a guess.
@@ -59,6 +60,7 @@ import { normDialect } from '../model.mjs'
 const P = path.posix
 const RB = /\.rb$/i
 const DBYML = /(^|\/)config\/database\.yml$/
+const GEMLOCK = /(^|\/)Gemfile\.lock$/ // the Rails version the application locks (what its associations infer)
 const SCHEMA_DEF = /\bActiveRecord::Schema(?:\[[\d.]{1,12}\])?\.define\b/
 const MODEL_CLASS = /^[ \t]*class[ \t]+[\w:]+[ \t]*<[ \t]*[\w:]+/m
 const MODEL_HINT = /\b(?:ApplicationRecord|ActiveRecord::Base)\b|^[ \t]*(?:belongs_to|has_many|has_one|has_and_belongs_to_many)\b|\bself\.(?:table_name|abstract_class)\b/m
@@ -257,7 +259,7 @@ function readModels(root, file) {
             const a = args(s)
             const name = nameOf(a.pos[0])
             const opt = (key) => (a.opts.has(key) ? nameOf(a.opts.get(key)) : null)
-            k.assocs.push({ macro: field(s, 'method').text, name, line: lineOf(s), class_name: opt('class_name'), foreign_key: a.opts.has('foreign_key') ? namesOf(a.opts.get('foreign_key')) : null, primary_key: opt('primary_key'), through: opt('through'), as: opt('as'), polymorphic: bool(a.opts.get('polymorphic')) === true, join_table: opt('join_table'), association_foreign_key: opt('association_foreign_key'), dependent: opt('dependent'), code: !name || a.splat })
+            k.assocs.push({ macro: field(s, 'method').text, name, line: lineOf(s), class_name: opt('class_name'), foreign_key: a.opts.has('foreign_key') ? namesOf(a.opts.get('foreign_key')) : null, primary_key: opt('primary_key'), through: opt('through'), as: opt('as'), polymorphic: bool(a.opts.get('polymorphic')) === true, join_table: opt('join_table'), association_foreign_key: opt('association_foreign_key'), dependent: opt('dependent'), inverse_of: opt('inverse_of'), code: !name || a.splat })
           }
         }
         if (body) visit(body, full.split('::'), full)
@@ -270,14 +272,14 @@ function readModels(root, file) {
 
 export default {
   id: 'rails',
-  version: 1,
+  version: 2,
   kind: 'code', // (it reads source: a schema written in Ruby, the models; each declaration names its own kind)
   scope: 'unit',
   tree: true,
-  wants: (p) => RB.test(p) || DBYML.test(p),
+  wants: (p) => RB.test(p) || DBYML.test(p) || GEMLOCK.test(p),
   level: (p, text) => (RB.test(p) ? railsLevel(text) : 0),
   parses: (p, text) => RB.test(p) && railsLevel(text) > 0,
-  config: (p) => DBYML.test(p),
+  config: (p) => DBYML.test(p) || GEMLOCK.test(p),
   discover(info) {
     const rb = [...info].filter(([p, i]) => RB.test(p) && i.ddl & 768)
     const schemas = rb.filter(([, i]) => i.ddl & 256).map(([p]) => p)
@@ -287,7 +289,8 @@ export default {
       const under = (rel) => (app === '.' ? rel : `${app}/${rel}`)
       const mine = models.filter((m) => m.startsWith(under('app/models/')))
       const yml = info.has(under('config/database.yml')) ? [under('config/database.yml')] : []
-      return { key: s, inputs: [s, ...mine.sort(), ...yml] }
+      const lock = info.has(under('Gemfile.lock')) ? [under('Gemfile.lock')] : []
+      return { key: s, inputs: [s, ...mine.sort(), ...yml, ...lock] }
     })
   },
   // one file through the grammar (what readers/code-aside.mjs runs for a base): a schema's statements, a
@@ -301,6 +304,7 @@ export default {
   },
   extract({ key, files }, ctx) {
     const yml = files.find((f) => DBYML.test(f.path)) || null
+    const lock = files.find((f) => GEMLOCK.test(f.path)) || null
     const rbs = files.filter((f) => RB.test(f.path))
     const read = (f) => (ctx.aside ? ctx.aside('rails', f.path, f.text) : this.parse(f.text, f.path, ctx))
     const schemaFile = rbs.find((f) => f.path === key)
@@ -353,7 +357,7 @@ export default {
     }]
     const modelFiles = rbs.filter((f) => f !== schemaFile)
     if (modelFiles.length) {
-      const m = models(modelFiles.map((f) => ({ path: f.path, facts: read(f).models })).filter((x) => x.facts), tables, key)
+      const m = models(modelFiles.map((f) => ({ path: f.path, facts: read(f).models })).filter((x) => x.facts), tables, key, railsVersion(lock?.text))
       if (m) decls.push({ store, dialect, dialectFrom, source: { path: modelFiles[0].path, line: 1, kind: 'code', confidence: 'declared' }, complete: false, partial: false, status: 'read', label: m.label, notes: m.notes, files: modelFiles.length, entities: m.entities })
     }
     return { declarations: decls }
@@ -374,9 +378,19 @@ function adapters(text) {
   return { dialect: [...ds][0], line: found[0].line }
 }
 
+// The Rails version a Gemfile.lock locks (`    rails (7.1.3)`): [major, minor], or null (no lock read).
+function railsVersion(text) {
+  const m = text ? /^ {4}rails \((\d+)\.(\d+)/m.exec(text) : null
+  return m ? [Number(m[1]), Number(m[2])] : null
+}
+
 // The models of an application against its schema: one entity per table a class of them maps to (at
 // that class's line), and the associations no foreign key states, as relations declared by the ORM.
-function models(list, tables, schemaPath) {
+// A has_many or has_one with `inverse_of:` and no `foreign_key:` takes its key from the inverse
+// belongs_to (its `foreign_key:`, else `<name>_id`), as Active Record infers it since 7.1 (a Gemfile.lock
+// locking an older Rails keeps the owner's `<model>_id`); an inverse that is polymorphic makes the
+// association polymorphic (`<name>_id` and `<name>_type`, its target named per row: no relation).
+function models(list, tables, schemaPath, version = null) {
   const notes = []
   const note = (s) => { if (notes.length < MAX.notes) notes.push(s) }
   const classes = new Map(), prefixes = {}
@@ -415,6 +429,12 @@ function models(list, tables, schemaPath) {
     for (let i = parents.length; i > 0; i--) { const q = parents.slice(0, i).join('::'); if (prefixes[q] !== undefined) { prefix = prefixes[q]; break } }
     return { name: `${prefix}${inModel?.name ? `${singularize(inModel.name)}_` : ''}${tableize(c.name)}`, how: 'convention' }
   }
+  // a class's belongs_to of that name, its own or a base class's
+  const assocOf = (c, name, seen = new Set()) => {
+    if (!c || seen.has(c.name)) return null
+    seen.add(c.name)
+    return c.assocs.find((x) => x.macro === 'belongs_to' && x.name === name) || assocOf(resolve(c.superclass, c.scope), name, seen)
+  }
   const pkOf = (c, table) => c?.primaryKey || (tables.get(table)?.keys.find((k) => k.role === 'primary' && k.parts.length === 1)?.parts[0]) || 'id'
   const entities = new Map()
   const placed = new Map() // class name → its table
@@ -452,7 +472,11 @@ function models(list, tables, schemaPath) {
       const target = resolve(targetName, c.name.split('::')) // as Active Record looks it up: in the model's namespace, innermost first
       const toTable = target ? placed.get(target.name) : null
       if (!toTable) { note(`${where}: its class ${targetName} is no model mapped to a table of ${schemaPath}`); counts.skipped++; continue }
-      const ownerFk = `${underscore(demodulize(c.name))}_id`
+      let ownerFk = `${underscore(demodulize(c.name))}_id`
+      // the inverse belongs_to names the key (Rails 7.1 and later)
+      const inverse = (a.macro === 'has_many' || a.macro === 'has_one') && a.inverse_of && !a.foreign_key && !(version && (version[0] < 7 || version[0] === 7 && version[1] < 1)) ? assocOf(target, a.inverse_of) : null
+      if (inverse?.polymorphic) { note(`${where}: polymorphic (its inverse ${target.name}.${inverse.name} is), its target named per row: no relation`); counts.skipped++; continue }
+      if (inverse && !inverse.code) ownerFk = inverse.foreign_key?.[0] || `${inverse.name}_id`
       if (a.macro === 'belongs_to') {
         const cols = a.foreign_key || [`${a.name}_id`]
         if (!cols.every((x) => has(own, x))) { note(`${where}: ${own} has no column ${cols.join(', ')}`); counts.skipped++; continue }

@@ -8,7 +8,7 @@
 // Found by content (bit 524288 of a Python file's level): a file defining `upgrade()` that calls
 // `op.<operation>(` and assigns `revision` (bit 1048576: an Alembic environment, `env.py`, setting
 // `target_metadata`, read by sqlalchemy.mjs). Per unit: a versions folder, and the alembic.ini or engine
-// URL stating its dialect.
+// URL stating its dialect (else the revisions' own: below, dialectOf).
 //
 // Order: the revision graph, `revision` and `down_revision` (a tuple for a merge), from its root to its one
 // head; two heads, a `down_revision` no file declares, or one not a literal: the order is unknown (listed,
@@ -33,6 +33,7 @@ import { ddlFacts } from './sql-migrations.mjs'
 import { replay } from '../readers/sqlite-replay.mjs'
 import { readDdl } from '../readers/ddl.mjs'
 import { counted } from '../readers/orm.mjs'
+import { normDialect } from '../model.mjs'
 
 const P = path.posix
 const PY = /\.py$/i
@@ -219,9 +220,35 @@ function readFile(root, file, d) {
   return out
 }
 
+// The dialect, first found: graph.data.migrations (an override); alembic.ini's sqlalchemy.url scheme
+// (nothing else of it kept), every one agreeing; a URL the environment (env.py) writes literally; else
+// sniffed from the revisions: the one engine whose dialect module they import or name
+// (`from sqlalchemy.dialects import postgresql`, `sa.dialects.postgresql.UUID`, `mysql.TINYINT`).
+// → { dialect, from } | { dialect: null, why }
+const URL_AT = /\b([a-z][a-z0-9]{1,20})(?:\+[a-z0-9_]{1,30})?:\/\//
+const DIALECT_MODULE = /\bsqlalchemy\.dialects\.(postgresql|mysql|sqlite)\b|\bfrom[ \t]+sqlalchemy\.dialects[ \t]+import[ \t]+(postgresql|mysql|sqlite)\b|\b(?:sa|sqlalchemy)\.dialects\.(postgresql|mysql|sqlite)\b/
+function dialectOf(override, inis, envs, members) {
+  if (override) return { dialect: normDialect(override), from: { how: 'override' } }
+  const lineAt = (text, i) => text.slice(0, i).split('\n').length
+  const ds = []
+  for (const f of inis) { const m = /^sqlalchemy\.url[ \t]*=[ \t]*([a-z][a-z0-9]{1,20})(?:\+[a-z0-9_]{1,30})?:\/\//m.exec(f.text); if (m && SCHEMES[m[1]]) ds.push({ d: SCHEMES[m[1]], path: f.path, line: lineAt(f.text, m.index) }) }
+  if (ds.length) return new Set(ds.map((x) => x.d)).size === 1 ? { dialect: ds[0].d, from: { how: 'stated', path: ds[0].path, line: ds[0].line } } : { dialect: null, why: 'the engine URLs name several engines' }
+  for (const f of envs) {
+    for (const m of f.text.matchAll(new RegExp(`(['"])${URL_AT.source}`, 'g'))) if (SCHEMES[m[2]]) ds.push({ d: SCHEMES[m[2]], path: f.path, line: lineAt(f.text, m.index) })
+  }
+  if (ds.length) return new Set(ds.map((x) => x.d)).size === 1 ? { dialect: ds[0].d, from: { how: 'stated', path: ds[0].path, line: ds[0].line } } : { dialect: null, why: 'the engine URLs name several engines' }
+  const seen = new Map()
+  for (const f of members) {
+    const re = new RegExp(DIALECT_MODULE.source, 'g')
+    for (const m of f.text.matchAll(re)) { const d = SCHEMES[m[1] || m[2] || m[3]]; if (d && !seen.has(d)) seen.set(d, { marker: m[0].replace(/\s+/g, ' '), path: f.path, line: lineAt(f.text, m.index) }) }
+  }
+  if (seen.size === 1) { const [[d, at]] = seen; return { dialect: d, from: { how: 'sniffed', ...at } } }
+  return { dialect: null, why: seen.size ? `the revisions name several engines' dialects (${[...seen.keys()].join(', ')})` : 'no alembic.ini or env.py states a literal engine URL, and no revision names a dialect' }
+}
+
 export default {
   id: 'alembic',
-  version: 1,
+  version: 2,
   kind: 'migration',
   source: true,
   aside: true,
@@ -231,27 +258,33 @@ export default {
   level: (p, text) => alembicLevel(p, text),
   parses: (p, text) => (alembicLevel(p, text) & 524288) !== 0,
   config: (p) => INI.test(p),
-  discover(info) {
+  // overrides: graph.data.migrations entries ({ path: the versions folder, dialect }), as for a .sql folder
+  discover(info, { overrides = [] } = {}) {
     const folders = new Map()
     for (const [p, i] of info) if (PY.test(p) && i.ddl & 524288) { const d = P.dirname(p); if (!folders.has(d)) folders.set(d, []); folders.get(d).push(p) }
     const inis = [...info.keys()].filter((p) => INI.test(p)).sort()
-    return [...folders].map(([d, list]) => ({ key: d, inputs: [...list.sort(), ...inis] }))
+    // the environment beside a versions folder (its env.py), read for an engine URL it states literally
+    const envs = [...info].filter(([p, i]) => PY.test(p) && i.ddl & 1048576 && !(i.ddl & 524288)).map(([p]) => p)
+    return [...folders].map(([d, list]) => {
+      const o = overrides.find((x) => x.path === d)
+      const env = envs.filter((p) => P.dirname(p) === P.dirname(d)).sort()
+      return { key: d, inputs: [...list.sort(), ...inis, ...env], ...(o ? { override: o.dialect, salt: `dialect=${o.dialect}` } : {}) }
+    })
   },
   // the dialect is a part of what a file reads as (the DDL written for it): parse takes it in ctx
   parse(text, file, ctx) {
     const tree = ctx.tree('python', text)
     try { return Object.fromEntries(['postgres', 'mysql', 'sqlite'].map((d) => [d, readFile(tree.rootNode, file, d)])) } finally { tree.delete?.() }
   },
-  extract({ key, files }, ctx) {
+  extract({ key, files, override }, ctx) {
     const inis = files.filter((f) => INI.test(f.path))
-    const members = files.filter((f) => !INI.test(f.path))
+    const envs = files.filter((f) => !INI.test(f.path) && !(alembicLevel(f.path, f.text) & 524288))
+    const members = files.filter((f) => !INI.test(f.path) && !envs.includes(f))
     const notes = []
-    // the dialect: alembic.ini's sqlalchemy.url scheme (nothing else of it kept), every one agreeing
-    const ds = []
-    for (const f of inis) { const m = /^sqlalchemy\.url[ \t]*=[ \t]*([a-z][a-z0-9]{1,20})(?:\+[a-z0-9_]{1,30})?:\/\//m.exec(f.text); if (m && SCHEMES[m[1]]) ds.push({ d: SCHEMES[m[1]], path: f.path, line: f.text.slice(0, m.index).split('\n').length }) }
-    const dialect = new Set(ds.map((x) => x.d)).size === 1 ? ds[0].d : null
-    const base = { store: key, dialect, dialectFrom: dialect ? { how: 'stated', path: ds[0].path, line: ds[0].line } : null, source: { path: members[0].path, line: 1, kind: 'migration', confidence: 'exact' }, complete: false, partial: false, files: members.length, entities: [], clients: ['alembic', 'sqlalchemy'] }
-    if (!dialect) return { declarations: [{ ...base, status: 'not-read', label: `dialect unknown (${ds.length ? 'the engine URLs name several engines' : 'no alembic.ini states a literal sqlalchemy.url'})`, notes: [] }] }
+    const d0 = dialectOf(override, inis, envs, members)
+    const dialect = d0.dialect
+    const base = { store: key, dialect, dialectFrom: d0.from, source: { path: members[0].path, line: 1, kind: 'migration', confidence: 'exact' }, complete: false, partial: false, files: members.length, entities: [], clients: ['alembic', 'sqlalchemy'] }
+    if (!dialect) return { declarations: [{ ...base, status: 'not-read', label: `dialect unknown (${d0.why})`, notes: [] }] }
     const parsed = members.map((f) => ({ path: f.path, text: f.text, ...(ctx.aside ? ctx.aside('alembic', f.path, f.text) : this.parse(f.text, f.path, ctx))[dialect] }))
     // the revision graph, root to its one head
     const byRev = new Map(parsed.filter((p) => p.revision).map((p) => [p.revision, p]))

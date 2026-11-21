@@ -3,10 +3,11 @@
 // repository (their common folder is the store, dialect `mongodb`); re-run when any changes.
 //
 // Found by content (bit 262144 of a source file's level): a TypeScript or JavaScript file importing
-// `mongoose` that builds a schema (`new Schema(`, `new mongoose.Schema(`).
+// `mongoose` that builds a schema (`new Schema(`, `new mongoose.Schema(`, or called without `new`,
+// `mongoose.Schema(` and `Schema(`, which Mongoose accepts alike).
 //
 // What is read:
-//   - `new Schema({ … }, { collection, timestamps, _id })` bound to a name, and the model built from it
+//   - `new Schema({ … }, { collection, timestamps, _id })` (or `Schema(…)`, no `new`) bound to a name, and the model built from it
 //     (`model('User', userSchema)`, `mongoose.model(…)`, `models.User || model(…)`): a collection, named
 //     by the model's third argument, else the schema's `collection` option, else the model's name as
 //     Mongoose names it (lower case, pluralized by its own rules: `User` → `users`); a schema no model is
@@ -28,7 +29,7 @@ import { common, counted } from '../readers/orm.mjs'
 const SRC = /\.(?:ts|mts|cts|tsx|js|mjs|cjs)$/i
 const DTS = /\.d\.[cm]?ts$/i
 const IMPORT = /\bfrom[ \t]*['"]mongoose['"]|\brequire\([ \t]*['"]mongoose['"][ \t]*\)/
-const SCHEMA = /\bnew[ \t]+(?:mongoose\.)?Schema\b/
+const SCHEMA = /\bnew[ \t]+(?:mongoose\.)?Schema\b|(?<![\w$.])(?:mongoose[ \t]*\.[ \t]*)?Schema[ \t]*\(/
 export const mongooseLevel = (p, text) => (SRC.test(p) && !DTS.test(p) && IMPORT.test(text) && SCHEMA.test(text) ? 262144 : 0)
 const MAX = { schemas: 500, fields: 1000, depth: 6, notes: 12 }
 const langOf = (p) => (/\.tsx$/i.test(p) ? 'tsx' : /\.(?:ts|mts|cts)$/i.test(p) ? 'typescript' : 'javascript')
@@ -102,8 +103,9 @@ function readFile(root, file) {
     if (n.type === 'ERROR' && out.errors.length < 4) out.errors.push(lineOf(n))
     if (n.type === 'variable_declarator') {
       const init = field(n, 'value')
-      const nw = init?.type === 'new_expression' ? init : null
-      if (nw && /^(?:mongoose\.)?Schema$/.test(field(nw, 'constructor')?.text || '')) schemaNodes.push([field(n, 'name')?.text, nw])
+      // `new Schema(…)`, or the constructor called without `new` (`mongoose.Schema(…)`, `Schema(…)`)
+      const ctor = init?.type === 'new_expression' ? field(init, 'constructor') : init?.type === 'call_expression' ? field(init, 'function') : null
+      if (ctor && /^(?:mongoose\.)?Schema$/.test(ctor.text.replace(/\s+/g, ''))) schemaNodes.push([field(n, 'name')?.text, init])
     }
     if (n.type === 'call_expression') {
       const fn = field(n, 'function')?.text.replace(/\s+/g, '') || ''
@@ -146,7 +148,7 @@ function readFile(root, file) {
 
 export default {
   id: 'mongoose',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'unit',
   tree: true,
