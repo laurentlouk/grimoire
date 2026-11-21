@@ -996,7 +996,7 @@ function liveRunsAt(config, root) {
 }
 // The project's run journals: telemetry.dir (default .grimoire/runs), a relative one resolved against
 // the main checkout when root is a linked worktree, where the loop's writer and render-logs keep them.
-function runsDirOf(config, root) {
+export function runsDirOf(config, root) {
   const t = isObj(config.telemetry) && typeof config.telemetry.dir === 'string' && config.telemetry.dir ? config.telemetry.dir : '.grimoire/runs'
   return resolve(mainCheckout(root) ?? root, t)
 }
@@ -1894,11 +1894,20 @@ export function headline(front, { now, schedule, interval = DAY, page = null } =
     const more = ids.length > IDS_SHOWN ? ` and ${ids.length - IDS_SHOWN} more` : ''
     parts.push(`partial: ${ids.length ? `${ids.slice(0, IDS_SHOWN).join(', ')}${more}` : 'some sources'} not checked`)
   }
-  const stale = schedule === undefined ? age > interval + STALE_GRACE_MIN * MINUTE : toMs(now) > staleAt(schedule, generated)
-  if (stale) parts.push('stale, run /grimoire:manager')
+  if (briefingStale(generated, { now, schedule, interval })) parts.push('stale, run /grimoire:manager')
   const line = parts.join(' · ')
   return line.length < HEADLINE_MAX && !UNSAFE.test(line) ? line : null
 }
+
+// Is a briefing generated at `generated` (ms) stale at `now`: past staleAt by the schedule, or,
+// with schedule undefined, older than interval plus the grace. What the headline's "stale" says.
+export function briefingStale(generated, { now, schedule, interval = DAY } = {}) {
+  const age = Math.max(0, toMs(now) - generated)
+  return schedule === undefined ? age > interval + STALE_GRACE_MIN * MINUTE : toMs(now) > staleAt(schedule, generated)
+}
+
+// A front matter's partial flag, as the headline reads it: partial, or some sources not checked.
+export const briefingPartial = (front) => isObj(front) && (front.partial === true || (Array.isArray(front.notChecked) && front.notChecked.length > 0))
 
 // The main checkout of a linked worktree, from files only (project-config.mjs).
 export { mainCheckout }
@@ -1923,25 +1932,33 @@ function headlineMain(args) {
   try {
     const now = args.now === undefined ? Date.now() : typeof args.now === 'string' ? Date.parse(args.now) : NaN
     if (!Number.isFinite(now)) return 0
-    const root = resolve(typeof args.root === 'string' ? args.root : process.cwd())
-    // brief writes to the main checkout; a session in a linked worktree reads it, and its own too
-    // (a brief run with --root there): the newer briefing wins.
-    const roots = [...new Set([root, mainCheckout(root)].filter(Boolean))]
-    // The schedule: --config, else the project's config, layered over the main checkout's.
-    // A config that is missing, unreadable or not JSON is no schedule: 24 h.
-    const config = readProjectConfig(typeof args.config === 'string' ? resolve(args.config) : join(root, CONFIG_FILE)).value ?? null
-    const schedule = isObj(config) && isObj(config.manager) ? config.manager.schedule ?? null : null
-    let best = null
-    for (const r of roots) {
-      const dir = join(r, '.grimoire', 'manager')
-      const front = frontMatter(readHead(join(dir, 'latest.md'), FRONT_MAX))
-      const page = join(dir, 'briefing.html')
-      const line = front && headline(front, { now, schedule, page: isFile(page) ? page : null })
-      if (line && (!best || parseTime(front.generatedAt) > best.at)) best = { line, at: parseTime(front.generatedAt) }
-    }
+    const best = briefingAt(resolve(typeof args.root === 'string' ? args.root : process.cwd()), { now, config: typeof args.config === 'string' ? resolve(args.config) : null })
     if (best) process.stdout.write(`${best.line}\n`)
   } catch { /* silent: the session starts without a headline */ }
   return 0
+}
+
+// The briefing the headline names for root, or null: { line, at (generatedAt, ms), front, page
+// (briefing.html's path, or null), schedule }. Reads files only and spawns nothing; it may throw
+// (the headline catches). config: a config file (`--config`), else the project's.
+export function briefingAt(root, { now = Date.now(), config: configFile = null } = {}) {
+  // brief writes to the main checkout; a session in a linked worktree reads it, and its own too
+  // (a brief run with --root there): the newer briefing wins.
+  const roots = [...new Set([root, mainCheckout(root)].filter(Boolean))]
+  // The schedule: --config, else the project's config, layered over the main checkout's.
+  // A config that is missing, unreadable or not JSON is no schedule: 24 h.
+  const config = readProjectConfig(configFile ?? join(root, CONFIG_FILE)).value ?? null
+  const schedule = isObj(config) && isObj(config.manager) ? config.manager.schedule ?? null : null
+  let best = null
+  for (const r of roots) {
+    const dir = join(r, '.grimoire', 'manager')
+    const front = frontMatter(readHead(join(dir, 'latest.md'), FRONT_MAX))
+    const page = join(dir, 'briefing.html')
+    const shown = isFile(page) ? page : null
+    const line = front && headline(front, { now, schedule, page: shown })
+    if (line && (!best || parseTime(front.generatedAt) > best.at)) best = { line, at: parseTime(front.generatedAt), front, page: shown, schedule }
+  }
+  return best
 }
 
 // ── handing work to AI: the repos check and the launch plan (spec D8, D13) ──
