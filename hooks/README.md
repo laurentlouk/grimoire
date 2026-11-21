@@ -1,11 +1,12 @@
 # Hooks
 
-Five hooks ship with the plugin (`hooks.json`); the economy hook runs on seven events. All are silent unless they have something to say, and all fail open: a hook that breaks must never wedge a session.
+Six hooks ship with the plugin (`hooks.json`); the economy hook runs on seven events. All are silent unless they have something to say, and all fail open: a hook that breaks must never wedge a session.
 
 | Hook | Event · matcher | What it does |
 | --- | --- | --- |
 | `scripts/first-run.sh` | `SessionStart` | One line pointing at `/grimoire:setup` while the project has no `AGENTS.md` and no `memory/`. |
 | `scripts/briefing.sh` → `scripts/manager.mjs headline` | `SessionStart` | One line from the latest manager briefing (`.grimoire/manager/latest.md`, the main checkout's in a linked worktree): urgent and ready-for-AI counts, new items, its age, the page when `briefing.html` exists, the sources not checked when it is partial, and "stale" once the next briefing is more than 15 minutes overdue by `manager.schedule` (24 h without one; a week for a cron restricted to some days other than weekdays; a weekdays schedule skips the weekend). Reads files only, never runs a briefing; ids and counts only, never ticket text. Silent with no briefing or a corrupt one. |
+| `scripts/live-pointer.sh` | `SessionStart` | Writes the plugin's absolute root to `<project>/.grimoire/live/plugin-root`, so a live view drawn in Claude Code finds `scripts/live.mjs`. Silent. See "The live pointer" below. |
 | `scripts/guard.sh` → `guard.mjs` | `PreToolUse` · `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit\|mcp__.*` | Blocks a narrow set of irreversible actions, and MCP writes by the plugin's read-only agents, so an unattended loop cannot do them by mistake. |
 | `scripts/economy.sh` → `economy.mjs` | `PostToolUse` · `PostToolUseFailure` · `SubagentStop` · `SessionStart` · `SessionEnd` · `UserPromptSubmit` · `Stop` | The stuck watch: folds each subagent call into `.grimoire/economy/turns/<agent_id>.json`, writes a judge request when the gate opens, and feeds each role's envelope from dispatches that ended green. Under shadow (the default) it records what it would redirect or block; under `"loopGuard": "on"` it tells the agent, and watches the main session's turns too. Learned environment facts: folds each finished dispatch and session into its repos' facts, and gives a session started in a repo that repo's block. Answers `{}` except for that block. See "The stuck watch" and "Learned environment facts" below. |
 | `scripts/graph-refresh.sh` | `SubagentStop` · async | Re-indexes the code graph after every subagent (an implementer's commit, an integrate merge), with the deterministic indexer, never a model: `tools/graph/graph.mjs refresh`. Runs in the background, so nothing waits on it. |
@@ -37,6 +38,14 @@ Commands are split the way the shell would (`;`, `&&`, `||`, `|`, newlines, `$(�
   - a write verb denies: `save`, `create`, `update`, `delete`, `send`, `reply`, `share`, `submit`, `resolve`, `trash`, `label`, `respond`, `upsert`, `exec`, `run`, `pause`, `stop`, `start`, `invalidate`, `sync` and the rest of `WRITE_VERBS` in `guard.mjs` (89 in all). `issue`, `verify` and `test` are left out on purpose: they read as nouns or reads too often.
   - So `slack_send_message` is a write (`slack` is no verb, `send` is), `list_task_runs` a read (`list` comes first), and a name with no known verb (`graph_index`) passes. Only whole words count: `saved`, `forwarding` and `labels` are not verbs.
 - The implementers (`migration-engineer`, `test-engineer`), generic subagents and the main session are never blocked by this rule. Nor is a project's own agent that `grimoire.config.json` names in `repos[].agent` or `specialists[].agent`, even one that shares a plugin agent's bare name: an `agent_type` of `reviewer` (no namespace) is the project's and passes, while `grimoire:reviewer` is the plugin's and stays bound.
+
+## The live pointer
+
+A live view drawn in Claude Code (a pane, a band above the prompt, a status line) runs `node <plugin root>/scripts/live.mjs --root <project>` every few seconds for a one-line JSON snapshot of the run in progress, the briefing and the stuck watch (README, "Live snapshot"). It knows the project, not where the plugin is installed: at every `SessionStart`, `live-pointer.sh` writes the plugin's absolute root (`$CLAUDE_PLUGIN_ROOT`, resolved), one line, to `<project>/.grimoire/live/plugin-root` (`$CLAUDE_PROJECT_DIR`, else the cwd).
+
+- It creates `.grimoire/live/` when it is missing, and writes nothing when it cannot, when the project is `/` or `$HOME`, or when the project is the plugin folder or inside it.
+- The file is rewritten only when the path changed, whole (a temp file renamed), so a view never reads half a path.
+- Silent, timeout 5 s, and it fails open: any error is exit 0 with no output.
 
 ## The stuck watch
 

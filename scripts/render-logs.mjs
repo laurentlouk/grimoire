@@ -164,11 +164,13 @@ function landedDetail(p) {
   return out
 }
 
-export function loadRuns(dir) {
+// `only(name, path)`, when given, picks the run dirs to read (scripts/live.mjs reads the recent ones only).
+export function loadRuns(dir, { only = null } = {}) {
   const runs = []
   for (const name of subdirs(dir)) {
     const p = join(dir, name)
     if (!isRunDir(p)) continue
+    if (only && !only(name, p)) continue
     const hasRun = existsSync(join(p, 'run.json'))
     const rj = hasRun ? readJson(join(p, 'run.json')) : null
     const run = isObj(rj) ? rj : {}
@@ -472,7 +474,7 @@ export function aggregate(runs) {
 // One row per run: how it ended, what it landed, what it cost, why it stopped, and whether its own
 // journal is complete. scorecard() sums the rows; the page runs the same function over the rows its
 // filters keep, so the CLI and the page never disagree.
-const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
+export const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
 export const STALE_HOURS = 12 // a "running" run with no journal write for this long: its session most likely died
 
 export function runOutcome(run, now = Date.now()) {

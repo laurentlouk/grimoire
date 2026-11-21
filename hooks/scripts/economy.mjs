@@ -106,7 +106,7 @@ function repoMatcher(root, config) {
   }
 }
 
-const guardMode = (config) => (isObj(config?.economy) && MODES.has(config.economy.loopGuard) ? config.economy.loopGuard : 'shadow')
+export const guardMode = (config) => (isObj(config?.economy) && MODES.has(config.economy.loopGuard) ? config.economy.loopGuard : 'shadow')
 
 // The agent's settings, read once at its first call: the mode, the thresholds and its repo.
 function firstLook(root, cwd) {
