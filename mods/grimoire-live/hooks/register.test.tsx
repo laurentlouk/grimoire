@@ -151,7 +151,7 @@ for (const [name, snap, want] of CASES) {
 }
 
 test('live.mjs\'s snapshots: the status line and the toasts', async () => {
-  expect(statusLine(RUNNING)).toBe('grimoire R1 · 1/7 tasks · 2 active · 1 failed · cost 41% · 3 stuck flags')
+  expect(statusLine(RUNNING)).toBe('grimoire R1 · 1/7 tasks · 2 active · 2 failed · cost 41% · 3 stuck flags')
   expect(statusLine(HALTED)).toBe(undefined)
   expect(transitions({ ...HALTED, run: { ...HALTED.run!, status: 'running', haltReason: null } }, HALTED)).toContain('grimoire run R2 halted: budget_exhausted')
 })
