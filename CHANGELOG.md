@@ -49,7 +49,38 @@ An audit ran the graph on real open-source projects, about a dozen across both r
   - YAML flow lists closing at their key's column parse, and a broken file reports its real error line.
   - A key-value cache's commands wrapped by the app (`promisify`, pass-through functions, across files) are read.
   - A settings file's secret, password or token constant is no longer kept in the index: only constants a table can be named by are.
-- Index schema 22: the index rebuilds once.
+- **A multi-agent review** (resolution, routes and config, data, security, integration and performance) re-ran every claim on real projects and fixed what did not hold:
+  - *Resolution narrows to what the syntax shows.* A `self.a().b()` chain is the object's own. A type from a dependency or a test mock is never the repository's. `super.m()` resolves up the supertypes only. A bare call reaches closures. Parameters and callback locals are never references. On a large app, name guesses halved (unique-name 517 → 284, ambiguous 1036 → 490).
+  - *Routes:*
+    - `methods=` is read as a tuple or a set.
+    - A file router's declarations, generated route trees and URLs in types are no call sites. Generated clients and table-driven tests state their method.
+    - Navigators' `getComponent` is read.
+    - Rails `%i[…]` lists and bare actions are read.
+    - A file-based app router serves one root per package.
+  - *Configuration and contracts:*
+    - Env reads across line breaks, one-hop helpers, config factories and CLI flags are read. CI-only and framework-owned keys are listed apart.
+    - Node gRPC `addService`, servicer subclasses and resolver mixins are linked.
+  - *Data:*
+    - `graph_diff` flags a column an ORM maps that is removed while code still names its attribute (high risk). It lists the creations that leave out a new not-null column, and the schema-vs-migration conflicts the diff creates.
+    - SQL in migration files is no longer read as queries.
+    - Fixes for TypeORM, Alembic, SQLAlchemy, Django, Mongoose and Rails. A named unique constraint and its index are one element. ClickHouse SQL is named and not read as MySQL.
+  - *Security:*
+    - A constant is kept only when it can name a table (an allow-list, token and high-entropy values refused).
+    - Module-resolution configs are read guarded: no credential file, no link out of the repository, no device, a 1 MB cap.
+    - Multi-line config values are skipped.
+    - Route paths keep their template only.
+    - The TypeScript ORM's defaults keep no literal text.
+    - Hostile wide or deep files index in milliseconds, not minutes.
+  - *Integration:*
+    - Editing a `package.json`, a tsconfig, a workspace file, `go.mod` or `Cargo.toml` re-resolves its repository.
+    - `graph_impact` on a key a definition also names answers both.
+    - `graph_diff` lists routes removed or moved that are still called (high risk).
+    - One test walk is shared by symbol, overview and diff. Ordering is deterministic.
+  - *Performance:*
+    - `graph_diff`'s base model is cached on disk and reuses the index for unchanged files. A cold diff on a large project went from 4–6 s to 1–2 s.
+    - The data extractors reuse the code pass's trees.
+    - The routes walk is skipped for files that cannot hold one. A full index costs about +23% against the previous release instead of +60%.
+- Index schema 26: the index rebuilds once.
 
 ## 0.45.0 — one data model diagram for every store: key-value tables and caches drawn like SQL, and the links no key states
 
