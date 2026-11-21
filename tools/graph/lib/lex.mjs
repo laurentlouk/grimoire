@@ -13,17 +13,35 @@
 // All linear in the input (one pass each, no backtracking regular expression), so a hostile file
 // costs its length. A caller scanning one text from many openers passes the text's matchTable: each
 // opener's match is then a lookup, and an object's entries skip their nested brackets by it.
+// masked and lineAt keep their last answer: the indexer asks both scans of a file
+// (configOfCode, contractHints) for the same text, one after the other, and pays once.
 
 const HASH = new Set(['python', 'ruby', 'yaml', 'graphql', 'shell'])
 const SLASH = new Set(['js', 'go', 'rust', 'jvm', 'c', 'csharp', 'swift', 'php', 'proto'])
 
+let lastMasked = null
 export function masked(src, family) {
+  if (lastMasked && lastMasked.src === src && lastMasked.family === family) return lastMasked.out
+  const out = maskedOnce(src, family)
+  lastMasked = { src, family, out }
+  return out
+}
+// One pass, jumping from one character that may open a string or a comment to the next; the text
+// between is copied as it is, a comment as blanks (its line breaks kept).
+const blankOf = (s) => s.replace(/[^\n\r]/g, ' ')
+function maskedOnce(src, family) {
   const hash = HASH.has(family) || family === 'php', slash = SLASH.has(family)
-  const out = src.split('')
-  const blank = (a, b) => { for (let i = a; i < b && i < out.length; i++) if (out[i] !== '\n' && out[i] !== '\r') out[i] = ' ' }
+  const parts = []
+  let kept = 0 // the text before this offset is in parts
+  const blank = (a, b) => { parts.push(src.slice(kept, a), blankOf(src.slice(a, b))); kept = b }
+  const special = /["'`/#]/g
   const n = src.length
   let i = 0
   while (i < n) {
+    special.lastIndex = i
+    const next = special.exec(src)
+    if (!next) break
+    i = next.index
     const c = src[i]
     // Python's triple-quoted strings: docstrings and prose, blanked whole
     if (family === 'python' && (c === '"' || c === "'") && src[i + 1] === c && src[i + 2] === c) {
@@ -43,13 +61,19 @@ export function masked(src, family) {
     if (hash && c === '#' && !(family === 'ruby' && src[i + 1] === '{')) { const e = src.indexOf('\n', i); const to = e < 0 ? n : e; blank(i, to); i = to; continue }
     i++
   }
-  return out.join('')
+  if (!parts.length) return src
+  parts.push(src.slice(kept))
+  return parts.join('')
 }
 
+let lastLines = null
 export function lineAt(src) {
+  if (lastLines && lastLines.src === src) return lastLines.at
   const starts = [0]
   for (let i = 0; i < src.length; i++) if (src.charCodeAt(i) === 10) starts.push(i + 1)
-  return (off) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= off) lo = mid; else hi = mid - 1 } return lo + 1 }
+  const at = (off) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= off) lo = mid; else hi = mid - 1 } return lo + 1 }
+  lastLines = { src, at }
+  return at
 }
 
 const PAIR = { '(': ')', '[': ']', '{': '}' }

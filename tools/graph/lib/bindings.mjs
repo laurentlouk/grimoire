@@ -72,8 +72,12 @@ function typeOfValue(v, spec) {
   return null
 }
 
-// Bindings a node introduces into the current scope: [[varName, TypeName], …].
+// Bindings a node introduces into the current scope: [[varName, TypeName], …]. Asked of every node
+// the indexer walks: a node of no kind that binds answers at once (one shared empty list).
+const NONE = Object.freeze([])
 export function bindingsOf(n, spec) {
+  const t = n.type
+  if (!PARAMS.has(t) && !ASSIGN.has(t)) return NONE
   const out = []
   const put = (name, type) => { if (name && type) out.push([varName(name), type]) }
   if (PARAMS.has(n.type)) {
@@ -121,6 +125,8 @@ const patternNames = (n, out = [], d = 0) => {
 }
 const idents = (n, out = [], d = 0) => { if (!n || d > 4) return out; if (IDENTISH.test(n.type) && n.namedChildCount === 0) out.push(n.text); else if (!TYPE_NODE.test(n.type)) for (const c of named(n)) idents(c, out, d + 1); return out }
 export function localsOf(n) {
+  const t = n.type
+  if (!PARAMS.has(t) && !ASSIGN.has(t) && !PARAM_LISTS.has(t) && !LOOPS.has(t) && t !== 'default_parameter' && t !== 'typed_default_parameter') return NONE
   if (PARAMS.has(n.type) || n.type === 'default_parameter' || n.type === 'typed_default_parameter') {
     const pat = field(n, 'pattern')
     if (pat && PATTERN.test(pat.type)) return patternNames(pat) // `({ onPress, label }: Props) => …`

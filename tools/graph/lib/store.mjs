@@ -56,10 +56,13 @@
 //            a file defines, `@name`) | defer (a read resolved through the imports: `@helper|KEY`,
 //            `@factory().k`; config.mjs linkConfig), src_key (a mapping's source), via, line
 //   config_inputs  the declaration files config.mjs reads: size, mtime, hash
+//   resolve_inputs the files module resolution reads (project.mjs resolveInputPaths: package.json,
+//            tsconfig, babel and workspace configs, go.mod, Cargo.toml): size, mtime, hash; one that
+//            changed re-resolves its repository
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '25'
+export const SCHEMA_VERSION = '26'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
@@ -72,7 +75,7 @@ export async function driver() {
 }
 
 // Every table of the index, in DDL order.
-export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts', 'routes', 'route_facts', 'route_refs', 'route_links', 'config', 'config_inputs']
+export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts', 'routes', 'route_facts', 'route_refs', 'route_links', 'config', 'config_inputs', 'resolve_inputs']
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -110,6 +113,7 @@ CREATE INDEX IF NOT EXISTS config_src ON config(src_key);
 CREATE INDEX IF NOT EXISTS config_file ON config(file_id);
 CREATE INDEX IF NOT EXISTS config_path ON config(repo, path);
 CREATE TABLE IF NOT EXISTS config_inputs(repo TEXT, path TEXT, size INTEGER, mtime INTEGER, hash TEXT, PRIMARY KEY(repo, path));
+CREATE TABLE IF NOT EXISTS resolve_inputs(repo TEXT, path TEXT, size INTEGER, mtime INTEGER, hash TEXT, PRIMARY KEY(repo, path));
 `
 
 export async function openStore(dbPath, { readOnly = false } = {}) {

@@ -16,6 +16,9 @@
 //      reaches; tests the diff edits.
 //   6. Co-change gaps: files that usually change with a changed file (git history) and are not in
 //      this diff.
+//   5b. Routes removed or moved: the routes the base's versions of the diff's files served (their
+//      routes read aside with the definitions) that no route of the branch serves any more (a route
+//      file moved or removed, a handler removed), with the call sites still naming them.
 //   7. A risk line, with its reasons. Everything is a lead: open path:line before relying on it.
 //   The data model's changes against the same base come with the definitions (dataChangeLines): a
 //   removed or retyped table or column still named by the queries in code is a contract change too.
@@ -26,8 +29,9 @@ import { langOf, familyOf } from './langs.mjs'
 import { skipped, maxBytesOf } from './project.mjs'
 import { treeAt, blobs } from './data/base.mjs'
 import { symbolsAside } from './symbols-aside.mjs'
-import { unresolved, mentions, kindOfPath, USE_KINDS, siteText, dispatch } from './reach.mjs'
-import { routesServedBy, routeCallers, routeTitle } from './route-graph.mjs'
+import { unresolved, mentions, kindOfPath, USE_KINDS, siteText, dispatch, TEST_EDGES, TEST_DEPTH } from './reach.mjs'
+import { routesServedBy, routeCallers, routeTitle, routeScore, methodText } from './route-graph.mjs'
+import { joinPath, UNKNOWN, hashSeg } from './routes.mjs'
 import { describe } from './query.mjs'
 import { elementsOf, schemaDrift } from './data/reconcile.mjs'
 
@@ -36,7 +40,7 @@ const dispatchUp = (g, n) => dispatch(g, n).up.map((u) => u.node)
 const git = (dir, args) => spawnSync('git', ['-c', 'core.quotepath=off', '-C', dir, ...args], { encoding: 'utf8', maxBuffer: 1 << 28 })
 const stem = (p) => path.posix.basename(p || '').replace(/\.[^.]+$/, '')
 const CALLABLE = new Set(['function', 'method', 'constructor', 'macro'])
-const LISTED = 40, TEST_DEPTH = 6, GAP_MIN = 2, GAP_RATIO = 0.3
+const LISTED = 40, GAP_MIN = 2, GAP_RATIO = 0.3
 
 // `git diff -U0` → [{ path, oldPath, status A|M|D|R, added: [[from, to]], removed: [[from, to]], cuts: [line] }]
 // (cuts: a pure deletion, after that line of the new side). C-quoted paths are unquoted.
@@ -161,7 +165,8 @@ function baseDefs(files, project) {
       items.push({ key: `${f.repo}|${f.oldPath}`, path: f.oldPath, lang: langOf(f.oldPath), text: buf.toString('utf8') })
     }
   }
-  const parsed = symbolsAside(items.map((x) => ({ path: x.key, lang: x.lang, text: x.text })))
+  // `rel`: the routes each base file declared come back too (on the list's `routes`)
+  const parsed = symbolsAside(items.map((x) => ({ path: x.key, lang: x.lang, text: x.text, rel: x.path })))
   for (const [k, v] of parsed) out.set(k, v)
   return out
 }
@@ -414,6 +419,74 @@ export function dataChangeLines(g, data, inLines, { project = null, text = true 
   return { out: out.filter((l) => l !== null), risk }
 }
 
+// The routes the base's versions of the diff's code files served that no route of the branch serves:
+// [{ repo, title, was (base path), line, handler, why (removed | moved with its file), now (what the
+// renamed file serves instead), callers: call sites that match it at least as well as any route they
+// reach now }]. A base route keeps its path as written; its prefix is composed as the index composes
+// it: a file route's own, NestJS's global prefix, a router's from the routes the same router still
+// serves in the file (else unknown, `{…}`, matched as any prefix).
+function routesGone(g, code, based) {
+  const files = code.filter((f) => f.oldPath && f.status !== 'A')
+  const base = files.map((f) => ({ f, list: based.get(`${f.repo}|${f.oldPath}`)?.routes?.list || [], gp: based.get(`${f.repo}|${f.oldPath}`)?.routes?.globalPrefix })).filter((x) => x.list.length)
+  if (!base.length) return []
+  const rowsIn = g.db.prepare('SELECT r.*, f.repo FROM routes r JOIN files f ON f.id = r.file_id WHERE f.repo = ? AND f.path = ? AND r.full IS NOT NULL')
+  const served = new Map() // repo → Set of `kind|method|path` served now
+  const servedIn = (repo) => {
+    if (!served.has(repo)) {
+      const set = new Set()
+      for (const r of g.q('SELECT r.kind, r.method, r.full FROM routes r JOIN files f ON f.id = r.file_id WHERE f.repo = ? AND r.full IS NOT NULL', repo)) for (const v of JSON.parse(r.full)) set.add(`${r.kind}|${methodText(r)}|${v.p}`)
+      served.set(repo, set)
+    }
+    return served.get(repo)
+  }
+  const prefixOf = new Map() // repo → NestJS's global prefix now
+  const globalPrefix = (repo) => {
+    if (!prefixOf.has(repo)) prefixOf.set(repo, g.q('SELECT rf.facts FROM route_facts rf JOIN files f ON f.id = rf.file_id WHERE f.repo = ?', repo).map((r) => JSON.parse(r.facts).meta?.globalPrefix).find((x) => x !== undefined))
+    return prefixOf.get(repo)
+  }
+  const gone = []
+  for (const { f, list, gp } of base) {
+    const now = f.path ? rowsIn.all(f.repo, f.path) : []
+    for (const r of list) {
+      // the same declaration in the file now (its router, method and path as written): still served
+      if (now.some((x) => x.kind === r.kind && (x.method || null) === (r.method || null) && (x.router || null) === (r.router || null) && x.path === r.path)) continue
+      let full
+      if (r.router && /^(v|p|i|g|a):|^django$/.test(r.router)) {
+        // the prefixes the same router serves under now, from its routes left in the file
+        const pre = new Set()
+        for (const x of now.filter((y) => y.router === r.router)) for (const v of JSON.parse(x.full)) { const own = joinPath('', x.path); if (v.p.endsWith(own) && joinPath(v.p.slice(0, v.p.length - own.length), x.path) === v.p) pre.add(v.p.slice(0, v.p.length - own.length)) }
+        full = (pre.size ? [...pre] : [UNKNOWN]).map((p) => ({ p: joinPath(p, r.path) }))
+      } else if (r.router === 'nest' && (gp ?? globalPrefix(f.repo)) !== undefined) full = [{ p: joinPath(gp ?? globalPrefix(f.repo), r.path) }]
+      else full = [{ p: r.kind === 'screen' && !r.path.startsWith('/') ? r.path : joinPath('', r.path) }]
+      // served elsewhere now under every path (a handler moved to another file, a route kept)
+      const set = servedIn(f.repo), mt = methodText(r)
+      if (full.every((v) => set.has(`${r.kind}|${mt}|${v.p}`) || set.has(`${r.kind}|*|${v.p}`))) continue
+      const renamed = f.status === 'R' && f.path
+      gone.push({ repo: f.repo, route: { ...r, full, repo: f.repo }, title: `${mt} ${full[0].p}`, was: f.oldPath, line: r.line, handler: r.handler?.name || null, why: renamed && now.length ? 'moved with its file' : f.path ? 'removed' : 'removed with its file', now: renamed ? now.slice(0, 3).map(routeTitle) : [] })
+    }
+  }
+  if (!gone.length) return []
+  // the call sites, each matched against the lost routes and against the route it reaches now
+  const refs = g.q(`SELECT x.id, x.kind, x.method, x.toks, x.lead, x.named, x.line, f.repo, f.path, f.is_test AS ftest, n.kind AS skind, n.qualname AS sname, n.is_test AS stest
+    FROM route_refs x JOIN files f ON f.id = x.file_id LEFT JOIN nodes n ON n.id = x.src_id ORDER BY f.is_test, f.repo, f.path, x.line`)
+  const linkedTo = g.db.prepare('SELECT r.kind, r.method, r.path, r.full, f.repo FROM route_links l JOIN routes r ON r.id = l.route_id JOIN files f ON f.id = r.file_id WHERE l.ref_id = ?')
+  const want = new Set(gone.flatMap((x) => x.route.full.flatMap((v) => (x.route.kind === 'screen' && !x.route.path.startsWith('/') ? [hashSeg(x.route.path)] : v.p.split('/').filter(Boolean).map(hashSeg)))))
+  for (const ref of refs) {
+    const toks = ref.toks.split('/')
+    if (!toks.some((t) => want.has(t))) continue // no literal segment of a lost route: no match
+    const site = { ...ref, toks }
+    let nowBest = null
+    for (const x of gone) {
+      const m = routeScore(x.route, site)
+      if (!m) continue
+      if (nowBest === null) nowBest = Math.max(-Infinity, ...linkedTo.all(ref.id).map((r) => routeScore({ ...r, full: JSON.parse(r.full) }, site)?.score ?? -Infinity))
+      if (m.score >= nowBest) x.callers = [...(x.callers || []), { ...ref, how: m.how }]
+    }
+  }
+  for (const x of gone) x.callers ||= []
+  return gone
+}
+
 export function changeImpact(g, project, base, { repo = null, depth = 2, text = true, data = null, diff = null } = {}) {
   const files = diff || readDiff(base, project, repo)
   const isCode = (p) => { const l = p && langOf(p); return !!l && l !== 'other' }
@@ -483,6 +556,10 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
   const dm = dataChangeLines(g, data, inLines, { project, text })
   out.push(...dm.out)
 
+  // a line this diff changed (its new side)
+  const ranges = new Map(files.filter((f) => f.path).map((f) => [`${f.repo}|${f.path}`, f.added]))
+  const lineChanged = (repo, p, line) => (ranges.get(`${repo}|${p}`) || []).some(([a, b]) => line >= a && line <= b)
+
   // ── contract changes: who still names them ──
   const contract = live.filter((c) => c.op === '-' || c.op === '>' || c.sig)
   const risk = [...dm.risk]
@@ -497,8 +574,6 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
     // site or mention on a line the diff changed. A caller in a changed file, on an untouched line,
     // is still at risk.
     const changedIds = new Set(live.filter((c) => c.node).map((c) => c.node.id))
-    const ranges = new Map(files.filter((f) => f.path).map((f) => [`${f.repo}|${f.path}`, f.added]))
-    const lineChanged = (repo, p, line) => (ranges.get(`${repo}|${p}`) || []).some(([a, b]) => line >= a && line <= b)
     const tag = (changed) => (changed ? '  (changed in this diff)' : '')
     // imports naming a removed or moved name (`from .helpers import x`, `import { x } from './a'`):
     // they fail at load time; one from the moved name's new module is fine
@@ -549,7 +624,7 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
 
   // ── impact: what reaches the changed definitions ──
   const nodes = live.filter((c) => c.node && c.op !== '+').map((c) => c.node)
-  const r = nodes.length ? g.reachData(nodes, { depth, project: null, text: false, members: false }) : { byFile: new Map(), dispatch: [] }
+  const r = nodes.length ? g.reachData(nodes, { depth, project: null, text: false, members: false, config: false, sites: false, routes: false, cochange: false }) : { byFile: new Map(), dispatch: [] }
   const outsideFiles = [...r.byFile.entries()].filter(([k]) => !inDiff.has(k))
   const insideN = r.byFile.size - outsideFiles.length
   out.push(`Impact (depth ${depth}): ${r.byFile.size} file(s) reach the changed definitions, ${outsideFiles.length} of them outside this diff${insideN ? ` (${insideN} in it)` : ''}`)
@@ -578,6 +653,21 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
     if (served.length > 20) out.push(`  … ${served.length - 20} more`)
   }
 
+  // ── routes the base served and the branch does not: who still calls them ──
+  const lost = routesGone(g, code, based)
+  if (lost.length) {
+    out.push(`Routes removed or moved (${lost.length}): served at the base, by no route now; the call sites naming them reach no handler`)
+    for (const x of lost.slice(0, 20)) {
+      const outside = x.callers.filter((c) => !lineChanged(c.repo, c.path, c.line))
+      const t = x.callers.filter((c) => c.ftest || c.stest).length
+      out.push(`  ${x.title}  was ${g.loc({ repo: x.repo, path: x.was, kind: 'x', line: x.line })}${x.handler ? ` → ${x.handler}` : ''}  ${x.why}${x.now.length ? ` (now ${x.now.join(', ')})` : ''}  ${x.callers.length} caller(s), ${t} in tests, ${outside.length} not changed by this diff`)
+      for (const c of x.callers.slice(0, 10)) out.push(`    caller  ${g.loc({ repo: c.repo, path: c.path, kind: 'x', line: c.line })}  ${c.skind && c.skind !== 'file' ? `in ${c.sname}` : 'at file level'}  (${c.how})${c.ftest || c.stest ? '  test' : ''}${lineChanged(c.repo, c.path, c.line) ? '  (changed in this diff)' : ''}`)
+      if (x.callers.length > 10) out.push(`    … ${x.callers.length - 10} more`)
+      if (outside.length) risk.push(`route ${x.title} ${x.why} is still named outside the lines this diff changed (${outside.length} place(s))`)
+    }
+    if (lost.length > 20) out.push(`  … ${lost.length - 20} more`)
+  }
+
   // ── tests ──
   // A function nested in another is tested through it: the outermost callable around a changed one
   // stands for it (its tests, its callers).
@@ -589,7 +679,7 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
     if (!c.node || c.node.is_test) continue
     const rep = outer(c.node)
     // a test calling the route it handles, by URL or by navigation, is a test on its path (ROUTES_TO)
-    const ts = [...g.walk([rep.id], ['CALLS', 'REFERENCES', 'IMPORTS', 'ROUTES_TO'], 'in', TEST_DEPTH).entries()].filter(([id, i]) => i.depth > 0 && g.node(id).is_test).map(([id, i]) => [g.node(id), i])
+    const ts = [...g.walk([rep.id], TEST_EDGES, 'in', TEST_DEPTH).entries()].filter(([id, i]) => i.depth > 0 && g.node(id).is_test).map(([id, i]) => [g.node(id), i])
     // a test calling it on a receiver the graph could not type is a test of it too
     const loose = c.op === '+' ? [] : unresolved(g, [rep]).filter((x) => x.src?.is_test)
     testsOf.set(c, ts.length + loose.length)
@@ -615,9 +705,9 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
     out.push(`Changed code no test reaches (${untested.length}; the graph misses tests that reach code dynamically: check before writing one):`)
     for (const c of untested.slice(0, 20)) out.push(`  ${c.via ? '~' : c.op} ${g.row(c.node)}${c.via ? `  (through ${c.via.qualname})` : ''}`)
     if (untested.length > 20) out.push(`  … ${untested.length - 20} more`)
-    // with callers: a CALLS edge into it (or a REFERENCES edge: passed as a value), or into a
-    // declaration it implements (dispatch)
-    const callersIn = g.db.prepare("SELECT 1 FROM edges WHERE dst = ? AND kind IN ('CALLS','REFERENCES') LIMIT 1")
+    // with callers: a CALLS edge into it (or a REFERENCES edge: passed as a value; a ROUTES_TO edge: a
+    // call site naming the route it handles), or into a declaration it implements (dispatch)
+    const callersIn = g.db.prepare("SELECT 1 FROM edges WHERE dst = ? AND kind IN ('CALLS','REFERENCES','ROUTES_TO') LIMIT 1")
     const used = untested.filter((c) => (c.op !== '+' || c.via) && [c.node, ...(dispatchUp(g, c.node))].some((n) => callersIn.get(n.id)))
     if (used.length) risk.push(`${used.length} changed definition(s) with callers and no test reaching them`)
   }

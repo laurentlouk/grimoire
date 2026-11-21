@@ -9,12 +9,13 @@
 // onto it when that saves parsing, so a worktree only re-parses what its branch changed.
 import { existsSync, statSync, lstatSync } from 'node:fs'
 import path from 'node:path'
-import { loadProject, scanRepo, listPaths } from './project.mjs'
+import { loadProject, scanRepo, listPaths, resolveInputPaths } from './project.mjs'
 import { openStore, SCHEMA_VERSION } from './store.mjs'
 import { runIndex } from './run.mjs'
 import { seed } from './freshness.mjs'
-import { candidates } from './data/registry.mjs'
-import { resolveBase, modelAt } from './data/base.mjs'
+import { candidates, inspect, asideOf, MAX_BYTES, SOURCE } from './data/registry.mjs'
+import { resolveBase, modelAt, treeAt, blobs } from './data/base.mjs'
+import { extractAside } from './data/readers/code-aside.mjs'
 import { confinedDelta } from './docs.mjs'
 import { parseDelta } from './data/delta.mjs'
 import { readRefines, groupingFor } from './data/check.mjs'
@@ -22,7 +23,6 @@ import { docRoots } from './docs.mjs'
 import { loadIndex } from './arch.mjs'
 import { archScope, archImpact, archLines, archDeltaStates, archDeltaLines } from './arch-change.mjs'
 import { changeImpact, readDiff } from './change.mjs'
-import { langOf } from './langs.mjs'
 import { diffModels } from './data/diff.mjs'
 import { overview } from './overview.mjs'
 import { routesTool } from './route-graph.mjs'
@@ -46,7 +46,7 @@ export const TOOLS = [
   },
   {
     name: 'graph_overview',
-    description: 'The project at a glance, to start on an unknown codebase: per repository its languages, definitions and tests; its modules (folders of production code, users first) with what each uses and the share of its functions a test reaches; its routes (count, top prefixes); its entry points (functions nothing calls that call the most: where flows start, or code reached through config or a framework), the route handlers and screens listed apart; its most used definitions; and its hotspots (often changed and large). Then go to graph_file, graph_search or graph_impact.',
+    description: 'The project at a glance, to start on an unknown codebase: per repository its languages, definitions and tests; its modules (folders of production code, users first) with what each uses and the share of its functions a test reaches; its routes (count, top prefixes); its entry points (functions nothing calls or passes as a value that call the most: where flows start, or code reached through config or a framework), the route handlers and screens listed apart; its most used definitions; and its hotspots (often changed and large). Then go to graph_file, graph_search or graph_impact.',
     params: { repo: repoParam, limit: { type: 'integer', default: 12, description: 'Rows per list (default 12).' } },
     run: (g, a) => overview(g, { repo: a.repo || null, limit: Math.max(1, Math.min(Number(a.limit) || 12, 50)) }),
   },
@@ -65,7 +65,7 @@ export const TOOLS = [
   },
   {
     name: 'graph_symbol',
-    description: 'One definition in context: signature, container, members, and counts of callers, callees, supertypes, subtypes and tests reaching it.',
+    description: 'One definition in context: signature, container, members, and counts of callers, callees, supertypes, subtypes and test files reaching it (by calls, references, routes and a test file\'s imports, as graph_diff finds tests).',
     params: { symbol: symbolParam, repo: repoParam },
     required: ['symbol'],
     run: (g, a) => g.symbol(a),
@@ -86,14 +86,14 @@ export const TOOLS = [
   },
   {
     name: 'graph_impact',
-    description: 'Blast radius of changing a symbol or a file, beyond what grep or the call edges alone show: everything reaching it through calls, inheritance, imports and routes (a call site naming a URL or a screen it handles) up to `depth` hops, grouped by file with distance; dispatch (a method\'s declarations on its interfaces, traits and base classes, whose callers may land on it, and the overrides or implementations that redefine it); the routes it handles with their callers in code and tests; the tests on those paths (a test calling its route among them); the configuration keys it reads (graph_config); the call sites naming it that resolution could not link (receiver of unknown type, too many same-named definitions); every other mention of its name in any file of the project that no edge explains, classified (a reference passed as a value, an unresolved import, a string key, config, markup, scripts, docs, comments) and never quoted; and the files that change together with it in git history. A data entity is a target too: a table (`notes`, `drizzle/notes`, `repo:drizzle/notes`, or the Drizzle variable code names it by) or a column (`notes.title`, or its Drizzle key): its declarations (schema, migrations, snapshot at path:line), its keys, indexes and foreign keys both ways, the functions reading and writing it (or naming the column) from the queries in code, what reaches those functions, and the table\'s mentions; when a code definition holds the name too, both are answered (`db:notes` names the data alone). A configuration key no definition holds (`AUTH_JWT_SECRET`, `auth.secret`) answers with its readers, the keys it sets and their readers, what reaches them, and its other mentions. Use it before changing something, to scope a plan, a task\'s declared files, or a review.',
+    description: 'Blast radius of changing a symbol or a file, beyond what grep or the call edges alone show: everything reaching it through calls, inheritance, imports and routes (a call site naming a URL or a screen it handles) up to `depth` hops, grouped by file with distance; dispatch (a method\'s declarations on its interfaces, traits and base classes, whose callers may land on it, and the overrides or implementations that redefine it); the routes it handles with their callers in code and tests; the tests on those paths (a test calling its route among them); the configuration keys it reads (graph_config); the call sites naming it that resolution could not link (receiver of unknown type, too many same-named definitions); every other mention of its name in any file of the project that no edge explains, classified (a reference passed as a value, an unresolved import, a string key, config, markup, scripts, docs, comments) and never quoted; and the files that change together with it in git history. A data entity is a target too: a table (`notes`, `drizzle/notes`, `repo:drizzle/notes`, or the Drizzle variable code names it by) or a column (`notes.title`, or its Drizzle key): its declarations (schema, migrations, snapshot at path:line), its keys, indexes and foreign keys both ways, the functions reading and writing it (or naming the column) from the queries in code, what reaches those functions, and the table\'s mentions; when a code definition holds the name too, both are answered (`db:notes` names the data alone). A configuration key (`AUTH_JWT_SECRET`, `auth.secret`) answers with its readers, the keys it sets and their readers, what reaches them, and its other mentions; when a code definition holds the name too (a settings class\'s field), both are answered, the key first. Use it before changing something, to scope a plan, a task\'s declared files, or a review.',
     params: { target: { type: 'string', description: 'A symbol (as for graph_symbol), a file path, or a data entity: a table (`notes`, `store/notes`, `repo:store/notes`), a column (`notes.title`); `db:` before it names the data model alone.' }, depth: depthParam(3, 6), strict: strictParam, mentions: { type: 'boolean', default: true, description: 'Search the project\'s files for the name\'s mentions no edge explains (default true).' }, repo: repoParam },
     required: ['target'],
     run: (g, a, ctx) => g.impact(a, ctx.project),
   },
   {
     name: 'graph_diff',
-    description: 'The impact of a change: what the working tree (committed, staged, unstaged and untracked) changed against a base, definition by definition, and what that can break that the diff does not show. Each definition added, removed, moved or modified, with its old and new signature when it changed (the base read through git, nothing checked out); for every contract change (removed, moved, new signature) who still names it: linked callers (inside or outside this diff), call sites resolution could not link, and the name\'s other mentions in the project (references passed as values, unresolved imports, string keys, config, scripts), classified and never quoted; the files reaching the changed definitions outside the diff (calls, inheritance, imports, dispatch through interfaces, overrides and implementations left unchanged); the routes the changed handlers serve; the tests to run (a test calling a changed handler\'s route among them) and the changed code no test reaches; the files that usually change with the changed ones (git history) and are not in the diff; and a risk line with its reasons. Use it before committing, to review a branch, or to check a task\'s footprint. `base: "HEAD"` limits it to the uncommitted changes. The data model\'s changes against the same base follow the definitions (tables, columns, keys, indexes and foreign keys added, removed or modified, as graph_changes reads them), and a table or column removed or retyped that the code still names (the SQL the code sends, the Drizzle query builder\'s calls, an ORM class\'s attribute) is a contract change too; a not-null column added with no default lists the inserts that leave it out, and the conflicts between a code model and its migrations the diff creates are listed. Use it before committing, to review a branch, or to check a task\'s footprint. `base: "HEAD"` limits it to the uncommitted changes.',
+    description: 'The impact of a change: what the working tree (committed, staged, unstaged and untracked) changed against a base, definition by definition, and what that can break that the diff does not show. Each definition added, removed, moved or modified, with its old and new signature when it changed (the base read through git, nothing checked out); for every contract change (removed, moved, new signature) who still names it: linked callers (inside or outside this diff), call sites resolution could not link, and the name\'s other mentions in the project (references passed as values, unresolved imports, string keys, config, scripts), classified and never quoted; the files reaching the changed definitions outside the diff (calls, inheritance, imports, dispatch through interfaces, overrides and implementations left unchanged); the routes the changed handlers serve, and the routes the base served that no route serves now (a route file moved or removed, a handler removed) with the call sites still naming them; the tests to run (a test calling a changed handler\'s route among them) and the changed code no test reaches; the files that usually change with the changed ones (git history) and are not in the diff; and a risk line with its reasons. The data model\'s changes against the same base follow the definitions (tables, columns, keys, indexes and foreign keys added, removed or modified, as graph_changes reads them), and a table or column removed or retyped that the code still names (the SQL the code sends, the Drizzle query builder\'s calls, an ORM class\'s attribute) is a contract change too; a not-null column added with no default lists the inserts that leave it out, and the conflicts between a code model and its migrations the diff creates are listed. Use it before committing, to review a branch, or to check a task\'s footprint. `base: "HEAD"` limits it to the uncommitted changes.',
     params: { base: { type: 'string', description: 'A branch, tag or commit; compared at its merge base with HEAD (default: baseBranch, else the base branch, else main). HEAD: only what is not committed.' }, depth: depthParam(2, 5), mentions: { type: 'boolean', default: true, description: 'Search the project for the mentions of contract changes (default true).' }, repo: repoParam },
     run: async (g, a, ctx) => {
       const base = resolveBase(ctx.project, { explicit: a.base || null, repo: a.repo || null })
@@ -104,9 +104,7 @@ export const TOOLS = [
       // the index holds, on either side of a rename, or a candidate of a format they read)
       let data = null
       const diff = readDiff(base, ctx.project, a.repo || null)
-      const input = g.db.prepare('SELECT ddl FROM data_inputs WHERE repo = ? AND path = ?')
-      const touches = diff.some((f) => [f.path, f.oldPath].filter(Boolean).some((p) => { const r = input.get(f.repo, p); return r ? r.ddl === null || r.ddl > 0 : candidates([p], ctx.project).length > 0 && !langOf(p) }))
-      if (touches) {
+      if (touchesModel(g, ctx.project, diff)) {
         try {
           const eq = groupingFor(readRefines(ctx.project.architectureDir, ctx.project.root), docRoots(ctx.project))
           const at = await modelAt(ctx.project, base, eq)
@@ -203,10 +201,67 @@ export const TOOLS = [
   },
 ]
 
-// Files that moved since the last index, per repo (cheap: stat only, no parsing): code files, and the
-// files data extractors read. An index built by another grimoire version is stale as a whole: the
-// next refresh rebuilds it with the current rules.
-function staleness(project, db) {
+// Does a diff change what the data model holds, on either side? A data input that is no source file (a
+// migration, a snapshot, a template) does whenever it changed. A source file does by its level's bits
+// (registry.mjs inspect), now (the index) or at the base (its text there): a bit that declares a store
+// (a schema, a model, an entity, a migration in code, a key-value cache's commands) always does; the
+// SQL and the query-builder calls code sends and the access patterns are never compared at a base; what
+// the item binding reads (TypeScript types, serde structs: bit 1) does only when the file's facts
+// changed, read at the base aside (code-aside.mjs) and compared with the index's, line numbers aside.
+const NOT_COMPARED = 2 | 64 | 2097152, BINDING = 1
+const lineless = (v) => (Array.isArray(v) ? v.map(lineless) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => !/^(line|end|start)$/.test(k)).map(([k, x]) => [k, lineless(x)])) : v)
+function touchesModel(g, project, diff) {
+  const input = g.db.prepare('SELECT ddl FROM data_inputs WHERE repo = ? AND path = ?')
+  const factsOf = g.db.prepare('SELECT extractor, facts FROM data_facts WHERE repo = ? AND key = ?')
+  const sources = [] // the source files whose bits need their base text
+  const source = (p) => SOURCE.some((ex) => ex.wants(p))
+  for (const f of diff) {
+    const now = f.path ? input.get(f.repo, f.path) : null
+    if (now && now.ddl === null) return true // too large to inspect: assume it does
+    const sides = [f.path, f.oldPath].filter((p) => p && candidates([p], project).length > 0)
+    if (!sides.length) { if (now && now.ddl > 0) return true; continue }
+    if (sides.some((p) => !source(p))) { if (f.path && now && !source(f.path) ? now.ddl > 0 : true) return true; continue }
+    sources.push({ f, now: now ? now.ddl : 0 })
+  }
+  if (!sources.length) return false
+  // the base's texts of those files, one git read per repository
+  const was = new Map()
+  for (const [repo, list] of Map.groupBy(sources.filter((x) => x.f.oldPath && x.f.status !== 'A'), (x) => x.f.repo)) {
+    const { abs, commit } = list[0].f
+    const tree = treeAt(abs, commit, list.map((x) => x.f.oldPath))
+    const want = list.map((x) => tree.get(x.f.oldPath)).filter((e) => e && e.size <= MAX_BYTES)
+    const got = blobs(abs, want)
+    for (const x of list) { const e = tree.get(x.f.oldPath), b = e && got.get(e.oid); if (b) was.set(`${repo}|${x.f.oldPath}`, b.toString('utf8')) }
+  }
+  const compare = []
+  for (const { f, now } of sources) {
+    const text = f.oldPath ? was.get(`${f.repo}|${f.oldPath}`) : null
+    const bits = (now || 0) | (text != null ? inspect(f.oldPath, text) || 0 : 0)
+    if (bits & ~(NOT_COMPARED | BINDING)) return true
+    if (!(bits & BINDING)) continue
+    if (f.status !== 'M' || text == null) return true // a file that came, went or moved: its declarations did
+    compare.push({ f, text })
+  }
+  if (!compare.length) return false
+  const items = compare.flatMap(({ f, text }) => asideOf(f.oldPath, text).map((ex) => ({ id: ex.id, path: f.oldPath, text, key: `${f.repo}\0${ex.id}\0${f.oldPath}` })))
+  const base = extractAside(items)
+  for (const { f, text } of compare) {
+    const ids = asideOf(f.oldPath, text).map((ex) => ex.id)
+    const cur = new Map(factsOf.all(f.repo, f.path).map((r) => [r.extractor.split('@')[0], r.facts]))
+    for (const id of new Set([...ids, ...[...cur.keys()].filter((k) => ['ts-types', 'serde'].includes(k))])) {
+      const b = base.get(`${f.repo}\0${id}\0${f.oldPath}`)
+      if (b instanceof Error || b === undefined || !cur.has(id)) return true
+      if (JSON.stringify(lineless(b)) !== JSON.stringify(lineless(JSON.parse(cur.get(id))))) return true
+    }
+  }
+  return false
+}
+
+// Files that moved since the last index, per repo (cheap: stat only, no parsing): code files, the
+// files data extractors read, the configuration declarations, and the files module resolution reads.
+// An index built by another grimoire version is stale as a whole: the next refresh rebuilds it with
+// the current rules.
+export function staleness(project, db) {
   const out = {}
   const schema = (() => { try { return db.prepare("SELECT value FROM meta WHERE key = 'schema'").get()?.value } catch { return null } })()
   if (schema && schema !== SCHEMA_VERSION) { for (const repo of project.repos) out[repo.name] = 'built by another grimoire version: rebuilt on the next query'; return out }
@@ -225,15 +280,18 @@ function staleness(project, db) {
       inputs.delete(p)
     }
     changed += inputs.size
-    const decls = new Map(db.prepare('SELECT path, size, mtime FROM config_inputs WHERE repo = ?').all(repo.name).map((f) => [f.path, f]))
-    for (const p of configDeclPaths(rels, project)) {
-      let st
-      try { st = lstatSync(path.join(repo.abs, p)) } catch { continue }
-      const k = decls.get(p)
-      if (!k || k.size !== st.size || k.mtime !== Math.floor(st.mtimeMs)) changed++
-      decls.delete(p)
+    for (const [table, paths] of [['config_inputs', configDeclPaths(rels, project)], ['resolve_inputs', resolveInputPaths(rels)]]) {
+      let tracked = new Map()
+      try { tracked = new Map(db.prepare(`SELECT path, size, mtime FROM ${table} WHERE repo = ?`).all(repo.name).map((f) => [f.path, f])) } catch {}
+      for (const p of paths) {
+        let st
+        try { st = lstatSync(path.join(repo.abs, p)) } catch { continue }
+        const k = tracked.get(p)
+        if (!k || k.size !== st.size || k.mtime !== Math.floor(st.mtimeMs)) changed++
+        tracked.delete(p)
+      }
+      changed += tracked.size
     }
-    changed += decls.size
     if (changed) out[repo.name] = `${changed} file(s) changed since`
   }
   return out

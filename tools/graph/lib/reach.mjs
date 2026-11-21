@@ -33,6 +33,12 @@ const ABSTRACT = new Set(['interface', 'trait', 'protocol'])
 // a type's members a call, an override and a receiver reach: methods, and fields (an annotated hook, a settings value)
 const MEMBERS = new Set(['method', 'field'])
 const CALL_KINDS = "('call','new','macro')"
+// What a test reaches a definition by, the same in graph_symbol, graph_overview and graph_diff: a call,
+// a definition passing it as a value (a registrar taking a handler), a call site naming its route (a
+// URL, a screen), and an import, which joins file nodes only: a test file importing a module whose
+// top-level code calls or registers it (file-level tests). Within TEST_DEPTH hops.
+export const TEST_EDGES = ['CALLS', 'REFERENCES', 'IMPORTS', 'ROUTES_TO']
+export const TEST_DEPTH = 6
 
 // ── dispatch ──
 export function dispatch(g, n) {
@@ -238,7 +244,10 @@ function grepRepo(abs, terms, project) {
 // whose edges, refs and imports already account for a hit (the targets, and everything the impact
 // reached is not needed: a hit is explained by its own line's edges).
 // opts.sites: the unlinked call sites already listed (unresolved()): their lines are explained.
-export function mentions(g, project, terms, { sites = [] } = {}) {
+// opts.explained: lines (`repo|path|line`) the answer explains otherwise, left out: the configuration
+// index's lines for a key (config.mjs explainedLines), given only when the answer prints that key's
+// readers and declarations.
+export function mentions(g, project, terms, { sites = [], explained = null } = {}) {
   const usable = terms.filter((t) => t.term.length >= MIN_NAME)
   const res = { hits: [], common: [], searched: usable.map((t) => t.term) }
   if (!usable.length) return res
@@ -249,13 +258,7 @@ export function mentions(g, project, terms, { sites = [] } = {}) {
   const otherDef = g.db.prepare("SELECT 1 FROM nodes WHERE file_id = ? AND line = ? AND name = ? AND kind != 'file' LIMIT 1")
   const edgeTo = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND kind IN ('CALLS','REFERENCES','EXTENDS','IMPLEMENTS')")
   const siteLines = new Set(sites.map((x) => `${x.ref.repo}|${x.ref.path}|${x.ref.line}`))
-  // a line the configuration index holds for one of the terms (a read, a declaration, a mapping):
-  // graph_config explains it, so it is not repeated as a mention
-  const cfgLines = new Set()
-  try {
-    const ts = usable.map((t) => t.term), ph = ts.map(() => '?').join(',')
-    for (const r of g.q(`SELECT repo, path, line FROM config WHERE key IN (${ph}) OR src_key IN (${ph})`, ...ts, ...ts)) cfgLines.add(`${r.repo}|${r.path}|${r.line}`)
-  } catch {} // an index without the table
+  const cfgLines = explained || new Set()
   // the lines of a GraphQL file inside a block description ("""…"""): prose, read once per file
   const descOf = new Map()
   const inDescription = (abs, rel, line) => {

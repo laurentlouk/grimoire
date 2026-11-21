@@ -16,6 +16,7 @@ import { readdirSync, statSync, existsSync, realpathSync, openSync, fstatSync, r
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { langOf, isContract } from './langs.mjs'
+import { CONFIG as JS_CONFIG } from './js-modules.mjs'
 import { loadConfig, mainCheckout } from '../../../scripts/project-config.mjs'
 
 export function projectRoot(explicit) {
@@ -104,6 +105,13 @@ export function compileGlobs(globs) {
     return new RegExp(`^${re}$|^${re}/`)
   })
 }
+
+// The files module resolution reads beside the code (resolve.mjs, js-modules.mjs): package.json,
+// tsconfig / jsconfig (and the tsconfig.*.json one `extends`), babel configs, workspace files, go.mod,
+// Cargo.toml. None is parsed as code, so the index tracks their hashes (resolve_inputs): one changed
+// re-resolves the repository.
+const RESOLVE_FILE = /(^|\/)(go\.mod|Cargo\.toml|[tj]sconfig[^/]*\.json)$/
+export const resolveInputPaths = (rels) => rels.filter((p) => (JS_CONFIG.test(p) || RESOLVE_FILE.test(p)) && !p.split('/').some((s) => SKIP_DIRS.has(s)))
 
 // The size cap of a file: a contract file's is the larger of the two caps.
 export const maxBytesOf = (project, rel) => (isContract(rel) ? Math.max(project.maxBytes, project.maxContractBytes || 0) : project.maxBytes)

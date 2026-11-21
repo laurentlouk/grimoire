@@ -29,7 +29,7 @@ const PLATFORM = /\.(ios|android|native|web)$/
 // a module's path with its code extension and platform suffix gone: `a/Button.ios.tsx` → `a/Button`
 export const platformBase = (p) => p.replace(JS_EXT, '').replace(PLATFORM, '')
 const SKIP = /(^|\/)(node_modules|\.git|dist|build|out|\.next|\.expo|coverage)\//
-const CONFIG = /(^|\/)(tsconfig\.json|jsconfig\.json|package\.json|pnpm-workspace\.yaml|lerna\.json|nx\.json|babel\.config\.(js|cjs|mjs|json)|\.babelrc(\.js|\.cjs|\.json)?)$/
+export const CONFIG = /(^|\/)(tsconfig\.json|jsconfig\.json|package\.json|pnpm-workspace\.yaml|lerna\.json|nx\.json|babel\.config\.(js|cjs|mjs|json)|\.babelrc(\.js|\.cjs|\.json)?)$/
 
 // JSON with comments and trailing commas (tsconfig's own dialect); null when it does not parse.
 export function jsonc(t) {

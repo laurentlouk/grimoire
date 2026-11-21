@@ -16,8 +16,8 @@ import { formOf } from './data/readers/redis-cmd.mjs'
 import { modelLinks, LEAD_SAYS, lackText } from './data/links.mjs'
 import { docRoots } from './docs.mjs'
 import { GUESSES, guessSql, HIDDEN_GUESSES } from './resolve.mjs'
-import { keyAnswer, readsOf, readsLines } from './config.mjs'
-import { dispatchStarts, dispatchLines, unresolved, unresolvedLines, mentions, mentionLines } from './reach.mjs'
+import { keyAnswer, readsOf, readsLines, explainedLines } from './config.mjs'
+import { dispatchStarts, dispatchLines, unresolved, unresolvedLines, mentions, mentionLines, TEST_EDGES, TEST_DEPTH } from './reach.mjs'
 import { routesServedBy, routeLines, routeTitle } from './route-graph.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
@@ -333,11 +333,12 @@ export class Graph {
       const rin = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind = 'REFERENCES'")
       const sup = this.q("SELECT e.kind, d.qualname FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.kind IN ('EXTENDS','IMPLEMENTS')", n.id)
       const sub = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind IN ('EXTENDS','IMPLEMENTS')")
-      // a test reaches it by calls, through a definition passing it as a value (a route, a handler), or by its route (URL, navigation)
-      const tests = [...this.walk([n.id], ['CALLS', 'REFERENCES', 'ROUTES_TO'], 'in', 4).keys()].map((id) => this.node(id)).filter((x) => x.is_test && x.id !== n.id)
+      // the test files reaching it (reach.mjs TEST_EDGES: calls, a definition passing it as a value, its
+      // route by URL or navigation, a test file importing a module whose top level registers it)
+      const tests = new Set([...this.walk([n.id], TEST_EDGES, 'in', TEST_DEPTH).keys()].map((id) => this.node(id)).filter((x) => x.is_test && x.id !== n.id).map((x) => x.file_id))
       const served = routesServedBy(this, [n.id])
       if (served.length) lines.push(`  routes: ${served.slice(0, 6).map((r) => `${routeTitle(r)} (#r${r.id})`).join(', ')}${served.length > 6 ? `, … ${served.length - 6} more` : ''}`)
-      lines.push(`  callers ${cin} · callees ${cout}${rin ? ` · referenced as a value by ${rin}` : ''}${sup.length ? ` · ${sup.map((s) => `${s.kind.toLowerCase()} ${s.qualname}`).join(', ')}` : ''}${sub ? ` · subtypes ${sub}` : ''} · tests reaching it ${tests.length}`)
+      lines.push(`  callers ${cin} · callees ${cout}${rin ? ` · referenced as a value by ${rin}` : ''}${sup.length ? ` · ${sup.map((s) => `${s.kind.toLowerCase()} ${s.qualname}`).join(', ')}` : ''}${sub ? ` · subtypes ${sub}` : ''} · test files reaching it ${tests.size}`)
       return lines.join('\n')
     })].filter(Boolean).join('\n\n')
   }
@@ -399,21 +400,25 @@ export class Graph {
     }
     const t = this.targets(target, { repo })
     const d0 = Math.max(1, Math.min(Number(depth) || 3, 6))
-    // a configuration key no definition holds (`AUTH_JWT_SECRET`, `auth.secret`): who reads it, what it
-    // sets and who reads that (config.mjs), the reach of those readers, then its other mentions
-    if (t.error && t.error.startsWith('No symbol or file')) {
-      const key = String(target).trim()
-      const a = /^[A-Za-z_][\w.:-]*$/.test(key) ? keyAnswer(this, key, repo || null) : null
-      if (a) {
-        const out = [`Impact of the configuration key ${a.lines[0]} — depth ${d0}`, ...a.lines.slice(1).map((l) => `  ${l}`)]
-        const readers = [...new Map(a.readers.filter((r) => r.node_id).map((r) => [r.node_id, r])).keys()].map((id) => this.node(id)).filter(Boolean)
-        if (readers.length) out.push(`What reaches its readers (${readers.length}):`, ...this.reachLines(readers, { depth: d0, strict: !!strict, project: null, text: false, config: false }))
-        if (project && withText) {
-          const m = mentions(this, project, [{ term: key, targets: [{ id: -1, name: key, kind: 'function', repo: null, path: null, line: -1 }] }])
-          if (m.searched.length) out.push('Its name as text, the reads and declarations above left out:', ...mentionLines(this, m))
-        }
-        return out.join('\n')
+    // a configuration key (`AUTH_JWT_SECRET`, `auth.secret`): who reads it, what it sets and who reads
+    // that (config.mjs), the reach of those readers, then its other mentions, the lines the config
+    // index holds for it left out (the view above explains them). A code definition holding the name
+    // too (a settings class's `APP_PORT` field) is answered after it, as a data entity's is.
+    const key = String(target).trim()
+    const a = (!t.error || t.error.startsWith('No symbol or file')) && /^[A-Za-z_][\w.:-]*$/.test(key) ? keyAnswer(this, key, repo || null) : null
+    if (a) {
+      const out = []
+      if (!t.error) out.push(`"${target}" names a configuration key and ${plural(t.hits.length, 'code definition')}: the key's impact first, then the code's.`)
+      out.push(`Impact of the configuration key ${a.lines[0]} — depth ${d0}`, ...a.lines.slice(1).map((l) => `  ${l}`))
+      const readers = [...new Map(a.readers.filter((r) => r.node_id).map((r) => [r.node_id, r])).keys()].map((id) => this.node(id)).filter(Boolean)
+      if (readers.length) out.push(`What reaches its readers (${readers.length}):`, ...this.reachLines(readers, { depth: d0, strict: !!strict, project: null, text: false, config: false }))
+      const explained = explainedLines(this, [key])
+      if (t.error && project && withText) {
+        const m = mentions(this, project, [{ term: key, targets: [{ id: -1, name: key, kind: 'function', repo: null, path: null, line: -1 }] }], { explained })
+        if (m.searched.length) out.push('Its name as text, the reads and declarations above left out:', ...mentionLines(this, m))
       }
+      if (!t.error) out.push('', ...[t.note, `Impact of ${t.hits.map((h) => this.row(h)).join(' + ')} — depth ${d0}`].filter(Boolean), ...this.reachLines(t.hits, { depth: d0, strict: !!strict, project, text: withText, explained }))
+      return out.join('\n')
     }
     // no definition by that name (code the index does not see, another language, a name being
     // introduced): its mentions are still what a grep would find, sorted
@@ -546,7 +551,10 @@ export class Graph {
   // The impact of a set of nodes: reached code by file, tests, dispatch, unresolved sites, mentions,
   // co-change. `skipFiles`: files left out of the listing; `members: false` walks from the hits
   // alone, not from a file's definitions or a type's members (a diff lists the changed ones itself).
-  reachData(hits, { depth = 3, strict = false, project = null, text = true, skipFiles = null, members = true, config: withConfig = true } = {}) {
+  // `explained`: lines the answer explains otherwise (a configuration key's view printed above), left
+  // out of the mentions. `config`, `sites`, `routes`, `cochange` false: those parts are not computed
+  // (an answer that does not print them: graph_diff reads the reach and the dispatch alone).
+  reachData(hits, { depth = 3, strict = false, project = null, text = true, skipFiles = null, members = true, config: withConfig = true, explained = null, sites: withSites = true, routes: withRoutes = true, cochange: withCochange = true } = {}) {
     let start = hits.map((h) => h.id)
     const files = new Set(hits.map((h) => h.file_id))
     for (const h of hits) {
@@ -558,7 +566,7 @@ export class Graph {
     start = [...new Set(start.concat(disp.extra))]
     const reached = this.walk(start, ['CALLS', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS', 'ROUTES_TO'], 'in', depth, strict)
     // the routes these definitions handle (or their class does): reached by URL or by navigation
-    const routes = routesServedBy(this, [...new Set([...start, ...hits.filter((h) => h.parent_id).map((h) => h.parent_id)])])
+    const routes = withRoutes ? routesServedBy(this, [...new Set([...start, ...hits.filter((h) => h.parent_id).map((h) => h.parent_id)])]) : []
     const byFile = new Map()
     const tests = []
     for (const [id, info] of reached) {
@@ -571,7 +579,7 @@ export class Graph {
       byFile.get(key).push([n, info])
     }
     const named = hits.filter((h) => h.kind !== 'file')
-    const sites = unresolved(this, named)
+    const sites = withSites ? unresolved(this, named) : []
     let text_ = null, ambiguous = []
     if (project && text) {
       const terms = new Map()
@@ -589,10 +597,10 @@ export class Graph {
       }
       // a route's declaration naming its handler (`component={X}`, `router.get('/a', x)`) is explained by the route
       const declared = routes.map((x) => ({ ref: { repo: x.repo, path: x.fpath, line: x.line } }))
-      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })), { sites: [...sites, ...declared] })
+      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })), { sites: [...sites, ...declared], explained })
     }
     const cochange = []
-    for (const fid of files) {
+    if (withCochange) for (const fid of files) {
       const f = this.one('SELECT repo, path FROM files WHERE id = ?', fid)
       for (const c of this.q('SELECT b, n FROM cochange WHERE repo = ? AND a = ? ORDER BY n DESC LIMIT 8', f.repo, f.path)) cochange.push({ repo: f.repo, from: f.path, path: c.b, n: c.n })
     }

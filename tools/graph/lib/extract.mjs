@@ -54,8 +54,8 @@ const FN_VALUE = /^(arrow_function|function_expression|function|generator_functi
 const ANON_FN = /^(arrow_function|function_expression|function|generator_function|lambda|lambda_expression|func_literal|closure_expression|lambda_literal|anonymous_function)$/
 // The names in scope: a callable's own, then those of the definitions and callbacks around it.
 const scope = (up) => ({ own: new Set(), up, add(v) { this.own.add(v) }, has(v) { for (let s = this; s; s = s.up) if (s.own.has(v)) return true; return false } })
-function valueSlots(node, isCall) {
-  const t = node.type
+const VALUE_ANY = new Set([...VALUE_RIGHT, ...VALUE_FIELD, ...VALUE_ALL])
+function valueSlots(node, isCall, t = node.type) {
   if (isCall) {
     let args = node.childForFieldName('arguments')
     if (!args) { const suffix = named(node).find((c) => c.type === 'call_suffix'); args = suffix ? named(suffix).find((c) => c.type === 'value_arguments') : null } // Kotlin
@@ -89,6 +89,7 @@ function valueNames(v, spec, out = [], d = 0) {
   return out
 }
 
+const NO_IMPORTS = Object.freeze([])
 // file: the file's repository path, which names a definition that has no name of its own (a default export).
 export function extract(tree, lang, isTestFile, file = null) {
   const spec = LANGS[lang].spec
@@ -97,6 +98,15 @@ export function extract(tree, lang, isTestFile, file = null) {
   const ref = (r) => { const k = `${r.src}|${r.kind}|${r.name}|${r.qual}|${r.fromType || ''}`; if (!seen.has(k)) { seen.add(k); refs.push(r) } }
   // A call on a variable whose type the syntax states carries that type (see bindings.mjs).
   const typed = (qual, ctx) => (qual && ctx.types.get(varName(qual))) || null
+  const local = (ctx, name) => !!(ctx.locals && ctx.locals.has(varName(name)))
+  // a function or method named as a value (resolve.mjs links it as REFERENCES)
+  const value = (c, ctx, line) => {
+    if (!c.name || !IDENT.test(c.name) || SELFISH.test(c.name)) return
+    const head = c.qual ? c.qual.split(/\.|::|->|\?\./)[0] : null, qtype = c.qual ? typed(c.qual, ctx) : null
+    // a local's own property, its type unknown (`row.id`), or a local named like a function
+    if (c.qual ? !SELFISH.test(head) && local(ctx, head) && !qtype : local(ctx, c.name)) return
+    ref({ kind: 'ref', name: c.name, qual: (c.qual || '').slice(0, 80), qtype, line, src: ctx.fn })
+  }
 
   // ctx: parent = enclosing symbol index (-1 = file), fn = enclosing callable (the caller of a
   // call found here), scopeType = the type an impl/extension block attaches its members to,
@@ -105,34 +115,26 @@ export function extract(tree, lang, isTestFile, file = null) {
   const walk = (node, ctx) => {
     const t = node.type
     const line = node.startPosition.row + 1
-    for (const [v, ty] of bindingsOf(node, spec)) ctx.types.set(v, ty)
+    const bs = bindingsOf(node, spec)
+    for (let i = 0; i < bs.length; i++) ctx.types.set(bs[i][0], bs[i][1])
     // the names a callable binds (parameters, locals, loop variables): a value by that name is the local
-    if (ctx.locals) for (const v of localsOf(node)) ctx.locals.add(varName(v))
+    if (ctx.locals) { const ls = localsOf(node); for (let i = 0; i < ls.length; i++) ctx.locals.add(varName(ls[i])) }
 
-    const found = spec.imports[t] ? spec.imports[t](node).filter((i) => i && i.source) : []
+    const found = spec.imports[t] ? spec.imports[t](node).filter((i) => i && i.source) : NO_IMPORTS
     for (const i of found) imports.push({ ...i, names: (i.names || []).filter(Boolean), line })
 
     const call = !found.length && spec.calls[t] // `require('x')` is an import, not a call
-    const local = (name) => !!(ctx.locals && ctx.locals.has(varName(name)))
-    // a function or method named as a value (resolve.mjs links it as REFERENCES)
-    const value = (c) => {
-      if (!c.name || !IDENT.test(c.name) || SELFISH.test(c.name)) return
-      const head = c.qual ? c.qual.split(/\.|::|->|\?\./)[0] : null, qtype = c.qual ? typed(c.qual, ctx) : null
-      // a local's own property, its type unknown (`row.id`), or a local named like a function
-      if (c.qual ? !SELFISH.test(head) && local(head) && !qtype : local(c.name)) return
-      ref({ kind: 'ref', name: c.name, qual: (c.qual || '').slice(0, 80), qtype, line, src: ctx.fn })
-    }
     if (call) {
       const c = (spec.callee && spec.callee(node)) || calleeOf(call[0] ? node.childForFieldName(call[0]) : node)
       if (c && c.name && IDENT.test(c.name)) ref({ kind: call[1], name: c.name, qual: (c.qual || '').slice(0, 80), qtype: typed(c.qual, ctx), line, src: ctx.fn })
       // `send_welcome.delay(…)`, `handler.apply_async()`, `on_save.send()`: a call on a function is a use
       // of that function as a value (a task queued, a signal sent)
       // (a JSX tag's qualifier is a namespace or an object of components: `<UI.Row>` uses no function `UI`)
-      if (c && c.qual && IDENT.test(c.qual) && !SELFISH.test(c.qual) && spec.bareValues !== false && !/^jsx_/.test(t)) value({ name: c.qual, qual: '' })
+      if (c && c.qual && IDENT.test(c.qual) && !SELFISH.test(c.qual) && spec.bareValues !== false && !/^jsx_/.test(t)) value({ name: c.qual, qual: '' }, ctx, line)
       // Ruby: a lowercase receiver that is no local is a call on self (`active.order(…)`, `user.name`)
-      else if (c && c.qual && spec.bareValues === false && /^[\p{Ll}_][\p{L}\p{N}_]*[!?]?$/u.test(c.qual) && !SELFISH.test(c.qual) && !local(c.qual)) ref({ kind: 'call', name: c.qual, qual: '', qtype: null, line, src: ctx.fn })
+      else if (c && c.qual && spec.bareValues === false && /^[\p{Ll}_][\p{L}\p{N}_]*[!?]?$/u.test(c.qual) && !SELFISH.test(c.qual) && !local(ctx, c.qual)) ref({ kind: 'call', name: c.qual, qual: '', qtype: null, line, src: ctx.fn })
     }
-    if (!found.length) for (const v of valueSlots(node, !!call)) for (const c of valueNames(v, spec)) value(c)
+    if (!found.length && (call || VALUE_ANY.has(t))) for (const v of valueSlots(node, !!call, t)) for (const c of valueNames(v, spec)) value(c, ctx, line)
     if (spec.tokenCalls && spec.tokenCalls[t]) for (const c of spec.tokenCalls[t](node, anc)) if (IDENT.test(c.name)) ref({ kind: 'call', name: c.name, qual: c.qual, qtype: typed(c.qual, ctx), line, src: ctx.fn })
 
     const d = spec.defs[t]
@@ -141,7 +143,7 @@ export function extract(tree, lang, isTestFile, file = null) {
     // a framework's declaration in a class or module body (langs.mjs members): a method of that type
     const ownerSym = ctx.parent >= 0 ? symbols[ctx.parent] : null
     const mem = !kind && spec.members && spec.members[t] && ownerSym && MEMBER_OWNERS.has(ownerSym.kind) ? spec.members[t](node) : null
-    if (!mem && spec.valueRefs && spec.valueRefs[t]) for (const c of spec.valueRefs[t](node)) value(c)
+    if (!mem && spec.valueRefs && spec.valueRefs[t]) for (const c of spec.valueRefs[t](node)) value(c, ctx, line)
     let next = ctx
     if (mem) {
       const names = [...new Set(mem.names)].filter((x) => IDENT.test(x))

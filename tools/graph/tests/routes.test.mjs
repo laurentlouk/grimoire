@@ -73,7 +73,7 @@ console.log('\n1b · declarations, file by file')
 {
   const { loadRuntime } = await import('../lib/deps.mjs')
   const { extract } = await import('../lib/extract.mjs')
-  const { extractRoutes } = await import('../lib/routes.mjs')
+  const { extractRoutes, mayHoldRoutes } = await import('../lib/routes.mjs')
   const rt = await loadRuntime({ install: false })
   const read = async (lang, rel, src) => { const p = await rt.parserFor(lang); const t = p.parse(src); try { const r = extract(t, lang, false); return extractRoutes(t, lang, rel, r) || { routes: [], refs: [], scopes: [], mounts: [] } } finally { t.delete() } }
   const rows = (f) => f.routes.map((r) => `${r.method} ${r.path} ${r.handler ? `${r.handler.qual ? r.handler.qual + '.' : ''}${r.handler.name}` : '-'}${r.middleware.length ? ` [${r.middleware.join(',')}]` : ''}`)
@@ -147,6 +147,29 @@ console.log('\n1b · declarations, file by file')
   ok(rows(urls).includes('GET /v1/items h') && rows(urls).includes('GET /webhook/{…} w') && urls.mounts.some((m) => m.prefix === '/mnt') && !/canary-route|example\.com|ZxCvBnM/.test(JSON.stringify(urls)), `express: a route or a mount written as a URL keeps its path alone; a credential-shaped segment is {…} (${rows(urls)})`)
   const railsUrl = await read('ruby', 'config/routes.rb', "Rails.application.routes.draw do\n  get '/old', to: redirect('https://u:canary-route-60@h/new?x=canary-route-61')\n  get '/p', to: 'https://u:canary-route-62@h/#canary'\n  get '/q', to: 'posts#show'\n  get 'https://canary-route-63.example.com/r?x=1', to: 'admin/posts#index'\nend\n")
   ok(rows(railsUrl).includes('GET /p -') && rows(railsUrl).includes('GET /q posts.show') && rows(railsUrl).includes('GET /r admin/posts.index') && !/canary/.test(JSON.stringify(railsUrl.routes)), `rails: a \`to:\` that is a URL is no handler; a path written as a URL keeps its path (${rows(railsUrl)})`)
+  // the indexer's pre-check (mayHoldRoutes) skips the walk of a file that can hold nothing: every
+  // fixture file of every test reads the same with it as without it
+  const { readdirSync, statSync } = await import('node:fs')
+  const { langOf, LANGS } = await import('../lib/langs.mjs')
+  const all = (d) => readdirSync(d).flatMap((x) => { const p = path.join(d, x); return statSync(p).isDirectory() ? all(p) : [p] })
+  const FIX = path.join(HERE, 'fixtures')
+  let files = 0, skippedN = 0
+  const differ = []
+  for (const abs of all(FIX)) {
+    const rel = path.relative(FIX, abs).split(path.sep).join('/'), lang = langOf(rel)
+    if (!lang || lang === 'other' || LANGS[lang]?.hand) continue
+    const p = await rt.parserFor(lang)
+    if (!p) continue
+    const src = readFileSync(abs, 'utf8'), t = p.parse(src)
+    try {
+      const r = extract(t, lang, false, rel)
+      files++
+      if (!mayHoldRoutes(lang, rel, src)) skippedN++
+      if (JSON.stringify(extractRoutes(t, lang, rel, r)) !== JSON.stringify(extractRoutes(t, lang, rel, r, src))) differ.push(rel)
+    } finally { t.delete() }
+  }
+  ok(files > 100 && skippedN > 0 && !differ.length, `the walk's pre-check: ${skippedN} of ${files} fixture files skipped, none reading differently${differ.length ? ` (${differ.slice(0, 5).join(', ')})` : ''}`)
+  ok(!mayHoldRoutes('typescript', 'src/a.ts', "import { x } from './a/b'\nexport const y = x(1)\n") && mayHoldRoutes('typescript', 'src/a.ts', "export const u = '/api/' + id\n") && mayHoldRoutes('typescript', 'src/a.ts', 'navigation.navigate(name)\n') && mayHoldRoutes('python', 'blog/urls.py', 'urlpatterns = []\n'), 'the pre-check: an import\'s path is no URL; a string with a slash, a navigation call, a urls.py are walked')
 }
 
 // ── 2 · the fixtures ──
@@ -278,7 +301,7 @@ const dm = await ask('impact', { target: 'DemoScreen' })
 lacks(dm, 'rnav/App.tsx  :13', 'impact: the route\'s declaration naming the screen is no unexplained mention')
 const sym = await ask('symbol', { symbol: 'ArticleList' })
 has(sym, 'routes: GET /api/articles/', 'symbol: the routes it handles')
-has(sym, 'tests reaching it 1', 'symbol: the test reaching it by URL counts')
+has(sym, 'test files reaching it 1', 'symbol: the test reaching it by URL counts')
 const ov = await ask('overview', { repo: 'gin' })
 has(ov, 'routes: 4 http · top prefixes /api/articles (2), /api/users (2)', 'overview: route count and top prefixes')
 has(ov, 'Route handlers and screens', 'overview: route handlers listed as entry points through HTTP')
@@ -296,6 +319,48 @@ has(await ask('overview', { repo: 'gin' }), 'articles  1 file(s) · tests reach 
   has(d, 'gin/articles/unit_test.go  (distance 1)', 'diff: the test calling its URL is a test to run')
   lacks(d.split('Changed code no test reaches')[1] || '', 'ArticleList', 'diff: … and the handler is not "no test reaches"')
   git(path.join(P, 'gin'), 'checkout', '-q', '--', '.')
+}
+// graph_diff: a route that the base served and the branch does not, while code still calls it
+{
+  // a handler removed from its controller: its route goes, the e2e test calling it stays
+  const f = path.join(P, 'nest/src/cats/cats.controller.ts')
+  const was = readFileSync(f, 'utf8')
+  writeFileSync(f, was.replace("  @Get(':id')\n  findOne(@Param('id') id: string): string {\n    return id\n  }\n\n", ''))
+  const d = await ask('diff', { base: 'HEAD', repo: 'nest' })
+  has(d, '- CatsController.findOne  method', 'diff: the handler removed')
+  has(d, 'Routes removed or moved (1)', 'diff: the route it served, gone')
+  has(d, 'GET /api/cats/:id  was nest/src/cats/cats.controller.ts:14 → findOne  removed', '… its path composed as the index composes it (the global prefix)')
+  has(d, 'caller  nest/test/cats.e2e-spec.ts:5  at file level  (template)  test', '… the test still calling it')
+  has(d, 'Risk: high', '… a route still called and served by nothing: high risk')
+  has(d, 'route GET /api/cats/:id removed is still named outside the lines this diff changed (1 place(s))', '… the reason')
+  lacks(d, 'GET /api/cats  was', '… the routes left in the file are not lost')
+  writeFileSync(f, was)
+}
+{
+  // a route file moved: its URL changes with its folder, its callers stay on the old one
+  const n = path.join(P, 'next')
+  git(n, 'mv', 'app/api/users', 'app/api/people')
+  const d = await ask('diff', { base: 'HEAD', repo: 'next' })
+  has(d, 'Routes removed or moved (2)', 'diff: a route file moved, both its routes')
+  has(d, 'GET /api/users  was next/app/api/users/route.ts:1 → GET  moved with its file (now GET /api/people, POST /api/people)', '… where it serves now')
+  has(d, 'caller  next/src/users.ts:7  in addUser  (exact)', '… the POST call site still naming the old URL')
+  has(d, 'caller  next/src/users.ts:2  in loadUsers  (exact)', '… and the GET one')
+  has(d, 'Risk: high', '… high risk')
+  git(n, 'reset', '-q', '--hard')
+  // a route file removed whose URL another route still answers (a call site's own repository): no caller lost
+  // a handler changed that only call sites reach (by URL) and no test: changed code with callers, untested
+  const rf = path.join(n, 'app/api/users/route.ts')
+  writeFileSync(rf, readFileSync(rf, 'utf8').replace('{ status: 201 }', '{ status: 202 }'))
+  const c = await ask('diff', { base: 'HEAD', repo: 'next' })
+  has(c, '~ POST  function  next/app/api/users/route.ts:5  body', 'diff: a route handler changed')
+  has(c, 'Risk: medium: 1 changed definition(s) with callers and no test reaching them', 'diff: … its call sites by URL are callers (ROUTES_TO), and no test reaches it')
+  git(n, 'checkout', '-q', '--', '.')
+  git(n, 'rm', '-q', 'pages/api/hello.ts')
+  const h = await ask('diff', { base: 'HEAD', repo: 'next' })
+  has(h, '* /api/hello  was next/pages/api/hello.ts:1 → handler  removed with its file', 'diff: a route file removed')
+  has(h, '0 caller(s), 0 in tests, 0 not changed by this diff', '… the call site naming its URL reaches another repository\'s route, as it did: not counted')
+  lacks(h, 'Risk: high', '… so no high risk')
+  git(n, 'reset', '-q', '--hard')
 }
 
 // ── 4 · incremental, and no literal ──

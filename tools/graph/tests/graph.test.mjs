@@ -33,7 +33,7 @@
 //  prior index that installed it into the user cache. Without it the file is skipped, except
 //  under CI, where a missing runtime fails.
 import { spawnSync, spawn } from 'node:child_process'
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, realpathSync, mkdirSync, existsSync, utimesSync } from 'node:fs'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, realpathSync, mkdirSync, existsSync, utimesSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1104,7 +1104,7 @@ console.log('\n6d · framework members (scopes, associations, annotated fields) 
   has(fc, 'queue  function  py/app/signals.py:7  [import]', 'Python: `task.apply_async(…)` on an imported task too')
   lacks(fc, 'shadow', 'Python: a parameter named like the function is the parameter, never a reference')
   lacks(fc, 'by_name', 'Python: a string naming it is never a reference')
-  has(await ask('symbol', { symbol: 'send_welcome' }), 'referenced as a value by 2 · tests reaching it 1', 'Python: the test reaching the task through the code queueing it')
+  has(await ask('symbol', { symbol: 'send_welcome' }), 'referenced as a value by 2 · test files reaching it 1', 'Python: the test reaching the task through the code queueing it')
   const fi = await ask('impact', { target: 'send_welcome' })
   has(fi, 'queue:7  d1 [import] by reference', 'impact: a reference is walked, labelled by reference')
   has(fi, 'test_queue  function test  py/tests/test_signals.py:4  d2', 'impact: … and the tests on that path')
@@ -1112,12 +1112,19 @@ console.log('\n6d · framework members (scopes, associations, annotated fields) 
   has(await ask('callers', { symbol: 'on_user_saved' }), 'app/signals.py  file  py/app/signals.py  [import]', 'Python: `signal.connect(handler)` at top level references the handler')
 
   const al = await ask('symbol', { symbol: 'ArticleList' })
-  has(al, 'referenced as a value by 1 · tests reaching it 1', 'Go: a handler passed to `router.GET` is reached by the test calling the registrar')
+  has(al, 'referenced as a value by 1 · test files reaching it 1', 'Go: a handler passed to `router.GET` is reached by the test calling the registrar')
   const ai = await ask('impact', { target: 'ArticleList' })
   has(ai, 'RegisterArticleRoutes:5  d1 [same-file] by reference', 'Go: the registrar passing it as a value is in the impact')
   has(ai, 'TestArticles  function test  gin/articles/unit_test.go:5  d2', 'Go: … and so is the test hitting the registrar')
   has(await ask('callees', { symbol: 'RegisterArticleRoutes' }), 'Functions it passes or stores as a value (by reference):\n  ArticleList', 'callees: the values a function passes are listed apart from its calls')
-  has(await ask('overview', { repo: 'gin' }), 'tests reach 75% of 4 functions', 'overview: test reach follows references (the handlers registered, not the one never registered)')
+  const ov = await ask('overview', { repo: 'gin' })
+  has(ov, 'tests reach 75% of 4 functions', 'overview: test reach follows references (the handlers registered, not the one never registered)')
+  // a function nothing calls but something passes as a value is reached through what takes it: no entry point
+  writeFileSync(path.join(FR, 'py/app/hooks.py'), 'def audit(x):\n    return x\n\n\ndef on_signup(user):\n    audit(user)\n    return user\n\n\ndef cli_main(argv):\n    audit(argv)\n\n\nregister_hook(on_signup)\n')
+  const entries = ((await ask('overview', { repo: 'py' })).split('Entry points')[1] || '').split('Most used')[0]
+  has(entries, 'cli_main  function  py/app/hooks.py:10', 'overview: a function nothing calls or passes is an entry point')
+  lacks(entries, 'on_signup', 'overview: … one passed as a value at top level (a hook registered) is not')
+  unlinkSync(path.join(FR, 'py/app/hooks.py'))
 
   // TypeScript: class fields are definitions (fields), literal-free
   const bx = await ask('symbol', { symbol: 'Box' })
