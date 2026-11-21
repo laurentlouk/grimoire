@@ -19,7 +19,12 @@
 // or a standard-library method name (COMMON_METHODS) on a receiver whose type the syntax does not
 // state, stays unresolved: most such calls go to the standard library or a dependency. So does a call
 // qualified by a repository type that declares no member of that name, itself or up its supertypes
-// (`Story.where`, `Hat.active` with no scope of that name): it is inherited from a framework.
+// (`Story.where`, `Hat.active` with no scope of that name): it is inherited from a framework. So does
+// `super.m()` / `super().m()` the class's supertypes in the repository do not declare (same-class when
+// they do), a call on a JavaScript runtime object (`console`, `window`, `JSON` …), a call typed by a
+// name the file imports from a dependency, and a JavaScript name whose import resolved to a repository
+// file that defines nothing by it (never a guess elsewhere). A name guess for production code never
+// lands on test-support code (a mock, a fixture, a story).
 //
 // A field (a class's annotated attribute, a TypeScript field) and a member a framework call declares
 // (Ruby `scope`, `has_many`, `attr_reader`, `delegate`: node via 'framework') are reached only by
@@ -51,13 +56,17 @@ const REFERABLE = new Set(['function', 'method'])
 const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'enum', 'protocol', 'module', 'object', 'type'])
 const TYPE_ONLY = new Set(['type', 'interface'])
 const SELF = /^(self|this|Self|super|cls|static|\$this|@)$/
+// the runtime's own objects in JavaScript: a call on one is the platform's, never the repository's
+// the runtime's own functions and constructors, called bare (`Error(…)`, `new Map()`, `fetch(…)`)
+const JS_BUILTINS = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'AggregateError', 'Map', 'Set', 'WeakMap', 'WeakSet', 'WeakRef', 'Date', 'Promise', 'Symbol', 'Number', 'String', 'Boolean', 'BigInt', 'Array', 'Object', 'RegExp', 'Proxy', 'URL', 'URLSearchParams', 'Blob', 'File', 'FileReader', 'FormData', 'Headers', 'Request', 'Response', 'AbortController', 'TextEncoder', 'TextDecoder', 'Image', 'Event', 'CustomEvent', 'Worker', 'WebSocket', 'IntersectionObserver', 'ResizeObserver', 'MutationObserver', 'fetch', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'requestAnimationFrame', 'queueMicrotask', 'structuredClone', 'parseInt', 'parseFloat', 'encodeURIComponent', 'decodeURIComponent', 'atob', 'btoa', 'require'])
+const JS_GLOBALS = new Set(['console', 'window', 'document', 'globalThis', 'global', 'process', 'navigator', 'JSON', 'Math', 'Promise', 'Object', 'Array', 'Reflect', 'Intl', 'Date', 'Number', 'String', 'jest'])
 const noExt = (p) => p.replace(/\.[^./]+$/, '')
 
 // rels: the repository's file list (project.mjs listPaths), when the caller has it already.
 export function resolveRepo(db, repo, repoAbs, rels = null) {
-  const files = db.prepare('SELECT id, path, lang, node_id FROM files WHERE repo = ?').all(repo)
+  const files = db.prepare('SELECT id, path, lang, node_id, is_test FROM files WHERE repo = ?').all(repo)
   const fileById = new Map(files.map((f) => [f.id, { ...f, family: familyOf(f.lang), dir: path.posix.dirname(f.path) }]))
-  const nodes = db.prepare('SELECT n.id, n.file_id, n.kind, n.name, n.parent_id, n.container, n.via FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ?').all(repo)
+  const nodes = db.prepare('SELECT n.id, n.file_id, n.kind, n.name, n.parent_id, n.container, n.via, n.is_test FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ?').all(repo)
   const nodeById = new Map(nodes.map((n) => [n.id, n]))
 
   db.prepare('DELETE FROM edges WHERE src IN (SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ?)').run(repo)
@@ -179,7 +188,8 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
   // Per file: what its imports bind. names: local → { orig, files }; quals: alias → files.
   const imports = db.prepare('SELECT i.id, i.file_id, i.source, i.names, i.alias, i.flags, i.line FROM imports i JOIN files f ON f.id = i.file_id WHERE f.repo = ?').all(repo)
   const bind = new Map()
-  const bindingOf = (fid) => { if (!bind.has(fid)) bind.set(fid, { names: new Map(), quals: new Map(), files: new Set() }); return bind.get(fid) }
+  // spaces: the names a namespace import binds (`import * as UI`, `const ui = require('./ui')`)
+  const bindingOf = (fid) => { if (!bind.has(fid)) bind.set(fid, { names: new Map(), quals: new Map(), files: new Set(), spaces: new Set() }); return bind.get(fid) }
   const edgeIns = db.prepare('INSERT INTO edges(src, dst, kind, confidence, line) VALUES(?, ?, ?, ?, ?)')
   const setResolved = db.prepare('UPDATE imports SET resolved = ? WHERE id = ?')
   const importEdges = new Set()
@@ -196,7 +206,7 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
     }
     const external = targets.length === 0
     for (const n of imp.names) { const [local, orig = local] = n.split('='); b.names.set(local, { orig, files: targets, external }) }
-    if (imp.alias) b.quals.set(imp.alias, { files: targets, external })
+    if (imp.alias) { b.quals.set(imp.alias, { files: targets, external }); b.spaces.add(imp.alias) }
     // `use std::fs; fs::read()`, `import a.b.Helper; Helper.help()`: an imported name used as a qualifier.
     for (const n of imp.names) { const [local] = n.split('='); if (!b.quals.has(local)) b.quals.set(local, { files: targets, external }) }
   }
@@ -207,7 +217,11 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
   // a contract hint (code implementing an API contract) and a GraphQL selection are linked apart,
   // once every call is (contracts.mjs linkContracts)
   const contractRefs = allRefs.filter((r) => r.kind === 'contract' || r.kind === 'select')
-  const refs = allRefs.filter((r) => r.kind !== 'contract' && r.kind !== 'select')
+  // `export const X = Y` (Y a name the file imports): X is Y under another name, followed like a barrel's
+  // re-export (extract.mjs records it as an `alias` ref)
+  const aliases = new Map()
+  for (const r of allRefs) if (r.kind === 'alias') { if (!aliases.has(r.file_id)) aliases.set(r.file_id, new Map()); aliases.get(r.file_id).set(r.name, r.qual) }
+  const refs = allRefs.filter((r) => r.kind !== 'contract' && r.kind !== 'select' && r.kind !== 'alias')
     .sort((a, b) => (a.kind === 'extends' || a.kind === 'implements' ? 0 : 1) - (b.kind === 'extends' || b.kind === 'implements' ? 0 : 1))
   const supers = new Map()
   // Members of `types` named like the candidates, else of their supertypes, nearest level first:
@@ -227,22 +241,46 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
   const seen = new Set()
   const emit = (src, dst, kind, conf, line) => { const k = `${src}|${dst}|${kind}`; if (seen.has(k) || src === dst && kind !== 'CALLS') return; seen.add(k); edgeIns.run(src, dst, kind, conf, line) }
   const inFiles = (cands, files) => cands.filter((c) => files.some((f) => f.id === c.file_id))
-  // The files a JavaScript barrel passes `name` on from, up to three files deep, until `found` holds;
-  // null when one of them takes it from a dependency.
-  const reexported = (files, name, found) => {
-    let level = files
+  // a definition of `name` in one of `fs` of the kinds `ok` takes (by default, what a value can be: a
+  // TypeScript type or interface is none)
+  const VALUE_KIND = (c) => !TYPE_ONLY.has(c.kind)
+  const definesIn = (fs, name, ok = VALUE_KIND) => (byName.get(`js|${name}`) || []).some((c) => ok(c) && fs.some((f) => f.id === c.file_id))
+  // Where a JavaScript barrel takes `name` from, up to three files deep: `export { X } from './x'`,
+  // `export * from './x'`, `export { Y as X } from './y'`, `export const X = Y` with Y imported. The
+  // files that define it and the name they define it by ({ files: [] } when none does); null when one of
+  // them takes it from a dependency.
+  const reexported = (files, name, ok = VALUE_KIND) => {
+    let level = files.map((f) => [f, name])
     for (let d = 0; d < 3; d++) {
-      const next = new Set()
-      for (const f of level) {
+      const next = new Map()
+      for (const [f, nm] of level) {
         const bb = bind.get(f.id)
         if (!bb) continue
-        const n = bb.names.get(name)
-        if (n) { if (n.external) return null; for (const t of n.files) next.add(t) } else for (const id of bb.files) next.add(fileById.get(id))
+        let n = bb.names.get(nm)
+        const y = !n && aliases.get(f.id)?.get(nm)
+        if (y && y.includes('.')) { // `export const Slot = Header.Slot`: a member of a namespace the file imports,
+          // or of a value of its own (`const group = createGroup(); export const Provider = group.Provider`)
+          const q = bb.quals.get(y.slice(0, y.indexOf('.'))), last = y.split('.').pop()
+          if (q && q.external) return null
+          // (a value of its own: only a definition of the file by that name, the factory's, is it)
+          for (const t of q ? q.files : definesIn([f], last, ok) ? [f] : []) next.set(`${t.id}|${last}`, [t, last])
+          continue
+        }
+        if (y) n = bb.names.get(y)
+        if (n) { if (n.external) return null; for (const t of n.files) next.set(`${t.id}|${n.orig}`, [t, n.orig]) } else for (const id of bb.files) next.set(`${id}|${nm}`, [fileById.get(id), nm])
       }
-      level = [...next]
-      if (!level.length || found(level)) return level
+      level = [...next.values()]
+      const hit = level.filter(([f, nm]) => definesIn([f], nm, ok))
+      if (hit.length) { const nm = hit[0][1]; return { files: hit.filter((h) => h[1] === nm).map((h) => h[0]), name: nm } }
+      if (!level.length) break
     }
-    return level
+    return { files: [], name }
+  }
+  // An imported name in JavaScript: the files defining it and the name they define it by, through barrels
+  // and aliases; null for a dependency's
+  const importedAs = (bound, name, family, ok = VALUE_KIND) => {
+    if (family !== 'js' || !bound.files.length || definesIn(bound.files, name, ok)) return { files: bound.files, name }
+    return reexported(bound.files, name, ok)
   }
   // A receiver that starts at a type the repository does not define (`Utc::now().timestamp()`,
   // `UpdateItemOutput::builder().build()`, `new Intl.NumberFormat(..).format()`) or, in Rust, at a
@@ -307,30 +345,77 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
   const stats = { calls: 0, resolved: 0, values: 0, referenced: 0 }
   // a node and its enclosing definitions: a nested function is named from inside its parent
   const within = (n, anc) => { for (let c = n; c; c = c.parent_id ? nodeById.get(c.parent_id) : null) if (c.id === anc) return true; return false }
-  // the first rule that matches, and nothing on a name alone
-  const firstRule = (cands, rules) => { for (const [conf, test] of rules) { const hit = cands.filter(test); if (hit.length) return { nodes: hit.slice(0, MAX_AMBIGUOUS), conf: hit.length === 1 ? conf : 'ambiguous' } } return null }
+  // c is a function nested in a definition enclosing `src` (a closure it can reach by its bare name), not a member
+  const nestedFor = (src, c) => !!src && !!c.parent_id && within(src, c.parent_id) && !CLASSY.has(nodeById.get(c.parent_id)?.kind)
+  // the first rule that matches, and nothing on a name alone (a definition's platform variants count once)
+  const firstRule = (cands, rules) => pickBy(cands, rules, () => false, variantOf)
+  const isTest = (n) => !!(n.is_test || fileById.get(n.file_id)?.is_test)
+  const superTypes = (t) => (supers.get(t.id) || []).map((id) => nodeById.get(id)).filter(Boolean)
+  // The repository's types a stated type names, for a caller (`prod`: production code). null: the
+  // type is not the repository's (imported from a dependency; in JavaScript, imported from a file that
+  // defines no type of that name, through its barrels; only test-support code defines it, as a mock
+  // does). [] when no type has that name at all.
+  const typesOf = (qtype, from, b, prod) => {
+    const dot = qtype.indexOf('.')
+    if (dot > 0) { // `new FileSystem.File(…)`: a type read from a namespace, a dependency's or one the file imports
+      const q = b.quals.get(qtype.slice(0, dot))
+      if (q && q.external) return null
+      let types = classesNamed(from.family, qtype.slice(qtype.lastIndexOf('.') + 1))
+      if (q) types = types.filter((t) => q.files.some((f) => f.id === t.file_id))
+      if (prod) types = types.filter((t) => !isTest(t))
+      return types.length ? types : null
+    }
+    const qb = b.names.get(qtype)
+    if (qb && qb.external) return null
+    let name = qb ? qb.orig : qtype
+    let types = classesNamed(from.family, name)
+    if (qb && qb.files.length) {
+      if (from.family === 'js') {
+        const at = importedAs(qb, name, 'js', (c) => CLASSY.has(c.kind))
+        if (!at) return null
+        name = at.name
+        types = classesNamed(from.family, name).filter((t) => at.files.some((f) => f.id === t.file_id))
+        if (!types.length) return null
+      } else { const own = types.filter((t) => qb.files.some((f) => f.id === t.file_id)); if (own.length) types = own }
+    }
+    if (prod && types.length) { types = types.filter((t) => !isTest(t)); if (!types.length) return null }
+    return types
+  }
+  // `super.m()`, `super().m()`, `parent::m()`: a member of the calling class's supertypes, never its own
+  const isSuper = (qual, family) => qual === 'super' || superCall(qual, family)
+  // (never the class's own member, even where a supertype guessed by name leads back to the class)
+  const superMembers = (selfType, cands) => { const ups = selfType ? superTypes(selfType).filter((t) => t.id !== selfType.id) : []; return ups.length ? membersUp(ups, cands.filter((c) => c.parent_id !== selfType.id)) : [] }
 
   // A value naming a function or method (REFERENCES): resolved by syntax only, as a call would be.
   const referenced = (r, from, b) => {
     const srcNode = nodeById.get(r.src_id)
+    // a namespace (`<Button.Button>`, `UI.Row` passed on) is no value of a function named like it
+    if (!r.qual && b.spaces.has(r.name)) return null
     const bound = !r.qual && b.names.get(r.name)
     if (bound && bound.external) return null
-    const name = bound ? bound.orig : r.name
+    let name = bound ? bound.orig : r.name
+    let boundFiles = bound ? bound.files : null
+    if (bound && boundFiles.length) { const at = importedAs(bound, name, from.family); if (!at) return null; boundFiles = at.files; name = at.name }
     const cands = (byName.get(`${from.family}|${name}`) || []).filter((c) => REFERABLE.has(c.kind) && !(srcNode && c.id === srcNode.id))
     if (!cands.length) return null
     const qual = r.qual || ''
     if (!qual) {
       return firstRule(cands, [
-        ['import', (c) => bound && bound.files.some((f) => f.id === c.file_id)],
-        // a function of this file: top-level, or nested in the definition naming it
-        ['same-file', (c) => c.file_id === from.id && (!c.parent_id || (srcNode && within(srcNode, c.parent_id) && !CLASSY.has(nodeById.get(c.parent_id)?.kind)))],
-        ['import', (c) => !bound && b.files.has(c.file_id) && !c.parent_id],
+        ['import', (c) => bound && boundFiles.some((f) => f.id === c.file_id)],
+        // a function of this file: nested in a definition enclosing the one naming it (it shadows the
+        // file's own of that name), else top-level
+        ['same-file', (c) => c.file_id === from.id && nestedFor(srcNode, c)],
+        ['same-file', (c) => c.file_id === from.id && !c.parent_id],
+        // a name the file never imports is no function of an imported JavaScript module (each name is
+        // imported by itself there); a C header, a Ruby or PHP require brings in all of a file's names
+        ['import', (c) => !bound && from.family !== 'js' && b.files.has(c.file_id) && !c.parent_id],
         ['same-package', (c) => fileById.get(c.file_id).dir === from.dir && !c.parent_id && /^(go|jvm|swift|csharp)$/.test(from.family)],
       ])
     }
     const selfType = srcNode ? (CLASSY.has(srcNode.kind) && srcNode.kind !== 'module' ? srcNode : enclosingType(srcNode)) : null
+    if (isSuper(qual, from.family)) { const up = superMembers(selfType, cands); return up.length ? { nodes: up.slice(0, MAX_AMBIGUOUS), conf: 'same-class' } : null }
     if (SELF.test(qual)) { const own = selfType ? membersUp([selfType], cands) : []; return own.length ? { nodes: own.slice(0, MAX_AMBIGUOUS), conf: 'same-class' } : null }
-    if (r.qtype) { const types = classesNamed(from.family, r.qtype); const m = types.length ? membersUp(types, cands) : []; return m.length ? { nodes: m.slice(0, MAX_AMBIGUOUS), conf: 'typed' } : null }
+    if (r.qtype) { const types = typesOf(r.qtype, from, b, !(srcNode ? isTest(srcNode) : from.is_test)); const m = types && types.length ? membersUp(types, cands) : []; return m.length ? { nodes: m.slice(0, MAX_AMBIGUOUS), conf: 'typed' } : null }
     const segs = qual.split(/::|\?\.|\.|->|\\/)
     const q = b.quals.get(segs[0]) || b.quals.get(qual)
     if (q) {
@@ -339,16 +424,16 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
       const members = cands.filter((c) => { const p = c.parent_id && nodeById.get(c.parent_id); return p && p.name === qLast && q.files.some((f) => f.id === p.file_id) })
       if (members.length) return { nodes: members.slice(0, MAX_AMBIGUOUS), conf: 'qualified' }
       const hit = segs.length === 1 ? inFiles(cands, q.files).filter((c) => !c.parent_id || !CLASSY.has(nodeById.get(c.parent_id)?.kind)) : []
-      return hit.length ? { nodes: hit.slice(0, MAX_AMBIGUOUS), conf: hit.length === 1 ? 'import' : 'ambiguous' } : null
+      return firstRule(hit, [['import', () => true]])
     }
     const types = classesNamed(from.family, segs[segs.length - 1])
     const m = types.length ? membersUp(types, cands) : []
     return m.length ? { nodes: m.slice(0, MAX_AMBIGUOUS), conf: m.length === 1 || types.length === 1 ? 'qualified' : 'ambiguous' } : null
   }
 
-  for (const r of refs) {
+  for (let r of refs) {
     const from = fileById.get(r.file_id)
-    const b = bind.get(from.id) || { names: new Map(), quals: new Map(), files: new Set() }
+    const b = bind.get(from.id) || { names: new Map(), quals: new Map(), files: new Set(), spaces: new Set() }
     if (r.kind === 'extends' || r.kind === 'implements') {
       const src = r.from_type ? (classesNamed(from.family, r.from_type).find((c) => c.file_id === from.id) || classesNamed(from.family, r.from_type)[0]) : nodeById.get(r.src_id)
       if (!src) continue
@@ -375,33 +460,51 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
     }
 
     stats.calls++
+    // `const Slot = Header.Slot` (or `= Canonical`) at module level, then `<Slot>`: the call is the aliased one's
+    const aliased = !r.qual && from.family === 'js' && !b.names.has(r.name) ? aliases.get(from.id)?.get(r.name) : null
+    if (aliased) {
+      const dot = aliased.indexOf('.')
+      if (dot > 0 && !b.quals.has(aliased.slice(0, dot))) continue // a member of a value of the file's own: no definition
+      r = dot > 0 ? { ...r, name: aliased.slice(dot + 1), qual: aliased.slice(0, dot), qtype: null } : { ...r, name: aliased }
+    }
     const srcNode = nodeById.get(r.src_id)
+    const prod = !(srcNode ? isTest(srcNode) : from.is_test)
     const bound = !r.qual && b.names.get(r.name)
     if (bound && bound.external) continue // imported from a dependency
-    const name = bound ? bound.orig : r.name
+    let name = bound ? bound.orig : r.name
+    // a name imported from a file that only passes it on (`export { X } from './x'`, `export * from`,
+    // `export const X = Y`): the files it passes on from, and the name they define; a dependency's
+    // (`export { Text as Span } from 'react-native'`): no link
+    let boundFiles = bound ? bound.files : null
+    if (bound && boundFiles.length) { const at = importedAs(bound, name, from.family); if (!at) continue; boundFiles = at.files; name = at.name }
     // a TypeScript type or interface is no value: never called, never rendered
     const named_ = (byName.get(`${from.family}|${name}`) || []).filter((c) => !(from.family === 'js' && TYPE_ONLY.has(c.kind)))
     let cands = named_.filter((c) => (r.kind === 'macro' ? c.kind === 'macro' : r.kind === 'new' ? CLASSY.has(c.kind) || c.kind === 'constructor' : CALLABLE.has(c.kind) || CLASSY.has(c.kind)))
     // fields join only where the syntax names their owner (typed, self, a type's name); so do the
-    // members a framework declares, which no rule below links by a name alone
-    const withFields = r.kind === 'call' ? cands.concat(named_.filter((c) => c.kind === 'field')) : cands
+    // members a framework declares, which no rule below links by a name alone. A field of test-support
+    // code (a mock's `write = jest.fn()`) is no production caller's callee.
+    const withFields = r.kind === 'call' ? cands.concat(named_.filter((c) => c.kind === 'field' && !(prod && isTest(c)))) : cands
     const guess = cands.filter((c) => !c.via)
     if (!withFields.length) continue
-    // a name imported from a file that only passes it on (`export { X } from './x'`, `export * from`):
-    // the files it passes on from; a dependency's (`export { Text as Span } from 'react-native'`): no link
-    let boundFiles = bound ? bound.files : null
-    if (bound && from.family === 'js' && boundFiles.length && !inFiles(withFields, boundFiles).length) {
-      boundFiles = reexported(boundFiles, name, (fs) => inFiles(withFields, fs).length > 0)
-      if (!boundFiles) continue
-    }
     const qual = r.qual || ''
     const qHead = qual.split(/::|\.|->|\\/)[0]
     const qLast = qual.split(/::|\.|->|\\/).pop()
     const selfType = srcNode ? enclosingType(srcNode) : null
+    // a name guess for production code never links a definition of test-support code (a mock, a
+    // fixture), though it counts among the candidates: dropping it never makes a guess of the rest
+    // (nor does a bare call link a method no class holds, `window.scrollTo = …`, which still counts)
+    const prodGuess = (c) => !(prod && isTest(c))
     let pick = null
 
-    if (r.qtype && !SELF.test(qual)) {
-      const types = classesNamed(from.family, r.qtype)
+    // `super.save()`, `super().save()`: the supertypes' member, or none the repository defines
+    if (isSuper(qual, from.family)) {
+      const up = superMembers(selfType, withFields)
+      if (!up.length) continue
+      pick = { nodes: up.slice(0, MAX_AMBIGUOUS), conf: 'same-class' }
+    }
+    if (!pick && r.qtype && !SELF.test(qual)) {
+      const types = typesOf(r.qtype, from, b, prod)
+      if (!types) continue // a dependency's type (`Logger` from a logging library, a framework's `File`)
       if (types.length) {
         const members = membersUp(types, withFields)
         if (!members.length) continue // a method the repo's own types do not declare: inherited from a dependency
@@ -418,6 +521,8 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
     }
     if (!pick && qual && !SELF.test(qual)) {
       const q = b.quals.get(qHead) || b.quals.get(qual)
+      // `console.error`, `window.open`, `JSON.parse(…).x()`: the runtime's own objects are a dependency
+      if (!q && from.family === 'js' && JS_GLOBALS.has(qHead.replace(/[?!\s]+$/, ''))) continue
       if (q) {
         if (q.external) continue
         const hit = inFiles(cands, q.files)
@@ -438,9 +543,8 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
       if (!pick) {
         // `x.len()`, `seen.has(k)`: an untyped receiver calling a standard-library name is that library's
         // method far more often than the repository's one definition of the name. A receiver the syntax
-        // constructs from a repository type (`Store::new().len()`) is that type's; `super().update()`
-        // is the parent's.
-        if (COMMON_METHODS[from.family]?.has(name) && !superCall(qual, from.family)) {
+        // constructs from a repository type (`Store::new().len()`) is that type's.
+        if (COMMON_METHODS[from.family]?.has(name)) {
           const own = SELF_CLASS.test(qual) && selfType ? membersUp([selfType], cands) : []
           const t = own.length ? null : constructedType(qual, from.family)
           const members = own.length ? own : t ? membersUp(classesNamed(from.family, t), cands) : []
@@ -451,22 +555,35 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
       if (!pick) {
         // a receiver of unknown type: by name, in this file, else an imported one (a name guess: the
         // import binds the file, not the receiver: `x.save()` is any `save` the file can see). A field of this
-        // object (`this.svc.findAll()`, `self.repo.save()`) holds another object: never this class's
-        // own method of that name, never the caller itself (Nest, Spring and Django delegation would
-        // read as self-recursion and hide the real callee's callers)
-        const ownField = /^(this|self|@)[.>-]*[\p{L}_$][\p{L}\p{N}_$]*$/u.test(qual) || /^(this|self)\??\.[\p{L}_$]/u.test(qual)
-        const methods = guess.filter((c) => (c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
-          && !(srcNode && c.id === srcNode.id) && !(ownField && selfType && c.parent_id === selfType.id))
-        pick = pickBy(methods, [['same-file', (c) => c.file_id === from.id], ['import-guess', (c) => b.files.has(c.file_id)]], undefined, variantOf)
+        // object (`this.svc.findAll()`, `self.repo.save()`; not a call chain, `self.filter(…).save()`,
+        // which is the object's own) holds another object: never this class's own method of that name,
+        // never the caller itself (Nest, Spring and Django delegation would read as self-recursion and
+        // hide the real callee's callers). Where that guard removed a candidate, the name decides
+        // nothing: the call stays an unlinked site rather than a guess at another class's method.
+        const ownField = /^(this|self|@)[.>-]*[\p{L}_$][\p{L}\p{N}_$]*$/u.test(qual) || (/^(this|self)\??\.[\p{L}_$]/u.test(qual) && !qual.includes('('))
+        const methods = guess.filter((c) => c.kind === 'method' || c.kind === 'constructor' || (c.parent_id && CLASSY.has(nodeById.get(c.parent_id)?.kind)))
+        const kept = methods.filter((c) => !(srcNode && c.id === srcNode.id) && !(ownField && selfType && c.parent_id === selfType.id))
+        pick = pickBy(kept, [['same-file', (c) => c.file_id === from.id], ['import-guess', (c) => b.files.has(c.file_id)]], kept.length < methods.length ? () => false : undefined, variantOf, prodGuess)
       }
     }
     if (!pick && !qual) {
+      // a JavaScript name whose import names a repository file is that file's (or what it passes on):
+      // where it defines nothing callable by the name, the call stays unlinked, never a guess elsewhere
+      const imported = from.family === 'js' && bound && bound.files.length > 0
+      // `Error(…)`, `Promise(…)`, `fetch(…)`: the runtime's, unless the file defines one of the name
+      const builtin = from.family === 'js' && !bound && JS_BUILTINS.has(name)
       pick = pickBy(guess, [
         ['import', (c) => boundFiles && boundFiles.some((f) => f.id === c.file_id)],
-        ['same-file', (c) => c.file_id === from.id && !c.parent_id],
-        ['import', (c) => b.files.has(c.file_id) && !c.parent_id],
-        ['same-package', (c) => fileById.get(c.file_id).dir === from.dir && !c.parent_id && /^(go|jvm|swift|csharp)$/.test(from.family)],
-      ], (c) => !c.parent_id || CLASSY.has(c.kind), variantOf)
+        ...(builtin ? [['same-file', (c) => c.file_id === from.id && nestedFor(srcNode, c)], ['same-file', (c) => c.file_id === from.id && !c.parent_id]] : []),
+        ...(imported || builtin ? [] : [
+          // a function of this file: a closure of a definition enclosing the caller (it shadows the
+          // file's own of that name), else top-level
+          ['same-file', (c) => c.file_id === from.id && nestedFor(srcNode, c)],
+          ['same-file', (c) => c.file_id === from.id && !c.parent_id],
+          ['import', (c) => b.files.has(c.file_id) && !c.parent_id],
+          ['same-package', (c) => fileById.get(c.file_id).dir === from.dir && !c.parent_id && /^(go|jvm|swift|csharp)$/.test(from.family)],
+        ]),
+      ], imported || builtin ? () => false : (c) => !c.parent_id || CLASSY.has(c.kind), variantOf, (c) => prodGuess(c) && c.kind !== 'method')
     }
     if (!pick) continue
     stats.resolved++
@@ -479,15 +596,17 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
 
 // First rule that matches wins; otherwise a unique candidate, otherwise ≤ MAX_AMBIGUOUS of them.
 // groupOf: candidates that are one definition (its platform variants) count once, and are all kept.
-function pickBy(cands, rules, fallbackFilter = () => true, groupOf = (c) => c.id) {
+// linkable: which of the name's candidates a guess may link (all of them count)
+function pickBy(cands, rules, fallbackFilter = () => true, groupOf = (c) => c.id, linkable = () => true) {
   if (!cands.length) return null
   const groups = (xs) => new Set(xs.map(groupOf)).size
   for (const [conf, test] of rules) {
     const hit = cands.filter(test)
     if (hit.length) { const g = groups(hit); return { nodes: g === hit.length ? hit.slice(0, MAX_AMBIGUOUS) : g <= MAX_AMBIGUOUS ? hit : hit.slice(0, MAX_AMBIGUOUS), conf: g === 1 ? conf : 'ambiguous' } }
   }
-  const rest = cands.filter(fallbackFilter), g = groups(rest)
-  if (g === 1) return { nodes: rest, conf: 'unique-name' }
-  if (g > 1 && g <= MAX_AMBIGUOUS) return { nodes: rest, conf: 'ambiguous' }
+  const rest = cands.filter(fallbackFilter), g = groups(rest), nodes = rest.filter(linkable)
+  if (!nodes.length) return null
+  if (g === 1) return { nodes, conf: 'unique-name' }
+  if (g > 1 && g <= MAX_AMBIGUOUS) return { nodes, conf: 'ambiguous' }
   return null
 }
