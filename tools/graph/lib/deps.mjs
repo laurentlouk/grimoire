@@ -104,6 +104,12 @@ function memoizeNodes(Node) {
     namedChildCount: { get() { const c = slot(this); return c.nc ?? (c.nc = named.call(this)) }, configurable: true },
     childCount: { get() { const c = slot(this); return c.cc ?? (c.cc = count.call(this)) }, configurable: true },
   })
+  // a node's children in one list: by index on a narrow node (namedChild(i) walks the i before it,
+  // which costs less there than the list's cursor), in one pass of the cursor on a wide one
+  const namedKids = Object.getOwnPropertyDescriptor(P, 'namedChildren')?.get, kids = Object.getOwnPropertyDescriptor(P, 'children')?.get
+  const NARROW = 16
+  if (namedKids && typeof P.namedChild === 'function') Object.defineProperty(P, 'namedChildren', { get() { const k = this.namedChildCount; if (k > NARROW) return namedKids.call(this); const out = new Array(k); for (let i = 0; i < k; i++) out[i] = this.namedChild(i); return out }, configurable: true })
+  if (kids && typeof P.child === 'function') Object.defineProperty(P, 'children', { get() { const k = this.childCount; if (k > NARROW) return kids.call(this); const out = new Array(k); for (let i = 0; i < k; i++) out[i] = this.child(i); return out }, configurable: true })
   // a node asks for a few fields: [name, child, name, child, …], searched in order
   P.childForFieldName = function (name) {
     const c = slot(this), m = c.fl || (c.fl = [])
