@@ -32,11 +32,11 @@
 // call's confidences: same-class (`self.on_done`, a Ruby symbol), typed, qualified, import, same-file,
 // same-package; never by a unique or ambiguous name (a bare name in a value position is as often a
 // local or a dependency's as the repository's function).
-import { readFileSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import { familyOf, COMMON_METHODS } from './langs.mjs'
 import { jsModules, platformBase } from './js-modules.mjs'
-import { listPaths, SKIP_DIRS } from './project.mjs'
+import { listPaths, SKIP_DIRS, readRepoText } from './project.mjs'
 import { linkContracts } from './contracts.mjs'
 
 const MAX_AMBIGUOUS = 3
@@ -99,12 +99,14 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
     const common = (f) => { const a = from.path.split('/'), b = f.path.split('/'); let i = 0; while (i < a.length && a[i] === b[i]) i++; return i }
     return all.sort((x, y) => common(y) - common(x))
   }
-  // go.mod is not an indexed language: read the module paths straight from disk.
+  // go.mod is not an indexed language: read the module paths from disk, guarded (project.mjs readRepoText)
+  let realRoot
+  const repoReal = () => { if (realRoot === undefined) { try { realRoot = realpathSync(repoAbs) } catch { realRoot = null } } return realRoot }
   const goModules = []
   if (files.some((f) => f.lang === 'go')) {
     const dirs = new Set([...fileById.values()].filter((f) => f.family === 'go').map((f) => f.dir))
     for (const d of new Set([...dirs].flatMap((d) => { const up = []; for (let x = d; ; x = path.posix.dirname(x)) { up.push(x); if (x === '.' || x === '/') break } return up }))) {
-      try { const m = /^module\s+(\S+)/m.exec(readFileSync(path.join(repoAbs, d, 'go.mod'), 'utf8')); if (m) goModules.push({ dir: d, module: m[1] }) } catch {}
+      const m = /^module\s+(\S+)/m.exec(readRepoText(repoAbs, path.posix.join(d, 'go.mod'), { root: repoReal() }) || ''); if (m) goModules.push({ dir: d, module: m[1] })
     }
   }
   const namespaces = new Map()
@@ -258,8 +260,8 @@ export function resolveRepo(db, repo, repoAbs, rels = null) {
   if (files.some((f) => f.lang === 'rust')) { // a crate is named by its Cargo.toml, not its folder (`lib/` → `my_lib`)
     const dirs = new Set([...fileById.values()].filter((f) => f.family === 'rust').flatMap((f) => { const up = []; for (let x = f.dir; ; x = path.posix.dirname(x)) { up.push(x); if (x === '.' || x === '/') break } return up }))
     for (const d of dirs) {
-      let toml = ''
-      try { toml = readFileSync(path.join(repoAbs, d, 'Cargo.toml'), 'utf8') } catch { continue }
+      const toml = readRepoText(repoAbs, path.posix.join(d, 'Cargo.toml'), { root: repoReal() })
+      if (toml === null) continue
       const tables = toml.split(/^[ \t]*\[/m) // each table up to the next header
       for (const t of tables.filter((sec) => /^(package|lib)\]/.test(sec))) { const m = /^\s*name\s*=\s*"([^"]+)"/m.exec(t); if (m) moduleNames.add(m[1].replace(/-/g, '_')) }
       for (const t of tables.filter((sec) => /^(dev-|build-)?dependencies\]/.test(sec))) for (const m of t.matchAll(/^\s*([\w-]+)\s*=\s*\{[^}\n]*\bpath\s*=/gm)) moduleNames.add(m[1].replace(/-/g, '_')) // a local path crate

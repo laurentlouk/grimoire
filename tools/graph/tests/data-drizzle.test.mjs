@@ -19,8 +19,9 @@
 //     conflict, the migrations applied at run time, the raw SQL attached beside the Drizzle calls
 //  4. graph_diff on the pg app, the schema and a migration edited: the data model's changes, the code
 //     still naming a removed column (risk high), the inserts a new not-null column breaks
+//  5. a schema's defaults: only that one exists and whether it is computed, never a literal's text
 //
-//  Parts 2 to 4 need the parser runtime: without it, they are skipped.
+//  Parts 2 to 5 need the parser runtime: without it, they are skipped.
 import { mkdtempSync, cpSync, rmSync, realpathSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -64,7 +65,7 @@ console.log('\n1 · import paths, migrators, the content filter, a primary key n
 const deps = await import('../lib/deps.mjs')
 if (!deps.findDeps()) {
   if (process.env.CI) ok(false, 'parser runtime missing (run npm ci --prefix tools/graph)')
-  else console.log('   - parts 2 to 4 skipped: parser runtime not installed (npm ci --prefix tools/graph)')
+  else console.log('   - parts 2 to 5 skipped: parser runtime not installed (npm ci --prefix tools/graph)')
 } else {
   const { call } = await import('../lib/commands.mjs')
   const { renderGraph } = await import('../lib/render.mjs')
@@ -183,6 +184,41 @@ if (!deps.findDeps()) {
     const GD = path.join(PG, '.grimoire/graph')
     const stored = readdirSync(GD).filter((f) => statSync(path.join(GD, f)).isFile()).flatMap((f) => readFileSync(path.join(GD, f)).toString('latin1').match(/canary-dz-\d/g) || [])
     eq([leaked, stored], [[], []], 'no literal of a query (a where\'s value, an insert\'s value, a test\'s) in any answer, the page or graph.db')
+
+    // ── 5 · a column's default: only that there is one, and whether it is computed ──
+    console.log('\n5 · a schema\'s defaults keep no literal\'s text')
+    const DF = path.join(SANDBOX, 'defaults')
+    const put = (rel, txt) => { spawnSync('mkdir', ['-p', path.dirname(path.join(DF, rel))]); writeFileSync(path.join(DF, rel), txt) }
+    put('grimoire.config.json', '{ "graph": {} }\n')
+    put('src/schema.ts', [
+      "import { pgTable, pgEnum, text, serial, integer, boolean, timestamp } from 'drizzle-orm/pg-core'",
+      "import { sql } from 'drizzle-orm'",
+      "export const mood = pgEnum('mood', ['calm', 'busy'])",
+      "export const users2 = pgTable('users2', {",
+      '  id: serial(\'id\').primaryKey(),',
+      "  key: text('key').default('canary-dz-77'),",
+      "  t: text('t').default(sql`'canary-dz-78'`),",
+      "  f: text('f').$defaultFn(() => 'canary-dz-79'),",
+      "  u: text('u').$onUpdate(() => 'canary-dz-80'),",
+      "  e: text('e').default(CANARY_DZ_81),",
+      "  n: integer('n').default(3),",
+      "  b: boolean('b').default(true),",
+      "  at: timestamp('at').default(sql`now()`),",
+      "  m: mood('m').default('calm'),",
+      '})',
+    ].join('\n'))
+    git(DF, 'init', '-q'); commit(DF, 'init')
+    const dq = (name, args = {}) => call(name, args, { root: DF })
+    await dq('graph_index')
+    const ent = await dq('graph_data', { entity: 'users2' })
+    for (const [col, says] of [['key', "default '…'"], ['t', 'default (expression)'], ['f', 'computed $defaultFn(…)'], ['u', 'computed $onUpdate(…)'], ['e', 'default (expression)'], ['n', 'default 3'], ['b', 'default true'], ['at', 'default now()'], ['m', "default 'calm'"]]) {
+      const line = ent.split('\n').find((l) => l.startsWith(`  ${col}  `)) || ''
+      ok(line.includes(says), `drizzle-ts: ${col}: ${says} (${line.trim()})`)
+    }
+    const dpage = await renderGraph(loadProject(DF))
+    const DG = path.join(DF, '.grimoire/graph')
+    const dstored = readdirSync(DG).filter((f) => statSync(path.join(DG, f)).isFile()).flatMap((f) => readFileSync(path.join(DG, f)).toString('latin1').match(/canary-dz-\d+/g) || []) // CANARY_DZ_81 is a name the code graph keeps
+    eq([[ent, await dq('graph_data'), dpage].flatMap((a) => a.match(/canary-dz-\d+|CANARY_DZ/g) || []), dstored], [[], []], 'a string default, a sql`…` or an expression default, a $defaultFn\'s or an $onUpdate\'s code: never in an answer, the page or graph.db (a number, a boolean, now(), an enum value: kept)')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

@@ -22,10 +22,12 @@
 //     `timestamp (3) with time zone`, an enum's name, `enum('a','b')` in MySQL, a customType's
 //     dataType()); `notNull()`, `primaryKey()` (not null), `unique()` (an index `<table>_<col>_unique`
 //     in SQLite, a unique key elsewhere, as drizzle-kit keeps them), `references(() => t.col,
-//     { onDelete, onUpdate })`, `default(…)` (a literal as the snapshot writes it, `sql\`…\`` its text,
-//     another expression kept as written and not compared), `defaultNow()`, `defaultRandom()`;
+//     { onDelete, onUpdate })`, `default(…)` (no literal's text is kept, as the other ORM readers keep
+//     none: a number or a boolean as the snapshot writes it, `sql\`now()\`` and another function of no
+//     argument or `CURRENT_TIMESTAMP` as written; a string `'…'`, any other `sql\`…\`` or expression
+//     `(expression)`, only that there is one, not compared), `defaultNow()`, `defaultRandom()`;
 //     `$defaultFn` / `$default` / `$onUpdate` recorded as computed defaults (the client's, not the
-//     database's), never evaluated; `generatedAlwaysAs`, identity, `.array()`;
+//     database's: `$defaultFn(…)`, only that there is one), never evaluated; `generatedAlwaysAs`, identity, `.array()`;
 //   - the third argument (an array or an object, from a callback): `index('n').on(t.a, t.b)`,
 //     `uniqueIndex`, `.where(…)` partial, an expression column `sql\`lower(${t.email})\`` as
 //     drizzle-kit writes it (`lower("email")`, backticks in MySQL; another expression `(expression)`), `primaryKey({ columns })`, `unique().on(…)`, `foreignKey({
@@ -219,7 +221,7 @@ export function readSchemaFile(tree, file) {
   const root = tree.rootNode
   const out = { file, dialect: null, importLine: null, tables: [], enums: [], schemas: [], creators: [], objects: [], factories: [], customs: [], relations: [], notes: [], error: null }
   const note = (s) => { if (out.notes.length < MAX.notes) out.notes.push(s) }
-  if (root.hasError) { let first = null; const stack = [root]; while (stack.length && first === null) { const x = stack.pop(); if (x.type === 'ERROR' || x.isMissing) first = lineOf(x); else for (let i = x.childCount - 1; i >= 0; i--) if (x.child(i).hasError || x.child(i).isMissing) stack.push(x.child(i)) } out.error = first ?? 1 }
+  if (root.hasError) { let first = null; const stack = [root]; while (stack.length && first === null) { const x = stack.pop(); if (x.type === 'ERROR' || x.isMissing) first = lineOf(x); else for (let cs = x.children, i = cs.length - 1; i >= 0; i--) if (cs[i].hasError || cs[i].isMissing) stack.push(cs[i]) } out.error = first ?? 1 }
   // imports: local → the builder it names; namespaces of a core module; drizzle-orm's relations and sql
   const imported = new Map(), spaces = new Set(), relationsLocal = new Set(), relationsV2 = new Set(), sqlLocal = new Set(['sql'])
   const tops = []
@@ -322,11 +324,12 @@ export function readSchemaFile(tree, file) {
         else col.ref = { var: null, key: null, text: a0 ? text1(a0) : '', ...actions(config(a1)) }
         break
       }
-      case 'default': col.dflt = dflt(a0); break
+      case 'default': col.dflt = dflt(a0); break // its text never kept past defaultText
       case 'defaultNow': col.dflt = { k: 'now' }; break
       case 'defaultRandom': col.dflt = { k: 'random' }; break
-      case '$defaultFn': case '$default': col.computed.push(`${m.name}(${a0 ? text1(a0) : ''})`); break
-      case '$onUpdate': case '$onUpdateFn': col.computed.push(`${m.name}(${a0 ? text1(a0) : ''})`); break
+      // a computed default: only that there is one, never its code (a literal it may hold)
+      case '$defaultFn': case '$default': col.computed.push(`${m.name}(${a0 ? '…' : ''})`); break
+      case '$onUpdate': case '$onUpdateFn': col.computed.push(`${m.name}(${a0 ? '…' : ''})`); break
       case 'generatedAlwaysAs': col.generated = config(a1).mode || 'default'; break
       case 'generatedAlwaysAsIdentity': case 'generatedByDefaultAsIdentity': col.identity = true; break
       case 'array': col.array++; break
@@ -511,7 +514,7 @@ export function readSchemaFile(tree, file) {
 // ── the unit: a config and its schema files, or a folder of them ──
 export default {
   id: 'drizzle-ts',
-  version: 4,
+  version: 5,
   kind: 'code',
   scope: 'unit',
   tree: true,
@@ -836,7 +839,7 @@ function declare(files, store, cfg, configPath) {
       // a Postgres serial is not null; a MySQL one only as a primary key (drizzle-kit's snapshot)
       if (!c.factory) f.nullable = !(c.notNull || c.pk || c.identity || (tdialect === 'postgres' && SERIALS.has(c.b)))
       if (c.dflt) {
-        const d = defaultText(c.dflt, tdialect)
+        const d = defaultText(c.dflt, tdialect, f.enum?.values)
         f.default = d.text
         if (d.unstated) unstated.push('default')
       }
@@ -930,12 +933,18 @@ function mergeCol(base, over) {
   }
 }
 
-// A default as the snapshot writes it: { text, unstated? }.
-function defaultText(d, dialect) {
-  if (d.k === 'str') return { text: `'${d.v.replace(/'/g, "''")}'` }
-  if (d.k === 'num' || d.k === 'bool' || d.k === 'sql') return { text: d.v }
+// A default as the snapshot writes it, when that holds no literal's text: { text, unstated? }. A
+// string is `'…'` (but a value of the column's enum), a `sql\`…\`` other than a function of no
+// argument (`now()`, `gen_random_uuid()`) or a bare SQL keyword (`CURRENT_TIMESTAMP`) is `(expression)`:
+// only that there is one, not compared.
+const SQL_PLAIN = /^\(?\s*(?:[A-Za-z_][\w.]{0,63}\(\s*\)|CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME|LOCALTIMESTAMP|NULL|TRUE|FALSE|-?\d+(?:\.\d+)?)\s*\)?$/i
+function defaultText(d, dialect, values = null) {
+  // a value of the column's enum is the schema's own (the store's enums list it): kept, and compared
+  if (d.k === 'str') return Array.isArray(values) && values.includes(d.v) ? { text: `'${d.v.replace(/'/g, "''")}'` } : { text: "'…'", unstated: true }
+  if (d.k === 'num' || d.k === 'bool') return { text: d.v }
+  if (d.k === 'sql') return SQL_PLAIN.test(d.v.trim()) ? { text: d.v } : { text: '(expression)', unstated: true }
   if (d.k === 'now' && dialect === 'postgres') return { text: 'now()' }
   if (d.k === 'now' && dialect === 'mysql') return { text: '(now())' }
   if (d.k === 'random' && dialect === 'postgres') return { text: 'gen_random_uuid()' }
-  return { text: d.k === 'expr' ? d.v : d.k === 'now' ? 'defaultNow()' : d.k === 'random' ? 'defaultRandom()' : null, unstated: true }
+  return { text: d.k === 'expr' ? '(expression)' : d.k === 'now' ? 'defaultNow()' : d.k === 'random' ? 'defaultRandom()' : null, unstated: true }
 }

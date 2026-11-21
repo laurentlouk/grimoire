@@ -19,15 +19,13 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { familyOf, langOf } from './langs.mjs'
-import { listPaths, skipped, maxBytesOf } from './project.mjs'
+import { listPaths, skipped, maxBytesOf, SECRET_GLOBS, SECRETISH } from './project.mjs'
 
 const MIN_NAME = 3 // shorter names are not searched as text
 const MAX_HITS = 2000 // per term and repository: past it, the name is too common to sort hit by hit
 const LISTED_FILES = 30, PER_FILE = 4, LISTED_SITES = 25
-// files that may hold credentials: never searched (excluded from git grep, skipped before a read by
-// the walk), never named. SECRET_GLOBS and SECRETISH say the same thing, for git and for the walk.
-export const SECRET_GLOBS = ['.env*', '*.env', '.envrc', '*.pem', '*.key', '*.p12', '*.pfx', '*.jks', '*.keystore', '*.crt', '*.cer', '*.der', 'id_rsa*', 'id_dsa*', 'id_ecdsa*', 'id_ed25519*', 'credentials*', '.npmrc*', '.pypirc*', '.netrc', '.git-credentials', '.pgpass', '.htpasswd', '*.tfstate', '*.tfstate.*', '.docker/config.json']
-export const SECRETISH = /(^|\/)(\.env[^/]*|[^/]*\.env|\.envrc|id_(rsa|dsa|ecdsa|ed25519)[^/]*|credentials[^/]*|\.npmrc[^/]*|\.pypirc[^/]*|\.netrc|\.git-credentials|\.pgpass|\.htpasswd|[^/]*\.tfstate(\.[^/]*)?|\.docker\/config\.json)$|\.(pem|key|p12|pfx|jks|keystore|crt|cer|der)$/i
+// files that may hold credentials: never searched, never named (project.mjs SECRET_GLOBS, SECRETISH)
+export { SECRET_GLOBS, SECRETISH }
 // a line past this length (minified code, data) is classified by its file alone; at most this many
 // occurrences of a name are read per line: classification stays linear in the input
 const MAX_LINE = 1000, PER_LINE = 8

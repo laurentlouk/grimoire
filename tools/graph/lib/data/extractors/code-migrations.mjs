@@ -74,7 +74,7 @@ function ups(root) {
     else if (n.type === 'assignment_expression' && /^(?:module\.)?exports\.up$/.test(field(n, 'left')?.text || '')) fn = field(n, 'right')
     else if (n.type === 'pair' && /^['"]?up['"]?$/.test(field(n, 'key')?.text || '')) fn = field(n, 'value')
     if (fn && /function|arrow|method/.test(fn.type)) { out.push(fn); continue }
-    for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i))
+    for (let cs = n.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push(cs[i])
   }
   return out
 }
@@ -85,7 +85,7 @@ function constsOf(root) {
   while (stack.length) {
     const n = stack.pop()
     if (n.type === 'lexical_declaration' && /^const\b/.test(n.text)) for (const d of named(n)) if (d.type === 'variable_declarator' && field(d, 'name')?.type === 'identifier' && field(d, 'value') && !out.has(field(d, 'name').text)) out.set(field(d, 'name').text, field(d, 'value'))
-    for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i))
+    for (let cs = n.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push(cs[i])
   }
   return out
 }
@@ -105,7 +105,7 @@ export function readMigration(tree, file) {
       const n = stack.pop()
       if (n.type === 'call_expression') calls.push(n)
       // a nested function (a callback) is code the migration runs too: read in place
-      for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i))
+      for (let cs = n.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push(cs[i])
     }
     for (const c of calls.sort((a, b) => a.startIndex - b.startIndex).slice(0, MAX.calls)) {
       const f = field(c, 'function')

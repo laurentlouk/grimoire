@@ -20,7 +20,7 @@ export function value(n, depth = 0) {
     case 'chained_string': { let v = ''; for (const c of named(n)) { const x = value(c, depth + 1); if (x.k !== 'str') return { k: 'code' }; v += x.v } return { k: 'str', v } }
     case 'simple_symbol': return { k: 'sym', v: n.text.replace(/^:/, '') }
     case 'hash_key_symbol': return { k: 'sym', v: n.text }
-    case 'delimited_symbol': { const x = value({ type: 'string', namedChildCount: n.namedChildCount, namedChild: (i) => n.namedChild(i) }, depth + 1); return x.k === 'str' ? { k: 'sym', v: x.v } : x }
+    case 'delimited_symbol': { const x = value({ type: 'string', namedChildCount: n.namedChildCount, namedChild: (i) => n.namedChild(i), namedChildren: n.namedChildren }, depth + 1); return x.k === 'str' ? { k: 'sym', v: x.v } : x }
     case 'integer': return { k: 'int', v: n.text.replace(/_/g, '') }
     case 'float': return { k: 'float', v: n.text.replace(/_/g, '') }
     case 'true': case 'false': case 'nil': return { k: n.type }

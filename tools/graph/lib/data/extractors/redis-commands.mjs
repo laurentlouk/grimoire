@@ -345,7 +345,7 @@ function keyFns(root, F) {
     if (name && body && KEY_BODY.test(body.type) && !F.keyFns.has(name)) F.keyFns.set(name, { params, body })
     else if (name && F.keyFns.has(name) && body) F.keyFns.get(name).twice = true
     // into the containers of functions, never into a function's body
-    if (/^(?:program|source_file|module|export_statement|lexical_declaration|class_declaration|class_body|class|class_definition|block|impl_item|declaration_list|mod_item|decorated_definition)$/.test(t) && !(t === 'block' && fam !== 'python')) for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i))
+    if (/^(?:program|source_file|module|export_statement|lexical_declaration|class_declaration|class_body|class|class_definition|block|impl_item|declaration_list|mod_item|decorated_definition)$/.test(t) && !(t === 'block' && fam !== 'python')) for (let cs = n.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push(cs[i])
     if (fam === 'python' && t === 'class_definition') { const b = field(n, 'body'); if (b) stack.push(b) }
   }
   for (const [k, v] of F.keyFns) if (v.twice) F.keyFns.delete(k)

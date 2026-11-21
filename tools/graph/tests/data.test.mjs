@@ -2857,11 +2857,11 @@ console.log('\n28 · code-declared SQL models: the schema-language reader (reade
     eq([s0.store, s0.dialect, s0.dialectFrom, s0.complete, s0.label, s0.source], ['drizzle', 'sqlite', { how: 'stated', path: 'src/db/schema.ts', line: 1 }, true, 'table builders, read 1 file: 2 tables', { path: 'src/db/schema.ts', line: 1, kind: 'code', confidence: 'declared' }],
       'the store is the folder drizzle-kit writes into (out, default drizzle), the dialect from the builders\' core module')
     eq(s0.entities.map(brief), [
-      { name: 'users', kind: 'table', at: 3, fields: ['id integer', 'email text(320)', 'score real? =1.5', 'avatar blob?', 'balance numeric?', 'admin integer =false', "nick text? ='it''s'", 'created_at integer =(unixepoch())', 'token text? [$defaultFn(() => makeToken())]', 'touched integer? [$onUpdate(() => Date.now())]', 'slug text?', 'odd text? =someConstant (default)'],
+      { name: 'users', kind: 'table', at: 3, fields: ['id integer', 'email text(320)', 'score real? =1.5', 'avatar blob?', 'balance numeric?', 'admin integer =false', "nick text? ='…' (default)", 'created_at integer =(unixepoch())', 'token text? [$defaultFn(…)]', 'touched integer? [$onUpdate(…)]', 'slug text?', 'odd text? =(expression) (default)'],
         keys: ['primary(id):4'], indexes: ['users_email_unique!(email):5'], rels: [] },
       { name: 'posts', kind: 'table', at: 17, fields: ['author_id integer', 'slug text', 'editor_id integer?'], keys: ['primary(author_id,slug):22'],
         indexes: ['posts_slug_idx(slug) partial:23', 'posts_lower_slug!(lower("slug")):24', 'posts_author_editor!(author_id,editor_id):25'], rels: ['(author_id)->users(id) cascade/restrict:18', '(editor_id)->users(id) set null/no action:26'] },
-    ], 'SQLite: each column builder\'s type, notNull, primaryKey (not null), unique() an index named as drizzle-kit names it, references() with its actions, defaults as the snapshot writes them (a literal quoted, sql`…` its text, another expression kept and not compared), $defaultFn and $onUpdate computed and never evaluated; the third argument: a composite key, a partial index, an expression index, a table-level unique() the unique index drizzle-kit creates, a foreign key with its action')
+    ], 'SQLite: each column builder\'s type, notNull, primaryKey (not null), unique() an index named as drizzle-kit names it, references() with its actions, defaults with no literal\'s text (a number, a boolean, sql`…` a function of no argument, as the snapshot writes them; a string \'…\' and another expression (expression), only that there is one, not compared), $defaultFn and $onUpdate computed, never evaluated, their code never kept; the third argument: a composite key, a partial index, an expression index, a table-level unique() the unique index drizzle-kit creates, a foreign key with its action')
     eq([s0.entities[0].fields.find((f) => f.name === 'slug').generated, s0.notes], ['stored', ['schema named by drizzle.config.ts', "relations() at src/db/schema.ts:28: the query API's, app-level, never foreign keys: 1 without fields (a many(), or the other side's)"]], 'generatedAlwaysAs stored; relations() noted, never a foreign key (a many() names no column)')
 
     const PGS = [
@@ -4232,7 +4232,7 @@ async function indexed() {
     const kq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: KV })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const kidx = await kq('index')
     ok(/lending: /.test(kidx) && !kidx.includes('failure'), `index: the YAML template and the JSON tables read, no extractor failure (${kidx.split('\n').find((l) => l.startsWith('lending')) || kidx})`)
-    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@2\nlocal/tables/loans.json\tdynamodb-table@2\nsrc/handler.ts\tts-types@1\ntemplate.yaml\tcloudformation@3',
+    eq(await kq('sql', { sql: 'SELECT key, extractor FROM data_facts ORDER BY key' }), 'key\textractor\nlocal/tables/fines.json\tdynamodb-table@2\nlocal/tables/loans.json\tdynamodb-table@2\nsrc/handler.ts\tts-types@2\ntemplate.yaml\tcloudformation@3',
       'found by content: the template and the two CreateTable files are jobs, and the handler for its item shapes; the CI workflow and the settings file (JSON and YAML declaring no table) are not')
     const klist = await kq('data')
     eq(klist.split('\n').slice(1), [
@@ -4542,7 +4542,7 @@ async function indexed() {
     const bidx2 = await bq('index')
     ok(/infra: 3 files/.test(bidx2) && /api: 7 files/.test(bidx2) && !bidx2.includes('failure'), `index: both repositories, no extractor failure (${bidx2.replace(/\n/g, ' | ')})`)
     eq(await bq('sql', { sql: "SELECT repo, key, extractor FROM data_facts WHERE extractor LIKE 'serde%' OR extractor LIKE 'ts-types%' ORDER BY repo, key" }),
-      'repo\tkey\textractor\napi\tnode/src/orders.ts\tts-types@1\napi\tnode/src/types.ts\tts-types@1\napi\tsrc/carts.rs\tserde@1\napi\tsrc/customers.rs\tserde@1\napi\tsrc/model.rs\tserde@1\napi\tsrc/orders.rs\tserde@1\napi\tsrc/reviews.rs\tserde@1',
+      'repo\tkey\textractor\napi\tnode/src/orders.ts\tts-types@2\napi\tnode/src/types.ts\tts-types@2\napi\tsrc/carts.rs\tserde@2\napi\tsrc/customers.rs\tserde@2\napi\tsrc/model.rs\tserde@2\napi\tsrc/orders.rs\tserde@2\napi\tsrc/reviews.rs\tserde@2',
       'found by content: each Rust and TypeScript file with a serde derive, a type, a conversion or an environment read is a job of its own')
     const ORD = '{env}-{project}-orders', TFMAIN = 'infra/modules/shop-tables/main.tf'
     eq((await bq('data')).split('\n').filter((l) => !/^ {2}(infra|  note)/.test(l)), [
@@ -4677,7 +4677,7 @@ async function indexed() {
     const aq = async (tool, args = {}) => (await call(`graph_${tool}`, args, { root: AP })).replace(/\n\nLeads, not facts:[^\n]*$/, '')
     const aidx = await aq('index')
     ok(/catalog: 4 files/.test(aidx) && /reports: 1 files/.test(aidx) && !aidx.includes('failure'), `index: both repositories, no extractor failure (${aidx.replace(/\n/g, ' | ')})`)
-    eq(await aq('sql', { sql: "SELECT repo, key, extractor, facts LIKE '%\"access\"%' AS calls FROM data_facts WHERE extractor LIKE 'dynamo-access%' ORDER BY repo, key" }), 'repo\tkey\textractor\tcalls\ncatalog\tsrc/books.rs\tdynamo-access@2\t1\ncatalog\tsrc/setup.rs\tdynamo-access@2\t0\nreports\treports/genres.py\tdynamo-access@2\t1',
+    eq(await aq('sql', { sql: "SELECT repo, key, extractor, facts LIKE '%\"access\"%' AS calls FROM data_facts WHERE extractor LIKE 'dynamo-access%' ORDER BY repo, key" }), 'repo\tkey\textractor\tcalls\ncatalog\tsrc/books.rs\tdynamo-access@3\t1\ncatalog\tsrc/setup.rs\tdynamo-access@3\t0\nreports\treports/genres.py\tdynamo-access@3\t1',
       'found by content: the Rust and the Python file making key-value calls; the table\'s declaration in code (create_table with a GSI builder) read, and holding none')
     const alist = (await aq('data')).split('\n')
     eq([alist[1], alist[alist.length - 1]], ['catalog:dynamodb  dynamodb  1 table · 4 GSIs · 1 item type bound · 1 conflict', 'Access patterns (inferred from key-value SDK calls; leads, never verdicts): 7 calls in 2 files, 7 reaching a table; 1 index with no access found (graph_data with a table lists them)'],
@@ -4777,7 +4777,7 @@ async function indexed() {
       '  code  prisma@3  schema, read 1 file: 5 models, 1 enum, 1 view  lending/prisma/schema.prisma',
       '  dialect: stated at lending/prisma/migrations/migration_lock.toml:3',
       'notes:drizzle  sqlite  3 tables · 3 foreign keys · 2 indexes · no conflicts',
-      '  code  drizzle-ts@4  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
+      '  code  drizzle-ts@5  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
       '    note: schema named by drizzle.config.ts (casing snake_case)',
       "    note: relations() at src/db/tables/notes.ts:27: the query API's, app-level, never foreign keys: 1 the same as a foreign key",
       '  dialect: stated at notes/src/db/tables/notes.ts:1',
@@ -4790,13 +4790,13 @@ async function indexed() {
     ].join('\n'), 'its tables, each at the line that declares it')
     eq(await sq('data', { entity: 'people' }), [
       'notes:drizzle/people  table  (sqlite)',
-      '  declared at notes/src/db/tables/people.ts:8 [code drizzle-ts@4]',
+      '  declared at notes/src/db/tables/people.ts:8 [code drizzle-ts@5]',
       'Fields (5):',
       '  id  integer  not null  — notes/src/db/tables/people.ts:9',
       '  handle  text  not null  — notes/src/db/tables/people.ts:10',
       '  name  text  null  — notes/src/db/tables/people.ts:11',
-      '  created_at  integer  not null  computed $defaultFn(() => new Date())  — notes/src/db/tables/people.ts:4',
-      '  updated_at  integer  null  computed $onUpdate(() => new Date())  — notes/src/db/tables/people.ts:5',
+      '  created_at  integer  not null  computed $defaultFn(…)  — notes/src/db/tables/people.ts:4',
+      '  updated_at  integer  null  computed $onUpdate(…)  — notes/src/db/tables/people.ts:5',
       'Keys (1):',
       '  primary (id)  — notes/src/db/tables/people.ts:9',
       'Indexes (1):',
@@ -4850,7 +4850,7 @@ async function indexed() {
     git(MB, 'init', '-q', '-b', 'main')
     commit(MB, 'the schema and its migrations')
     await sq('index', {}, MB)
-    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@4  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
+    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@5  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
       'the schema, the newest snapshot and the replay: three declarations of one store (the config\'s out), agreeing')
     has(await sq('data', { entity: 'streaks' }, MB), "  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9 · mobile/src/db/schema.ts:42\nKeys (1):\n  primary (day)  — mobile/drizzle/meta/0005_snapshot.json:208 · mobile/drizzle/0004_streaks.sql:7 · mobile/src/db/schema.ts:40",
       'a sql`(unixepoch())` default as the snapshot and the replay write it; every element at its three lines')
@@ -4870,7 +4870,7 @@ async function indexed() {
     const mdata = dataOf(mpage).data
     const mbooks = mdata.stores[0].tables.find((t) => t.name === 'books')
     const mrating = mbooks.fields.find((f) => f.name === 'rating')
-    ok(mrating.cf.length === 1 && mrating.cf[0].drift === 1 && mdata.stores[0].decls.some((d) => d.kind === 'code' && d.extractor === 'drizzle-ts@4'), 'the Data tab: the column carries its conflict, marked as the schema against its migrations; the schema among the declarations')
+    ok(mrating.cf.length === 1 && mrating.cf[0].drift === 1 && mdata.stores[0].decls.some((d) => d.kind === 'code' && d.extractor === 'drizzle-ts@5'), 'the Data tab: the column carries its conflict, marked as the schema against its migrations; the schema among the declarations')
     const mpg = asCards(await stubPage(mpage, '#data-0'))
     mpg.click(mdata.stores[0].tables.findIndex((t) => t.name === 'books'))
     ok(mpg.text().includes('The code model and the migrations or snapshot disagree: a schema edited and no migration generated, or a migration edited by hand.'), '… and its passport says so under the conflicts')
@@ -4899,7 +4899,7 @@ async function indexed() {
       'prisma:prisma/migrations  sqlite  6 tables · 6 foreign keys · 4 indexes · no conflicts',
     ], 'each schema against what its tool generated from it: SQLite, Postgres and MySQL table builders (numeric defaults, a table-level unique() in SQLite, time(p), unsigned decimals, a MySQL serial, an enum value with a quote), and a schema-language file with named relations (no phantom join table); in MySQL a unique index is the unique key it is')
     for (const s of ['pg1', 'pg2', 'my1', 'my2']) has(golden, `  migration  sql-migrations@2  replayed 1 file, `, `${s}: its migrations read too`)
-    has(golden, 'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  pg2/drizzle/meta/0000_snapshot.json\n  migration  sql-migrations@2  replayed 1 file, 9 statements  pg2/drizzle/0000_fuzzy_mongoose.sql\n  code  drizzle-ts@4  table builders, read 1 file: 2 tables, 2 enums  pg2/src/schema.ts',
+    has(golden, 'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  pg2/drizzle/meta/0000_snapshot.json\n  migration  sql-migrations@2  replayed 1 file, 9 statements  pg2/drizzle/0000_fuzzy_mongoose.sql\n  code  drizzle-ts@5  table builders, read 1 file: 2 tables, 2 enums  pg2/src/schema.ts',
       'Postgres: the snapshot, the migration read statement by statement and the schema, three declarations of one store')
     has(await gq('data', { entity: 'lite2:drizzle/users' }), '  users_email_lower unique (lower("email"))  — lite2/drizzle/meta/0000_snapshot.json:119 · lite2/drizzle/0000_thin_whistler.sql:19 · lite2/src/schema.ts:18',
       'an expression index: its text as the snapshot keeps it, as the SQLite replay\'s CREATE INDEX writes it, and as the schema\'s sql`lower(${t.email})` renders it')
@@ -5271,6 +5271,18 @@ console.log('\nconstants: a settings file\'s secrets never reach the index; a ta
   const { tableConsts } = await import('../lib/data/readers/code.mjs')
   eq(tableConsts([{ name: 'ORDERS_TABLE', line: 1, names: [{ text: 'orders', line: 1 }], env: [] }, { name: 'SECRET_KEY', line: 2, names: [{ text: 'abc', line: 2 }], env: [] }, { name: 'DB_URL', line: 3, names: [{ text: 'postgres://u:p@h/db', line: 3 }], env: [] }, { name: 'TPL', line: 4, names: [{ text: '{}-orders', line: 4 }], env: [] }, { name: 'DB_PASSWORD', line: 5, value: 'hunter2' }, { name: 'TABLE', line: 6, value: 'carts' }]).map((c) => c.name),
     ['ORDERS_TABLE', 'TPL', 'TABLE'], 'tableConsts: a table-shaped value under a name that says nothing of a secret; a URL, a password or a key never')
+  // an allow-list: the names the fixtures and real code name tables and indexes by are kept…
+  const KEPT = [['ORDERS_TABLE', 'orders'], ['TABLE_NAME', 'orders'], ['TABLE', 'carts'], ['ordersTable', 'orders'], ['Repo.TABLE', 'repo'], ['GENRE_INDEX', 'genre-index'], ['SHARED_INDEX', 'by-shared'],
+    ['BY_ISBN', 'byIsbn'], ['BY_OWNER', 'gsi1'], ['ByStatus', 'status-idx'], ['GSI1', 'gsi1'], ['LSI_BY_DATE', 'lsi-date'], ['USERS_COLLECTION', 'users'], ['EVENTS_STREAM', 'events'], ['JOBS_QUEUE', 'jobs'],
+    ['UPLOADS_BUCKET', 'uploads'], ['ORDER_ENTITY', 'order'], ['USER_MODEL', 'user'], ['KEYSPACE', 'shop'], ['KEY_PREFIX', 'app'], ['TABLE_PREFIX', 'dev-'], ['DDB_ORDERS', 'orders'], ['ORDERS', 'orders2'],
+    ['TPL', '{}-orders'], ['EVENTS', 'events-{}'], ['SESSIONS_TABLE', 'sessions'], ['TOKENS_TABLE', 'tokens'], ['AUTH_TABLE', 'auth_users']]
+  const kept = (rows) => tableConsts(rows.map(([name, text], i) => ({ name, line: i + 1, names: [{ text, line: i + 1 }], env: [] }))).filter((c) => c.names.length).map((c) => c.name)
+  eq(kept(KEPT), KEPT.map(([n]) => n), 'tableConsts: an allow-list — a name that says table, index, collection, stream, queue, bucket, entity, model, keyspace, prefix or *_NAME, an index named by its key (BY_…), a template hole, or a value spelling its name')
+  // …and nothing else: a secret is named any way, and a credential's value is never table-shaped enough
+  eq(kept([['STRIPE_SK', 'sk_live_abc'], ['DB_PWD', 'hunter2x'], ['ADMIN_PW', 'hunter2x'], ['CREDS', 'abcdef'], ['GITHUB_PAT', 'ghp_abc'], ['HMAC_SEED', 'abcdef'], ['LICENSE', 'ABC-DEF-123'], ['PASSPHRASE_X', 'a-b-c'], ['T', 'orders'], ['SHARED', 'orders'],
+    ['ORDERS_TABLE', 'sk_live_orders'], ['ORDERS_TABLE', 'ghp_orders'], ['ORDERS_TABLE', 'xoxb-1-2'], ['ORDERS_TABLE', 'AKIAORDERS'], ['ORDERS_TABLE', 'AIzaOrders'], ['ORDERS_TABLE', 'eyJorders'], ['ORDERS_TABLE', 'aB3dE5gH7jK9mN1pQ3sT'], ['ORDERS_TABLE', '0123456789abcdef0123456789abcdef'],
+    ['SECRET_PREFIX', 'abc'], ['DB_PASSWORD_NAME', 'abc'], ['API_KEY', '{}-key'], ['PASSWORD', 'my-password']]), [], 'tableConsts: no other constant — a secret by any name, a token prefix, a high-entropy value, a weak reason under a secret\'s name')
+  eq(tableConsts([{ name: 'ORDERS', line: 1, env: [{ name: 'ORDERS_TABLE', line: 1 }], names: [] }]).map((c) => c.env.map((e) => e.name)), [['ORDERS_TABLE']], 'tableConsts: an environment variable a constant reads is a name: kept whatever the constant is called')
   const { findDeps } = await import('../lib/deps.mjs')
   if (findDeps()) {
     const SB = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-consts-')))
@@ -5279,11 +5291,22 @@ console.log('\nconstants: a settings file\'s secrets never reach the index; a ta
       put('grimoire.config.json', '{ "graph": {} }\n')
       put('app/settings.py', "SECRET_KEY = 'canary-const-1'\nDB_PASSWORD = \"canary-const-2\"\nDATABASES = {'default': {'PASSWORD': 'canary-const-3'}}\nORDERS_TABLE = 'orders'\nAPI_TOKEN = 'canaryconst4'\n")
       put('app/orders.py', "import boto3\nfrom app.settings import ORDERS_TABLE\n\ndef get_order(oid):\n    return boto3.client('dynamodb').get_item(TableName=ORDERS_TABLE, Key={'id': {'S': oid}})\n")
+      // secrets under names a deny-list never thought of, a container's secret beside its table-like key
+      put('app/more_settings.py', "STRIPE_SK = 'sk_live_canaryconst5'\nDB_PWD = 'canaryconst6'\nADMIN_PW = 'canaryconst7'\nCREDS = 'canaryconst8'\nGITHUB_PAT = 'ghp_canaryconst9'\nHMAC_SEED = 'canary-const-10'\nDATABASES2 = {'default': {'PWD': 'canary-const-11', 'NAME': 'app'}}\nPASSPHRASE_X = 'canary-const-12'\nLICENSE = 'CANARY-CONST-13'\nCONF = dict(PWD='canary-const-14', TABLE_NAME='orders')\n")
+      put('src/consts.ts', "export const STRIPE_SK = 'sk_live_canaryconst15'\nexport const DB_PWD = 'canaryconst16'\nexport const CFG = { pwd: 'canary-const-17', tableName: 'orders' }\nexport const ORDERS = 'orders2'\n")
+      put('src/use.ts', "import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb'\nimport { ORDERS } from './consts'\nconst c = new DynamoDBClient({})\nexport const f = () => c.send(new GetItemCommand({ TableName: ORDERS, Key: {} }))\n")
+      for (const t of ['orders', 'orders2']) put(`tables/${t}.json`, JSON.stringify({ TableName: t, KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }] }))
       const { call: callC } = await import('../lib/commands.mjs')
       await callC('graph_index', {}, { root: SB })
       const dir = path.join(SB, '.grimoire/graph')
-      const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-?const-?\d/g) || []))
+      const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-?const-?\d+/gi) || []))
       ok(!bytes.length, `a settings file's secret, password or token constant is not kept in the index (${bytes.length ? [...new Set(bytes)].join(', ') : 'none'})`)
+      const dt = await callC('graph_data', {}, { root: SB })
+      has(dt, '2 calls in 2 files, 2 reaching a table', 'the binding still reaches its tables through the constants kept (ORDERS_TABLE, and ORDERS = \'orders2\' in another file)')
+      const { renderGraph: renderK } = await import('../lib/render.mjs')
+      const { loadProject: loadK } = await import('../lib/project.mjs')
+      const answers = [dt, await callC('graph_data', { entity: 'orders2' }, { root: SB }), await renderK(loadK(SB))].join('\n')
+      ok(!/canary-?const-?\d+/i.test(answers), 'no such constant in an answer or the page')
     } finally { rmSync(SB, { recursive: true, force: true }) }
   }
 }

@@ -18,15 +18,16 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { familyOf } from './langs.mjs'
+import { secretValue } from './data/readers/code.mjs'
 
 export const UNKNOWN = '{…}'
 const MAX_REFS = 2000, MAX_ROUTES = 2000
 export const hashSeg = (s) => createHash('sha1').update(s).digest('hex').slice(0, 12)
 
-const named = (n) => { const out = []; for (let i = 0; i < n.namedChildCount; i++) out.push(n.namedChild(i)); return out }
+const named = (n) => (n.namedChildren ? n.namedChildren.slice() : Array.from({ length: n.namedChildCount }, (_, i) => n.namedChild(i))) // one call: namedChild(i) walks the children before i
 const field = (n, f) => (n ? n.childForFieldName(f) : null)
 const line = (n) => n.startPosition.row + 1
-const hasToken = (n, tok) => { for (let i = 0; i < n.childCount; i++) { const c = n.child(i); if (!c.isNamed && c.type === tok) return true } return false }
+const hasToken = (n, tok) => { for (const c of n.children) if (!c.isNamed && c.type === tok) return true; return false }
 
 // ── literals ──
 const STRINGS_LIST = () => [...STRINGS]
@@ -354,7 +355,7 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     else if (family === 'js' && (t === 'class_declaration' || t === 'abstract_class_declaration')) nestClass(n)
     else if (family === 'js' && (t === 'jsx_self_closing_element' || t === 'jsx_opening_element')) jsxElement(n)
     if (scanNode(n, t)) return
-    for (let i = 0, k = n.namedChildCount; i < k; i++) walk(n.namedChild(i), inner)
+    for (const c of n.namedChildren) walk(c, inner) // one call for all: namedChild(i) is linear in i
   }
 
   // ── JavaScript / TypeScript ──
@@ -833,7 +834,26 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
 }
 
 function finish(out) {
+  for (const r of out.routes) r.path = routePath(r.path)
+  for (const x of [...out.scopes, ...out.mounts]) if (typeof x.prefix === 'string') x.prefix = routePath(x.prefix)
+  if (typeof out.meta.globalPrefix === 'string') out.meta.globalPrefix = routePath(out.meta.globalPrefix)
   return out.routes.length || out.refs.length || out.scopes.length || out.mounts.length || Object.keys(out.meta).length ? out : null
+}
+
+// A route's path as stored and shown: its path template only. A declaration written as a URL keeps
+// no scheme, host or user info (`https://u:p@host/x` → `/x`), and no query or fragment (`/x?key=…`
+// → `/x`); a segment that looks like a credential (a known token prefix, or 20 characters or more
+// mixing upper case, lower case and numerals: readers/code.mjs secretValue) is `{…}`, what code fills in.
+export function routePath(p) {
+  let s = String(p ?? '')
+  s = s.replace(/[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/g, '') // scheme://user:pass@host:port, anywhere
+  s = s.replace(/^\/\/[^/?#]*[.@:][^/?#]*/, '') // //host
+  s = s.replace(/^[^/?#{]*:[^/?#@]*@[^/?#]*/, '') // user:pass@host, no scheme
+  s = s.replace(/^\/{2,}/, '/') // what a joined prefix left: `/` + `//r`
+  const cut = s.search(/#|\?(?=[^/(])/) // an optional parameter (`:id?`) is no query
+  if (cut >= 0) s = s.slice(0, cut)
+  if (s.includes('/') || secretValue(s)) s = s.split('/').map((seg) => (seg && secretValue(seg) ? UNKNOWN : seg)).join('/')
+  return s || (String(p ?? '') ? '/' : s)
 }
 
 // Two path parts joined: one slash between them, none doubled; `''` + `''` is `/`
@@ -936,7 +956,8 @@ function railsRoutes(rootNode, addRoute, consumed) {
   const opt = (args, k) => { for (const a of args) if (a.type === 'pair') { const key = field(a, 'key'); const kt = key.type === 'hash_key_symbol' ? key.text : sym(key); if (kt === k) return field(a, 'value') } return null }
   // `[:a, :b]`, `%i[a b]` (a symbol_array of bare_symbol), `%w[a b]`, or one symbol
   const symList = (v) => (!v ? null : /^(array|symbol_array|string_array)$/.test(v.type) ? named(v).map(sym).filter(Boolean) : [sym(v)].filter(Boolean))
-  const handlerOf = (to, ctx) => { const s = to ? lit(to) : null; if (!s || !s.includes('#')) return null; const [c, a] = s.split('#'); return { name: a, qual: [ctx.module, c].filter(Boolean).join('/'), rails: true } }
+  // `to: 'posts#index'`: a controller and an action, never a URL (`to: 'https://…#…'` is no handler)
+  const handlerOf = (to, ctx) => { const s = to ? lit(to) : null; if (!s || !/^[A-Za-z_][\w/]*#[A-Za-z_]\w*[!?]?$/.test(s)) return null; const [c, a] = s.split('#'); return { name: a, qual: [ctx.module, c].filter(Boolean).join('/'), rails: true } }
   const visit = (n, ctx) => {
     if (n.type === 'call' && !field(n, 'receiver')) {
       const m = field(n, 'method')?.text

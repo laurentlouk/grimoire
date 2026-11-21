@@ -102,7 +102,7 @@ function readSchema(root, file) {
     const n = stack.pop()
     if (n.type === 'ERROR' && out.errors.length < 4) out.errors.push(lineOf(n))
     if (n.type === 'call' && !field(n, 'receiver')) { calls.push(n); if (field(n, 'method')?.text === 'create_table') continue }
-    for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i))
+    for (let cs = n.namedChildren, i = cs.length - 1; i >= 0; i--) stack.push(cs[i])
   }
   for (const c of calls.sort((a, b) => a.startIndex - b.startIndex)) {
     const m = field(c, 'method')?.text

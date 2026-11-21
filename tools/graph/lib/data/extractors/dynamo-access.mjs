@@ -49,7 +49,7 @@
 //   Const  { name, line, names, env, test? }
 // A base's file is not read (graph_changes does not compare access patterns; data/base.mjs).
 import { codeName } from '../readers/names.mjs'
-import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each, tableConsts } from '../readers/code.mjs'
+import { MAX, named, field, lineOf, endOf, cap, push, CONST_NAME, each, tableConsts, tableFns, keyed } from '../readers/code.mjs'
 import { readRust, scanUses as rsScan, strOf, isStr, attrOf, isTestAttr, formatParts } from './serde.mjs'
 import { readTs, scanUses as tsScan, strVal, knownOf, decls } from './ts-types.mjs'
 import { TEST_PATH } from '../../langs.mjs'
@@ -586,7 +586,7 @@ function pyScan(root, ctx, sink) {
       const parts = pyParts(n)
       if (parts && (n.type === 'string' || n.type === 'concatenated_string' || parts.some((p) => p !== null))) {
         const p = codeName(parts)
-        if (p) push(sink.names, { text: p, line: lineOf(n) })
+        if (p) push(sink.names, keyed({ text: p, line: lineOf(n) }, n))
         each(n, (x) => (x === n ? true : x.type === 'string' ? (named(x).filter((i) => i.type === 'interpolation').forEach((i) => pyScan(i, ctx, sink)), false) : visitPy(x, ctx, sink) !== false))
         return false
       }
@@ -734,10 +734,10 @@ const goUnwrap = (n) => {
 function goScan(root, ctx, sink) {
   each(root, (n) => {
     const s = goLit(n)
-    if (s !== null) { const p = codeName([s]); if (p) push(sink.names, { text: p, line: lineOf(n) }); return false }
+    if (s !== null) { const p = codeName([s]); if (p) push(sink.names, keyed({ text: p, line: lineOf(n) }, n)); return false }
     if (n.type === 'call_expression') {
       const f = field(n, 'function')?.text || '', args = named(field(n, 'arguments') || n)
-      if (/^fmt\.Sprintf?$/.test(f)) { const fs = goLit(args[0]); if (fs !== null) { const p = codeName(f === 'fmt.Sprintf' ? goFormat(fs) : [fs]); if (p) push(sink.names, { text: p, line: lineOf(n) }); for (const a of args.slice(1)) goScan(a, ctx, sink); return false } }
+      if (/^fmt\.Sprintf?$/.test(f)) { const fs = goLit(args[0]); if (fs !== null) { const p = codeName(f === 'fmt.Sprintf' ? goFormat(fs) : [fs]); if (p) push(sink.names, keyed({ text: p, line: lineOf(n) }, n)); for (const a of args.slice(1)) goScan(a, ctx, sink); return false } }
       if (/^os\.(?:Getenv|LookupEnv)$/.test(f)) { const e = goLit(args[0]); if (e !== null) push(sink.env, { name: e, line: lineOf(n) }); return false }
     }
     if (n.type === 'identifier' && ctx.known.has(n.text) && !sink.uses.includes(n.text)) push(sink.uses, n.text)
@@ -851,7 +851,7 @@ export function readAccess(tree, lang, file) {
 
 export default {
   id: 'dynamo-access',
-  version: 2,
+  version: 3,
   kind: 'inferred',
   scope: 'file',
   tree: true,
@@ -866,6 +866,7 @@ export default {
     try {
       const a = readAccess(tree, lang, file)
       a.consts = tableConsts(a.consts) // a constant no table can be named by never reaches the index (readers/code.mjs)
+      a.fns = tableFns(a.fns) // nor a credential a function holds
       // a file with no call keeps its constants, for the calls of other files to name (not its functions)
       if (a.sites.length) return { declarations: [], access: { path: file, ...a } }
       return a.consts.length ? { declarations: [], access: { path: file, lang: a.lang, sites: [], fns: [], consts: a.consts, notes: [] } } : { declarations: [] }

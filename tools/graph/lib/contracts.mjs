@@ -54,7 +54,8 @@ function tokens(src, lang) {
     if (gql && c === '"' && src[i + 1] === '"' && src[i + 2] === '"') {
       const at = line
       i += 3
-      while (i < n && !(src[i] === '"' && src[i + 1] === '"' && src[i + 2] === '"')) { if (src[i] === '\\') i++; else if (src[i] === '\n') line++; i++ }
+      // a block string's only escape is \""" (spec: BlockStringCharacter); any other backslash is literal
+      while (i < n && !(src[i] === '"' && src[i + 1] === '"' && src[i + 2] === '"')) { if (src[i] === '\\' && src[i + 1] === '"' && src[i + 2] === '"' && src[i + 3] === '"') i += 3; else if (src[i] === '\n') line++; i++ }
       i += 3
       out.push({ t: 'str', v: '"…"', line: at }); continue
     }
