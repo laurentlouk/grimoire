@@ -477,6 +477,30 @@ export function aggregate(runs) {
 export const LANDED = ['DONE', 'DONE_WITH_CONCERNS', 'DONE_PENDING_GATE'] // the engine's landed statuses
 export const STALE_HOURS = 12 // a "running" run with no journal write for this long: its session most likely died
 
+// A run's task counts, and where they come from: the newest session's run.end, else run.json's
+// summary (both the engine's own count: a BLOCKED settle is failed there, blocked is what never
+// ran), else each task's last settle (`settles`, for a run still writing or whose end was lost).
+export function outcomeTasks(run) {
+  const ev = run.events
+  const sm = run.summary || {}
+  const lastAttempt = ev.length ? Math.max(...ev.map(attemptOf)) : 1
+  const end = [...ev].reverse().find((e) => e.type === 'run.end' && attemptOf(e) === lastAttempt)
+  const lastSettle = new Map()
+  const seen = new Set()
+  for (const e of ev) {
+    if (e.type === 'settle' && e.task != null) lastSettle.set(String(e.task), String(e.status))
+    if (e.task != null && (e.type === 'dispatch' || e.type === 'settle')) seen.add(String(e.task))
+  }
+  const settled = [...lastSettle.values()]
+  const n = (v) => num(v) ?? (Array.isArray(v) ? v.length : null)
+  const src = end || (run.summary ? { done: sm.done, failed: sm.failed ?? sm.needsAttention, blocked: sm.blocked, stillRunning: sm.stillRunning } : null)
+  const tasks = src
+    ? { landed: n(src.done) ?? 0, failed: n(src.failed) ?? 0, blocked: n(src.blocked) ?? 0, inFlight: n(src.stillRunning) ?? 0 }
+    : { landed: settled.filter((x) => LANDED.includes(x)).length, failed: settled.filter((x) => !LANDED.includes(x) && x !== 'BLOCKED').length,
+      blocked: settled.filter((x) => x === 'BLOCKED').length, inFlight: Math.max(0, seen.size - lastSettle.size) }
+  return { tasks, source: end ? 'run.end' : src ? 'summary' : 'settles' }
+}
+
 export function runOutcome(run, now = Date.now()) {
   const ev = run.events
   const f = runFacts(run)
@@ -487,13 +511,7 @@ export function runOutcome(run, now = Date.now()) {
   // tasks: the newest session's run.end, else run.json's summary, else each task's last settle
   const lastSettle = new Map()
   for (const e of ev) if (e.type === 'settle' && e.task != null) lastSettle.set(String(e.task), String(e.status))
-  const settled = [...lastSettle.values()]
-  const n = (v) => num(v) ?? (Array.isArray(v) ? v.length : null)
-  const src = end || (run.summary ? { done: sm.done, failed: sm.failed ?? sm.needsAttention, blocked: sm.blocked, stillRunning: sm.stillRunning } : null)
-  const tasks = src
-    ? { landed: n(src.done) ?? 0, failed: n(src.failed) ?? 0, blocked: n(src.blocked) ?? 0, inFlight: n(src.stillRunning) ?? 0 }
-    : { landed: settled.filter((x) => LANDED.includes(x)).length, failed: settled.filter((x) => !LANDED.includes(x) && x !== 'BLOCKED').length,
-      blocked: settled.filter((x) => x === 'BLOCKED').length, inFlight: Math.max(0, f.tasks - lastSettle.size) }
+  const { tasks } = outcomeTasks(run)
   const gatePrs = new Set(ev.filter((e) => e.type === 'gate' && e.prUrl).map((e) => String(e.prUrl)))
   const prs = num(end?.prs) ?? num(sm.prs) ?? (Array.isArray(sm.prUrls) ? sm.prUrls.length : gatePrs.size)
   // every halt, in any session; a pre-0.9.0 run.json holds a bare reason and its halt event no kind

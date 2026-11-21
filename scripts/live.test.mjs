@@ -8,7 +8,13 @@
 //    • the contract's shape: every field present, in every fixture, null when unknown
 //    • a running run: task counts, the active tasks (step, agent, model, round, since), the last
 //      decisions newest first, the caps and output tokens from the journal, the effective cost
-//      from the transcripts, cached in .grimoire/live/cost.json and recomputed at most every 60 s
+//      from .grimoire/live/cost.json only, which a detached child refreshes (one at a time) once
+//      it is missing or 60 s old, recomputing only when a transcript or a dispatch moved
+//    • review regressions: of two running runs the one written to last; the caps of the last
+//      run.start; counts as the run's own outcome has them (tracker-done issues left out, a BLOCKED
+//      settle failed, what never ran on an ended run blocked); a task an earlier session left in
+//      flight is queued; event types such as `constructor` or `__proto__` look up nothing; a time
+//      a Date cannot hold is null in its field only
 //    • a run halted by the cost fuse reads budget_exhausted; a closed run reads closed; a run
 //      that ended more than 6 h ago, and a "running" one silent for a day, are no run
 //    • the briefing line is exactly what `manager.mjs headline` prints
@@ -19,14 +25,15 @@
 //      close note or a judge's reason never reaches the output
 //    • 5 runs × 2000 events: the CLI answers within 300 ms
 //    • hooks/scripts/live-pointer.sh writes the plugin root to <project>/.grimoire/live/plugin-root,
-//      never in the plugin folder or $HOME, silent and exit 0 whatever happens
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, realpathSync, statSync } from 'node:fs'
+//      never in the plugin folder or $HOME, silent and exit 0 whatever happens; in a linked git
+//      worktree it counts the main checkout's .grimoire/ and writes in the worktree's own
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, realpathSync, statSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { snapshot, COST_EVERY_MS } from './live.mjs'
-import { closeRun } from './render-logs.mjs'
+import { closeRun, loadRuns, runOutcome } from './render-logs.mjs'
 import { writeClaudeRun } from './economy/fixtures.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -99,6 +106,18 @@ const run = (root, extra) => {
   return { ...r, json, lines: r.stdout.split('\n').filter(Boolean).length }
 }
 const samples = {}
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+// The detached refresh: waits (up to 15 s) for the run's cache, matching `pred`, with no lock held.
+function waitCost(root, runId, pred = () => true) {
+  const live = join(root, '.grimoire', 'live')
+  for (let i = 0; i < 150; i++) {
+    let c = null
+    try { c = JSON.parse(readFileSync(join(live, 'cost.json'), 'utf8')) } catch {}
+    if (c && c.runId === runId && pred(c) && !existsSync(join(live, 'cost.lock'))) return true
+    sleep(100)
+  }
+  return false
+}
 
 try {
   // ── a running run ─────────────────────────────────────────────────────────
@@ -167,6 +186,9 @@ try {
   writeFileSync(join(turns, 'broken.json'), '{ not json')
 
   section('a running run')
+  const s0 = run(P1)
+  ok(s0.json.run.cost.effective === null && s0.json.run.cost.isCovered === false, 'the first snapshot never reads a transcript: no bill yet, a refresh started in a detached child')
+  ok(waitCost(P1, 'R1'), 'the child wrote the bill to .grimoire/live/cost.json and released its lock')
   const s1 = run(P1)
   samples.running = s1.json
   ok(s1.status === 0 && s1.lines === 1 && s1.stderr === '', 'exit 0, one line of JSON, nothing on stderr')
@@ -175,7 +197,7 @@ try {
   ok(r1.id === 'R1' && r1.status === 'running' && r1.haltReason === null && r1.isStale === false, `the newest running run, not stale (${r1.id} ${r1.status})`)
   ok(r1.startedAt === new Date(t0).toISOString() && Date.parse(r1.updatedAt) > Date.now() - 10 * MIN, 'startedAt from run.json, updatedAt from the last write')
   const tk = r1.tasks
-  ok(tk.total === 7 && tk.done === 1 && tk.active === 2 && tk.failed === 1 && tk.blocked === 1 && tk.queued === 2, `tasks: 7 total, 1 done, 2 active, 1 failed, 1 blocked, 2 queued (${JSON.stringify(tk)})`)
+  ok(tk.total === 7 && tk.done === 1 && tk.active === 2 && tk.failed === 2 && tk.blocked === 0 && tk.queued === 2, `tasks: 7 total, 1 done, 2 active, 2 failed (a BLOCKED settle is failed, as run.end counts it), 2 queued (${JSON.stringify(tk)})`)
   ok(r1.active.map((a) => a.task).join(',') === 'T2,T1', `active tasks newest dispatch first (${r1.active.map((a) => a.task)})`)
   const a1 = r1.active.find((a) => a.task === 'T1')
   ok(a1.step === 'fix' && a1.agent === 'api-engineer' && a1.model === 'opus' && a1.round === 1 && a1.title === null, `T1: fix round 1, escalated to opus, no title (${JSON.stringify(a1)})`)
@@ -187,7 +209,7 @@ try {
   ok(r1.recent.every((e) => typeof e.at === 'string'), 'each decision carries its chunk\'s time')
   const c1 = r1.cost
   ok(c1.maxCost === 5000000 && c1.maxOutput === 2000000 && c1.output === 812345, `caps from run.start's knobs, output tokens from the checkpoint (${JSON.stringify(c1)})`)
-  ok(typeof c1.effective === 'number' && c1.effective > 0, `effective cost from the transcripts (${c1.effective})`)
+  ok(typeof c1.effective === 'number' && c1.effective > 0, `then the effective cost from the transcripts (${c1.effective})`)
   ok(c1.isCovered === false, 'not covered: T1 has an implementer transcript, T2, T3, T6 and T7 none')
   const b1 = s1.json.briefing
   const headline = spawnSync(process.execPath, [MANAGER, 'headline', '--root', P1], { encoding: 'utf8', env: ENV }).stdout.replace(/\n$/, '')
@@ -200,20 +222,31 @@ try {
   ok(s1.json.errors === 0, 'no part failed (a corrupt turn state is skipped)')
   ok(!CANARY_RE.test(s1.stdout) && !/Jane/.test(s1.stdout), 'canary: no ticket text, reason, note or identity in the output')
 
-  section('the cost cache')
+  section('the cost cache: read, never recomputed on the snapshot\'s path')
   const cacheFile = join(P1, '.grimoire', 'live', 'cost.json')
   const cache = JSON.parse(readFileSync(cacheFile, 'utf8'))
-  ok(cache.runId === 'R1' && cache.effective === c1.effective && typeof cache.key === 'string' && cache.key.startsWith('R1|'), `written to .grimoire/live/cost.json, keyed by runId, newest transcript and dispatches (${cache.key})`)
+  ok(cache.runId === 'R1' && cache.effective === c1.effective && typeof cache.key === 'string' && cache.key.startsWith('R1|'), `keyed by runId, newest transcript and dispatches (${cache.key})`)
   writeFileSync(cacheFile, JSON.stringify({ ...cache, effective: 42 }))
-  ok(run(P1).json.run.cost.effective === 42, 'within 60 s the cache answers: no transcript read')
+  ok(run(P1).json.run.cost.effective === 42 && !existsSync(join(P1, '.grimoire', 'live', 'cost.lock')), 'within 60 s the cache answers and no refresh starts')
+  sleep(300)
+  ok(JSON.parse(readFileSync(cacheFile, 'utf8')).effective === 42, '… and nothing rewrites it')
   writeFileSync(cacheFile, JSON.stringify({ ...cache, effective: 42, checkedAt: Date.now() - COST_EVERY_MS - 1000 }))
-  ok(run(P1).json.run.cost.effective === 42, 'past 60 s with nothing moved, the cached bill stands (checked again, not recomputed)')
-  ok(Date.now() - JSON.parse(readFileSync(cacheFile, 'utf8')).checkedAt < 30000, 'and the check is stamped')
+  ok(run(P1).json.run.cost.effective === 42, 'past 60 s the cached bill answers at once')
+  ok(waitCost(P1, 'R1', (c) => Date.now() - c.checkedAt < 30000), 'and the child checks it again and stamps it')
+  ok(JSON.parse(readFileSync(cacheFile, 'utf8')).effective === 42, 'nothing moved: the bill stands, not recomputed')
   writeFileSync(cacheFile, JSON.stringify({ ...cache, effective: 42, checkedAt: Date.now() - COST_EVERY_MS - 1000, key: 'R1|0|1' }))
-  ok(run(P1).json.run.cost.effective === c1.effective, 'past 60 s with a newer transcript or dispatch, recomputed')
+  ok(run(P1).json.run.cost.effective === 42, 'a transcript or a dispatch moved: the old bill answers at once')
+  ok(waitCost(P1, 'R1', (c) => c.effective === c1.effective) && run(P1).json.run.cost.effective === c1.effective, 'and the next snapshot has the recomputed one')
   writeFileSync(cacheFile, '{ broken')
   const sb = run(P1)
-  ok(sb.json.run.cost.effective === c1.effective && sb.json.errors === 0, 'a corrupt cache is recomputed')
+  ok(sb.json.run.cost.effective === null && sb.json.errors === 0, 'a corrupt cache is no bill, no error')
+  ok(waitCost(P1, 'R1', (c) => c.effective === c1.effective), 'and is rewritten by the child')
+  mkdirSync(join(P1, '.grimoire', 'live', 'cost.lock'))
+  writeFileSync(cacheFile, JSON.stringify({ ...cache, effective: 42, checkedAt: Date.now() - COST_EVERY_MS - 1000, key: 'R1|0|1' }))
+  run(P1)
+  sleep(1500)
+  ok(JSON.parse(readFileSync(cacheFile, 'utf8')).effective === 42, 'a refresh already at work (its lock): no second one')
+  rmSync(join(P1, '.grimoire', 'live', 'cost.lock'), { recursive: true, force: true })
 
   // ── a run the cost fuse halted ────────────────────────────────────────────
   const P2 = join(TMP, 'halted')
@@ -294,6 +327,109 @@ try {
   const direct = snapshot({ root: P1, claudeDir: CLAUDE })
   ok(shapeOk(direct) && direct.run.id === 'R1', 'snapshot() in process gives the same snapshot')
 
+  // ── review regressions ────────────────────────────────────────────────────
+  // A run dir written session by session: chunks [{attempt, at, events}], seq per session.
+  function writeSessions(root, runId, run, chunks) {
+    const d = join(root, '.grimoire', 'runs', runId)
+    rmSync(join(d, 'events'), { recursive: true, force: true })
+    mkdirSync(join(d, 'events'), { recursive: true })
+    writeFileSync(join(d, 'run.json'), JSON.stringify({ runId, project: 'PROJ', meta: {}, ...run }))
+    const seqs = {}
+    for (const c of chunks) {
+      const a = c.attempt ?? 1
+      seqs[a] ??= 0
+      const first = seqs[a] + 1
+      const lines = c.events.map((e) => JSON.stringify({ seq: ++seqs[a], at: new Date(c.at).toISOString(), attempt: a, ...e }))
+      writeFileSync(join(d, 'events', `${pad(first)}${a > 1 ? `.a${a}` : ''}.jsonl`), `${lines.join('\n')}\n`)
+    }
+  }
+  const T0 = Date.now()
+  section('review: which run, which session')
+  const RA = join(TMP, 'two-running')
+  // resumed now under an old startedAt, and a newer start whose session died 4 h ago (run.json still "running")
+  writeSessions(RA, 'R_OLD', { attempt: 2, startedAt: ago(72 * HOUR), updatedAt: ago(2 * MIN), status: 'running', checkpoint: { attempt: 2, pending: ['X1', 'X2'] } }, [
+    { attempt: 1, at: T0 - 72 * HOUR, events: [start(), { type: 'halt', kind: 'harness' }, { type: 'run.end', status: 'halted', done: 0, failed: 0, blocked: 0 }] },
+    { attempt: 2, at: T0 - 2 * MIN, events: [start({ resumed: true }), { type: 'dispatch', task: 'X1', agent: 'api-engineer', model: 'sonnet' }] },
+  ])
+  writeSessions(RA, 'R_NEW', { attempt: 1, startedAt: ago(5 * HOUR), updatedAt: ago(4 * HOUR), status: 'running', checkpoint: { pending: ['Y1'] } }, [
+    { attempt: 1, at: T0 - 4 * HOUR, events: [start(), { type: 'dispatch', task: 'Y1', agent: 'web-engineer', model: 'haiku' }] },
+  ])
+  const ra = run(RA).json.run
+  ok(ra.id === 'R_OLD' && ra.isStale === false && ra.active.map((a) => a.task).join() === 'X1', `of two running runs, the one written to last, not the one started last (${ra.id})`)
+  const RK = join(TMP, 'knobs')
+  writeSessions(RK, 'R', { attempt: 2, startedAt: ago(5 * HOUR), updatedAt: ago(MIN), status: 'running', checkpoint: { attempt: 2, outputTokensSpent: 10 } }, [
+    { attempt: 1, at: T0 - 4 * HOUR, events: [start({ knobs: { maxCost: 5000000, maxOutputTokens: 1000000 } }), { type: 'halt', kind: 'budget', reason: 'budget_exhausted: x' }, { type: 'run.end', status: 'halted' }] },
+    { attempt: 2, at: T0 - MIN, events: [start({ resumed: true, knobs: { maxCost: 20000000, maxOutputTokens: 4000000 } })] },
+  ])
+  const rk = run(RK).json.run.cost
+  ok(rk.maxCost === 20000000 && rk.maxOutput === 4000000, `the caps of the session writing now: the last run.start's knobs (${rk.maxCost}, ${rk.maxOutput})`)
+  const RB = join(TMP, 'resume')
+  // session 1 dispatched T1 and T2 (T2 landed) and died with T1 in review; session 2 resumed, absorbed T2, has not dispatched T1 again
+  writeSessions(RB, 'R', { attempt: 2, startedAt: ago(9 * HOUR), updatedAt: ago(3 * MIN), status: 'running', checkpoint: { attempt: 2, pending: ['T1', 'T3'], landed: ['T2'], landedTasks: [{ id: 'T2', repo: 'api' }] } }, [
+    { attempt: 1, at: T0 - 8 * HOUR, events: [start(), { type: 'dispatch', task: 'T1', agent: 'api-engineer', model: 'opus' }, { type: 'dispatch', task: 'T2', agent: 'api-engineer', model: 'sonnet' }, { type: 'settle', task: 'T2', status: 'DONE' }, { type: 'review', task: 'T1', stage: 'spec', verdict: 'FAIL', round: 1, gating: 1 }, { type: 'fix', task: 'T1', round: 1, model: 'opus' }] },
+    { attempt: 2, at: T0 - 3 * MIN, events: [start({ resumed: true }), { type: 'absorb', task: 'T2', source: 'checkpoint' }] },
+  ])
+  const rb = run(RB).json.run
+  ok(rb.active.length === 0 && JSON.stringify(rb.tasks) === JSON.stringify({ total: 3, done: 1, active: 0, failed: 0, blocked: 0, queued: 2 }),
+    `a task an earlier session left in flight, not dispatched again by the current one, is queued, not active (${JSON.stringify(rb.tasks)})`)
+  writeSessions(RB, 'R', { attempt: 2, startedAt: ago(9 * HOUR), updatedAt: ago(MIN), status: 'running', checkpoint: { attempt: 2, pending: ['T1', 'T3'], landed: ['T2'], landedTasks: [{ id: 'T2', repo: 'api' }] } }, [
+    { attempt: 1, at: T0 - 8 * HOUR, events: [start(), { type: 'dispatch', task: 'T1', agent: 'api-engineer', model: 'opus' }] },
+    { attempt: 2, at: T0 - MIN, events: [start({ resumed: true }), { type: 'dispatch', task: 'T1', agent: 'api-engineer', model: 'sonnet' }] },
+  ])
+  const rb2 = run(RB).json.run
+  ok(rb2.active.length === 1 && rb2.active[0].task === 'T1' && rb2.active[0].model === 'sonnet' && rb2.tasks.active === 1, 'dispatched again by the current session: active')
+
+  section('review: counts agree with the run\'s own outcome')
+  const RC = join(TMP, 'counts')
+  // D1–D3 were done in the tracker before the run (checkpoint.landed seeds them); T1 landed, T2 settled BLOCKED, T3 never ran
+  writeSessions(RC, 'R', { attempt: 1, startedAt: ago(2 * HOUR), updatedAt: ago(10 * MIN), status: 'drained', summary: { done: 1, failed: 1, blocked: 1 },
+    checkpoint: { landed: ['D1', 'D2', 'D3', 'T1'], landedTasks: [{ id: 'T1', repo: 'api' }], pending: ['T3'] } }, [
+    { attempt: 1, at: T0 - 10 * MIN, events: [start(),
+      { type: 'dispatch', task: 'T1', agent: 'a', model: 'sonnet' }, { type: 'settle', task: 'T1', status: 'DONE' },
+      { type: 'dispatch', task: 'T2', agent: 'a', model: 'sonnet' }, { type: 'settle', task: 'T2', status: 'BLOCKED' },
+      { type: 'run.end', status: 'drained', done: 1, failed: 1, stillRunning: 0, recovered: 0, blocked: 1, prs: 1, tokens: 5 }] },
+  ])
+  const rc = run(RC).json.run.tasks
+  const oc = runOutcome(loadRuns(join(RC, '.grimoire', 'runs'))[0]).tasks
+  ok(JSON.stringify(rc) === JSON.stringify({ total: 3, done: 1, active: 0, failed: 1, blocked: 1, queued: 0 }) && rc.done === oc.landed && rc.failed === oc.failed && rc.blocked === oc.blocked && rc.active === oc.inFlight,
+    `an ended run: its run.end's counts, as render-logs reads them; tracker-done issues are not the run's (${JSON.stringify(rc)} vs ${JSON.stringify(oc)})`)
+  const RD = join(TMP, 'counts-running')
+  writeSessions(RD, 'R', { attempt: 1, startedAt: ago(HOUR), updatedAt: ago(MIN), status: 'running', checkpoint: { landed: ['D1', 'D2', 'T1'], landedTasks: [{ id: 'T1', repo: 'api' }], pending: ['T3'] } }, [
+    { attempt: 1, at: T0 - MIN, events: [start(), { type: 'dispatch', task: 'T1', agent: 'a', model: 'sonnet' }, { type: 'settle', task: 'T1', status: 'DONE' },
+      { type: 'dispatch', task: 'T2', agent: 'a', model: 'sonnet' }, { type: 'settle', task: 'T2', status: 'BLOCKED' }] },
+  ])
+  const rd = run(RD).json.run.tasks
+  ok(JSON.stringify(rd) === JSON.stringify({ total: 3, done: 1, active: 0, failed: 1, blocked: 0, queued: 1 }), `a running run: tracker-done issues left out, a BLOCKED settle failed, what has not run queued (${JSON.stringify(rd)})`)
+  const RE = join(TMP, 'counts-lost-end')
+  // closed, its run.end lost: counted from the journal, what never ran blocked
+  writeSessions(RE, 'R', { attempt: 1, startedAt: ago(2 * HOUR), updatedAt: ago(HOUR), status: 'running', checkpoint: { pending: ['T2', 'T3'] } }, [
+    { attempt: 1, at: T0 - HOUR, events: [start(), { type: 'dispatch', task: 'T1', agent: 'a', model: 'sonnet' }, { type: 'settle', task: 'T1', status: 'DONE' }] },
+  ])
+  closeRun(join(RE, '.grimoire', 'runs'), 'R', { reason: 'abandoned', now: Date.now() + 13 * HOUR })
+  const re = run(RE).json.run
+  ok(re.status === 'closed' && JSON.stringify(re.tasks) === JSON.stringify({ total: 3, done: 1, active: 0, failed: 0, blocked: 2, queued: 0 }), `an ended run with no run.end: what never ran is blocked, not queued (${JSON.stringify(re.tasks)})`)
+
+  section('review: hostile event types and times')
+  for (const type of ['constructor', '__proto__', 'valueOf', 'hasOwnProperty', 'toString']) {
+    const RP = join(TMP, `proto-${type.replace(/_/g, 'u')}`)
+    writeSessions(RP, 'R', { attempt: 1, startedAt: ago(HOUR), updatedAt: ago(MIN), status: 'running', checkpoint: { pending: ['T1'] } }, [
+      { attempt: 1, at: T0 - MIN, events: [start(), { type: 'dispatch', task: 'T1', agent: 'a', model: 'sonnet' }, { type, task: 'T1', reason: CANARY, note: 'secret sk-ant-xxxx' }] },
+    ])
+    const r = run(RP)
+    const a = r.json && r.json.run && r.json.run.active[0]
+    ok(r.status === 0 && shapeOk(r.json) && r.json.errors === 0 && a && a.step === 'build' && typeof r.json.run.recent[0].text === 'string' && !CANARY_RE.test(r.stdout) && !/sk-ant/.test(r.stdout),
+      `an event of type ${type}: no prototype lookup, the run shown, nothing leaked (${r.json && r.json.run && r.json.run.recent[0].text})`)
+  }
+  const RI = join(TMP, 'iso')
+  writeSessions(RI, 'R', { attempt: 1, startedAt: ago(HOUR), updatedAt: ago(MIN), status: 'running', checkpoint: { pending: ['T1'] } }, [
+    { attempt: 1, at: T0 - MIN, events: [start(), { type: 'dispatch', task: 'T1', agent: 'a', model: 'sonnet' }, { type: 'review', task: 'T1', verdict: 'PASS', at: 1e16 }] },
+  ])
+  mkdirSync(join(RI, '.grimoire', 'economy', 'turns'), { recursive: true })
+  writeFileSync(join(RI, '.grimoire', 'economy', 'turns', 'a.json'), JSON.stringify({ agentId: 'a', agentType: 'api-engineer', events: [{ action: 'block', reason: 'backstop:9>=8', at: T0 - MIN }, { action: 'block', reason: 'x', at: 1e16 }] }))
+  const ri = run(RI).json
+  ok(ri.errors === 0 && ri.run && ri.run.recent[0].kind === 'review' && ri.run.recent[0].at === null && ri.watch && ri.watch.flags.some((f) => f.at === null) && ri.watch.flags.some((f) => typeof f.at === 'string'),
+    'a time a Date cannot hold is null in its own field: the run and the watch still shown, no error')
+
   // ── timing: 5 runs × 2000 events ──────────────────────────────────────────
   const P8 = join(TMP, 'big')
   const kinds = ['route', 'dispatch', 'precheck', 'review', 'verify', 'guard', 'fix', 'integrate', 'settle']
@@ -356,11 +492,34 @@ try {
   writeFileSync(join(RO, '.grimoire'), 'a file')
   const h2 = hook(RO)
   ok(h2.status === 0 && h2.stdout === '' && h2.stderr === '', '.grimoire/ that cannot be created: silent, exit 0')
+  // a linked git worktree (the files git writes, as project-config.mjs reads them): the main checkout's .grimoire/ counts
+  const MAIN = join(TMP, 'wt-main'), WT = join(TMP, 'wt-lane')
+  mkdirSync(join(MAIN, '.git', 'worktrees', 'lane'), { recursive: true })
+  writeFileSync(join(MAIN, '.git', 'worktrees', 'lane', 'commondir'), '../..\n')
+  mkdirSync(WT, { recursive: true })
+  writeFileSync(join(WT, '.git'), `gitdir: ${join(MAIN, '.git', 'worktrees', 'lane')}\n`)
+  hook(WT)
+  ok(!existsSync(join(WT, '.grimoire')), 'a linked worktree whose main checkout has no .grimoire/: nothing written')
+  mkdirSync(join(MAIN, '.grimoire'))
+  const hw = hook(WT)
+  ok(hw.status === 0 && hw.stdout === '' && readFileSync(join(WT, '.grimoire', 'live', 'plugin-root'), 'utf8') === `${PLUGIN}\n` && !existsSync(join(MAIN, '.grimoire', 'live')),
+    'its main checkout has one: the pointer goes in the worktree\'s own .grimoire/live/, created there')
+  writeFileSync(join(WT, '.git'), 'gitdir: wt-relative/none\n')
+  rmSync(join(WT, '.grimoire'), { recursive: true, force: true })
+  const hx = hook(WT)
+  ok(hx.status === 0 && !existsSync(join(WT, '.grimoire')), 'a .git file naming no git dir: no main checkout, nothing written')
   const reg = JSON.parse(readFileSync(join(PLUGIN, 'hooks', 'hooks.json'), 'utf8')).hooks.SessionStart.flatMap((h) => h.hooks)
   ok(reg.some((h) => h.command === 'bash "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/live-pointer.sh"' && h.timeout === 5), 'hooks.json registers it under SessionStart, timeout 5')
 
   if (PRINT) for (const [k, v] of Object.entries(samples)) console.log(`\n=== ${k}\n${JSON.stringify(v)}`)
 } finally {
+  // the detached cost refreshes: let them end before their project dirs go
+  for (let i = 0; i < 100; i++) {
+    let busy = false
+    try { busy = readdirSync(TMP).some((d) => existsSync(join(TMP, d, '.grimoire', 'live', 'cost.lock'))) } catch {}
+    if (!busy) break
+    sleep(100)
+  }
   rmSync(TMP, { recursive: true, force: true })
 }
 
