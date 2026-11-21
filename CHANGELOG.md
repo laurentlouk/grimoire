@@ -79,7 +79,7 @@ An audit ran the graph on real open-source projects, about a dozen across both r
   - *Performance:*
     - `graph_diff`'s base model is cached on disk and reuses the index for unchanged files. A cold diff on a large project went from 4–6 s to 1–2 s.
     - The data extractors reuse the code pass's trees.
-    - The routes walk is skipped for files that cannot hold one. A full index costs about +23% against the previous release instead of +60%.
+    - The routes walk is skipped for files that cannot hold one. A full index costs about +30% CPU against the previous release instead of +60%, for the maps this release adds.
 - Index schema 26: the index rebuilds once.
 
 ## 0.45.0 — one data model diagram for every store: key-value tables and caches drawn like SQL, and the links no key states
