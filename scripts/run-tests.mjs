@@ -23,6 +23,7 @@ const SERIAL = new Set([
   'tools/graph/tests/arch-docs.test.mjs', // bounds rendering time in milliseconds: a loaded machine overruns it
   'tools/graph/tests/data.test.mjs', // the same: a 200-table store's page, in milliseconds
   'tools/graph/tests/data-redis.test.mjs', // the same: hostile files read within their bounds, in milliseconds
+  'scripts/live.test.mjs', // the snapshot's 300 ms budget, measured on a real process
 ])
 // The loop-durability files that drive real git sandboxes and shells for most of the suite's time.
 // `--fast` leaves them out for quick local iteration; CI and `npm test` always run them.

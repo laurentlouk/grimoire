@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.47.0 — grimoire live in Claude Code
+
+- **`scripts/live.mjs`** prints one line of JSON: what grimoire is doing right now in a project. It lists the run in progress (or one that ended in the last 6 hours) with its task counts, the tasks in flight (step, agent, model, round), the last decisions, and the cost fuse. It also gives the briefing's headline and what the stuck watch flagged in the last hour. It reads the journal through the same parsers as `/grimoire:logs` and answers in about 130 ms. It holds ids, enums, counts and times only: never a ticket's title, a reason or a finding.
+- **`grimoire-live`**, an optional mod and a second plugin in the marketplace (`mods/grimoire-live`), draws that snapshot in Claude Code: a pane following the run, the briefing above the prompt, the run and its cost on the status line, graph_diff's risk and reach on its row, and toasts when a run halts, nears its cost cap or goes quiet. It decides nothing itself; grimoire works the same without it.
+- A `SessionStart` hook writes the plugin's root into `.grimoire/live/plugin-root`, only in a project grimoire already writes to, so the mod finds the script.
+
 ## 0.46.0 — the code graph on real stacks: routes and screens, ORMs, injected collaborators, React Native and monorepos, configuration keys, API contracts
 
 An audit ran the graph on real open-source projects, about a dozen across both rounds (two NestJS apps, a FastAPI template, a Spring app, a Go service, a Rails app, a large Django app, a large React Native app, a monorepo, mobile apps on an embedded SQL store). It found the places where the map was blind or wrong, then each was fixed with fixtures and tests and measured again on those projects.

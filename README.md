@@ -100,6 +100,21 @@ Every execute run writes a **decision journal**: which agent and model each task
 
 `/grimoire:logs` answers questions straight from the journal ("why did PROJ-12 run on opus?"), renders one self-contained HTML report you open locally, shows what each run really cost (read from Claude Code's transcripts, cache included: output tokens are only a few percent of it), per dispatch, task, model tier, review lens and repo, prints the cross-run summary `crystallize` learns from (first-round pass rate, fix rounds per model tier, findings overturned per lens, guard passes a later sweep re-flagged, cost per tier and lens), and prunes runs older than six months (`telemetry.retentionDays`).
 
+### Live snapshot
+
+`node <plugin root>/scripts/live.mjs --root <project>` prints one line of JSON, what grimoire is doing right now, for a live view drawn in Claude Code (a pane, a band above the prompt, a status line) that runs it every few seconds: the run in progress (or the one that ended in the last 6 hours) with its task counts, up to 8 active tasks (step, agent, model, round), its last 8 decisions, and the cost fuse (effective cost against `maxCost`, output tokens against `maxOutputTokens`); the briefing's headline; and what the stuck watch flagged in the last hour. It reads the journal through the same parsers as `/grimoire:logs`, answers in about 100–150 ms (node's startup included), and always exits 0 with valid JSON, a part it could not read left null and counted in `errors`. The effective cost reads Claude Code's transcripts, so the snapshot never does: it reads `.grimoire/live/cost.json`, which a detached child refreshes once that cache is a minute old (the reading is null until the first refresh lands). Ids, enums, counts and times only: never a ticket's title, a halt or replan reason, a finding or a judge's text. A view finds the script through `<project>/.grimoire/live/plugin-root`, which a `SessionStart` hook writes (`hooks/README.md`). The fields are listed at the top of [`scripts/live.mjs`](scripts/live.mjs).
+
+### Live in Claude Code: the `grimoire-live` mod
+
+An optional second plugin in this marketplace, [`mods/grimoire-live`](mods/grimoire-live/README.md), draws that snapshot in Claude Code's interface:
+- a pane, "grimoire run", which follows the run as it goes;
+- the manager briefing above the prompt, while it asks for attention;
+- the running run and its cost on the status line;
+- graph_diff's risk and reach on its row;
+- a toast when a run halts, nears its cost cap or goes quiet.
+
+It decides nothing itself, and grimoire works the same without it. To install it: `/plugin install grimoire-live@grimoire`.
+
 ## 🧭 The team's briefing: `/grimoire:manager`
 
 One page of what the team owes, from three sources: tracker issues (Linear, Jira or GitHub), open pull requests, and grimoire's own loop runs.

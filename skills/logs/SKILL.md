@@ -48,6 +48,14 @@ The page is one file with no network access: run picker, version, briefs and pro
 
 **Keep it local.** The log holds code details, file paths and review findings. Never publish, upload or share the page by default. Do it only when the user explicitly asks, and say what the page contains before you do.
 
+## Live snapshot: what is it doing right now?
+
+```sh
+node <plugin root>/scripts/live.mjs --root <project dir>         # one line of JSON, exit 0
+```
+
+For "what is the loop doing now", or a live view drawn in Claude Code that runs it every few seconds. It shows the run still running (or the one that ended in the last 6 h): its status and halt code (`budget_exhausted`, `harness`, ...), task counts, up to 8 active tasks with their step, agent, model and round, the last 8 decisions as one-line texts built from ids and counts, and the cost fuse (effective cost from the transcripts, read from `.grimoire/live/cost.json`, which a detached child refreshes once it is a minute old, against `maxCost`; output tokens against `maxOutputTokens`, both caps from the newest session's `run.start`). It also shows the briefing's headline and the stuck watch's mode and its flags of the last hour. An ended run's counts are its `run.end` (what never ran is blocked, a BLOCKED settle failed); a running run's come from the checkpoint and the journal, and a task an earlier session left in flight that the current session has not dispatched again counts as queued, not active. A task's `title` is always null, because the journal holds no titles for tasks in flight. Reasons, findings and summaries never appear: read the events for those. A part it could not read is null and counted in `errors`.
+
 ## Scorecard: did the runs deliver?
 
 The page opens on it, and `summary` prints it first (`scorecard` and one `outcomes` row per run in `--json`). It answers "how are the runs doing", "what is our success rate" and "why do runs halt" without reading events by hand:

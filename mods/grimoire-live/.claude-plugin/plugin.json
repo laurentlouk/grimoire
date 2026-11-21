@@ -1,0 +1,8 @@
+{
+  "name": "grimoire-live",
+  "version": "0.1.0",
+  "description": "A live view of grimoire beside the chat: the build loop's run in a pane, the manager briefing above the prompt, the run's cost on the status line, and graph_diff's risk on its row.",
+  "author": { "name": "Laurent Loukopoulos", "url": "https://github.com/laurentlouk" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
