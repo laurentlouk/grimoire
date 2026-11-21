@@ -30,9 +30,16 @@
 //      `halted`, `drained`, `closed`, …).
 //    • its cost: effective tokens from Claude Code's transcripts (economy/runs.mjs runBill and
 //      render-logs costOf), cached in <main checkout>/.grimoire/live/cost.json under the runId,
-//      the newest transcript's mtime and the journal's dispatch count, looked at again at most
-//      every 60 s; output tokens and the caps (maxCost, maxOutputTokens) from the journal itself.
-//      That cache is the only file it writes.
+//      the newest transcript's mtime and the journal's dispatch count. The snapshot reads the
+//      cache only, never a transcript: a cache that is missing, another run's or 60 s old starts
+//      `live.mjs --refresh-cost <runId>` in a detached child (one at a time, under cost.lock),
+//      which a later snapshot reads; until the first one lands, `effective` is null. Output
+//      tokens and the caps (maxCost, maxOutputTokens, from the newest session's run.start) come
+//      from the journal itself. The cache and its lock are the only files it writes.
+//    • the tasks: an ended run's counts are its own outcome (render-logs outcomeTasks: run.end,
+//      else run.json's summary); a running run's are counted from the checkpoint and the journal
+//      (taskStates). A task an earlier session left in flight, and the current one has not
+//      dispatched again, is queued, never active: that session is gone.
 //    • the briefing: manager.mjs briefingAt, the line `manager.mjs headline` prints.
 //    • the stuck watch: the mode from the config (hooks/scripts/economy.mjs guardMode), and the
 //      verdicts it recorded in .grimoire/economy/turns/<agent>.json in the last hour.
@@ -42,11 +49,12 @@
 //  halt and replan reasons, review findings, summaries, judge text, claim identities, URLs. Every
 //  string is an id, an enum, a number or a time, checked against a pattern before it is printed;
 //  anything else prints as `?` (the headline line is manager.mjs's, under its own rules).
-import { readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, statSync, lstatSync, realpathSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, statSync, lstatSync, realpathSync, existsSync, rmdirSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readConfig, loadConfig, mainCheckout } from './project-config.mjs'
-import { loadRuns, costOf, finalTokens, STALE_HOURS, LANDED } from './render-logs.mjs'
+import { loadRuns, costOf, finalTokens, outcomeTasks, STALE_HOURS, LANDED } from './render-logs.mjs'
 import { briefingAt, briefingStale, briefingPartial, runsDirOf } from './manager.mjs'
 import { indexWorkflows, runBill, rootsOf } from './economy/runs.mjs'
 import { economyDir } from './economy/paths.mjs'
@@ -81,10 +89,15 @@ const word = (v) => id(v) ?? '?'
 const count = (v) => (num(v) !== null ? String(Math.round(v)) : '?')
 // the stuck watch's own reason codes: `backstop:40>=38`, `judge-stuck@0.85`
 const REASON = /^[A-Za-z0-9][A-Za-z0-9._:@<>=+-]{0,59}$/
+// A time as ISO, or null: not a time, or outside what a Date holds (±8.64e15 ms), which
+// toISOString would throw on.
 const iso = (v) => {
   const t = typeof v === 'number' ? v : typeof v === 'string' ? Date.parse(v) : NaN
-  return Number.isFinite(t) ? new Date(t).toISOString() : null
+  return Number.isFinite(t) && Math.abs(t) <= 8.64e15 ? new Date(t).toISOString() : null
 }
+// An own entry of a lookup table: an event type such as `constructor` or `__proto__` is no key.
+const own = (table, k) => (typeof k === 'string' && Object.hasOwn(table, k) ? table[k] : undefined)
+const attemptOf = (e) => num(e.attempt) ?? 1
 const cut = (s, max) => (s.length > max ? `${s.slice(0, max - 1)}…` : s)
 
 // ── the run ──
@@ -92,18 +105,25 @@ const cut = (s, max) => (s.length > max ? `${s.slice(0, max - 1)}…` : s)
 // The run dirs worth reading: written to (the dir, run.json, a chunk) in the last READ_WITHIN_H.
 const recentDir = (now) => (name, p) => Math.max(mtime(p), mtime(join(p, 'run.json')), mtime(join(p, 'events')), mtime(join(p, 'events.jsonl'))) >= now - READ_WITHIN_H * HOUR
 
-/** The run the snapshot shows, from loadRuns' list (newest start first), or null. */
+/** The run the snapshot shows, or null: of the runs still running (written to within STALE_HOURS),
+ * the one written to last (a resumed run keeps its first startedAt, so start order says nothing);
+ * else the run written to last, if that is under ENDED_WITHIN_H ago. */
 export function pickRun(runs, now) {
   const at = (r) => Date.parse(r.updatedAt ?? '')
-  const live = runs.find((r) => r.status === 'running' && Number.isFinite(at(r)) && now - at(r) <= STALE_HOURS * HOUR)
-  if (live) return live
-  const ended = runs.filter((r) => Number.isFinite(at(r)) && now - at(r) < ENDED_WITHIN_H * HOUR).sort((a, b) => at(b) - at(a))
-  return ended[0] ?? null
+  const byWrite = runs.filter((r) => Number.isFinite(at(r))).sort((a, b) => at(b) - at(a))
+  return byWrite.find((r) => r.status === 'running' && now - at(r) <= STALE_HOURS * HOUR)
+    ?? byWrite.find((r) => now - at(r) < ENDED_WITHIN_H * HOUR) ?? null
 }
 
-// Each plan task's state, from the checkpoint and the journal in order: queued until dispatched,
-// active from its dispatch until it settles, then done, blocked or failed (a later dispatch, after
-// a replan, makes it active again). The step is the stage of its latest decision.
+// Each plan task's state, from the checkpoint and the journal in order. A task is the run's when the
+// checkpoint holds it as pending or as landed by the run (`landedTasks`: never `landed`, which also
+// holds the issues already done in the tracker before the run), or the journal routed, dispatched,
+// settled or absorbed it. queued until dispatched; active from a dispatch of the CURRENT session
+// until it settles; then done, or failed (any other status, BLOCKED included, as the engine's
+// run.end counts it). A task an earlier session dispatched and never settled, and the current one
+// has not dispatched again, is queued: that session died, and a resume runs the task again (it is
+// still in the checkpoint's pending). A later dispatch, after a replan, makes a task active again.
+// The step is the stage of the task's latest decision.
 const STEP = { dispatch: 'build', precheck: 'precheck', review: 'review', verify: 'review', guard: 'review', fast: 'review', fix: 'fix', escalate: 'fix', resolve: 'resolve', integrate: 'integrate' }
 export function taskStates(run) {
   const tasks = new Map()
@@ -111,24 +131,47 @@ export function taskStates(run) {
     if (!tasks.has(key)) tasks.set(key, { id: key, state: 'queued', step: null, agent: null, model: null, round: null, since: null, seq: -1 })
     return tasks.get(key)
   }
-  const cp = run.checkpoint || {}
+  const cp = isObj(run.checkpoint) ? run.checkpoint : {}
+  // the session writing now: the newest the journal or the checkpoint names
+  const current = Math.max(num(cp.attempt) ?? 1, ...run.events.map(attemptOf))
   for (const t of Array.isArray(cp.pending) ? cp.pending : []) if (id(t) && !SLOT.test(t)) get(String(t))
-  for (const t of Array.isArray(cp.landed) ? cp.landed : []) if (id(t) && !SLOT.test(t)) get(String(t)).state = 'done'
+  for (const t of Array.isArray(cp.landedTasks) ? cp.landedTasks : []) if (isObj(t) && id(t.id) && !SLOT.test(t.id)) get(String(t.id)).state = 'done'
   run.events.forEach((e, i) => {
     if (e.task == null || e.type === 'claim') return // a claim skipped is another session's task
     const key = id(e.task)
     if (!key || SLOT.test(key)) return
     const t = get(key)
     if (e.type === 'route') { t.agent = id(e.agent) ?? t.agent; t.model = id(e.model) ?? t.model }
-    else if (e.type === 'dispatch') Object.assign(t, { state: 'active', step: 'build', agent: id(e.agent) ?? t.agent, model: id(e.model) ?? t.model, round: 0, since: iso(e.at), seq: i })
-    else if (e.type === 'settle') t.state = LANDED_SET.has(e.status) ? 'done' : e.status === 'BLOCKED' ? 'blocked' : 'failed'
+    else if (e.type === 'dispatch') Object.assign(t, { state: attemptOf(e) === current ? 'active' : 'queued', step: 'build', agent: id(e.agent) ?? t.agent, model: id(e.model) ?? t.model, round: 0, since: iso(e.at), seq: i })
+    else if (e.type === 'settle') t.state = LANDED_SET.has(e.status) ? 'done' : 'failed'
     else if (e.type === 'absorb') t.state = 'done'
-    if (STEP[e.type] && e.type !== 'dispatch') t.step = STEP[e.type]
+    const step = own(STEP, e.type)
+    if (step && e.type !== 'dispatch') t.step = step
     if (e.type === 'fix') { t.model = id(e.model) ?? t.model; t.round = num(e.round) ?? t.round }
     if (e.type === 'review' && num(e.round) !== null) t.round = Math.max(t.round ?? 0, e.round)
     if (e.type === 'escalate') t.model = id(e.to) ?? t.model
   })
   return [...tasks.values()]
+}
+
+// The counts and the active tasks. An ended run's counts are its own outcome (render-logs
+// outcomeTasks: the newest session's run.end, else run.json's summary), what never ran counted
+// blocked there; the active list is then the tasks its last session left in flight, as many as it
+// counted. A running run, or an ended one whose end was lost, is counted from taskStates, and on an
+// ended one what never ran is blocked, not queued.
+export function taskView(run) {
+  const states = taskStates(run)
+  const active = states.filter((t) => t.state === 'active').sort((a, b) => b.seq - a.seq)
+  const n = (s) => states.filter((t) => t.state === s).length
+  if (run.status !== 'running') {
+    const o = outcomeTasks(run)
+    if (o.source !== 'settles') {
+      const t = o.tasks
+      return { tasks: { total: t.landed + t.failed + t.blocked + t.inFlight, done: t.landed, active: t.inFlight, failed: t.failed, blocked: t.blocked, queued: 0 }, active: active.slice(0, t.inFlight) }
+    }
+    return { tasks: { total: states.length, done: n('done'), active: n('active'), failed: n('failed'), blocked: n('blocked') + n('queued'), queued: 0 }, active }
+  }
+  return { tasks: { total: states.length, done: n('done'), active: n('active'), failed: n('failed'), blocked: n('blocked'), queued: n('queued') }, active }
 }
 
 // The halt's code: budget_exhausted (a cap) or budget_floor, else the halt's kind, else
@@ -173,7 +216,7 @@ const TEXT = {
 }
 const SKIP = new Set(['landed.flush']) // the writer's own bookkeeping, no decision
 export function decisionText(e) {
-  const f = TEXT[e.type]
+  const f = own(TEXT, e.type)
   return cut(f ? f(e) : `${word(e.type)}${e.task != null ? ` · ${T(e)}` : ''}`, TEXT_MAX)
 }
 
@@ -190,13 +233,16 @@ const newestTranscript = (wfs) => {
   return newest
 }
 
-/** {effective, dispatched, matched} of the run, from the cache when it is under COST_EVERY_MS old or
- * nothing it depends on moved, else from the transcripts (and the cache rewritten). */
-export function runCost(run, { stateRoot, root, claudeDir, now = Date.now() }) {
-  const file = join(stateRoot, '.grimoire', 'live', 'cost.json')
+const liveDir = (stateRoot) => join(stateRoot, '.grimoire', 'live')
+const COST_LOCK_STALE_MS = 2 * MIN // a refresh that died left its lock: broken after this
+
+/** Recompute the cache (the detached child's work): the bill again when a transcript or a dispatch
+ * moved since the cached key, else the cached bill stamped as checked. {effective, dispatched,
+ * matched, ...}. Writes nothing when the project's .grimoire/ is gone. */
+export function refreshCost(run, { stateRoot, root, claudeDir, now = Date.now() }) {
+  const file = join(liveDir(stateRoot), 'cost.json')
   const cache = readJson(file)
   const same = isObj(cache) && cache.v === 1 && cache.runId === run.runId
-  if (same && num(cache.checkedAt) !== null && now >= cache.checkedAt && now - cache.checkedAt < COST_EVERY_MS) return cache
   const roots = [...new Set([...rootsOf(stateRoot), root])]
   const index = indexWorkflows({ claudeDir, roots })
   const wfs = index.get(run.runId) || []
@@ -207,17 +253,54 @@ export function runCost(run, { stateRoot, root, claudeDir, now = Date.now() }) {
     const { cost, costCoverage } = costOf(run, runBill(run.runId, { claudeDir, index }))
     out = { v: 1, runId: run.runId, key, checkedAt: now, effective: cost ? cost.effective : null, dispatched: costCoverage.dispatched, matched: costCoverage.matched }
   }
-  try {
-    mkdirSync(join(stateRoot, '.grimoire', 'live'), { recursive: true })
-    const tmp = `${file}.${process.pid}`
-    writeFileSync(tmp, `${JSON.stringify(out)}\n`)
-    renameSync(tmp, file)
-  } catch { /* a cache that can't be written is recomputed next time */ }
+  if (!existsSync(join(stateRoot, '.grimoire'))) return out
+  mkdirSync(liveDir(stateRoot), { recursive: true })
+  const tmp = `${file}.${process.pid}`
+  writeFileSync(tmp, `${JSON.stringify(out)}\n`)
+  renameSync(tmp, file)
   return out
 }
 
+// Starts the refresh in a detached child and does not wait for it (the snapshot stays off the
+// transcripts): unless one is already at work (its lock, cost.lock, younger than COST_LOCK_STALE_MS).
+function refreshInChild(run, { stateRoot, root, claudeDir }) {
+  if (!existsSync(join(stateRoot, '.grimoire'))) return
+  try { if (Date.now() - statSync(join(liveDir(stateRoot), 'cost.lock')).mtimeMs < COST_LOCK_STALE_MS) return } catch {}
+  const args = [fileURLToPath(import.meta.url), '--refresh-cost', String(run.runId), '--root', root, ...(claudeDir ? ['--claude-dir', claudeDir] : [])]
+  spawn(process.execPath, args, { detached: true, stdio: 'ignore' }).unref()
+}
+
+/** The run's bill from the cache, never from a transcript: the cache when it is the run's, else
+ * null. A cache that is missing, another run's or COST_EVERY_MS old starts a refresh in a detached
+ * child, read by a later snapshot. */
+export function runCost(run, ctx, { refresh = refreshInChild } = {}) {
+  const now = ctx.now ?? Date.now()
+  const cache = readJson(join(liveDir(ctx.stateRoot), 'cost.json'))
+  const same = isObj(cache) && cache.v === 1 && cache.runId === run.runId
+  const fresh = same && num(cache.checkedAt) !== null && now >= cache.checkedAt && now - cache.checkedAt < COST_EVERY_MS
+  if (!fresh) refresh(run, ctx)
+  return same ? cache : null
+}
+
+// `--refresh-cost <runId>`: the child. One at a time per project, under cost.lock (a directory).
+function refreshMain(runId, root, claudeDir) {
+  const stateRoot = mainCheckout(root) ?? root
+  if (!existsSync(join(stateRoot, '.grimoire'))) return
+  mkdirSync(liveDir(stateRoot), { recursive: true })
+  const lock = join(liveDir(stateRoot), 'cost.lock')
+  try { mkdirSync(lock) } catch {
+    try { if (Date.now() - statSync(lock).mtimeMs < COST_LOCK_STALE_MS) return; rmdirSync(lock); mkdirSync(lock) } catch { return }
+  }
+  try {
+    const now = Date.now()
+    const run = loadRuns(runsDirOf(readConfig(root), root), { only: recentDir(now) }).find((r) => r.runId === runId)
+    if (run) refreshCost(run, { stateRoot, root, claudeDir, now })
+  } finally { try { rmdirSync(lock) } catch {} }
+}
+
 function costPart(run, ctx, fail) {
-  const start = run.events.find((e) => e.type === 'run.start')
+  // the caps of the session writing now: a resume can raise them (the events are in session order)
+  const start = [...run.events].reverse().find((e) => e.type === 'run.start')
   const knobs = isObj(start?.knobs) ? start.knobs : {}
   const cap = (v) => (num(v) !== null && v > 0 ? v : null)
   const cpSpent = num(run.checkpoint?.outputTokensSpent)
@@ -240,11 +323,9 @@ function runPart(root, stateRoot, now, claudeDir, fail) {
   const dir = runsDirOf(readConfig(root), root)
   const run = pickRun(loadRuns(dir, { only: recentDir(now) }), now)
   if (!run) return null
-  const tasks = taskStates(run)
-  const n = (s) => tasks.filter((t) => t.state === s).length
+  const view = taskView(run)
   const updated = Date.parse(run.updatedAt ?? '')
-  const active = tasks.filter((t) => t.state === 'active').sort((a, b) => b.seq - a.seq).slice(0, ACTIVE_MAX)
-    .map((t) => ({ task: t.id, title: null, step: t.step, agent: t.agent, model: t.model, round: t.round, since: t.since }))
+  const active = view.active.slice(0, ACTIVE_MAX).map((t) => ({ task: t.id, title: null, step: t.step, agent: t.agent, model: t.model, round: t.round, since: t.since }))
   const recent = run.events.filter((e) => typeof e.type === 'string' && !SKIP.has(e.type)).slice(-RECENT_MAX).reverse()
     .map((e) => ({ at: iso(e.at), kind: word(e.type), task: e.task != null ? id(e.task) : null, text: decisionText(e) }))
   return {
@@ -254,7 +335,7 @@ function runPart(root, stateRoot, now, claudeDir, fail) {
     startedAt: iso(run.startedAt),
     updatedAt: iso(run.updatedAt),
     isStale: run.status === 'running' && Number.isFinite(updated) && now - updated > STALE_MIN * MIN,
-    tasks: { total: tasks.length, done: n('done'), active: n('active'), failed: n('failed'), blocked: n('blocked'), queued: n('queued') },
+    tasks: view.tasks,
     active,
     recent,
     cost: costPart(run, { stateRoot, root, claudeDir, now }, fail),
@@ -323,6 +404,10 @@ function arg(argv, k) {
 
 function main(argv) {
   const root = resolve(arg(argv, 'root') ?? process.cwd())
+  if (argv.includes('--refresh-cost')) {
+    try { refreshMain(arg(argv, 'refresh-cost'), root, arg(argv, 'claude-dir') ?? undefined) } catch {}
+    return 0
+  }
   let out
   try {
     const at = arg(argv, 'now')
