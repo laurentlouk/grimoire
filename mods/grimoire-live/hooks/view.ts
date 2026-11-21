@@ -72,13 +72,16 @@ export function bandLine(snap: LiveSnapshot | null): string | null {
   return null
 }
 
-// What changed between two snapshots that deserves a toast (one line each).
+// What changed between two snapshots that deserves a toast (one line each). The mod passes the
+// snapshot drawn before; a session's first one is a baseline and is never toasted.
 export function transitions(before: LiveSnapshot | null, after: LiveSnapshot | null): string[] {
   const out: string[] = []
   const a = before?.run ?? null, b = after?.run ?? null
   if (b && a && a.id === b.id && RUNNING.has(a.status) && !RUNNING.has(b.status)) {
     out.push(`grimoire run ${b.id} ${b.status}${b.haltReason ? `: ${b.haltReason}` : ''}`)
   }
+  if (a && RUNNING.has(a.status) && (!b || b.id !== a.id)) out.push(`grimoire run ${a.id} is no longer the current run`)
+  if (b && isLive(b) && !(a && a.id === b.id && RUNNING.has(a.status))) out.push(`grimoire run ${b.id} started: /grimoire-run follows it`)
   if (b && isLive(b)) {
     const was = a && a.id === b.id ? costShare(a) : null, now = costShare(b)
     if (now !== null && now >= 0.8 && (was === null || was < 0.8)) out.push(`grimoire run ${b.id}: ${Math.round(now * 100)}% of its cost cap spent`)

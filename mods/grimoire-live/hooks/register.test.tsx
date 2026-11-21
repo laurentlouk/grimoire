@@ -34,28 +34,49 @@ const PANE = {
 } as const
 const BAND = { plugin: 'grimoire-live', component: 'AbovePrompt', requestId: 'band', props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 3, bodyColumns: 80, scroll: { offset: 0, bodyRows: 3 }, view: {} } } as any
 
-// the engine beneath the mod: a project with grimoire's pointer, a live.mjs printing `snap`
-function world(on: any, snap: LiveSnapshot | null, seen: { status: (string | undefined)[]; toasts: string[]; opened: string[] }) {
+// the engine beneath the mod: a project with grimoire's pointer to an installed grimoire, a
+// live.mjs printing `box.snap` (changed between polls by the test)
+type Seen = { status: (string | undefined)[]; toasts: string[]; opened: string[]; argv: string[][] }
+const seenOf = (): Seen => ({ status: [], toasts: [], opened: [], argv: [] })
+function world(on: any, snap: LiveSnapshot | null, seen: Seen, opts: { pointer?: string | null; manifest?: string; exit?: number } = {}) {
+  const box = { snap }
+  const pointer = opts.pointer === undefined ? (snap ? '/opt/grimoire' : null) : opts.pointer
+  const files: Record<string, string> = {}
+  if (pointer !== null) files['/proj/.grimoire/live/plugin-root'] = `${pointer}\n`
+  files['/opt/grimoire/.claude-plugin/plugin.json'] = opts.manifest ?? '{"name":"grimoire","version":"0.47.0"}'
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/proj' }))
   on('command.register', (_: unknown, e: any) => ({ value: { command: e.name } }))
-  on('clock.every', () => ({ value: undefined }))
-  on('fs.read', (_: unknown, e: any) => (e.path === '/proj/.grimoire/live/plugin-root' && snap ? { value: '/opt/grimoire\n' } : { deny: 'ENOENT' }))
-  on('process.run', (_: unknown, e: any) => ({ value: { exitCode: 0, stdout: JSON.stringify(snap), stderr: '', argv: e.argv } }))
+  on('clock.every', () => ({ value: { cancel() {} } }))
+  on('fs.read', (_: unknown, e: any) => (e.path in files ? { value: files[e.path] } : { deny: 'ENOENT' }))
+  on('fs.stat', (_: unknown, e: any) => (e.path === '/opt/grimoire/scripts/live.mjs' || e.path === './scripts/live.mjs' ? { value: { size: 1, isFile: true } } : { deny: 'ENOENT' }))
+  on('process.run', (_: unknown, e: any) => {
+    seen.argv.push([...e.argv])
+    if (e.argv[0] === 'git') return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository' } }
+    return { value: { exitCode: opts.exit ?? 0, stdout: JSON.stringify(box.snap), stderr: '' } }
+  })
   on('ui.status', (_: unknown, e: any) => { seen.status.push(e.text); return { value: undefined } })
   on('ui.toast', (_: unknown, e: any) => { seen.toasts.push(e.text); return { value: undefined } })
   on('ui.open', (_: unknown, e: any) => { seen.opened.push(e.id); return { value: { isPlaced: true } } })
+  return box
 }
+const RUN_70: LiveSnapshot = { ...RUN, run: { ...RUN.run!, cost: { ...RUN.run!.cost, effective: 3_500_000 } } }
 
 test('a running run: the pane, the status line and the band, on every surface', async ($, on) => {
-  const seen = { status: [] as (string | undefined)[], toasts: [] as string[], opened: [] as string[] }
-  world(on, RUN, seen)
+  const seen = seenOf()
+  const box = world(on, RUN_70, seen)
   await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'grimoire-run', args: '' } as any)
+  // the session's first snapshot is a baseline: no toast, no pane opened unasked
+  expect(seen.toasts).toEqual([])
+  box.snap = RUN
+  await $.command.run({ command: 'grimoire-run', args: '' } as any)
   await $.command.run({ command: 'grimoire-run', args: '' } as any)
 
   expect(seen.status.at(-1)).toBe('grimoire r7 · 5/12 tasks · 2 active · cost 84%')
   expect(seen.opened).toContain('grimoire-run')
-  expect(seen.toasts.some((t) => /84% of its cost cap/.test(t))).toBe(true)
+  expect(seen.toasts).toEqual(['grimoire run r7: 84% of its cost cap spent'])
+  expect(seen.argv.find((a) => a[0] === 'node')).toEqual(['node', '/opt/grimoire/scripts/live.mjs', '--root', '/proj'])
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const pane = await $.ui.mount({ ...PANE, surface })
@@ -70,7 +91,7 @@ test('a running run: the pane, the status line and the band, on every surface', 
 })
 
 test('no grimoire in the project: the pane says why, the band and status stay empty', async ($, on) => {
-  const seen = { status: [] as (string | undefined)[], toasts: [] as string[], opened: [] as string[] }
+  const seen = seenOf()
   world(on, null, seen)
   on('ui.render', ($: any, e: any) => { const { Text } = $.ui.resolve(e); return <Text>engine</Text> })
   await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
@@ -101,6 +122,8 @@ test('the plain functions: status, band, toasts, the diff summary', async () => 
   expect(bandLine({ ...RUN, briefing: { ...RUN.briefing!, urgent: 0, ready: 0 } })).toBe(null)
   const halted = { ...RUN, run: { ...RUN.run!, status: 'halted', haltReason: 'budget_exhausted' } }
   expect(transitions(RUN, halted)).toEqual(['grimoire run r7 halted: budget_exhausted'])
+  const other = { ...RUN, run: { ...RUN.run!, id: 'r8' } }
+  expect(transitions(RUN, other).slice(0, 2)).toEqual(['grimoire run r7 is no longer the current run', 'grimoire run r8 started: /grimoire-run follows it'])
   const flagged = { ...RUN, watch: { mode: 'on', flags: [{ agent: 'api-engineer', reason: 'same edit 4 times', at: NOW }] } }
   expect(transitions(RUN, flagged)).toEqual(['grimoire stuck watch: api-engineer same edit 4 times'])
   expect(diffSummary('nothing here')).toBe(null)
@@ -115,7 +138,7 @@ const CASES = [
 ] as const
 for (const [name, snap, want] of CASES) {
   test(`live.mjs's snapshot, ${name}: the pane draws it`, async ($, on) => {
-    const seen = { status: [] as (string | undefined)[], toasts: [] as string[], opened: [] as string[] }
+    const seen = seenOf()
     world(on, snap, seen)
     await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: true })
     await $.command.run({ command: 'grimoire-run', args: '' } as any)
@@ -131,4 +154,67 @@ test('live.mjs\'s snapshots: the status line and the toasts', async () => {
   expect(statusLine(RUNNING)).toBe('grimoire R1 · 1/7 tasks · 2 active · 1 failed · cost 41% · 3 stuck flags')
   expect(statusLine(HALTED)).toBe(undefined)
   expect(transitions({ ...HALTED, run: { ...HALTED.run!, status: 'running', haltReason: null } }, HALTED)).toContain('grimoire run R2 halted: budget_exhausted')
+})
+
+// a pointer a repository could ship: never followed
+for (const [name, pointer, manifest] of [
+  ['relative', '.', undefined], ['inside the project', '/proj/tools', undefined], ['with ..', '/opt/../proj', undefined],
+  ['not grimoire', '/opt/grimoire', '{"name":"evil"}'],
+] as const) {
+  test(`a pointer ${name}: no script is run`, async ($, on) => {
+    const seen = seenOf()
+    world(on, RUN, seen, { pointer, manifest })
+    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+    await $.command.run({ command: 'grimoire-run', args: '' } as any)
+    expect(seen.argv.filter((a) => a[0] === 'node')).toEqual([])
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await pane.find({ type: 'Text', text: /does not name an installed grimoire/ })).toBeTruthy()
+    await pane.unmount()
+  })
+}
+
+test('the snapshot stops coming: the status line is cleared, the pane says why', async ($, on) => {
+  const seen = seenOf()
+  const box = world(on, RUN, seen)
+  await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'grimoire-run', args: '' } as any)
+  expect(seen.status.at(-1)).toMatch(/^grimoire r7/)
+  box.snap = { version: 2 } as any
+  await $.command.run({ command: 'grimoire-run', args: '' } as any)
+  await $.command.run({ command: 'grimoire-run', args: '' } as any)
+  expect(seen.status.at(-1)).toBe(undefined)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await pane.find({ type: 'Text', text: /does not read/ })).toBeTruthy()
+  await pane.unmount()
+})
+
+test('the same snapshot at a later time changes nothing', async ($, on) => {
+  const seen = seenOf()
+  const box = world(on, RUN_70, seen)
+  await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: true })
+  for (const at of ['2026-11-21T12:00:05.000Z', '2026-11-21T12:00:10.000Z']) { box.snap = { ...RUN_70, at }; await $.command.run({ command: 'grimoire-run', args: '' } as any) }
+  expect(seen.argv.filter((a) => a[0] === 'node').length).toBeGreaterThan(1)
+  expect(seen.status.filter(Boolean)).toEqual(['grimoire r7 · 5/12 tasks · 2 active · cost 70%'])
+  expect(seen.toasts).toEqual([])
+})
+
+test('a linked worktree: the main checkout\'s pointer is read', async ($, on) => {
+  const seen = seenOf()
+  on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: '/main/.claude/worktrees/wt1' }))
+  on('command.register', (_: unknown, e: any) => ({ value: { command: e.name } }))
+  on('clock.every', () => ({ value: { cancel() {} } }))
+  const files: Record<string, string> = { '/main/.grimoire/live/plugin-root': '/opt/grimoire\n', '/opt/grimoire/.claude-plugin/plugin.json': '{"name":"grimoire"}' }
+  on('fs.read', (_: unknown, e: any) => (e.path in files ? { value: files[e.path] } : { deny: 'ENOENT' }))
+  on('fs.stat', () => ({ value: { size: 1 } }))
+  on('process.run', (_: unknown, e: any) => {
+    seen.argv.push([...e.argv])
+    return e.argv[0] === 'git' ? { value: { exitCode: 0, stdout: '/main/.git\n', stderr: '' } } : { value: { exitCode: 0, stdout: JSON.stringify(RUN), stderr: '' } }
+  })
+  on('ui.status', (_: unknown, e: any) => { seen.status.push(e.text); return { value: undefined } })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await $.session.start({ cwd: '/main/.claude/worktrees/wt1', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'grimoire-run', args: '' } as any)
+  expect(seen.argv.find((a) => a[0] === 'node')).toEqual(['node', '/opt/grimoire/scripts/live.mjs', '--root', '/main/.claude/worktrees/wt1'])
+  expect(seen.status.at(-1)).toMatch(/^grimoire r7/)
 })

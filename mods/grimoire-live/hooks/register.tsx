@@ -2,7 +2,8 @@
 // grimoire's own `scripts/live.mjs` prints (the mod reads and decides nothing else):
 //
 //   - a pane, "grimoire run": the build loop's run as it goes (tasks, who works on what, the
-//     latest decisions, the cost against its cap), opened when a run starts or by /grimoire-run;
+//     latest decisions, the cost against its cap), opened by /grimoire-run (a toast says when a
+//     run starts; the mod never opens a pane unasked);
 //   - the band above the prompt: the manager briefing's line while it asks for attention;
 //   - the status line: the running run, its progress and its cost;
 //   - a card on graph_diff's row: its risk and what it reaches, at a glance;
@@ -10,8 +11,9 @@
 //     an agent.
 //
 // Where it finds the script: grimoire's SessionStart hook writes the plugin's root into
-// `<project>/.grimoire/live/plugin-root`. Without it (grimoire not installed, never run here)
-// the mod draws nothing but the pane's one line saying why.
+// `<project>/.grimoire/live/plugin-root` (in a linked worktree, the main checkout's is read too).
+// It is followed only when it names an installed grimoire outside the project. Without it
+// (grimoire not installed, never run here) the mod draws nothing but the pane's one line saying why.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
@@ -24,19 +26,74 @@ const snapshot = atom({ plugin: 'grimoire-live', key: 'snapshot' } as const, nul
 const problem = atom({ plugin: 'grimoire-live', key: 'problem' } as const, null)
 const isBandHidden = atom({ plugin: 'grimoire-live', key: 'isBandHidden' } as const, false)
 
-// what the last poll printed, and the snapshot it was (a reload starts them over)
-let lastText = ''
-let last: LiveSnapshot | null = null
+// what the last poll read, its time left out (a reload starts these over; the snapshot itself is
+// kept in $.state, so a reload compares with what was drawn)
+let lastKey = ''
 // the poll in flight: a second caller waits for it rather than starting another
 let inflight: Promise<void> | null = null
 let lastStatus: string | undefined
 let lastProblem: string | null | undefined
+let tick: { cancel: () => void } | null = null
+// per working directory: the main checkout's root when it is a linked git worktree, else null
+const mainOf = new Map<string, string | null>()
 
 // a write redraws the pane: only when the reason changes
 async function setProblem($: EngineInterface, why: string | null) {
   if (why === lastProblem) return
   lastProblem = why
   await update($, problem, () => why)
+}
+
+function setStatus($: EngineInterface, text: string | undefined) {
+  if (text === lastStatus) return
+  lastStatus = text
+  $.ui.status(text)
+}
+
+// The snapshot stopped coming (no pointer, the script failed): nothing stale stays on screen.
+async function lost($: EngineInterface, why: string) {
+  setStatus($, undefined)
+  if (lastKey) { lastKey = ''; await update($, snapshot, () => null) }
+  await setProblem($, why)
+}
+
+const trimSlash = (p: string) => p.replace(/\/+$/, '')
+const isUnder = (p: string, dir: string) => { const d = trimSlash(dir); return p === d || p.startsWith(`${d}/`) }
+
+// A linked worktree keeps grimoire's state in its main checkout: git says where that is.
+async function mainCheckout($: EngineInterface, cwd: string): Promise<string | null> {
+  if (mainOf.has(cwd)) return mainOf.get(cwd) ?? null
+  let main: string | null = null
+  try {
+    const r = await $.process.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, timeoutMs: 5000 })
+    const dir = r.exitCode === 0 ? String(r.stdout).trim() : ''
+    if (dir.endsWith('/.git')) { const m = dir.slice(0, -'/.git'.length); if (m && m !== trimSlash(cwd)) main = m }
+  } catch {}
+  mainOf.set(cwd, main)
+  return main
+}
+
+// The pointer grimoire's SessionStart hook writes, trusted only when it names an installed grimoire:
+// an absolute path outside the project (a repository could ship a pointer to a script of its own),
+// holding a plugin.json named grimoire and scripts/live.mjs.
+async function grimoireRoot($: EngineInterface, cwd: string): Promise<{ root: string } | { why: string }> {
+  const main = await mainCheckout($, cwd)
+  let raw: string | null = null
+  for (const dir of [cwd, main]) {
+    if (!dir || raw) continue
+    try { raw = (String(await $.fs.read(`${trimSlash(dir)}/.grimoire/live/plugin-root`)).split('\n')[0] ?? '').trim() || null } catch {}
+  }
+  if (!raw) return { why: 'grimoire has not run in this project yet (its session hook writes .grimoire/live/plugin-root)' }
+  const root = trimSlash(raw)
+  const ok = root.startsWith('/') && !/(^|\/)\.\.?(\/|$)/.test(root) && !isUnder(root, cwd) && !(main && isUnder(root, main))
+  if (ok) {
+    try {
+      const manifest = JSON.parse(String(await $.fs.read(`${root}/.claude-plugin/plugin.json`)))
+      await $.fs.stat(`${root}/scripts/live.mjs`)
+      if (manifest?.name === 'grimoire') return { root }
+    } catch {}
+  }
+  return { why: '.grimoire/live/plugin-root does not name an installed grimoire: not followed' }
 }
 
 function poll($: EngineInterface): Promise<void> {
@@ -47,42 +104,26 @@ function poll($: EngineInterface): Promise<void> {
 async function pollOnce($: EngineInterface) {
   try {
     const cwd: string = await $.session.cwd()
-    let root: string | null = null
-    try {
-      root = (String(await $.fs.read(`${cwd}/.grimoire/live/plugin-root`)).split('\n')[0] ?? '').trim() || null
-    } catch {
-      root = null
-    }
-    if (!root) {
-      await setProblem($, 'grimoire has not run in this project yet (its session hook writes .grimoire/live/plugin-root)')
-      return
-    }
-    const ran = await $.process.run(['node', `${root}/scripts/live.mjs`, '--root', cwd], { timeoutMs: 15000 })
-    if (ran.exitCode !== 0) {
-      await setProblem($, `scripts/live.mjs exited ${ran.exitCode}`)
-      return
-    }
-    const text = String(ran.stdout).trim()
-    if (text === lastText) return
-    const snap = JSON.parse(text) as LiveSnapshot
-    if (!snap || snap.version !== 1) {
-      await setProblem($, 'scripts/live.mjs printed a snapshot this mod does not read (update grimoire-live)')
-      return
-    }
-    const before = last
-    lastText = text
-    last = snap
-    await update($, snapshot, () => snap)
+    const found = await grimoireRoot($, cwd)
+    if ('why' in found) return await lost($, found.why)
+    const ran = await $.process.run(['node', `${found.root}/scripts/live.mjs`, '--root', cwd], { timeoutMs: 15000 })
+    if (ran.exitCode !== 0) return await lost($, `scripts/live.mjs exited ${ran.exitCode}`)
+    const snap = JSON.parse(String(ran.stdout).trim()) as LiveSnapshot
+    if (!snap || snap.version !== 1) return await lost($, 'scripts/live.mjs printed a snapshot this mod does not read (update grimoire-live)')
     await setProblem($, null)
-    const status = statusLine(snap)
-    if (status !== lastStatus) { $.ui.status(status); lastStatus = status }
-    for (const line of transitions(before, snap)) $.ui.toast(line)
-    // a run that starts opens its pane (unasked, the surface places it only where it is a sidebar)
-    if (isLive(snap.run) && !(before && isLive(before.run) && before.run.id === snap.run.id)) {
-      void $.ui.open({ id: PANE, title: `grimoire run ${snap.run.id}` })
-    }
+    // its time changes on every call: the rest decides whether anything is to be drawn again
+    const key = JSON.stringify({ ...snap, at: null })
+    if (key === lastKey) return
+    lastKey = key
+    // what was drawn before (kept through a reload); a session's first snapshot is the baseline,
+    // never toasted
+    const before = await read($, snapshot)
+    await update($, snapshot, () => snap)
+    setStatus($, statusLine(snap))
+    if (before) for (const line of transitions(before, snap)) $.ui.toast(line)
   } catch (err) {
-    await setProblem($, `the live snapshot could not be read: ${String((err as Error)?.message ?? err).slice(0, 160)}`)
+    // the module may be going (a reload, the session's end): what is left to say is said if it can be
+    await lost($, `the live snapshot could not be read: ${String((err as Error)?.message ?? err).slice(0, 160)}`).catch(() => {})
   }
 }
 
@@ -90,7 +131,8 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'grimoire-run', description: 'Show the grimoire build loop\'s run in a pane, live' })
     await $.command.register({ name: 'grimoire-band', description: 'Show or hide the grimoire briefing above the prompt' })
-    $.clock.every(EVERY_MS, () => poll($))
+    tick?.cancel()
+    tick = $.clock.every(EVERY_MS, () => { void poll($) })
     void poll($)
     return next(e)
   })
