@@ -121,6 +121,9 @@ const NEXT_FILES = /^(page|layout|loading|error|not-found|template|default|globa
 const SCREEN_PLATFORM = /\.(web|ios|android|native)$/
 const SCANNED = new Set([...STRINGS_LIST(), 'call_expression', 'call', 'method_invocation', 'jsx_self_closing_element', 'jsx_opening_element', 'binary_expression', 'binary_operator'])
 const SKIP = new Set(['import_statement', 'import_declaration', 'import_from_statement', 'import_spec_list', 'import_spec', 'comment', 'line_comment', 'block_comment'])
+// what a walk of strings alone visits (a file gateOf finds no keyword in)
+const CALLS = new Set(['call_expression', 'call', 'method_invocation'])
+const SCAN_ONLY = [...STRINGS_LIST(), 'binary_expression', 'binary_operator', ...CALLS, ...SKIP]
 
 // The callee of a call: { name, recv: receiver node | null }
 const calleeMemo = new WeakMap()
@@ -198,7 +201,43 @@ function paramNames(fn) {
 const paramType = (fn, i) => { const ps = field(fn, 'parameters'); const p = ps ? named(ps).filter((x) => !/comment/.test(x.type))[i] : null; return p ? (field(p, 'type')?.text || '') : '' }
 const ROUTER_TYPE = /\b(gin\.(Engine|RouterGroup|IRouter|IRoutes)|echo\.(Echo|Group)|chi\.(Router|Mux)|mux\.Router|http\.ServeMux|fiber\.(App|Router)|Router|Express|Application|FastifyInstance|Hono|APIRouter|FastAPI|Flask|Blueprint)\b/
 
-export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] } = {}) {
+// A cheap look at a file's text before its tree is walked: false when the walk can find nothing (no
+// declaration, mount or router of its family, no string holding a `/` outside an import, no screen
+// named to navigation). Conservative: a file it passes may still hold nothing.
+// what a string's opening quote follows when the string is an import's path (never a call site)
+const IMPORT_BEFORE = /(?:\bfrom\s*|\b(?:require|require_relative|import|load|include)\s*\(?\s*|\bjest\.(?:mock|requireActual)\(\s*)$/
+const IMPORT_LINE = { go: /^\s*(?:import\s+)?(?:[\w.]+\s+)?"[^"\n]*"\s*$/, c: /^\s*#\s*(?:include|import)\b/ }
+// a string a call site's URL can be: its text up to its first `/` is a scheme, URL characters or what
+// code fills in (`{…}`, `${…}`); a string with a space before its first slash (prose) is none
+const SLASH_STRING = /['"](?:[A-Za-z0-9\-._~!$&()*+,;=:@%[\]]|\{[^}\n]*\})*\/|`(?:[^`\s\\]|\\.|\$\{[^}\n]*\})*\//g
+const WALK_WORDS = {
+  js: [/\b(?:Hono|Elysia|OpenAPIHono|Router|KoaRouter|express|koa|fastify|polka|restify|basePath|setGlobalPrefix|Controller|navigate|jumpTo)\b|['"]router['"]|<\s*(?:[\w$]+\s*\.\s*)*Screen\b|\bscreen\s*=|create\w*Navigator|module\.exports\s*=|export\s+default\s+[\w$\u0080-￿]+\s*(?:;|$)/m,
+    /\b(?:app|router|server|fastify|routes)\s*\??\.\s*(?:get|post|put|patch|delete|del|all|head|options|route|use|register)\s*\(|(?:router|navigation|navigator|nav|navigationref|navref|\))\s*\??\.\s*(?:push|replace|navigate|prefetch|dismissto|jumpto|reset|popto)\b/i],
+  python: [/@[\w.]+\.(?:get|post|put|patch|delete|head|options|route|api_route)\b|\b(?:FastAPI|Flask|Quart|Sanic|Starlette|APIRouter|Blueprint|DefaultRouter|SimpleRouter|include_router|register_blueprint|mount|add_url_rule|add_api_route|ROOT_URLCONF|basePath)\b/],
+  go: [/gin-gonic|labstack\/echo|go-chi|gorilla\/mux|gofiber|net\/http|\b(?:Group|PathPrefix|Subrouter|With|Methods|HandleFunc|Handle|Mount|Route|Use)\s*\(|\b(?:gin|echo|chi|mux|fiber|http)\.|Router|Express|Application|FastifyInstance|Hono|APIRouter|FastAPI|Flask|Blueprint/],
+  jvm: [/@(?:RestController|Controller|RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\b/],
+}
+// 2: a keyword of its family (the walk reads declarations and call sites), 1: only a string with a
+// slash (the walk reads its strings alone: with no keyword, no declaration can be there), 0: nothing
+function gateOf(lang, relPath, text) {
+  const family = familyOf(lang)
+  if (WALK_WORDS[family] && WALK_WORDS[family].some((re) => re.test(text))) return 2
+  if (family === 'python' && path.posix.basename(relPath) === 'urls.py') return 2
+  // a string with a slash that is no import's path
+  const re = new RegExp(SLASH_STRING.source, 'g'), line = IMPORT_LINE[family]
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const at = m.index
+    if (IMPORT_BEFORE.test(text.slice(Math.max(0, at - 40), at))) continue
+    if (line) { const from = text.lastIndexOf('\n', at) + 1, to = text.indexOf('\n', at); if (line.test(text.slice(from, to < 0 ? text.length : to))) continue }
+    return 1
+  }
+  return 0
+}
+export const mayHoldRoutes = (lang, relPath, text) => gateOf(lang, relPath, text) > 0
+
+// src: the file's text, when the caller has it: a file gateOf rules out is not walked, and one holding
+// only strings with a slash has its strings read alone.
+export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] } = {}, src = null) {
   const family = familyOf(lang)
   const out = { routes: [], scopes: [], mounts: [], refs: [], meta: {} }
   const consumed = new Set() // string nodes a declaration reads: never a call site
@@ -228,6 +267,9 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
   fileRoutes(tree, lang, relPath, out, addRoute)
 
   if (isRoutesRb) { railsRoutes(tree.rootNode, addRoute, consumed); return finish(out) }
+  const gate = src === null ? 2 : gateOf(lang, relPath, src)
+  if (!gate) return finish(out)
+  const stringsOnly = gate === 1
 
   let scopeSeq = 0
   const root = { id: 0, vars: new Map(), params: [], line: 0, parent: null, node: tree.rootNode }
@@ -701,8 +743,11 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
   const seenRef = new Set()
   // one node, in the same walk as the declarations (after them, so their strings are consumed
   // first): true when its subtree holds nothing more to read (a string, a concatenation, an import)
+  // no `/` in a node's text: no URL in it (the file's text, when the caller gave it)
+  const slashless = (n) => { if (src === null) return false; const k = src.indexOf('/', n.startIndex); return k < 0 || k >= n.endIndex }
   const scanNode = (n, t) => {
     if (!SCANNED.has(t)) return false // `type` is a call into the grammar: asked once per node
+    if (STRINGS.has(t) && slashless(n)) return true // a string is read whole: nothing in it to read
     if (t === 'call_expression' || t === 'call' || t === 'method_invocation') {
       const c = callee(n)
       if (c && /^(require|import|require_relative|include)$/.test(c.name || '') && !c.recv) return true
@@ -748,7 +793,20 @@ export function extractRoutes(tree, lang, relPath, { symbols = [], imports = [] 
     seenRef.add(k)
     addRef({ kind: ctx.kind, named: 0, toks: u.toks, lead: u.lead, method: ctx.method || null, line: line(n), src: srcAt(line(n)) })
   }
-  walk(tree.rootNode, root)
+  if (stringsOnly) {
+    // the strings, concatenations and calls the walk would reach, found by the grammar in one pass
+    // (in tree order: a node a scan consumed whole, or an import or a comment, skips what it holds)
+    let skipTo = -1
+    const loader = /(?:require_relative|require|import|include)\b/y
+    for (const x of tree.rootNode.descendantsOfType(SCAN_ONLY)) {
+      if (x.startIndex < skipTo || !x.isNamed) continue
+      const t = x.type
+      if (SKIP.has(t)) { skipTo = x.endIndex; continue }
+      if (CALLS.has(t)) { loader.lastIndex = x.startIndex; if (!loader.test(src)) continue } // only a loader's call is read here (its strings skipped)
+      else if (slashless(x)) { skipTo = x.endIndex; continue }
+      if (scanNode(x, t)) skipTo = x.endIndex
+    }
+  } else walk(tree.rootNode, root)
   out.refs = refs
   return finish(out)
 }

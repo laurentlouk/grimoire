@@ -384,7 +384,7 @@ export function keyAnswer(g, key, repo = null) {
 // The listing: every key (or those matching `query`: a fragment, or a `*` pattern), then the gaps.
 export function configList(g, { query = null, kind = null, repo = null, limit = 60 } = {}) {
   const R = repo ? ' AND repo = ?' : '', ra = repo ? [repo] : []
-  const all = g.q(`SELECT key, kind, role, src_key, via, repo, path, line FROM config WHERE 1=1${R} ORDER BY key`, ...ra)
+  const all = g.q(`SELECT key, kind, role, src_key, via, repo, path, line FROM config WHERE 1=1${R} ORDER BY key, repo, path, line`, ...ra)
   if (!all.length) return 'No configuration key found: no environment read (process.env, os.environ, os.Getenv, System.getenv, ENV, std::env …), no config path read (ConfigService.get, @Value, viper …) and no declaration (.env.example, compose environment, CI env, app.json extra, application.properties) in the indexed repositories.'
   const keys = new Map()
   for (const r of all) {
@@ -430,7 +430,8 @@ export function configAnswer(g, { key = null, kind = null, repo = null, limit = 
   return configList(g, { query: k || null, kind, repo, limit: Math.max(1, Math.min(Number(limit) || 60, 400)) })
 }
 
-// The lines of the config index naming one of these keys: a mention there is explained.
+// The lines of the config index naming one of these keys (a read, a declaration, a mapping): an answer
+// printing the key's view explains them, so its mentions leave them out (reach.mjs mentions).
 export function explainedLines(g, terms) {
   if (!terms.length) return new Set()
   try {

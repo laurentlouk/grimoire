@@ -1,24 +1,28 @@
 // grimoire graph · incremental indexing. A file is re-parsed only when its size or mtime moved AND
 // its content hash changed; deleted files leave the graph. Edges of a repository are re-resolved
-// whenever any of its files changed, since a new definition can capture names anywhere.
+// whenever any of its files changed, since a new definition can capture names anywhere, or one of the
+// files resolution reads (resolve_inputs: package.json, tsconfig, babel and workspace configs, go.mod,
+// Cargo.toml) changed: a package renamed, an alias moved, re-routes imports no code file changed.
 //
 // Runs in its own process (worker.mjs) with V8's Liftoff-only wasm tier: some grammars crash the
 // optimizing wasm compiler of current Node, and a crash must never take the MCP server with it.
 //
 // After a repository's code, its data model (lib/data): the files data extractors read are tracked
 // the same way (data_inputs), and each extraction job (one file, or one folder) runs again only when
-// the hash of one of its inputs, or its extractor's version, changed (data_facts).
+// the hash of one of its inputs, or its extractor's version, changed (data_facts). A code file a data
+// extractor parses (its level says so) keeps the tree the code pass parsed, within a budget, and the
+// extractors read that tree instead of parsing the file again (spareTrees).
 import { readFileSync, statSync, lstatSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { loadRuntime } from './deps.mjs'
 import { extract } from './extract.mjs'
 import { TEST_PATH, LANGS, familyOf } from './langs.mjs'
-import { scanRepo, gitHead, listPaths } from './project.mjs'
+import { scanRepo, gitHead, listPaths, resolveInputPaths } from './project.mjs'
 import { parseContract, contractHints } from './contracts.mjs'
 import { configOfCode, configOfDecl, declKind, configDeclPaths, DECL_MAX } from './config.mjs'
 import { openStore, tx, driver } from './store.mjs'
-import { candidates, inspect, plan, run, idOf, readsYaml, readsCode, keeps, MAX_BYTES } from './data/registry.mjs'
+import { candidates, inspect, plan, run, idOf, readsYaml, readsCode, keeps, MAX_BYTES, TREE } from './data/registry.mjs'
 import { CODE_LANGS } from './data/readers/code-aside.mjs'
 import { ACCESS_LANGS } from './data/extractors/dynamo-access.mjs'
 import { readYaml } from './data/readers/yaml.mjs'
@@ -34,6 +38,7 @@ export async function indexProject(project, { full = false, only = null, log = (
   let rt = null
   const runtime = async () => (rt ||= await loadRuntime({ log }))
 
+  const spare = spareTrees()
   const known = new Set(project.repos.map((r) => r.name))
   let relink = false // routes link across repositories: once any of them changed, after them all
   for (const { name } of db.prepare('SELECT name FROM repos').all()) if (!known.has(name)) { dropRepo(db, name); relink = true } // left the config
@@ -55,12 +60,16 @@ export async function indexProject(project, { full = false, only = null, log = (
       todo.push({ ...f, prevId: p ? p.id : null, prevHash: p ? p.hash : null })
     }
     const parsedFiles = []
+    const levels = new Map() // a data candidate's level, computed once: path → { hash, ddl }
     for (const f of todo) {
       let src
       try { src = readFileSync(path.join(repo.abs, f.path), 'utf8') } catch { continue }
       const hash = createHash('sha1').update(src).digest('hex')
       if (hash === f.prevHash) { db.prepare('UPDATE files SET size = ?, mtime = ? WHERE id = ?').run(f.size, f.mtime, f.prevId); continue }
       let result = { symbols: [], refs: [], imports: [] }
+      // a source file a data extractor reads: its level now (indexData takes it), and whether one parses it
+      let level = null
+      if (candidates([f.path], project).length && f.size <= MAX_BYTES) { try { level = inspect(f.path, src) } catch {} levels.set(f.path, { hash, ddl: level }) }
       if (LANGS[f.lang]?.hand) { // an API contract, read by hand (contracts.mjs)
         try { result = parseContract(f.lang, src, TEST_PATH.test(f.path)) } catch (e) { rs.failed.push(`${f.path}: ${e.message.slice(0, 80)}`) }
       } else if (f.lang !== 'other') {
@@ -68,10 +77,12 @@ export async function indexProject(project, { full = false, only = null, log = (
         if (parser) {
           try {
             const tree = parser.parse(src)
+            let kept = false
             try {
               result = extract(tree, f.lang, TEST_PATH.test(f.path), f.path)
-              try { result.routes = extractRoutes(tree, f.lang, f.path, result) } catch (e) { rs.failed.push(`${f.path}: routes: ${e.message.slice(0, 80)}`) }
-            } finally { tree.delete() }
+              try { result.routes = extractRoutes(tree, f.lang, f.path, result, src) } catch (e) { rs.failed.push(`${f.path}: routes: ${e.message.slice(0, 80)}`) }
+              kept = level > 0 && TREE.some((ex) => ex.wants(f.path)) && spare.keep(f.lang, src, tree)
+            } finally { if (!kept) tree.delete() }
           } catch (e) { rs.failed.push(`${f.path}: ${e.message.slice(0, 80)}`) }
         }
       }
@@ -88,7 +99,8 @@ export async function indexProject(project, { full = false, only = null, log = (
       for (const [, gone] of prev) { removeFile(db, gone.id); rs.removed++ }
       for (const f of parsedFiles) { writeFile(db, repo.name, f); rs.parsed++ }
       const r = db.prepare('SELECT head FROM repos WHERE name = ?').get(repo.name)
-      const needsResolve = full || rs.parsed || rs.removed || !r
+      const moved = resolveInputs(db, repo, rels)
+      const needsResolve = full || rs.parsed || rs.removed || !r || moved
       if (needsResolve) {
         resolveRepo(db, repo.name, repo.abs, rels)
         // the routes' composition is a lead like the rest: a failure loses the routes, never the index
@@ -102,7 +114,7 @@ export async function indexProject(project, { full = false, only = null, log = (
       if (head && (cc.cochange_head !== head || needsResolve)) { cochange(db, repo); db.prepare('UPDATE repos SET cochange_head = ? WHERE name = ?').run(head, repo.name) }
     })
     rs.config = indexConfigDecls(db, project, repo, rels)
-    rs.data = await indexData(db, project, repo, rels, runtime)
+    try { rs.data = await indexData(db, project, repo, rels, runtime, { levels, spare }) } finally { spare.clear() }
     log(`${repo.name}: ${rs.files} files, ${rs.parsed} parsed, ${rs.removed} removed${rs.data.extracted ? `, ${rs.data.extracted} data job(s) run` : ''}`)
     summary.repos.push(rs)
   }
@@ -120,7 +132,7 @@ export async function indexProject(project, { full = false, only = null, log = (
 // values would land in the model as the repository's): it is kept as found, not read, an error row
 // of its own (`data-inputs`), so graph_data and graph_status say so.
 export const OUTSIDE_LINK = 'a symbolic link to a file out of the repository: not read'
-async function indexData(db, project, repo, rels, runtime) {
+async function indexData(db, project, repo, rels, runtime, { levels = new Map(), spare = null } = {}) {
   const out = { extracted: 0, failed: [] }
   let root = null
   try { root = realpathSync(repo.abs) } catch {}
@@ -154,7 +166,7 @@ async function indexData(db, project, repo, rels, runtime) {
       if (st.size <= MAX_BYTES) {
         try {
           const text = readFileSync(path.join(repo.abs, p), 'utf8')
-          hash = createHash('sha1').update(text).digest('hex'); ddl = inspect(p, text)
+          hash = createHash('sha1').update(text).digest('hex'); ddl = levels.get(p)?.hash === hash ? levels.get(p).ddl : inspect(p, text)
           if (keeps(p, text)) texts.set(p, text) // a JSON or YAML file that declares no table is not kept
         } catch { continue }
       }
@@ -182,7 +194,7 @@ async function indexData(db, project, repo, rels, runtime) {
       // index keeps no tree), only when the file changed
       const parsers = {}
       for (const lang of new Set([...CODE_LANGS, ...ACCESS_LANGS])) { try { parsers[lang] = await (await runtime()).parserFor(lang) } catch { parsers[lang] = null } }
-      ctx.tree = (lang, text) => { if (!parsers[lang]) throw new Error(`the pinned ${lang} grammar did not load`); return parsers[lang].parse(text) }
+      ctx.tree = (lang, text) => { const t = spare && spare.take(lang, text); if (t) return t; if (!parsers[lang]) throw new Error(`the pinned ${lang} grammar did not load`); return parsers[lang].parse(text) }
     }
     const r = run(job, read, ctx)
     results.push([job.extractor.scope, job.key, id, sig, r])
@@ -197,6 +209,30 @@ async function indexData(db, project, repo, rels, runtime) {
   for (const p of refused) out.failed.push(`${p}: ${OUTSIDE_LINK}`)
   out.extracted = results.length
   return out
+}
+
+// The trees the code pass parsed for the files a data extractor parses too, kept until the repository's
+// data model is read (at most SPARE_BYTES of their source at once: past it a file is parsed again).
+// take() hands one out as a view its extractor's delete() leaves alone (several extractors may read
+// one file); clear() frees them all.
+const SPARE_BYTES = 24 << 20
+function spareTrees() {
+  const byLang = new Map() // lang → Map(text → tree)
+  let bytes = 0
+  return {
+    keep(lang, text, tree) {
+      if (bytes + text.length > SPARE_BYTES) return false
+      const m = byLang.get(lang) || byLang.set(lang, new Map()).get(lang)
+      if (m.has(text)) return false
+      m.set(text, tree); bytes += text.length
+      return true
+    },
+    take(lang, text) {
+      const t = byLang.get(lang)?.get(text)
+      return t ? Object.create(t, { delete: { value: () => {} } }) : null
+    },
+    clear() { for (const m of byLang.values()) for (const t of m.values()) t.delete(); byLang.clear(); bytes = 0 },
+  }
 }
 
 // A repository's configuration declaration files (config.mjs declKind: env templates, compose files,
@@ -233,26 +269,61 @@ function indexConfigDecls(db, project, repo, rels) {
   return out
 }
 
+// The files module resolution reads (project.mjs resolveInputPaths), tracked by size, mtime and hash:
+// true when one was added, removed or changed content since the last index.
+function resolveInputs(db, repo, rels) {
+  const prev = new Map(db.prepare('SELECT path, size, mtime, hash FROM resolve_inputs WHERE repo = ?').all(repo.name).map((r) => [r.path, r]))
+  const put = db.prepare('INSERT INTO resolve_inputs(repo, path, size, mtime, hash) VALUES(?, ?, ?, ?, ?) ON CONFLICT(repo, path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime, hash = excluded.hash')
+  let moved = false
+  for (const p of resolveInputPaths(rels)) {
+    let st
+    try { st = lstatSync(path.join(repo.abs, p)) } catch { continue }
+    const r = prev.get(p), mtime = Math.floor(st.mtimeMs)
+    if (r && r.size === st.size && r.mtime === mtime) { prev.delete(p); continue }
+    let hash = null
+    if (st.isFile()) { try { hash = createHash('sha1').update(readFileSync(path.join(repo.abs, p))).digest('hex') } catch {} }
+    if (!r || r.hash !== hash) moved = true
+    prev.delete(p)
+    put.run(repo.name, p, st.size, mtime, hash)
+  }
+  for (const p of prev.keys()) { db.prepare('DELETE FROM resolve_inputs WHERE repo = ? AND path = ?').run(repo.name, p); moved = true }
+  return moved
+}
+
+// the statements writing a file's rows, prepared once per store
+const writers = new WeakMap()
+const writerOf = (db) => {
+  if (!writers.has(db)) writers.set(db, {
+    file: db.prepare('INSERT INTO files(repo, path, lang, size, mtime, hash, is_test) VALUES(?, ?, ?, ?, ?, ?, ?)'),
+    node: db.prepare('INSERT INTO nodes(file_id, kind, name, qualname, parent_id, container, line, end_line, signature, is_test, via) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+    fileNode: db.prepare('UPDATE files SET node_id = ? WHERE id = ?'),
+    ref: db.prepare('INSERT INTO refs(file_id, src_id, kind, name, qual, qtype, from_type, line) VALUES(?, ?, ?, ?, ?, ?, ?, ?)'),
+    imp: db.prepare('INSERT INTO imports(file_id, source, names, alias, flags, line) VALUES(?, ?, ?, ?, ?, ?)'),
+    cfg: db.prepare('INSERT INTO config(repo, path, file_id, node_id, key, kind, role, src_key, via, line) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+  })
+  return writers.get(db)
+}
 function writeFile(db, repo, f) {
   if (f.prevId) removeFile(db, f.prevId)
+  const w = writerOf(db)
   const isTest = TEST_PATH.test(f.path) ? 1 : 0
-  const fileId = Number(db.prepare('INSERT INTO files(repo, path, lang, size, mtime, hash, is_test) VALUES(?, ?, ?, ?, ?, ?, ?)').run(repo, f.path, f.lang, f.size, f.mtime, f.hash, isTest).lastInsertRowid)
-  const insNode = db.prepare('INSERT INTO nodes(file_id, kind, name, qualname, parent_id, container, line, end_line, signature, is_test, via) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  const fileId = Number(w.file.run(repo, f.path, f.lang, f.size, f.mtime, f.hash, isTest).lastInsertRowid)
+  const insNode = w.node
   const fileNode = Number(insNode.run(fileId, 'file', path.basename(f.path), f.path, null, null, 1, 1, null, isTest, null).lastInsertRowid)
-  db.prepare('UPDATE files SET node_id = ? WHERE id = ?').run(fileNode, fileId)
+  w.fileNode.run(fileNode, fileId)
   const ids = []
   for (const s of f.result.symbols) {
     ids.push(Number(insNode.run(fileId, s.kind, s.name, s.qualname, s.parent >= 0 ? ids[s.parent] : null, s.container, s.line, s.endLine, s.signature, s.isTest ? 1 : 0, s.via || null).lastInsertRowid))
   }
   writeRoutes(db, fileId, fileNode, ids, f.result.routes || null)
-  const insRef = db.prepare('INSERT INTO refs(file_id, src_id, kind, name, qual, qtype, from_type, line) VALUES(?, ?, ?, ?, ?, ?, ?, ?)')
+  const insRef = w.ref
   for (const r of f.result.refs) insRef.run(fileId, r.src >= 0 ? ids[r.src] : fileNode, r.kind, r.name, r.qual || '', r.qtype || null, r.fromType || null, r.line)
-  const insImp = db.prepare('INSERT INTO imports(file_id, source, names, alias, flags, line) VALUES(?, ?, ?, ?, ?, ?)')
+  const insImp = w.imp
   for (const i of f.result.imports) {
     const { source, names, alias, line, ...flags } = i
     insImp.run(fileId, source, JSON.stringify(names || []), alias || null, JSON.stringify(flags), line)
   }
-  const insCfg = db.prepare('INSERT INTO config(repo, path, file_id, node_id, key, kind, role, src_key, via, line) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  const insCfg = w.cfg
   for (const c of f.result.config || []) insCfg.run(repo, f.path, fileId, c.src >= 0 ? ids[c.src] : fileNode, c.key, c.kind, c.role, c.srcKey || null, c.via, c.line)
 }
 
@@ -272,6 +343,7 @@ function dropRepo(db, repo) {
     db.prepare('DELETE FROM data_facts WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM config WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM config_inputs WHERE repo = ?').run(repo)
+    db.prepare('DELETE FROM resolve_inputs WHERE repo = ?').run(repo)
     db.prepare('DELETE FROM repos WHERE name = ?').run(repo)
   })
 }

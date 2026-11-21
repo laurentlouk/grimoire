@@ -199,7 +199,19 @@ const routerOf = (decl) => {
   if (v.type === 'satisfies_expression' && /Router/.test(text(v.namedChild(1)))) { const o = unwrapValue(v.namedChild(0)); return o && o.type === 'object' ? o : null }
   return routerObject(v)
 }
-const routerPair = (n) => { const o = n.parent; if (!o || o.type !== 'object') return false; let d = o.parent; while (d && d.type !== 'variable_declarator' && /^(arguments|call_expression|satisfies_expression|as_expression|parenthesized_expression)$/.test(d.type)) d = d.parent; return !!d && d.type === 'variable_declarator' && same(routerOf(d), o) }
+// one answer per object literal (its pairs ask the same question): the last tree's, by node id
+let routerObjects = { tree: null, of: new Map() }
+const routerPair = (n) => {
+  const o = n.parent
+  if (!o || o.type !== 'object') return false
+  if (routerObjects.tree !== o.tree) routerObjects = { tree: o.tree, of: new Map() }
+  if (routerObjects.of.has(o.id)) return routerObjects.of.get(o.id)
+  let d = o.parent
+  while (d && d.type !== 'variable_declarator' && /^(arguments|call_expression|satisfies_expression|as_expression|parenthesized_expression)$/.test(d.type)) d = d.parent
+  const yes = !!d && d.type === 'variable_declarator' && same(routerOf(d), o)
+  routerObjects.of.set(o.id, yes)
+  return yes
+}
 // `export default () => …`, `export default function () {}`, `export default memo(…)`: a definition
 // with no name of its own, known by its file's (`Home.tsx` → Home; `index.tsx` → its folder's name).
 const defaultFn = (n) => { const v = unwrapValue(field(n, 'value')); return !!v && (FN_VALUE.test(v.type) && !field(v, 'name') || wrapsFn(v)) }
@@ -230,6 +242,8 @@ const jsxCallee = (n) => {
 // What a wrapper wraps: `memo(Button)`, `withTheme(Card)`, `styled(View)`, `connect(…)(Screen)`: the
 // wrapped definition renders what it wraps, a call the syntax holds no call node for.
 const wrappedArgs = (n) => {
+  const caps = named(n).filter((a) => a.type === 'identifier' && /^\p{Lu}/u.test(a.text))
+  if (!caps.length) return [] // no component name among the arguments: nothing to wrap
   const call = n.parent
   if (!call || call.type !== 'call_expression' || !same(field(call, 'arguments'), n)) return []
   let up = call
@@ -237,7 +251,7 @@ const wrappedArgs = (n) => {
   while (up.parent && /^(satisfies_expression|as_expression|parenthesized_expression)$/.test(up.parent.type)) up = up.parent
   const owner = up.parent
   const defined = owner && ((owner.type === 'variable_declarator' && same(field(owner, 'value'), up) && wrappedFn(owner)) || (owner.type === 'export_statement' && same(field(owner, 'value'), up) && defaultFn(owner)))
-  return defined ? named(n).filter((a) => a.type === 'identifier' && /^\p{Lu}/u.test(a.text)).map((a) => ({ name: a.text, qual: '' })) : []
+  return defined ? caps.map((a) => ({ name: a.text, qual: '' })) : []
 }
 const js = {
   defs: {
@@ -278,6 +292,7 @@ const js = {
 // A class-level annotated attribute (`order_created: Callable[…]`, a settings field `TIMEOUT: int = 60`,
 // a dataclass or model field): a field of its class. An unannotated assignment is not one.
 const pyClassField = (n) => {
+  if (!field(n, 'type')) return false // most assignments: no annotation, asked first
   const l = field(n, 'left'), st = n.parent, block = st && st.parent
   return !!(field(n, 'type') && l && l.type === 'identifier' && st.type === 'expression_statement' && block && block.type === 'block' && block.parent && block.parent.type === 'class_definition')
 }

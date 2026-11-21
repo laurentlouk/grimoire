@@ -80,6 +80,40 @@ export function cxxShim(u) {
   return u
 }
 
+// Each accessor of a syntax node crosses into wasm on every read (its type, its end, its parent, a
+// field, how many children it has). A tree is never edited after its parse, so what a node reads of
+// itself is kept on the node object: the walks of the indexer (extract.mjs, routes.mjs, the data
+// extractors) and their helpers read one node's type and fields many times. A child reached again by
+// index is another object (caching those costs more than it saves).
+function memoizeNodes(Node) {
+  const P = Node?.prototype
+  if (!P || P.__grimoireMemo) return
+  const get = (k) => Object.getOwnPropertyDescriptor(P, k)?.get
+  const type = get('type'), endIndex = get('endIndex'), endPosition = get('endPosition'), parent = get('parent'), isNamed = get('isNamed'), named = get('namedChildCount'), count = get('childCount')
+  const byField = P.childForFieldName
+  if (!type || !endIndex || !endPosition || !parent || !isNamed || !named || !count || typeof byField !== 'function') return // another library version: left as it is
+  // one record per node, of one shape (the node object gains one property, the same on every node)
+  const slot = (n) => n._c || (n._c = { ty: undefined, ei: undefined, ep: undefined, nm: undefined, pa: undefined, nc: undefined, cc: undefined, fl: undefined })
+  Object.defineProperties(P, {
+    __grimoireMemo: { value: true },
+    type: { get() { const c = slot(this); return c.ty ?? (c.ty = type.call(this)) }, configurable: true },
+    endIndex: { get() { const c = slot(this); return c.ei ?? (c.ei = endIndex.call(this)) }, configurable: true },
+    endPosition: { get() { const c = slot(this); return c.ep ?? (c.ep = endPosition.call(this)) }, configurable: true },
+    isNamed: { get() { const c = slot(this); return c.nm ?? (c.nm = isNamed.call(this)) }, configurable: true },
+    parent: { get() { const c = slot(this); return c.pa !== undefined ? c.pa : (c.pa = parent.call(this)) }, configurable: true },
+    namedChildCount: { get() { const c = slot(this); return c.nc ?? (c.nc = named.call(this)) }, configurable: true },
+    childCount: { get() { const c = slot(this); return c.cc ?? (c.cc = count.call(this)) }, configurable: true },
+  })
+  // a node asks for a few fields: [name, child, name, child, …], searched in order
+  P.childForFieldName = function (name) {
+    const c = slot(this), m = c.fl || (c.fl = [])
+    for (let i = 0; i < m.length; i += 2) if (m[i] === name) return m[i + 1]
+    const x = byField.call(this, name)
+    m.push(name, x)
+    return x
+  }
+}
+
 let runtime = null
 // { parserFor(lang) → Parser | null } — grammars load lazily, once each.
 export async function loadRuntime({ install = true, log } = {}) {
@@ -88,6 +122,7 @@ export async function loadRuntime({ install = true, log } = {}) {
   if (!nm) throw new Error('parser runtime not installed; run the index once (it installs it) or `npm ci --prefix tools/graph`')
   const TS = await import(pathToFileURL(path.join(nm, 'web-tree-sitter', 'tree-sitter.js')).href)
   await TS.Parser.init()
+  memoizeNodes(TS.Node)
   const parsers = new Map()
   runtime = {
     async parserFor(lang) {

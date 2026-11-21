@@ -393,3 +393,18 @@ export function routeSummary(g, repo) {
   const top = [...pre].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 6)
   return `  routes: ${http.length} http${screens.length ? `, ${screens.length} screen(s)` : ''}${top.length ? ` · top prefixes ${top.map(([k, n]) => `${k} (${n})`).join(', ')}` : ''} (graph_routes)`
 }
+
+// How well one call site matches one route, as linkRoutes scores it (null: no match). route { kind,
+// method, path, full: [{ p }], repo }; ref { kind, method, toks: [hash], lead, named, repo }. graph_diff
+// (change.mjs) matches the call sites against a route the base served and the branch does not.
+export function routeScore(route, ref) {
+  if (ref.named) return route.kind === 'screen' && !route.path.startsWith('/') && hashSeg(route.path) === ref.toks[0] ? { score: route.repo === ref.repo ? 1 : 0, how: 'name' } : null
+  if ((ref.kind === 'http' && route.kind !== 'http') || (ref.kind === 'screen' && route.kind !== 'screen')) return null
+  if (route.kind === 'screen' && !route.path.startsWith('/')) return null
+  const ms = methodsOf(route.method)
+  if (ref.method && ms && !ms.includes(ref.method)) return null
+  let best = null
+  for (const v of route.full) { const m = matchSegs(templateSegs(v.p), ref.toks, !!ref.lead); if (m && m.lits && (!best || m.lits * 10 - m.params - 2 * m.wild > best.lits * 10 - best.params - 2 * best.wild)) best = m }
+  if (!best) return null
+  return { score: best.lits * 10 - best.params - 2 * best.wild + (ref.method && ms ? 1 : 0) + (route.repo === ref.repo ? 0.5 : 0), how: best.wild ? 'prefix unknown' : best.params ? 'template' : 'exact' }
+}

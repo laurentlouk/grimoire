@@ -69,8 +69,12 @@ function typeOfValue(v, spec) {
   return null
 }
 
-// Bindings a node introduces into the current scope: [[varName, TypeName], …].
+// Bindings a node introduces into the current scope: [[varName, TypeName], …]. Asked of every node
+// the indexer walks: a node of no kind that binds answers at once (one shared empty list).
+const NONE = Object.freeze([])
 export function bindingsOf(n, spec) {
+  const t = n.type
+  if (!PARAMS.has(t) && !ASSIGN.has(t)) return NONE
   const out = []
   const put = (name, type) => { if (name && type) out.push([varName(name), type]) }
   if (PARAMS.has(n.type)) {
@@ -107,6 +111,8 @@ const PARAM_LISTS = new Set(['parameters', 'formal_parameters', 'method_paramete
 const LOOPS = new Set(['for_statement', 'for_in_statement', 'range_clause', 'for_in_clause', 'catch_clause', 'as_pattern', 'for_expression', 'enhanced_for_statement'])
 const idents = (n, out = [], d = 0) => { if (!n || d > 4) return out; if (IDENTISH.test(n.type) && n.namedChildCount === 0) out.push(n.text); else if (!TYPE_NODE.test(n.type)) for (const c of named(n)) idents(c, out, d + 1); return out }
 export function localsOf(n) {
+  const t = n.type
+  if (!PARAMS.has(t) && !ASSIGN.has(t) && !PARAM_LISTS.has(t) && !LOOPS.has(t) && t !== 'default_parameter' && t !== 'typed_default_parameter') return NONE
   if (PARAMS.has(n.type) || n.type === 'default_parameter' || n.type === 'typed_default_parameter') { const b = bound(field(n, 'name') || field(n, 'pattern') || n); return b ? [b] : [] }
   if (PARAM_LISTS.has(n.type)) return named(n).filter((c) => IDENTISH.test(c.type)).map((c) => c.text)
   if (ASSIGN.has(n.type)) {

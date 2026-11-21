@@ -3,9 +3,12 @@
 // never the MCP server. graph_diff (change.mjs) compares them with the index's to tell a symbol
 // added, removed, or changed (and whether its signature moved).
 //
-//   symbolsAside([{ path, lang, text }]) → Map(path → [{ kind, name, qualname, line, endLine, signature }] | Error)
-//   node --liftoff-only symbols-aside.mjs  < JSON [{ path, lang, text }]  → JSON [{ symbols } | { error }]
+//   symbolsAside([{ path, lang, text, rel? }]) → Map(path → [{ kind, name, qualname, line, endLine, signature }] | Error)
+//   node --liftoff-only symbols-aside.mjs  < JSON [{ path, lang, text, rel? }]  → JSON [{ symbols, routes? } | { error }]
 //
+// An item with `rel` (its path in its repository) also gets the routes it declared (routes.mjs, as the
+// indexer reads them: the route's own template, its router and handler as named; no call site), in
+// the array's `routes` property, keyed like the definitions: graph_diff tells a route removed or moved.
 // A signature is extract.mjs's: no literal's value in it.
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -23,11 +26,12 @@ export function symbolsAside(items) {
     return null
   }
   const got = run(items)
-  if (got) { items.forEach((x, i) => out.set(x.path, got[i].error ? new Error(got[i].error) : got[i].symbols)); return out }
+  const value = (r) => (r.error ? new Error(r.error) : Object.assign(r.symbols, r.routes ? { routes: r.routes } : {}))
+  if (got) { items.forEach((x, i) => out.set(x.path, value(got[i]))); return out }
   // the batch failed whole: each file on its own, so one bad file loses only itself
   for (const x of items) {
     const one = run([x])
-    out.set(x.path, !one ? new Error('the parser stopped on this file') : one[0].error ? new Error(one[0].error) : one[0].symbols)
+    out.set(x.path, !one ? new Error('the parser stopped on this file') : value(one[0]))
   }
   return out
 }
@@ -39,6 +43,9 @@ if (process.argv[1] === HERE) {
   const { extract } = await import('./extract.mjs')
   const { TEST_PATH, LANGS } = await import('./langs.mjs')
   const { parseContract } = await import('./contracts.mjs')
+  const { extractRoutes } = await import('./routes.mjs')
+  // a route as the index stores it, before composition (route-graph.mjs writeRoutes)
+  const routeOf = (r) => ({ line: r.line, kind: r.kind, method: r.method || null, path: r.path, framework: r.framework, router: r.router || null, handler: r.handler || null, handlerLine: r.handlerLine || null })
   const out = []
   const pick = (s) => ({ kind: s.kind, name: s.name, qualname: s.qualname, line: s.line, endLine: s.endLine, signature: s.signature, isTest: s.isTest })
   for (const x of items) {
@@ -55,8 +62,10 @@ if (process.argv[1] === HERE) {
       if (!parser) throw new Error(`no ${x.lang} grammar`)
       const tree = parser.parse(x.text)
       try {
-        const r = extract(tree, x.lang, TEST_PATH.test(x.path), x.path)
-        out.push({ symbols: r.symbols.map((s) => ({ kind: s.kind, name: s.name, qualname: s.qualname, line: s.line, endLine: s.endLine, signature: s.signature, isTest: s.isTest })) })
+        const r = extract(tree, x.lang, TEST_PATH.test(x.path), x.rel || x.path)
+        let routes = null
+        if (x.rel) { try { const f = extractRoutes(tree, x.lang, x.rel, r, x.text); routes = f ? { list: f.routes.map(routeOf), globalPrefix: f.meta?.globalPrefix } : null } catch {} }
+        out.push({ symbols: r.symbols.map(pick), routes })
       } finally { tree.delete() }
     } catch (e) { out.push({ error: String(e.message || e).split('\n')[0].slice(0, 200) }) }
   }

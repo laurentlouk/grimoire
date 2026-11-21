@@ -158,6 +158,24 @@ const ask = async (tool, args = {}) => { const a = await cq(tool, args); answers
   const db = await ask('impact', { target: 'DATABASE_URL' })
   lacks(db, 'src/db.ts  :3', 'mentions: a line the config index explains is not repeated')
   lacks(db, 'docker-compose.yml  :', 'mentions: … nor a declaration it holds')
+  // a key a code definition holds too (a settings class's field): both answered, the key first; its
+  // config lines hidden from the mentions only where the key's view is printed
+  writeFileSync(path.join(C, 'src/env.validation.ts'), 'export class EnvironmentVariablesValidator {\n  APP_PORT: number\n}\n')
+  writeFileSync(path.join(C, 'src/server.ts'), 'export function listen() {\n  return Number(process.env.APP_PORT)\n}\n')
+  const both = await ask('impact', { target: 'APP_PORT' })
+  has(both, '"APP_PORT" names a configuration key and 1 code definition: the key\'s impact first, then the code\'s.', 'impact on a key a field holds too: both answered')
+  has(both, 'Impact of the configuration key APP_PORT', '… the key\'s view')
+  has(both, 'src/server.ts:2  in listen  process.env', '… its reader')
+  has(both, 'Impact of EnvironmentVariablesValidator.APP_PORT', '… then the field\'s impact')
+  lacks(both, 'src/server.ts  :2', '… the key\'s read, printed in its view, is not repeated as a mention')
+  const field = await ask('impact', { target: 'EnvironmentVariablesValidator.APP_PORT' })
+  lacks(field, 'Impact of the configuration key', 'impact on the field alone (qualified): no key view')
+  has(field, 'src/server.ts  :2', '… so the config line naming it is a mention, not hidden')
+  // the listing's order does not depend on the order files were indexed in: a key's reads by path, line
+  writeFileSync(path.join(C, 'src/zz.ts'), 'export const z = process.env.ORDER_KEY\n')
+  await ask('config', { key: 'ORDER_KEY' })
+  writeFileSync(path.join(C, 'src/aa.ts'), 'export const a = process.env.ORDER_KEY\n')
+  has(await ask('config'), '  ORDER_KEY  env  src/aa.ts:1 (+1)', 'list: a key read in two files names the first by path, whichever was indexed first')
   // a refresh: a template edited, a compose file removed
   writeFileSync(path.join(C, '.env.example'), readFileSync(path.join(C, '.env.example'), 'utf8') + 'NEW_TEMPLATE_KEY=canary-cfg-value-12\n')
   unlinkSync(path.join(C, 'docker-compose.yml'))
