@@ -294,6 +294,56 @@ if (!RT) {
   const tst = readFile('web/src/cache.test.ts', ["import Redis from 'ioredis'", 'const r = new Redis()', "test('x', async () => { await r.hset('t:1', 'a', 1) })"])
   eq([tst.sites.length, tst.tests], [0, 1], 'test code: counted, not read')
 
+  console.log('\n2 · commands the code wraps (TypeScript and JavaScript): promisified or bound methods, functions passing their parameters on, the callback style, what a module exports and imports')
+  const wr = readFile('svc/store.js', [
+    "const { promisify } = require('util')",
+    "const util = require('util')",
+    "const redis = require('redis')",
+    'const client = redis.createClient()',
+    'const get = promisify(client.get).bind(client)',
+    'const hget = util.promisify(client.hget.bind(client))',
+    'const lpush = client.lpush.bind(client)',
+    'const sadd = (key, ...members) => new Promise((ok, fail) => client.sadd(key, ...members, (e, v) => (e ? fail(e) : ok(v))))',
+    'const hset = (key, field, value) => new Promise((ok, fail) => client.hset(key, field, value, settle(ok, fail)))',
+    'const settle = (ok, fail) => (e, v) => (e ? fail(e) : ok(v))',
+    'const twice = (key) => { client.incr(key); return client.expire(key, 60) }',
+    'const loop = (key) => loop(key)',
+    "async function seen(id) { await hset(`seen:${id}`, 'at', 1); return get(`seen:${id}:last`) }",
+    "function local(get) { return get('not:a:key') }",
+    "const queue = (id, done) => { lpush(`q:${id}`, 'VALUE-W1'); client.del(`q:${id}:old`, done) }",
+    'const viaAsync = (id) => client.hgetallAsync(`profile:${id}`)',
+    'module.exports = { get, hget, sadd, hset, twice, seen }',
+    'module.exports.lpush = lpush',
+    'exports.del = (key) => new Promise((resolve, reject) => client.del(key, resolve))',
+  ])
+  eq(brief(wr), [
+    '8 sadd SADD dyn1 bound', '11 twice INCR dyn1 bound', '11 twice EXPIRE dyn1 bound',
+    '13 seen HSET seen:{id}:w wrapper', '13 seen GET seen:{id}:last:r wrapper',
+    '15 queue DEL q:{id}:old:w bound', '15 queue LPUSH q:{id}:w wrapper', '16 viaAsync HGETALL profile:{id}:r bound', '19 del DEL dyn1 bound',
+  ], 'a wrapper called by its name in its own file is the command at the call (`promisify(client.get).bind(client)`, `client.lpush.bind(client)`, a function passing its parameters on, a trailing `settle(ok, fail)` of the executor no argument); the wrapper\'s own command then dropped; a function sending two commands, one calling itself, a name a parameter rebinds: none; a trailing callback no key; `client.hgetallAsync(…)` its command')
+  eq([wr.exports, wr.sites.filter((x) => x.pass).map((x) => `${x.line} ${x.cmd}`)], [[
+    { name: 'get', cmd: 'GET', line: 17 }, { name: 'hget', cmd: 'HGET', line: 17 }, { name: 'sadd', cmd: 'SADD', line: 17, fn: 0 }, { name: 'hset', cmd: 'HSET', line: 17, fn: 1 }, { name: 'lpush', cmd: 'LPUSH', line: 18 }, { name: 'del', cmd: 'DEL', line: 19, fn: 2 },
+  ], ['8 SADD', '19 DEL']], '… what the module exports that wraps a command: its name, the command, its function (a promisified method has none); a wrapper nothing in its file calls keeps its own command, marked for data/redis.mjs (`pass`); never a function sending two, nor one building its key')
+  const es = readFile('svc/routes/users.ts', [
+    "import { get, hset as put, client } from '../store.js'",
+    "import type { Thing } from './types'",
+    "import { set } from 'some-package'",
+    "const { del: drop, sadd } = require('../store')",
+    'export async function show(id: string) { await put(`user:${id}`, "name", "VALUE-E1"); drop(`user:${id}:old`); return get(`user:${id}`) }',
+    'export const tag = (id: string, t: string) => sadd(`tags:${id}`, t)',
+    "export const pkg = () => set('x:1', 'v')",
+    "export function shadow(get: (k: string) => string) { return get('no:key') }",
+  ])
+  eq(es.sites.map((x) => `${x.line} ${x.cmd} ${x.keys.map((k) => k.t)} ${x.how}${x.wrap ? ` ${x.wrap.from}#${x.wrap.name}` : ''}`), [
+    '5 HSET user:{id} wrapper svc/store#hset', '5 DEL user:{id}:old wrapper svc/store#del', '5 GET user:{id} wrapper svc/store#get', '6 SADD tags:{id} wrapper svc/store#sadd',
+  ], 'an ES module or a CommonJS require of a file of the repository (`./store.js` and `../store` one module): each call of a name it imports that names a command read as it, at the call, with the module and the name it exports (followed by data/redis.mjs); a package\'s, a type import, a parameter of that name: none')
+  ok(!JSON.stringify(wr).includes('VALUE-W1') && !JSON.stringify(es).includes('VALUE-E1') && !wr.sites.some((x) => x.keys.some((k) => k.t === 'not:a:key')), '… no value kept from a wrapped call')
+  const exp = readFile('svc/esm.ts', ["import { createClient } from 'redis'", 'const client = createClient()', 'export const get = client.get.bind(client)', 'export function hgetall(key: string) { return client.hGetAll(key) }', 'const del = (...keys: string[]) => client.del(...keys)', 'export { del as remove, del }', 'export const keyed = (id: string) => client.get(`k:${id}`)'])
+  eq(exp.exports.map((e) => `${e.name} ${e.cmd}`), ['get GET', 'hgetall HGETALL', 'remove DEL', 'del DEL'], '… exports in every ES form: `export const`, `export function`, `export { a as b }`; a function building its key is no wrapper')
+  const manyW = ["const redis = require('redis')", 'const client = redis.createClient()', "const { sadd } = require('./store')", 'const set = (k, v) => client.set(k, v)', 'async function f(id) {', ...Array.from({ length: 30000 }, (_, i) => (i % 2 ? `  set(\`a:\${id}:${i}\`, 1)` : `  sadd(\`b:\${id}:${i}\`, 1)`)), '}']
+  const [mw, tmw] = timed(() => readFile('svc/many.js', manyW))
+  ok(mw.sites.length === 1000 && mw.capped && tmw < 10000, `30 000 calls of wrappers, of this file and imported: the first 1 000 commands read, bounded (${tmw} ms)`)
+
   console.log('\n2 · the call sites: Rust (redis, fred, the pools)')
   const rs = readFile('api/src/sessions.rs', [
     'use redis::AsyncCommands;',
@@ -614,6 +664,17 @@ console.log('\n3 · the key space (data/redis.mjs): templates, types and their c
   const imports = [{ repo: 'api', path: 'api/src/sessions.rs', source: 'redis' }, { repo: 'web', path: 'web/src/cache.ts', source: 'ioredis' }, { repo: 'jobs', path: 'jobs/q.py', source: 'redis' }]
   eq(gapsOf({ ...m, redis: { ...m.redis, clients: [{ repo: 'api', source: 'redis' }, { repo: 'web', source: 'ioredis' }] } }, [], imports).map((g) => `${g.id} ${g.sources} ${g.files.map((f) => f.path)}`), ['redis redis jobs/q.py'], 'the gap closes for a client whose commands are read; one whose commands are not stays a gap')
   eq(m.redis.clients, [{ repo: 'api', source: 'ioredis' }, { repo: 'web', source: 'ioredis' }], '… the clients read, per repository')
+  // a command sent through a wrapper another file exports: kept where that file of the same repository
+  // exports a wrapper of that name sending that command; the wrapper's own command then dropped
+  const wsite = (line, from, name, cmd0, ...args) => ({ line, fn: 0, how: 'wrapper', wrap: { from, name, cmd: cmd0 }, ...readCommand({ name: cmd0, args: args.map((a) => (typeof a === 'string' ? L(a) : a)) }) })
+  const store = (repo) => ({ repo, extractor: 'redis-commands@2', facts: { declarations: [], redis: { lang: 'ts', path: `${repo}/lib/store.js`, clients: [{ source: 'redis', client: 'redis', line: 1 }], env: [], dbs: [], fns: [{ name: 'get', line: 3, end: 3 }, { name: 'decr', line: 4, end: 4 }], notes: [], tests: 0, dyn: 2, exports: [{ name: 'get', cmd: 'GET', line: 5, fn: 0 }, { name: 'decr', cmd: 'DECR', line: 5, fn: 1 }],
+    sites: [{ line: 3, fn: 0, how: 'bound', pass: true, ...readCommand({ name: 'GET', args: [X('key')] }) }, { line: 4, fn: 1, how: 'bound', pass: true, ...readCommand({ name: 'DECR', args: [X('key')] }) }] } } })
+  const caller = (repo, from) => ({ repo, extractor: 'redis-commands@2', facts: { declarations: [], redis: { lang: 'ts', path: `${repo}/routes/a.js`, clients: [], env: [], dbs: [], fns: [{ name: 'show', line: 1, end: 9 }], notes: [], tests: 0, dyn: 0, exports: [],
+    sites: [wsite(2, from, 'get', 'GET', s('user:', h('id'))), wsite(3, from, 'set', 'SET', s('user:', h('id')), 'v'), wsite(4, from, 'get', 'HGET', s('cfg:', h('id')), 'f')] } } })
+  const wm = reconcile([store('app'), caller('app', 'app/lib/store'), caller('other', 'app/lib/store')])
+  eq(wm.stores.map((st) => `${st.id}: ${RM.templatesOf(st).map((e) => e.name)} · ${st.keyspace.commands} commands · ${st.keyspace.dyn} dynamic${st.keyspace.notes.length ? ` · ${st.keyspace.notes}` : ''}`), [
+    'app:redis: user:{id} · 2 commands · 1 dynamic · a call of set, get (imported from another file) not read as a command: no file of the repository read exports a wrapper of it',
+  ], 'a wrapped call kept where the module it names, in its repository, exports a wrapper of that name sending that command (GET); one it does not export (set), or exports as another command, dropped and said; never followed into another repository (no key space for one whose calls all name another\'s module); the wrapper\'s own GET dropped once a call of it is kept, the uncalled DECR kept')
   // no value anywhere
   ok(!JSON.stringify(m).includes('@name:x') && !JSON.stringify(m).includes('"v"'), 'no value and no query text in the model')
   // the review's false facts, in the model
@@ -786,10 +847,13 @@ if (RT) {
   const { renderGraph } = await import('../lib/render.mjs')
   const { loadProject } = await import('../lib/project.mjs')
   const SANDBOX = realpathSync(mkdtempSync(path.join(tmpdir(), 'grimoire-redis-')))
+  // the fixture's folders: api, web and infra (sections 5 to 8), chat (section 9, a repository of its own)
+  const FX = path.join(HERE, 'fixtures', 'redis')
+  const fxTop = (src) => path.relative(FX, src).split(path.sep)[0]
   try {
     console.log('\n5 · two repositories, no instance wired: a key space each, never grouped by a guess (fixtures/redis, its infra left out)')
     const P1 = path.join(SANDBOX, 'apart')
-    cpSync(path.join(HERE, 'fixtures', 'redis'), P1, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') && !src.split(path.sep).includes('infra') })
+    cpSync(FX, P1, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') && !['infra', 'chat'].includes(fxTop(src)) })
     writeFileSync(path.join(P1, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'api', path: 'api' }, { name: 'web', path: 'web' }], graph: { dir: '.grimoire/graph' } }))
     const q1 = async (tool, args = {}) => strip(await call(`graph_${tool}`, args, { root: P1 }))
     const idx1 = await q1('index')
@@ -834,13 +898,13 @@ if (RT) {
     pg1.search('session'); eq(tplRows(), ['user:{userId}:session'], '… or by a name')
     console.log('\n7 · one instance wired to both repositories by Compose through REDIS_URL (fixtures/redis): one key space, the issue\'s "done when"')
     const P2 = path.join(SANDBOX, 'wired')
-    cpSync(path.join(HERE, 'fixtures', 'redis'), P2, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+    cpSync(FX, P2, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') && fxTop(src) !== 'chat' })
     const q2 = async (tool, args = {}) => strip(await call(`graph_${tool}`, args, { root: P2 }))
     const idx2 = await q2('index')
     ok(!idx2.includes('failure'), `index: three repositories, no extractor failure (${idx2.replace(/\n/g, ' | ')})`)
     const list2 = (await q2('data')).split('\n')
     eq(list2.filter((l) => /^\S+:redis/.test(l)), ['infra:redis:cache  redis  6 key templates · 2 search indexes · 1 channel · 1 stream · inferred from the commands in code, not declared (19 commands) · 1 conflict · 4 leads'], 'one key space: the Compose service wired to both repositories (never one per repository once an instance ties them)')
-    has(list2.join('\n'), '  instance: cache  Compose service  engine Redis Stack 7.4.0-v8 · modules search, JSON, time series, bloom (the redis-stack image) · maxmemory-policy allkeys-lru · persistence AOF · keyspace notifications Ex · databases 4  — infra/compose.yaml:2 [infra redis-infra@1]\n    wired to api through REDIS_URL (set at infra/compose.yaml:11)\n    wired to web through REDIS_URL (set at infra/compose.yaml:15)', 'the instance: engine, version, modules, eviction policy, persistence, notifications, databases; wired to each repository at the line that sets the variable')
+    has(list2.join('\n'), '  instance: cache  Compose service  engine Redis Stack 7.4.0-v8 · modules search, JSON, time series, bloom (the redis-stack image) · maxmemory-policy allkeys-lru · persistence AOF · keyspace notifications Ex · databases 4  — infra/compose.yaml:2 [infra redis-infra@2]\n    wired to api through REDIS_URL (set at infra/compose.yaml:11)\n    wired to web through REDIS_URL (set at infra/compose.yaml:15)', 'the instance: engine, version, modules, eviction policy, persistence, notifications, databases; wired to each repository at the line that sets the variable')
     has(list2.join('\n'), '    eviction lead: allkeys-lru may evict any key; 2 templates written with no lifetime (product:{id}, user:{user_id}:profile) lose their data when evicted unless another store holds a copy: a lead, never a verdict', '… the eviction lead')
     const ks2 = await q2('data', { store: 'infra:redis:cache' })
     for (const [line, m] of [
@@ -949,6 +1013,43 @@ if (RT) {
     has(outs[0], '  database: 2 (a connection URL at web/src/planted.ts:2)', '… the URL\'s database index kept')
     ok(outs.every((o) => !o.includes(SECRET)), 'the secret is in no graph_data answer, no graph_status, not in the page')
     ok(!allBytes(path.join(P1, '.grimoire')).includes(SECRET), '… nor in any file under .grimoire/ (graph.db and its pages included)')
+
+    console.log('\n9 · commands wrapped by the code (fixtures/redis/chat): promisified methods and functions passing their parameters on, called in their own file and from other files of the repository; no gap for the client they cover')
+    const P9 = path.join(SANDBOX, 'chat')
+    cpSync(path.join(FX, 'chat'), path.join(P9, 'chat'), { recursive: true })
+    writeFileSync(path.join(P9, 'grimoire.config.json'), JSON.stringify({ repos: [{ name: 'chat', path: 'chat' }], graph: { dir: '.grimoire/graph' } }))
+    const q9 = async (tool, args = {}) => strip(await call(`graph_${tool}`, args, { root: P9 }))
+    const idx9 = await q9('index')
+    ok(/chat: 6 files/.test(idx9) && !idx9.includes('failure'), `index: the repository, no extractor failure (${idx9.replace(/\n/g, ' | ')})`)
+    const list9 = await q9('data')
+    has(list9, 'chat:redis  redis  12 key templates · 0 search indexes · 1 channel · 0 streams · inferred from the commands in code, not declared (32 commands) · no conflicts · 8 leads', 'graph_data: the key space, every template the wrapped commands write or read (before, only the one sent on the client itself)')
+    has(list9, '  reached through: redis', '… reached through the client the wrapping file requires (CommonJS)')
+    ok(!list9.includes('Gaps (') && !/no extractor reads it/.test(list9), 'no gap: the client the extracted key space covers is not listed as a datastore with no extractor')
+    has(list9, 'note: a call of touch, del, set (imported from another file) not read as a command: no file of the repository read exports a wrapper of it', '… a call named after a command whose module exports no wrapper of it (a function sending two commands, one building its own key, a module with no store) is not read as the command, and said')
+    has(list9, '4 keys code builds wholly counted, never named', '… a wrapper\'s own command, its key a parameter, dropped once its calls are read (only keys the callers build wholly, and a wrapper nothing calls, counted)')
+    const ks9 = await q9('data', { store: 'chat:redis' })
+    for (const [line, m] of [
+      ['  total_users  string · no expiry found (lead) · 2 functions (1 reading, 2 writing)  chat/server/index.js:8 · chat/server/index.js:9 · chat/server/users.js:11', 'a literal key through functions exported from the module object (`exists`, `set`, `incr`), called from two files'],
+      ['  username:{name}  string · no expiry found (lead) · 1 function (0 reading, 1 writing)  chat/server/users.js:13', 'a key from a key function holding a local it returns, passed to a wrapper'],
+      ['  user:{id}  hash · fields: username, password · no expiry found (lead) · 3 functions (2 reading, 1 writing)  chat/server/index.js:24 · chat/server/users.js:14 · chat/server/users.js:19', 'a hash through HMSET, HMGET and a promisified HGETALL, its fields from an array of pairs'],
+      ['  user:{userId}:rooms  set · no expiry found (lead) · 2 functions (1 reading, 1 writing)  chat/server/index.js:41 · chat/server/users.js:15', 'a set through SADD and a promisified SMEMBERS (bound inside)'],
+      ['  room:0:name  string · no expiry found (lead) · 1 function (0 reading, 1 writing)  chat/server/index.js:10', 'a number written in a template literal is its literal text'],
+      ['  room:{roomId}:name  string · 2 functions (2 reading, 0 writing)  chat/server/feed.mjs:7 · chat/server/index.js:43', 'a promisified GET, imported under another name by an ES module (`get as read`, `./redis.js`)'],
+      ['  room:{roomId}  sorted set · no expiry found (lead) · 2 functions (1 reading, 1 writing)  chat/server/feed.mjs:4 · chat/server/users.js:22', 'ZADD through a wrapper, ZREVRANGE on the client itself in the callback style'],
+      ['  online_users  set · no expiry found (lead) · 4 functions (2 reading, 2 writing)', 'a function passing its rest parameter on (`(...args) => client.sismember(...args)`)'],
+      ['  presence:{userId}  hash · fields: seen · lifetime 2 min · 3 functions (1 reading, 2 writing)  chat/server/redis.js:22 · chat/server/redis.js:23 · chat/server/redis.js:25 · chat/server/redis.js:26', 'wrappers called in their own file, a callback-style EXPIRE\'s lifetime, a DEL whose trailing callback is no key'],
+      ['  legacy:{id}  type unknown · 1 function (0 reading, 1 writing)  chat/server/redis.js:49', 'a function named after a command that builds its own key: its key read where it is, its callers not followed'],
+      ['  jobs:nightly:runs  string', 'the module object required whole (`store.incr(…)`)'],
+      ['Channels (1):\n  MESSAGES  1 publisher · 1 subscriber  chat/server/index.js:5 · chat/server/index.js:12', 'a channel through the client and the subscriber the module exports'],
+    ]) has(ks9, line, `graph_data store: ${m}`)
+    ok(!ks9.includes('theme') && !ks9.includes('TOUCH'), '… no key from a module that sends no command (`theme`), no TOUCH from a function merely named like it')
+    const users9 = await q9('data', { entity: 'chat:redis/user:{id}' })
+    has(users9, 'Reads and writes, from the commands the code sends (inferred; 3 functions: 2 reading, 1 writing):\n  online  reads (HGETALL)  chat/server/index.js:22  (the call at line 24) · 0 callers\n  createUser  writes (HMSET)  chat/server/users.js:9  (the call at line 14) · 1 caller\n  roomNames  reads (HMGET)  chat/server/users.js:19  (the call at line 19) · 0 callers', 'graph_data entity: the readers and writers are the functions calling the wrappers, through the code graph\'s symbols')
+    has(await q9('data', { entity: 'chat:redis/online_users' }), '  isOnline  reads (SISMEMBER)  chat/server/index.js:33  (the call at line 33) · 0 callers\n  disconnect  writes (SREM)  chat/server/index.js:35  (the call at line 36) · 0 callers', '… each at the line of its call')
+    const page9 = await renderGraph(loadProject(P9))
+    const D9 = dataOf(page9).data
+    const pg9 = await stubPage(page9, `#data-${D9.stores.findIndex((x) => x.id === 'chat:redis')}`)
+    ok(!pg9.ctl('data-gaps') && D9.stores.find((x) => x.id === 'chat:redis').ks.tpl.length === 12, 'the page: the key space\'s twelve templates, and no Gaps box for the client it covers')
   } finally { rmSync(SANDBOX, { recursive: true, force: true }) }
 }
 

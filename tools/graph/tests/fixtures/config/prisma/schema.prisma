@@ -1,0 +1,5 @@
+datasource db {
+  provider = "postgresql"
+  // url = env("IN_A_PRISMA_COMMENT")
+  url      = env("SHADOW_DATABASE_URL")
+}

@@ -14,6 +14,14 @@
 //             checked: read the code before relying on it.
 //   refined   a `relations` claim of a refine file that holds (data/check.mjs). It replaces a lead on the
 //             same entity and column, whatever the lead's target.
+//   declared  a column a relation of the entity covers is no candidate: a foreign key, or a relation the
+//             schema declares and its client enforces (reconcile.mjs `kind: client`, no foreign key in
+//             the database). Like a refined relation, it replaces the lead on its columns, and is drawn
+//             as the store's own relation, never as a lead.
+//   declared  a column a relation of the entity covers is no candidate: a foreign key, or a relation the
+//             schema declares and its client enforces (reconcile.mjs `kind: client`, no foreign key in
+//             the database). Like a refined relation, it replaces the lead on its columns, and is drawn
+//             as the store's own relation, never as a lead.
 //   lineage   a `lineage` claim that holds: an entity mirroring another, across stores.
 //
 // A link whose two ends sit in two stores is a stub in each store's diagram (D5): the other store and
@@ -148,6 +156,7 @@ export function modelLinks(model, claims = []) {
   }
   for (const st of stores) {
     for (const e of st.entities) {
+      // the columns a relation covers: a foreign key, or one its client enforces (declared all the same)
       const fk = new Set((e.relations || []).flatMap((r) => r.columns.map((x) => String(x).toLowerCase())))
       const cands = st.dialect === 'redis' ? placeholders(e.name) : (e.fields || []).map((f) => f.name)
       const seen = new Set()

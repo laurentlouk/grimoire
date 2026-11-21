@@ -19,27 +19,33 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { familyOf, langOf } from './langs.mjs'
-import { listPaths, skipped } from './project.mjs'
+import { listPaths, skipped, maxBytesOf, SECRET_GLOBS, SECRETISH } from './project.mjs'
 
 const MIN_NAME = 3 // shorter names are not searched as text
 const MAX_HITS = 2000 // per term and repository: past it, the name is too common to sort hit by hit
 const LISTED_FILES = 30, PER_FILE = 4, LISTED_SITES = 25
-// files that may hold credentials: never searched (excluded from git grep, skipped before a read by
-// the walk), never named. SECRET_GLOBS and SECRETISH say the same thing, for git and for the walk.
-export const SECRET_GLOBS = ['.env*', '*.env', '.envrc', '*.pem', '*.key', '*.p12', '*.pfx', '*.jks', '*.keystore', '*.crt', '*.cer', '*.der', 'id_rsa*', 'id_dsa*', 'id_ecdsa*', 'id_ed25519*', 'credentials*', '.npmrc*', '.pypirc*', '.netrc', '.git-credentials', '.pgpass', '.htpasswd', '*.tfstate', '*.tfstate.*', '.docker/config.json']
-export const SECRETISH = /(^|\/)(\.env[^/]*|[^/]*\.env|\.envrc|id_(rsa|dsa|ecdsa|ed25519)[^/]*|credentials[^/]*|\.npmrc[^/]*|\.pypirc[^/]*|\.netrc|\.git-credentials|\.pgpass|\.htpasswd|[^/]*\.tfstate(\.[^/]*)?|\.docker\/config\.json)$|\.(pem|key|p12|pfx|jks|keystore|crt|cer|der)$/i
+// files that may hold credentials: never searched, never named (project.mjs SECRET_GLOBS, SECRETISH)
+export { SECRET_GLOBS, SECRETISH }
 // a line past this length (minified code, data) is classified by its file alone; at most this many
 // occurrences of a name are read per line: classification stays linear in the input
 const MAX_LINE = 1000, PER_LINE = 8
 const ABSTRACT = new Set(['interface', 'trait', 'protocol'])
+// a type's members a call, an override and a receiver reach: methods, and fields (an annotated hook, a settings value)
+const MEMBERS = new Set(['method', 'field'])
 const CALL_KINDS = "('call','new','macro')"
+// What a test reaches a definition by, the same in graph_symbol, graph_overview and graph_diff: a call,
+// a definition passing it as a value (a registrar taking a handler), a call site naming its route (a
+// URL, a screen), and an import, which joins file nodes only: a test file importing a module whose
+// top-level code calls or registers it (file-level tests). Within TEST_DEPTH hops.
+export const TEST_EDGES = ['CALLS', 'REFERENCES', 'IMPORTS', 'ROUTES_TO']
+export const TEST_DEPTH = 6
 
 // ── dispatch ──
 export function dispatch(g, n) {
-  if (n.kind !== 'method' || !n.parent_id) return { up: [], down: [] }
+  if (!MEMBERS.has(n.kind) || !n.parent_id) return { up: [], down: [] }
   const owner = g.node(n.parent_id)
   if (!owner) return { up: [], down: [] }
-  const member = g.db.prepare("SELECT n.*, f.repo, f.path, f.lang FROM nodes n JOIN files f ON f.id = n.file_id WHERE n.parent_id = ? AND n.name = ? AND n.kind IN ('method','function') ORDER BY n.line LIMIT 1")
+  const member = g.db.prepare("SELECT n.*, f.repo, f.path, f.lang FROM nodes n JOIN files f ON f.id = n.file_id WHERE n.parent_id = ? AND n.name = ? AND n.kind IN ('method','function','field') ORDER BY n.line LIMIT 1")
   const side = (dir) => {
     const out = []
     for (const [id, info] of g.walk([owner.id], ['EXTENDS', 'IMPLEMENTS'], dir, 4)) {
@@ -84,7 +90,9 @@ export function dispatchLines(g, info) {
 // [{ ref, src (node), file }] for refs naming one of the targets, in the target's language family, in
 // any repository of the project (no edge crosses repositories), that no CALLS edge accounts for: the
 // site's definition is not already a linked caller of the target, and no edge from it links that very
-// line to another definition of the name (that one is the other definition's caller, not a lead).
+// line to another definition of the name (that one is the other definition's caller, not a lead). A site
+// whose receiver's type the syntax states (`this.userRepository.findOne()` on a `Repository<User>`) is
+// a lead only when that type is the target's owner or one of its supertypes or subtypes.
 export function unresolved(g, targets) {
   const out = [], seen = new Set()
   const callsTarget = g.db.prepare("SELECT 1 FROM edges WHERE src = ? AND dst = ? AND kind = 'CALLS' LIMIT 1")
@@ -94,8 +102,18 @@ export function unresolved(g, targets) {
     const fam = familyOf(t.lang)
     const kinds = ['class', 'struct'].includes(t.kind) ? "('new','call')" : CALL_KINDS
     const rows = g.q(`SELECT r.*, f.repo, f.path, f.lang FROM refs r JOIN files f ON f.id = r.file_id WHERE r.name = ? AND r.kind IN ${kinds} ORDER BY f.repo != ?, f.repo, f.path, r.line`, t.name, t.repo || '')
+    let related = null // the owner's name and its supertypes' and subtypes': the types a stated receiver may have
+    const typedTo = (qtype) => {
+      if (!related) {
+        related = new Set()
+        const owner = t.parent_id ? g.node(t.parent_id) : null
+        if (owner) for (const dir of ['out', 'in']) for (const id of g.walk([owner.id], ['EXTENDS', 'IMPLEMENTS'], dir, 4).keys()) { const n = g.node(id); if (n) related.add(n.name) }
+      }
+      return related.has(qtype.split('.').pop())
+    }
     for (const r of rows) {
       if (familyOf(r.lang) !== fam || r.src_id === t.id) continue
+      if (r.qtype && t.id > 0 && !typedTo(r.qtype)) continue // (a name no definition holds yet: every site)
       if ((t.id > 0 && callsTarget.get(r.src_id, t.id)) || linkedHere.get(r.src_id, r.name, r.line)) continue
       const k = `${r.file_id}|${r.line}|${r.name}`
       if (seen.has(k)) continue
@@ -127,7 +145,9 @@ const KIND_BY_EXT = [
   [/\.(sh|bash|zsh|fish|ps1|bat|cmd|sql|graphql|gql|proto)$/i, 'script'],
 ]
 export const kindOfPath = (p) => (KIND_BY_EXT.find(([re]) => re.test(p)) || [null, 'other'])[1]
-const HASH_COMMENT = new Set(['python', 'ruby', 'php'])
+const HASH_COMMENT = new Set(['python', 'ruby', 'php', 'graphql'])
+// API contracts read by hand (contracts.mjs): a line is a reference, a comment or a description
+const CONTRACT_FAMILIES = new Set(['graphql', 'proto'])
 // Where an occurrence sits in its line, read lexically (no parse): inside a string literal, after a
 // comment marker, or in code. Multi-line strings and block comments are only caught by a line that
 // opens with `*`, `/*`, `<!--` or `#`.
@@ -164,7 +184,8 @@ export const USE_KINDS = new Set(['reference', 'import', 'string', 'key', 'confi
 // `.x` a property of something else, unless the target is a method (then a method passed as a value).
 // A line of prose inside a docstring: five words or more, no code punctuation, the name not called
 const PROSE_LANGS = new Set(['python'])
-const prose = (text, at, len) => !/[=(){}[\]]/.test(text) && !/^\s*[.(]/.test(text.slice(at + len)) && (text.match(/[\p{L}]{2,}/gu) || []).length >= 5
+// (a member access `settings.SOME_NAME` is code; the name's own words, `ACCESS_TOKEN_EXPIRE`, are not counted)
+const prose = (text, at, len) => !/[=(){}[\]]/.test(text) && !/^\s*[.(]/.test(text.slice(at + len)) && !/(\.|->)\s*$/.test(text.slice(0, at)) && ((text.slice(0, at) + text.slice(at + len)).match(/[\p{L}]{2,}/gu) || []).length >= 5
 const DECL_BEFORE = /(^|[^\p{L}\p{N}_$])(const|let|var|val|def|fn|func|function|class|struct|enum|interface|type|my|local)\s+$/u
 // Returns the kind, 'decl' for a local binding (it shadows the name in its definition), or null.
 const SELF_MODULE = new Set(['exports']) // `exports.x`: a CommonJS module's own export
@@ -180,11 +201,11 @@ export function refine(text, at, len, kind, targetKind, lang = null, modules = n
   const member = /(\.|->)\s*$/.test(before)
   // `util.slug`, `ns.fn`: qualified by a module the file imports is a use, not another object's property
   const qual = /([\p{L}_$][\p{L}\p{N}_$]*)\s*(\.|->)\s*$/u.exec(before)
-  if (member && targetKind !== 'method' && qual && ((modules && modules.has(qual[1])) || SELF_MODULE.has(qual[1]))) return 'reference'
-  if (member && targetKind !== 'method') return 'property'
+  if (member && !MEMBERS.has(targetKind) && qual && ((modules && modules.has(qual[1])) || SELF_MODULE.has(qual[1]))) return 'reference'
+  if (member && !MEMBERS.has(targetKind)) return 'property'
   // a method is reached through a receiver (or `self`/`this`, which the edges cover): a bare name in
   // another definition is another binding
-  if (!member && targetKind === 'method') return null
+  if (!member && MEMBERS.has(targetKind)) return null
   return 'reference'
 }
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -212,7 +233,7 @@ function grepRepo(abs, terms, project) {
   for (const rel of listPaths(abs)) {
     if (skipped(rel, project) || SECRETISH.test(rel)) continue
     let text
-    try { if (statSync(path.join(abs, rel)).size > project.maxBytes) continue; text = readFileSync(path.join(abs, rel), 'utf8') } catch { continue }
+    try { if (statSync(path.join(abs, rel)).size > maxBytesOf(project, rel)) continue; text = readFileSync(path.join(abs, rel), 'utf8') } catch { continue }
     if (text.includes('\u0000')) continue
     text.split('\n').forEach((t, i) => { if (re.test(t)) out.push({ path: rel, line: i + 1, text: t }) })
   }
@@ -223,7 +244,10 @@ function grepRepo(abs, terms, project) {
 // whose edges, refs and imports already account for a hit (the targets, and everything the impact
 // reached is not needed: a hit is explained by its own line's edges).
 // opts.sites: the unlinked call sites already listed (unresolved()): their lines are explained.
-export function mentions(g, project, terms, { sites = [] } = {}) {
+// opts.explained: lines (`repo|path|line`) the answer explains otherwise, left out: the configuration
+// index's lines for a key (config.mjs explainedLines), given only when the answer prints that key's
+// readers and declarations.
+export function mentions(g, project, terms, { sites = [], explained = null } = {}) {
   const usable = terms.filter((t) => t.term.length >= MIN_NAME)
   const res = { hits: [], common: [], searched: usable.map((t) => t.term) }
   if (!usable.length) return res
@@ -232,10 +256,30 @@ export function mentions(g, project, terms, { sites = [] } = {}) {
   const fileRow = g.db.prepare('SELECT * FROM files WHERE repo = ? AND path = ?')
   const around = g.db.prepare("SELECT id, kind, qualname, line, end_line FROM nodes WHERE file_id = ? AND kind != 'file' AND line <= ? AND end_line >= ? ORDER BY (end_line - line) ASC")
   const otherDef = g.db.prepare("SELECT 1 FROM nodes WHERE file_id = ? AND line = ? AND name = ? AND kind != 'file' LIMIT 1")
-  const edgeTo = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND kind IN ('CALLS','EXTENDS','IMPLEMENTS')")
+  const edgeTo = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND kind IN ('CALLS','REFERENCES','EXTENDS','IMPLEMENTS')")
   const siteLines = new Set(sites.map((x) => `${x.ref.repo}|${x.ref.path}|${x.ref.line}`))
+  const cfgLines = explained || new Set()
+  // the lines of a GraphQL file inside a block description ("""…"""): prose, read once per file
+  const descOf = new Map()
+  const inDescription = (abs, rel, line) => {
+    const k = `${abs}|${rel}`
+    if (!descOf.has(k)) {
+      const set = new Set()
+      try {
+        const text = readFileSync(path.join(abs, rel), 'utf8')
+        let at = 0, ln = 1, open = -1
+        for (let i = text.indexOf('"""'); i >= 0; i = text.indexOf('"""', i + 3)) {
+          for (; at < i; at++) if (text.charCodeAt(at) === 10) ln++
+          if (open < 0) open = ln
+          else { for (let l = open; l <= ln; l++) set.add(l); open = -1 }
+        }
+      } catch {}
+      descOf.set(k, set)
+    }
+    return descOf.get(k).has(line)
+  }
   // a call on this line linked to another definition of the name: that definition's caller
-  const linkedOther = g.db.prepare("SELECT d.id FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.line = ? AND e.kind = 'CALLS' AND d.name = ?")
+  const linkedOther = g.db.prepare("SELECT d.id FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.line = ? AND e.kind IN ('CALLS','REFERENCES') AND d.name = ?")
   // the names a file's imports bind (a module, a namespace, an imported name): `util.slug` is a use
   const importNames = g.db.prepare('SELECT names, alias FROM imports WHERE file_id = ?')
   const modulesOf = new Map()
@@ -248,9 +292,14 @@ export function mentions(g, project, terms, { sites = [] } = {}) {
     return modulesOf.get(fid)
   }
   const sizeOf = new Map()
-  const tooBig = (abs, rel) => { const k = `${abs}|${rel}`; if (!sizeOf.has(k)) { let n = 0; try { n = statSync(path.join(abs, rel)).size } catch {} sizeOf.set(k, n) } return sizeOf.get(k) > project.maxBytes }
+  const tooBig = (abs, rel) => { const k = `${abs}|${rel}`; if (!sizeOf.has(k)) { let n = 0; try { n = statSync(path.join(abs, rel)).size } catch {} sizeOf.set(k, n) } return sizeOf.get(k) > maxBytesOf(project, rel) }
   const importAt = g.db.prepare('SELECT resolved FROM imports WHERE file_id = ? AND line = ?')
-  const edgeAt = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND line = ? AND kind IN ('CALLS','EXTENDS','IMPLEMENTS')")
+  // a line holding a contract hint for the name (`user: findUser` in a resolver map) whose IMPLEMENTS
+  // edge reaches a target: that edge explains it (the edge carries the hint's line)
+  const hintAt = g.db.prepare("SELECT 1 FROM refs WHERE file_id = ? AND line = ? AND kind = 'contract' AND name = ? LIMIT 1")
+  const implAt = g.db.prepare("SELECT dst FROM edges WHERE kind = 'IMPLEMENTS' AND line = ? AND confidence IN ('contract', 'contract-name')")
+  const hinted = (fid, line, term) => !!hintAt.get(fid, line, term) && implAt.all(line).some((e) => targetIds.has(e.dst))
+  const edgeAt = g.db.prepare("SELECT dst FROM edges WHERE src = ? AND line = ? AND kind IN ('CALLS','REFERENCES','EXTENDS','IMPLEMENTS')")
   const shadow = new Map() // scope → the lines declaring the local
   const callsTarget = new Map()
   const reachesTarget = (id) => { if (!callsTarget.has(id)) callsTarget.set(id, edgeTo.all(id).some((e) => targetIds.has(e.dst))); return callsTarget.get(id) }
@@ -262,7 +311,7 @@ export function mentions(g, project, terms, { sites = [] } = {}) {
     const tooMany = new Set([...perTerm].filter(([, n]) => n > MAX_HITS).map(([t]) => t))
     for (const t of tooMany) res.common.push({ repo: repo.name, term: t, n: perTerm.get(t) })
     for (const h of hits) {
-      if (SECRETISH.test(h.path) || skipped(h.path, project) || tooBig(repo.abs, h.path)) continue
+      if (SECRETISH.test(h.path) || skipped(h.path, project) || tooBig(repo.abs, h.path) || cfgLines.has(`${repo.name}|${h.path}|${h.line}`)) continue
       const terms = usable.filter((t) => !tooMany.has(t.term))
       let kind = null, term = null
       const f = fileRow.get(repo.name, h.path)
@@ -284,6 +333,7 @@ export function mentions(g, project, terms, { sites = [] } = {}) {
           else {
             if (defLines.has(`${repo.name}|${h.path}|${h.line}`)) continue // the definition itself
             if (otherDef.get(f.id, h.line, t.term)) continue // another definition of the same name
+            if (hinted(f.id, h.line, t.term)) continue // code implementing a contract element of that name: an edge
             // an import line: resolved, its edge is in the graph; unresolved (an alias path, another
             // package or repository), it is a lead the graph cannot follow
             const imp = importAt.all(f.id, h.line)
@@ -294,6 +344,7 @@ export function mentions(g, project, terms, { sites = [] } = {}) {
             else if (siteLines.has(`${repo.name}|${h.path}|${h.line}`) || nodes.some((n) => reachesTarget(n.id)) || (!nodes.length && edgeAt.all(f.node_id, h.line).some((e) => targetIds.has(e.dst)))) continue
             // a call here linked to another definition of the name is that one's
             else if ([...nodes.map((n) => n.id), f.node_id].some((id) => linkedOther.all(id, h.line, t.term).some((d) => !targetIds.has(d.id)))) continue
+            else if (CONTRACT_FAMILIES.has(familyOf(f.lang))) { const c = familyOf(f.lang) === 'graphql' && inDescription(repo.abs, h.path, h.line) ? 'text' : classify(h.text, at, f.lang); k = c === 'string' ? 'text' : c } // a type used, a comment, a description
             else k = refine(h.text, at, t.term.length, classify(h.text, at, f.lang), t.targets[0].kind, f.lang, modules(f.id))
             if (k === 'decl') { if (nodes[0]) { const sc = `${f.id}|${nodes[0].id}|${t.term}`; (shadow.get(sc) || shadow.set(sc, new Set()).get(sc)).add(h.line) } continue }
           }

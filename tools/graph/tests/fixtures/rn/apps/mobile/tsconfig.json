@@ -1,0 +1,10 @@
+{
+  // the app's own aliases
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"],
+      "@assets/*": ["./assets/*"], /* no slash after the prefix */
+    },
+  },
+}

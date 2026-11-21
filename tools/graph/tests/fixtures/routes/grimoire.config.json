@@ -1,0 +1,16 @@
+{
+  "repos": [
+    { "name": "express", "path": "express" },
+    { "name": "nest", "path": "nest" },
+    { "name": "fastapi", "path": "fastapi" },
+    { "name": "spring", "path": "spring" },
+    { "name": "gin", "path": "gin" },
+    { "name": "rails", "path": "rails" },
+    { "name": "django", "path": "django" },
+    { "name": "next", "path": "next" },
+    { "name": "expo", "path": "expo" },
+    { "name": "rnav", "path": "rnav" },
+    { "name": "expo2", "path": "expo2" }
+  ],
+  "graph": { "dir": ".grimoire/graph" }
+}

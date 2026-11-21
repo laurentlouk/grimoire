@@ -69,7 +69,7 @@ const isDump = (p, header) => DUMP_NAME.test(p) || (header && !VERSIONED.test(P.
 
 export default {
   id: 'sql-migrations',
-  version: 2,
+  version: 3,
   kind: 'migration',
   scope: 'unit',
   wants: (p) => (SQL.test(p) && !DOWN.test(p)) || CONFIG.test(p),
@@ -213,7 +213,7 @@ function dumped(key, d, configs, journal, override, DatabaseSync) {
 }
 
 // What readers/ddl.mjs read, as a declaration's facts: what it skipped counted per file by kind.
-function ddlFacts(r, notes, what) {
+export function ddlFacts(r, notes, what) {
   const skipped = r.skipped.reduce((a, s) => a + s.n, 0)
   const per = r.skipped.slice(0, NOTES).map((s) => `skipped in ${s.path}: ${s.n} statement${s.n === 1 ? ' that does' : 's that do'} not shape the store (${Object.entries(s.kinds).map(([k, n]) => `${k} ${n}`).join(', ')})`)
   if (r.skipped.length > NOTES) per.push(`… and ${r.skipped.length - NOTES} more files with skipped statements`)
@@ -254,13 +254,14 @@ function dialectOf(folder, configs, members, override, journal, statedOnly = fal
     if (m) return { dialect: normDialect(m[1]), from: { how: 'stated', path: p, line: text.slice(0, block.index + m.index).split('\n').length } }
   }
   if (folder === 'supabase/migrations' || folder.endsWith('/supabase/migrations')) return { dialect: 'postgres', from: { how: 'supabase' } }
+  if (/(^|\/)clickhouse(\/|$)/i.test(folder)) return { dialect: 'clickhouse', from: { how: 'folder', marker: folder } } // a folder the project names for ClickHouse: no reader
   if (dump) return dump // the header of a dump beside the migrations
   if (statedOnly) return { dialect: null }
   const s = sniffDialect(members)
   return s.dialect ? { dialect: s.dialect, from: { how: 'sniffed', marker: s.marker, path: s.path, line: s.line } } : { dialect: null, reason: s.reason }
 }
 
-function orderOf(folder, members, journal) {
+export function orderOf(folder, members, journal) {
   const notes = []
   const nameOf = (p) => (folder === '.' ? p : p.slice(folder.length + 1)).split('/')[0] // the file, or its versioned subfolder
   if (journal?.tags) {

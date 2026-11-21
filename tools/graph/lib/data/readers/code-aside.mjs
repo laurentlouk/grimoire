@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const HERE = fileURLToPath(import.meta.url)
-export const CODE_LANGS = ['rust', 'typescript', 'tsx', 'javascript', 'python', 'go']
+export const CODE_LANGS = ['rust', 'typescript', 'tsx', 'javascript', 'python', 'go', 'ruby', 'java']
 export const BATCH = 200, BATCH_BYTES = 8 << 20, BATCH_MS = 30_000, TOTAL_MS = 60_000
 
 export function extractAside(items, { batchMs = BATCH_MS, totalMs = TOTAL_MS } = {}) {

@@ -8,23 +8,36 @@
 //            Swift `extension T`, Go method receivers, C++ `T::m`): (node) => { type, super? }
 //   calls    call sites → a CALLS ref. value: [field holding the callee (null = the call node
 //            itself carries name + receiver fields), ref kind]; `callee(node)` overrides both
+//            (null: the default; an object with no name: this node calls nothing)
 //   imports  (node, file) => [{ source, names: [local names], alias? }]
 //   supers   (defNode) => [{ name, kind: 'extends' | 'implements' }]
+//   name     (defNode, file) => the definition's name, when nameOf() is not it
 //   isTest   (defNode, name) => bool, on top of the file-path test heuristic
 //   container  (defNode) => type name | null: the type a definition attaches to that no enclosing
 //            block names (JavaScript `X.prototype.y = function`)
-//   tokenCalls  node type → (node) => [{ name, qual }]: calls hidden in unparsed token trees
+//   tokenCalls  node type → (node) => [{ name, qual }]: calls the syntax holds no call node for
+//            (in unparsed token trees, a wrapper's wrapped component)
+//   members  node type → (node) => { names, owns? } | null: definitions a framework declares by a call
+//            in a class or module body (Ruby `scope :active, -> {…}`, `has_many :comments`,
+//            `delegate :x, to: :y`, `attr_reader :a`, `define_method :x`): each name a method of the
+//            enclosing type; `owns` when the call's block or lambda is that one method's body
+//   valueRefs  node type → (node) => [{ name, qual }]: names a construct passes as a value that the
+//            generic value positions (extract.mjs) do not see (Ruby `method(:x)`, a callback symbol)
+//   bareValues  false where a bare identifier in a value position is as likely a call or a local as a
+//            function (Ruby): only valueRefs and qualified values count there
+//   via      (defNode, kind) => 'framework' | null: a definition only syntax may link (a router's procedure)
+//   alias    (node) => { name, qual } | null: `export const X = Y` (or `= Y.Z`) at module level, X another name for Y
 //   import names are local names, or `local=original` when aliased (`import { a as b }` → `b=a`).
 // Anything a spec does not name is walked through, never extracted. Files in a language with no
 // spec (or none of these) still become file nodes, so path search covers them.
 
 const text = (n) => (n ? n.text : '')
 const field = (n, f) => n.childForFieldName(f)
-const named = (n) => { const out = []; for (let i = 0; i < n.namedChildCount; i++) out.push(n.namedChild(i)); return out }
+const named = (n) => (n.namedChildren ? n.namedChildren.slice() : Array.from({ length: n.namedChildCount }, (_, i) => n.namedChild(i))) // one call: namedChild(i) walks the children before i
 const kids = (n, ...types) => named(n).filter((c) => types.includes(c.type))
 const deep = (n, types, out = []) => { for (const c of named(n)) { if (types.includes(c.type)) out.push(c); else deep(c, types, out) } return out }
 const unquote = (s) => s.replace(/^[`'"<]+|[`'">]+$/g, '')
-const hasKeyword = (n, kw) => { for (let i = 0; i < n.childCount; i++) { const c = n.child(i); if (!c.isNamed && c.type === kw) return true } return false }
+const hasKeyword = (n, kw) => { for (const c of n.children) if (!c.isNamed && c.type === kw) return true; return false }
 const prevSibling = (n) => n.previousNamedSibling
 const LEAF = /^(identifier|simple_identifier|type_identifier|field_identifier|property_identifier|constant|name|namespace_identifier|package_identifier|scoped_type_identifier|private_property_identifier)$/
 
@@ -70,8 +83,7 @@ export function bare(n, to = n.endIndex) {
   const src = n.text, from = n.startIndex, out = []
   let at = from
   const visit = (p) => {
-    for (let i = 0; i < p.namedChildCount; i++) {
-      const c = p.namedChild(i)
+    for (const c of p.namedChildren) {
       if (c.startIndex >= to) return false
       if (LITERAL.has(c.type)) { out.push(src.slice(at - from, c.startIndex - from), hide(c)); at = c.endIndex }
       else if (/comment$/.test(c.type)) { out.push(src.slice(at - from, c.startIndex - from)); at = c.endIndex; while (at < to && /[ \t]/.test(src[at - from])) at++ }
@@ -138,29 +150,170 @@ const jsSupers = (n) => {
   for (const e of kids(n, 'extends_type_clause', 'extends_clause')) for (const v of named(e)) out.push({ name: lastSegment(v), kind: 'extends' })
   return out
 }
+// A function made by a call: `const Text = forwardRef(function Text(…) {…})`, `memo(…)`,
+// `React.memo(…)`, `styled.View\`…\``, `styled(View)`, `withX(Component)`, `connect(…)(Component)`,
+// `create<State>()((set) => …)`, `debounce(() => …)`. At module level the value is a call whose callee
+// is a known wrapper (a `withX` given a component), or a plain function (`debounce`, not a member
+// chain, `t.procedure.use(…)`) whose first or last argument is a function (or such a call); deeper, only
+// a component wrapper counts. What the call returns is taken to be a function of the variable's name.
+// Not a value built from a callback: an array method (`list.map(…)`), a timer, a hook that returns a
+// value (`useMemo`), a table or a context built with a callback (`pgTable('t', {…}, (t) => …)`,
+// `createContext(() => {})`), a schema refined by one (`z.object({…}).refine(…)`).
+const WRAPPER = /^(forwardRef|memo|observer|lazy|styled|connect|compose|create\w*Component)$/
+const COMPONENT_WRAPPER = /^(forwardRef|memo|observer|styled|create\w*Component)$/
+const same = (a, b) => !!a && !!b && a.id === b.id
+const NOT_WRAPPER = /^(setTimeout|setInterval|setImmediate|requestAnimationFrame|queueMicrotask|Promise|describe|it|test|use(?!\w*(Callback|Event)$)[A-Z]\w*|\w*Table|createContext|refine|superRefine|transform|use)$/
+// a plain function, or a curried call of one (`create<State>()(…)`): no member chain
+const plainCallee = (f) => !!f && (f.type === 'identifier' || (f.type === 'call_expression' && plainCallee(field(f, 'function'))))
+const unwrapValue = (v) => { while (v && /^(satisfies_expression|as_expression|parenthesized_expression|non_null_expression)$/.test(v.type)) v = v.namedChild(0); return v }
+const calleeHead = (f) => { // the name a callee is known by: `styled` in `styled.View` / `styled(View)`, `memo` in `React.memo`
+  if (!f) return null
+  if (f.type === 'call_expression') return calleeHead(field(f, 'function'))
+  if (f.type === 'member_expression') { const o = field(f, 'object'); return o && /^styled\b/.test(o.text) ? 'styled' : text(field(f, 'property')) }
+  return f.type === 'identifier' ? f.text : null
+}
+const wrapsFn = (call, depth = 0) => {
+  if (!call || call.type !== 'call_expression' || depth > 4) return false
+  const f = field(call, 'function'), head = calleeHead(f)
+  if (head && NOT_WRAPPER.test(head)) return false
+  if (f && f.type === 'member_expression' && COMMON_METHODS.js.has(text(field(f, 'property')))) return false
+  if (head && WRAPPER.test(head)) return true
+  const args = field(call, 'arguments')
+  const list = args && args.type === 'arguments' ? named(args) : []
+  if (head && /^with[A-Z]/.test(head) && list.some((a) => a.type === 'identifier' && /^\p{Lu}/u.test(a.text))) return true // an HOC, not `withTiming(1)`
+  if (!plainCallee(f)) return false
+  const ends = [list[0], list[list.length - 1]].filter(Boolean).map(unwrapValue)
+  return ends.some((a) => FN_VALUE.test(a.type) || wrapsFn(a, depth + 1)) || (f && f.type === 'call_expression' && wrapsFn(f, depth + 1))
+}
+const atModuleLevel = (decl) => { const d = decl.parent, p = d && d.parent; return !!p && /^(lexical_declaration|variable_declaration)$/.test(d.type) && (p.type === 'program' || p.type === 'export_statement') }
+// a known wrapper defines a component at any depth (`const View = memo(…)` inside a test); any other
+// call with a function argument only at module level
+const knownWrap = (v) => !!v && v.type === 'call_expression' && COMPONENT_WRAPPER.test(calleeHead(field(v, 'function')) || '')
+const wrappedFn = (n) => field(n, 'name')?.type === 'identifier' && (atModuleLevel(n) ? wrapsFn(unwrapValue(field(n, 'value'))) : knownWrap(unwrapValue(field(n, 'value'))))
+// A router of procedures: `createTRPCRouter({ … })`, `router({ … })`, `t.router({ … })`, or an object
+// literal `satisfies TRPCRouterRecord`. The router is an object definition; each of its keys a member.
+const ROUTER_CALL = /^(createTRPCRouter|createRouter|router|mergeRouters)$/
+const routerObject = (v) => {
+  v = unwrapValue(v)
+  if (!v) return null
+  if (v.type === 'call_expression') { const f = field(v, 'function'), a = field(v, 'arguments'); const first = a && named(a)[0]; return f && ROUTER_CALL.test(lastSegment(f) || '') && first && first.type === 'object' ? first : null }
+  return null
+}
+const routerOf = (decl) => {
+  const v = field(decl, 'value')
+  if (!v || !atModuleLevel(decl) || field(decl, 'name')?.type !== 'identifier') return null
+  if (v.type === 'satisfies_expression' && /Router/.test(text(v.namedChild(1)))) { const o = unwrapValue(v.namedChild(0)); return o && o.type === 'object' ? o : null }
+  return routerObject(v)
+}
+// one answer per object literal (its pairs ask the same question): the last tree's, by node id
+let routerObjects = { tree: null, of: new Map() }
+const routerPair = (n) => {
+  const o = n.parent
+  if (!o || o.type !== 'object') return false
+  if (routerObjects.tree !== o.tree) routerObjects = { tree: o.tree, of: new Map() }
+  if (routerObjects.of.has(o.id)) return routerObjects.of.get(o.id)
+  let d = o.parent
+  while (d && d.type !== 'variable_declarator' && /^(arguments|call_expression|satisfies_expression|as_expression|parenthesized_expression)$/.test(d.type)) d = d.parent
+  const yes = !!d && d.type === 'variable_declarator' && same(routerOf(d), o)
+  routerObjects.of.set(o.id, yes)
+  return yes
+}
+// `export default () => …`, `export default function () {}`, `export default memo(…)`: a definition
+// with no name of its own, known by its file's (`Home.tsx` → Home; `index.tsx` → its folder's name).
+const defaultFn = (n) => { const v = unwrapValue(field(n, 'value')); return !!v && (FN_VALUE.test(v.type) && !field(v, 'name') || wrapsFn(v)) }
+export const nameFromFile = (file) => {
+  if (!file) return null
+  const parts = file.split('/')
+  let stem = parts.pop().replace(/\.[^.]+$/, '').replace(/\.(ios|android|native|web)$/, '')
+  if (stem === 'index' && parts.length) stem = parts.pop()
+  const words = stem.split(/[^\p{L}\p{N}_$]+/u).filter(Boolean)
+  const id = words.map((w, i) => (i ? w[0].toUpperCase() + w.slice(1) : w)).join('')
+  return /^[\p{L}_$]/u.test(id) ? id : null
+}
+// `export default memo(Card)` beside `function Card`: the file's name is the wrapped one's, no new definition
+const defaultName = (n, file) => {
+  const name = nameFromFile(file), v = unwrapValue(field(n, 'value'))
+  const wrapsOwn = (c) => c && c.type === 'call_expression' && (named(field(c, 'arguments') || c).some((a) => a.type === 'identifier' && a.text === name) || wrapsOwn(field(c, 'function')))
+  return name && !wrapsOwn(v) ? name : null
+}
+// JSX: rendering `<Button />`, `<Button>…</Button>` or `<UI.Row />` calls the component. A lowercase
+// tag (`<div>`, `<path>`) is the host's own element, never a call.
+const jsxCallee = (n) => {
+  const t = field(n, 'name')
+  if (!t) return { name: null }
+  if (t.type === 'identifier') return /^[\p{Lu}_$]/u.test(t.text) ? { name: t.text, qual: '' } : { name: null }
+  if (t.type === 'member_expression') return calleeOf(t) || { name: null }
+  return { name: null }
+}
+// What a wrapper wraps: `memo(Button)`, `withTheme(Card)`, `styled(View)`, `connect(…)(Screen)`: the
+// wrapped definition renders what it wraps, a call the syntax holds no call node for.
+// anc: the walker's ancestors of n, nearest last (extract.mjs): a step up is a lookup there, where
+// tree-sitter's `parent` searches from the root (a nest of calls would cost the square of its depth).
+const wrappedArgs = (n, anc = null) => {
+  const caps = named(n).filter((a) => a.type === 'identifier' && /^\p{Lu}/u.test(a.text))
+  if (!caps.length) return [] // no component name among the arguments: nothing to wrap
+  let k = anc ? anc.length : 0
+  const parentOf = (x) => (anc ? (k > 0 ? anc[--k] : null) : x.parent)
+  const call = parentOf(n)
+  if (!call || call.type !== 'call_expression' || !same(field(call, 'arguments'), n)) return []
+  let up = call, p = parentOf(up)
+  while (p && p.type === 'call_expression') { up = p; p = parentOf(up) }
+  while (p && /^(satisfies_expression|as_expression|parenthesized_expression)$/.test(p.type)) { up = p; p = parentOf(up) }
+  const owner = p
+  const defined = owner && ((owner.type === 'variable_declarator' && same(field(owner, 'value'), up) && wrappedFn(owner)) || (owner.type === 'export_statement' && same(field(owner, 'value'), up) && defaultFn(owner)))
+  return defined ? caps.map((a) => ({ name: a.text, qual: '' })) : []
+}
 const js = {
   defs: {
     function_declaration: 'function', generator_function_declaration: 'function', function_signature: 'function',
     class_declaration: 'class', abstract_class_declaration: 'class', class: 'class',
     method_definition: 'method', method_signature: 'method', abstract_method_signature: 'method',
     interface_declaration: 'interface', type_alias_declaration: 'type', enum_declaration: 'enum',
-    variable_declarator: (n) => (fnValue(n) ? 'function' : null),
-    public_field_definition: (n) => (fnValue(n) ? 'method' : null),
-    field_definition: (n) => (fnValue(n) ? 'method' : null),
+    variable_declarator: (n) => (fnValue(n) || wrappedFn(n) ? 'function' : routerOf(n) ? 'object' : null),
+    // a class field holding a function is a method; any other is a field (`private repo: Repo`, `count = 0`)
+    public_field_definition: (n) => (fnValue(n) ? 'method' : 'field'),
+    field_definition: (n) => (fnValue(n) ? 'method' : 'field'),
     assignment_expression: (n) => (assignedFn(n) ? (assignedOwner(n) ? 'method' : 'function') : null),
+    export_statement: (n) => (defaultFn(n) ? 'function' : null),
+    pair: (n) => (routerPair(n) ? 'method' : null),
   },
-  name: (n) => (n.type === 'field_definition' ? lastSegment(field(n, 'property')) : n.type === 'assignment_expression' ? text(field(field(n, 'left'), 'property')) : nameOf(n)),
+  name: (n, file) => (n.type === 'field_definition' ? lastSegment(field(n, 'property')) : n.type === 'assignment_expression' ? text(field(field(n, 'left'), 'property'))
+    : n.type === 'export_statement' ? defaultName(n, file) : n.type === 'pair' ? unquote(text(field(n, 'key'))) : nameOf(n)),
   container: (n) => (n.type === 'assignment_expression' ? assignedOwner(n) : null),
-  calls: { call_expression: ['function', 'call'], new_expression: ['constructor', 'new'] },
+  // a router's procedure is linked only by syntax (`appRouter.health`, a typed caller), never by its name
+  via: (n) => (n.type === 'pair' ? 'framework' : null),
+  alias: (n) => {
+    if (n.type !== 'variable_declarator' || !atModuleLevel(n)) return null
+    const x = field(n, 'name'), y = unwrapValue(field(n, 'value'))
+    if (!x || !y || x.type !== 'identifier') return null
+    if (y.type === 'identifier') return { name: x.text, qual: y.text }
+    // `export const Slot = Header.Slot`: a member of a namespace
+    const o = y.type === 'member_expression' ? field(y, 'object') : null, p = o && field(y, 'property')
+    return o && p && o.type === 'identifier' && p.type === 'property_identifier' ? { name: x.text, qual: `${o.text}.${p.text}` } : null
+  },
+  calls: { call_expression: ['function', 'call'], new_expression: ['constructor', 'new'], jsx_opening_element: ['name', 'call'], jsx_self_closing_element: ['name', 'call'] },
+  callee: (n) => (n.type === 'jsx_opening_element' || n.type === 'jsx_self_closing_element' ? jsxCallee(n) : null),
+  tokenCalls: { arguments: wrappedArgs },
   imports: {
     import_statement: jsImports,
     export_statement: jsImports,
+    // `const { View } = jest.requireActual<typeof import('x')>('x')`: in a .tsx file the grammar reads the
+    // type argument as comparisons, so the call is matched by its text (only the module path is kept)
+    binary_expression: (v) => {
+      const d = v.parent, decl = d && d.type === 'variable_declarator' && same(field(d, 'value'), v) ? field(d, 'name') : null
+      if (!decl) return []
+      const m = /^(?:jest\.requireActual|jest\.requireMock|require)\s*<[^]*>\s*\(\s*(['"])([^'"\n]+)\1\s*\)$/.exec(v.text)
+      return m ? [{ source: m[2], names: decl.type === 'object_pattern' ? deep(decl, ['shorthand_property_identifier_pattern', 'identifier']).map(text) : [], alias: decl.type === 'identifier' ? decl.text : null }] : []
+    },
     call_expression: (n) => {
       const f = field(n, 'function'), a = field(n, 'arguments')
-      if (!f || !a || !/^(require|import)$/.test(f.text)) return []
+      if (!f || !a || !/^(require|import|jest\.requireActual|jest\.requireMock|jest\.createMockFromModule)$/.test(f.text)) return []
       const s = named(a)[0]
       if (!s || !/string|template_string/.test(s.type)) return []
-      const decl = n.parent && n.parent.type === 'variable_declarator' ? field(n.parent, 'name') : null
+      // `const { View } = require('react-native')`, also through `as typeof import(…)`, `await`, parentheses
+      let up = n.parent
+      while (up && /^(as_expression|satisfies_expression|parenthesized_expression|non_null_expression|await_expression)$/.test(up.type)) up = up.parent
+      const decl = up && up.type === 'variable_declarator' ? field(up, 'name') : null
       return [{ source: unquote(s.text), names: decl && decl.type === 'object_pattern' ? deep(decl, ['shorthand_property_identifier_pattern', 'identifier']).map(text) : [], alias: decl && decl.type === 'identifier' ? decl.text : null }]
     },
   },
@@ -168,8 +321,15 @@ const js = {
 }
 
 // ───────────────────────── Python ─────────────────────────
+// A class-level annotated attribute (`order_created: Callable[…]`, a settings field `TIMEOUT: int = 60`,
+// a dataclass or model field): a field of its class. An unannotated assignment is not one.
+const pyClassField = (n) => {
+  if (!field(n, 'type')) return false // most assignments: no annotation, asked first
+  const l = field(n, 'left'), st = n.parent, block = st && st.parent
+  return !!(field(n, 'type') && l && l.type === 'identifier' && st.type === 'expression_statement' && block && block.type === 'block' && block.parent && block.parent.type === 'class_definition')
+}
 const py = {
-  defs: { function_definition: 'function', class_definition: 'class' },
+  defs: { function_definition: 'function', class_definition: 'class', assignment: (n) => (pyClassField(n) ? 'field' : null) },
   calls: { call: ['function', 'call'] },
   imports: {
     import_statement: (n) => named(n).map((c) => c.type === 'aliased_import'
@@ -178,9 +338,7 @@ const py = {
     import_from_statement: (n) => {
       const mod = field(n, 'module_name')
       const names = []
-      for (let i = 0; i < n.childCount; i++) {
-        if (n.fieldNameForChild(i) !== 'name') continue
-        const c = n.child(i)
+      for (const c of n.childrenForFieldName('name')) { // one call: an index loop walks the children before each
         names.push(c.type === 'aliased_import' ? `${text(field(c, 'alias'))}=${lastSegment(field(c, 'name'))}` : lastSegment(c))
       }
       return [{ source: text(mod), names: names.filter(Boolean) }]
@@ -316,8 +474,62 @@ const csharp = {
 }
 
 // ───────────────────────── Ruby ─────────────────────────
+// What a Rails-style class body declares by a call: each a method of the class (`Story.active`,
+// `story.user`). Only literal symbols name one; a string, an interpolation or a variable never does.
+const RB_SYM = (n) => (n && n.type === 'simple_symbol' ? n.text.slice(1) : null)
+const RB_ASSOC = /^(has_many|has_one|belongs_to|has_and_belongs_to_many)$/
+const RB_ACCESSOR = /^(attr_reader|attr_accessor|cattr_reader|cattr_accessor|mattr_reader|mattr_accessor)$/
+const rbArgs = (n) => { const r = field(n, 'receiver'); if (r && r.type !== 'self') return null; const a = field(n, 'arguments'); return a ? named(a) : null }
+const rbMembers = (n) => {
+  const m = text(field(n, 'method')), a = rbArgs(n)
+  if (!a || !a.length) return null
+  if (m === 'scope' || RB_ASSOC.test(m) || m === 'define_method' || m === 'define_singleton_method') { const s = RB_SYM(a[0]); return s ? { names: [s], owns: true } : null }
+  if (RB_ACCESSOR.test(m)) return { names: a.map(RB_SYM).filter(Boolean) }
+  if (m === 'delegate') {
+    const opts = new Map(a.filter((x) => x.type === 'pair').map((p) => [text(field(p, 'key')).replace(/^:|:$/g, ''), field(p, 'value')]))
+    if (!opts.has('to')) return null
+    const pre = opts.get('prefix')
+    let prefix = ''
+    if (pre && pre.type === 'true') prefix = RB_SYM(opts.get('to')) || null
+    else if (pre && pre.type === 'simple_symbol') prefix = RB_SYM(pre)
+    else if (pre && pre.type !== 'false' && pre.type !== 'nil') prefix = null // a prefix the syntax does not state
+    if (prefix === null) return null
+    return { names: a.map(RB_SYM).filter(Boolean).map((x) => (prefix ? `${prefix}_${x}` : x)) }
+  }
+  return null
+}
+// A method named by a literal symbol a callback-style macro passes (`before_action :require_user`,
+// `after_commit :notify, if: :published?`, `validate :check`, `skip_before_action :x, only: [:show]`,
+// `helper_method :current_user`), or the first one `method(:x)`, `send(:x)`, `public_send(:x)`,
+// `respond_to?(:x)` pass: a reference to the class's own method of that name. Any other symbol is no
+// method's name (`has_many :votes, through: :stories`, `render action: :new`, `group(:title)`: an
+// association, an action, a column), and neither is an option other than `only`, `except`, `if`, `unless`.
+const RB_CALLBACK = /^((prepend|append|skip)_)?(before|after|around)_\w+$|^(validate|helper_method)$|^skip_\w+_action$/
+const RB_NAMED = /^(method|send|public_send|__send__|respond_to\?)$/
+const RB_CALLBACK_OPTS = /^(only|except|if|unless)$/
+const rbSymbols = (n, out = [], d = 0) => {
+  if (d > 2) return out
+  for (const c of named(n)) {
+    if (c.type === 'simple_symbol') out.push({ name: c.text.slice(1), qual: 'self' })
+    else if (c.type === 'pair') {
+      if (!RB_CALLBACK_OPTS.test(text(field(c, 'key')).replace(/^:|:$/g, ''))) continue
+      const v = field(c, 'value')
+      if (v && v.type === 'simple_symbol') out.push({ name: v.text.slice(1), qual: 'self' }); else if (v && v.type === 'array') rbSymbols(v, out, d + 1)
+    } else if (c.type === 'array') rbSymbols(c, out, d + 1)
+  }
+  return out
+}
+const rbValueRefs = (n) => {
+  const a = field(n, 'arguments'), m = text(field(n, 'method')), recv = field(n, 'receiver')
+  if (!a || (recv && recv.text !== 'self')) return []
+  if (RB_NAMED.test(m)) { const s = RB_SYM(named(a)[0]); return s ? [{ name: s, qual: 'self' }] : [] }
+  return !recv && RB_CALLBACK.test(m) ? rbSymbols(a) : []
+}
 const ruby = {
   defs: { method: 'function', singleton_method: 'method', class: 'class', module: 'module' },
+  members: { call: rbMembers },
+  valueRefs: { call: rbValueRefs },
+  bareValues: false,
   calls: { call: [null, 'call'] },
   imports: {
     call: (n) => {
@@ -393,12 +605,15 @@ export const LANGS = {
   ruby: { wasm: 'ruby', family: 'ruby', exts: ['.rb', '.rake'], spec: ruby },
   php: { wasm: 'php', family: 'php', exts: ['.php'], spec: php },
   swift: { wasm: 'swift', family: 'swift', exts: ['.swift'], spec: swift },
+  // API contracts, read by hand (contracts.mjs): the pinned runtime has no grammar for them
+  graphql: { wasm: null, family: 'graphql', exts: ['.graphql', '.gql'], spec: null, hand: true },
+  proto: { wasm: null, family: 'proto', exts: ['.proto'], spec: null, hand: true },
   // A data grammar, not a code language: no extension maps to it, so no file is indexed as YAML
   // code; the data model's extractors read YAML through it (lib/data/readers/yaml.mjs).
   yaml: { wasm: 'yaml', family: 'yaml', exts: [], spec: null },
 }
 // Indexed as file nodes only (searchable by path, reachable through imports), no symbols.
-export const FILE_ONLY_EXTS = ['.vue', '.svelte', '.scala', '.dart', '.lua', '.ex', '.exs', '.zig', '.sol', '.ml', '.m', '.mm', '.sh', '.bash', '.sql', '.proto', '.graphql', '.gql', '.tf', '.tfvars', '.hcl']
+export const FILE_ONLY_EXTS = ['.vue', '.svelte', '.scala', '.dart', '.lua', '.ex', '.exs', '.zig', '.sol', '.ml', '.m', '.mm', '.sh', '.bash', '.sql', '.tf', '.tfvars', '.hcl']
 
 // Method names each family's standard library defines on its everyday types (collections,
 // strings, options, results, promises, streams). A call `x.len()` on a receiver whose type the
@@ -430,9 +645,14 @@ export const COMMON_METHODS = {
 
 const BY_EXT = new Map()
 for (const [id, l] of Object.entries(LANGS)) for (const e of l.exts) BY_EXT.set(e, id)
-export const langOf = (file) => { const m = /(\.[^./]+)$/.exec(file); return m ? BY_EXT.get(m[1].toLowerCase()) || (FILE_ONLY_EXTS.includes(m[1].toLowerCase()) ? 'other' : null) : null }
+// An OpenAPI or Swagger document: a file node (searchable by path, its mentions read), no symbols.
+const OPENAPI = /(^|\/)(openapi|swagger)[\w.-]*\.(ya?ml|json)$/i
+export const langOf = (file) => { const m = /(\.[^./]+)$/.exec(file); return m ? BY_EXT.get(m[1].toLowerCase()) || (FILE_ONLY_EXTS.includes(m[1].toLowerCase()) || OPENAPI.test(file) ? 'other' : null) : null }
+// API contract files (GraphQL, protobuf, OpenAPI, Swagger): indexed up to graph.maxContractKB, not maxFileKB
+export const isContract = (file) => /\.(graphql|gql|proto)$/i.test(file) || OPENAPI.test(file)
 export const familyOf = (lang) => (LANGS[lang] ? LANGS[lang].family : lang)
 
 // A file is test code when its path says so, in any of the usual conventions. Test-support code
-// counts too: Storybook stories, mocks and fixtures exercise the product but are not part of it.
-export const TEST_PATH = /(^|\/)(tests?|__tests__|spec|specs|testing|\.storybook|__mocks__|mocks?|__fixtures__|fixtures?)\/|[._-](test|spec)s?\.[^/]+$|\.stories\.[^/]+$|(^|\/)test_[^/]+\.py$|_test\.(go|py|rb|exs?)$|Tests?\.(java|kt|cs|swift|php)$/
+// counts too: Storybook stories, mocks, fixtures and a test runner's setup (`jest/`, `jest.setup.ts`,
+// `setupTests.js`) exercise the product but are not part of it.
+export const TEST_PATH = /(^|\/)(tests?|__tests__|spec|specs|testing|\.storybook|__mocks__|mocks?|__fixtures__|fixtures?|jest)\/|(^|\/)((jest|vitest)[._-]?[sS]etup|setupTests)[^/]*\.[^/]+$|[._-](test|spec)s?\.[^/]+$|\.stories\.[^/]+$|(^|\/)test_[^/]+\.py$|_test\.(go|py|rb|exs?)$|Tests?\.(java|kt|cs|swift|php)$/

@@ -2,20 +2,23 @@
 // with its kind, a project-relative `path:line` to open, and for edges how the name was resolved.
 // The graph is a map for research (what relates to what, how far a change reaches). It is never
 // the source of truth for what code does: that is read in the code, at the path:line given here.
-import { langOf } from './langs.mjs'
-import { reconcile, elementsOf, storeSummary, schemaDrift, SCHEMA_DRIFT } from './data/reconcile.mjs'
+import { langOf, isContract } from './langs.mjs'
+import { reconcile, elementsOf, storeSummary, schemaDrift, SCHEMA_DRIFT, isClient } from './data/reconcile.mjs'
 import { bindingHow } from './data/binding.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, capList, CAP, LABELS, FANOUT } from './data/access.mjs'
 import { kvIndex, projectionText } from './data/model.mjs'
 import { diffModels, itemText } from './data/diff.mjs'
 import { parseDelta, parseTarget, deltaStates, changeText, diffText, STATE_TEXT } from './data/delta.mjs'
 import { refineModel, refineCheck } from './data/check.mjs'
-import { NOT_DECLARED, sqlFunctions, queryConflicts } from './data/queries.mjs'
+import { NOT_DECLARED, sqlFunctions, queryConflicts, queriesFrom, fnDetail } from './data/queries.mjs'
 import { templatesOf, indexesOf, streamsOf, redisFunctions, ttlText, shownName, NO_QUERY, ASSEMBLED } from './data/redis.mjs'
 import { formOf } from './data/readers/redis-cmd.mjs'
 import { modelLinks, LEAD_SAYS, lackText } from './data/links.mjs'
 import { docRoots } from './docs.mjs'
-import { dispatchStarts, dispatchLines, unresolved, unresolvedLines, mentions, mentionLines } from './reach.mjs'
+import { GUESSES, guessSql, HIDDEN_GUESSES } from './resolve.mjs'
+import { keyAnswer, readsOf, readsLines, explainedLines } from './config.mjs'
+import { dispatchStarts, dispatchLines, unresolved, unresolvedLines, mentions, mentionLines, TEST_EDGES, TEST_DEPTH } from './reach.mjs'
+import { routesServedBy, routeLines, routeTitle } from './route-graph.mjs'
 
 export const FOOTER = 'Leads, not facts: edges are resolved by name from syntax. Open path:line before relying on any of it.'
 export const DATA_FOOTER = 'Leads, not facts: read from migrations and generated files (or deduced from the SQL or the cache commands the code sends, labelled inferred), never from a database. Open path:line before relying on any of it.'
@@ -45,6 +48,11 @@ export function clean(x, seen = new Map()) {
 const plural = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
 export const changeVal = (attr, v, at = (p) => p) => (Array.isArray(v) ? v.map(at).join(', ') : attr === 'nullable' ? (v ? 'nullable' : 'not null') : attr === 'unique' ? (v ? 'unique' : 'not unique') : attr === 'partial' ? (v ? 'partial' : 'whole') : attr === 'enabled' ? (v === true ? 'on' : v === false ? 'off' : 'not said') : v === null || v === undefined || v === '' ? 'none' : String(v))
 export const CHANGE_KIND = { field: 'column', key: 'key', index: 'index', relation: 'foreign key' }
+// a relation its client enforces is no foreign key (data/reconcile.mjs): its changes say so
+export const CLIENT_RELATION = 'relation enforced by the client'
+export const changeKind = (c) => (c.kind === 'relation' && isClient(c.after || c.before || {}) ? CLIENT_RELATION : CHANGE_KIND[c.kind])
+// what graph_data and the page say of one (the schema declares it; no foreign key in the database)
+export const CLIENT_SAYS = 'declared by the schema, enforced by the client: no foreign key in the database'
 const typeOf = (x) => x.type?.raw ?? x.type
 // A key-value table's elements in words (graph_data, graph_changes): a key, an index, the table.
 export const kvKeyText = (k) => (k.role === 'ttl' ? `TTL (${k.parts.length ? k.parts.join(', ') : 'no attribute'})${k.enabled === true ? ' on' : k.enabled === false ? ' off' : typeof k.enabled === 'string' ? ` ${k.enabled}` : ''}` : `${k.role} (${k.parts.join(', ')})`)
@@ -64,10 +72,11 @@ export function describe(c, el, dialect = null) {
   if (c.kind === 'key') return `${c.entity} ${el.role} key (${el.parts.join(', ')})`
   if (c.kind === 'index' && kvIndex(el)) return `${c.entity} index ${el.name} ${kvIndexText(el)}`
   if (c.kind === 'index') return `${c.entity} index ${el.name}${el.unique ? ' unique' : ''} (${el.columns.join(', ')})${el.partial ? ' partial' : ''}`
+  if (isClient(el)) return `${c.entity} relation (${el.columns.join(', ')}) → ${el.to}(${el.toColumns.join(', ')}), enforced by the client`
   return `${c.entity} foreign key (${el.columns.join(', ')}) → ${el.to}(${el.toColumns.join(', ')})`
 }
 export const renameText = (s, r) => {
-  const word = r.kind === 'entity' ? (s.changes[r.from[0]].before.kind || 'table') : CHANGE_KIND[r.kind]
+  const word = r.kind === 'entity' ? (s.changes[r.from[0]].before.kind || 'table') : changeKind(s.changes[r.from[0]])
   const names = (list) => list.map((i) => s.changes[i].name).join(', ')
   return r.ambiguous ? `possible renames, ambiguous, not decided: ${word}s ${names(r.from)} → ${names(r.to)}${r.entity ? ` in ${r.entity}` : ''} (each with the ${r.shape.replace('same ', '')}: any may pair)`
     : `possible rename, not decided: ${word} ${names(r.from)} → ${names(r.to)}${r.entity ? ` in ${r.entity}` : ''} (${r.shape})`
@@ -160,23 +169,24 @@ export class Graph {
 
   // ── traversal ──
   // Breadth-first over edges of `kinds`, `dir` = 'in' (who points here) or 'out'. Returns
-  // Map(id → { depth, via: parent id, conf, line }).
+  // Map(id → { depth, via: parent id, conf, line, kind: the edge's }). At one depth a call wins over a
+  // reference, so a definition both calling and naming the target reads as its caller.
   walk(startIds, kinds, dir, depth, strict = false) {
-    const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? " AND confidence != 'ambiguous'" : '')
-    const sql = dir === 'in' ? `SELECT src AS id, confidence, line FROM edges WHERE dst = ? AND kind IN (${K}` : `SELECT dst AS id, confidence, line FROM edges WHERE src = ? AND kind IN (${K}`
+    const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? ` AND confidence NOT IN ${guessSql(HIDDEN_GUESSES)}` : '')
+    const sql = dir === 'in' ? `SELECT src AS id, confidence, line, kind FROM edges WHERE dst = ? AND kind IN (${K} ORDER BY kind = 'REFERENCES'` : `SELECT dst AS id, confidence, line, kind FROM edges WHERE src = ? AND kind IN (${K} ORDER BY kind = 'REFERENCES'`
     const st = this.db.prepare(sql)
     const seen = new Map(startIds.map((id) => [id, { depth: 0, via: null }]))
     let frontier = startIds
     for (let d = 1; d <= depth && frontier.length; d++) {
       const next = []
-      for (const id of frontier) for (const e of st.all(id)) if (!seen.has(e.id)) { seen.set(e.id, { depth: d, via: id, conf: e.confidence, line: e.line }); next.push(e.id) }
+      for (const id of frontier) for (const e of st.all(id)) if (!seen.has(e.id)) { seen.set(e.id, { depth: d, via: id, conf: e.confidence, line: e.line, kind: e.kind }); next.push(e.id) }
       frontier = next
     }
     return seen
   }
   tree(start, kinds, dir, depth, strict = false, limit = 80) {
-    const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? " AND confidence != 'ambiguous'" : '')
-    const order = "ORDER BY confidence = 'ambiguous', line"
+    const K = kinds.map((k) => `'${k}'`).join(',') + ')' + (strict ? ` AND confidence NOT IN ${guessSql(HIDDEN_GUESSES)}` : '')
+    const order = `ORDER BY confidence IN ${guessSql(HIDDEN_GUESSES)}, line`
     const sql = dir === 'in' ? `SELECT src AS id, confidence, line, kind FROM edges WHERE dst = ? AND kind IN (${K} ${order}` : `SELECT dst AS id, confidence, line, kind FROM edges WHERE src = ? AND kind IN (${K} ${order}`
     const st = this.db.prepare(sql)
     const out = [], seen = new Set([start.id])
@@ -212,8 +222,15 @@ export class Graph {
       lines.push(`  files: ${langs}`)
       lines.push(`  symbols: ${counts}   edges: ${edges || 'none'}`)
       lines.push(`  call sites resolved: ${calls.resolved}/${calls.calls}${conf ? ` (${conf})` : ''}`)
-      const n = byConf.reduce((a, e) => a + e.c, 0), guessed = byConf.filter((e) => e.confidence === 'ambiguous' || e.confidence === 'unique-name').reduce((a, e) => a + e.c, 0)
-      if (n) lines.push(`  name guesses: ${Math.round((100 * guessed) / n)}% of ${n} call links (ambiguous + unique-name)`)
+      const n = byConf.reduce((a, e) => a + e.c, 0), guessed = byConf.filter((e) => GUESSES.includes(e.confidence)).reduce((a, e) => a + e.c, 0)
+      if (n) lines.push(`  name guesses: ${Math.round((100 * guessed) / n)}% of ${n} call links (${GUESSES.join(' + ')})`)
+      const contract = this.q("SELECT f.lang, count(*) c FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND f.lang IN ('graphql','proto') AND n.kind != 'file' GROUP BY f.lang", r.name)
+      if (contract.length) {
+        const impl = this.one("SELECT count(*) c, sum(e.confidence = 'contract-name') g FROM edges e JOIN nodes n ON n.id = e.src JOIN files f ON f.id = n.file_id WHERE f.repo = ? AND e.kind = 'IMPLEMENTS' AND e.confidence IN ('contract','contract-name')", r.name)
+        lines.push(`  API contracts: ${contract.map((c) => `${c.lang} ${c.c} definitions`).join(', ')}; ${impl.c} implementation link(s) from code${impl.g ? ` (${impl.g} by name only, contract-name)` : ''}`)
+      }
+      const cfg = (() => { try { return this.one("SELECT count(DISTINCT key) k, sum(role = 'read') r, sum(role = 'declare') d FROM config WHERE repo = ? AND role IN ('read', 'declare', 'map')", r.name) } catch { return null } })()
+      if (cfg && cfg.k) lines.push(`  configuration keys: ${cfg.k} (${cfg.r || 0} reads, ${cfg.d || 0} declarations: graph_config)`)
       const data = this.q('SELECT key, extractor, facts, error FROM data_facts WHERE repo = ? ORDER BY key', r.name)
       if (data.length) {
         const facts = data.map((x) => (x.facts ? JSON.parse(x.facts) : null))
@@ -240,14 +257,37 @@ export class Graph {
     const like = qv.includes('*') ? qv.replace(/\*/g, '%') : `%${qv}%`
     const args = [like, like]
     let where = "(n.name LIKE ? OR n.qualname LIKE ?) AND n.kind != 'file'"
-    if (/[/\\]|\.[a-z]{1,5}$/.test(qv)) { where = "(f.path LIKE ?) AND n.kind = 'file'"; args.length = 0; args.push(like) }
+    if (/[/\\]|\.[a-z]{1,5}$/.test(qv) || isContract(qv)) { where = "(f.path LIKE ?) AND n.kind = 'file'"; args.length = 0; args.push(like) }
     if (kind) { where += ' AND n.kind = ?'; args.push(kind) }
     if (repo) { where += ' AND f.repo = ?'; args.push(repo) }
     const exact = qv.replace(/\*/g, '')
     const rows = this.q(`SELECT n.*, f.repo, f.path FROM nodes n JOIN files f ON f.id = n.file_id WHERE ${where}
       ORDER BY (n.name = ?) DESC, (n.name LIKE ?) DESC, n.is_test, length(n.qualname), f.path LIMIT ?`, ...args, exact, `${exact}%`, Math.min(Number(limit) || 30, 200))
-    if (!rows.length) return `Nothing named like "${qv}". The graph only knows definitions in indexed languages; fall back to grep for strings, config and docs.`
-    return rows.map((n) => `#${n.id}  ${this.row(n)}${n.signature ? `\n      ${n.signature}` : ''}`).join('\n')
+    const data = this.searchData(qv, repo)
+    if (!rows.length && !data.length) return `Nothing named like "${qv}". The graph only knows definitions in indexed languages; fall back to grep for strings, config and docs.`
+    return [...rows.map((n) => `#${n.id}  ${this.row(n)}${n.signature ? `\n      ${n.signature}` : ''}`), ...data].join('\n')
+  }
+  // The data model's tables and columns named like a fragment (or a `*` pattern), any letter case, by
+  // their name or the Drizzle variable or key code names them by: graph_impact and graph_data take them.
+  searchData(qv, repo = null, limit = 20) {
+    if (/[/\\]/.test(qv) || !this.factsHold(qv)) return [] // a path, or a name no data fact holds
+    const dm = this.dataModel()
+    if (!dm) return []
+    const esc = (x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(qv.includes('*') ? `^${qv.split('*').map(esc).join('.*')}$` : esc(qv), 'i')
+    const out = []
+    for (const st of dm.model.stores) {
+      if (repo && st.repo !== repo) continue
+      for (const e of st.entities) {
+        const v = dm.names.get(e.id)
+        const at = (x) => (x.sources?.[0] ? this.dloc({ repo: x.sources[0].repo ?? st.repo, path: x.sources[0].path, line: x.sources[0].line }) : '')
+        if (re.test(e.name) || [...(v?.vars || [])].some((x) => re.test(x))) out.push(`  ${e.kind || 'table'}  ${e.id}${v?.vars.size && ![...v.vars].includes(e.name) ? ` (${[...v.vars].join(', ')} in code)` : ''}  ${at(e)}`)
+        const keyOf = new Map([...(v?.keys || [])].map(([k, c]) => [c, k]))
+        for (const f of e.fields) if (re.test(f.name) || (keyOf.has(f.name) && re.test(keyOf.get(f.name)))) out.push(`  column  ${e.id}.${f.name}${keyOf.has(f.name) && keyOf.get(f.name) !== f.name ? ` (${keyOf.get(f.name)} in code)` : ''}  ${typeOf(f) || ''}  ${at(f)}`)
+      }
+    }
+    if (!out.length) return []
+    return [`Data model, named like it (graph_impact and graph_data take these):`, ...out.slice(0, limit), ...(out.length > limit ? [`  … and ${out.length - limit} more`] : [])]
   }
 
   // Each word must appear in the qualified name or the path; candidates are then ranked in JS: a word
@@ -290,10 +330,15 @@ export class Graph {
       const count = (sql) => this.one(sql, n.id).c
       const cin = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind = 'CALLS'")
       const cout = count("SELECT count(*) c FROM edges WHERE src = ? AND kind = 'CALLS'")
+      const rin = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind = 'REFERENCES'")
       const sup = this.q("SELECT e.kind, d.qualname FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.kind IN ('EXTENDS','IMPLEMENTS')", n.id)
       const sub = count("SELECT count(*) c FROM edges WHERE dst = ? AND kind IN ('EXTENDS','IMPLEMENTS')")
-      const tests = [...this.walk([n.id], ['CALLS'], 'in', 4).keys()].map((id) => this.node(id)).filter((x) => x.is_test && x.id !== n.id)
-      lines.push(`  callers ${cin} · callees ${cout}${sup.length ? ` · ${sup.map((s) => `${s.kind.toLowerCase()} ${s.qualname}`).join(', ')}` : ''}${sub ? ` · subtypes ${sub}` : ''} · tests reaching it ${tests.length}`)
+      // the test files reaching it (reach.mjs TEST_EDGES: calls, a definition passing it as a value, its
+      // route by URL or navigation, a test file importing a module whose top level registers it)
+      const tests = new Set([...this.walk([n.id], TEST_EDGES, 'in', TEST_DEPTH).keys()].map((id) => this.node(id)).filter((x) => x.is_test && x.id !== n.id).map((x) => x.file_id))
+      const served = routesServedBy(this, [n.id])
+      if (served.length) lines.push(`  routes: ${served.slice(0, 6).map((r) => `${routeTitle(r)} (#r${r.id})`).join(', ')}${served.length > 6 ? `, … ${served.length - 6} more` : ''}`)
+      lines.push(`  callers ${cin} · callees ${cout}${rin ? ` · referenced as a value by ${rin}` : ''}${sup.length ? ` · ${sup.map((s) => `${s.kind.toLowerCase()} ${s.qualname}`).join(', ')}` : ''}${sub ? ` · subtypes ${sub}` : ''} · test files reaching it ${tests.size}`)
       return lines.join('\n')
     })].filter(Boolean).join('\n\n')
   }
@@ -305,9 +350,16 @@ export class Graph {
     const out = [t.note].filter(Boolean)
     for (const n of t.hits) {
       const { lines, truncated } = this.tree(n, ['CALLS'], dir, d, !!strict)
+      // a function passed or stored as a value (a route's handler, a task, a signal's receiver): apart
+      // from the calls, one level, since what the value is called through is not in the graph
+      const refs = this.q(`SELECT e.${dir === 'in' ? 'src' : 'dst'} AS id, e.confidence, e.line FROM edges e WHERE e.${dir === 'in' ? 'dst' : 'src'} = ? AND e.kind = 'REFERENCES'${strict ? " AND e.confidence != 'ambiguous'" : ''} ORDER BY e.line LIMIT 40`, n.id).map((e) => ({ ...e, node: this.node(e.id) }))
       out.push(`${dir === 'in' ? 'Callers of' : 'Called by'} ${this.row(n)} — depth ${d}`)
-      out.push(lines.length ? lines.join('\n') : `  none found${dir === 'in' ? ' (dynamic dispatch, callbacks, reflection and cross-repo calls are invisible to the graph: grep the name before concluding it is unused)' : ''}`)
+      out.push(lines.length ? lines.join('\n') : `  none found${dir === 'in' ? (refs.length ? ' (it is passed as a value: see below)' : ' (dynamic dispatch, callbacks, reflection and cross-repo calls are invisible to the graph: grep the name before concluding it is unused)') : ''}`)
       if (truncated) out.push('  … truncated; lower the depth or query a narrower symbol')
+      if (refs.length) {
+        out.push(dir === 'in' ? `Passed or stored as a value by (by reference: it may be called through them, the graph does not see where):` : `Functions it passes or stores as a value (by reference):`)
+        for (const e of refs) out.push(`  ${this.row(e.node, `[${e.confidence}]`)}`)
+      }
     }
     return out.join('\n')
   }
@@ -330,8 +382,44 @@ export class Graph {
   // implementations, call sites resolution left unlinked, and the name's other mentions in the
   // project (with a project; `mentions: false` leaves them out).
   impact({ target, repo, depth = 3, strict = false, mentions: text = true }, project = null) {
-    const t = this.targets(target, { repo })
     const withText = text !== false && text !== 'false'
+    // a data entity the spec names (a table, `store/table`, `repo:store/table`, a column `table.column`,
+    // `db:` or `data:` before it to name only the data model): its own impact, and the code's when a
+    // definition holds the name too
+    const data = this.dataFind(target, repo)
+    if (data.only || data.hits.length) {
+      const t = data.only ? { error: 'data only' } : this.targets(target, { repo })
+      const d = Math.max(1, Math.min(Number(depth) || 3, 6))
+      if (!data.hits.length) return `No data entity matches "${target}". graph_data lists the stores and their tables.`
+      const out = []
+      if (!t.error) out.push(`"${target}" names ${data.hits.length === 1 ? 'a data entity' : `${data.hits.length} data entities`} and ${plural(t.hits.length, 'code definition')}: the data model's impact first, then the code's (db:${target} names the data alone).`)
+      out.push(...this.dataImpact(data, { depth: d, strict: !!strict, project, text: withText }))
+      if (!t.error) out.push('', ...[t.note, `Impact of ${t.hits.map((h) => this.row(h)).join(' + ')} — depth ${d}`].filter(Boolean), ...this.reachLines(t.hits, { depth: d, strict: !!strict, project, text: withText }))
+      else if (!data.only && !t.error.startsWith('No symbol')) out.push('', `The code: ${t.error}`)
+      return out.join('\n')
+    }
+    const t = this.targets(target, { repo })
+    const d0 = Math.max(1, Math.min(Number(depth) || 3, 6))
+    // a configuration key (`AUTH_JWT_SECRET`, `auth.secret`): who reads it, what it sets and who reads
+    // that (config.mjs), the reach of those readers, then its other mentions, the lines the config
+    // index holds for it left out (the view above explains them). A code definition holding the name
+    // too (a settings class's `APP_PORT` field) is answered after it, as a data entity's is.
+    const key = String(target).trim()
+    const a = (!t.error || t.error.startsWith('No symbol or file')) && /^[A-Za-z_][\w.:-]*$/.test(key) ? keyAnswer(this, key, repo || null) : null
+    if (a) {
+      const out = []
+      if (!t.error) out.push(`"${target}" names a configuration key and ${plural(t.hits.length, 'code definition')}: the key's impact first, then the code's.`)
+      out.push(`Impact of the configuration key ${a.lines[0]} — depth ${d0}`, ...a.lines.slice(1).map((l) => `  ${l}`))
+      const readers = [...new Map(a.readers.filter((r) => r.node_id).map((r) => [r.node_id, r])).keys()].map((id) => this.node(id)).filter(Boolean)
+      if (readers.length) out.push(`What reaches its readers (${readers.length}):`, ...this.reachLines(readers, { depth: d0, strict: !!strict, project: null, text: false, config: false }))
+      const explained = explainedLines(this, [key])
+      if (t.error && project && withText) {
+        const m = mentions(this, project, [{ term: key, targets: [{ id: -1, name: key, kind: 'function', repo: null, path: null, line: -1 }] }], { explained })
+        if (m.searched.length) out.push('Its name as text, the reads and declarations above left out:', ...mentionLines(this, m))
+      }
+      if (!t.error) out.push('', ...[t.note, `Impact of ${t.hits.map((h) => this.row(h)).join(' + ')} — depth ${d0}`].filter(Boolean), ...this.reachLines(t.hits, { depth: d0, strict: !!strict, project, text: withText, explained }))
+      return out.join('\n')
+    }
     // no definition by that name (code the index does not see, another language, a name being
     // introduced): its mentions are still what a grep would find, sorted
     if (t.error && t.error.startsWith('No symbol or file') && project && withText) {
@@ -345,10 +433,128 @@ export class Graph {
     out.push(...this.reachLines(t.hits, { depth: d, strict: !!strict, project, text: withText }))
     return out.join('\n')
   }
+  // ── the data model's entities as targets (graph_impact, graph_search) ──
+  // The model, once per answer: the facts reconciled (no refine file: a target is what was extracted),
+  // and each Drizzle table's variable and column keys (what code names them by).
+  // Does any data fact hold this text (as a whole JSON string when `whole`)? Any letter case.
+  factsHold(text, whole = false) {
+    const esc = String(text).replace(/[\\%_]/g, (c) => `\\${c}`).replace(/\*/g, '%')
+    return !!this.one("SELECT 1 x FROM data_facts WHERE facts LIKE ? ESCAPE '\\' LIMIT 1", whole ? `%"${esc}"%` : `%${esc}%`)
+  }
+  dataModel() {
+    if (this._dm !== undefined) return this._dm
+    const rows = this.factRows()
+    if (!rows.length) return (this._dm = null)
+    const model = clean(reconcile(rows, { roots: [...this.roots].map(([name, root]) => ({ name, rel: root || '.' })) }))
+    const names = new Map() // entity id → { vars, keys: Map(key → column) }
+    for (const r of rows) {
+      if (!/^drizzle-ts@/.test(r.extractor)) continue
+      for (const d of r.facts.declarations || []) for (const e of d.entities || []) {
+        const id = `${r.repo}:${d.store}/${e.name}`
+        if (!names.has(id)) names.set(id, { vars: new Set(), keys: new Map() })
+        if (e.var) names.get(id).vars.add(e.var)
+        for (const f of e.fields || []) if (f.key) names.get(id).keys.set(f.key, f.name)
+      }
+    }
+    return (this._dm = { model, names })
+  }
+  // A spec as data entities: { hits: [{ st, e, f: field | null }], only: the spec said `db:` or `data:` }.
+  // Names: an entity's id (`repo:store/table`), `store/table`, its name (in any letter case) or the
+  // Drizzle variable code names it by; a column after a dot, by its name or its Drizzle key.
+  dataFind(spec, repo = null) {
+    let s = String(spec || '').trim()
+    const pre = /^(db|data):(.+)$/i.exec(s)
+    const only = !!pre && !this.roots.has(pre[1])
+    if (only) s = pre[2].trim()
+    // (a name no data fact holds is no entity: the model is not reconciled for it)
+    const last = (x) => x.split(/[/:]/).pop()
+    const probes = [...new Set([s, last(s), s.includes('.') ? last(s.slice(0, s.lastIndexOf('.'))) : null].filter(Boolean))]
+    const dm = probes.some((p) => this.factsHold(p, true)) ? this.dataModel() : null
+    if (!dm) return { hits: [], only }
+    const lower = (x) => String(x).toLowerCase()
+    const ents = dm.model.stores.filter((st) => !repo || st.repo === repo).flatMap((st) => st.entities.map((e) => ({ st, e })))
+    const named = (x, n) => {
+      const v = dm.names.get(x.e.id)
+      return x.e.id === n || `${x.st.name}/${x.e.name}` === n || lower(x.e.name) === lower(n) || lower(`${x.st.name}/${x.e.name}`) === lower(n) || !!(v && v.vars.has(n))
+    }
+    let hits = ents.filter((x) => named(x, s)).map((x) => ({ ...x, f: null }))
+    if (!hits.length && s.includes('.')) {
+      const at = s.lastIndexOf('.'), head = s.slice(0, at), col = s.slice(at + 1)
+      hits = ents.filter((x) => named(x, head)).flatMap((x) => {
+        const v = dm.names.get(x.e.id)
+        const name = v?.keys.get(col) ?? col
+        const f = x.e.fields.find((y) => y.name === name) || x.e.fields.find((y) => lower(y.name) === lower(name))
+        return f ? [{ ...x, f }] : []
+      })
+    }
+    return { hits: hits.slice(0, MAX_TARGETS), only, more: Math.max(0, hits.length - MAX_TARGETS) }
+  }
+  // The functions reading and writing an entity (or naming a column), from whatever code reaches it:
+  // the SQL and the Drizzle queries in code, the key-value SDK calls, a key-value cache's commands.
+  //   → [{ name, key, repo, path, line, callers, says }]
+  dataUsers(model, st, e, f = null) {
+    const sym = symbolAt(this.db)
+    const verb = (x) => [x.reads ? 'reads' : null, x.writes ? 'writes' : null].filter(Boolean).join(' · ') || 'names it'
+    if (st.dialect === 'redis') return f ? [] : this.redisFns(model, e.queries?.sites || [], e.id).map((x) => ({ ...x, says: `${verb(x)} (${x.kinds.join(', ')})` }))
+    if (e.access) return f ? [] : byFunction(e.access.sites.map((k) => model.access.sites[k]).filter(Boolean), sym).map((x) => ({ ...x, says: x.ops.join(', ') }))
+    let list = (e.queries?.sites || []).map((k) => model.queries?.sites[k]).filter(Boolean)
+    if (f) list = list.filter((x) => (x.columns || []).some((c) => c.entity === e.id && c.name === f.name))
+    return sqlFunctions(list, sym, e.id).map((x) => {
+      const mine = list.filter((y) => (sym(y)?.key ?? `${y.repo}\0${y.path}\0${y.fn ?? y.line}`) === x.key)
+      const hows = f ? [...new Set(mine.flatMap((y) => y.columns.filter((c) => c.entity === e.id && c.name === f.name).map((c) => c.how)))] : []
+      const more = f ? (hows.length ? `names it in ${hows.join(', ')}` : '') : fnDetail(x)
+      return { ...x, says: `${verb(x)} (${x.kinds.join(', ')})${more ? ` · ${more}` : ''}` }
+    })
+  }
+  dataImpact(data, { depth = 3, strict = false, project = null, text = true } = {}) {
+    const dm = this.dataModel(), model = dm.model
+    const out = []
+    if (data.hits.length > 1) out.push(`${data.hits.length} data entities match${data.more ? ` (and ${data.more} more)` : ''}: ${data.hits.map((x) => (x.f ? `${x.e.id}.${x.f.name}` : x.e.id)).join(', ')}; each follows (narrow with repo:store/table).`)
+    const starts = new Map()
+    for (const { st, e, f } of data.hits) {
+      const kind = f ? 'column' : e.kind || 'table'
+      out.push(`Impact of ${kind} ${f ? `${e.id}.${f.name}` : e.id}  (${st.dialect || 'dialect unknown'}${f ? `; ${typeOf(f) || 'type unknown'}, ${f.nullable === null ? 'nullability unknown' : f.nullable ? 'nullable' : 'not null'}` : ''}) — depth ${depth}`)
+      const el = f || e
+      out.push(`  declared at ${(el.sources || []).map((x) => `${this.dloc({ repo: x.repo ?? st.repo, path: x.path, line: x.line })} [${x.kind}]`).join(' · ') || 'no source'}`)
+      // what else in the model the change touches: its keys, indexes, foreign keys both ways
+      const has = (cols) => !f || cols.includes(f.name)
+      const keys = e.keys.filter((k) => has(k.parts)), idx = e.indexes.filter((i) => has(i.columns || []))
+      const rels = e.relations.filter((r) => has(r.columns))
+      const by = st.entities.flatMap((o) => o.relations.filter((r) => r.to === e.name && (!f || r.toColumns.includes(f.name))).map((r) => [o, r]))
+      if (keys.length) out.push(`  keys: ${keys.map((k) => `${k.role} (${k.parts.join(', ')})`).join(' · ')}`)
+      if (idx.length) out.push(`  indexes: ${idx.map((i) => `${i.name}${i.unique ? ' unique' : ''} (${(i.columns || []).join(', ')})`).join(' · ')}`)
+      if (rels.length) out.push(`  references: ${rels.map((r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})${isClient(r) ? ' [relation enforced by the client]' : ''}`).join(' · ')}`)
+      if (by.length) out.push(`  referenced by: ${by.map(([o, r]) => `${o.name} (${r.columns.join(', ')}) → (${r.toColumns.join(', ')})${isClient(r) ? ' [relation enforced by the client]' : ''}`).join(' · ')}`)
+      const fns = this.dataUsers(model, st, e, f)
+      const label = f ? 'Queries naming it' : 'Read and written by'
+      out.push(fns.length ? `${label} (inferred from the queries in code; ${plural(fns.length, 'function')}):` : `${label}: none found in the queries the data extractors read (SQL built elsewhere, another repository or a script may still reach it)`)
+      for (const x of fns.slice(0, CAP)) out.push(`  ${x.name}  ${x.says}  ${this.dloc({ repo: x.repo, path: x.path, line: x.line })}${x.callers !== null && x.callers !== undefined ? ` · ${plural(x.callers, 'caller')}` : ''}`)
+      if (fns.length > CAP) out.push(`  … and ${plural(fns.length - CAP, 'more function')} (the first ${CAP} listed)`)
+      for (const x of fns) { const id = /^#(\d+)$/.exec(x.key || '')?.[1]; if (id && !starts.has(id)) { const n = this.node(Number(id)); if (n) starts.set(id, n) } }
+    }
+    // what reaches the functions that read and write it: the code graph's own impact of them
+    if (starts.size) { const r = this.reachLines([...starts.values()], { depth, strict, project, text: false }); const cut = r.findIndex((l) => /^Changes together/.test(l)); out.push(`What reaches those functions (calls, inheritance, imports; depth ${depth}):`, ...(cut < 0 ? r : r.slice(0, cut))) }
+    // its names as text: where code, config and docs mention the table (a column's name is too common to search)
+    if (project && text) {
+      const terms = [...new Set(data.hits.filter((x) => !x.f).flatMap((x) => [x.e.name.split('.').pop(), ...(dm.names.get(x.e.id)?.vars || [])]))].filter((t) => t.length >= 3)
+      if (terms.length) {
+        // (the lines its declarations and the queries read already explain are left out)
+        const decl = data.hits.filter((x) => !x.f).flatMap((x) => (x.e.sources || []).map((y) => ({ id: -1, name: '', kind: 'table', repo: y.repo ?? x.st.repo, path: y.path, line: y.line })))
+        const seen = data.hits.flatMap((x) => (x.e.queries?.sites || []).map((k) => model.queries?.sites[k]).filter(Boolean)).flatMap((y) => (y.lines || [y.line]).map((line) => ({ ref: { repo: y.repo, path: y.path, line } })))
+        const m = mentions(this, project, terms.map((term) => ({ term, targets: decl.length ? decl.map((d) => ({ ...d, name: term })) : [{ id: -1, name: term, kind: 'function', repo: null, path: null, line: -1 }] })), { sites: seen })
+        if (m.searched.length) out.push(...mentionLines(this, m))
+      }
+    }
+    return out
+  }
+
   // The impact of a set of nodes: reached code by file, tests, dispatch, unresolved sites, mentions,
   // co-change. `skipFiles`: files left out of the listing; `members: false` walks from the hits
   // alone, not from a file's definitions or a type's members (a diff lists the changed ones itself).
-  reachData(hits, { depth = 3, strict = false, project = null, text = true, skipFiles = null, members = true } = {}) {
+  // `explained`: lines the answer explains otherwise (a configuration key's view printed above), left
+  // out of the mentions. `config`, `sites`, `routes`, `cochange` false: those parts are not computed
+  // (an answer that does not print them: graph_diff reads the reach and the dispatch alone).
+  reachData(hits, { depth = 3, strict = false, project = null, text = true, skipFiles = null, members = true, config: withConfig = true, explained = null, sites: withSites = true, routes: withRoutes = true, cochange: withCochange = true } = {}) {
     let start = hits.map((h) => h.id)
     const files = new Set(hits.map((h) => h.file_id))
     for (const h of hits) {
@@ -358,7 +564,9 @@ export class Graph {
     }
     const disp = dispatchStarts(this, hits.filter((h) => h.kind !== 'file'))
     start = [...new Set(start.concat(disp.extra))]
-    const reached = this.walk(start, ['CALLS', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS'], 'in', depth, strict)
+    const reached = this.walk(start, ['CALLS', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS', 'IMPORTS', 'ROUTES_TO'], 'in', depth, strict)
+    // the routes these definitions handle (or their class does): reached by URL or by navigation
+    const routes = withRoutes ? routesServedBy(this, [...new Set([...start, ...hits.filter((h) => h.parent_id).map((h) => h.parent_id)])]) : []
     const byFile = new Map()
     const tests = []
     for (const [id, info] of reached) {
@@ -371,7 +579,7 @@ export class Graph {
       byFile.get(key).push([n, info])
     }
     const named = hits.filter((h) => h.kind !== 'file')
-    const sites = unresolved(this, named)
+    const sites = withSites ? unresolved(this, named) : []
     let text_ = null, ambiguous = []
     if (project && text) {
       const terms = new Map()
@@ -387,33 +595,45 @@ export class Graph {
         const n = this.one("SELECT count(*) c FROM nodes WHERE name = ? AND kind != 'file'", term).c
         if (n > 1) ambiguous.push({ name: term, n })
       }
-      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })), { sites })
+      // a route's declaration naming its handler (`component={X}`, `router.get('/a', x)`) is explained by the route
+      const declared = routes.map((x) => ({ ref: { repo: x.repo, path: x.fpath, line: x.line } }))
+      text_ = mentions(this, project, [...terms].map(([term, targets]) => ({ term, targets })), { sites: [...sites, ...declared], explained })
     }
     const cochange = []
-    for (const fid of files) {
+    if (withCochange) for (const fid of files) {
       const f = this.one('SELECT repo, path FROM files WHERE id = ?', fid)
       for (const c of this.q('SELECT b, n FROM cochange WHERE repo = ? AND a = ? ORDER BY n DESC LIMIT 8', f.repo, f.path)) cochange.push({ repo: f.repo, from: f.path, path: c.b, n: c.n })
     }
-    return { byFile, tests, dispatch: disp.info, sites, mentions: text_, ambiguous, cochange }
+    let config = []
+    if (withConfig) try { config = readsOf(this, hits) } catch {} // an index without the table
+    return { byFile, tests, dispatch: disp.info, sites, mentions: text_, ambiguous, cochange, routes, config }
   }
   reachLines(hits, opts = {}) {
     const r = this.reachData(hits, opts)
     const out = []
-    if (!r.byFile.size && !r.tests.length && !r.sites.length && !r.dispatch.length) out.push('  nothing in the index reaches it (dynamic dispatch, config wiring and other repositories are invisible to the edges: see the mentions below)')
+    if (!r.byFile.size && !r.tests.length && !r.sites.length && !r.dispatch.length && !r.routes.length) out.push('  nothing in the index reaches it (dynamic dispatch, config wiring and other repositories are invisible to the edges: see the mentions below)')
     const groups = [...r.byFile.values()].sort((a, b) => Math.min(...a.map(([, i]) => i.depth)) - Math.min(...b.map(([, i]) => i.depth)))
     for (const g of groups.slice(0, 60)) {
       const f = g[0][0]
       const syms = g.filter(([n]) => n.kind !== 'file').sort((a, b) => a[1].depth - b[1].depth)
       out.push(`  ${this.loc({ ...f, kind: 'file' })}  (distance ${Math.min(...g.map(([, i]) => i.depth))})`)
-      for (const [n, i] of syms.slice(0, 8)) out.push(`    ${n.qualname}:${n.line}  d${i.depth} [${i.conf}]`)
+      for (const [n, i] of syms.slice(0, 8)) out.push(`    ${n.qualname}:${n.line}  d${i.depth} [${i.conf}]${i.kind === 'REFERENCES' ? ' by reference' : ''}`)
+      // the file's top-level code calling it or naming it as a value (`app.get('/', handler)`)
+      for (const [, i] of g.filter(([n, i]) => n.kind === 'file' && (i.kind === 'CALLS' || i.kind === 'REFERENCES')).slice(0, 1)) out.push(`    top level:${i.line}  d${i.depth} [${i.conf}]${i.kind === 'REFERENCES' ? ' by reference' : ''}`)
       if (syms.length > 8) out.push(`    … ${syms.length - 8} more`)
     }
     if (groups.length > 60) out.push(`  … ${groups.length - 60} more files`)
     out.push(...dispatchLines(this, r.dispatch))
+    if (r.routes.length) {
+      out.push(`Routes it handles (${r.routes.length}; a call site naming the route reaches it: [route] above, its tests below):`)
+      for (const x of r.routes.slice(0, 10)) out.push(...routeLines(this, x, { indent: '  ', limit: 10 }))
+      if (r.routes.length > 10) out.push(`  … ${r.routes.length - 10} more (graph_routes)`)
+    }
     const looseTests = r.sites.filter((x) => x.src?.is_test).length
     out.push(r.tests.length ? `Tests on these paths (${r.tests.length}):` : looseTests ? `Tests on these paths: none linked; ${looseTests} unlinked call site(s) in tests, below` : 'Tests on these paths: none found by the graph (search the test tree by name before concluding it is untested)')
     for (const [n, i] of r.tests.sort((a, b) => a[1].depth - b[1].depth).slice(0, 25)) out.push(`  ${this.row(n, `d${i.depth}`)}`)
     out.push(...unresolvedLines(this, r.sites))
+    out.push(...readsLines(this, r.config))
     if (r.mentions) out.push(...mentionLines(this, r.mentions, { ambiguous: r.ambiguous }))
     if (r.cochange.length) out.push('Changes together with (git history):', ...r.cochange.map((c) => `  ${this.loc({ repo: c.repo, path: c.path, kind: 'file' })}  ${c.n} shared commits`))
     return out
@@ -429,7 +649,8 @@ export class Graph {
     out.push('Outline:', ...(syms.length ? syms.slice(0, 120).map((n) => `${'  '.repeat(depth(n) + 1)}${n.name}  ${n.kind}${n.is_test ? ' test' : ''}  :${n.line}`) : ['  (no symbols extracted)']))
     const imps = this.q("SELECT d.id FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.src = ? AND e.kind = 'IMPORTS'", f.node_id).map((r) => this.node(r.id))
     const ext = this.q('SELECT source FROM imports WHERE file_id = ? AND resolved = 0', f.id).map((r) => r.source)
-    out.push('Imports:', ...imps.map((n) => `  ${this.loc(n)}`), ...(ext.length ? [`  external: ${[...new Set(ext)].join(', ')}`] : []), ...(imps.length || ext.length ? [] : ['  none']))
+    const unindexed = this.q('SELECT source FROM imports WHERE file_id = ? AND resolved < 0', f.id).map((r) => r.source) // a file of the repository the index does not hold (an image, JSON)
+    out.push('Imports:', ...imps.map((n) => `  ${this.loc(n)}`), ...(unindexed.length ? [`  files outside the index: ${[...new Set(unindexed)].join(', ')}`] : []), ...(ext.length ? [`  external: ${[...new Set(ext)].join(', ')}`] : []), ...(imps.length || ext.length || unindexed.length ? [] : ['  none']))
     const by = this.q("SELECT s.id FROM edges e JOIN nodes s ON s.id = e.src WHERE e.dst = ? AND e.kind = 'IMPORTS'", f.node_id).map((r) => this.node(r.id))
     out.push('Imported by:', ...(by.length ? by.slice(0, 40).map((n) => `  ${this.loc(n)}`) : ['  none in the index']))
     const cc = this.q('SELECT b, n FROM cochange WHERE repo = ? AND a = ? ORDER BY n DESC LIMIT 8', f.repo, f.path)
@@ -474,6 +695,10 @@ export class Graph {
       }
       if (st.inferred) out.push(`  reached through: ${st.inferred.clients.join(', ') || 'no client import read'}`, `  ${NOT_DECLARED}`)
       if (st.dialect === 'redis') out.push(...this.redisStoreHead(st))
+      if (st.drizzle) {
+        if (st.drizzle.calls) out.push(`  inferred  Drizzle queries in code: ${plural(st.drizzle.calls, 'call')} in ${plural(st.drizzle.files, 'file')} read or write its tables`)
+        for (const m of st.drizzle.runtime || []) out.push(`  migrations applied at run time: ${m.call} at ${this.dloc(m)}${m.fn ? ` in ${m.fn}` : ''}${m.source ? ` (given ${m.source}: the folder this store replays)` : ''}`)
+      }
       if (st.queries) out.push(`  inferred  queries in code attached (${st.queries.why}): ${plural(st.queries.statements, 'statement')} in ${plural(st.queries.files, 'file')}${queryConflicts(st) ? `, ${plural(queryConflicts(st), '[inferred] conflict')} where they name what the declarations lack` : ', naming nothing the declarations lack'}`)
       if (st.dialectFrom) out.push(`  dialect: ${this.dialectFrom(st.repo, st.dialectFrom)}`)
     }
@@ -608,15 +833,26 @@ export class Graph {
   dialectFrom(repo, f) {
     const at = f.path ? this.dloc({ repo, path: f.path, line: f.line }) : ''
     return f.how === 'stated' ? `stated at ${at}` : f.how === 'sniffed' ? `sniffed: ${f.marker} at ${at}` : f.how === 'supabase' ? 'Supabase migrations are Postgres'
+      : f.how === 'folder' ? `its folder's name: ${f.marker}`
       : f.how === 'client' ? `its client: ${f.source} at ${at}` : f.how === 'repository' ? `the repository's client: ${f.source} at ${at}` : f.how === 'hint' ? `a type naming it: ${f.marker} at ${at}` : 'set in grimoire.config.json (graph.data.migrations)'
   }
   // the SQL the code sends (data/queries.mjs), in one line: graph_data with a store or a table says the rest
   dataQueries(model) {
-    if (model.queriesError) return [`Queries in code: ${model.queriesError}`]
+    const out = []
+    if (model.queriesError) out.push(`Queries in code: ${model.queriesError}`)
     const q = model.queries
-    if (!q) return []
     const deduced = model.stores.filter((s) => s.inferred).length
-    return [`Queries in code (inferred from the SQL the code sends; leads, never verdicts): ${plural(q.statements, 'statement')} in ${plural(q.files, 'file')}, ${plural(deduced, 'store')} deduced, ${plural(q.attached.length, 'store')} declared they attach to${q.tests ? `; ${plural(q.tests, 'call')} in test code not read` : ''}`]
+    if (q && (q.files || q.statements || q.tests || deduced)) out.push(`Queries in code (inferred from the SQL the code sends; leads, never verdicts): ${plural(q.statements, 'statement')} in ${plural(q.files, 'file')}, ${plural(deduced, 'store')} deduced, ${plural(q.attached.length, 'store')} declared they attach to${q.tests ? `; ${plural(q.tests, 'call')} in test code not read` : ''}`)
+    if (model.drizzleError) out.push(`Drizzle queries in code: ${model.drizzleError}`)
+    const z = model.drizzle
+    if (z) {
+      const tables = new Set(model.stores.flatMap((s) => s.entities.filter((e) => e.queries?.sites?.some((k) => q.sites[k]?.call === 'drizzle')).map((e) => e.id))).size
+      out.push(`Drizzle queries in code (inferred from the query builder's and the relational API's calls; leads, never verdicts): ${plural(z.placed, 'call')} in ${plural(z.files, 'file')} reaching ${plural(tables, 'table')}${z.unresolved ? `; ${plural(z.unresolved, 'table name')} no schema table resolves` : ''}${z.ambiguous ? `; ${plural(z.ambiguous, 'name')} several schemas declare (not attached)` : ''}${z.dynamic ? `; ${plural(z.dynamic, 'table')} code computes (not named)` : ''}${z.tests ? `; ${plural(z.tests, 'call')} in test code not read` : ''}`)
+      for (const u of z.unresolvedAt.slice(0, 8)) out.push(`  unresolved: ${u.name ?? '?'}  ${this.dloc(u)}${u.fn ? ` in ${u.fn}` : ''}`)
+      if (z.unresolvedAt.length > 8) out.push(`  … and ${plural(z.unresolvedAt.length - 8, 'more place')}`)
+      for (const m of z.runtime) out.push(`  migrations applied at run time, no store found for them: ${m.call} at ${this.dloc(m)}${m.source ? ` (given ${m.source})` : ''}`)
+    }
+    return out
   }
   // the functions reading and writing a table through the SQL they send, through the code graph's symbols
   dataEntityQueries(model, e) {
@@ -624,8 +860,8 @@ export class Graph {
     if (!e.queries) return []
     const fns = sqlFunctions(all, symbolAt(this.db), e.id)
     const reads = fns.filter((f) => f.reads).length, writes = fns.filter((f) => f.writes).length
-    const out = [fns.length ? `Reads and writes, from the SQL the code sends (inferred; ${plural(fns.length, 'function')}: ${reads} reading, ${writes} writing):` : 'Reads and writes: no query in code reaches this table']
-    for (const f of fns.slice(0, CAP)) out.push(`  ${f.name}  ${[f.reads ? 'reads' : null, f.writes ? 'writes' : null].filter(Boolean).join(' · ') || 'names it'} (${f.kinds.join(', ')})  ${this.dloc({ repo: f.repo, path: f.path, line: f.line })}  (${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')})${f.callers !== null ? ` · ${plural(f.callers, 'caller')}` : ''}`)
+    const out = [fns.length ? `Reads and writes, from ${queriesFrom(fns)} (inferred; ${plural(fns.length, 'function')}: ${reads} reading, ${writes} writing):` : 'Reads and writes: no query in code reaches this table']
+    for (const f of fns.slice(0, CAP)) { const more = fnDetail(f); out.push(`  ${f.name}  ${[f.reads ? 'reads' : null, f.writes ? 'writes' : null].filter(Boolean).join(' · ') || 'names it'} (${f.kinds.join(', ')})  ${this.dloc({ repo: f.repo, path: f.path, line: f.line })}  (${f.lines.length === 1 ? 'the call at line' : 'the calls at lines'} ${f.lines.join(', ')})${f.callers !== null ? ` · ${plural(f.callers, 'caller')}` : ''}${more ? ` · ${more}` : ''}`) }
     if (fns.length > CAP) out.push(`  … and ${plural(fns.length - CAP, 'more function')} (the first ${CAP} listed)`)
     return out
   }
@@ -763,9 +999,11 @@ export class Graph {
       const count = (kind) => e.indexes.filter((i) => i.kind === kind).length
       const itemOnly = e.fields.filter((f) => f.item && f.sources.every((s) => s.kind === 'code')).length
       const parts = kv ? [plural(e.fields.length - itemOnly, 'attribute'), itemOnly ? plural(itemOnly, 'item field') : null, ...e.keys.map(kvKeyText), count('gsi') ? plural(count('gsi'), 'GSI') : null, count('lsi') ? plural(count('lsi'), 'LSI') : null, kvTableText(e)].filter(Boolean)
-        : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.length ? `foreign keys → ${[...new Set(e.relations.map((r) => r.to))].join(', ')}` : null, e.bookkeeping ? "a migration tool's own record (not compared)" : null].filter(Boolean)
+        : [`${e.fields.length} field${e.fields.length === 1 ? '' : 's'}`, pk ? `primary (${pk.parts.join(', ')})` : e.kind === 'table' ? 'no primary key' : null, e.indexes.length ? `${e.indexes.length} index${e.indexes.length === 1 ? '' : 'es'}` : null, e.relations.some((r) => !isClient(r)) ? `foreign keys → ${[...new Set(e.relations.filter((r) => !isClient(r)).map((r) => r.to))].join(', ')}` : null, e.relations.some(isClient) ? `relations → ${[...new Set(e.relations.filter(isClient).map((r) => r.to))].join(', ')} (enforced by the client)` : null, e.bookkeeping ? "a migration tool's own record (not compared)" : null].filter(Boolean)
       const items = (e.bound || []).map((b) => `${b.type} (${b.confidence})`)
       out.push(`  ${e.name}  ${e.kind}  ${parts.join(' · ')}  ${this.sources(st.repo, e.sources)}${conflicts ? `  [${conflicts} conflict${conflicts === 1 ? '' : 's'}]` : ''}${items.length ? `  items: ${items.join(', ')}` : ''}${e.logical ? `  [one table with ${e.logical.members.filter((m) => m !== e.id).join(', ')}]` : ''}`)
+      // the classes a code model maps to the table (an ORM's entity or model), each at its line
+      if (!kv) for (const s of e.sources.filter((x) => x.kind === 'code' && x.as)) out.push(`    ${s.as}  ${this.dloc({ repo: s.repo ?? st.repo, path: s.path, line: s.line })}`)
     }
     // the enums a code model declares
     for (const en of st.enums || []) out.push(`  enum ${en.name}  ${en.values.join(' | ')}  ${this.sources(st.repo, en.sources)}`)
@@ -829,7 +1067,9 @@ export class Graph {
     else section('Fields', e.fields, (f) => `${f.name}  ${f.type.raw}  ${f.nullable ? 'null' : 'not null'}${f.default !== null ? `  default ${f.default}` : ''}${f.generated ? `  generated ${f.generated}` : ''}${f.computed ? `  computed ${f.computed}` : ''}${f.enum ? `  enum${f.enum.name ? ` ${f.enum.name}` : ''} (${f.enum.values.join(' | ')})` : ''}${f.unstated ? `  (${f.unstated.join(', ')} as written, not compared)` : ''}`)
     section('Keys', e.keys, (k) => (kv ? kvKeyText(k) : `${k.role} (${k.parts.join(', ')})`))
     section('Indexes', e.indexes, (i) => (kvIndex(i) ? `${i.name}  ${kvIndexText(i)}` : `${i.name}${i.unique ? ' unique' : ''} (${i.columns.join(', ')})${i.partial ? ' partial' : ''}${i.implicit ? ' (built for a foreign key)' : ''}`))
-    section('Foreign keys', e.relations, (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
+    section('Foreign keys', e.relations.filter((r) => !isClient(r)), (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  on delete ${r.onDelete} · on update ${r.onUpdate}`)
+    // a relation the schema declares and its client enforces: no foreign key in the database
+    section(`Relations ${CLIENT_SAYS}`, e.relations.filter(isClient), (r) => `(${r.columns.join(', ')}) → ${r.to}(${r.toColumns.join(', ')})  ${r.onDelete === null && r.onUpdate === null ? 'no action stated (the query API\'s relation: the client joins through it, nothing enforces it)' : `on delete ${r.onDelete} · on update ${r.onUpdate} (as the client emulates them)`}`)
     if (kv) {
       const item = e.fields.filter((f) => f.item)
       const types = [...new Set(item.flatMap((f) => f.item.map((i) => i.type)))]

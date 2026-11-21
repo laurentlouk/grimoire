@@ -1,0 +1,7 @@
+{
+  "name": "@acme/db",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./src/index.ts" },
+    "./schema": { "types": "./dist/schema.d.ts", "default": "./dist/schema.js" }
+  }
+}

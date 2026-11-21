@@ -18,13 +18,22 @@
 //     risk); graph_overview; several-word search; no literal quoted in any of them
 //  6b. the review's cases: CommonJS definitions, cross-repository calls, local bindings, namespaces,
 //     keyword arguments, Ruby symbols, credential files, a huge line, JSX text, the diff's parsing
+//  6c. dependency injection: fields typed by their declaration or their constructor (TypeScript, Java,
+//     Python), no self-recursion from a call on a field, a Python bare call never the class's method
+//  6d. fixtures/frame: members a framework declares (Ruby scopes, associations, delegate, accessors,
+//     define_method), annotated fields (a plugin's hooks, a settings class), TypeScript class fields;
+//     functions passed as values (a router's handlers, a queued task, a signal's receiver) as
+//     REFERENCES, followed by impact, callers, test discovery, the diff and the overview
+//  6f. fixtures/resolve: resolution's narrowing (call chains on self, the self-call guard, types from
+//     dependencies, closures, locals, platform variants, Ruby callback symbols, JSX imports and aliases,
+//     non-wrapper calls, router procedures, runtime globals, super) and typed unlinked sites in impact
 //  1b-1d (between 1 and 2): which files count and as what, modules and the system map, the page's helpers
 //
 //  Needs the parser runtime (web-tree-sitter + grammars): `npm ci --prefix tools/graph`, or a
 //  prior index that installed it into the user cache. Without it the file is skipped, except
 //  under CI, where a missing runtime fails.
 import { spawnSync, spawn } from 'node:child_process'
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, realpathSync, mkdirSync, existsSync, utimesSync } from 'node:fs'
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, realpathSync, mkdirSync, existsSync, utimesSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -63,7 +72,7 @@ for (const f of readdirSync(path.join(HERE, 'fixtures', 'langs')).sort()) {
   const parser = await rt.parserFor(lang)
   const src = readFileSync(path.join(HERE, 'fixtures', 'langs', f), 'utf8')
   const tree = parser.parse(src)
-  const r = extract(tree, lang, false)
+  const r = extract(tree, lang, false, f)
   const binds = []
   const walk = (n) => { for (const b of bindingsOf(n, LANGS[lang].spec)) binds.push(b.join(':')); for (let i = 0; i < n.namedChildCount; i++) walk(n.namedChild(i)) }
   walk(tree.rootNode)
@@ -78,6 +87,7 @@ for (const f of readdirSync(path.join(HERE, 'fixtures', 'langs')).sort()) {
 }
 const expect = {
   'a.ts': { defs: ['interface Shape', 'class Circle', 'method Circle.area', 'function run', 'function arrow', 'type Alias', 'enum Color'], calls: ['helper', 'Circle', 'c.area', 'fs.readFileSync'], supers: ['Circle extends Base', 'Circle implements Shape'], imports: ['./util', 'node:fs'], binds: ['a:Circle', 'y:Circle'] },
+  'a.tsx': { defs: ['function Text', 'function Fancy', 'function Box', 'function Themed', 'function useStore', 'function Card', 'function a'], calls: ['View', 'UI.Row', 'Label', 'Text', 'Card', 'format', 'count'], imports: ['react-native', './ui'] },
   'a.js': { defs: ['class Circle', 'method Circle.area', 'function run', 'function arrow'], calls: ['helper', 'c.area'], imports: ['./util', './lib'] },
   'a.py': { defs: ['class Circle', 'method Circle.area', 'method Circle.make', 'function run'], calls: ['helper', 'Circle', 'c.area'], supers: ['Circle extends Base', 'Circle extends Shape'], imports: ['os.path', '.util', 'pkg.mod'], binds: ['c:Circle'] },
   'a.rs': { defs: ['trait Shape', 'struct Circle', 'enum Color', 'method Circle.area', 'method Circle.new', 'function run', 'function test_run', 'type Alias'], calls: ['helper', 'Circle.new', 'c.area', 'fs.read', 'println', 'run'], supers: ['Circle implements Shape'], imports: ['crate::util', 'std', 'self::inner'], binds: ['c:Circle'] },
@@ -98,6 +108,8 @@ for (const [f, want] of Object.entries(expect)) {
   ok(!missing.length, `${f} (${langOf(f)})${missing.length ? `: missing ${missing.join(' · ')}\n       got ${JSON.stringify(got)}` : ''}`)
 }
 ok(!facts['a.js'].calls.includes('require'), 'a require() is an import, not a call')
+ok(!facts['a.tsx'].calls.includes('div'), 'JSX: a lowercase tag is the host\'s element, never a call')
+ok(!facts['a.tsx'].defs.some((d) => /doubled|timer|onPress/.test(d)), `JSX: an array built by a callback, a timer, a hook inside a component are no definitions (${facts['a.tsx'].defs.join(', ')})`)
 ok(facts['a.rs'].defs.includes('function test_run') && facts['a.rs'].defs.every((d) => !d.startsWith('method run')), 'Rust: free functions stay functions; impl members become methods of their type')
 { // A literal may hold a secret: a signature keeps the name, parameters and return type, up to the
   // body; each string, template, character or regex literal in it shows as `…` between its
@@ -256,7 +268,7 @@ has(st, 'EXTENDS 1, IMPLEMENTS 1', 'status: edge counts per kind')
 // [same-package], NewBuilder → Builder (`&Builder{}`), Build → NewBuilder and Build → BuildThing
 // (`NewBuilder().BuildThing()`) [same-file], and `c.Total()` on `c := New()`, whose type the syntax
 // does not state: the one name guess of its 7 call links.
-has(st, 'name guesses: 14% of 7 call links (ambiguous + unique-name)', 'status: the share of call links that are name guesses, per repo')
+has(st, 'name guesses: 14% of 7 call links (unique-name + ambiguous + import-guess)', 'status: the share of call links that are name guesses, per repo')
 
 let r = await q('callers', { symbol: 'square', repo: 'web', depth: 3 })
 has(r, 'Circle.area  method  web/src/geo/circle.ts:8  [import]', 'TS: a named import resolves the call to the imported file')
@@ -814,7 +826,10 @@ console.log('\n6 · beyond the edges (fixtures/edge): dispatch, unlinked calls, 
   const cs = await imp('createSession')
   has(cs, 'login:3  d1 [import]', 'impact: a linked caller is listed as before')
   has(cs, 'testCreate  function test  test/session.test.ts:3', 'impact: the test on the path')
-  has(cs, 'src/api/routes.ts  :4 reference in register', 'impact: a function passed as a value (a callback) is a mention the edges miss')
+  has(cs, 'register:3  d1 [import] by reference', 'impact: a function passed as a value (a callback) is linked by reference')
+  lacks(cs, 'src/api/routes.ts  :4', '… and so no longer a mention the edges miss')
+  // a function passed as a route's handler (a callback): listed with its route (routes.test.mjs), its line explained by it
+  has(cs, 'POST {…}/login  (http, node)  declared src/api/routes.ts:4', 'impact: a function passed as a value to a router is listed with the route it handles')
   has(cs, 'src/jobs/runner.ts  :5 string in run', 'impact: a string key naming it is a mention')
   has(cs, 'config/jobs.yaml  :3 config', 'impact: config naming it is a mention')
   has(cs, 'docs/auth.md  :3 docs', 'impact: docs naming it are a mention')
@@ -936,21 +951,21 @@ console.log('\n6b · beyond the edges: the review\'s cases')
   has(ss, 'res.sendStatus  method  a/lib/response.js:3', 'review: `obj.x = function` is a method of obj')
   has(await rimp('View.render'), 'View.render  method  a/lib/app.js:2', 'review: `X.prototype.y = function` is a method of X')
   const vw = await rimp('View', { repo: 'a' })
-  ok(/a\/lib\/app\.js  .*:6 reference/.test(vw), 'review: a file-level value use (`app.set(\'view\', View)`) is a mention, whatever else the top level calls')
+  has(vw, 'top level:6  d1 [same-file] by reference', 'review: a file-level value use (`app.set(\'view\', View)`) is linked by reference, whatever else the top level calls')
   const nf = await rimp('compileETag')
   has(nf, 'No symbol or file matches', 'review: a name the index does not hold is said so')
   has(nf, 'Its name as text', 'review: … and its mentions are still searched')
   const gt = await rimp('Store.get')
   has(gt, 'a/src/use.ts:6  in viaAny  y.get', 'review: an untyped call beside a typed call to another same-named method is still a possible caller')
   const ld = await rimp('Store.load')
-  has(ld, 'a/src/use.ts  :9 reference in bind', 'review: `const load = store.load`: the use on the declaring line stays')
+  has(ld, 'bind:8  d1 [typed] by reference', 'review: `const load = store.load` on a typed receiver is a reference to the method')
   const sl = await rimp('slugify')
-  has(sl, 'a/src/use.ts  :13 reference in each', 'review: `ns.slugify` qualified by an imported namespace is a use, not a property')
+  has(sl, 'each:12  d1 [import] by reference', 'review: `ns.slugify` qualified by an imported namespace is a reference, not a property')
   lacks(sl, 'secrets.env', 'review: a credential file is never searched')
   lacks(sl, '.git-credentials', 'review: … nor .git-credentials')
   has(sl, 'a/data.json  :1 config', 'review: a huge one-line data file is listed by its file, its line not read')
   const uf = await rimp('Flask.url_for')
-  has(uf, 'a/py/app.py  :6 reference in Flask.setup', 'review: a keyword argument passing a method (`url_for=self.url_for`) is a use, not a local binding')
+  has(uf, 'Flask.setup:5  d1 [same-class] by reference', 'review: a keyword argument passing a method (`url_for=self.url_for`) is a reference, not a local binding')
   const rb = await rimp('User.valid?')
   has(rb, 'a/rb/user.rb  :8 reference in check', 'review: a Ruby symbol naming a method (`&:valid?`) is a use')
   const fu = await rimp('Api.fetchUser')
@@ -993,6 +1008,337 @@ console.log('\n6b · beyond the edges: the review\'s cases')
   const dir = path.join(R, '.grimoire/graph')
   const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-rev-[12]/g) || []))
   ok(!bytes.length, `review: JSX text is not kept in the index (${bytes.length})`)
+}
+
+// ── 6c · injected collaborators: a field's type from its declaration or its constructor ──
+console.log('\n6c · dependency injection: calls on a field typed by its declaration or its constructor')
+{
+  const DI = path.join(SANDBOX, 'di')
+  const put = (rel, txt) => { mkdirSync(path.dirname(path.join(DI, rel)), { recursive: true }); writeFileSync(path.join(DI, rel), txt) }
+  put('grimoire.config.json', '{ "graph": {} }\n')
+  // a NestJS-shaped controller and service: the controller's findAll delegates to the service's
+  put('src/article.service.ts', "export class ArticleService {\n  findAll() { return [] }\n}\n")
+  put('src/article.controller.ts', "import { ArticleService } from './article.service'\nimport { Repo } from './repo'\nexport class ArticleController {\n  private repo: Repo\n  constructor(private readonly articleService: ArticleService) {}\n  findAll() {\n    return this.articleService.findAll()\n  }\n  save() {\n    return this.repo.save()\n  }\n}\n")
+  put('src/repo.ts', "export class Repo {\n  save() { return 1 }\n}\n")
+  // Spring: a field-injected repository, read with and without `this`
+  put('java/OwnerController.java', "class OwnerController {\n  @Autowired private OwnerRepository owners;\n  private final VetRepository vets;\n  OwnerController(VetRepository v) { this.vets = v; }\n  void list() { owners.findAll(); this.vets.findAll(); }\n}\n")
+  put('java/OwnerRepository.java', "interface OwnerRepository {\n  void findAll();\n}\n")
+  put('java/VetRepository.java', "class VetRepository {\n  void findAll() {}\n}\n")
+  // Python: a field set from a typed constructor parameter; a bare call in a method is a module function
+  put('py/svc.py', "from py.repo import Repo, get_domain\n\nclass Service:\n    def __init__(self, repo: Repo):\n        self.repo = repo\n\n    def save(self):\n        return self.repo.save()\n\n    def get_domain(self):\n        return get_domain()\n")
+  put('py/repo.py', "class Repo:\n    def save(self):\n        return 1\n\ndef get_domain():\n    return 'x'\n")
+  const dq = (tool, args = {}) => call(`graph_${tool}`, args, { root: DI })
+  await dq('index')
+  const c1 = await dq('callers', { symbol: 'ArticleService.findAll' })
+  has(c1, 'ArticleController.findAll  method  src/article.controller.ts:6  [typed]', 'TypeScript: a constructor parameter property types the field; the call reaches the injected service')
+  const loops = await dq('sql', { sql: "SELECT count(*) AS n FROM edges WHERE kind = 'CALLS' AND src = dst" })
+  ok(/\n0\b/.test(loops), `no call on a field links a method to itself (self-loops: ${loops.split('\n').pop()})`)
+  has(await dq('callers', { symbol: 'Repo.save', repo: undefined }), 'ArticleController.save  method  src/article.controller.ts:9  [typed]', 'TypeScript: a typed field declaration types `this.repo`')
+  const c2 = await dq('callers', { symbol: 'OwnerRepository.findAll' })
+  has(c2, 'OwnerController.list', 'Java: an annotated field types a bare `owners.findAll()`')
+  has(await dq('callers', { symbol: 'VetRepository.findAll' }), 'OwnerController.list', 'Java: a field the constructor sets from a typed parameter types `this.vets`')
+  has(await dq('callers', { symbol: 'Repo.save', depth: 1 }), 'Service.save  method  py/svc.py:7  [typed]', 'Python: `self.repo = repo` from a typed parameter types `self.repo`')
+  const gd = await dq('callers', { symbol: 'get_domain' })
+  has(gd, 'Service.get_domain  method  py/svc.py:10  [import]', 'Python: a bare call in a method is the imported module function')
+  lacks(gd, '[same-class]', '… never the method itself (no self-recursion)')
+}
+
+// ── 6d · what a framework declares, and functions passed as values ──
+console.log('\n6d · framework members (scopes, associations, annotated fields) and functions passed as values (REFERENCES)')
+{
+  const FR = path.join(SANDBOX, 'frame')
+  cpSync(path.join(HERE, 'fixtures', 'frame'), FR, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+  const commit = (dir, m) => { git(dir, 'add', '-A'); git(dir, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m) }
+  for (const r of ['rails', 'py', 'gin', 'web']) { git(path.join(FR, r), 'init', '-q', '-b', 'main'); commit(path.join(FR, r), 'init') }
+  const fq = (tool, args = {}) => call(`graph_${tool}`, args, { root: FR })
+  await fq('index')
+  const answers = []
+  const ask = async (tool, args) => { const a = await fq(tool, args); answers.push(a); return a }
+
+  // Rails: scopes, associations, delegate, accessors and define_method are methods of their class
+  const sa = await ask('symbol', { symbol: 'Story.active' })
+  has(sa, 'Story.active  method  rails/app/models/story.rb:4', 'Ruby: `scope :active, -> {…}` is a method of its class')
+  has(sa, '  scope :active\n', '… its signature ends before the lambda')
+  const ca = await ask('callers', { symbol: 'Story.active' })
+  has(ca, 'HomeController.active  method  rails/app/controllers/home_controller.rb:2  [qualified]', 'Ruby: `Story.active` resolves to the scope, qualified')
+  has(ca, 'Story.recent  method  rails/app/models/story.rb:5  [same-class]', 'Ruby: a bare receiver in a scope\'s lambda (`active.order`) is a call on self')
+  lacks(ca, 'HatsController', 'Ruby: `Hat.active` is not a caller of another class\'s scope')
+  has(await ask('callers', { symbol: 'HomeController.active' }), 'none found', 'Ruby: `Story.active` no longer resolves to a controller\'s action of that name')
+  const hw = await ask('sql', { sql: "SELECT count(*) AS n FROM edges e JOIN nodes s ON s.id = e.src WHERE s.qualname = 'HatsController.index' AND e.kind = 'CALLS'" })
+  ok(/\n0\b/.test(hw), `Ruby: a call qualified by a repository type that declares no such member (\`Hat.active\`, \`Hat.where\`) links to nothing (${hw.split('\n').pop()})`)
+  const ia = await ask('impact', { target: 'Story.active' })
+  has(ia, 'StoryTest.test_hottest  method test  rails/test/models/story_test.rb:2  d2', 'Ruby: the test reaching a scope through a class method')
+  has(ia, 'rails/app/controllers/hats_controller.rb:3  in HatsController.index  Hat.active', '… and `Hat.active` stays a possible caller, never a link')
+  has(await ask('callers', { symbol: 'Story.user' }), 'HomeController.show  method  rails/app/controllers/home_controller.rb:6  [typed]', 'Ruby: `belongs_to :user` is the accessor `story.user` reaches (typed by `Story.find`)')
+  has(await ask('callers', { symbol: 'Story.user_email' }), 'HomeController.show', 'Ruby: `delegate :email, to: :user, prefix: true` defines `user_email`')
+  const rs = await ask('search', { query: 'title_slug' })
+  has(rs, 'Story.title_slug  method  rails/app/models/story.rb:9', 'Ruby: `define_method(:title_slug)` with a literal symbol is a definition')
+  has(await ask('symbol', { symbol: 'User.token' }), 'attr_reader :token', 'Ruby: `attr_reader :token` is a method')
+  has(await ask('symbol', { symbol: 'Story.username' }), 'delegate :username, to: :user', 'Ruby: `delegate :username, to: :user` is a method')
+  const nt = await ask('callers', { symbol: 'Story.normalize_title' })
+  has(nt, 'Passed or stored as a value by', 'Ruby: a callback named by a symbol (`before_save :normalize_title`) is a reference')
+  has(nt, 'Story  class  rails/app/models/story.rb:1  [same-class]', '… from the class body declaring it')
+  has(await ask('status', {}), 'name guesses: 0% of 6 call links', 'Ruby: every call link in the app is resolved by syntax')
+
+  // Python: annotated class attributes are fields; a typed or self call reaches them; overrides dispatch
+  const pf = await ask('symbol', { symbol: 'BasePlugin.order_created' })
+  has(pf, 'BasePlugin.order_created  field  py/shop/plugins/base_plugin.py:5', 'Python: an annotated hook `order_created: Callable[…]` is a field of its class')
+  has(pf, 'order_created: Callable[["…", None], None]', '… its signature literal-free')
+  const po = await ask('callers', { symbol: 'BasePlugin.order_created' })
+  has(po, 'PluginsManager.order_created  method  py/shop/plugins/manager.py:5  [typed]', 'Python: a call on a typed receiver reaches the annotated field')
+  has(po, 'BasePlugin.notify  method  py/shop/plugins/base_plugin.py:8  [same-class]', 'Python: `self.order_created()` reaches it')
+  has(await ask('impact', { target: 'BasePlugin.order_created' }), 'WebhookPlugin.order_created  method  py/shop/plugins/webhook/plugin.py:5  (class WebhookPlugin)', 'Python: a subclass\'s method overriding the hook is listed as an override')
+  const wo = await ask('impact', { target: 'WebhookPlugin.order_created' })
+  has(wo, 'BasePlugin.order_created  field  py/shop/plugins/base_plugin.py:5  (class BasePlugin)', 'Python: … and the hook is the declaration calls may dispatch through')
+  has(wo, 'PluginsManager.order_created:5  d1 [typed]', '… whose callers join the impact')
+  const st = await ask('symbol', { symbol: 'ACCESS_TOKEN_EXPIRE_MINUTES' })
+  has(st, 'Settings.ACCESS_TOKEN_EXPIRE_MINUTES  field  py/app/settings.py:5', 'Python: a settings field `ACCESS_TOKEN_EXPIRE_MINUTES: int = 60` is a symbol')
+  has(st, '  ACCESS_TOKEN_EXPIRE_MINUTES: int\n', '… its signature stops before its value')
+  has(await ask('search', { query: 'ACCESS_TOKEN' }), 'Settings.ACCESS_TOKEN_EXPIRE_MINUTES  field', 'Python: graph_search finds a settings field')
+  has(await ask('symbol', { symbol: 'Settings.SECRET_KEY' }), '  SECRET_KEY: str\n', 'Python: a string default is not in the signature')
+  has(await ask('impact', { target: 'Settings.ACCESS_TOKEN_EXPIRE_MINUTES' }), 'py/app/security.py  :5 reference in expiry', 'Python: a field read through a receiver is a mention, a reference (not prose)')
+
+  // functions passed as values: a route's handler, a queued task, a signal's receiver
+  const fc = await ask('callers', { symbol: 'send_welcome' })
+  has(fc, 'on_user_saved  function  py/app/tasks.py:9  [same-file]', 'Python: `task.delay(…)` is a reference to the task')
+  has(fc, 'queue  function  py/app/signals.py:7  [import]', 'Python: `task.apply_async(…)` on an imported task too')
+  lacks(fc, 'shadow', 'Python: a parameter named like the function is the parameter, never a reference')
+  lacks(fc, 'by_name', 'Python: a string naming it is never a reference')
+  has(await ask('symbol', { symbol: 'send_welcome' }), 'referenced as a value by 2 · test files reaching it 1', 'Python: the test reaching the task through the code queueing it')
+  const fi = await ask('impact', { target: 'send_welcome' })
+  has(fi, 'queue:7  d1 [import] by reference', 'impact: a reference is walked, labelled by reference')
+  has(fi, 'test_queue  function test  py/tests/test_signals.py:4  d2', 'impact: … and the tests on that path')
+  lacks(fi, 'py/app/signals.py  :8', 'mentions: a line a reference explains is not a mention')
+  has(await ask('callers', { symbol: 'on_user_saved' }), 'app/signals.py  file  py/app/signals.py  [import]', 'Python: `signal.connect(handler)` at top level references the handler')
+
+  const al = await ask('symbol', { symbol: 'ArticleList' })
+  has(al, 'referenced as a value by 1 · test files reaching it 1', 'Go: a handler passed to `router.GET` is reached by the test calling the registrar')
+  const ai = await ask('impact', { target: 'ArticleList' })
+  has(ai, 'RegisterArticleRoutes:5  d1 [same-file] by reference', 'Go: the registrar passing it as a value is in the impact')
+  has(ai, 'TestArticles  function test  gin/articles/unit_test.go:5  d2', 'Go: … and so is the test hitting the registrar')
+  has(await ask('callees', { symbol: 'RegisterArticleRoutes' }), 'Functions it passes or stores as a value (by reference):\n  ArticleList', 'callees: the values a function passes are listed apart from its calls')
+  const ov = await ask('overview', { repo: 'gin' })
+  has(ov, 'tests reach 75% of 4 functions', 'overview: test reach follows references (the handlers registered, not the one never registered)')
+  // a function nothing calls but something passes as a value is reached through what takes it: no entry point
+  writeFileSync(path.join(FR, 'py/app/hooks.py'), 'def audit(x):\n    return x\n\n\ndef on_signup(user):\n    audit(user)\n    return user\n\n\ndef cli_main(argv):\n    audit(argv)\n\n\nregister_hook(on_signup)\n')
+  const entries = ((await ask('overview', { repo: 'py' })).split('Entry points')[1] || '').split('Most used')[0]
+  has(entries, 'cli_main  function  py/app/hooks.py:10', 'overview: a function nothing calls or passes is an entry point')
+  lacks(entries, 'on_signup', 'overview: … one passed as a value at top level (a hook registered) is not')
+  unlinkSync(path.join(FR, 'py/app/hooks.py'))
+
+  // TypeScript: class fields are definitions (fields), literal-free
+  const bx = await ask('symbol', { symbol: 'Box' })
+  has(bx, 'members: size:2, label:3, area:4', 'TypeScript: class fields are members of their class')
+  has(await ask('symbol', { symbol: 'Box.label' }), 'Box.label  field  web/src/box.ts:3\n  label\n', 'TypeScript: a field\'s signature stops before its value')
+
+  // the diff: a changed handler is tested through its registrar; a removed one still registered is a break
+  const edit = (rel, a, b) => { const f = path.join(FR, rel); const t = readFileSync(f, 'utf8'); ok(t.includes(a), `fixture edit applies to ${rel}`); writeFileSync(f, t.replace(a, b)) }
+  edit('gin/articles/routers.go', 'func ArticleList(c *gin.Context) {\n\tc.JSON(200, nil)', 'func ArticleList(c *gin.Context) {\n\tc.JSON(201, nil)')
+  edit('py/app/tasks.py', '@app.task\ndef send_welcome(user_id):\n    return user_id\n', '')
+  const d = await ask('diff', { base: 'HEAD' })
+  has(d, '~ ArticleList  function  gin/articles/routers.go:10  body', 'diff: a handler\'s body change')
+  has(d, 'gin/articles/unit_test.go  (distance 2)', 'diff: the test reaching it through its registrar is a test to run')
+  lacks(d, 'Changed code no test reaches (1', 'diff: … so the handler is not untested')
+  has(d, 'removed send_welcome', 'diff: a removed task')
+  has(d, '- send_welcome  function  (was py/app/tasks.py:5)', 'diff: … read from the base')
+  has(d, 'Risk: high', 'diff: a removed function still queued elsewhere is high risk')
+
+  const leaked = answers.flatMap((a) => a.match(/canary-frame-\d/g) || [])
+  ok(!leaked.length, `6d: no answer quotes a field's or a member's literal (${leaked.length ? [...new Set(leaked)].join(', ') : 'none'})`)
+  const dir = path.join(FR, '.grimoire/graph')
+  const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => (readFileSync(path.join(dir, f), 'latin1').match(/canary-frame-\d/g) || []))
+  ok(!bytes.length, `6d: no field default is kept in the index (${bytes.length})`)
+}
+
+// ── 6e · a React Native workspace: JSX, wrapped components, aliases, workspace packages, platform files ──
+console.log('\n6e · a React Native workspace (fixtures/rn): JSX renders, aliases, workspace packages, platform files, files outside the index')
+{
+  const RN = path.join(SANDBOX, 'rn')
+  cpSync(path.join(HERE, 'fixtures', 'rn'), RN, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+  const commit = (m) => { git(RN, 'add', '-A'); git(RN, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', m) }
+  git(RN, 'init', '-q', '-b', 'main'); commit('init')
+  const nq = (tool, args = {}) => call(`graph_${tool}`, args, { root: RN })
+  const sql = async (s) => (await nq('sql', { sql: s })).split('\n').slice(1).filter((l) => l && !l.startsWith('Leads')).map((l) => l.trim())
+  await nq('index')
+
+  const home = await nq('file', { path: 'apps/mobile/src/screens/Home.tsx' })
+  has(home, 'Home  function  :13', '`export default () => …` is a definition named after its file')
+  has(home, '  apps/mobile/src/ui.ts', 'relative: `../ui` resolves as before')
+  has(home, '  apps/mobile/src/components/Card.tsx', 'babel module-resolver: `@components/Card` (no slash after the prefix) resolves through the literal alias')
+  has(home, '  apps/mobile/src/alf/index.tsx', 'an alias no config maps (`~/alf`) reaches a folder\'s index file below the repository root')
+  has(home, '  packages/db/src/schema.ts', 'workspace: `@acme/db/schema` resolves through the package\'s conditional exports, a dist target mapped to its source')
+  has(home, '  packages/db/src/index.ts', 'workspace: `@acme/db` resolves through the package\'s `.` export')
+  has(home, '  packages/ui/src/button.tsx', 'workspace: `@acme/ui/button` resolves through a subpath pattern (`./*`)')
+  has(home, '  packages/api/src/root.ts', 'workspace: `@acme/api` resolves through `main`')
+  has(home, '  apps/mobile/src/sql/posts.sql', 'a relative import of a non-code file the index holds (`.sql`) is an IMPORTS edge to it')
+  has(home, 'files outside the index: @assets/logo.png, ../data.json', 'an image through a tsconfig alias (`@assets/*`) and a JSON file are files outside the index, not external')
+  lacks(home, 'external: ', '… so nothing in that file is called external')
+  const card = await nq('file', { path: 'apps/mobile/src/components/Card.tsx' })
+  for (const p of ['ios', 'android', 'web', 'mobile']) has(card, `apps/mobile/src/components/Button.${p}.tsx`, `platform files: \`./Button\` resolves to Button.${p}.tsx${p === 'mobile' ? ' (a suffix the tsconfig\'s moduleSuffixes adds, through extends)' : ''}`)
+  has(await nq('file', { path: 'packages/db/src/config.ts' }), '  packages/db/src/config.base.ts', 'a dotted file name (`./config.base`) keeps its dots')
+  has(await nq('callers', { symbol: 'baseConfig' }), 'config  function  packages/db/src/config.ts:3  [import]', '… and its function is called through the import')
+
+  // JSX renders are calls; a test rendering a component is its test
+  const cc = await nq('callers', { symbol: 'Card' })
+  has(cc, 'Home  function  apps/mobile/src/screens/Home.tsx:13  [import]', 'JSX: `<Card />` calls Card, through its default import')
+  has(await nq('callers', { symbol: 'Row' }), 'Home  function  apps/mobile/src/screens/Home.tsx:13  [import]', 'JSX: `<UI.Row>` calls Row through the namespace import')
+  has(await nq('callers', { symbol: 'Button', repo: 'rn' }), 'Home  function  apps/mobile/src/screens/Home.tsx:13  [import]', 'JSX: an aliased import (`Button as UIButton`) renders the workspace package\'s forwardRef component')
+  has(await nq('callers', { symbol: 'postTable' }), 'postRouter.all  method  packages/api/src/router/post.ts:4  [import]', 'tRPC: a procedure of a `satisfies TRPCRouterRecord` object is a member, and calls through a workspace package')
+  has(await nq('callers', { symbol: 'ping' }), 'appRouter.health  method  packages/api/src/root.ts:5  [same-file]', 'tRPC: a procedure of `createTRPCRouter({…})` is a member of the router')
+  has(await nq('callers', { symbol: 'count' }), 'useStore  function  apps/mobile/src/store.ts:1  [same-file]', 'a store made by `create<State>()((set) => …)` is a definition: its calls are its own')
+  const variants = await sql("SELECT count(*) AS n FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst JOIN files f ON f.id = d.file_id WHERE e.kind = 'CALLS' AND s.name = 'Card' AND d.name = 'Button' AND e.confidence = 'import' AND f.path LIKE 'apps/%'")
+  ok(variants[0] === '4', `platform files: Card's \`<Button>\` links each of the 4 variants, by import, not as an ambiguity (${variants.join(',')})`)
+  const shared = await sql("SELECT f.path, e.confidence FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst JOIN files f ON f.id = d.file_id WHERE e.kind = 'CALLS' AND s.name = 'Card' AND f.path LIKE 'packages/%'")
+  ok(shared.length === 1 && /^packages\/ui\/src\/button\.tsx\s+import$/.test(shared[0]), `a barrel's re-export (\`export { Button } from './button'\`) is followed to the definition (${shared.join(' · ')})`)
+  const span = await sql("SELECT count(*) AS n FROM edges e JOIN nodes d ON d.id = e.dst WHERE e.kind = 'CALLS' AND d.name = 'Span'")
+  ok(span[0] === '0', `a barrel passing on a dependency's component (\`export { Text as Span } from 'react-native'\`) links nothing, never the repository's \`type Span\` (${span.join(',')})`)
+  has(await nq('callers', { symbol: 'Home' }), 'Framed  function test', 'a component wrapped by `memo(…)` inside a test is a definition: it renders Home')
+  const intrinsic = await sql("SELECT count(*) AS n FROM refs WHERE name IN ('div', 'button')")
+  ok(intrinsic[0] === '0', `JSX: a lowercase tag is never a call (${intrinsic.join(',')})`)
+  const ih = await nq('impact', { target: 'Home', mentions: false })
+  has(ih, 'apps/mobile/src/screens/Home.test.tsx  file test', 'impact: a test rendering `<Home />` is a test of Home')
+  const ov = await nq('overview')
+  const entries = ov.slice(ov.indexOf('Entry points'), ov.indexOf('Most used'))
+  lacks(entries, 'Card  function', 'overview: a component something renders is no entry point')
+  writeFileSync(path.join(RN, 'apps/mobile/src/screens/Home.tsx'), readFileSync(path.join(RN, 'apps/mobile/src/screens/Home.tsx'), 'utf8').replace('<Card />', '<Card />\n    <Card />'))
+  const d = await nq('diff', { base: 'HEAD' })
+  has(d, '~ Home  function  apps/mobile/src/screens/Home.tsx:13  body', 'diff: the default export, named after its file, is the changed definition')
+  has(d, 'apps/mobile/src/screens/Home.test.tsx', 'diff: … and the test rendering it is the test to run')
+  lacks(d, 'Changed code no test reaches', 'diff: … so the change is not untested')
+}
+
+console.log('\n6f · module resolution reads the configs a repository states guarded: no credential file, no link out of it, no device, a size cap')
+{
+  const H = path.join(SANDBOX, 'hostile-js'), OUT = path.join(SANDBOX, 'hostile-js-outside')
+  const put = (rel, txt) => { mkdirSync(path.dirname(path.join(H, rel)), { recursive: true }); writeFileSync(path.join(H, rel), txt) }
+  mkdirSync(OUT, { recursive: true })
+  writeFileSync(path.join(OUT, 'package.json'), JSON.stringify({ name: '@leak/outside', main: 'index.ts', note: 'canary-js-1' }))
+  put('grimoire.config.json', '{ "graph": {} }\n')
+  // a tsconfig extending credential files (paths only they map) beside a config of the repository
+  put('tsconfig.json', '{ "extends": ["./.env", "./credentials.json", "./tsconfig.base.json"] }\n')
+  put('.env', '{ "compilerOptions": { "paths": { "@env/*": ["./src/*"] } }, "x": "canary-js-2" }\n')
+  put('credentials.json', '{ "compilerOptions": { "paths": { "@cred/*": ["./src/*"] } }, "token": "canary-js-3" }\n')
+  put('tsconfig.base.json', '{ "compilerOptions": { "paths": { "@ok/*": ["./src/*"] } } }\n')
+  put('package.json', JSON.stringify({ name: 'root', workspaces: ['pkgs/*'] }))
+  put('src/b.ts', 'export const b = 1\n')
+  put('src/a.ts', "import { b } from '@ok/b'\nimport { e } from '@env/b'\nimport { c } from '@cred/b'\nimport { o } from '@leak/outside'\nimport { i } from '@in/pkg'\nexport const a = () => b + e + c + o + i\n")
+  put('real/pkg/package.json', JSON.stringify({ name: '@in/pkg', main: 'index.ts' }))
+  put('real/pkg/index.ts', 'export const i = 1\n')
+  mkdirSync(path.join(H, 'pkgs'), { recursive: true })
+  const { symlinkSync } = await import('node:fs')
+  // a package.json that is a device (unbounded), one linked out of the repository, one linked inside it
+  mkdirSync(path.join(H, 'pkgs/zero')); symlinkSync('/dev/zero', path.join(H, 'pkgs/zero/package.json'))
+  mkdirSync(path.join(H, 'pkgs/out')); symlinkSync(path.join(OUT, 'package.json'), path.join(H, 'pkgs/out/package.json')); writeFileSync(path.join(H, 'pkgs/out/index.ts'), 'export const o = 1\n')
+  mkdirSync(path.join(H, 'pkgs/in')); symlinkSync('../../real/pkg/package.json', path.join(H, 'pkgs/in/package.json')); symlinkSync('../../real/pkg/index.ts', path.join(H, 'pkgs/in/index.ts'))
+  for (const f of ['babel.config.js', 'lerna.json', 'pnpm-workspace.yaml']) symlinkSync('/dev/zero', path.join(H, f))
+  put('svc/main.go', 'package main\n\nfunc main() {}\n'); symlinkSync('/dev/zero', path.join(H, 'svc/go.mod'))
+  git(H, 'init', '-q', '-b', 'main'); git(H, 'add', '-A'); git(H, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'init')
+  const t0 = Date.now()
+  const idx = await call('graph_index', {}, { root: H })
+  ok(/Indexed in/.test(idx) && Date.now() - t0 < 60000, `the index completes: a config linked to /dev/zero is never read (${idx.split('\n')[0]}, ${Date.now() - t0} ms)`)
+  const fa = await call('graph_file', { path: 'src/a.ts' }, { root: H })
+  has(fa, '  src/b.ts', 'a tsconfig\'s relative `extends` of the repository is still followed (`@ok/b`)')
+  ok((fa.match(/ {2}src\/b\.ts/g) || []).length === 1, 'an `extends` naming `.env` or `credentials.json` is never opened: the paths only they map resolve to nothing')
+  lacks(fa, 'pkgs/out/index.ts', 'a workspace package.json linked out of the repository is never read: its name maps nothing')
+  has(fa, 'pkgs/in/index.ts', 'a package.json linked inside the repository is read as before')
+  const dir = path.join(H, '.grimoire/graph')
+  const bytes = readdirSync(dir).filter((f) => f.startsWith('graph.db')).flatMap((f) => readFileSync(path.join(dir, f), 'latin1').match(/canary-js-\d/g) || [])
+  ok(!bytes.length && !/canary-js/.test(fa), `nothing of those files reaches an answer or the index (${bytes.length ? [...new Set(bytes)].join(', ') : 'none'})`)
+  const { readRepoText } = await import('../lib/project.mjs')
+  ok(readRepoText(H, 'pkgs/zero/package.json') === null && readRepoText(H, '.env') === null && readRepoText(H, 'pkgs/out/package.json') === null && readRepoText(H, '../hostile-js-outside/package.json') === null && readRepoText(H, 'tsconfig.base.json') !== null,
+    'readRepoText: a device, a credential file, a link out of the repository, a path out of it: null; a config of the repository: read')
+  writeFileSync(path.join(H, 'big.json'), `{"x":"${'a'.repeat(1 << 20)}"}`)
+  ok(readRepoText(H, 'big.json') === null && readRepoText(H, 'big.json', { max: 2 << 20 }) !== null, 'readRepoText: a file past its cap (1 MB by default) is not read at all')
+}
+
+console.log('\n6g · a wide syntax tree is walked in its size: each node\'s children listed in one call')
+{
+  const W = path.join(SANDBOX, 'wide')
+  mkdirSync(path.join(W, 'src'), { recursive: true }); mkdirSync(path.join(W, 'py'), { recursive: true })
+  writeFileSync(path.join(W, 'grimoire.config.json'), '{ "graph": {} }\n')
+  // 440 KB of an unclosed factory (the error recovery leaves one node of 20000 children), a wide
+  // array, a Python import of 20000 names
+  writeFileSync(path.join(W, 'src/config.js'), 'export default () => {'.repeat(20000))
+  writeFileSync(path.join(W, 'src/list.js'), `export const xs = [${'f(),'.repeat(40000)}]\n`)
+  writeFileSync(path.join(W, 'py/imp.py'), `from m import ${Array.from({ length: 20000 }, (_, i) => `n${i}`).join(', ')}\n`)
+  git(W, 'init', '-q', '-b', 'main')
+  const t0 = Date.now()
+  const idx = await call('graph_index', {}, { root: W })
+  const ms = Date.now() - t0
+  ok(/Indexed in/.test(idx) && ms < 8000, `indexed in ${ms} ms (< 8 s; a child listed by its index walked the children before it: 17 s for the factory alone)`)
+}
+
+// ── 6h · resolution's narrowing, measured on real projects: each a wrong link no longer made, or a right one kept ──
+console.log('\n6h · resolution (fixtures/resolve): call chains, the self-call guard, dependency types, closures, locals, variants, Ruby symbols, JSX imports, wrappers, routers, globals, super, typed sites')
+{
+  const RS = path.join(SANDBOX, 'resolve')
+  cpSync(path.join(HERE, 'fixtures', 'resolve'), RS, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+  const rq = (tool, args = {}) => call(`graph_${tool}`, args, { root: RS })
+  const rows = async (s) => (await rq('sql', { sql: s })).split('\n').slice(1).filter((l) => l && !l.startsWith('Leads')).map((l) => l.trim().replace(/\s+/g, ' '))
+  // the edges of `kind` from the definition (or file) `src` names, as `confidence dst-path:dst-qualname`
+  const edgesFrom = (src, kind = 'CALLS') => rows(`SELECT e.confidence || ' ' || fd.path || ':' || d.qualname AS e FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst JOIN files fd ON fd.id = d.file_id WHERE e.kind = '${kind}' AND (s.qualname = '${src}') ORDER BY 1`)
+  await rq('index')
+
+  // 1 · a call chain rooted at self is the object's own method, not a field holding another object
+  ok((await edgesFrom('ProductsQueryset.annotate_publication_info')).includes('same-file shop/managers.py:ProductsQueryset.annotate_published_at'), `Python: \`self.annotate_is_published(c).annotate_published_at(c)\` reaches the class's own method (${(await edgesFrom('ProductsQueryset.annotate_publication_info')).join(' · ')})`)
+  ok(!(await edgesFrom('Delegating.annotate_published_at')).length, `Python: \`self.repo.annotate_published_at()\` is never the caller itself nor another class's method by name (${(await edgesFrom('Delegating.annotate_published_at')).join(' · ')})`)
+  // 2 · where the guard removed the caller or its class's method, the name decides nothing
+  ok(!(await edgesFrom('SharedPrefs.getString')).length, `Kotlin: \`safeInstance.getString()\` in SharedPrefs.getString is not a unique-name link to NotificationPrefs.getString (${(await edgesFrom('SharedPrefs.getString')).join(' · ')})`)
+  ok(!(await edgesFrom('GifView.playAsync')).length, `TypeScript: \`this.nativeRef.current.playAsync()\` is not linked to the other platform variant's method (${(await edgesFrom('GifView.playAsync')).join(' · ')})`)
+  ok((await edgesFrom('GifView.render')).some((e) => /^same-file src\/GifView\.tsx:GifView\.playAsync$/.test(e)), `TypeScript: \`this.chain().playAsync()\` (a chain, not a field) stays the class's own (${(await edgesFrom('GifView.render')).join(' · ')})`)
+  // 3 · a type imported from a dependency is not the repository's class of that name; a mock is no production callee
+  ok(!(await edgesFrom('logWith')).length, `TypeScript: \`l.info()\` on a \`Logger\` imported from a dependency links nothing (${(await edgesFrom('logWith')).join(' · ')})`)
+  ok((await edgesFrom('logOwn')).includes('typed src/logger.ts:Logger.info'), '… a `Logger` imported (renamed) from the repository is typed to it')
+  ok(!(await edgesFrom('link.ts', 'REFERENCES')).length && !(await rows("SELECT 1 FROM edges e JOIN nodes s ON s.id = e.src JOIN files f ON f.id = s.file_id WHERE f.path = 'src/link.ts' AND e.kind = 'REFERENCES'")).length, 'TypeScript: `redirectLogger.info` passed on (a dependency\'s `Logger`) references nothing')
+  ok(!(await edgesFrom('save')).length, `TypeScript: \`new File()\` / \`new FS.File()\` from a dependency, \`f.write()\`: never the jest setup's mock field (${(await edgesFrom('save')).join(' · ')})`)
+  has(await rq('symbol', { symbol: 'File' }), 'class test', 'a test runner\'s setup (`jest/setup.js`) is test-support code')
+  // 4 · a bare call reaches a closure of an enclosing definition, a wrapped component's too
+  has(await rq('callers', { symbol: 'selectItem' }), 'MentionList.enterHandler  function  web/src/Autocomplete.tsx:5  [same-file]', 'JSX: a bare call inside `forwardRef(function …)` reaches the closure it names')
+  has(await rq('callers', { symbol: 'Row' }), 'MentionList  function  web/src/Autocomplete.tsx:3  [same-file]', 'JSX: a component defined as a closure is rendered from its enclosing definition')
+  // 5 · locals are no references: an arrow's lone parameter, a destructured one, a callback's locals; nor a name the file never imports
+  const listRefs = await edgesFrom('List', 'REFERENCES')
+  ok(!listRefs.length, `TypeScript: \`profile => <Item profile={profile} />\` and a destructured \`{ clearTranslation }\` are parameters, not the imported functions (${listRefs.join(' · ')})`)
+  const fileRefs = await rows("SELECT d.qualname FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst WHERE e.kind = 'REFERENCES' AND s.qualname = 'src/List.tsx'")
+  ok(fileRefs.join(',') === 'profile', `TypeScript: \`{ onGet: get }\` names nothing the file imports (no link to a module's \`get\`); \`onProfile: profile\` is the import (${fileRefs.join(',')})`)
+  const testRefs = await rows("SELECT d.qualname FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst WHERE e.kind = 'REFERENCES' AND s.qualname = 'src/merge.test.ts'")
+  ok(!testRefs.length, `a local of an anonymous callback (\`it('…', () => { const get = …; get.mockRestore() })\`) is that local, not the import it shadows (${testRefs.join(',')})`)
+  const badge = await edgesFrom('Badge', 'REFERENCES')
+  ok(!badge.some((e) => /Button\.tsx:Button$/.test(e)), `JSX: \`<Button.Button>\` names a namespace, no value of the function \`Button\` (${badge.join(' · ')})`)
+  has(await rq('callers', { symbol: 'Button' }), 'Badge  function  web/src/Settings.tsx:4  [import]', '… while the render still calls it through the namespace')
+  // 6 · a value naming a function in its platform variants links each variant, not as an ambiguity
+  ok(badge.filter((e) => /^import src\/share\.(ios|android)\.ts:onShare$/.test(e)).length === 2, `REFERENCES: \`onPress={onShare}\` links share.ios.ts and share.android.ts by import (${badge.join(' · ')})`)
+  // 7 · Ruby: only a callback-style macro's symbols name methods
+  const story = await edgesFrom('Story', 'REFERENCES')
+  ok(story.join(',') === 'same-class app/models/story.rb:Story.normalize_title,same-class app/models/story.rb:Story.published?', `Ruby: \`before_save :normalize_title, if: :published?\` name the class's methods, and nothing else in its body does (${story.join(' · ')})`)
+  ok((await edgesFrom('Story.normalize_title', 'REFERENCES')).includes('same-class app/models/story.rb:Story.published?'), 'Ruby: `respond_to?(:published?)` names the method')
+  const scoped = [...await edgesFrom('Story.by_title', 'REFERENCES'), ...await edgesFrom('Story.preloaded', 'REFERENCES')]
+  ok(!scoped.length, `Ruby: \`group(:title)\` names a column, \`preload(:votes, hidings: :user)\` associations to load (another model's \`user\` among them): no method used as a value (${scoped.join(' · ')})`)
+  const ctl = await edgesFrom('StoriesController', 'REFERENCES')
+  ok(ctl.join(',') === 'same-class app/controllers/stories_controller.rb:StoriesController.find_story,same-class app/controllers/stories_controller.rb:StoriesController.show', `Ruby: \`before_action :find_story, only: [:show]\` names both (${ctl.join(' · ')})`)
+  ok(!(await edgesFrom('StoriesController.create', 'REFERENCES')).length, 'Ruby: `render action: :new` names an action to render, no method used as a value')
+  // 8 · a JSX name whose import resolved stays that file's: an alias followed, never a guess elsewhere
+  const dialog = await edgesFrom('Dialog')
+  ok(!dialog.some((e) => e.includes('embed/')), `JSX: \`<Check>\` imported from a file re-exporting a non-function is never a unique-name link to another \`Check\` (${dialog.join(' · ')})`)
+  ok(dialog.includes('import src/icons/brands/Star.tsx:Star'), '… and `export const Star = CanonicalStar` is followed to the definition it names')
+  const card = await rows("SELECT d.name FROM edges e JOIN nodes s ON s.id = e.src JOIN files f ON f.id = s.file_id JOIN nodes d ON d.id = e.dst WHERE f.path = 'src/__tests__/Card.test.tsx' AND e.kind = 'CALLS'")
+  ok(!card.length, `JSX: a name destructured from \`jest.requireActual('react-native')\`, also through \`jest.requireActual<typeof import('react-native')>(…)\` or \`require('react-native') as typeof import(…)\`, is the dependency's (${card.join(',')})`)
+  const header = await edgesFrom('Header')
+  ok(header.join(',') === 'import src/Layout.tsx:Slot', `JSX: \`export const Slot = Layout.Slot\` then \`<Slot />\` is the namespace's member; \`throw Error(…)\` the runtime's, never a component named \`Error\` (${header.join(' · ')})`)
+  // 9 · a value built with a callback is no function unless the callee wraps one
+  const fns = await rows("SELECT n.name FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.path = 'src/schema.ts' AND n.kind = 'function' ORDER BY n.name")
+  ok(fns.join(',') === 'debounced,wire', `\`pgTable(…, cb)\`, \`z.object().refine(cb)\`, \`createContext(() => {})\`, \`t.procedure.use(cb)\` are no functions; \`debounce(() => …)\` is (${fns.join(',')})`)
+  // 10 · a router's procedure is reached only by syntax
+  ok(!(await edgesFrom('getSession')).length, `tRPC: \`auth.api.getSession()\` is no name guess at a router's procedure (${(await edgesFrom('getSession')).join(' · ')})`)
+  ok((await edgesFrom('viaRouter')).includes('qualified src/router.ts:authRouter.getSession'), '… `authRouter.getSession()` still reaches it')
+  // 11 · the runtime's objects are a dependency
+  ok(!(await edgesFrom('report')).length, `\`console.error()\`, \`window.open()\` never guess at the repository's \`Logger.error\` or a mock's \`open\` (${(await edgesFrom('report')).join(' · ')})`)
+  // 12 · super: the supertypes' member, or none
+  ok((await edgesFrom('AddressForm.clean')).join(',') === 'same-class shop/forms.py:BaseForm.clean', `Python: \`super().clean()\` is the base class's (${(await edgesFrom('AddressForm.clean')).join(' · ')})`)
+  ok(!(await edgesFrom('Order.save')).length, `Python: \`super().save()\` up a framework's class links nothing, never another class's \`save\` (${(await edgesFrom('Order.save')).join(' · ')})`)
+  ok((await edgesFrom('Child.save')).join(',') === 'same-class src/user.service.ts:Base.save', `TypeScript: \`super.save()\` is the parent's, never the method itself (${(await edgesFrom('Child.save')).join(' · ')})`)
+  // 13 · an unlinked site typed to an unrelated type is no possible caller
+  const imp = await rq('impact', { target: 'UserService.findOne', mentions: false })
+  lacks(imp, 'this.userRepository.findOne', 'impact: `this.userRepository.findOne()` on a `Repository<…>` is not listed as a possible caller of UserService.findOne')
 }
 
 rmSync(SANDBOX, { recursive: true, force: true })

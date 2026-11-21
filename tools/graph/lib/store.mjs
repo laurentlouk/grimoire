@@ -3,36 +3,66 @@
 //   repos    name, root (project-relative), head (git HEAD at the last index), indexed_at
 //   files    one row per indexed file; node_id = its `file` node
 //   nodes    kind: file | function | method | constructor | class | struct | interface | trait |
-//            protocol | enum | type | module | namespace | macro; qualname = Container.name;
+//            protocol | enum | type | module | namespace | macro | field | object (a JavaScript router of
+//            procedures); qualname = Container.name;
 //            parent_id = the enclosing type or module (NULL at top level); is_test; signature = the
-//            first line up to the body, each literal's text shown as `…` (extract.mjs)
-//   edges    src → dst, kind: CALLS | IMPORTS | EXTENDS | IMPLEMENTS; confidence: how the name
-//            was resolved (same-class, qualified, import, same-file, same-package, unique-name,
-//            ambiguous, path)
-//   refs     unresolved names as extracted (call sites with the receiver's text, literals as `…`,
-//            and its stated type when the syntax gives it, supertypes); imports: import statements
+//            first line up to the body, each literal's text shown as `…` (extract.mjs). A field is a
+//            class's annotated attribute (Python) or class field (TypeScript, JavaScript), its
+//            signature up to its value; a framework's declaration in a class body (Ruby `scope`,
+//            `has_many`, `delegate`, `attr_reader`, `define_method`) is a method of that class, its
+//            via 'framework' (NULL for every definition the language's own syntax makes)
+//   edges    src → dst, kind: CALLS | IMPORTS | EXTENDS | IMPLEMENTS | REFERENCES (a function or
+//            method named as a value: an argument, a property value, an assignment, a return, a
+//            `task.delay()`); confidence: how the name was resolved (same-class, typed, qualified,
+//            import, same-file, same-package, unique-name, ambiguous, path; REFERENCES never by a
+//            name alone)
+//   refs     unresolved names as extracted (kind call | new | macro: call sites with the receiver's
+//            text, literals as `…`, and its stated type when the syntax gives it; extends | implements:
+//            supertypes; ref: a name in a value position, its qualifier's text; alias: `export const X = Y`,
+//            name X, qual Y); imports: import
+//            statements, resolved = the files linked, 0 none (external), -1 a file of the repository
+//            the index does not hold (an image, a JSON file)
 //   cochange files that changed in the same commits (from git log), n = commits shared
 //   churn    per file, n = recent commits that touched it (same window as cochange)
+//   routes · route_facts · route_refs · route_links   HTTP routes and navigation screens, the
+//            routers and mounts that compose their paths, the call sites naming one (literal
+//            segments hashed: no literal's text), and which site reaches which route
+//            (lib/routes.mjs, lib/route-graph.mjs); edges ROUTES_TO run from a site's definition
+//            to the route's handler
 //   data_inputs  the files data extractors read (lib/data/registry.mjs): size, mtime, hash, and
 //            ddl, what its content declares (registry.mjs inspect): for a .sql file its schema
 //            statements (3 a schema dump's header over a table, 2 creates or alters a table or an
 //            index, 1 other schema statements only, 0 none); for a JSON or YAML file its tables (3 a template's table resource, 2 a key
 //            schema, a CreateTable input; 0 none); for a Terraform or Terragrunt file what it
 //            declares (4 a module with a table resource, 5 a terragrunt.hcl Terragrunt runs, 6 a
-//            module out of reach, 1 other); for a source file (.rs, .ts, .js, .py, .go, .prisma),
+//            module out of reach, 1 other); for a source file (.rs, .ts, .js, .py, .go, .rb, .java, .prisma),
 //            bits: 1 what the item binding reads (a serde derive or a type, a conversion, an
 //            environment read, a string constant), 2 a key-value SDK call shape (the access
 //            patterns), 4 a table-builder schema, 8 a barrel re-exporting relative modules, 16 a
 //            schema-language file's models, 32 its datasource, 64 a query call beside SQL text or a
 //            SQL client import (the queries the code sends), 128 a key-value cache's client or command
-//            (its key space); 0 none
+//            (its key space), and the ORMs' (lib/data/extractors): 256 a Rails schema.rb, 512 an Active
+//            Record model, 1024 a migration sending DDL as raw SQL, 2048 a TypeORM data source, 4096 a
+//            Django model file, 8192 Django settings, 16384 SQLAlchemy models, 32768 an engine URL, 65536
+//            a TypeORM entity, 131072 a JPA entity, 262144 a Mongoose schema, 524288 an Alembic revision,
+//            1048576 an Alembic environment, 2097152 a Drizzle query-builder call (extractors/drizzle-queries.mjs); 0 none
 //   data_facts   one row per extraction job: scope file | unit, key (the file, or the folder),
 //            extractor 'id@version', sig (hash of its inputs), facts (JSON, lib/data/model.mjs),
 //            or error when the extractor threw
+//   config   configuration keys (config.mjs), names only: repo, path, file_id (NULL for a declaration
+//            file the index does not parse: an env template, a compose file, a CI workflow, app.json,
+//            a Spring file, a Prisma schema), node_id (the innermost definition holding the line, else
+//            the file node), key, kind env | config, role read | declare | map | helper (an env helper
+//            a file defines, `@name`) | defer (a read resolved through the imports: `@helper|KEY`,
+//            `@factory().k`; config.mjs linkConfig), src_key (a mapping's source), via, line
+//   config_inputs  the declaration files config.mjs reads: size, mtime, hash
+//   resolve_inputs the files module resolution reads (project.mjs resolveInputPaths: package.json,
+//            tsconfig, babel and workspace configs, go.mod, Cargo.toml): size, mtime, hash; one that
+//            changed re-resolves its repository
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '15'
+export const SCHEMA_VERSION = '26'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
@@ -45,13 +75,13 @@ export async function driver() {
 }
 
 // Every table of the index, in DDL order.
-export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts']
+export const TABLES = ['meta', 'repos', 'files', 'nodes', 'refs', 'imports', 'edges', 'cochange', 'churn', 'data_inputs', 'data_facts', 'routes', 'route_facts', 'route_refs', 'route_links', 'config', 'config_inputs', 'resolve_inputs']
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS repos(name TEXT PRIMARY KEY, root TEXT, head TEXT, indexed_at TEXT, cochange_head TEXT);
 CREATE TABLE IF NOT EXISTS files(id INTEGER PRIMARY KEY, repo TEXT, path TEXT, lang TEXT, size INTEGER, mtime INTEGER, hash TEXT, is_test INTEGER, node_id INTEGER, UNIQUE(repo, path));
-CREATE TABLE IF NOT EXISTS nodes(id INTEGER PRIMARY KEY, file_id INTEGER, kind TEXT, name TEXT, qualname TEXT, parent_id INTEGER, container TEXT, line INTEGER, end_line INTEGER, signature TEXT, is_test INTEGER);
+CREATE TABLE IF NOT EXISTS nodes(id INTEGER PRIMARY KEY, file_id INTEGER, kind TEXT, name TEXT, qualname TEXT, parent_id INTEGER, container TEXT, line INTEGER, end_line INTEGER, signature TEXT, is_test INTEGER, via TEXT);
 CREATE INDEX IF NOT EXISTS nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS nodes_file ON nodes(file_id);
 CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(parent_id);
@@ -68,6 +98,22 @@ CREATE TABLE IF NOT EXISTS churn(repo TEXT, path TEXT, n INTEGER);
 CREATE INDEX IF NOT EXISTS churn_repo ON churn(repo, path);
 CREATE TABLE IF NOT EXISTS data_inputs(repo TEXT, path TEXT, size INTEGER, mtime INTEGER, hash TEXT, ddl INTEGER, PRIMARY KEY(repo, path));
 CREATE TABLE IF NOT EXISTS data_facts(repo TEXT, scope TEXT, key TEXT, extractor TEXT, sig TEXT, facts TEXT, error TEXT, PRIMARY KEY(repo, extractor, key));
+CREATE TABLE IF NOT EXISTS routes(id INTEGER PRIMARY KEY, file_id INTEGER, line INTEGER, kind TEXT, method TEXT, path TEXT, framework TEXT, router TEXT, handler TEXT, handler_line INTEGER, middleware TEXT, app_root TEXT, full TEXT, handler_id INTEGER);
+CREATE INDEX IF NOT EXISTS routes_file ON routes(file_id);
+CREATE INDEX IF NOT EXISTS routes_handler ON routes(handler_id);
+CREATE TABLE IF NOT EXISTS route_facts(file_id INTEGER PRIMARY KEY, facts TEXT);
+CREATE TABLE IF NOT EXISTS route_refs(id INTEGER PRIMARY KEY, file_id INTEGER, src_id INTEGER, line INTEGER, kind TEXT, method TEXT, toks TEXT, lead INTEGER, named INTEGER);
+CREATE INDEX IF NOT EXISTS route_refs_file ON route_refs(file_id);
+CREATE TABLE IF NOT EXISTS route_links(ref_id INTEGER, route_id INTEGER, how TEXT);
+CREATE INDEX IF NOT EXISTS route_links_route ON route_links(route_id);
+CREATE INDEX IF NOT EXISTS route_links_ref ON route_links(ref_id);
+CREATE TABLE IF NOT EXISTS config(repo TEXT, path TEXT, file_id INTEGER, node_id INTEGER, key TEXT, kind TEXT, role TEXT, src_key TEXT, via TEXT, line INTEGER);
+CREATE INDEX IF NOT EXISTS config_key ON config(key);
+CREATE INDEX IF NOT EXISTS config_src ON config(src_key);
+CREATE INDEX IF NOT EXISTS config_file ON config(file_id);
+CREATE INDEX IF NOT EXISTS config_path ON config(repo, path);
+CREATE TABLE IF NOT EXISTS config_inputs(repo TEXT, path TEXT, size INTEGER, mtime INTEGER, hash TEXT, PRIMARY KEY(repo, path));
+CREATE TABLE IF NOT EXISTS resolve_inputs(repo TEXT, path TEXT, size INTEGER, mtime INTEGER, hash TEXT, PRIMARY KEY(repo, path));
 `
 
 export async function openStore(dbPath, { readOnly = false } = {}) {

@@ -1,5 +1,87 @@
 # Changelog
 
+## 0.46.0 — the code graph on real stacks: routes and screens, ORMs, injected collaborators, React Native and monorepos, configuration keys, API contracts
+
+An audit ran the graph on real open-source projects, about a dozen across both rounds (two NestJS apps, a FastAPI template, a Spring app, a Go service, a Rails app, a large Django app, a large React Native app, a monorepo, mobile apps on an embedded SQL store). It found the places where the map was blind or wrong, then each was fixed with fixtures and tests and measured again on those projects.
+
+- **Injected collaborators are typed.** A class's fields take their type from a typed field, a TypeScript constructor parameter property, a Kotlin `val` parameter, a Python class annotation, or a field the constructor sets from a typed parameter. `this.svc.findAll()` now reaches the injected service. Before, it was linked to the calling class's own method: on two NestJS apps, self-loops went from 16 to 0 and from 41 to 2.
+- **Routes and screens** (`graph_routes`, `ROUTES_TO`):
+  - HTTP routes declared in Express, Koa, Hono, Fastify, NestJS, Next.js, FastAPI, Flask, Django, Spring, Go (net/http, gin, echo, chi, gorilla) and Rails, composed through their routers and mounts.
+  - App navigation screens: file-based routers and stack/tab navigators.
+  - Linked to every place that calls them by URL or navigates to them. A test calling a handler's URL is a test of that handler in `graph_impact`, `graph_diff` and `graph_overview`.
+  - Only a route's own path template is ever shown.
+- **Framework members and functions passed as values** (`REFERENCES`):
+  - Rails `scope`, associations, `delegate`, `attr_*` and `define_method` are definitions. So are Python annotated class attributes and TypeScript/JavaScript class fields (a new `field` kind).
+  - A function named as a value is linked by syntax: a route handler, a signal handler, a queued task, a callback symbol. Impact and test discovery follow it.
+  - On a Go app, the tests reaching a handler went from 0 to 37.
+- **React Native and monorepos:**
+  - JSX renders are calls.
+  - Imports resolve the way the bundler does: tsconfig `paths`/`baseUrl`/`moduleSuffixes`, babel aliases, workspace packages through their `exports`, folder indexes under any alias, platform variants (`.ios`, `.android`, `.web`), dotted names, assets.
+  - Wrapped components (`forwardRef`, `memo`, `styled`, HOCs, stores) and tRPC routers are definitions.
+  - On a large app, imports resolved went from 50% to 68%, and call edges were ×2.3 with half the name guesses.
+- **The data model map reads the common ORMs:**
+  - Rails `db/schema.rb` and Active Record models;
+  - Django models;
+  - SQLAlchemy, SQLModel and Flask-SQLAlchemy with Alembic revisions;
+  - TypeORM entities and raw SQL in TypeORM and Knex migrations;
+  - JPA entities beside Flyway;
+  - Mongoose schemas.
+
+  An association the database holds no foreign key for is a relation declared by the ORM.
+- **The TypeScript ORM's query builder:**
+  - Its queries list each table's readers and writers (columns named, joins, callers).
+  - A table or a column is a `graph_impact` / `graph_search` target.
+  - `graph_diff` folds in the data model's changes, so a removed or retyped column still queried is high risk. A not-null column added without a default lists the inserts that miss it.
+  - `relations()` links are client-enforced relations.
+  - Primary keys compare as not null.
+  - Mobile SQLite clients are SQL clients.
+- **Relations enforced by the client:** a schema-language ORM's relations under `relationMode = "prisma"` are kept, with their own line, and never raise a conflict against migrations without foreign keys.
+- **Configuration keys** (`graph_config`): environment variables and config paths, names only, never a value.
+  - Their reads in code across 13 language families.
+  - Their declarations in env templates, compose files, CI workflows and app config. A `.env` or credential file is never read.
+  - The mappings the code states (`auth.secret ← AUTH_JWT_SECRET`).
+- **API contracts:**
+  - GraphQL, protobuf and OpenAPI files are indexed up to 4 MB.
+  - Their types, fields, operations, services and rpcs are nodes.
+  - Resolvers and gRPC implementations link by `IMPLEMENTS`.
+- **Honest statistics:** an untyped method call linked only because its file is imported is an `import-guess`, counted with the name guesses. On a large Django app, `Fulfillment.save` no longer shows 1,011 callers.
+- **Fixes:**
+  - YAML flow lists closing at their key's column parse, and a broken file reports its real error line.
+  - A key-value cache's commands wrapped by the app (`promisify`, pass-through functions, across files) are read.
+  - A settings file's secret, password or token constant is no longer kept in the index: only constants a table can be named by are.
+- **A multi-agent review** (resolution, routes and config, data, security, integration and performance) re-ran every claim on real projects and fixed what did not hold:
+  - *Resolution narrows to what the syntax shows.* A `self.a().b()` chain is the object's own. A type from a dependency or a test mock is never the repository's. `super.m()` resolves up the supertypes only. A bare call reaches closures. Parameters and callback locals are never references. On a large app, name guesses halved (unique-name 517 → 284, ambiguous 1036 → 490).
+  - *Routes:*
+    - `methods=` is read as a tuple or a set.
+    - A file router's declarations, generated route trees and URLs in types are no call sites. Generated clients and table-driven tests state their method.
+    - Navigators' `getComponent` is read.
+    - Rails `%i[…]` lists and bare actions are read.
+    - A file-based app router serves one root per package.
+  - *Configuration and contracts:*
+    - Env reads across line breaks, one-hop helpers, config factories and CLI flags are read. CI-only and framework-owned keys are listed apart.
+    - Node gRPC `addService`, servicer subclasses and resolver mixins are linked.
+  - *Data:*
+    - `graph_diff` flags a column an ORM maps that is removed while code still names its attribute (high risk). It lists the creations that leave out a new not-null column, and the schema-vs-migration conflicts the diff creates.
+    - SQL in migration files is no longer read as queries.
+    - Fixes for TypeORM, Alembic, SQLAlchemy, Django, Mongoose and Rails. A named unique constraint and its index are one element. ClickHouse SQL is named and not read as MySQL.
+  - *Security:*
+    - A constant is kept only when it can name a table (an allow-list, token and high-entropy values refused).
+    - Module-resolution configs are read guarded: no credential file, no link out of the repository, no device, a 1 MB cap.
+    - Multi-line config values are skipped.
+    - Route paths keep their template only.
+    - The TypeScript ORM's defaults keep no literal text.
+    - Hostile wide or deep files index in milliseconds, not minutes.
+  - *Integration:*
+    - Editing a `package.json`, a tsconfig, a workspace file, `go.mod` or `Cargo.toml` re-resolves its repository.
+    - `graph_impact` on a key a definition also names answers both.
+    - `graph_diff` lists routes removed or moved that are still called (high risk).
+    - One test walk is shared by symbol, overview and diff. Ordering is deterministic.
+  - *Performance:*
+    - `graph_diff`'s base model is cached on disk and reuses the index for unchanged files. A cold diff on a large project went from 4–6 s to 1–2 s.
+    - The data extractors reuse the code pass's trees.
+    - The routes walk is skipped for files that cannot hold one. A full index costs about +30% CPU against the previous release instead of +60%, for the maps this release adds.
+- Index schema 26: the index rebuilds once.
+
 ## 0.45.0 — one data model diagram for every store: key-value tables and caches drawn like SQL, and the links no key states
 
 The Data tab drew an ERD per SQL store and a grid of unconnected cards for everything else, so the model of a NoSQL project could not be seen as a model: a message's `orbit_id`, a review's `ownerId`, a cache keyed by `{cartId}` all point somewhere, and nothing drew it. This implements the approved design `docs/specs/2026-11-09-key-value-diagram-design.md`, amended by its owner on 2026-11-20 to put SQL and SQLite in the same system (D10).

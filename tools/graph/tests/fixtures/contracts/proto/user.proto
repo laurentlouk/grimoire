@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package acme.users.v1;
+
+import "proto/common.proto";
+
+// The user service.
+service UserService {
+  rpc GetUser(GetUserRequest) returns (User);
+  rpc ListUsers(ListUsersRequest) returns (stream User) {
+    option (google.api.http) = { get: "/canary-proto-path" };
+  }
+}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message ListUsersRequest {
+  int32 page_size = 1 [default = 10];
+  map<string, string> labels = 2;
+}
+
+message User {
+  string id = 1;
+  string name = 2 [json_name = "canary-proto-json"];
+  oneof contact {
+    string email = 3;
+    string phone = 4;
+  }
+  message Address {
+    string city = 1;
+  }
+  Address address = 5;
+  Status status = 6;
+}

@@ -25,7 +25,8 @@
 //              editable only when the page is served (serve.mjs), which adds connect-src 'self'
 // The file map and the Architecture and Data diagrams share one way to move around (stage-view.mjs):
 // drag the background (it never selects the page) or focus the stage and use the arrow keys, + − 0.
-// Test code and ambiguous links are hidden until asked for; unique-name matches are drawn dashed.
+// Test code and ambiguous links (and import-guess ones, a method picked by its imported file) are
+// hidden until asked for; unique-name matches are drawn dashed.
 // Views have plain anchors (#sym-12, #file-3, #mod-4, #arch-0, #data-1, #doc-7): they hold for the
 // index the page was rendered from (a re-parsed file gets new ids; module, diagram, store and note
 // numbers shift as those change).
@@ -53,14 +54,14 @@ import { layoutErd, erdBox } from './data/layout.mjs'
 import { diffModels } from './data/diff.mjs'
 import { resolveBase, modelAt } from './data/base.mjs'
 import { parseDelta, deltaStates, findTarget, changeText, diffText } from './data/delta.mjs'
-import { changeVal, renameText, baseText, refName, CHANGE_KIND, symbolAt } from './query.mjs'
+import { changeVal, renameText, baseText, refName, changeKind, symbolAt } from './query.mjs'
 import { byFunction, siteHow, isRead, isWrite, isUnknown, CAP, LABELS } from './data/access.mjs'
-import { sqlFunctions, NOT_DECLARED } from './data/queries.mjs'
+import { sqlFunctions, NOT_DECLARED, queriesFrom, fnDetail } from './data/queries.mjs'
 import { redisFunctions, templatesOf, indexesOf, streamsOf, prefixTree, ttlText, NO_EXPIRY, NO_QUERY, ASSEMBLED, UNKNOWN as KS_UNKNOWN } from './data/redis.mjs'
 import { dataClient } from './data-view.mjs'
 import { stageClient } from './stage-view.mjs'
 
-const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']
+const KINDS = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'REFERENCES']
 const MAP_MAX_FILES = 1500 // the file map keeps the most connected production files; the other tabs keep everything
 export const DATA_COLLAPSE = 60 // a store with more tables starts collapsed: names only, until focused or searched
 
@@ -82,7 +83,7 @@ export async function renderGraph(project, opts = {}) {
     const repos = db.prepare('SELECT name, root, head, indexed_at FROM repos ORDER BY name').all()
     const files = db.prepare('SELECT id, repo, path, lang, size, is_test, node_id FROM files ORDER BY repo, path').all()
     const nodes = db.prepare("SELECT id, file_id, kind, COALESCE(qualname, name) AS name, line, is_test FROM nodes WHERE kind != 'file'").all()
-    const edges = db.prepare('SELECT src, dst, kind, confidence FROM edges').all()
+    const edges = db.prepare("SELECT src, dst, kind, confidence FROM edges WHERE kind != 'ROUTES_TO'").all()
     // each repository's 25 strongest pairs, each once: cochange.mjs stores a pair both ways unless one
     // side's partner cap cut it, so keep a < b, or the one way it was stored
     const cochange = db.prepare(`SELECT repo, a, b, n FROM (SELECT c.repo, c.a, c.b, c.n, ROW_NUMBER() OVER (PARTITION BY c.repo ORDER BY c.n DESC, c.a, c.b) AS rk FROM cochange c
@@ -210,6 +211,10 @@ function packArch(doc, r, extra) {
 // link to another store (a lead, a refined relation, a lineage claim) a stub, packed on the store as
 // `links: { st: [{ kind, dir, from, column, store, n: that store's index or -1, entity, toColumn,
 // why, stem }], rv: the names several tables share }`.
+// A relation the schema declares and its client enforces (data/reconcile.mjs `kind: client`: no
+// foreign key in the database) is packed among the table's own relations, `cl: 1`: drawn with a line
+// of its own (dash-dot-dot), its column with no FK mark, and it replaces a lead on its columns as a
+// foreign key does (data/links.mjs).
 export function dataData(db, files, repos, changes = null, deltas = [], refined = null) {
   const out = { stores: [], unread: [], failed: [], refine: null, changes: { base: null, why: changes?.why || 'no base was resolved' } }
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'data_facts'").get()) return out // an index built before the data model
@@ -230,8 +235,12 @@ export function dataData(db, files, repos, changes = null, deltas = [], refined 
   out.accessError = model.accessError || null
   // the SQL the code sends (data/queries.mjs), its calls placed in the code graph's functions
   const qacc = model.queries ? { sites: model.queries.sites, sym: acc?.sym || symbolAt(db) } : null
-  out.queries = model.queries ? { files: model.queries.files, statements: model.queries.statements, deduced: model.stores.filter((s) => s.inferred).length, attached: model.queries.attached.length, tests: model.queries.tests } : null
+  const deduced = model.stores.filter((s) => s.inferred).length
+  out.queries = model.queries && (model.queries.files || model.queries.statements || model.queries.tests || deduced) ? { files: model.queries.files, statements: model.queries.statements, deduced, attached: model.queries.attached.length, tests: model.queries.tests } : null
   out.queriesError = model.queriesError || null
+  // the Drizzle queries in code (data/drizzle.mjs), in one line: each table's passport says the rest
+  out.drizzle = model.drizzle ? { calls: model.drizzle.placed, files: model.drizzle.files, unresolved: model.drizzle.unresolved, ambiguous: model.drizzle.ambiguous, tests: model.drizzle.tests } : null
+  out.drizzleError = model.drizzleError || null
   // a key-value cache's commands (data/redis.mjs), their calls placed in the code graph's functions
   const kacc = model.redis ? { sites: model.redis.sites, sym: acc?.sym || qacc?.sym || symbolAt(db) } : null
   out.redis = model.redis ? { files: model.redis.files, commands: model.redis.commands, spaces: model.stores.filter((s) => s.dialect === 'redis').length, dyn: model.redis.dyn, tests: model.redis.tests } : null
@@ -328,7 +337,7 @@ function packDelta(file, { model, base, diff, why, stores, packedAt, shown }) {
   const overlay = stores.map((ps, n) => (byStore.has(n) && !ps.ks ? packDeltaStore(ps, model.stores.find((x) => x.id === ps.id), byStore.get(n), { base, diff, changes, unplanned, shown }) : null))
   return { ...head, errors: [], spec: delta.spec, changes, unplanned, stores: overlay, unplWhy: diff ? null : why || 'no base was resolved' }
 }
-const describeChange = (c, dialect = null) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${dialect === 'dynamodb' && c.kind === 'field' ? 'attribute' : CHANGE_KIND[c.kind]} ${c.entity} · ${c.name} ${c.change}`)
+const describeChange = (c, dialect = null) => (c.kind === 'entity' ? `${(c.after || c.before).kind} ${c.name} ${c.change}` : `${dialect === 'dynamodb' && c.kind === 'field' ? 'attribute' : changeKind(c)} ${c.entity} · ${c.name} ${c.change}`)
 // What `after` states, in a line (shown as text in the passport).
 function afterText(kind, c) {
   const a = c.after
@@ -506,7 +515,8 @@ function packer(entities, src, cf, bsrc = null) {
   return (e) => {
     const rels = e.relations.map((r) => { const to = entity(r.to); return { r, columns: r.columns.map((c) => column(e, c)), to: to ? to.name : r.to, toColumns: r.toColumns.map((c) => column(to, c)) } })
     const keys = e.keys.map((k) => ({ k, parts: k.parts.map((c) => column(e, c)) }))
-    const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.flatMap(({ columns }) => columns))
+    // (a relation its client enforces is no foreign key: its column gets no FK mark)
+    const pk = new Set(keys.filter(({ k }) => k.role === 'primary').flatMap(({ parts }) => parts)), fk = new Set(rels.filter(({ r }) => r.kind !== 'client').flatMap(({ columns }) => columns))
     return {
       name: e.name, kind: e.kind, ...(kvTable(e) ? { billing: e.billing ?? null, stream: e.stream ?? null } : {}), ...(e.nameTemplate ? { nt: e.nameTemplate } : {}), ...cite(e),
       fields: e.fields.map((f) => ({ name: f.name, type: f.type.raw, nullable: f.nullable, def: f.default, gen: f.generated, pk: pk.has(f.name) ? 1 : 0, fk: fk.has(f.name) ? 1 : 0, ...cite(f),
@@ -514,7 +524,7 @@ function packer(entities, src, cf, bsrc = null) {
         ...(f.item ? { it: f.item.map((i) => ({ t: i.type, raw: i.raw, kind: i.kind, nul: i.nullable ? 1 : 0, def: i.default ?? null, vals: i.values ?? null })), ...(f.sources.every((s) => s.kind === 'code') ? { code: 1 } : {}) } : {}) })),
       keys: keys.map(({ k, parts }) => ({ role: k.role, parts, ...(k.role === 'ttl' ? { enabled: k.enabled ?? null } : {}), ...cite(k) })),
       indexes: e.indexes.map((x) => ({ name: x.name, unique: x.unique, columns: x.columns, partial: x.partial, ...(kvIndex(x) ? kvPack(x) : {}), ...cite(x) })),
-      rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, ...cite(r) })),
+      rels: rels.map(({ r, columns, to, toColumns }) => ({ columns, to, toColumns, onDelete: r.onDelete, onUpdate: r.onUpdate, ...(r.kind === 'client' ? { cl: 1 } : {}), ...cite(r) })),
     }
   }
 }
@@ -654,7 +664,7 @@ function packStore(st, shown, fileId, sd = null, acc = null, rr = [], qacc = nul
   if (qacc) st.entities.forEach((e, i) => {
     if (!e.queries?.sites?.length) return
     const fns = sqlFunctions(e.queries.sites.map((k) => qacc.sites[k]).filter(Boolean), qacc.sym, e.id)
-    tables[i].sq = { rw: fns.slice(0, CAP).map((x) => ({ n: x.name, at: src([{ repo: x.repo, path: x.path, line: x.line, kind: 'code' }])[0], r: x.reads ? 1 : 0, wr: x.writes ? 1 : 0, k: x.kinds, lines: x.lines, c: x.callers })), more: Math.max(0, fns.length - CAP) }
+    tables[i].sq = { from: queriesFrom(fns), rw: fns.slice(0, CAP).map((x) => ({ n: x.name, at: src([{ repo: x.repo, path: x.path, line: x.line, kind: 'code' }])[0], r: x.reads ? 1 : 0, wr: x.writes ? 1 : 0, k: x.kinds, lines: x.lines, c: x.callers, ...(fnDetail(x) ? { d: fnDetail(x) } : {}) })), more: Math.max(0, fns.length - CAP) }
   })
   const f = st.dialectFrom, cards = CARDS.has(st.dialect), collapsed = !cards && tables.length > DATA_COLLAPSE
   return {
@@ -724,8 +734,9 @@ export function mapData(files, nodes, edges) {
     if (a === undefined || b === undefined || a === b) continue
     const k = a < b ? `${a},${b}` : `${b},${a}`
     w.set(k, (w.get(k) || 0) + 1)
-    if (e.confidence !== 'ambiguous') shown.set(k, true)
-    if (e.confidence !== 'ambiguous' && e.confidence !== 'unique-name') sure.set(k, (sure.get(k) || 0) + 1)
+    const hidden = e.confidence === 'ambiguous' || e.confidence === 'import-guess' // hidden until asked, as ambiguous
+    if (!hidden) shown.set(k, true)
+    if (!hidden && e.confidence !== 'unique-name') sure.set(k, (sure.get(k) || 0) + 1)
   }
   for (const k of sure.keys()) { const [a, b] = k.split(',').map(Number); deg.set(a, (deg.get(a) || 0) + 1); deg.set(b, (deg.get(b) || 0) + 1) }
   // Production code first: test files only take slots production code leaves free. The cap is
@@ -945,10 +956,10 @@ ul.kattrs{display:flex;flex-wrap:wrap;gap:2px 10px}ul.kattrs .krow{padding:1px 4
 .mkl.k-gsi,.mkl.k-lsi,.mkl.k-idx{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 12%,var(--panel))}.mkl.k-a{color:var(--muted);background:var(--hover)}
 .mkl.k-i{color:var(--t-backend);background:color-mix(in srgb,var(--t-backend) 10%,var(--panel))}ul.kitem .krow.d1{padding-left:20px}ul.kitem .krow.d2{padding-left:34px}ul.kitem .krow.d3{padding-left:48px}ul.kitem .krow.d4,ul.kitem .krow.d5,ul.kitem .krow.d6{padding-left:62px}
 .krow .kacc{margin:1px 0 2px 30px;font-size:12px}.krow .kacc .pill{margin:0 4px 0 0}.kfn{overflow-wrap:anywhere}.mkl.k-r{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,var(--panel))}.mkl.k-w{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel))}.mkl.k-u{color:var(--muted);background:var(--hover)}ul.kaccess .krow.test{opacity:.8}
-.pill.refined{color:var(--t-worker);border-color:currentColor;border-style:dashed}.rent{font-size:12.5px;margin:10px 0 3px;overflow-wrap:anywhere}.rent .mono{font-weight:600}.krow .kpur{margin:1px 0 2px 30px}.note.unused{color:var(--warn)}svg.erd .fk.rf{stroke:var(--t-worker);stroke-dasharray:4 4}
+.pill.refined{color:var(--t-worker);border-color:currentColor;border-style:dashed}.pill.client{color:var(--link);border-color:currentColor}.rent{font-size:12.5px;margin:10px 0 3px;overflow-wrap:anywhere}.rent .mono{font-weight:600}.krow .kpur{margin:1px 0 2px 30px}.note.unused{color:var(--warn)}svg.erd .fk.rf{stroke:var(--t-worker);stroke-dasharray:4 4}
 svg.erd .tbl rect{fill-opacity:.86}svg.erd .port{fill:var(--panel);stroke:var(--muted);stroke-width:1.4}svg.erd .port.rf{stroke:var(--t-worker)}svg.erd .port.on{stroke:var(--accent)}svg.erd .port.dim{opacity:.25}svg.erd .fk.ld{stroke:var(--muted);stroke-dasharray:1.5 4.5;stroke-linecap:round;stroke-width:1.8}svg.erd .fk.ex{stroke:color-mix(in srgb,var(--t-cloud) 70%,var(--line));stroke-width:1.1}svg.erd .fk.lin{stroke-dasharray:8 3 2 3}svg.erd .stub{cursor:pointer}svg.erd .stub rect{fill:color-mix(in srgb,var(--t-database) 4%,var(--panel));stroke:color-mix(in srgb,var(--t-database) 45%,var(--line));stroke-width:1.2;stroke-dasharray:5 3}svg.erd .stub.ld rect{stroke:var(--muted)}svg.erd .stub.off{cursor:default;opacity:.6}svg.erd .stub .sst{font:500 10px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--muted)}svg.erd .stub .sen{font:600 12.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink)}svg.erd .stub .sgo{fill:none;stroke:var(--muted);stroke-width:1.4}svg.erd .stub:hover rect,svg.erd .stub:focus rect{stroke:var(--accent);stroke-dasharray:none}
-svg.erd .mk.msk{fill:var(--t-worker)}svg.erd .mk.mttl{fill:var(--warn)}svg.erd .mk.mkey{fill:var(--t-cloud)}svg.erd .mk.mk{fill:var(--muted)}svg.erd .xr.more .xrow{fill:var(--muted);font-style:italic}.dlegend .lnk{display:inline-block;width:24px;height:0;margin:0 4px;vertical-align:middle;border:0;border-radius:0;background:none;transform:none}.dlegend .fkl{border-top:1.6px solid var(--link)}.dlegend .rfl{border-top:1.6px dashed var(--t-worker)}.dlegend .ldl{border-top:2px dotted var(--muted)}.dlegend .exl{border-top:1.1px solid var(--t-cloud)}.dlegend .stubk{display:inline-block;width:18px;height:11px;border:1.2px dashed var(--t-database);border-radius:3px;margin:0 4px;vertical-align:middle}.kvpass .kcard{margin:0}
-svg.erd .tbl.inf .tframe{stroke-dasharray:6 4;stroke-width:1.5}svg.erd .tbl.inf .thead{fill:color-mix(in srgb,var(--t-database) 5%,var(--panel))}svg.erd .fk.jn{stroke-dasharray:6 4}svg.erd .unk{fill:var(--panel);stroke:var(--muted);stroke-width:1;stroke-dasharray:2 1.6}svg.erd .row.inf .ctype{font-style:italic}
+svg.erd .mk.msk{fill:var(--t-worker)}svg.erd .mk.mttl{fill:var(--warn)}svg.erd .mk.mkey{fill:var(--t-cloud)}svg.erd .mk.mk{fill:var(--muted)}svg.erd .xr.more .xrow{fill:var(--muted);font-style:italic}.dlegend .lnk{display:inline-block;width:24px;height:0;margin:0 4px;vertical-align:middle;border:0;border-radius:0;background:none;transform:none}.dlegend .fkl{border-top:1.6px solid var(--link)}.dlegend .rfl{border-top:1.6px dashed var(--t-worker)}.dlegend .ldl{border-top:2px dotted var(--muted)}.dlegend .exl{border-top:1.1px solid var(--t-cloud)}.dlegend .cll{height:1.6px;background:repeating-linear-gradient(90deg,var(--link) 0 6px,transparent 6px 8px,var(--link) 8px 9.5px,transparent 9.5px 11.5px,var(--link) 11.5px 13px,transparent 13px 15px)}.dlegend .stubk{display:inline-block;width:18px;height:11px;border:1.2px dashed var(--t-database);border-radius:3px;margin:0 4px;vertical-align:middle}.kvpass .kcard{margin:0}
+svg.erd .tbl.inf .tframe{stroke-dasharray:6 4;stroke-width:1.5}svg.erd .tbl.inf .thead{fill:color-mix(in srgb,var(--t-database) 5%,var(--panel))}svg.erd .fk.jn{stroke-dasharray:6 4}svg.erd .fk.cl{stroke-dasharray:9 3 2 3 2 3}svg.erd .unk{fill:var(--panel);stroke:var(--muted);stroke-width:1;stroke-dasharray:2 1.6}svg.erd .row.inf .ctype{font-style:italic}
 .pill.inferred{color:var(--muted);border-color:currentColor;border-style:dashed}.dia.unk{border-style:dashed;background:transparent}.dlegend .jnline{display:inline-block;width:22px;border-top:1.6px dashed var(--link);margin:0 3px}.dlegend .infbox{display:inline-block;width:16px;height:10px;border:1.4px dashed var(--muted);border-radius:3px;margin:0 3px}
 .kcard.kspace{max-width:none}.kshead{flex-wrap:wrap;gap:4px 6px}ul.ktree .krow.d1{padding-left:18px}ul.ktree .krow.d2{padding-left:34px}ul.ktree .krow.d3{padding-left:50px}ul.ktree .krow.d4,ul.ktree .krow.d5,ul.ktree .krow.d6{padding-left:66px}ul.ktree .krow.cf{background:color-mix(in srgb,var(--warn) 7%,transparent)}ul.ktree .kfields,ul.ktree .kaccess{margin-left:30px;font-size:12px}.kcard.kix.lead{border-style:dashed}.mkl.k-hash,.mkl.k-string,.mkl.k-set,.mkl.k-sorted,.mkl.k-list,.mkl.k-json,.mkl.k-geo,.mkl.k-hyperloglog,.mkl.k-bitmap,.mkl.k-time{color:var(--t-database);background:color-mix(in srgb,var(--t-database) 10%,var(--panel))}.mkl.k-stream,.mkl.k-ch{color:var(--link);background:color-mix(in srgb,var(--link) 10%,var(--panel))}
 details.refine{margin:0 0 14px}details.refine h2{font-size:14px;margin:14px 0 6px}.lineagebox{margin:6px 0}.lineagebox svg{min-width:640px;max-width:900px}svg.lineage .lbox rect{fill:var(--panel);stroke:color-mix(in srgb,var(--t-database) 55%,var(--line));stroke-width:1.3}svg.lineage .lbox.rf rect{stroke:var(--t-worker);stroke-dasharray:5 4}svg.lineage .lbox.go{cursor:pointer}
@@ -1059,8 +1070,9 @@ function client() {
   }
   const PALETTE = ['#6d4aff', '#e0527a', '#1f9d8a', '#e38b22', '#3b82f6', '#8b5cf6', '#16a34a', '#d946ef', '#0ea5e9', '#f43f5e']
   const repoColor = new Map(D.repos.map((r, i) => [r.name, PALETTE[i % PALETTE.length]]))
-  const GUESS = new Set(['ambiguous', 'unique-name'])
-  const confRank = (c) => (c === 'ambiguous' ? 2 : c === 'unique-name' ? 1 : 0)
+  const GUESS = new Set(['ambiguous', 'unique-name', 'import-guess'])
+  const hiddenConf = (c) => c === 'ambiguous' || c === 'import-guess' // hidden until asked
+  const confRank = (c) => (hiddenConf(c) ? 2 : c === 'unique-name' ? 1 : 0)
   const activate = (e) => e.key === 'Enter' || e.key === ' ' // a role=button answers both
   const nav = stageClient() // drag and keys on the stages: the file map, the Architecture and Data tabs (stage-view.mjs)
 
@@ -1108,7 +1120,7 @@ function client() {
   const edgeCount = {}
   let calls = 0, guesses = 0
   // a file link counts its edges: [all, resolved by syntax, unique-name, ambiguous]
-  const bump = (m, k, conf) => { const v = m.get(k) || [0, 0, 0, 0]; v[0]++; v[conf === 'ambiguous' ? 3 : conf === 'unique-name' ? 2 : 1]++; m.set(k, v) }
+  const bump = (m, k, conf) => { const v = m.get(k) || [0, 0, 0, 0]; v[0]++; v[hiddenConf(conf) ? 3 : conf === 'unique-name' ? 2 : 1]++; m.set(k, v) }
   for (const [src, dst, k, c] of D.edges) {
     const kind = D.edgeKinds[k], conf = D.confs[c]
     edgeCount[kind] = (edgeCount[kind] || 0) + 1
@@ -1174,7 +1186,7 @@ function client() {
       h('div', { class: 'cards' }, card(fs.filter((f) => !f.test).length, 'production files'), card(fs.filter((f) => f.test).length, 'test and support files'),
         card(ns.length, 'symbols'), card(modules.filter((m) => !st.repo || m.repo === st.repo).length, 'modules'),
         ...D.edgeKinds.map((k) => card(edgeCount[k] || 0, `${k} links (all repos)`)),
-        card(calls ? `${Math.round((100 * guesses) / calls)}%` : '0%', 'of call links are name guesses: unique-name or ambiguous')),
+        card(calls ? `${Math.round((100 * guesses) / calls)}%` : '0%', 'of call links are name guesses: unique-name, ambiguous or import-guess')),
       h('h2', null, 'Repositories'),
       h('table', null, h('tr', null, h('th', null, 'repo'), h('th', null, 'root'), h('th', { class: 'n' }, 'files'), h('th', { class: 'n' }, 'tests'), h('th', { class: 'n' }, 'modules'), h('th', { class: 'n' }, 'symbols'), h('th', null, 'HEAD'), h('th', null, 'indexed')),
         D.repos.filter((r) => !st.repo || r.name === st.repo).map((r) => h('tr', null,
@@ -1192,7 +1204,7 @@ function client() {
   function neighbourhood(focus, leftTitle, left, rightTitle, right) {
     const prep = (items) => {
       const shown = [], hid = { test: 0, amb: 0 }
-      for (const it of items) { if (it.test && !st.tests) hid.test++; else if (it.conf === 'ambiguous' && !st.guesses) hid.amb++; else shown.push(it) }
+      for (const it of items) { if (it.test && !st.tests) hid.test++; else if (hiddenConf(it.conf) && !st.guesses) hid.amb++; else shown.push(it) }
       shown.sort((a, b) => confRank(a.conf) - confRank(b.conf) || (b.n || 0) - (a.n || 0) || (a.label < b.label ? -1 : 1))
       const pills = []
       if (shown.length > MAXCOL) pills.push(`+${shown.length - MAXCOL} more in the lists below`)
@@ -1209,7 +1221,7 @@ function client() {
       '<defs><marker id="nb-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0L8,4L0,8z" class="arrow"/></marker></defs>',
       `<text class="head" x="0" y="14">${esc(leftTitle.toUpperCase())} · ${L.total}</text>`,
       `<text class="head" x="${R0}" y="14">${esc(rightTitle.toUpperCase())} · ${R.total}</text>`]
-    const cls = (c) => `edge${c === 'unique-name' ? ' dash' : c === 'ambiguous' ? ' dot' : ''}`
+    const cls = (c) => `edge${c === 'unique-name' ? ' dash' : hiddenConf(c) ? ' dot' : ''}`
     const item = (it, x, y) => {
       const attr = it.sym !== undefined ? `data-sym="${it.sym}"` : `data-file="${it.file}"`
       const tag = it.n > 1 ? ` · ${it.n} links` : it.conf && it.conf !== 'resolved' ? ` · ${it.conf}` : ''
@@ -1250,7 +1262,7 @@ function client() {
       h('h3', null, n.name, h('span', { class: 'pill' }, n.kind), n.test ? h('span', { class: 'pill' }, 'test') : null),
       h('div', null, 'at ', h('code', null, loc(n)), ' · in ', n.file ? jumpFile(n.file) : '?'),
       neighbourhood({ label: n.name, sub: loc(n), kind: n.kind, repo: n.file && n.file.repo }, 'Callers', n.callers.map(it), 'Callees', n.callees.map(it)),
-      h('p', { class: 'note' }, 'Solid: resolved by syntax · dashed: the only definition of that name (unique-name) · dotted: one of several (ambiguous). Arrows point from the caller to what it calls.'),
+      h('p', { class: 'note' }, 'Solid: resolved by syntax · dashed: the only definition of that name (unique-name) · dotted: one of several (ambiguous), or a method picked by its imported file on a receiver of unknown type (import-guess). Arrows point from the caller to what it calls.'),
       n.supers.length || n.subs.length ? h('div', { class: 'grid2' }, list('Extends / implements', n.supers, true), list('Extended / implemented by', n.subs, true)) : null,
       h('details', null, h('summary', null, `Every caller (${n.callers.length}) and callee (${n.callees.length}), as lists, test code and guesses included`),
         h('div', { class: 'grid2' }, list('Callers', n.callers), list('Callees', n.callees))))
@@ -1344,7 +1356,7 @@ function client() {
       rows.map(([f, v]) => h('tr', { class: 'click', onclick: () => select({ file: f }) }, h('td', { class: 'mono' }, jumpFile(f)), h('td', { class: 'n' }, v)))))
     const co = D.cochange.filter(([repo]) => !st.repo || repo === st.repo).slice(0, 25) // already strongest first
     return h('section', null,
-      h('p', { class: 'note' }, `Ranked by links resolved by syntax; name guesses (unique-name, ambiguous) are counted apart.${st.tests ? '' : ' Test code hidden.'}`),
+      h('p', { class: 'note' }, `Ranked by links resolved by syntax; name guesses (unique-name, ambiguous, import-guess) are counted apart.${st.tests ? '' : ' Test code hidden.'}`),
       h('h2', null, 'Size and churn'), treemap(fs),
       h('div', { class: 'grid2' }, symTable('Most called', top(ns, (n) => resolved(n.callers)), 'callers', 'callers'), symTable('Widest fan-out', top(ns, (n) => resolved(n.callees)), 'callees', 'callees')),
       h('div', { class: 'grid2' }, fileTable('Most used files', top(fs, (f) => resolvedOf(f.in).length), 'files using it'), fileTable('Files using the most', top(fs, (f) => resolvedOf(f.out).length), 'files it uses')),

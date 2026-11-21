@@ -1,0 +1,47 @@
+"""
+The schema. User and Post are described here; a description is prose.
+"""
+schema { query: Query mutation: Mutation }
+
+interface Node {
+  id: ID!
+}
+
+type Query {
+  "One user, by id."
+  user(id: ID!, filter: String = "canary-gql-default"): User
+  users(first: Int = 10): [User!]!
+  viewer: User
+  allPosts: [Post!]!
+}
+
+type Mutation {
+  createUser(name: String!): User @deprecated(reason: "canary-gql-reason")
+  createPost(title: String!): Post
+}
+
+type User implements Node {
+  id: ID!
+  name: String
+  # posts are paged
+  posts: [Post!]!
+  role: Role
+}
+
+type Post implements Node {
+  id: ID!
+  title: String!
+  author: User
+}
+
+enum Role { ADMIN MEMBER }
+
+union SearchResult = User | Post
+
+input UserFilter {
+  name: String
+}
+
+scalar DateTime
+
+directive @auth(requires: Role = ADMIN) on OBJECT | FIELD_DEFINITION

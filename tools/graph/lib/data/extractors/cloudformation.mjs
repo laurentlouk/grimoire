@@ -44,7 +44,7 @@ function kindOf(v, types) {
 
 export default {
   id: 'cloudformation',
-  version: 2,
+  version: 3,
   kind: 'infra',
   scope: 'file',
   wants: (p) => DOC.test(p),

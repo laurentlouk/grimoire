@@ -18,6 +18,7 @@
 import { readFileSync, readdirSync, existsSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { systemMap } from './modules.mjs'
+import { GUESSES as GUESS_LIST } from './resolve.mjs'
 import { docRoots } from './docs.mjs'
 
 export const TYPES = ['frontend', 'backend', 'worker', 'database', 'messagebus', 'cloud', 'security', 'external', 'library', 'cli']
@@ -25,14 +26,14 @@ export const VARIANTS = ['default', 'emphasis', 'security', 'async', 'dashed']
 export const BOUNDARY_KINDS = ['repo', 'deploy', 'trust', 'region', 'network', 'group']
 export const CARD_COLORS = ['cyan', 'emerald', 'violet', 'amber', 'rose', 'orange', 'slate']
 export const SUFFIX = '.architecture.json'
-const GUESSES = new Set(['ambiguous', 'unique-name'])
+const GUESSES = new Set(GUESS_LIST)
 export const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 
 // External services an import names. `imports` are package prefixes (see importMatches).
 export const KNOWN = [
   { id: 'postgres', label: 'PostgreSQL', type: 'database', via: 'SQL', imports: ['pg', 'postgres', 'pg-promise', 'psycopg', 'psycopg2', 'asyncpg', 'github.com/lib/pq', 'github.com/jackc/pgx', '@neondatabase/serverless', '@vercel/postgres', 'org.postgresql'] },
   { id: 'mysql', label: 'MySQL', type: 'database', via: 'SQL', imports: ['mysql', 'mysql2', 'pymysql', 'MySQLdb', 'github.com/go-sql-driver/mysql'] },
-  { id: 'sqlite', label: 'SQLite', type: 'database', via: 'SQL', imports: ['sqlite3', 'better-sqlite3', 'node:sqlite', 'sqlite', 'rusqlite', 'github.com/mattn/go-sqlite3'] },
+  { id: 'sqlite', label: 'SQLite', type: 'database', via: 'SQL', imports: ['sqlite3', 'better-sqlite3', 'node:sqlite', 'sqlite', 'rusqlite', 'github.com/mattn/go-sqlite3', 'expo-sqlite', '@op-engineering/op-sqlite', 'op-sqlite'] },
   { id: 'sql-db', label: 'SQL database', sublabel: 'through an ORM', type: 'database', via: 'ORM', imports: ['@prisma/client', 'typeorm', 'sequelize', 'knex', 'drizzle-orm', 'sqlalchemy', 'django.db', 'gorm.io/gorm', 'diesel', 'sqlx', 'sea_orm', 'org.hibernate', 'jakarta.persistence', 'javax.persistence', 'peewee', 'tortoise'] },
   { id: 'mongodb', label: 'MongoDB', type: 'database', via: 'queries', imports: ['mongodb', 'mongoose', 'pymongo', 'motor', 'go.mongodb.org/mongo-driver'] },
   { id: 'redis', label: 'Redis', type: 'database', via: 'cache', imports: ['redis', 'ioredis', '@redis/client', '@upstash/redis', 'aioredis', 'github.com/redis/go-redis', 'github.com/go-redis/redis', 'fred', 'deadpool_redis', 'bb8_redis', 'github.com/redis/rueidis', 'github.com/gomodule/redigo', 'iovalkey', 'valkey', 'github.com/valkey-io/valkey-go'] },
@@ -559,7 +560,7 @@ export function loadIndex(db) {
     repos: db.prepare('SELECT name FROM repos ORDER BY name').all().map((r) => r.name),
     files: db.prepare('SELECT id, repo, path, lang, is_test, node_id FROM files ORDER BY repo, path').all(),
     nodes: db.prepare("SELECT id, file_id FROM nodes WHERE kind != 'file'").all(),
-    edges: db.prepare('SELECT src, dst, kind, confidence FROM edges').all(),
+    edges: db.prepare("SELECT src, dst, kind, confidence FROM edges WHERE kind != 'ROUTES_TO'").all(),
     imports: db.prepare('SELECT file_id, source FROM imports').all(),
   }
 }

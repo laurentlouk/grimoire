@@ -30,7 +30,7 @@ function tablesIn(v) {
 
 export default {
   id: 'dynamodb-table',
-  version: 1,
+  version: 2,
   kind: 'infra',
   scope: 'file',
   wants: (p) => DOC.test(p),
