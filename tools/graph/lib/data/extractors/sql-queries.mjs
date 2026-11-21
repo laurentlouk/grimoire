@@ -28,7 +28,9 @@
 // (readers/sql-query.mjs PARAM): a table named by one is never a table, and SQL built from variables is
 // read only from its literal parts. A text is read only when its first word is a statement's
 // (SELECT, INSERT, UPDATE, DELETE, WITH, …): a query builder's fragment (`sql\`${col} = 1\``) is none.
-// Test code (the code graph's test paths, each language's own marks) is not read for the model: its
+// A schema migration written as code (an Alembic revision, a Django migration, a TypeORM or Knex migration:
+// readers/migration-file.mjs) is not read: the SQL it sends is the store's history, never a query compared
+// with today's model. Test code (the code graph's test paths, each language's own marks) is not read for the model: its
 // sites are counted. Bounded: MAX_SITES calls, MAX_STATEMENTS statements and MAX_FACTS names a file; a
 // text many calls send (a constant) is read once; one walk down the tree (a call's function, class and
 // test status come down with it, never by walking up: a node's parent costs the tree's depth), within
@@ -49,6 +51,7 @@ import { named, field, lineOf, endOf, each } from '../readers/code.mjs'
 import { SRC, treeLang } from './dynamo-access.mjs'
 import { KNOWN, importMatches } from '../../arch.mjs'
 import { LANGS, TEST_PATH } from '../../langs.mjs'
+import { migrationFile } from '../readers/migration-file.mjs'
 
 const DTS = /\.d\.[cm]?ts$/i
 // calls, statements and names (tables, columns, joins, lookups, casts) a file keeps: its facts stay small in graph.db
@@ -86,9 +89,11 @@ const CLIENT_TEXT = {
   python: new RegExp(`^[ \\t]*(?:from|import)[ \\t]+(?:${CLIENTS.map((c) => esc(c.source)).join('|')})\\b`, 'm'),
   rust: new RegExp(`\\buse[ \\t]+(?:${CLIENTS.filter((c) => !c.source.includes('/')).map((c) => esc(c.source.split('::')[0])).join('|')})::|\\bextern[ \\t]+crate[ \\t]+(?:sqlx|rusqlite|postgres|tokio_postgres|mysql|diesel)\\b`),
 }
+// A migration file is never read (readers/migration-file.mjs): its SQL is the store's history, not a query
+// code sends today against today's model.
 export const queryLevel = (p, text) => {
   const l = treeLang(p)
-  if (!l) return 0
+  if (!l || migrationFile(p, text)) return 0
   return (CALL.test(text) && SQL_TEXT.test(text)) || CLIENT_TEXT[familyOf(l)].test(text) ? 64 : 0
 }
 
@@ -460,7 +465,7 @@ export function readQueryFile(tree, lang, file, { ms = FILE_MS } = {}) {
 
 export default {
   id: 'sql-queries',
-  version: 2,
+  version: 3,
   kind: 'inferred',
   scope: 'file',
   tree: true,

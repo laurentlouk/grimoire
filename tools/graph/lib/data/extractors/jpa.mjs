@@ -143,7 +143,7 @@ function springName(s) {
 
 export default {
   id: 'jpa',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'unit',
   tree: true,
@@ -260,7 +260,7 @@ export default {
             const ref = j.referencedColumnName ? N(j.referencedColumnName) : tid?.column || 'id'
             const col = N(j.name || `${f.name}_${ref}`)
             const nn = j.nullable === false || rel.o.optional === false || !!ann(f, 'NotNull')
-            e.fields.push({ name: col, type: tid?.type || 'unknown', nullable: !nn, default: null, generated: null, ...where, unstated: ['type', ...(!nn && j.nullable === undefined ? ['nullable'] : [])] })
+            e.fields.push({ name: col, ...(col !== f.name ? { attr: f.name } : {}), type: tid?.type || 'unknown', nullable: !nn, default: null, generated: null, ...where, unstated: ['type', ...(!nn && j.nullable === undefined ? ['nullable'] : [])] })
             if (rel.name === 'OneToOne') e.keys.push({ role: 'unique', parts: [col], ...where })
             const od = ann(f, 'OnDelete')?.o.action
             const noFk = (j.foreignKey || []).some((x) => x.value === 'NO_CONSTRAINT')
@@ -273,7 +273,7 @@ export default {
           const id = !!ann(f, 'Id')
           const nn = id || o.nullable === false || !!ann(f, 'NotNull') || !!ann(f, 'Version') && PRIMITIVES.has(f.type) || PRIMITIVES.has(f.type)
           const said = nn || o.nullable === true
-          e.fields.push({ name: col, type: typeText(f), nullable: sub || !nn, default: null, generated: null, ...where, unstated: ['type', ...(said && !sub ? [] : ['nullable'])] })
+          e.fields.push({ name: col, ...(col !== f.name ? { attr: f.name } : {}), type: typeText(f), nullable: sub || !nn, default: null, generated: null, ...where, unstated: ['type', ...(said && !sub ? [] : ['nullable'])] })
           if (id) pk.push(col)
           if (o.unique === true) e.keys.push({ role: 'unique', parts: [col], ...where })
         }

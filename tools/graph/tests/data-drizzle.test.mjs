@@ -56,7 +56,7 @@ console.log('\n1 · import paths, migrators, the content filter, a primary key n
   const { reconcile } = await import('../lib/data/reconcile.mjs')
   const entity = (nullable, src) => ({ name: 'notes', kind: 'table', path: src, line: 1, fields: [{ name: 'id', type: 'text', nullable, default: null, generated: null, path: src, line: 2 }, { name: 'title', type: 'text', nullable: true, default: null, generated: null, path: src, line: 3 }], keys: [{ role: 'primary', parts: ['id'], path: src, line: 2 }], indexes: [], relations: [] })
   const decl = (kind, src, nullable) => ({ store: 'drizzle', dialect: 'sqlite', source: { path: src, line: 1, kind, confidence: 'declared' }, complete: true, status: 'read', label: kind, notes: [], entities: [entity(nullable, src)] })
-  const m = reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: [decl('migration', 'drizzle/1/migration.sql', true)] } }, { repo: 'app', extractor: 'drizzle-ts@4', facts: { declarations: [decl('code', 'db/schema.ts', false)] } }])
+  const m = reconcile([{ repo: 'app', extractor: 'sql-migrations@3', facts: { declarations: [decl('migration', 'drizzle/1/migration.sql', true)] } }, { repo: 'app', extractor: 'drizzle-ts@4', facts: { declarations: [decl('code', 'db/schema.ts', false)] } }])
   const id = m.stores[0].entities[0].fields.find((f) => f.name === 'id')
   eq([id.nullable, id.conflicts, m.stores[0].entities[0].fields.find((f) => f.name === 'title').nullable], [false, [], true], 'a primary key\'s column is not null wherever it is declared: a migration\'s `text PRIMARY KEY` without NOT NULL and the schema\'s primaryKey() agree; another column keeps what it says')
 }

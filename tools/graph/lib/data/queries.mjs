@@ -39,7 +39,8 @@
 // model.queries { files, statements, sites: [Site], attached: [{ store, files, why }], clients: [{ repo,
 //   source }] (no longer a gap: a client a file whose queries were read imports, or one of its repository
 //   speaking the dialect of a store its queries were read into), tests }
-//   Site { repo, path, line, extractor, fn, fnLine, call, store, reads: [entity id], writes: [entity id], kinds }
+//   Site { repo, path, line, extractor, fn, fnLine, call, store, reads: [entity id], writes: [entity id], kinds,
+//     inserts?: [{ table, columns: the INSERT's column list (empty: none) }] }
 // A declared store with queries attached gains queries { files, statements, why, conflicts, more };
 // its entities gain queries { sites, conflicts, more }.
 import { KV_DIALECTS } from './model.mjs'
@@ -179,7 +180,9 @@ const cite = (el, s) => { if (el.sources.length < MAX_SOURCES) { if (!el.sources
 // one site of a file, recorded once: { index into out.sites }
 function siteOf(out, f, s, store) {
   const fn = s.fn >= 0 ? f.q.fns[s.fn] : null
-  out.sites.push({ repo: f.repo, path: f.q.path, line: s.line, extractor: f.extractor, fn: fn?.name ?? null, fnLine: fn?.line ?? null, call: s.call, store, reads: [], writes: [], kinds: [...new Set(s.statements.map((x) => x.kind))] })
+  // an INSERT's target and the columns its column list names (none: no list, every column by position, or a source that is a query)
+  const inserts = s.statements.filter((x) => x.kind === 'insert').map((x) => { const t = (x.tables || []).find((y) => y.role === 'write'); return t ? { table: t.name, columns: (x.columns || []).filter((c) => c.how === 'insert' && lower(c.table) === lower(t.name)).map((c) => c.name) } : null }).filter(Boolean)
+  out.sites.push({ repo: f.repo, path: f.q.path, line: s.line, extractor: f.extractor, fn: fn?.name ?? null, fnLine: fn?.line ?? null, call: s.call, store, reads: [], writes: [], kinds: [...new Set(s.statements.map((x) => x.kind))], ...(inserts.length ? { inserts } : {}) })
   return out.sites.length - 1
 }
 

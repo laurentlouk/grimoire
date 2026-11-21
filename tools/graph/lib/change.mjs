@@ -20,6 +20,7 @@
 //   The data model's changes against the same base come with the definitions (dataChangeLines): a
 //   removed or retyped table or column still named by the queries in code is a contract change too.
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { langOf, familyOf } from './langs.mjs'
 import { skipped, maxBytesOf } from './project.mjs'
@@ -28,6 +29,7 @@ import { symbolsAside } from './symbols-aside.mjs'
 import { unresolved, mentions, kindOfPath, USE_KINDS, siteText, dispatch } from './reach.mjs'
 import { routesServedBy, routeCallers, routeTitle } from './route-graph.mjs'
 import { describe } from './query.mjs'
+import { elementsOf, schemaDrift } from './data/reconcile.mjs'
 
 const dispatchUp = (g, n) => dispatch(g, n).up.map((u) => u.node)
 
@@ -164,6 +166,105 @@ function baseDefs(files, project) {
   return out
 }
 
+// ── an ORM's code: what names a table's class or a column's attribute ──
+// The classes an ORM maps to an entity, as its declaration cites them (`class Checkout`, `class User,
+// Admin`, `class Blog::Post`, `model Post`): their last names
+export const ormClasses = (e) => [...new Set((e?.sources || []).flatMap((s) => { const m = /^(?:class|model) (.+)$/.exec(s.as || ''); return m ? m[1].split(/,\s*/).map((x) => x.split(/::|\./).pop()).filter(Boolean) : [] }))]
+// a file of a store's history (a migration, a revision): never a use of what it names
+const HISTORY_PATH = /(^|\/)(?:migrations|db\/migrate)\//
+const isUse = (h) => USE_KINDS.has(h.kind)
+// The uses of attributes (each asked as its names: the attribute, its column when another), as
+// graph_impact reads a name: the call sites naming it the graph could not link, and its mentions in
+// code as a member (`obj.attr`), a keyword or a key (`filter(attr=…)`, `attr:`), a symbol (`:attr`) or
+// a string (`"attr"`); never a bare local of that name, a word in a comment or docs. One search of the
+// project for every name asked. `skip(repo, path)`: files left out (the store's history).
+//   asks: [{ repo, terms, lang }] → per ask { terms, uses: [{ repo, path, line, fn, how }], common }
+export function ormUses(g, project, asks, skip) {
+  const target = (t, a) => ({ id: -1, name: t, kind: 'field', lang: a.lang, repo: a.repo, path: null, line: -1, parent_id: null })
+  const all = [...new Set(asks.flatMap((a) => a.terms.filter((t) => t.length >= 3)))]
+  const sitesOf = new Map(all.map((t) => [t, asks.filter((a) => a.terms.includes(t)).flatMap((a) => unresolved(g, [target(t, a)]))]))
+  const m = all.length ? mentions(g, project, all.map((t) => ({ term: t, targets: [target(t, asks.find((a) => a.terms.includes(t)))] })), { sites: [...sitesOf.values()].flat() }) : { hits: [], common: [] }
+  return asks.map((a) => {
+    const terms = a.terms.filter((t) => t.length >= 3), seen = new Set()
+    const uses = [
+      ...terms.flatMap((t) => sitesOf.get(t) || []).map((x) => ({ repo: x.ref.repo, path: x.ref.path, line: x.ref.line, fn: x.src && x.src.kind !== 'file' ? x.src.qualname : null, how: 'call' })),
+      ...m.hits.filter((h) => isUse(h) && terms.includes(h.term)).map((h) => ({ repo: h.repo, path: h.path, line: h.line, fn: h.where, how: h.kind })),
+    ].filter((x) => { const k = `${x.repo}|${x.path}|${x.line}`; if (seen.has(k) || skip(x.repo, x.path)) return false; seen.add(k); return true })
+    return { terms, uses, common: m.common.filter((c) => terms.includes(c.term)) }
+  })
+}
+// What names a class still defined: its linked callers and references, its unlinked call sites, its
+// mentions in code. → [{ repo, path, line, fn, how }]
+export function ormClassUses(g, project, classes, repo, skip) {
+  const nodes = classes.flatMap((k) => g.q("SELECT n.id FROM nodes n WHERE n.name = ? AND n.kind IN ('class','struct')", k).map((r) => g.node(r.id)))
+  const linked = nodes.flatMap((n) => g.q("SELECT DISTINCT e.src, e.line FROM edges e WHERE e.dst = ? AND e.kind IN ('CALLS','REFERENCES','EXTENDS','IMPLEMENTS')", n.id).map((r) => { const s = g.node(r.src); return s ? { repo: s.repo, path: s.path, line: r.line || s.line, fn: s.kind !== 'file' ? s.qualname : null, how: 'linked' } : null }).filter(Boolean))
+  const sites = unresolved(g, nodes)
+  const m = mentions(g, project, classes.map((k) => ({ term: k, targets: nodes.filter((n) => n.name === k) })), { sites })
+  const seen = new Set()
+  return [...linked, ...sites.map((x) => ({ repo: x.ref.repo, path: x.ref.path, line: x.ref.line, fn: x.src && x.src.kind !== 'file' ? x.src.qualname : null, how: 'call' })), ...m.hits.filter(isUse).map((h) => ({ repo: h.repo, path: h.path, line: h.line, fn: h.where, how: h.kind }))]
+    .filter((x) => { const k = `${x.repo}|${x.path}|${x.line}`; if (seen.has(k) || skip(x.repo, x.path)) return false; seen.add(k); return true })
+}
+// Where code builds or creates a mapped class, and whether it sets an attribute: `Checkout(…)`,
+// `new Post({ … })`, `Post.new(…)`, `Post.create(…)`, `Model.objects.create(…)`, `get_or_create`,
+// `find_or_create_by`. The call's arguments are read as text from its file (to its closing parenthesis;
+// Ruby's call with none, to the end of its line and the lines a trailing comma continues): a keyword, a
+// key or a hash key of the attribute's name sets it (`attr=`, `attr:`, `"attr":`, `:attr =>`), and so
+// does an assignment to it later in the same definition (`obj.attr = …`); a spread, a dict or a
+// variable passed whole is code building the values (`open`, not judged).
+// → { unset: [{ repo, path, line, fn, how }], open: n }
+const CREATES = new Set(['new', 'create', 'create!', 'get_or_create', 'update_or_create', 'first_or_create', 'first_or_create!', 'find_or_create_by', 'find_or_create_by!', 'create_or_find_by', 'insert'])
+export function ormCreates(g, project, classes, attrs, skip, lang = null) {
+  const out = { unset: [], open: 0 }
+  if (!classes.length || !attrs.length) return out
+  const abs = new Map((project.repos || []).map((r) => [r.name, r.abs]))
+  const texts = new Map()
+  const lines = (repo, p) => { const k = `${repo}|${p}`; if (!texts.has(k)) { let t = null; try { t = readFileSync(path.join(abs.get(repo), p), 'utf8').split('\n') } catch {} texts.set(k, t) } return texts.get(k) }
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const sets = attrs.map((a) => new RegExp(`(^|[^\\w.$])["':]?${esc(a)}["']?\\s*(?:=(?![=>])|:(?!:)|=>)`))
+  const later = attrs.map((a) => new RegExp(`\\.${esc(a)}\\s*=(?![=>])`))
+  const rows = g.q(`SELECT r.line, r.name, r.qual, r.kind, r.src_id, f.repo, f.path, f.lang FROM refs r JOIN files f ON f.id = r.file_id WHERE (r.name IN (${classes.map(() => '?').join(',')}) AND r.kind IN ('new','call')) OR (r.name IN (${[...CREATES].map(() => '?').join(',')}) AND r.kind IN ('call','new'))`, ...classes, ...CREATES)
+  const qualOk = (q) => classes.some((k) => new RegExp(`(^|[.:])${esc(k)}(\\.objects|\\.all|\\.where\\([^)]*\\))?$`).test(String(q || '').replace(/\s+/g, '')))
+  const seen = new Set()
+  for (const r of rows) {
+    const own = classes.includes(r.name)
+    if (!own && !(CREATES.has(r.name) && qualOk(r.qual))) continue
+    if (skip(r.repo, r.path) || (lang && familyOf(r.lang) !== familyOf(lang))) continue
+    const key = `${r.repo}|${r.path}|${r.line}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const ls = lines(r.repo, r.path)
+    if (!ls) continue
+    const at = ls[r.line - 1] || ''
+    const m = new RegExp(`(^|[^\\w$])${esc(r.name)}\\s*(\\()?`).exec(at)
+    if (!m) continue
+    let args = ''
+    if (m[2]) { // to the closing parenthesis
+      let depth = 0, i = r.line - 1, j = m.index + m[0].length - 1
+      outer: for (let n = 0; i < ls.length && n < 200; i++, n++, j = 0) {
+        for (; j < ls[i].length; j++) {
+          const ch = ls[i][j]
+          if (ch === '(' || ch === '[' || ch === '{') depth++
+          else if (ch === ')' || ch === ']' || ch === '}') { depth--; if (depth === 0) { args += ls[i].slice(0, j + 1); break outer } }
+        }
+        args += `${ls[i]}\n`
+      }
+      args = args.slice(args.indexOf('(') + 1).replace(/\)\s*$/, '')
+    } else { // Ruby, no parenthesis: the rest of the line, and the lines a trailing comma continues
+      args = at.slice(m.index + m[0].length)
+      for (let i = r.line; i < ls.length && /,\s*$/.test(ls[i - 1]) && i < r.line + 50; i++) args += `\n${ls[i]}`
+    }
+    if (sets.some((re) => re.test(args))) continue
+    const top = args.trim()
+    if (/\*\*|\.\.\.|^\*|\bdict\(|\b\w+_params\b/.test(top) || (top && !/[=:]/.test(top) && /^[\w.$]+(?:\([^)]*\))?$/.test(top))) { out.open++; continue }
+    // an assignment to it later in the same definition (`obj = Model(); obj.attr = …; obj.save()`)
+    const src = r.src_id ? g.node(r.src_id) : null
+    const end = src && src.kind !== 'file' ? Math.min(src.end_line || r.line, r.line + 200) : r.line + 20
+    if (ls.slice(r.line - 1, end).some((t) => later.some((re) => re.test(t)))) continue
+    out.unset.push({ repo: r.repo, path: r.path, line: r.line, fn: src && src.kind !== 'file' ? src.qualname : null, how: `${own ? `${r.name}(…)` : `${String(r.qual || '').replace(/\s+/g, '').split('.').slice(-2).join('.')}.${r.name}(…)`}` })
+  }
+  return out
+}
+
 // The data model's part of a change (step 3b): the branch's model against the base's, read as
 // graph_changes reads them (data/diff.mjs), each element added, removed or modified, and for a table
 // or a column removed or retyped, the code still naming it: the Drizzle calls naming a table no schema
@@ -171,15 +272,23 @@ function baseDefs(files, project) {
 // the queries in code add where they name a column or a table the declarations lack (the SQL the code
 // sends and the Drizzle calls alike), and for a retyped column the calls naming it (or, for SQL, the
 // calls reading or writing its table). A use outside the lines this diff changed is still at risk.
-// A column added not null with no default: the Drizzle inserts into its table that do not set it.
-//   data: { d: diffModels(base, branch), current: the branch's model, baseRows: the base's facts } | { why }
-export function dataChangeLines(g, data, inLines) {
+// A column added not null with no default: the inserts into its table that do not set it (the Drizzle
+// calls, the SQL code sends, and an ORM's own: the mapped class built or created, ormCreates).
+// A table or a column an ORM maps (a class the entity's declaration cites: Django, Active Record,
+// SQLAlchemy, TypeORM, JPA, Mongoose, a Prisma schema's field): its attribute is what code names, so its
+// uses are read as graph_impact reads a name (ormUses): the call sites naming it and its mentions in
+// code (`checkout.redirect_url`, `:thread_id`, `filter(redirect_url=…)`, `"redirect_url"`), the
+// migrations and dumps left out (they are its history). And the conflicts between a code model and
+// its migrations this diff creates (a schema edited and no migration generated, or a migration edited
+// by hand): listed apart, a risk of their own.
+//   data: { d: diffModels(base, branch), current: the branch's model, base: the base's, baseRows: the base's facts } | { why }
+//   opts: { project, text } (text false: no mentions searched, as graph_diff's `mentions: false`)
+export function dataChangeLines(g, data, inLines, { project = null, text = true } = {}) {
   if (!data) return { out: [], risk: [] }
   if (data.why) return { out: [`Data model: not compared (${data.why})`], risk: [] }
   const { d, current } = data
   const k = d.counts
-  if (!d.stores.length) return { out: ['Data model changes (against the same base): none'], risk: [] }
-  const out = [`Data model changes (against the same base; graph_changes lists each in full): ${k.stores} store(s) changed · ${k.added} added · ${k.removed} removed · ${k.modified} modified${k.renames ? ` · ${k.renames} possible rename(s), never decided` : ''}`]
+  const out = [d.stores.length ? `Data model changes (against the same base; graph_changes lists each in full): ${k.stores} store(s) changed · ${k.added} added · ${k.removed} removed · ${k.modified} modified${k.renames ? ` · ${k.renames} possible rename(s), never decided` : ''}` : 'Data model changes (against the same base): none']
   const risk = []
   const loc = (repo, x) => g.dloc({ repo: x.repo ?? repo, path: x.path, line: x.line })
   // the base's Drizzle names: (store id, table) → its variable, (store id, table, column) → its key
@@ -203,7 +312,23 @@ export function dataChangeLines(g, data, inLines) {
   for (const st of d.stores) {
     out.push(`  ${st.id}  ${st.change === 'added' ? 'added (absent at the base)' : st.change === 'removed' ? 'removed (absent from the branch)' : 'modified'}`)
     const now = current.stores.find((x) => x.id === st.id)
+    const was = data.base?.stores.find((x) => x.id === st.id) || null
     const entityNow = (name) => now?.entities.find((e) => e.name === name) || null
+    const entityWas = (name) => was?.entities.find((e) => e.name === name) || null
+    // the files that state the store's history or its dump (migrations, schema files): no use of it in code
+    const history = new Set([now, was].filter(Boolean).flatMap((x) => x.entities.flatMap((e) => elementsOf(e).flatMap(([, el]) => (el.sources || []).filter((y) => y.kind === 'migration' || y.kind === 'artifact').map((y) => `${y.repo ?? st.repo}|${y.path}`)))))
+    const skip = (r, p) => history.has(`${r}|${p}`) || HISTORY_PATH.test(p)
+    // the uses of a column an ORM maps, through its attribute (ormUses): asked where the change is
+    // listed (a slot in `out`), answered by one search once the store's changes are read
+    const asked = []
+    const orm = (c, el, what, verb) => {
+      const e = entityWas(c.entity) || entityNow(c.entity)
+      // a column a code model states, or one of a table a class maps (Active Record: the schema states its columns)
+      const code = [...(el.sources || []).filter((x) => x.kind === 'code'), ...(e?.sources || []).filter((x) => x.as && x.kind === 'code')]
+      if (!project || !text || !code.length) return
+      const classes = ormClasses(e)
+      asked.push({ slot: out.push(null) - 1, repo: st.repo, terms: [...new Set([el.attr, el.name].filter((t) => t && t.length >= 3))], lang: langOf(code[0].path), label: `${what} ${c.entity}.${el.name}${classes.length ? ` (${classes.join(', ')}.${el.attr || el.name})` : ''}`, verb })
+    }
     let shown = 0
     for (const c of st.changes) {
       if (shown++ >= 30) { out.push(`    … ${st.changes.length - 30} more (graph_changes lists them)`); break }
@@ -218,12 +343,19 @@ export function dataChangeLines(g, data, inLines) {
         const left = z.unresolvedAt.filter((u) => u.repo === st.repo && u.name === v).map((u) => ({ ...u, how: 'drizzle' }))
         const sql = (now?.queries?.conflicts || []).filter((x) => x.label.toLowerCase() === c.name.toLowerCase()).flatMap((x) => x.values[0].sources.map((y) => ({ ...y, how: 'sql' })))
         if (left.length || sql.length) out.push(`      still named: ${named([...left, ...sql], `removed table ${c.name}`)}`)
+        // a class the ORM mapped to it, still defined: what names that class
+        const classes = ormClasses(entityWas(c.name)).filter((k) => g.q("SELECT 1 FROM nodes WHERE name = ? AND kind IN ('class','struct') LIMIT 1", k).length)
+        if (classes.length && project) {
+          const u = ormClassUses(g, project, classes, st.repo, skip)
+          if (u.length) out.push(`      its class ${classes.join(', ')} still named: ${named(u, `removed table ${c.name}'s class ${classes.join(', ')}`)}`)
+        }
       }
       if (c.kind === 'field' && c.change === 'removed') {
         const e = entityNow(c.entity)
         const keys = new Set([c.name, baseKey.get(`${st.id}\0${c.entity}\0${c.name}`)].filter(Boolean))
         const left = (e?.queries?.conflicts || []).filter((x) => keys.has(x.path)).flatMap((x) => x.values[0].sources.map((y) => ({ ...y, how: y.extractor && /^drizzle-queries@/.test(y.extractor) ? 'drizzle' : 'sql' })))
         if (left.length) out.push(`      still named: ${named(left, `removed column ${c.entity}.${c.name}`)}`)
+        orm(c, el, 'removed column', 'still named')
       }
       if (c.kind === 'field' && c.change === 'modified' && c.attrs.some((a) => a.attr === 'type')) {
         const e = entityNow(c.entity)
@@ -231,18 +363,55 @@ export function dataChangeLines(g, data, inLines) {
         const cols = mine.filter((x) => (x.columns || []).some((y) => y.entity === e.id && y.name === el.name)).map((x) => ({ repo: x.repo, path: x.path, line: x.line, fn: x.fn, how: 'drizzle' }))
         const sql = mine.filter((x) => x.call !== 'drizzle').map((x) => ({ repo: x.repo, path: x.path, line: x.line, fn: x.fn, how: 'sql, reads or writes its table' }))
         if (cols.length || sql.length) out.push(`      read or written by: ${named([...cols, ...sql], `retyped column ${c.entity}.${el.name}`)}`)
+        orm(c, el, 'retyped column', 'named in code')
       }
       if (c.kind === 'field' && c.change === 'added' && c.after.nullable === false && (c.after.default === null || c.after.default === undefined) && !c.after.computed && !c.after.generated) {
         const e = entityNow(c.entity)
-        const inserts = (e?.queries?.sites || []).map((i) => sites[i]).filter((x) => x && x.call === 'drizzle' && x.kinds.includes('insert') && x.writes.includes(e.id) && !x.open && !(x.columns || []).some((y) => y.entity === e.id && y.name === el.name))
+        const mine = (e?.queries?.sites || []).map((i) => sites[i]).filter((x) => x && x.kinds.includes('insert') && x.writes.includes(e.id))
+        const drizzle = mine.filter((x) => x.call === 'drizzle' && !x.open && !(x.columns || []).some((y) => y.entity === e.id && y.name === el.name)).map((x) => ({ ...x, how: 'drizzle' }))
+        // the SQL the code sends: an INSERT whose column list leaves it out (one with no list is not judged)
+        const bare = (n) => String(n).toLowerCase().split('.').pop()
+        const sql = mine.filter((x) => x.call !== 'drizzle' && (x.inserts || []).some((i) => bare(i.table) === bare(e.name) && i.columns.length && !i.columns.some((y) => y.toLowerCase() === el.name.toLowerCase()))).map((x) => ({ ...x, how: 'sql' }))
+        // the ORM's own: its class built or created with no value for the attribute
+        const classes = ormClasses(e)
+        const classAt = (e?.sources || []).find((x) => x.as && x.kind === 'code')
+        const created = classes.length && project ? ormCreates(g, project, classes, [...new Set([el.attr, el.name].filter(Boolean))], skip, classAt ? langOf(classAt.path) : null) : { unset: [], open: 0 }
+        const inserts = [...drizzle, ...sql, ...created.unset]
         const outside = inserts.filter((x) => !inLines(x.repo, x.path, x.line))
-        if (inserts.length) out.push(`      inserts that do not set it (a not-null column with no default): ${inserts.slice(0, 8).map((x) => `${loc(null, x)}${x.fn ? ` (${x.fn})` : ''}`).join(' · ')}`)
+        if (inserts.length) out.push(`      inserts that do not set it (a not-null column with no default): ${inserts.slice(0, 8).map((x) => `${loc(null, x)}${x.fn ? ` (${x.fn})` : ''}${x.how && x.how !== 'drizzle' ? ` [${x.how}]` : ''}`).join(' · ')}${inserts.length > 8 ? ` · … ${inserts.length - 8} more` : ''}`)
+        if (created.open) out.push(`      (${created.open} creation(s) of ${classes.join(', ')} whose values code builds (a spread, a dict or a variable): not judged)`)
         if (outside.length) risk.push(`${outside.length} insert(s) into ${c.entity} do not set the not-null column ${el.name} added with no default`)
       }
     }
+    if (asked.length) {
+      const said = new Set()
+      ormUses(g, project, asked, skip).forEach((u, i) => {
+        const a = asked[i]
+        out[a.slot] = [
+          ...(u.uses.length ? [`      ${a.verb} through the ORM (${u.uses.length} use(s) of ${u.terms.map((t) => `.${t}`).join(', ')}): ${named(u.uses, a.label)}`] : []),
+          ...u.common.filter((cm) => !said.has(cm.term) && said.add(cm.term)).map((cm) => `      "${cm.term}" appears on ${cm.n} lines of ${cm.repo}: too common to sort (search it with a narrower pattern)`),
+        ].join('\n') || null
+      })
+    }
     for (const r of st.renames.slice(0, 5)) out.push(`    possible rename, not decided: ${r.from.map((i) => st.changes[i].name).join(', ')} → ${r.to.map((i) => st.changes[i].name).join(', ')}`)
   }
-  return { out, risk }
+  // the code model and its migrations: the disagreements this diff creates
+  const drift = (model) => {
+    const m = new Map()
+    for (const s of model?.stores || []) for (const e of s.entities) for (const [label, x] of elementsOf(e)) for (const c of x.conflicts || []) if (schemaDrift(c)) m.set(`${s.id}\0${label}\0${c.attr}`, { st: s, label, c })
+    return m
+  }
+  if (data.base) {
+    const before = drift(data.base), after = drift(current)
+    const made = [...after].filter(([k]) => !before.has(k)).map(([, v]) => v)
+    if (made.length) {
+      out.push(`Schema and migrations disagree, ${made.length} conflict(s) this diff creates (a code model edited and no migration generated, or a migration edited by hand; ${before.size} before, ${after.size} now):`)
+      for (const { st, label, c } of made.slice(0, 20)) out.push(`  ${st.id}  ${label}  ${c.attr}: ${c.values.map((v) => `${v.value} — ${v.sources.slice(0, 2).map((x) => `${loc(st.repo, x)} [${x.kind}]`).join(' · ')}`).join(' | ')}`)
+      if (made.length > 20) out.push(`  … ${made.length - 20} more (graph_data lists every conflict)`)
+      risk.push(`${made.length} conflict(s) between a code model and its migrations this diff creates (generate the migration, or say why not)`)
+    }
+  }
+  return { out: out.filter((l) => l !== null), risk }
 }
 
 export function changeImpact(g, project, base, { repo = null, depth = 2, text = true, data = null, diff = null } = {}) {
@@ -311,7 +480,7 @@ export function changeImpact(g, project, base, { repo = null, depth = 2, text = 
 
   // ── the data model: what the branch changed in it, and who still names what it removed ──
   const inLines = (r, p, line) => files.some((f) => f.repo === r && f.path === p && f.added.some(([a, b]) => a <= line && line <= b))
-  const dm = dataChangeLines(g, data, inLines)
+  const dm = dataChangeLines(g, data, inLines, { project, text })
   out.push(...dm.out)
 
   // ── contract changes: who still names them ──

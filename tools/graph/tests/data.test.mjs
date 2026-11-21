@@ -448,23 +448,23 @@ CREATE TABLE \`shelf_books\` (
 \tPRIMARY KEY(\`shelf_id\`, \`book_id\`)
 );`
   const snapshot = { repo: 'app', extractor: 'drizzle-snapshot@1', facts: drizzleSnapshot.extract(LEGACY, 'db/meta/0010_snapshot.json') }
-  const model = reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: migration(AGREES) }, snapshot])
+  const model = reconcile([{ repo: 'app', extractor: 'sql-migrations@3', facts: migration(AGREES) }, snapshot])
   const [st] = model.stores
   eq([model.stores.length, st.id, st.dialect, st.entities.map((e) => e.id)], [1, 'app:db', 'sqlite', ['app:db/books', 'app:db/shelf_books']], 'a replay and a snapshot of one folder are two declarations of one store')
   eq(everyConflict(st), [], 'replay and snapshot agree element for element: no conflict')
   const books = st.entities[0]
-  eq(srcs(books.fields.find((f) => f.name === 'title')), ['db/meta/0010_snapshot.json:12 artifact drizzle-snapshot@1', 'db/0001_init.sql:4 migration sql-migrations@2'], 'each element keeps both sources, most trusted first')
-  eq(st.entities[1].keys.map((k) => [k.role, k.parts, srcs(k)]), [['primary', ['shelf_id', 'book_id'], ['db/meta/0010_snapshot.json:28 artifact drizzle-snapshot@1', 'db/0001_init.sql:12 migration sql-migrations@2']]], "a composite primary key is compared as a key: the snapshot's compositePrimaryKeys and the columns PRAGMA marks are one element")
+  eq(srcs(books.fields.find((f) => f.name === 'title')), ['db/meta/0010_snapshot.json:12 artifact drizzle-snapshot@1', 'db/0001_init.sql:4 migration sql-migrations@3'], 'each element keeps both sources, most trusted first')
+  eq(st.entities[1].keys.map((k) => [k.role, k.parts, srcs(k)]), [['primary', ['shelf_id', 'book_id'], ['db/meta/0010_snapshot.json:28 artifact drizzle-snapshot@1', 'db/0001_init.sql:12 migration sql-migrations@3']]], "a composite primary key is compared as a key: the snapshot's compositePrimaryKeys and the columns PRAGMA marks are one element")
 
   const edited = AGREES.replace("\`title\` text DEFAULT 'untitled' NOT NULL", "\`title\` varchar(80) DEFAULT 'untitled' NOT NULL").replace('CREATE INDEX', 'ALTER TABLE \`books\` ADD \`isbn\` text;\nCREATE INDEX')
-  const drift = reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: migration(edited) }, snapshot]).stores[0]
+  const drift = reconcile([{ repo: 'app', extractor: 'sql-migrations@3', facts: migration(edited) }, snapshot]).stores[0]
   eq(everyConflict(drift), [
     'books.title type: text @ db/meta/0010_snapshot.json:12 | varchar(80) @ db/0001_init.sql:4',
     'books.isbn presence: declared @ db/0001_init.sql:8 | absent @ db/meta/0010_snapshot.json:7',
   ], 'a hand-edited migration disagreeing with the snapshot: each conflict carries both sources, none resolved')
 
-  const partial = reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: migration(edited, { complete: false, partial: true, status: 'partial' }) }, snapshot]).stores[0]
-  eq([everyConflict(partial), srcs(partial.entities[0].fields.find((f) => f.name === 'isbn'))], [[], ['db/0001_init.sql:8 migration sql-migrations@2']], 'a replay that stopped early is shown, but compared with nothing')
+  const partial = reconcile([{ repo: 'app', extractor: 'sql-migrations@3', facts: migration(edited, { complete: false, partial: true, status: 'partial' }) }, snapshot]).stores[0]
+  eq([everyConflict(partial), srcs(partial.entities[0].fields.find((f) => f.name === 'isbn'))], [[], ['db/0001_init.sql:8 migration sql-migrations@3']], 'a replay that stopped early is shown, but compared with nothing')
 
   const declaring = (kind, path, entities) => ({ repo: 'app', extractor: `${kind}@1`, facts: { declarations: [{ store: 'db', dialect: 'sqlite', source: { path, line: 1, kind, confidence: 'declared' }, complete: true, partial: false, status: 'read', notes: [], entities }] } })
   const replayed = replay([{ path: 'db/0001_t.sql', text: 'CREATE TABLE t (\n  at integer DEFAULT (unixepoch()) NOT NULL,\n  total integer DEFAULT ((1) + (2))\n);' }], DatabaseSync).entities
@@ -507,7 +507,7 @@ console.log('\n6 · finding and ordering migration folders')
 console.log('\n7 · diffing two models (diff.mjs)')
 const { diffModels } = await import('../lib/data/diff.mjs')
 // a store's model from SQL, as the index reconciles it
-const modelOf = (text, { store = 'db', dialect = 'sqlite', path: p = `${store}/0001_init.sql` } = {}) => reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: [{ store, dialect, source: { path: p, line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', notes: [], entities: replay([{ path: p, text }], DatabaseSync).entities }] } }])
+const modelOf = (text, { store = 'db', dialect = 'sqlite', path: p = `${store}/0001_init.sql` } = {}) => reconcile([{ repo: 'app', extractor: 'sql-migrations@3', facts: { declarations: [{ store, dialect, source: { path: p, line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', notes: [], entities: replay([{ path: p, text }], DatabaseSync).entities }] } }])
 // one line per change: + added, - removed, ~ modified (before → after), then the rename candidates
 const changeLines = (d) => d.stores.flatMap((s) => [`${s.id} ${s.change}`,
   ...s.changes.map((c) => `  ${{ added: '+', removed: '-', modified: '~' }[c.change]} ${c.kind} ${c.kind === 'entity' ? c.name : `${c.entity} ${c.name}`}${c.attrs.length ? `  ${c.attrs.map((a) => `${a.attr}: ${a.before} → ${a.after}`).join('; ')}` : ''}`),
@@ -686,13 +686,13 @@ CREATE TABLE books (
 CREATE INDEX books_author_idx ON books (author_id);
 `
     const replayed = replay([{ path: 'db/0001_init.sql', text: INIT }], DatabaseSync)
-    fact('db', 'sql-migrations@2', { declarations: [decl('db', { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 3 statements', files: 1, implicitIndexes: replayed.implicit, entities: replayed.entities })] })
+    fact('db', 'sql-migrations@3', { declarations: [decl('db', { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 3 statements', files: 1, implicitIndexes: replayed.implicit, entities: replayed.entities })] })
     let line = 100
     const SNAP = 'db/meta/0001_snapshot.json'
     const cite = (x) => ({ ...x, path: SNAP, line: line++ })
     const snapshot = replayed.entities.map((e) => ({ ...cite(e), fields: e.fields.map((f) => cite(e.name === 'books' && f.name === 'title' ? { ...f, type: 'text' } : f)), keys: e.keys.map(cite), indexes: e.indexes.map(cite), relations: e.relations.map(cite) }))
     fact(SNAP, 'drizzle-snapshot@1', { declarations: [decl('db', { path: SNAP, line: 1, kind: 'artifact', confidence: 'declared' }, { label: 'snapshot', entities: snapshot })] })
-    fact('db/pg', 'sql-migrations@2', { declarations: [{ ...decl('db/pg', { path: 'db/pg/0001_a.sql', line: 1, kind: 'migration', confidence: 'exact' }, { status: 'not-read', complete: false, label: 'order unknown (create.sql has no numeric or timestamp prefix)', files: 2, entities: [] }), dialect: 'postgres', dialectFrom: { how: 'supabase' } }] })
+    fact('db/pg', 'sql-migrations@3', { declarations: [{ ...decl('db/pg', { path: 'db/pg/0001_a.sql', line: 1, kind: 'migration', confidence: 'exact' }, { status: 'not-read', complete: false, label: 'order unknown (create.sql has no numeric or timestamp prefix)', files: 2, entities: [] }), dialect: 'postgres', dialectFrom: { how: 'supabase' } }] })
     const name = (i) => `t${String(i).padStart(3, '0')}`
     const wide = Array.from({ length: 200 }, (_, i) => {
       const cols = ['id', 'name', 'parent_id', 'created_at', ...(i % 50 ? [] : ['audit_note'])]
@@ -701,16 +701,16 @@ CREATE INDEX books_author_idx ON books (author_id);
         keys: [{ role: 'primary', parts: ['id'], line: i + 1 }], indexes: [{ name: `${name(i)}_name_idx`, unique: false, columns: ['name'], partial: false, line: i + 1 }],
         relations: i < 190 && i % 5 ? [{ columns: ['parent_id'], to: name(i - (i % 5)), toColumns: ['id'], onDelete: 'no action', onUpdate: 'no action', line: i + 1 }] : [] }
     })
-    fact('warehouse', 'sql-migrations@2', { declarations: [decl('warehouse', { path: 'warehouse/0001_all.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 400 statements', files: 1, entities: wide })] })
+    fact('warehouse', 'sql-migrations@3', { declarations: [decl('warehouse', { path: 'warehouse/0001_all.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 400 statements', files: 1, entities: wide })] })
     fact('db/meta/0002_snapshot.json', 'drizzle-snapshot@1', null, 'Unexpected end of JSON input')
     // foreign keys naming their target in another letter case, as SQLite accepts and keeps them
     const MIXED = 'CREATE TABLE authors(id INTEGER PRIMARY KEY); CREATE TABLE books(id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES Authors(id)); CREATE TABLE "Loans"(id INTEGER PRIMARY KEY); CREATE TABLE reviews(id INTEGER PRIMARY KEY, loan_id INTEGER REFERENCES loans(id));\nCREATE TABLE ratings(id INTEGER PRIMARY KEY, book_id INTEGER REFERENCES BOOKS(ID));\n'
     const mixed = replay([{ path: 'x/legacy/0001_init.sql', text: MIXED }], DatabaseSync)
-    fact('x/legacy', 'sql-migrations@2', { declarations: [decl('x/legacy', { path: 'x/legacy/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 5 statements', files: 1, entities: mixed.entities })] })
+    fact('x/legacy', 'sql-migrations@3', { declarations: [decl('x/legacy', { path: 'x/legacy/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 5 statements', files: 1, entities: mixed.entities })] })
     // every name and path a hostile repository could choose, holding markup
     const BAD = '"><img src=x onerror=alert(1)></title><script>x</script><!--', HOSTILE = `y/${BAD}.sql`
     const at1 = (line) => ({ path: HOSTILE, line })
-    fact('y/hostile', 'sql-migrations@2', { declarations: [decl('y/hostile', { path: HOSTILE, line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 1 statement', files: 1, entities: [{ name: `t${BAD}`, kind: 'table', ...at1(1),
+    fact('y/hostile', 'sql-migrations@3', { declarations: [decl('y/hostile', { path: HOSTILE, line: 1, kind: 'migration', confidence: 'exact' }, { label: 'replayed 1 file, 1 statement', files: 1, entities: [{ name: `t${BAD}`, kind: 'table', ...at1(1),
       fields: [{ name: `c${BAD}`, type: `text${BAD}`, nullable: true, default: null, generated: null, ...at1(2) }], keys: [], indexes: [{ name: `i${BAD}`, unique: false, columns: [`c${BAD}`], partial: false, ...at1(3) }],
       relations: [{ columns: [`c${BAD}`], to: `r${BAD}`, toColumns: ['id'], onDelete: 'no action', onUpdate: 'no action', ...at1(4) }] }] })] })
     db.close()
@@ -2741,7 +2741,7 @@ console.log('\n28 · code-declared SQL models: the schema-language reader (reade
     const mig = (fks) => ({ store: 'prisma/migrations', dialect: 'postgres', source: { path: 'prisma/migrations/1_init/migration.sql', line: 1, kind: 'migration', confidence: 'declared' }, complete: true, partial: false, status: 'read', label: 'replayed', notes: [], files: 1,
       entities: [T('user', [col('id', 'UUID')]), T('website', [col('id', 'UUID'), col('user_id', 'UUID', true), col('created_by', 'UUID', true)], fks), T('session', [col('id', 'UUID'), col('website_id', 'UUID')]), T('Tag', [col('id', 'UUID')]),
         { ...T('_TagToWebsite', [col('A', 'UUID'), col('B', 'UUID')]), keys: [] }] })
-    const rows = (fks = []) => [{ repo: 'site', extractor: 'prisma@3', facts: { declarations: [cr] } }, { repo: 'site', extractor: 'sql-migrations@2', facts: { declarations: [mig(fks)] } }]
+    const rows = (fks = []) => [{ repo: 'site', extractor: 'prisma@4', facts: { declarations: [cr] } }, { repo: 'site', extractor: 'sql-migrations@3', facts: { declarations: [mig(fks)] } }]
     const M = reconcile(rows())
     const st = M.stores[0], web = st.entities.find((e) => e.name === 'website')
     eq([M.stores.length, web.relations.map((r) => `${r.kind} (${r.columns})->${r.to} ${r.conflicts.length}`), st.entities.reduce((a, e) => a + elementsOf(e).reduce((b, [, x]) => b + x.conflicts.length, 0), 0)],
@@ -2755,7 +2755,7 @@ console.log('\n28 · code-declared SQL models: the schema-language reader (reade
     eq([r2.kind, r2.conflicts.map((c) => `${c.attr}: ${c.values.map((v) => `${v.value} ${v.sources.map((x) => x.kind)}`).join(' | ')}`), schemaDrift(r2.conflicts[0])], ['fk', ['enforced: database migration | client code'], true],
       'a foreign key the migrations create where the schema says its client enforces the relation: one element, a foreign key, its `enforced` the conflict (the schema edited, no migration generated)')
     // the diff: a foreign key that becomes a relation its client enforces is modified; adding one is a relation added
-    const before = reconcile([{ repo: 'site', extractor: 'sql-migrations@2', facts: { declarations: [mig([fk])] } }])
+    const before = reconcile([{ repo: 'site', extractor: 'sql-migrations@3', facts: { declarations: [mig([fk])] } }])
     const dd = diffModels(before, M).stores[0].changes.filter((c) => c.kind === 'relation')
     eq(dd.map((c) => `${c.change} ${c.name}${c.attrs.map((a) => ` ${a.attr}: ${a.before} → ${a.after}`).join('')}`).sort(), ['added (A) → Tag (id)', 'added (B) → website (id)', 'added (created_by) → user (id)', 'added (website_id) → website (id)', 'modified (user_id) → user (id) enforced: database → client'],
       'the diff: a relation the client enforces added is a relation added; a foreign key turned into one is modified, `enforced` database → client')
@@ -2797,7 +2797,7 @@ console.log('\n28 · code-declared SQL models: the schema-language reader (reade
   const decl = (kind, extractor, path, entities, extra = {}) => ({ repo: 'app', extractor, facts: { declarations: [{ store: 'drizzle', dialect: 'sqlite', source: { path, line: 1, kind, confidence: 'exact' }, complete: true, partial: false, status: 'read', label: kind, notes: [], entities, ...extra }] } })
   const col = (name, type, nullable, line, more = {}) => ({ name, type, nullable, default: null, generated: null, line, ...more })
   const ent = (name, fields, more = {}) => ({ name, kind: 'table', line: 1, fields, keys: [{ role: 'primary', parts: ['id'], line: 2 }], indexes: [], relations: [], ...more })
-  const replay = decl('migration', 'sql-migrations@2', 'drizzle/0000_init.sql', [ent('books', [col('id', 'text', false, 2), col('title', 'text', false, 3, { default: "'untitled'" })])])
+  const replay = decl('migration', 'sql-migrations@3', 'drizzle/0000_init.sql', [ent('books', [col('id', 'text', false, 2), col('title', 'text', false, 3, { default: "'untitled'" })])])
   const same = decl('code', 'drizzle-ts@3', 'src/schema.ts', [ent('books', [col('id', 'text', false, 5), col('title', 'text', false, 6, { default: "'untitled'" })])])
   const ahead = decl('code', 'drizzle-ts@3', 'src/schema.ts', [ent('books', [col('id', 'text', false, 5), col('title', 'text', false, 6, { default: 'someDefault()', unstated: ['default'], computed: '$onUpdate(() => x)' }), col('rating', 'integer', true, 7)]), ent('reviews', [col('id', 'text', false, 9)])], { enums: [{ name: 'mood', values: ['ok'], path: 'src/schema.ts', line: 12 }] })
   const agree = reconcile([replay, same]).stores[0]
@@ -3203,10 +3203,10 @@ DROP INDEX posts_slug ON articles;` }], { dialect: 'mysql' })
     ['migration', 'db/migrations/20240101000000_init.sql', 'postgres', { how: 'stated', path: 'db/schema.sql', line: 2 }, 'replayed 1 file, 1 statement', ['also stated by the schema dump db/schema.sql, listed first (where the two disagree, a conflict)']],
     ['artifact', 'db/schema.sql', 'postgres', { how: 'stated', path: 'db/schema.sql', line: 2 }, 'schema dump, 5 statements (1 skipped)', ['a schema dump of db/migrations, preferred over its replay where an element is shown (the replay kept beside it)', 'skipped in db/schema.sql: 1 statement that does not shape the store (SET 1)']],
   ], 'a dump and the migrations of one store: two declarations, the dump an artifact (its dialect from its header), listed first, the replay beside it')
-  const merged = reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: both } }]).stores[0]
-  eq([merged.declarations.map((d) => d.kind), everyConflict(merged), merged.entities[0].fields.map((f) => `${f.name} ${f.type.raw} ${srcs(f).join(' + ')}`)], [['artifact', 'migration'], [], ['id serial db/schema.sql:6 artifact sql-migrations@2 + db/migrations/20240101000000_init.sql:1 migration sql-migrations@2', 'email character varying(255) db/schema.sql:7 artifact sql-migrations@2 + db/migrations/20240101000000_init.sql:1 migration sql-migrations@2']],
+  const merged = reconcile([{ repo: 'app', extractor: 'sql-migrations@3', facts: { declarations: both } }]).stores[0]
+  eq([merged.declarations.map((d) => d.kind), everyConflict(merged), merged.entities[0].fields.map((f) => `${f.name} ${f.type.raw} ${srcs(f).join(' + ')}`)], [['artifact', 'migration'], [], ['id serial db/schema.sql:6 artifact sql-migrations@3 + db/migrations/20240101000000_init.sql:1 migration sql-migrations@3', 'email character varying(255) db/schema.sql:7 artifact sql-migrations@3 + db/migrations/20240101000000_init.sql:1 migration sql-migrations@3']],
     "… reconciled: the dump first and shown, the engine's names agreeing with the migration's (an integer with its own sequence's default is the migration's serial; character varying is varchar), each element at both lines (in the dump, where its CREATE states it)")
-  const stale = reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: run('db/migrations', [['db/migrations/20240101000000_init.sql', 'CREATE TABLE accounts (id serial PRIMARY KEY, email varchar(255) NOT NULL);'], ['db/migrations/20240301000000_name.sql', 'ALTER TABLE accounts ADD COLUMN name text;'], ['db/schema.sql', PG_DUMP]]) } }]).stores[0]
+  const stale = reconcile([{ repo: 'app', extractor: 'sql-migrations@3', facts: { declarations: run('db/migrations', [['db/migrations/20240101000000_init.sql', 'CREATE TABLE accounts (id serial PRIMARY KEY, email varchar(255) NOT NULL);'], ['db/migrations/20240301000000_name.sql', 'ALTER TABLE accounts ADD COLUMN name text;'], ['db/schema.sql', PG_DUMP]]) } }]).stores[0]
   eq(everyConflict(stale), ['accounts.name presence: declared @ db/migrations/20240301000000_name.sql:1 | absent @ db/schema.sql:5'], 'a migration the dump does not show yet (the dump not regenerated): a conflict carrying both sides, never resolved by precedence')
 
   // ─ how the engines' names compare ─
@@ -3229,7 +3229,7 @@ console.log('\n30b · a dump and the migrations that built it say the same: what
   const { normType, normDefault } = await import('../lib/data/model.mjs')
   const { storeSummary } = await import('../lib/data/reconcile.mjs')
   const run = (key, files, override = null) => sqlMigrations.extract({ key, files: files.map(([p, text]) => ({ path: p, text })), override }, { DatabaseSync }).declarations
-  const merged = (decls) => reconcile([{ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: decls } }]).stores[0]
+  const merged = (decls) => reconcile([{ repo: 'app', extractor: 'sql-migrations@3', facts: { declarations: decls } }]).stores[0]
 
   // a qualified COLLATE, as pg_dump writes it, in a column, an ALTER … TYPE and an index column
   const collate = readDdl([{ path: 'db/schema.sql', text: `CREATE TABLE public.customers (
@@ -3429,7 +3429,7 @@ console.log('\n32 · the refine file (data/check.mjs): its format, each claim re
   put('outside.ts', 'title\n')
   symlinkSync(path.join(RD, 'outside.ts'), path.join(RD, 'api/src/escape.ts'))
   const roots = [{ name: 'app', rel: 'app', abs: path.join(RD, 'app') }, { name: 'api', rel: 'api', abs: path.join(RD, 'api') }]
-  const sqlRow = (text) => ({ repo: 'app', extractor: 'sql-migrations@2', facts: { declarations: [{ store: 'db', dialect: 'sqlite', source: { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', label: 'replayed', notes: [], entities: replay([{ path: 'db/0001_init.sql', text }], DatabaseSync).entities }] } })
+  const sqlRow = (text) => ({ repo: 'app', extractor: 'sql-migrations@3', facts: { declarations: [{ store: 'db', dialect: 'sqlite', source: { path: 'db/0001_init.sql', line: 1, kind: 'migration', confidence: 'exact' }, complete: true, partial: false, status: 'read', label: 'replayed', notes: [], entities: replay([{ path: 'db/0001_init.sql', text }], DatabaseSync).entities }] } })
   const SQL = 'CREATE TABLE events (id text PRIMARY KEY, title text, owner_id text);\nCREATE TABLE event_participants (event_id text, user_id text);\nCREATE TABLE tags (id text PRIMARY KEY, event_id text REFERENCES events(id));\nCREATE INDEX tags_event_idx ON tags (event_id);'
   const tpl = (name, attr, extra = {}) => ({ name, nameTemplate: name, kind: 'table', path: 'infra/main.tf', line: 3, whole: true, billing: 'PAY_PER_REQUEST', stream: null, fields: [{ name: attr, type: 'S', nullable: false, default: null, generated: null, path: 'infra/main.tf', line: 5 }], keys: [{ role: 'partition', parts: [attr], path: 'infra/main.tf', line: 6 }], indexes: [], relations: [], ...extra })
   const infra = { repo: 'api', extractor: 'terraform@1', facts: { declarations: [{ store: 'dynamodb', dialect: 'dynamodb', source: { path: 'infra/main.tf', line: 1, kind: 'infra', confidence: 'exact' }, complete: false, partial: false, status: 'read', label: 'a Terraform module', notes: [], entities: [
@@ -3765,7 +3765,7 @@ console.log('\n35 · the SQL code sends, against the model (data/queries.mjs): a
   eq(orders.fields.map((f) => [f.name, f.type.raw, f.casts.map((c) => c.type)]).filter(([, , c]) => c.length), [['total', null, ['numeric']]], '… a cast is the only type the code states, kept as a cast, never as the column\'s type')
   eq(M.queries.sites.map((s) => [s.path, s.line, s.fn, s.reads.map((x) => x.split('/').pop()), s.writes.map((x) => x.split('/').pop())]), [['web/users.ts', 5, 'save', ['users'], []], ['web/users.ts', 9, 'save', [], ['users']], ['worker/orders.go', 12, 'Repo.Open', ['orders', 'users'], []]], 'readers and writers: each call with its function and the tables it reads and writes')
   // a declared store: the queries attach, adding only [inferred] conflicts and access sites
-  const D = (repo, store, dialect, tables, extractor = 'sql-migrations@2') => ({ repo, extractor, facts: { declarations: [{ store, dialect, dialectFrom: { how: 'sniffed', marker: 'x', path: `${store}/0001.sql`, line: 1 }, source: { path: `${store}/0001.sql`, line: null, kind: 'migration', confidence: 'declared' }, complete: true, status: 'read', label: 'replayed 1 file', notes: [], entities: tables.map(([name, cols], i) => ({ name, kind: 'table', path: `${store}/0001.sql`, line: 1 + i * 10, fields: cols.map((c, j) => ({ name: c, type: 'text', nullable: false, default: null, generated: null, path: `${store}/0001.sql`, line: 2 + i * 10 + j })), keys: [], indexes: [], relations: [] })) }] } })
+  const D = (repo, store, dialect, tables, extractor = 'sql-migrations@3') => ({ repo, extractor, facts: { declarations: [{ store, dialect, dialectFrom: { how: 'sniffed', marker: 'x', path: `${store}/0001.sql`, line: 1 }, source: { path: `${store}/0001.sql`, line: null, kind: 'migration', confidence: 'declared' }, complete: true, status: 'read', label: 'replayed 1 file', notes: [], entities: tables.map(([name, cols], i) => ({ name, kind: 'table', path: `${store}/0001.sql`, line: 1 + i * 10, fields: cols.map((c, j) => ({ name: c, type: 'text', nullable: false, default: null, generated: null, path: `${store}/0001.sql`, line: 2 + i * 10 + j })), keys: [], indexes: [], relations: [] })) }] } })
   const mig = D('shop', 'db/migrations', 'postgres', [['users', ['id', 'email']], ['orders', ['id', 'total', 'user_id', 'status', 'created_at']]])
   const audit = qf('shop', 'web/audit.ts', [['pg', 'postgres']], [site(4, 'DELETE FROM audit_log WHERE user_id IN (SELECT id FROM users WHERE email = $1)')])
   const analytics = qf('shop', 'analytics/events.ts', [['pg', 'postgres']], [site(2, 'INSERT INTO events (name, at) VALUES ($1, now())'), site(3, 'SELECT name FROM page_views WHERE at > $1')])
@@ -3964,16 +3964,16 @@ async function indexed() {
       'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes (+2 implicit, for keys) · no conflicts',
       'web:supabase/migrations  postgres  1 table · 1 foreign key · 0 indexes · no conflicts',
     ], 'graph_data: a store per migration folder, found by its DDL whatever its name; the Drizzle replay and snapshot agree')
-    has(list, 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql', "Drizzle: the newest snapshot (0005) and the replay in the journal's order, its DROP-only migration included, are two declarations of one store")
-    has(list, '  migration  sql-migrations@2  replayed 3 files, 6 statements  api/prisma/migrations/20240105090000_init/migration.sql\n  code  prisma@3  schema, read 1 file: 3 models  api/prisma/schema.prisma\n  dialect: stated at api/prisma/migrations/migration_lock.toml:3', 'Prisma: one migration per versioned subfolder, the dialect from its lock file; schema.prisma beside them a second declaration of the store, agreeing with the replay')
-    has(list, '  migration  sql-migrations@2  replayed 3 files, 5 statements  kiosk/storage/schema-changes/0001_visits.up.sql\n  dialect: sniffed: AUTOINCREMENT at kiosk/storage/schema-changes/0001_visits.up.sql:2', 'no tool named: the dialect sniffed; the down migrations and the seed left out, the migration holding only a DROP and a view kept')
-    has(list, 'web:db/changes  dialect unknown  found, not read (2 files)\n  migration  sql-migrations@2  not read: dialect unknown (no config states it, and no dialect marker in the SQL)  web/db/changes/0001_events.sql', 'no dialect stated or seen: found, never replayed as SQLite by assumption')
-    has(list, 'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes (+2 implicit, for keys) · no conflicts\n  migration  sql-migrations@2  replayed 2 files, 2 statements  web/db/legacy/0001_accounts.sql\n  dialect: set in grimoire.config.json (graph.data.migrations)', 'the same kind of SQL is read once grimoire.config.json states its dialect')
-    has(list, '  migration  sql-migrations@2  replayed 1 file, 1 statement  web/supabase/migrations/20240110120000_profiles.sql\n  dialect: Supabase migrations are Postgres', 'Postgres: read (the folder slice 1 found, not read)')
+    has(list, 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@3  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql', "Drizzle: the newest snapshot (0005) and the replay in the journal's order, its DROP-only migration included, are two declarations of one store")
+    has(list, '  migration  sql-migrations@3  replayed 3 files, 6 statements  api/prisma/migrations/20240105090000_init/migration.sql\n  code  prisma@4  schema, read 1 file: 3 models  api/prisma/schema.prisma\n  dialect: stated at api/prisma/migrations/migration_lock.toml:3', 'Prisma: one migration per versioned subfolder, the dialect from its lock file; schema.prisma beside them a second declaration of the store, agreeing with the replay')
+    has(list, '  migration  sql-migrations@3  replayed 3 files, 5 statements  kiosk/storage/schema-changes/0001_visits.up.sql\n  dialect: sniffed: AUTOINCREMENT at kiosk/storage/schema-changes/0001_visits.up.sql:2', 'no tool named: the dialect sniffed; the down migrations and the seed left out, the migration holding only a DROP and a view kept')
+    has(list, 'web:db/changes  dialect unknown  found, not read (2 files)\n  migration  sql-migrations@3  not read: dialect unknown (no config states it, and no dialect marker in the SQL)  web/db/changes/0001_events.sql', 'no dialect stated or seen: found, never replayed as SQLite by assumption')
+    has(list, 'web:db/legacy  sqlite  2 tables · 1 foreign key · 0 indexes (+2 implicit, for keys) · no conflicts\n  migration  sql-migrations@3  replayed 2 files, 2 statements  web/db/legacy/0001_accounts.sql\n  dialect: set in grimoire.config.json (graph.data.migrations)', 'the same kind of SQL is read once grimoire.config.json states its dialect')
+    has(list, '  migration  sql-migrations@3  replayed 1 file, 1 statement  web/supabase/migrations/20240110120000_profiles.sql\n  dialect: Supabase migrations are Postgres', 'Postgres: read (the folder slice 1 found, not read)')
     has(await q('data', { entity: 'profiles' }), 'Foreign keys (1):\n  (id) → auth.users(id)  on delete cascade · on update no action  — web/supabase/migrations/20240110120000_profiles.sql:2', '… a foreign key to a table outside the migrations named as written, schema and all')
     eq(await q('data', { entity: 'books' }), [
       'mobile:drizzle/books  table  (sqlite)',
-      '  declared at mobile/drizzle/meta/0005_snapshot.json:39 [artifact drizzle-snapshot@1] · mobile/drizzle/0002_book_isbn.sql:1 [migration sql-migrations@2]',
+      '  declared at mobile/drizzle/meta/0005_snapshot.json:39 [artifact drizzle-snapshot@1] · mobile/drizzle/0002_book_isbn.sql:1 [migration sql-migrations@3]',
       'Fields (5):',
       '  id  text  not null  — mobile/drizzle/meta/0005_snapshot.json:42 · mobile/drizzle/0000_init.sql:8',
       '  title  text  not null  — mobile/drizzle/meta/0005_snapshot.json:49 · mobile/drizzle/0000_init.sql:9',
@@ -4035,7 +4035,7 @@ async function indexed() {
     ok(badged.includes('>integer ≠ text</text><title>type: integer — mobile/drizzle/meta/0005_snapshot.json:63 [artifact] | text — mobile/drizzle/0000_init.sql:11 [migration]</title>'), '… badged in the Data tab on its column, with both values and both sources')
     edit('mobile/drizzle/0002_book_isbn.sql', (t) => t.replace('ALTER TABLE `books`', 'ALTER TABLE `bookz`'))
     await q('index')
-    has(await q('data'), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed to mobile/drizzle/0002_book_isbn.sql:1: no such table: bookz  mobile/drizzle/0000_init.sql', 'a rejected statement stops the replay there: labelled, with the error')
+    has(await q('data'), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+3 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@3  replayed to mobile/drizzle/0002_book_isbn.sql:1: no such table: bookz  mobile/drizzle/0000_init.sql', 'a rejected statement stops the replay there: labelled, with the error')
     has(await q('data', { entity: 'books' }), '  published_at  integer  null  — mobile/drizzle/meta/0005_snapshot.json:63 · mobile/drizzle/0000_init.sql:11\n  isbn  text  null  — mobile/drizzle/meta/0005_snapshot.json:70\n', 'the facts replayed so far are kept (and compared with nothing: they describe the store partway)')
     has(await q('status'), 'data: 1 store(s) (graph_data), 1 replay(s) stopped early', 'graph_status counts the replays that stopped')
     edit('mobile/drizzle/0000_init.sql', (t) => t.replace('`published_at` text,', '`published_at` integer,'))
@@ -4050,12 +4050,12 @@ async function indexed() {
     edit('mobile/drizzle/meta/0005_snapshot.json', (t) => t.slice(0, 200)) // read by the data model only: the query notices it
     has(await q('status'), 'data: 1 store(s) (graph_data); 1 extractor failure(s): drizzle-snapshot@1 on mobile/drizzle/meta/0005_snapshot.json: ', 'a snapshot that no longer parses: graph_status reports the extractor failure (after refreshing on its own)')
     const after = await q('data')
-    has(after, 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql', '… its facts are lost, the replay still answers')
+    has(after, 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  migration  sql-migrations@3  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql', '… its facts are lost, the replay still answers')
     has(after, 'Extractor failures (1), their facts are missing:\n  drizzle-snapshot@1 on mobile/drizzle/meta/0005_snapshot.json: ', '… and graph_data names the failure')
 
     has(cli('data', 'list'), 'kiosk:storage/schema-changes  sqlite  2 tables · 1 view · 0 foreign keys · 0 indexes (+1 implicit, for keys) · no conflicts', 'graph.mjs data list')
     has(cli('data', 'list', 'web:db/legacy'), '  sessions  table  3 fields · primary (id) · foreign keys → accounts  web/db/legacy/0002_sessions.sql:1', 'graph.mjs data list <store>')
-    has(cli('data', 'show', 'Loan'), 'api:prisma/migrations/Loan  table  (sqlite)\n  declared at api/prisma/migrations/20240212143000_loan_notes/migration.sql:3 [migration sql-migrations@2]', 'graph.mjs data show <entity>')
+    has(cli('data', 'show', 'Loan'), 'api:prisma/migrations/Loan  table  (sqlite)\n  declared at api/prisma/migrations/20240212143000_loan_notes/migration.sql:3 [migration sql-migrations@3]', 'graph.mjs data show <entity>')
 
     // ── 15 · a branch against its base ──
     console.log('\n15 · a branch against its base (graph_changes), on a copy with two commits')
@@ -4773,8 +4773,8 @@ async function indexed() {
     eq((await sq('data')).split('\n'), [
       'Data stores (2), read from migrations, snapshots, schemas and table declarations:',
       'lending:prisma/migrations  sqlite  6 tables · 1 view · 5 foreign keys · 7 indexes (+2 implicit, for keys) · no conflicts',
-      '  migration  sql-migrations@2  replayed 2 files, 14 statements  lending/prisma/migrations/20240501090000_init/migration.sql',
-      '  code  prisma@3  schema, read 1 file: 5 models, 1 enum, 1 view  lending/prisma/schema.prisma',
+      '  migration  sql-migrations@3  replayed 2 files, 14 statements  lending/prisma/migrations/20240501090000_init/migration.sql',
+      '  code  prisma@4  schema, read 1 file: 5 models, 1 enum, 1 view  lending/prisma/schema.prisma',
       '  dialect: stated at lending/prisma/migrations/migration_lock.toml:3',
       'notes:drizzle  sqlite  3 tables · 3 foreign keys · 2 indexes · no conflicts',
       '  code  drizzle-ts@4  table builders, read 2 files: 3 tables  notes/src/db/tables/notes.ts',
@@ -4818,7 +4818,7 @@ async function indexed() {
     ].join('\n'), 'the schema and the replay: every table at both its lines (the @@map\'ed one, the view, the implicit many-to-many join table), the enum at its line')
     eq(await sq('data', { entity: 'patrons' }), [
       'lending:prisma/migrations/patrons  table  (sqlite)',
-      '  declared at lending/prisma/migrations/20240501090000_init/migration.sql:2 [migration sql-migrations@2] · lending/prisma/schema.prisma:18 [code prisma@3]',
+      '  declared at lending/prisma/migrations/20240501090000_init/migration.sql:2 [migration sql-migrations@3] · lending/prisma/schema.prisma:18 [code prisma@4]',
       'Fields (5):',
       '  id  TEXT  not null  computed @default(cuid())  — lending/prisma/migrations/20240501090000_init/migration.sql:3 · lending/prisma/schema.prisma:19',
       '  email  TEXT  not null  — lending/prisma/migrations/20240501090000_init/migration.sql:4 · lending/prisma/schema.prisma:20',
@@ -4850,7 +4850,7 @@ async function indexed() {
     git(MB, 'init', '-q', '-b', 'main')
     commit(MB, 'the schema and its migrations')
     await sq('index', {}, MB)
-    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@2  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@4  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
+    has(await sq('data', {}, MB), 'mobile:drizzle  sqlite  5 tables · 3 foreign keys · 2 indexes (+4 implicit, for keys) · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  mobile/drizzle/meta/0005_snapshot.json\n  migration  sql-migrations@3  replayed 6 files, 16 statements  mobile/drizzle/0000_init.sql\n  code  drizzle-ts@4  table builders, read 1 file: 5 tables  mobile/src/db/schema.ts',
       'the schema, the newest snapshot and the replay: three declarations of one store (the config\'s out), agreeing')
     has(await sq('data', { entity: 'streaks' }, MB), "  logged_at  integer  not null  default (unixepoch())  — mobile/drizzle/meta/0005_snapshot.json:223 · mobile/drizzle/0004_streaks.sql:9 · mobile/src/db/schema.ts:42\nKeys (1):\n  primary (day)  — mobile/drizzle/meta/0005_snapshot.json:208 · mobile/drizzle/0004_streaks.sql:7 · mobile/src/db/schema.ts:40",
       'a sql`(unixepoch())` default as the snapshot and the replay write it; every element at its three lines')
@@ -4898,8 +4898,8 @@ async function indexed() {
       'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts',
       'prisma:prisma/migrations  sqlite  6 tables · 6 foreign keys · 4 indexes · no conflicts',
     ], 'each schema against what its tool generated from it: SQLite, Postgres and MySQL table builders (numeric defaults, a table-level unique() in SQLite, time(p), unsigned decimals, a MySQL serial, an enum value with a quote), and a schema-language file with named relations (no phantom join table); in MySQL a unique index is the unique key it is')
-    for (const s of ['pg1', 'pg2', 'my1', 'my2']) has(golden, `  migration  sql-migrations@2  replayed 1 file, `, `${s}: its migrations read too`)
-    has(golden, 'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  pg2/drizzle/meta/0000_snapshot.json\n  migration  sql-migrations@2  replayed 1 file, 9 statements  pg2/drizzle/0000_fuzzy_mongoose.sql\n  code  drizzle-ts@4  table builders, read 1 file: 2 tables, 2 enums  pg2/src/schema.ts',
+    for (const s of ['pg1', 'pg2', 'my1', 'my2']) has(golden, `  migration  sql-migrations@3  replayed 1 file, `, `${s}: its migrations read too`)
+    has(golden, 'pg2:drizzle  postgres  2 tables · 1 foreign key · 3 indexes · no conflicts\n  artifact  drizzle-snapshot@1  snapshot  pg2/drizzle/meta/0000_snapshot.json\n  migration  sql-migrations@3  replayed 1 file, 9 statements  pg2/drizzle/0000_fuzzy_mongoose.sql\n  code  drizzle-ts@4  table builders, read 1 file: 2 tables, 2 enums  pg2/src/schema.ts',
       'Postgres: the snapshot, the migration read statement by statement and the schema, three declarations of one store')
     has(await gq('data', { entity: 'lite2:drizzle/users' }), '  users_email_lower unique (lower("email"))  — lite2/drizzle/meta/0000_snapshot.json:119 · lite2/drizzle/0000_thin_whistler.sql:19 · lite2/src/schema.ts:18',
       'an expression index: its text as the snapshot keeps it, as the SQLite replay\'s CREATE INDEX writes it, and as the schema\'s sql`lower(${t.email})` renders it')
@@ -4921,14 +4921,14 @@ async function indexed() {
       'loose:sql  postgres  found, not read (2 files)',
       'supa:supabase/migrations  postgres  3 tables · 3 foreign keys · 2 indexes · no conflicts',
     ], 'graph_data: each folder read in its tool\'s order, a dump beside its migrations agreeing with them, a folder whose order cannot be decided listed, not replayed')
-    has(ddl, 'supa:supabase/migrations  postgres  3 tables · 3 foreign keys · 2 indexes · no conflicts\n  migration  sql-migrations@2  replayed 3 files, 14 statements (11 skipped)  supa/supabase/migrations/20240101000000_init.sql\n' +
+    has(ddl, 'supa:supabase/migrations  postgres  3 tables · 3 foreign keys · 2 indexes · no conflicts\n  migration  sql-migrations@3  replayed 3 files, 14 statements (11 skipped)  supa/supabase/migrations/20240101000000_init.sql\n' +
       '    note: skipped in supabase/migrations/20240101000000_init.sql: 4 statements that do not shape the store (CREATE POLICY 2, ALTER TABLE … ENABLE ROW LEVEL SECURITY 1, CREATE EXTENSION 1)\n' +
       '    note: skipped in supabase/migrations/20240102000000_tasks.sql: 5 statements that do not shape the store (COMMENT ON 1, CREATE FUNCTION 1, CREATE TRIGGER 1, DO 1, GRANT 1)\n' +
       '    note: skipped in supabase/migrations/20240103000000_alter_chain.sql: 2 statements that do not shape the store (ALTER TABLE … ENABLE ROW LEVEL SECURITY 1, CREATE POLICY 1)\n  dialect: Supabase migrations are Postgres',
       'the hosted-Postgres project: every statement that does not shape the store counted per file by kind (its DO block, functions, triggers, policies, row level security, grants, comments)')
     eq(await dq('data', { entity: 'tasks' }), [
       'supa:supabase/migrations/tasks  table  (postgres)',
-      '  declared at supa/supabase/migrations/20240103000000_alter_chain.sql:9 [migration sql-migrations@2]',
+      '  declared at supa/supabase/migrations/20240103000000_alter_chain.sql:9 [migration sql-migrations@3]',
       'Fields (7):',
       '  id  bigint  not null  — supa/supabase/migrations/20240102000000_tasks.sql:2',
       '  project_id  bigint  not null  — supa/supabase/migrations/20240102000000_tasks.sql:3',
@@ -4950,23 +4950,23 @@ async function indexed() {
     has(await dq('data', { entity: 'profiles' }), 'Foreign keys (1):\n  (id) → auth.users(id)  on delete cascade · on update no action  — supa/supabase/migrations/20240101000000_init.sql:7', 'a foreign key to the platform\'s own auth.users, named as written')
     has(await dq('data', { entity: 'projects' }), 'Keys (2):\n  primary (id)  — supa/supabase/migrations/20240101000000_init.sql:13\n  unique (owner_id, name)  — supa/supabase/migrations/20240103000000_alter_chain.sql:11', 'an identity primary key and a unique constraint ALTER adds')
 
-    has(ddl, '  migration  sql-migrations@2  replayed 6 files, 6 statements  fly/src/main/resources/db/migration/V1__init.sql\n    note: also stated by the schema dump src/main/resources/db/dump.sql, listed first (where the two disagree, a conflict)\n    note: src/main/resources/db/migration/U10__note_text.sql is an undo migration: not replayed\n  dialect: stated at fly/src/main/resources/db/dump.sql:1',
+    has(ddl, '  migration  sql-migrations@3  replayed 6 files, 6 statements  fly/src/main/resources/db/migration/V1__init.sql\n    note: also stated by the schema dump src/main/resources/db/dump.sql, listed first (where the two disagree, a conflict)\n    note: src/main/resources/db/migration/U10__note_text.sql is an undo migration: not replayed\n  dialect: stated at fly/src/main/resources/db/dump.sql:1',
       'the versioned-file tool: V1, V2, V9, V10, V11, then R__ (the undo file never)')
-    has(ddl, 'fly:src/main/resources/db/migration  mysql  2 tables · 1 view · 1 foreign key · 2 indexes · no conflicts\n  artifact  sql-migrations@2  schema dump, 6 statements (44 skipped)  fly/src/main/resources/db/dump.sql\n',
+    has(ddl, 'fly:src/main/resources/db/migration  mysql  2 tables · 1 view · 1 foreign key · 2 indexes · no conflicts\n  artifact  sql-migrations@3  schema dump, 6 statements (44 skipped)  fly/src/main/resources/db/dump.sql\n',
       "… and the engine's own dump of what they built (a dump tool's header, whatever the file's name, the folder of migrations right under it), agreeing with them: the engine's answer, kept as a golden expectation")
     has(await dq('data', { entity: 'orders' }), "Fields (4):\n  id  bigint unsigned  not null  — fly/src/main/resources/db/dump.sql:78 · fly/src/main/resources/db/migration/V2__orders.sql:2\n  customer_id  bigint unsigned  not null  — fly/src/main/resources/db/dump.sql:79 · fly/src/main/resources/db/migration/V2__orders.sql:3\n  amount  decimal(12,2)  not null  — fly/src/main/resources/db/dump.sql:80 · fly/src/main/resources/db/migration/V10__note_text.sql:3\n  note  text  null  — fly/src/main/resources/db/dump.sql:81 · fly/src/main/resources/db/migration/V10__note_text.sql:2",
       '… V10 after V9 (V10 changes the column V9 adds): MODIFY and CHANGE, the column placed AFTER another, as the engine has them (the dump, shown first)')
     has(await dq('data', { entity: 'customers' }), "Keys (2):\n  primary (id)  — fly/src/main/resources/db/dump.sql:29 · fly/src/main/resources/db/migration/V1__init.sql:6\n  unique (email)  — fly/src/main/resources/db/dump.sql:30 · fly/src/main/resources/db/migration/V1__init.sql:7", "MySQL: a UNIQUE KEY is the unique key it is")
-    has(ddl, 'gom:migrations  postgres  2 tables · 1 foreign key · 1 index · no conflicts\n  migration  sql-migrations@2  replayed 2 files, 3 statements  gom/migrations/000001_create_users.up.sql', 'up and down files: the up files alone, in version order')
+    has(ddl, 'gom:migrations  postgres  2 tables · 1 foreign key · 1 index · no conflicts\n  migration  sql-migrations@3  replayed 2 files, 3 statements  gom/migrations/000001_create_users.up.sql', 'up and down files: the up files alone, in version order')
     eq((await dq('data', { entity: 'accounts' })).split('\n').filter((l) => /^ {2}\w+ {2}/.test(l)).map((l) => l.trim().split(/ {2}/).slice(0, 2).join(' ')), ['id serial', 'name text', 'email text'],
       'goose: the Up sections alone, a StatementBegin block one statement (a function, skipped)')
-    has(ddl, 'loose:sql  postgres  found, not read (2 files)\n  migration  sql-migrations@2  not read: order unknown (add_posts.sql has no numeric or timestamp prefix)  loose/sql/add_posts.sql', 'a folder whose order cannot be decided: reported as such, never replayed by file name')
+    has(ddl, 'loose:sql  postgres  found, not read (2 files)\n  migration  sql-migrations@3  not read: order unknown (add_posts.sql has no numeric or timestamp prefix)  loose/sql/add_posts.sql', 'a folder whose order cannot be decided: reported as such, never replayed by file name')
 
     // a dump beside its migrations: two declarations of one store, the dump first; then a migration the
     // dump does not show yet (the dump not regenerated): a conflict carrying both sides
-    has(ddl, 'dbm:db/migrations  postgres  3 tables · 2 foreign keys · 1 index · no conflicts\n  artifact  sql-migrations@2  schema dump, 18 statements (15 skipped)  dbm/db/schema.sql\n', 'the dump (as the database\'s dump tool wrote it, its psql meta-commands, SET and SELECT skipped): an artifact, listed first')
+    has(ddl, 'dbm:db/migrations  postgres  3 tables · 2 foreign keys · 1 index · no conflicts\n  artifact  sql-migrations@3  schema dump, 18 statements (15 skipped)  dbm/db/schema.sql\n', 'the dump (as the database\'s dump tool wrote it, its psql meta-commands, SET and SELECT skipped): an artifact, listed first')
     has(ddl, '    note: a schema dump of db/migrations, preferred over its replay where an element is shown (the replay kept beside it)', '… and it says so')
-    has(ddl, '  migration  sql-migrations@2  replayed 2 files, 6 statements  dbm/db/migrations/20240101000000_init.sql\n    note: also stated by the schema dump db/schema.sql, listed first (where the two disagree, a conflict)', '… the replay beside it, saying so')
+    has(ddl, '  migration  sql-migrations@3  replayed 2 files, 6 statements  dbm/db/migrations/20240101000000_init.sql\n    note: also stated by the schema dump db/schema.sql, listed first (where the two disagree, a conflict)', '… the replay beside it, saying so')
     const books = await dq('data', { entity: 'books' })
     ok(/  id  bigserial  not null  — dbm\/db\/schema\.sql:\d+ · dbm\/db\/migrations\/20240101000000_init\.sql:12/.test(books) && books.endsWith('Conflicts: none'), `the dump's bigint column with its own sequence is the migration's bigserial; the elements agree (${books.split('\n').find((l) => l.includes(' id '))})`)
     writeFileSync(path.join(DD, 'dbm/db/migrations/20240301000000_isbn.sql'), '-- migrate:up\nALTER TABLE books ADD COLUMN isbn varchar(20);\n-- migrate:down\nALTER TABLE books DROP COLUMN isbn;\n')
@@ -5115,7 +5115,7 @@ async function indexed() {
     eq(qlist.split('\n'), [
       'Data stores (1), read from migrations, snapshots, schemas and table declarations, or deduced from the SQL the code sends (inferred):',
       'shop:sql (inferred, postgres)  postgres  4 tables · 2 relations from joins · 2 unique keys from ON CONFLICT · 6 lookup columns · inferred from queries in code, not declared (8 statements)',
-      '  inferred  sql-queries@2  deduced from 8 statements in 2 files, not declared  shop/web/src/users.ts',
+      '  inferred  sql-queries@3  deduced from 8 statements in 2 files, not declared  shop/web/src/users.ts',
       '  reached through: database/sql, github.com/lib/pq, postgres',
       '  not declared: deduced from the SQL the code sends; types (but for casts), nullability, defaults and other constraints unknown; relations inferred from joins, never foreign keys; lookup columns are leads for an index, never indexes',
       "  dialect: the repository's client: postgres at shop/web/src/db.ts:1",
@@ -5130,7 +5130,7 @@ async function indexed() {
       '  order_lines(order_id) → orders(id)  lead: "order_id" names order',
     ], 'graph_data store: the tables, each at every statement naming it (a table in a parameter is none; SELECT * reveals nothing); then the leads the page draws on it')
     const qusers = await qq('data', { entity: 'users' })
-    has(qusers, 'shop:sql (inferred, postgres)/users  table  (postgres; deduced from the queries in code, not declared)\n  seen at shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25 [inferred sql-queries@2]\nColumns seen in code (3): type, nullability and default unknown:', 'graph_data entity: a deduced table, every statement that names it')
+    has(qusers, 'shop:sql (inferred, postgres)/users  table  (postgres; deduced from the queries in code, not declared)\n  seen at shop/web/src/users.ts:6 · shop/web/src/users.ts:14 · shop/web/src/users.ts:25 [inferred sql-queries@3]\nColumns seen in code (3): type, nullability and default unknown:', 'graph_data entity: a deduced table, every statement that names it')
     has(qusers, '  display_name  type unknown  seen in select, insert, set, expr  — shop/web/src/users.ts:5 · shop/web/src/users.ts:14 · shop/web/src/users.ts:16', '… each column with the statements that name it, its type unknown')
     has(qusers, 'Unique keys from ON CONFLICT (1):\n  unique (email)  — shop/web/src/users.ts:16\nLookup columns (2): used in lookups, a lead for an index, never one:\n  email  where  — shop/web/src/users.ts:7\n  id  where  — shop/web/src/users.ts:26', '… a unique key from ON CONFLICT, the lookup columns (leads)')
     has(qusers, 'Reads and writes, from the SQL the code sends (inferred; 3 functions: 2 reading, 1 writing):\n  findUser  reads (select)  shop/web/src/users.ts:3  (the call at line 4) · 0 callers\n  upsertUser  writes (insert)  shop/web/src/users.ts:12  (the call at line 13) · 0 callers\n  recentOrders  reads (select)  shop/web/src/users.ts:21  (the call at line 22) · 0 callers', '… its readers and writers, the code graph\'s functions')
@@ -5219,7 +5219,7 @@ async function indexed() {
     ok(!(await cq('index')).includes('failure'), 'index: no extractor failure')
     const clist = await cq('data')
     has(clist, 'site:prisma/migrations  postgres  3 tables · 0 foreign keys · 3 relations enforced by the client · 4 indexes · no conflicts', 'graph_data: the relations counted apart from foreign keys, and the migrations lacking their foreign keys no conflict')
-    has(clist, '  code  prisma@3  schema, read 1 file: 3 models  site/prisma/schema.prisma\n    note: relationMode = "prisma"', '… the schema\'s declaration, its relation mode noted')
+    has(clist, '  code  prisma@4  schema, read 1 file: 3 models  site/prisma/schema.prisma\n    note: relationMode = "prisma"', '… the schema\'s declaration, its relation mode noted')
     const cstore = await cq('data', { store: 'site:prisma/migrations' })
     has(cstore, '  website  table  5 fields · primary (id) · 2 indexes · relations → user (enforced by the client)  site/prisma/migrations/20240110120000_init/migration.sql:11 · site/prisma/schema.prisma:19', '… a table lists the relations its client enforces, never as foreign keys')
     ok(!cstore.includes('Leads ('), 'no lead: a declared relation replaces the lead on its columns (website.user_id, session.website_id)')

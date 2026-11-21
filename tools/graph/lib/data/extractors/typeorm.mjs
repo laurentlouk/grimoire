@@ -61,6 +61,28 @@ const sha1 = (s) => createHash('sha1').update(s).digest('hex')
 const keyOf = (table, cols) => `${table.replace('.', '_')}_${[...cols].sort().join('_')}`
 export const tname = { index: (t, c) => `IDX_${sha1(keyOf(t, c)).slice(0, 26)}`, unique: (t, c) => `UQ_${sha1(keyOf(t, c)).slice(0, 27)}`, primary: (t, c) => `PK_${sha1(keyOf(t, c)).slice(0, 27)}` }
 
+// A data source's `migrations` glob, its first entry: a literal (`'src/migration/*.ts'`), or one built from
+// the data source's own folder (`__dirname + '/migrations/**/*{.ts,.js}'`, `${__dirname}/migrations/*.ts`
+// in a template, `path.join(__dirname, 'migrations', '*.ts')`, `path.resolve(__dirname, …)`); anything
+// else code builds is not read. → { glob, dirname: built from __dirname, shown: as written } | null
+const LIT = String.raw`(['"` + '`' + String.raw`])([^'"` + '`' + String.raw`\n$]{1,300})\1`
+const AT = String.raw`\bmigrations[ \t]*:[ \t]*\[\s*`
+const GLOBS = [
+  [new RegExp(String.raw`${AT}__dirname\s*\+\s*${LIT}`), (m) => ({ glob: m[2], dirname: true })],
+  [new RegExp(AT + '`' + String.raw`\$\{__dirname\}([^` + '`' + String.raw`$\n]{1,300})` + '`'), (m) => ({ glob: m[1], dirname: true })],
+  [new RegExp(String.raw`${AT}(?:path\s*\.\s*)?(?:join|resolve)\(\s*__dirname\s*((?:,\s*['"` + '`' + String.raw`][^'"` + '`' + String.raw`\n$]{1,200}['"` + '`' + String.raw`]\s*){1,8})\)`), (m) => ({ glob: [...m[1].matchAll(/['"`]([^'"`\n]*)['"`]/g)].map((x) => x[1]).join('/'), dirname: true })],
+  [new RegExp(AT + LIT), (m) => ({ glob: m[2], dirname: false })],
+]
+export function migrationsGlob(text) {
+  for (const [re, read] of GLOBS) {
+    const m = re.exec(text)
+    if (!m) continue
+    const g = read(m)
+    return { glob: g.dirname ? g.glob.replace(/^\/+/, '').replace(/\/{2,}/g, '/') : g.glob, dirname: g.dirname, shown: g.dirname ? m[0].replace(/^[^[]*\[\s*/, '').replace(/\s+/g, ' ').slice(0, 120) : g.glob }
+  }
+  return null
+}
+
 const decoratorsOf = (n) => named(n).filter((c) => c.type === 'decorator')
 function decorator(d) {
   const x = named(d)[0]
@@ -150,7 +172,7 @@ function readArgs(args) {
 
 export default {
   id: 'typeorm',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'unit',
   tree: true,
@@ -182,16 +204,18 @@ export default {
       for (const c of r.classes) if (c.name && !classes.has(c.name)) classes.set(c.name, { ...c, path: f.path })
     }
     // the store: the folder the data source's migrations glob names, when it is a literal
-    let store = key, storeNote = null, dialect = null, dialectFrom = null
+    let store = key, storeNote = null, dialect = null, dialectFrom = null, uuidFn = 'uuid_generate_v4()'
     for (const s of sources) {
-      const m = /\bmigrations[ \t]*:[ \t]*\[[ \t\r\n]*(['"`])([^'"`\n]{1,300})\1/.exec(s.text)
+      const m = migrationsGlob(s.text)
       if (m && store === key) {
-        // the glob is read from where the app runs (the repository's root), else from the data source's folder
-        const dir = [globDir(m[2]), globDir(P.join(P.dirname(s.path), m[2]))].find((d) => folders.has(d))
-        if (dir) { store = dir; storeNote = `the migrations of ${s.path} (${m[2]}): the entities and those migrations are one store` }
+        // a glob built from __dirname is under the data source's folder; a literal is read from where the
+        // app runs (the repository's root), else from the data source's folder
+        const here = (g) => P.join(P.dirname(s.path), g)
+        const dir = (m.dirname ? [globDir(here(m.glob))] : [globDir(m.glob), globDir(here(m.glob))]).find((d) => folders.has(d))
+        if (dir) { store = dir; storeNote = `the migrations of ${s.path} (${m.shown}): the entities and those migrations are one store` }
       }
       const t = /\btype[ \t]*:[ \t]*['"`](postgres|mysql|mariadb|sqlite|better-sqlite3|cockroachdb)['"`]/.exec(s.text)
-      if (t && !dialect) { dialect = { postgres: 'postgres', cockroachdb: 'postgres', mysql: 'mysql', mariadb: 'mysql', sqlite: 'sqlite', 'better-sqlite3': 'sqlite' }[t[1]]; dialectFrom = { how: 'stated', path: s.path, line: s.text.slice(0, t.index).split('\n').length } }
+      if (t && !dialect) { dialect = { postgres: 'postgres', cockroachdb: 'postgres', mysql: 'mysql', mariadb: 'mysql', sqlite: 'sqlite', 'better-sqlite3': 'sqlite' }[t[1]]; dialectFrom = { how: 'stated', path: s.path, line: s.text.slice(0, t.index).split('\n').length }; uuidFn = t[1] === 'cockroachdb' || /\buuidExtension[ \t]*:[ \t]*['"`]pgcrypto['"`]/.test(s.text) ? 'gen_random_uuid()' : 'uuid_generate_v4()' }
     }
     if (storeNote) note(storeNote)
     const entities = []
@@ -199,7 +223,22 @@ export default {
     const qualified = (schema, name) => (schema && schema !== 'public' ? `${schema}.${name}` : name)
     // a class's properties, its base classes' first (an abstract base of entities)
     const propsOf = (c, seen = new Set()) => { if (!c || seen.has(c.name)) return []; seen.add(c.name); return [...propsOf(c.extends ? classes.get(c.extends) : null, seen), ...c.props.map((p) => ({ ...p, path: c.path }))] }
-    const columnName = (p) => { const d = p.decos.find((x) => COLUMNS.has(x.name)); const o = d ? d.args.find((a) => a.o)?.o || {} : {}; return o.name || p.name }
+    // a property's column: a column decorator's name, else a relation's join column (`@JoinColumn({ name })`,
+    // else `<property><ReferencedColumn>`: what an `@Index()` on the relation indexes), else the property
+    const columnName = (p) => {
+      const d = p.decos.find((x) => COLUMNS.has(x.name))
+      if (d) return (d.args.find((a) => a.o)?.o || {}).name || p.name
+      const r = p.decos.find((x) => x.name === 'ManyToOne' || x.name === 'OneToOne' && p.decos.some((y) => y.name === 'JoinColumn'))
+      return r ? joinOf(p, r)?.column ?? p.name : p.name
+    }
+    function joinOf(p, d) {
+      const target = classes.get(d.args.find((a) => a.cls)?.cls || d.args.find((a) => a.s)?.s)
+      if (!target?.entity) return null
+      const jo = p.decos.find((x) => x.name === 'JoinColumn')?.args.find((a) => a.o)?.o || {}
+      const tpk = pkOf(target)
+      const refCol = jo.referencedColumnName || tpk?.column || 'id'
+      return { target, jo, tpk, refCol, column: jo.name || camelCase(`${p.name}_${refCol}`) }
+    }
     const pkOf = (c) => { const p = propsOf(c).find((x) => x.decos.some((d) => d.name === 'PrimaryColumn' || d.name === 'PrimaryGeneratedColumn')); return p ? { prop: p.name, column: columnName(p), type: columnType(p) } : null }
     function columnType(p) {
       const d = p.decos.find((x) => COLUMNS.has(x.name) || x.name === 'PrimaryGeneratedColumn')
@@ -231,10 +270,14 @@ export default {
           if (COLUMNS.has(d.name)) {
             if (d.args.some((a) => a.cls || a.fn)) { e.part = true; note(`${p.path}:${p.line}: ${c.name}.${p.name} is an embedded column: its columns are not read`); continue }
             const column = o.name || p.name
-            const f = { name: column, type: columnType(p), nullable: d.name === 'DeleteDateColumn' ? true : o.nullable === true, default: null, generated: null, ...where, unstated: ['type'] }
+            const f = { name: column, ...(column !== p.name ? { attr: p.name } : {}), type: columnType(p), nullable: d.name === 'DeleteDateColumn' ? true : o.nullable === true, default: null, generated: null, ...where, unstated: ['type'] }
             if (o.default) { f.default = o.default.default; if (o.default.unstated) f.unstated.push('default') }
             if (d.name === 'CreateDateColumn' || d.name === 'UpdateDateColumn') { f.default = 'now()'; f.unstated.push('default') }
             if (d.name === 'PrimaryColumn' || d.name === 'PrimaryGeneratedColumn') { f.nullable = false; pk.push(column) }
+            // the uuid strategy: on Postgres the database's uuid_generate_v4() (gen_random_uuid() under the
+            // pgcrypto extension, and on CockroachDB), on another engine a value the client computes; an
+            // engine the data source does not state leaves the default not compared
+            if (d.name === 'PrimaryGeneratedColumn' && f.type === 'uuid') { if (dialect === 'postgres') f.default = uuidFn; else { f.unstated.push('default'); if (dialect) f.computed = 'uuid' } }
             if (o.unique) e.keys.push({ role: 'unique', parts: [column], ...where })
             e.fields.push(f)
           } else if (d.name === 'Index') {
@@ -246,14 +289,11 @@ export default {
             const join = p.decos.find((x) => x.name === 'JoinColumn')
             if (d.name === 'OneToOne' && !join) continue // the inverse side: no column
             const targetName = d.args.find((a) => a.cls)?.cls || d.args.find((a) => a.s)?.s
-            const target = classes.get(targetName)
-            if (!target?.entity) { note(`${p.path}:${p.line}: ${c.name}.${p.name}'s target ${targetName || '(built by code)'} is no entity read: its column is not stated`); e.part = true; continue }
-            const jo = join?.args.find((a) => a.o)?.o || {}
-            const tpk = pkOf(target)
-            const refCol = jo.referencedColumnName || tpk?.column || 'id'
-            const column = jo.name || camelCase(`${p.name}_${refCol}`)
+            const j = joinOf(p, d)
+            if (!j) { note(`${p.path}:${p.line}: ${c.name}.${p.name}'s target ${targetName || '(built by code)'} is no entity read: its column is not stated`); e.part = true; continue }
+            const { target, tpk, refCol, column } = j, jo = j.jo
             const refType = jo.referencedColumnName ? (propsOf(target).find((x) => columnName(x) === refCol) ? columnType(propsOf(target).find((x) => columnName(x) === refCol)) : 'unknown') : tpk?.type || 'unknown'
-            e.fields.push({ name: column, type: refType, nullable: o.nullable !== false, default: null, generated: null, ...where, unstated: ['type'] })
+            e.fields.push({ name: column, attr: p.name, type: refType, nullable: o.nullable !== false, default: null, generated: null, ...where, unstated: ['type'] })
             if (d.name === 'OneToOne') e.keys.push({ role: 'unique', parts: [column], ...where })
             e.relations.push({ columns: [column], to: tableOf(target), toColumns: [refCol], onDelete: ACTIONS[String(o.onDelete || 'NO ACTION').toUpperCase()] || 'no action', onUpdate: ACTIONS[String(o.onUpdate || 'NO ACTION').toUpperCase()] || 'no action', ...(o.createForeignKeyConstraints === false ? { enforced: 'client' } : {}), ...where })
             relations++

@@ -150,7 +150,7 @@ function configDialect(text, key) {
 
 export default {
   id: 'code-migrations',
-  version: 1,
+  version: 2,
   kind: 'migration',
   source: true, // it reads source files, inspected by level (registry.mjs SOURCE)
   aside: true, // a base reads its files aside too (readers/code-aside.mjs)

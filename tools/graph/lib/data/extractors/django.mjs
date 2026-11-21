@@ -53,7 +53,9 @@ const APPS = /(^|\/)apps\.py$/
 const DJANGO_DB = /^[ \t]*(?:from[ \t]+django\.db(?:\.models)?[ \t]+import|import[ \t]+django\.db)\b/m
 const CLASS = /^[ \t]*class[ \t]+\w+[ \t]*\(/m
 const SETTINGS = /^(?:DATABASES|DEFAULT_AUTO_FIELD|AUTH_USER_MODEL)[ \t]*=/m
-export const djangoLevel = (p, text) => (!PY.test(p) ? 0 : (DJANGO_DB.test(text) && CLASS.test(text) ? 4096 : 0) | (SETTINGS.test(text) ? 8192 : 0))
+const MIGRATION = /\bclass[ \t]+\w+[ \t]*\([ \t]*migrations\.Migration[ \t]*\)/ // a migration, wherever it is: never a model file
+export const djangoLevel = (p, text) => (!PY.test(p) ? 0 : (DJANGO_DB.test(text) && CLASS.test(text) && !MIGRATION.test(text) ? 4096 : 0) | (SETTINGS.test(text) ? 8192 : 0))
+const HIDDEN = /(^|\/)\.[^/]+\// // a dot-folder (.github, .semgrep, .devcontainer): tooling, never the project's models
 const ENGINES = { postgresql: 'postgres', postgresql_psycopg2: 'postgres', postgis: 'postgres', mysql: 'mysql', sqlite3: 'sqlite', spatialite: 'sqlite' }
 const MAX = { models: 2000, fields: 1000, notes: 12 }
 const RELATIONS = new Set(['ForeignKey', 'OneToOneField', 'ManyToManyField', 'ParentalKey'])
@@ -87,17 +89,19 @@ function readFile(root, file) {
     const k = { name: field(c, 'name').text, line: lineOf(c), bases, fields: [], meta: null, file }
     for (const st of named(field(c, 'body') || c)) {
       const inner = st.type === 'decorated_definition' ? field(st, 'definition') : st
-      if (inner?.type === 'class_definition' && field(inner, 'name')?.text === 'Meta') { k.meta = readMeta(inner, imports); continue }
+      if (inner?.type === 'class_definition' && field(inner, 'name')?.text === 'Meta') { k.meta = readMeta(inner, imports, file); continue }
       if (st.type !== 'expression_statement') continue
       const a = named(st)[0]
       if (a?.type !== 'assignment' || field(a, 'left')?.type !== 'identifier') continue
       const right = field(a, 'right')
+      // a field class that adds no column (`concrete = False`: a composite of other fields)
+      if (field(a, 'left').text === 'concrete' && boolOf(right) === false) { k.concrete = false; continue }
       if (right?.type !== 'call' || k.fields.length >= MAX.fields) continue
       const fn = qualify(field(right, 'function')?.text.replace(/\s+/g, '') || '', imports)
       const cls = lastName(fn)
       if (!/Field$|^ForeignKey$|^ParentalKey$/.test(cls)) continue
       const args = callArgs(right)
-      const f = { name: field(a, 'left').text, cls, django: /^django\./.test(fn), line: lineOf(st), opts: {} }
+      const f = { name: field(a, 'left').text, cls, q: fn, django: /^django\./.test(fn), line: lineOf(st), opts: {} }
       const kw = args.kw
       for (const o of ['null', 'primary_key', 'unique', 'db_index', 'auto_now', 'auto_now_add', 'db_constraint']) if (kw.has(o)) f.opts[o] = boolOf(kw.get(o))
       for (const o of ['max_length', 'max_digits', 'decimal_places']) if (kw.has(o)) f.opts[o] = intOf(kw.get(o))
@@ -107,7 +111,7 @@ function readFile(root, file) {
       if (RELATIONS.has(cls)) {
         const to = args.pos[0] || kw.get('to')
         const v = value(to)
-        f.to = v.k === 'str' ? { s: v.v } : v.k === 'name' ? (/AUTH_USER_MODEL$/.test(v.v) ? { user: true } : { cls: v.v }) : null
+        f.to = v.k === 'str' ? { s: v.v } : v.k === 'name' ? (/AUTH_USER_MODEL$/.test(v.v) ? { user: true } : { cls: v.v, q: qualify(v.v, imports) }) : null
         if (kw.has('through')) f.through = true
       }
       if (cls === 'CharField' && args.pos.length && f.opts.max_length === undefined) f.opts.max_length = null
@@ -134,34 +138,91 @@ function dbDefault(n) {
   if (v.k === 'true' || v.k === 'false') return { default: v.k }
   return { default: v.k === 'str' ? "'…'" : '(expression)', unstated: true }
 }
-function readMeta(c, imports) {
-  const m = { line: lineOf(c), bases: field(c, 'superclasses') ? named(field(c, 'superclasses')).map((b) => b.text) : [], indexes: [], uniques: [], checks: 0 }
+// Meta's indexes and constraints: each entry with the attribute stating it, at its line in its file. A list
+// is read whole (`[…]`, a tuple), spliced (`[*Base.Meta.indexes, …]`, `Base.Meta.indexes + […]`), and
+// grown (`indexes += […]`, `indexes.extend(Base.Meta.indexes)`, `indexes.append(Index(…))`): another
+// model's Meta list it names is resolved by the extractor (a `splat`, read where that model is). The
+// index classes are Django's and its Postgres ones (django.contrib.postgres.indexes); a constraint other
+// than a unique one (a check, an exclusion) is counted, not modelled. An entry code builds otherwise is
+// counted too (`code`).
+const INDEX_SUFFIX = { Index: 'idx', GinIndex: 'gin', BTreeIndex: 'btree', GistIndex: 'gist', HashIndex: 'hash', BrinIndex: 'brin', SpGistIndex: 'spgist', BloomIndex: 'bloom' }
+const LISTED = new Set(['indexes', 'constraints'])
+const after = (n, child) => n.text.slice(child.endIndex - n.startIndex) // the text of n past one of its children
+function readMeta(c, imports, file) {
+  const m = { line: lineOf(c), file, bases: field(c, 'superclasses') ? named(field(c, 'superclasses')).map((b) => b.text) : [], set: [], items: [] }
+  const push = (attr, x) => m.items.push({ attr, file, ...x })
+  // another model's Meta list (`Base.Meta.indexes`), its class qualified through the imports
+  const ref = (x) => { const r = /^(.+)\.Meta\.(indexes|constraints)$/.exec((x?.text || '').replace(/\s+/g, '')); return r ? { q: qualify(r[1], imports), attr: r[2] } : null }
+  // the entries of a list expression, into attr
+  const entries = (attr, n, depth = 0) => {
+    if (!n || depth > 8) return
+    if (n.type === 'parenthesized_expression') return entries(attr, named(n)[0], depth + 1)
+    if (n.type === 'binary_operator' && field(n, 'left') && /^\s*\+/.test(after(n, field(n, 'left')))) { entries(attr, field(n, 'left'), depth + 1); entries(attr, field(n, 'right'), depth + 1); return }
+    if (n.type === 'list' || n.type === 'tuple') {
+      for (const x of named(n)) {
+        if (x.type === 'comment') continue
+        if (x.type === 'list_splat') { const r = ref(named(x)[0]); push(attr, r ? { kind: 'splat', splat: r, line: lineOf(x) } : { kind: 'code', line: lineOf(x) }); continue }
+        entry(attr, x)
+      }
+      return
+    }
+    const r = ref(n)
+    push(attr, r ? { kind: 'splat', splat: r, line: lineOf(n) } : { kind: 'code', line: lineOf(n) })
+  }
+  const entry = (attr, n) => {
+    if (n.type !== 'call') { push(attr, { kind: 'code', line: lineOf(n) }); return }
+    const cls = lastName(qualify(field(n, 'function')?.text || '', imports))
+    const args = callArgs(n)
+    const fields = args.kw.has('fields') ? strsOf(args.kw.get('fields')) : null
+    const name = args.kw.has('name') ? strOf(args.kw.get('name')) : null
+    const line = lineOf(n)
+    if (cls === 'UniqueConstraint' && fields) push(attr, { kind: 'unique', fields, name, partial: args.kw.has('condition'), line })
+    else if (cls in INDEX_SUFFIX && fields) push(attr, { kind: 'index', fields, name, suffix: INDEX_SUFFIX[cls], partial: args.kw.has('condition'), line })
+    else push(attr, { kind: cls in INDEX_SUFFIX || cls === 'UniqueConstraint' ? 'code' : 'check', line }) // an index on expressions; a check, an exclusion
+  }
   for (const st of named(field(c, 'body') || c)) {
     if (st.type !== 'expression_statement') continue
     const a = named(st)[0]
+    const line = lineOf(st)
+    if (a?.type === 'call') { // indexes.extend(…), indexes.append(…)
+      const fn = field(a, 'function')
+      const obj = fn?.type === 'attribute' ? field(fn, 'object')?.text : null, how = fn?.type === 'attribute' ? field(fn, 'attribute')?.text : null
+      const arg = callArgs(a).pos[0]
+      if (LISTED.has(obj) && arg) { if (how === 'extend') entries(obj, arg); else if (how === 'append') entry(obj, arg) }
+      continue
+    }
+    if (a?.type === 'augmented_assignment') { const key = field(a, 'left')?.text; if (LISTED.has(key) && /^\s*\+=/.test(after(a, field(a, 'left')))) entries(key, field(a, 'right')); continue }
     if (a?.type !== 'assignment') continue
-    const key = field(a, 'left')?.text, right = field(a, 'right'), line = lineOf(st)
+    const key = field(a, 'left')?.text, right = field(a, 'right')
+    if (!right) continue
     if (key === 'abstract' || key === 'proxy' || key === 'managed') m[key] = boolOf(right)
     else if (key === 'db_table' || key === 'app_label') m[key] = strOf(right)
     else if (key === 'unique_together' || key === 'index_together') {
+      m.set.push(key)
       const v = value(right)
       const groups = v.k === 'list' && v.items.length && v.items.every((x) => x.k === 'str') ? [v.items.map((x) => x.v)] : v.k === 'list' ? v.nodes.map(strsOf).filter(Boolean) : []
-      for (const g of groups) (key === 'unique_together' ? m.uniques : m.indexes).push({ fields: g, line, together: true })
-    } else if (key === 'constraints' || key === 'indexes') {
-      const v = value(right)
-      for (const n of v.k === 'list' ? v.nodes : []) {
-        if (n.type !== 'call') continue
-        const cls = lastName(qualify(field(n, 'function')?.text || '', imports))
-        const args = callArgs(n)
-        const fields = args.kw.has('fields') ? strsOf(args.kw.get('fields')) : null
-        const name = args.kw.has('name') ? strOf(args.kw.get('name')) : null
-        if (cls === 'UniqueConstraint' && fields) m.uniques.push({ fields, name, partial: args.kw.has('condition'), line: lineOf(n) })
-        else if (cls === 'Index' && fields) m.indexes.push({ fields, name, partial: args.kw.has('condition'), line: lineOf(n) })
-        else m.checks++
-      }
-    }
+      for (const g of groups) push(key, { kind: key === 'unique_together' ? 'unique' : 'index', fields: g, line, together: true })
+    } else if (LISTED.has(key)) { m.set.push(key); entries(key, right) }
   }
   return m
+}
+
+const META_LISTS = ['indexes', 'constraints', 'unique_together', 'index_together']
+// the module a dotted import names, from the file importing it: relative (`..shipping.models` from
+// shop/checkout/models.py → shop/shipping/models) or absolute (`shop.shipping.models`, matched as
+// a path's end); whether a file is that module or in that package
+function modulePath(mod, file) {
+  const m = /^(\.*)(.*)$/.exec(mod)
+  const parts = m[2] ? m[2].split('.').filter(Boolean) : []
+  if (!m[1]) return parts.length ? { abs: parts.join('/') } : null
+  let dir = P.dirname(file)
+  for (let i = 1; i < m[1].length; i++) dir = P.dirname(dir)
+  return { rel: P.normalize(P.join(dir, ...parts)) }
+}
+function inModule(file, mod) {
+  const f = file.replace(/\.py$/i, '').replace(/\/__init__$/, '')
+  if (mod.rel !== undefined) return f === mod.rel || f.startsWith(`${mod.rel}/`)
+  return f === mod.abs || f.endsWith(`/${mod.abs}`) || f.startsWith(`${mod.abs}/`) || f.includes(`/${mod.abs}/`)
 }
 
 // Django's names for what it creates (django/db/backends/base/schema.py, models/indexes.py)
@@ -174,16 +235,17 @@ function indexName(table, columns, suffix, max) {
   name = `${table.slice(0, other)}_${columns.join('_').slice(0, other)}_${hash}`
   return name[0] === '_' || /\d/.test(name[0]) ? `D${name.slice(0, -1)}` : name
 }
-// an unnamed models.Index (Index.set_name_with_model)
-function metaIndexName(table, fields, columns) {
-  const ordered = fields.map((f, i) => (f.startsWith('-') ? `${columns[i]} DESC` : columns[i]))
-  const name = `${table.slice(0, 11)}_${columns[0].slice(0, 7)}_${digest([table, ...ordered, 'idx'], 6)}_idx`
+// an unnamed models.Index, or one of django.contrib.postgres's (its suffix: gin, btree…), as
+// Index.set_name_with_model names it
+function metaIndexName(table, fields, columns, suffix = 'idx') {
+  const ordered = fields.map((f, i) => (f.startsWith('-') ? `-${columns[i]}` : columns[i]))
+  const name = `${table.slice(0, 11)}_${columns[0].slice(0, 7)}_${digest([table, ...ordered, suffix], 6)}_${suffix}`
   return name[0] === '_' || /\d/.test(name[0]) ? `D${name.slice(1)}` : name
 }
 
 export default {
   id: 'django',
-  version: 1,
+  version: 2,
   kind: 'code',
   scope: 'unit',
   tree: true,
@@ -192,7 +254,7 @@ export default {
   parses: (p, text) => (djangoLevel(p, text) & 4096) !== 0,
   config: (p) => MANAGE.test(p) || APPS.test(p),
   discover(info) {
-    const models = [...info].filter(([p, i]) => PY.test(p) && i.ddl & 4096 && !APPS.test(p) && !/(^|\/)migrations\//.test(p)).map(([p]) => p)
+    const models = [...info].filter(([p, i]) => PY.test(p) && i.ddl & 4096 && !APPS.test(p) && !/(^|\/)migrations\//.test(p) && !HIDDEN.test(p)).map(([p]) => p)
     if (!models.length) return []
     const manages = [...info.keys()].filter((p) => MANAGE.test(p)).map((p) => P.dirname(p))
     const under = (d, p) => d === '.' || p.startsWith(`${d}/`)
@@ -237,8 +299,16 @@ export default {
     const appLabel = (c) => c.meta?.app_label || labels.get(c.appDir)?.label || P.basename(c.appDir === '.' ? root : c.appDir)
     const byName = new Map()
     for (const c of all) { if (!byName.has(c.name)) byName.set(c.name, []); byName.get(c.name).push(c) }
-    // a base or a target named by a class: the project's class of that name (its own app's first)
-    const classOf = (name, from) => { const list = byName.get(lastName(name)) || []; return list.find((x) => x.appDir === from.appDir) || (list.length === 1 ? list[0] : null) }
+    // a base, a target or a field class a file names, qualified through its imports (`..shipping.models.X`,
+    // `shop.shipping.models.X`): the project's class of that name in the module it imports from (a
+    // package: any file in it), else (a name the file does not import) the file's own, its app's, the only
+    // one; `models`: only a model (a target: a class of another kind may share the name)
+    const classOf = (name, from, models = false) => {
+      const list = (byName.get(lastName(name)) || []).filter((x) => !models || modelInfo(x).model)
+      const mod = String(name).includes('.') ? modulePath(String(name).slice(0, String(name).lastIndexOf('.')), from.file) : null
+      if (mod) { const inMod = list.filter((x) => inModule(x.file, mod)); return inMod.length === 1 ? inMod[0] : inMod.find((x) => x.appDir === from.appDir) || null }
+      return list.find((x) => x.file === from.file) || list.find((x) => x.appDir === from.appDir) || (list.length === 1 ? list[0] : null)
+    }
     const isDjangoModel = (b) => /^django\.db\.models(?:\.base)?\.Model$/.test(b) || b === 'models.Model'
     // whether a class is a model: its bases reach models.Model through the project's classes
     const memo = new Map()
@@ -281,13 +351,37 @@ export default {
       const inherited = modelInfo(c).parents.filter((p) => p.meta?.abstract).flatMap((p) => fieldsOf(p, seen))
       return [...inherited, ...c.fields.map((f) => ({ ...f, from: c }))]
     }
-    const metaOf = (c) => {
-      if (c.meta && !c.meta.bases.length) return c.meta
+    // a model's Meta as Django reads it: its own; an abstract parent's when it states none; a Meta subclassing
+    // the parent's takes each list it does not set (indexes, constraints, unique_together, index_together)
+    // from it, and a list it sets replaces the parent's. Another model's list it splices in
+    // (`*Base.Meta.indexes`) is that model's, as its own Meta reads it.
+    const metaOf = (c, seen = new Set()) => {
+      if (seen.has(c)) return null
+      seen.add(c)
       const parent = modelInfo(c).parents.find((p) => p.meta?.abstract)
-      const pm = parent ? metaOf(parent) : null
-      if (!c.meta) return pm ? { ...pm, abstract: false, db_table: null, line: pm.line } : null
-      return { ...c.meta, indexes: [...(pm?.indexes || []), ...c.meta.indexes], uniques: [...(pm?.uniques || []), ...c.meta.uniques] }
+      const pm = parent ? metaOf(parent, new Set(seen)) : null
+      if (!c.meta) return pm ? { ...pm, abstract: false, db_table: null } : null
+      const own = c.meta, items = []
+      for (const attr of META_LISTS) {
+        const mine = own.items.filter((i) => i.attr === attr)
+        if (own.set.includes(attr) || mine.length) items.push(...mine.flatMap((i) => (i.kind === 'splat' ? splice(i, c, seen) : [i])))
+        else if (own.bases.length && pm) items.push(...pm.items.filter((i) => i.attr === attr))
+      }
+      return { ...own, items }
     }
+    const splice = (i, c, seen) => {
+      const m = classOf(i.splat.q, c)
+      const mm = m ? metaOf(m, new Set(seen)) : null
+      return mm ? mm.items.filter((x) => x.attr === i.splat.attr).map((x) => ({ ...x, attr: i.attr })) : [{ ...i, kind: 'code' }]
+    }
+    // a field class that adds no column: it, or a class it inherits, sets `concrete = False`
+    const columnless = (q, from, seen = new Set()) => {
+      const k = classOf(q, from)
+      if (!k || seen.has(k)) return false
+      seen.add(k)
+      return k.concrete === false || k.bases.some((b) => columnless(b, k, seen))
+    }
+    let virtual = 0
     const models = all.filter((c) => modelInfo(c).model)
     const pkOf = (c, seen = new Set()) => {
       if (seen.has(c)) return null
@@ -304,7 +398,7 @@ export default {
       if (f.to.user) return S.user ? byLabel(S.user, c) : { table: 'auth_user', column: 'id', type: { type: dialect === 'sqlite' || !dialect ? 'integer' : 'integer' }, external: true }
       if (f.to.s === 'self') return { model: c }
       if (f.to.s) return byLabel(f.to.s, c)
-      const m = classOf(f.to.cls, c)
+      const m = classOf(f.to.q || f.to.cls, c, true)
       return m ? { model: m } : null
     }
     const byLabel = (s, c) => {
@@ -340,6 +434,7 @@ export default {
       for (const f of fieldsOf(c)) {
         const where = at(f.line, f.from.file)
         if (f.cls === 'ManyToManyField') continue
+        if (!f.django && !RELATIONS.has(f.cls) && columnless(f.q || f.cls, f.from)) { virtual++; continue } // (MoneyField-like: a composite of the columns beside it)
         const rel = RELATIONS.has(f.cls)
         const column = f.opts.db_column || (rel ? `${f.name}_id` : f.name)
         cols.set(f.name, column)
@@ -351,7 +446,7 @@ export default {
           else type = t.model ? (f.opts.to_field ? { type: 'unknown', unstated: ['type'] } : pkType(t.model)) : t.type
         } else type = typeOf(f.cls, f.opts)
         if (!f.django && !rel) type = { type: f.cls, unstated: ['type'] }
-        const field_ = { name: column, ...type, nullable: f.opts.null === true, default: null, generated: null, ...where }
+        const field_ = { name: column, ...(column !== f.name ? { attr: f.name } : {}), ...type, nullable: f.opts.null === true, default: null, generated: null, ...where }
         if (f.opts.db_default) { field_.default = f.opts.db_default.default; if (f.opts.db_default.unstated) field_.unstated = [...(field_.unstated || []), 'default'] }
         const computed = [f.opts.default !== undefined ? `default=${f.opts.default}` : null, f.opts.auto_now ? 'auto_now' : null, f.opts.auto_now_add ? 'auto_now_add' : null].filter(Boolean)
         if (computed.length) field_.computed = computed.join(' · ')
@@ -366,17 +461,21 @@ export default {
         if ((f.opts.db_index || (rel && f.opts.db_index !== false)) && !f.opts.unique && !f.opts.primary_key && f.cls !== 'OneToOneField') e.indexes.push({ name: indexName(table, [column], '', maxName), unique: false, columns: [column], partial: false, ...where })
       }
       const meta = metaOf(c)
+      const items = meta?.items || []
       const colFor = (name) => cols.get(name.replace(/^-/, '')) || colOf(c, name.replace(/^-/, ''))
-      for (const u of meta?.uniques || []) {
+      const nameFor = (n) => n.replace(/%\(app_label\)s/g, appLabel(c)).replace(/%\(class\)s/g, c.name.toLowerCase()) // as the concrete model formats them
+      for (const u of items.filter((x) => x.kind === 'unique')) {
         const columns = u.fields.map(colFor)
-        if (u.partial) e.indexes.push({ name: u.name || indexName(table, columns, '_uniq', maxName), unique: true, columns, partial: true, ...at(u.line) })
-        else e.keys.push({ role: 'unique', parts: columns, ...at(u.line) })
+        if (u.partial) e.indexes.push({ name: u.name ? nameFor(u.name) : indexName(table, columns, '_uniq', maxName), unique: true, columns, partial: true, ...at(u.line, u.file) })
+        else e.keys.push({ role: 'unique', parts: columns, ...at(u.line, u.file) })
       }
-      for (const i of meta?.indexes || []) {
+      for (const i of items.filter((x) => x.kind === 'index')) {
         const columns = i.fields.map(colFor)
-        e.indexes.push({ name: i.name ? i.name.replace(/%\(app_label\)s/g, appLabel(c)).replace(/%\(class\)s/g, c.name.toLowerCase()) : i.together ? indexName(table, columns, '_idx', maxName) : metaIndexName(table, i.fields, columns), unique: false, columns, partial: !!i.partial, ...at(i.line) })
+        e.indexes.push({ name: i.name ? nameFor(i.name) : i.together ? indexName(table, columns, '_idx', maxName) : metaIndexName(table, i.fields, columns, i.suffix), unique: false, columns, partial: !!i.partial, ...at(i.line, i.file) })
       }
-      if (meta?.checks) note(`${c.file}:${meta.line}: ${meta.checks} constraint${meta.checks === 1 ? '' : 's'} of ${c.name} not modelled (checks, exclusions)`)
+      const checks = items.filter((x) => x.kind === 'check').length, built = items.filter((x) => x.kind === 'code').length
+      if (checks) note(`${meta.file || c.file}:${meta.line}: ${checks} constraint${checks === 1 ? '' : 's'} of ${c.name} not modelled (checks, exclusions)`)
+      if (built) note(`${meta.file || c.file}:${meta.line}: ${built} ${built === 1 ? 'index or constraint' : 'indexes or constraints'} of ${c.name} built by code (expressions, a list code fills): not read`)
       entities.push(e)
       // a many-to-many field's join table
       for (const f of fieldsOf(c).filter((x) => x.cls === 'ManyToManyField')) {
@@ -400,10 +499,13 @@ export default {
       }
     }
     if (!entities.length) return { declarations: [] }
+    if (virtual) note(`${virtual} field${virtual === 1 ? '' : 's'} of a class that adds no column (concrete = False: a composite of the fields beside it) not read as columns`)
     const counted = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+    // the declaration cites a model file (models.py, a models/ package's), never another file read beside them
+    const cited = sources.find((f) => /(^|\/)models(?:\.py$|\/)/.test(f.path)) || sources[0]
     return { declarations: [{
       store: root, dialect, dialectFrom: S.dialect ? { how: 'stated', path: S.dialect.path, line: S.dialect.line } : null,
-      source: { path: sources[0].path, line: 1, kind: 'code', confidence: 'declared' },
+      source: { path: cited.path, line: 1, kind: 'code', confidence: 'declared' },
       complete: false, partial: false, status: 'read',
       label: `Django models, read ${counted(sources.length, 'file')}: ${counted(models.filter((c) => tableOf(c) && !c.meta?.proxy).length, 'model')}, ${counted(relations, 'relation')}`,
       notes, files: sources.length, clients: ['django.db'],

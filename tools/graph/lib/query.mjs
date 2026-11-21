@@ -825,6 +825,7 @@ export class Graph {
   dialectFrom(repo, f) {
     const at = f.path ? this.dloc({ repo, path: f.path, line: f.line }) : ''
     return f.how === 'stated' ? `stated at ${at}` : f.how === 'sniffed' ? `sniffed: ${f.marker} at ${at}` : f.how === 'supabase' ? 'Supabase migrations are Postgres'
+      : f.how === 'folder' ? `its folder's name: ${f.marker}`
       : f.how === 'client' ? `its client: ${f.source} at ${at}` : f.how === 'repository' ? `the repository's client: ${f.source} at ${at}` : f.how === 'hint' ? `a type naming it: ${f.marker} at ${at}` : 'set in grimoire.config.json (graph.data.migrations)'
   }
   // the SQL the code sends (data/queries.mjs), in one line: graph_data with a store or a table says the rest

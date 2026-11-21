@@ -66,7 +66,7 @@ const cap = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
 export default {
   id: 'prisma',
-  version: 3,
+  version: 4,
   kind: 'code',
   scope: 'unit',
   wants: (p) => PRISMA.test(p) || CONFIG.test(p),
@@ -172,7 +172,7 @@ export default {
           continue
         }
         const column = mapOf(f.attrs, 'map') || f.name
-        const field = { name: column, ...typeOf(f, dialect, enums), nullable: f.optional || f.list, default: null, generated: null, ...at(f.line) }
+        const field = { name: column, ...(column !== f.name ? { attr: f.name } : {}), ...typeOf(f, dialect, enums), nullable: f.optional || f.list, default: null, generated: null, ...at(f.line) }
         const d = f.attrs.find((a) => a.name === 'default')
         if (d) Object.assign(field, defaultOf(d, f, dialect, enums, enumValue, field))
         if (f.attrs.some((a) => a.name === 'updatedAt')) field.computed = field.computed ? `${field.computed} · @updatedAt` : '@updatedAt'

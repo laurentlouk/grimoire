@@ -1424,7 +1424,7 @@ function modelOf(db) {
     })
     const keys = []
     if (t.pk) keys.push({ role: 'primary', parts: t.pk.parts, ...at(t.pk) })
-    for (const u of t.uniques) keys.push({ role: 'unique', parts: u.parts, ...at(u) })
+    for (const u of t.uniques) keys.push({ role: 'unique', parts: u.parts, name: u.name, ...at(u) }) // its name: a unique index of that name is the same object (reconcile.mjs uniqueTwins)
     const indexes = [...t.ix.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).map((i) => ({ name: i.name, unique: i.unique, columns: i.columns, partial: i.partial, ...(i.implicit ? { implicit: true } : {}), ...at(i) }))
     const relations = [...t.fks].map((f) => {
       const target = db.tables.get(f.to)
