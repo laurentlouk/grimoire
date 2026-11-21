@@ -7,6 +7,11 @@
       "name": "grimoire",
       "source": "./",
       "description": "The whole spellbook: roast · to-plan · to-issues · implement · review · crystallize · orchestrate · launch-agent · tdd · adaptive-replanning · logs · graph · architecture · data-model · manager, with the scouts, the specialists, the reviewer, the guard hook, the memory stores, the code graph and the build loop."
+    },
+    {
+      "name": "grimoire-live",
+      "source": "./mods/grimoire-live",
+      "description": "Optional: grimoire live in Claude Code's interface: the build loop's run in a pane, the manager briefing above the prompt, the run's cost on the status line, graph_diff's risk on its row."
     }
   ]
 }
