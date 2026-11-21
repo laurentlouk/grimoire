@@ -24,6 +24,9 @@
 //     define_method), annotated fields (a plugin's hooks, a settings class), TypeScript class fields;
 //     functions passed as values (a router's handlers, a queued task, a signal's receiver) as
 //     REFERENCES, followed by impact, callers, test discovery, the diff and the overview
+//  6f. fixtures/resolve: resolution's narrowing (call chains on self, the self-call guard, types from
+//     dependencies, closures, locals, platform variants, Ruby callback symbols, JSX imports and aliases,
+//     non-wrapper calls, router procedures, runtime globals, super) and typed unlinked sites in impact
 //  1b-1d (between 1 and 2): which files count and as what, modules and the system map, the page's helpers
 //
 //  Needs the parser runtime (web-tree-sitter + grammars): `npm ci --prefix tools/graph`, or a
@@ -1256,6 +1259,79 @@ console.log('\n6g · a wide syntax tree is walked in its size: each node\'s chil
   const idx = await call('graph_index', {}, { root: W })
   const ms = Date.now() - t0
   ok(/Indexed in/.test(idx) && ms < 8000, `indexed in ${ms} ms (< 8 s; a child listed by its index walked the children before it: 17 s for the factory alone)`)
+}
+
+// ── 6h · resolution's narrowing, measured on real projects: each a wrong link no longer made, or a right one kept ──
+console.log('\n6h · resolution (fixtures/resolve): call chains, the self-call guard, dependency types, closures, locals, variants, Ruby symbols, JSX imports, wrappers, routers, globals, super, typed sites')
+{
+  const RS = path.join(SANDBOX, 'resolve')
+  cpSync(path.join(HERE, 'fixtures', 'resolve'), RS, { recursive: true, filter: (src) => !src.split(path.sep).includes('.grimoire') })
+  const rq = (tool, args = {}) => call(`graph_${tool}`, args, { root: RS })
+  const rows = async (s) => (await rq('sql', { sql: s })).split('\n').slice(1).filter((l) => l && !l.startsWith('Leads')).map((l) => l.trim().replace(/\s+/g, ' '))
+  // the edges of `kind` from the definition (or file) `src` names, as `confidence dst-path:dst-qualname`
+  const edgesFrom = (src, kind = 'CALLS') => rows(`SELECT e.confidence || ' ' || fd.path || ':' || d.qualname AS e FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst JOIN files fd ON fd.id = d.file_id WHERE e.kind = '${kind}' AND (s.qualname = '${src}') ORDER BY 1`)
+  await rq('index')
+
+  // 1 · a call chain rooted at self is the object's own method, not a field holding another object
+  ok((await edgesFrom('ProductsQueryset.annotate_publication_info')).includes('same-file shop/managers.py:ProductsQueryset.annotate_published_at'), `Python: \`self.annotate_is_published(c).annotate_published_at(c)\` reaches the class's own method (${(await edgesFrom('ProductsQueryset.annotate_publication_info')).join(' · ')})`)
+  ok(!(await edgesFrom('Delegating.annotate_published_at')).length, `Python: \`self.repo.annotate_published_at()\` is never the caller itself nor another class's method by name (${(await edgesFrom('Delegating.annotate_published_at')).join(' · ')})`)
+  // 2 · where the guard removed the caller or its class's method, the name decides nothing
+  ok(!(await edgesFrom('SharedPrefs.getString')).length, `Kotlin: \`safeInstance.getString()\` in SharedPrefs.getString is not a unique-name link to NotificationPrefs.getString (${(await edgesFrom('SharedPrefs.getString')).join(' · ')})`)
+  ok(!(await edgesFrom('GifView.playAsync')).length, `TypeScript: \`this.nativeRef.current.playAsync()\` is not linked to the other platform variant's method (${(await edgesFrom('GifView.playAsync')).join(' · ')})`)
+  ok((await edgesFrom('GifView.render')).some((e) => /^same-file src\/GifView\.tsx:GifView\.playAsync$/.test(e)), `TypeScript: \`this.chain().playAsync()\` (a chain, not a field) stays the class's own (${(await edgesFrom('GifView.render')).join(' · ')})`)
+  // 3 · a type imported from a dependency is not the repository's class of that name; a mock is no production callee
+  ok(!(await edgesFrom('logWith')).length, `TypeScript: \`l.info()\` on a \`Logger\` imported from a dependency links nothing (${(await edgesFrom('logWith')).join(' · ')})`)
+  ok((await edgesFrom('logOwn')).includes('typed src/logger.ts:Logger.info'), '… a `Logger` imported (renamed) from the repository is typed to it')
+  ok(!(await edgesFrom('link.ts', 'REFERENCES')).length && !(await rows("SELECT 1 FROM edges e JOIN nodes s ON s.id = e.src JOIN files f ON f.id = s.file_id WHERE f.path = 'src/link.ts' AND e.kind = 'REFERENCES'")).length, 'TypeScript: `redirectLogger.info` passed on (a dependency\'s `Logger`) references nothing')
+  ok(!(await edgesFrom('save')).length, `TypeScript: \`new File()\` / \`new FS.File()\` from a dependency, \`f.write()\`: never the jest setup's mock field (${(await edgesFrom('save')).join(' · ')})`)
+  has(await rq('symbol', { symbol: 'File' }), 'class test', 'a test runner\'s setup (`jest/setup.js`) is test-support code')
+  // 4 · a bare call reaches a closure of an enclosing definition, a wrapped component's too
+  has(await rq('callers', { symbol: 'selectItem' }), 'MentionList.enterHandler  function  web/src/Autocomplete.tsx:5  [same-file]', 'JSX: a bare call inside `forwardRef(function …)` reaches the closure it names')
+  has(await rq('callers', { symbol: 'Row' }), 'MentionList  function  web/src/Autocomplete.tsx:3  [same-file]', 'JSX: a component defined as a closure is rendered from its enclosing definition')
+  // 5 · locals are no references: an arrow's lone parameter, a destructured one, a callback's locals; nor a name the file never imports
+  const listRefs = await edgesFrom('List', 'REFERENCES')
+  ok(!listRefs.length, `TypeScript: \`profile => <Item profile={profile} />\` and a destructured \`{ clearTranslation }\` are parameters, not the imported functions (${listRefs.join(' · ')})`)
+  const fileRefs = await rows("SELECT d.qualname FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst WHERE e.kind = 'REFERENCES' AND s.qualname = 'src/List.tsx'")
+  ok(fileRefs.join(',') === 'profile', `TypeScript: \`{ onGet: get }\` names nothing the file imports (no link to a module's \`get\`); \`onProfile: profile\` is the import (${fileRefs.join(',')})`)
+  const testRefs = await rows("SELECT d.qualname FROM edges e JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst WHERE e.kind = 'REFERENCES' AND s.qualname = 'src/merge.test.ts'")
+  ok(!testRefs.length, `a local of an anonymous callback (\`it('…', () => { const get = …; get.mockRestore() })\`) is that local, not the import it shadows (${testRefs.join(',')})`)
+  const badge = await edgesFrom('Badge', 'REFERENCES')
+  ok(!badge.some((e) => /Button\.tsx:Button$/.test(e)), `JSX: \`<Button.Button>\` names a namespace, no value of the function \`Button\` (${badge.join(' · ')})`)
+  has(await rq('callers', { symbol: 'Button' }), 'Badge  function  web/src/Settings.tsx:4  [import]', '… while the render still calls it through the namespace')
+  // 6 · a value naming a function in its platform variants links each variant, not as an ambiguity
+  ok(badge.filter((e) => /^import src\/share\.(ios|android)\.ts:onShare$/.test(e)).length === 2, `REFERENCES: \`onPress={onShare}\` links share.ios.ts and share.android.ts by import (${badge.join(' · ')})`)
+  // 7 · Ruby: only a callback-style macro's symbols name methods
+  const story = await edgesFrom('Story', 'REFERENCES')
+  ok(story.join(',') === 'same-class app/models/story.rb:Story.normalize_title,same-class app/models/story.rb:Story.published?', `Ruby: \`before_save :normalize_title, if: :published?\` name the class's methods, and nothing else in its body does (${story.join(' · ')})`)
+  ok((await edgesFrom('Story.normalize_title', 'REFERENCES')).includes('same-class app/models/story.rb:Story.published?'), 'Ruby: `respond_to?(:published?)` names the method')
+  const scoped = [...await edgesFrom('Story.by_title', 'REFERENCES'), ...await edgesFrom('Story.preloaded', 'REFERENCES')]
+  ok(!scoped.length, `Ruby: \`group(:title)\` names a column, \`preload(:votes, hidings: :user)\` associations to load (another model's \`user\` among them): no method used as a value (${scoped.join(' · ')})`)
+  const ctl = await edgesFrom('StoriesController', 'REFERENCES')
+  ok(ctl.join(',') === 'same-class app/controllers/stories_controller.rb:StoriesController.find_story,same-class app/controllers/stories_controller.rb:StoriesController.show', `Ruby: \`before_action :find_story, only: [:show]\` names both (${ctl.join(' · ')})`)
+  ok(!(await edgesFrom('StoriesController.create', 'REFERENCES')).length, 'Ruby: `render action: :new` names an action to render, no method used as a value')
+  // 8 · a JSX name whose import resolved stays that file's: an alias followed, never a guess elsewhere
+  const dialog = await edgesFrom('Dialog')
+  ok(!dialog.some((e) => e.includes('embed/')), `JSX: \`<Check>\` imported from a file re-exporting a non-function is never a unique-name link to another \`Check\` (${dialog.join(' · ')})`)
+  ok(dialog.includes('import src/icons/brands/Star.tsx:Star'), '… and `export const Star = CanonicalStar` is followed to the definition it names')
+  const card = await rows("SELECT d.name FROM edges e JOIN nodes s ON s.id = e.src JOIN files f ON f.id = s.file_id JOIN nodes d ON d.id = e.dst WHERE f.path = 'src/__tests__/Card.test.tsx' AND e.kind = 'CALLS'")
+  ok(!card.length, `JSX: a name destructured from \`jest.requireActual('react-native')\`, also through \`jest.requireActual<typeof import('react-native')>(…)\` or \`require('react-native') as typeof import(…)\`, is the dependency's (${card.join(',')})`)
+  const header = await edgesFrom('Header')
+  ok(header.join(',') === 'import src/Layout.tsx:Slot', `JSX: \`export const Slot = Layout.Slot\` then \`<Slot />\` is the namespace's member; \`throw Error(…)\` the runtime's, never a component named \`Error\` (${header.join(' · ')})`)
+  // 9 · a value built with a callback is no function unless the callee wraps one
+  const fns = await rows("SELECT n.name FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.path = 'src/schema.ts' AND n.kind = 'function' ORDER BY n.name")
+  ok(fns.join(',') === 'debounced,wire', `\`pgTable(…, cb)\`, \`z.object().refine(cb)\`, \`createContext(() => {})\`, \`t.procedure.use(cb)\` are no functions; \`debounce(() => …)\` is (${fns.join(',')})`)
+  // 10 · a router's procedure is reached only by syntax
+  ok(!(await edgesFrom('getSession')).length, `tRPC: \`auth.api.getSession()\` is no name guess at a router's procedure (${(await edgesFrom('getSession')).join(' · ')})`)
+  ok((await edgesFrom('viaRouter')).includes('qualified src/router.ts:authRouter.getSession'), '… `authRouter.getSession()` still reaches it')
+  // 11 · the runtime's objects are a dependency
+  ok(!(await edgesFrom('report')).length, `\`console.error()\`, \`window.open()\` never guess at the repository's \`Logger.error\` or a mock's \`open\` (${(await edgesFrom('report')).join(' · ')})`)
+  // 12 · super: the supertypes' member, or none
+  ok((await edgesFrom('AddressForm.clean')).join(',') === 'same-class shop/forms.py:BaseForm.clean', `Python: \`super().clean()\` is the base class's (${(await edgesFrom('AddressForm.clean')).join(' · ')})`)
+  ok(!(await edgesFrom('Order.save')).length, `Python: \`super().save()\` up a framework's class links nothing, never another class's \`save\` (${(await edgesFrom('Order.save')).join(' · ')})`)
+  ok((await edgesFrom('Child.save')).join(',') === 'same-class src/user.service.ts:Base.save', `TypeScript: \`super.save()\` is the parent's, never the method itself (${(await edgesFrom('Child.save')).join(' · ')})`)
+  // 13 · an unlinked site typed to an unrelated type is no possible caller
+  const imp = await rq('impact', { target: 'UserService.findOne', mentions: false })
+  lacks(imp, 'this.userRepository.findOne', 'impact: `this.userRepository.findOne()` on a `Repository<…>` is not listed as a possible caller of UserService.findOne')
 }
 
 rmSync(SANDBOX, { recursive: true, force: true })

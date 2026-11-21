@@ -84,7 +84,9 @@ export function dispatchLines(g, info) {
 // [{ ref, src (node), file }] for refs naming one of the targets, in the target's language family, in
 // any repository of the project (no edge crosses repositories), that no CALLS edge accounts for: the
 // site's definition is not already a linked caller of the target, and no edge from it links that very
-// line to another definition of the name (that one is the other definition's caller, not a lead).
+// line to another definition of the name (that one is the other definition's caller, not a lead). A site
+// whose receiver's type the syntax states (`this.userRepository.findOne()` on a `Repository<User>`) is
+// a lead only when that type is the target's owner or one of its supertypes or subtypes.
 export function unresolved(g, targets) {
   const out = [], seen = new Set()
   const callsTarget = g.db.prepare("SELECT 1 FROM edges WHERE src = ? AND dst = ? AND kind = 'CALLS' LIMIT 1")
@@ -94,8 +96,18 @@ export function unresolved(g, targets) {
     const fam = familyOf(t.lang)
     const kinds = ['class', 'struct'].includes(t.kind) ? "('new','call')" : CALL_KINDS
     const rows = g.q(`SELECT r.*, f.repo, f.path, f.lang FROM refs r JOIN files f ON f.id = r.file_id WHERE r.name = ? AND r.kind IN ${kinds} ORDER BY f.repo != ?, f.repo, f.path, r.line`, t.name, t.repo || '')
+    let related = null // the owner's name and its supertypes' and subtypes': the types a stated receiver may have
+    const typedTo = (qtype) => {
+      if (!related) {
+        related = new Set()
+        const owner = t.parent_id ? g.node(t.parent_id) : null
+        if (owner) for (const dir of ['out', 'in']) for (const id of g.walk([owner.id], ['EXTENDS', 'IMPLEMENTS'], dir, 4).keys()) { const n = g.node(id); if (n) related.add(n.name) }
+      }
+      return related.has(qtype.split('.').pop())
+    }
     for (const r of rows) {
       if (familyOf(r.lang) !== fam || r.src_id === t.id) continue
+      if (r.qtype && t.id > 0 && !typedTo(r.qtype)) continue // (a name no definition holds yet: every site)
       if ((t.id > 0 && callsTarget.get(r.src_id, t.id)) || linkedHere.get(r.src_id, r.name, r.line)) continue
       const k = `${r.file_id}|${r.line}|${r.name}`
       if (seen.has(k)) continue

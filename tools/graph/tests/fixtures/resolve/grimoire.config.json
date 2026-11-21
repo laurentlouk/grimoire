@@ -1,0 +1,9 @@
+{
+  "repos": [
+    { "name": "web", "path": "web" },
+    { "name": "py", "path": "py" },
+    { "name": "kt", "path": "kt" },
+    { "name": "rails", "path": "rails" }
+  ],
+  "graph": {}
+}

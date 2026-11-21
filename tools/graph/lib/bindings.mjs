@@ -57,6 +57,9 @@ function bound(n) {
 function typeOfValue(v, spec) {
   if (!v) return null
   if (/^(unary_expression|await_expression|parenthesized_expression|expression_list|equals_value_clause|reference_expression)$/.test(v.type)) return typeOfValue(field(v, 'operand') || field(v, 'value') || named(v)[0], spec)
+  // `new FileSystem.File(…)` (JavaScript): the type with the namespace it is read from, `FileSystem.File`,
+  // so resolution can tell a dependency's namespace from the repository's
+  if (v.type === 'new_expression') { const k = field(v, 'constructor'); if (k && k.type === 'member_expression' && field(k, 'object')?.type === 'identifier' && field(k, 'property')) return `${field(k, 'object').text}.${field(k, 'property').text}` }
   if (/^(new_expression|object_creation_expression|composite_literal|struct_expression)$/.test(v.type)) return typeName(field(v, 'constructor') || field(v, 'type') || field(v, 'name') || named(v).find((c) => /name|identifier|type/.test(c.type)))
   if (CALLISH.test(v.type)) {
     const call = spec.calls[v.type]
@@ -105,16 +108,32 @@ export function bindingsOf(n, spec) {
 // reference not linked.
 const PARAM_LISTS = new Set(['parameters', 'formal_parameters', 'method_parameters', 'lambda_parameters', 'block_parameters', 'parameter_list', 'function_value_parameters'])
 const LOOPS = new Set(['for_statement', 'for_in_statement', 'range_clause', 'for_in_clause', 'catch_clause', 'as_pattern', 'for_expression', 'enhanced_for_statement'])
+// a JavaScript destructuring pattern (`{ a, b: c, d = x, ...rest }`, `[a, b]`): the names it binds,
+// never a default's value
+const PATTERN = /^(object_pattern|array_pattern|assignment_pattern|object_assignment_pattern|rest_pattern|pair_pattern)$/
+const patternNames = (n, out = [], d = 0) => {
+  if (!n || d > 6) return out
+  if (IDENTISH.test(n.type) && n.namedChildCount === 0) { out.push(n.text); return out }
+  if (n.type === 'pair_pattern') return patternNames(field(n, 'value'), out, d + 1)
+  if (n.type === 'assignment_pattern' || n.type === 'object_assignment_pattern') return patternNames(field(n, 'left'), out, d + 1)
+  if (PATTERN.test(n.type)) for (const c of named(n)) patternNames(c, out, d + 1)
+  return out
+}
 const idents = (n, out = [], d = 0) => { if (!n || d > 4) return out; if (IDENTISH.test(n.type) && n.namedChildCount === 0) out.push(n.text); else if (!TYPE_NODE.test(n.type)) for (const c of named(n)) idents(c, out, d + 1); return out }
 export function localsOf(n) {
-  if (PARAMS.has(n.type) || n.type === 'default_parameter' || n.type === 'typed_default_parameter') { const b = bound(field(n, 'name') || field(n, 'pattern') || n); return b ? [b] : [] }
-  if (PARAM_LISTS.has(n.type)) return named(n).filter((c) => IDENTISH.test(c.type)).map((c) => c.text)
+  if (PARAMS.has(n.type) || n.type === 'default_parameter' || n.type === 'typed_default_parameter') {
+    const pat = field(n, 'pattern')
+    if (pat && PATTERN.test(pat.type)) return patternNames(pat) // `({ onPress, label }: Props) => …`
+    const b = bound(field(n, 'name') || pat || n); return b ? [b] : []
+  }
+  if (PARAM_LISTS.has(n.type)) return named(n).flatMap((c) => (IDENTISH.test(c.type) ? [c.text] : PATTERN.test(c.type) ? patternNames(c) : []))
   if (ASSIGN.has(n.type)) {
     // `const onSave = () => …` is a nested function's definition, which a value may name
     if (n.type === 'variable_declarator' && field(n, 'value') && /^(arrow_function|function_expression|function|generator_function)$/.test(field(n, 'value').type)) return []
     const target = field(n, 'name') || field(n, 'pattern') || field(n, 'left') || field(n, 'declarator')
     if (!target) return []
-    if (/^(identifier|expression_list|pattern_list|tuple_pattern|array_pattern|object_pattern|list_pattern)$/.test(target.type)) return idents(target)
+    if (PATTERN.test(target.type)) return patternNames(target)
+    if (/^(identifier|expression_list|pattern_list|tuple_pattern|list_pattern)$/.test(target.type)) return idents(target)
     const b = /member|attribute|selector|field|subscript|index/.test(target.type) ? null : bound(target)
     return b ? [b] : []
   }

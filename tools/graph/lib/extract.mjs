@@ -49,6 +49,11 @@ const MEMBER = /^(member_expression|attribute|selector_expression|field_expressi
 const PATH = /^[\p{L}_$][\p{L}\p{N}_$]*(\s*(\.|::|->|\?\.)\s*[\p{L}_$][\p{L}\p{N}_$]*)*$/u
 const SELFISH = /^(self|this|Self|super|cls)$/
 const FN_VALUE = /^(arrow_function|function_expression|function|generator_function)$/
+// A function no definition names (a callback: `.map((p) => …)`, `it('…', () => …)`, `jest.mock('x', () => …)`,
+// a lambda, a closure): its parameters and locals are its own, a scope of their own even at file level.
+const ANON_FN = /^(arrow_function|function_expression|function|generator_function|lambda|lambda_expression|func_literal|closure_expression|lambda_literal|anonymous_function)$/
+// The names in scope: a callable's own, then those of the definitions and callbacks around it.
+const scope = (up) => ({ own: new Set(), up, add(v) { this.own.add(v) }, has(v) { for (let s = this; s; s = s.up) if (s.own.has(v)) return true; return false } })
 function valueSlots(node, isCall) {
   const t = node.type
   if (isCall) {
@@ -122,7 +127,8 @@ export function extract(tree, lang, isTestFile, file = null) {
       if (c && c.name && IDENT.test(c.name)) ref({ kind: call[1], name: c.name, qual: (c.qual || '').slice(0, 80), qtype: typed(c.qual, ctx), line, src: ctx.fn })
       // `send_welcome.delay(…)`, `handler.apply_async()`, `on_save.send()`: a call on a function is a use
       // of that function as a value (a task queued, a signal sent)
-      if (c && c.qual && IDENT.test(c.qual) && !SELFISH.test(c.qual) && spec.bareValues !== false) value({ name: c.qual, qual: '' })
+      // (a JSX tag's qualifier is a namespace or an object of components: `<UI.Row>` uses no function `UI`)
+      if (c && c.qual && IDENT.test(c.qual) && !SELFISH.test(c.qual) && spec.bareValues !== false && !/^jsx_/.test(t)) value({ name: c.qual, qual: '' })
       // Ruby: a lowercase receiver that is no local is a call on self (`active.order(…)`, `user.name`)
       else if (c && c.qual && spec.bareValues === false && /^[\p{Ll}_][\p{L}\p{N}_]*[!?]?$/u.test(c.qual) && !SELFISH.test(c.qual) && !local(c.qual)) ref({ kind: 'call', name: c.qual, qual: '', qtype: null, line, src: ctx.fn })
     }
@@ -146,7 +152,7 @@ export function extract(tree, lang, isTestFile, file = null) {
           line, endLine: node.endPosition.row + 1, signature: signature(node, 'member'), isTest: isTestFile, via: 'framework',
         })
         // `scope :active, -> { where(…) }`, `define_method(:x) do … end`: the block is that method's body
-        if (mem.owns && names.length === 1) next = { parent: idx, fn: idx, scopeType: null, scopeOwner: -2, types: new Map(ctx.types), locals: new Set() }
+        if (mem.owns && names.length === 1) next = { parent: idx, fn: idx, scopeType: null, scopeOwner: -2, types: new Map(ctx.types), locals: scope(null) }
       }
     } else if (kind) {
       const name = (spec.name || nameOf)(node, file)
@@ -160,7 +166,7 @@ export function extract(tree, lang, isTestFile, file = null) {
           kind, name, qualname: container ? `${container}.${name}` : name,
           parent: scopeType ? -1 : ctx.parent, container: scopeType || null,
           line, endLine: node.endPosition.row + 1, signature: signature(node, kind),
-          isTest: isTestFile || !!(spec.isTest && spec.isTest(node, name)),
+          isTest: isTestFile || !!(spec.isTest && spec.isTest(node, name)), via: (spec.via && spec.via(node, kind)) || undefined,
         })
         for (const s of (spec.supers ? spec.supers(node) : [])) if (s.name && IDENT.test(s.name)) ref({ kind: s.kind, name: s.name, qual: '', line, src: idx })
         // a class's own scope: its fields' types (bindings.mjs fieldBindings), as `this.f` / `self.f`
@@ -170,13 +176,21 @@ export function extract(tree, lang, isTestFile, file = null) {
           types = new Map(ctx.types)
           for (const [f, t] of fieldBindings(node, spec)) { for (const pre of ['this.', 'self.', 'this->']) types.set(`${pre}${f}`, t); if (IMPLICIT_THIS.has(lang)) types.set(f, t) }
         }
-        const locals = CALLABLE.has(kind) ? new Set(ctx.locals || []) : ctx.locals
+        const locals = CALLABLE.has(kind) ? scope(ctx.locals) : ctx.locals
         next = { parent: idx, fn: CALLABLE.has(kind) ? idx : ctx.fn >= 0 ? ctx.fn : idx, scopeType: null, scopeOwner: -2, types, locals }
       }
     } else if (sc && sc.type) {
       if (sc.super) ref({ kind: 'implements', name: sc.super, qual: '', line, src: -1, fromType: sc.type })
       next = { ...ctx, scopeType: sc.type, scopeOwner: ctx.parent }
+    } else if (ANON_FN.test(t)) {
+      // a callback's parameters (`profile => …` has no parameter list) and locals are its own
+      next = { ...ctx, locals: scope(ctx.locals) }
+      const p = node.childForFieldName('parameter')
+      if (p && p.type === 'identifier') next.locals.add(p.text)
     }
+    // `export const X = Y`, `const X = Y.Z` at module level: X is Y (Y.Z) under another name, which
+    // resolution follows like a barrel's re-export
+    if (spec.alias && ctx.parent < 0) { const a = spec.alias(node); if (a) ref({ kind: 'alias', name: a.name, qual: a.qual, line, src: -1 }) }
     anc.push(node) // the ancestors, for what looks up (tree-sitter finds a parent from the root: a step up costs the depth)
     for (const c of node.namedChildren) walk(c, next) // one call for all (namedChild(i) walks the children before i: quadratic on a wide node)
     anc.pop()

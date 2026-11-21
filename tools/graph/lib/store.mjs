@@ -18,7 +18,8 @@
 //            name alone)
 //   refs     unresolved names as extracted (kind call | new | macro: call sites with the receiver's
 //            text, literals as `…`, and its stated type when the syntax gives it; extends | implements:
-//            supertypes; ref: a name in a value position, its qualifier's text); imports: import
+//            supertypes; ref: a name in a value position, its qualifier's text; alias: `export const X = Y`,
+//            name X, qual Y); imports: import
 //            statements, resolved = the files linked, 0 none (external), -1 a file of the repository
 //            the index does not hold (an image, a JSON file)
 //   cochange files that changed in the same commits (from git log), n = commits shared
@@ -58,7 +59,7 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-export const SCHEMA_VERSION = '24'
+export const SCHEMA_VERSION = '25'
 
 let sqlite = null
 // node:sqlite, loaded once: the index's store, and the in-memory databases data/readers/sqlite-replay.mjs replays migrations into.
