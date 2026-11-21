@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { LiveSnapshot } from '../types'
+import { BIG, CLOSED, CORRUPT, FAILING, HALTED, OLD, RUNNING } from './fixtures/snapshots'
 import { bandLine, diffSummary, statusLine, transitions } from './view'
 
 const NOW = '2026-11-21T12:00:00.000Z'
@@ -104,4 +105,30 @@ test('the plain functions: status, band, toasts, the diff summary', async () => 
   expect(transitions(RUN, flagged)).toEqual(['grimoire stuck watch: api-engineer same edit 4 times'])
   expect(diffSummary('nothing here')).toBe(null)
   expect(diffSummary('Risk: low')?.risk).toBe('low')
+})
+
+// what scripts/live.mjs really prints, on its own fixtures: each draws on every surface
+const CASES = [
+  ['running', RUNNING, /^Run R1$/], ['halted by the cost fuse', HALTED, /halted \(budget_exhausted\)/], ['closed', CLOSED, /^closed/],
+  ['a corrupt chunk', CORRUPT, /^Run R7$/], ['quiet for 15 minutes', BIG, /No event for 15 minutes/],
+  ['only old runs', OLD, /No grimoire run in the last 6 hours/], ['a part that threw', FAILING, /No grimoire run in the last 6 hours/],
+] as const
+for (const [name, snap, want] of CASES) {
+  test(`live.mjs's snapshot, ${name}: the pane draws it`, async ($, on) => {
+    const seen = { status: [] as (string | undefined)[], toasts: [] as string[], opened: [] as string[] }
+    world(on, snap, seen)
+    await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'grimoire-run', args: '' } as any)
+    for (const surface of ['terminal', 'desktop', 'mobile'] as const) {
+      const pane = await $.ui.mount({ ...PANE, surface })
+      expect(await pane.find({ type: 'Text', text: want })).toBeTruthy()
+      await pane.unmount()
+    }
+  })
+}
+
+test('live.mjs\'s snapshots: the status line and the toasts', async () => {
+  expect(statusLine(RUNNING)).toBe('grimoire R1 · 1/7 tasks · 2 active · 1 failed · cost 41% · 3 stuck flags')
+  expect(statusLine(HALTED)).toBe(undefined)
+  expect(transitions({ ...HALTED, run: { ...HALTED.run!, status: 'running', haltReason: null } }, HALTED)).toContain('grimoire run R2 halted: budget_exhausted')
 })

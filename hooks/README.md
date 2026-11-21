@@ -43,7 +43,7 @@ Commands are split the way the shell would (`;`, `&&`, `||`, `|`, newlines, `$(â
 
 A live view drawn in Claude Code (a pane, a band above the prompt, a status line) runs `node <plugin root>/scripts/live.mjs --root <project>` every few seconds for a one-line JSON snapshot of the run in progress, the briefing and the stuck watch (README, "Live snapshot"). It knows the project, not where the plugin is installed: at every `SessionStart`, `live-pointer.sh` writes the plugin's absolute root (`$CLAUDE_PLUGIN_ROOT`, resolved), one line, to `<project>/.grimoire/live/plugin-root` (`$CLAUDE_PROJECT_DIR`, else the cwd).
 
-- It creates `.grimoire/live/` when it is missing, and writes nothing when it cannot, when the project is `/` or `$HOME`, or when the project is the plugin folder or inside it.
+- Only in a project grimoire already writes to (its `.grimoire/` exists: a run, a briefing, a graph): it creates `.grimoire/live/` there when it is missing, and writes nothing when it cannot, when the project is `/` or `$HOME`, or when the project is the plugin folder or inside it.
 - The file is rewritten only when the path changed, whole (a temp file renamed), so a view never reads half a path.
 - Silent, timeout 5 s, and it fails open: any error is exit 0 with no output.
 

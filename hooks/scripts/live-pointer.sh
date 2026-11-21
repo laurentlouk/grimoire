@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # grimoire · SessionStart live pointer. Writes the plugin's absolute root, one line, to
 # <project>/.grimoire/live/plugin-root, so a live view drawn in Claude Code finds
-# <plugin root>/scripts/live.mjs (the snapshot it runs every few seconds). Only when the project's
-# .grimoire/ exists or can be created; never in $HOME or /, never when the project is the plugin
+# <plugin root>/scripts/live.mjs (the snapshot it runs every few seconds). Only in a project grimoire
+# already writes to (its .grimoire/ exists: a run, a briefing, a graph); never in $HOME or /, never when the project is the plugin
 # folder or inside it. The file is rewritten only when the path changed, whole (a temp file
 # renamed). Silent, and fails open: any error is exit 0 with no output.
 {
@@ -14,6 +14,7 @@
   home="$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P)"
   [ -n "$home" ] && [ "$proj" = "$home" ] && exit 0
   case "$proj/" in "$plugin"/*) exit 0 ;; esac
+  [ -d "$proj/.grimoire" ] || exit 0
   dir="$proj/.grimoire/live"
   mkdir -p "$dir" || exit 0
   [ "$(cat "$dir/plugin-root" 2>/dev/null)" = "$plugin" ] && exit 0

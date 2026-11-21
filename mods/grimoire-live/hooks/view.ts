@@ -25,19 +25,23 @@ export function ago(iso: string | null | undefined, now: number): string {
   return `${Math.floor(s / 86400)}d`
 }
 
-// the cost fuse's share spent, 0..1, or null with no cap: the effective cost against maxCost,
-// else the output tokens against maxOutput
+// The cost fuse stops a run at either cap: its effective cost against maxCost, or its output tokens
+// against maxOutput. The share shown is the nearer of the two, 0..1, or null with neither cap set.
+function shares(run: LiveRun): { share: number; text: string }[] {
+  const c = run.cost, out: { share: number; text: string }[] = []
+  if (c.maxCost && c.effective !== null) out.push({ share: c.effective / c.maxCost, text: `${short(c.effective)} / ${short(c.maxCost)} tokens${c.isCovered ? '' : ' (partial)'}` })
+  if (c.maxOutput && c.output !== null) out.push({ share: c.output / c.maxOutput, text: `${short(c.output)} / ${short(c.maxOutput)} output tokens` })
+  return out.sort((a, b) => b.share - a.share)
+}
+
 export function costShare(run: LiveRun): number | null {
-  const c = run.cost
-  if (c.maxCost && c.effective !== null) return c.effective / c.maxCost
-  if (c.maxOutput && c.output !== null) return c.output / c.maxOutput
-  return null
+  return shares(run)[0]?.share ?? null
 }
 
 export function costText(run: LiveRun): string {
+  const top = shares(run)[0]
+  if (top) return top.text
   const c = run.cost
-  if (c.maxCost && c.effective !== null) return `${short(c.effective)} / ${short(c.maxCost)} tokens`
-  if (c.maxOutput && c.output !== null) return `${short(c.output)} / ${short(c.maxOutput)} output tokens`
   if (c.effective !== null) return `${short(c.effective)} tokens${c.isCovered ? '' : ' (partial)'}`
   if (c.output !== null) return `${short(c.output)} output tokens`
   return 'cost unknown'
